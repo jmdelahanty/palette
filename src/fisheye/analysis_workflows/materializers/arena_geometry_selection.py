@@ -40,6 +40,19 @@ from fisheye.shared.selector_activation import (
     SelectorActivationError,
     activate_selector_eligible_run,
 )
+from fisheye.shared.zarr.arena_geometry_selection import (
+    COMPARISON_BOUND_SELECTION_POLICY,
+    LEGACY_SELECTION_RECORD_SCHEMA_VERSION,
+    MANUAL_PALETTE_SELECTION_POLICY,
+    MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION,
+    SELECTION_POLICY,
+    SELECTION_RECORD_SCHEMA_ID,
+    SELECTION_RECORD_SCHEMA_VERSION,
+    SELECTION_RUN_SCHEMA_ID,
+    SELECTION_RUN_SCHEMA_VERSION,
+    SELECTION_RUNS_PARENT,
+    validate_arena_geometry_selection_record,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
@@ -47,18 +60,8 @@ from fisheye.shared.zarr_run_completion import (
     require_runs_parent,
 )
 
-SELECTION_RECORD_SCHEMA_ID = "palette.arena_geometry_selection_record"
-SELECTION_RECORD_SCHEMA_VERSION = 2
-LEGACY_SELECTION_RECORD_SCHEMA_VERSION = 1
-MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION = 3
-SELECTION_RUN_SCHEMA_ID = "palette.arena_geometry_selection_run"
-SELECTION_RUN_SCHEMA_VERSION = 1
-SELECTION_RUNS_PARENT = "arena_geometry_selection"
 SELECTION_PUBLISH_SCHEMA_ID = "palette.arena_geometry_selection_publish"
 SELECTION_ALGORITHM_VERSION = 1
-SELECTION_POLICY = "reviewed_candidate_exact_binding_v1"
-COMPARISON_BOUND_SELECTION_POLICY = "comparison_bound_reviewed_candidate_v2"
-MANUAL_PALETTE_SELECTION_POLICY = "manual_reviewed_palette_candidate_exact_binding_v3"
 SELECTION_POLICY_ATTR = "arena_geometry_selection_policy"
 SELECTION_GENERATION_ATTR = "arena_geometry_selection_generation"
 SELECTION_LEASE_ATTR = "arena_geometry_selection_lease"
@@ -337,92 +340,6 @@ def build_arena_geometry_selection_plan(
         target_run_path=(zarr_path / "analysis" / SELECTION_RUNS_PARENT / selection_id),
         run_provenance=provenance,
     )
-
-
-def validate_arena_geometry_selection_record(record: Mapping[str, Any]) -> None:
-    schema_version = record.get("schema_version")
-    expected_policy = {
-        LEGACY_SELECTION_RECORD_SCHEMA_VERSION: SELECTION_POLICY,
-        SELECTION_RECORD_SCHEMA_VERSION: COMPARISON_BOUND_SELECTION_POLICY,
-        MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION: (
-            MANUAL_PALETTE_SELECTION_POLICY
-        ),
-    }.get(schema_version)
-    if (
-        record.get("schema_id") != SELECTION_RECORD_SCHEMA_ID
-        or expected_policy is None
-        or record.get("selection_policy") != expected_policy
-    ):
-        raise ValueError("Unsupported arena-geometry selection record.")
-    selected = record.get("selected_candidate")
-    if not isinstance(selected, Mapping):
-        raise ValueError("Selection lacks selected_candidate.")
-    for name in (
-        "run_name",
-        "candidate_id",
-        "candidate_kind",
-        "candidate_record_sha256",
-    ):
-        if not str(selected.get(name) or "").strip():
-            raise ValueError(f"Selection candidate lacks {name}.")
-    if selected.get("run_name") != selected.get("candidate_id"):
-        raise ValueError("Selection candidate run and identity disagree.")
-    for name in ("arena_binding", "coordinate_binding", "valid_detection_region"):
-        if not isinstance(selected.get(name), Mapping):
-            raise ValueError(f"Selection candidate lacks {name}.")
-    if schema_version == LEGACY_SELECTION_RECORD_SCHEMA_VERSION:
-        if not isinstance(selected.get("physical_inner_rim"), Mapping):
-            raise ValueError("Legacy selection candidate lacks physical_inner_rim.")
-    else:
-        boundary = selected.get("boundary_observation")
-        if not isinstance(boundary, Mapping):
-            raise ValueError("Selection candidate lacks boundary_observation.")
-        kind = selected.get("candidate_kind")
-        if kind == ACQUISITION_CANDIDATE_KIND:
-            if (
-                not isinstance(selected.get("physical_inner_rim"), Mapping)
-                or selected.get("observed_boundary") is not None
-            ):
-                raise ValueError("Selected acquisition boundary semantics are invalid.")
-        elif kind == PALETTE_CANDIDATE_KIND:
-            if (
-                not isinstance(selected.get("observed_boundary"), Mapping)
-                or selected.get("physical_inner_rim") is not None
-            ):
-                raise ValueError("Selected Palette boundary semantics are invalid.")
-        else:
-            raise ValueError("Selection candidate kind is unsupported.")
-    decision = record.get("decision")
-    if not isinstance(decision, Mapping):
-        raise ValueError("Selection lacks decision metadata.")
-    for name in ("selected_by", "decision_reason", "decision_source"):
-        if not str(decision.get(name) or "").strip():
-            raise ValueError(f"Selection decision lacks {name}.")
-    comparison = decision.get("comparison_binding")
-    if schema_version == SELECTION_RECORD_SCHEMA_VERSION:
-        if not isinstance(comparison, Mapping):
-            raise ValueError("Version-2 selection requires comparison binding.")
-        for name in (
-            "run_name",
-            "comparison_record_sha256",
-            "policy_id",
-            "evidence_outcome",
-            "workflow_action",
-            "semantic_compatibility",
-        ):
-            if not str(comparison.get(name) or "").strip():
-                raise ValueError(f"Selection comparison binding lacks {name}.")
-    elif schema_version == MANUAL_PALETTE_SELECTION_RECORD_SCHEMA_VERSION:
-        if selected.get("candidate_kind") != PALETTE_CANDIDATE_KIND:
-            raise ValueError("Version-3 selection requires a Palette candidate.")
-        if decision.get("decision_source") != "manual_review":
-            raise ValueError("Version-3 selection requires explicit manual review.")
-        if comparison is not None:
-            raise ValueError("Version-3 selection cannot claim comparison evidence.")
-    if record.get("candidate_mutated") is not False:
-        raise ValueError("Selection must not claim candidate mutation.")
-    if record.get("legacy_dish_mask_projection_written") is not False:
-        raise ValueError("Arena-geometry selection cannot write a legacy projection.")
 
 
 def _selection_attrs(plan: ArenaGeometrySelectionPlan) -> dict[str, Any]:

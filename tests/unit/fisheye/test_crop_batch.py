@@ -753,7 +753,7 @@ def test_main_reports_invalid_plans_in_summary(monkeypatch, tmp_path: Path, caps
         mod.CropPlan(
             zarr_path=Path("/tmp/a.zarr"),
             status="invalid",
-            reason="future-canonical ordinary crop requires materialized crop runs",
+            reason="the materialized-crop publication profile requires crop_storage_mode=materialized",
             crop_storage_mode="geometry_only",
         ),
     ]

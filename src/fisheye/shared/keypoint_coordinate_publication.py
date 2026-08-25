@@ -15,7 +15,7 @@ It deliberately has two phases:
   fresh root-based load before returning.
 
 Neither API accepts a caller-constructed crop frame, extent, placement, or
-transform.  Historical crop runs therefore cannot self-certify as canonical.
+transform. Each supported crop profile must pass the shared resolver first.
 """
 
 from __future__ import annotations
@@ -98,6 +98,7 @@ from fisheye.shared.observation_coordinate_publication import (
 )
 from fisheye.shared.pixel_frame_authority import (
     CROP_PLACEMENT_OWNERSHIP_ATTR,
+    CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
     CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     BoundCropPlacementOwnership,
     BoundPixelFrameAuthority,
@@ -805,6 +806,10 @@ class BoundKeypointCropSource:
     bbox_roi_frame: BoundPixelFrameAuthority = field(repr=False)
     bbox_roi_to_source_camera: BoundDirectedTransformChain = field(repr=False)
     crop_path: str
+    crop_profile: str
+    placement_ownership_attr: str
+    placement_pixel_center_ownership_attr: str
+    placement_pixel_edge_ownership_attr: str
     _root: Any = field(repr=False, compare=False)
     _rowset_node: Any = field(repr=False, compare=False)
     _roi_images_node: Any = field(repr=False, compare=False)
@@ -848,6 +853,22 @@ class BoundKeypointCropSource:
             bbox_roi_to_source_camera,
         )
         object.__setattr__(self, "crop_path", crop_path)
+        object.__setattr__(self, "crop_profile", "materialized_canonical_v2")
+        object.__setattr__(
+            self,
+            "placement_ownership_attr",
+            CROP_PLACEMENT_OWNERSHIP_ATTR,
+        )
+        object.__setattr__(
+            self,
+            "placement_pixel_center_ownership_attr",
+            CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+        )
+        object.__setattr__(
+            self,
+            "placement_pixel_edge_ownership_attr",
+            CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+        )
         object.__setattr__(self, "_root", root)
         object.__setattr__(self, "_rowset_node", rowset_node)
         object.__setattr__(self, "_roi_images_node", roi_images_node)
@@ -855,7 +876,7 @@ class BoundKeypointCropSource:
         object.__setattr__(self, "_seal", _verification_seal)
 
 
-def _load_persisted_keypoint_crop_source_fresh(
+def _load_persisted_materialized_keypoint_crop_source_fresh(
     root_node: Any,
     crop_path: str,
 ) -> BoundKeypointCropSource:
@@ -1018,6 +1039,41 @@ def _load_persisted_keypoint_crop_source_fresh(
     )
 
 
+def _load_persisted_keypoint_crop_source_fresh(
+    root_node: Any,
+    crop_path: str,
+) -> Any:
+    """Dispatch one crop rowset to exactly one full-strength profile branch."""
+
+    path = _canonical_path(crop_path, prefix="crop_runs/", label="crop rowset")
+    rowset = _node(root_node, path, label="crop rowset")
+    attrs = getattr(rowset, "attrs", {})
+    manifest_profile = (
+        isinstance(attrs.get("run_manifest"), Mapping)
+        or attrs.get("artifact_class") == "geometry_only_analysis"
+    )
+    attr_stamped_profile = any(
+        name in attrs
+        for name in (
+            "crop_geometry_selection",
+            "detection_acquisition_frame_mapping",
+            "collection_proxy_coordinate_successor_mapping",
+        )
+    ) or attrs.get("crop_storage_mode") == "materialized"
+    if manifest_profile and attr_stamped_profile:
+        _fail(
+            "Selected crop declares both sealed geometry-only and attr-stamped "
+            "crop authority profiles."
+        )
+    if manifest_profile:
+        from fisheye.shared.zarr.sealed_geometry_crop_profile import (
+            load_sealed_geometry_crop_source,
+        )
+
+        return load_sealed_geometry_crop_source(root_node, path)
+    return _load_persisted_materialized_keypoint_crop_source_fresh(root_node, path)
+
+
 def _keypoint_crop_source_proof_key(root_node: Any, crop_path: str) -> tuple[Any, ...]:
     identity = archive_identity(root_node)
     return (
@@ -1029,12 +1085,31 @@ def _keypoint_crop_source_proof_key(root_node: Any, crop_path: str) -> tuple[Any
 
 
 def _assert_keypoint_crop_source_unchanged(
-    value: BoundKeypointCropSource,
+    value: Any,
 ) -> None:
     current = _load_persisted_keypoint_crop_source_fresh(
         value._root,
         value.crop_path,
     )
+    if current.crop_profile != value.crop_profile:
+        _fail("Selected crop authority profile changed after binding.")
+    if current.crop_profile == "sealed_geometry_only_v2":
+        if (
+            current.crop_geometry.selection_derivation.record_sha256
+            != value.crop_geometry.selection_derivation.record_sha256
+            or current.roi_geometry.derivation.record_sha256
+            != value.roi_geometry.derivation.record_sha256
+            or current.roi_frame.record_sha256 != value.roi_frame.record_sha256
+            or current.bbox_roi_frame.record_sha256
+            != value.bbox_roi_frame.record_sha256
+            or current.placement_ownership_attr != value.placement_ownership_attr
+            or current.placement_pixel_center_ownership_attr
+            != value.placement_pixel_center_ownership_attr
+            or current.placement_pixel_edge_ownership_attr
+            != value.placement_pixel_edge_ownership_attr
+        ):
+            _fail("Selected sealed geometry crop changed after binding.")
+        return
     if (
         current.crop_geometry.selection_derivation.record_sha256
         != value.crop_geometry.selection_derivation.record_sha256
@@ -1066,8 +1141,13 @@ def _assert_keypoint_crop_source_unchanged(
 def load_persisted_keypoint_crop_source(
     root_node: Any,
     crop_path: str,
-) -> BoundKeypointCropSource:
-    """Load one crop freshly, or reuse it inside one verified writer operation."""
+) -> Any:
+    """Resolve one supported crop profile through the shared consumer gate.
+
+    Materialized crops retain their pixel-bearing validation branch. Sealed
+    geometry-only crops retain full manifest validation and expose coordinate
+    evidence only. A rowset declaring both grammars is rejected.
+    """
 
     path = _canonical_path(crop_path, prefix="crop_runs/", label="crop rowset")
     key = _keypoint_crop_source_proof_key(root_node, path)
@@ -1086,6 +1166,35 @@ def require_bound_keypoint_crop_source(value: Any) -> BoundKeypointCropSource:
         lambda: _assert_keypoint_crop_source_unchanged(value),
     )
     return value
+
+
+def _resolve_keypoint_crop_source(
+    root_node: Any,
+    crop_path: str,
+    *,
+    resolved_source: Any | None = None,
+) -> Any:
+    """Return one revalidated profile-bound crop source."""
+
+    path = _canonical_path(crop_path, prefix="crop_runs/", label="crop rowset")
+    if resolved_source is None:
+        return load_persisted_keypoint_crop_source(root_node, path)
+    if type(resolved_source) is BoundKeypointCropSource:
+        if resolved_source.crop_path != path:
+            _fail("Resolved materialized crop source names another rowset.")
+        return require_bound_keypoint_crop_source(resolved_source)
+    from fisheye.shared.zarr.sealed_geometry_crop_profile import (
+        require_bound_sealed_geometry_crop_source,
+    )
+
+    try:
+        return require_bound_sealed_geometry_crop_source(
+            resolved_source,
+            root=root_node,
+            crop_path=path,
+        )
+    except Exception as exc:
+        _fail(f"Resolved sealed geometry crop source is invalid: {exc}.")
 
 
 def require_direct_keypoint_crop_pixel_source(
@@ -1476,6 +1585,7 @@ def prepare_keypoint_coordinate_context(
     model_input_transform: ModelInputTransform,
     preprocessing_input_mode: str,
     model_artifact: Mapping[str, Any],
+    _resolved_crop_source: Any | None = None,
 ) -> BoundKeypointCoordinateContext:
     """Persist and reload the exact transform context used by every model batch."""
 
@@ -1487,7 +1597,11 @@ def prepare_keypoint_coordinate_context(
         label="Keypoint coordinate preflight target",
         expected_selector_eligible=False,
     )
-    source = load_persisted_keypoint_crop_source(root_node, crop_path)
+    source = _resolve_keypoint_crop_source(
+        root_node,
+        crop_path,
+        resolved_source=_resolved_crop_source,
+    )
     transform = _model_transform_from_payload(_model_transform_payload(model_input_transform))
     if preprocessing_input_mode not in {"numpy-list", "tensor"}:
         _fail(
@@ -1574,13 +1688,13 @@ def prepare_keypoint_coordinate_context(
             placement_node,
             row_identity=identity,
             source_camera_frame=point_camera,
-            attr_name=CROP_PLACEMENT_OWNERSHIP_ATTR,
+            attr_name=source.placement_ownership_attr,
         )
         bbox_placement_ownership = stamp_crop_placement_ownership(
             placement_node,
             row_identity=identity,
             source_camera_frame=bbox_camera,
-            attr_name=CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+            attr_name=source.placement_pixel_edge_ownership_attr,
         )
         roi_extent_record = _extent_record(
             role="keypoint_native_roi",
@@ -1741,6 +1855,7 @@ def prepare_keypoint_coordinate_context(
             path,
             require_complete=False,
             expected_selector_eligible=False,
+            resolved_crop_source=_resolved_crop_source,
         )
     except BaseException as exc:
         rollback_failures: list[str] = []
@@ -1766,6 +1881,7 @@ def _load_persisted_keypoint_coordinate_context(
     *,
     require_complete: bool,
     expected_selector_eligible: bool,
+    resolved_crop_source: Any | None = None,
 ) -> BoundKeypointCoordinateContext:
     """Freshly reconstruct a persisted context with an explicit status policy."""
 
@@ -1787,7 +1903,11 @@ def _load_persisted_keypoint_coordinate_context(
     )
     raw = context.record
     source_path = raw.get("source_crop_path")
-    source = load_persisted_keypoint_crop_source(root_node, source_path)
+    source = _resolve_keypoint_crop_source(
+        root_node,
+        source_path,
+        resolved_source=resolved_crop_source,
+    )
     selected = _validate_output_selection(source, run_group)
     identity = load_bound_row_identity_contract(
         run_group,
@@ -1823,13 +1943,13 @@ def _load_persisted_keypoint_coordinate_context(
         placement,
         row_identity=identity,
         source_camera_frame=point_camera,
-        attr_name=CROP_PLACEMENT_OWNERSHIP_ATTR,
+        attr_name=source.placement_ownership_attr,
     )
     bbox_ownership = load_crop_placement_ownership(
         placement,
         row_identity=identity,
         source_camera_frame=bbox_camera,
-        attr_name=CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+        attr_name=source.placement_pixel_edge_ownership_attr,
     )
     roi_frame_node = _node(root_node, f"{path}/coordinate_frames/roi_local", label="keypoint ROI frame")
     roi_extent = bind_persisted_record_reference_extent(
@@ -2052,29 +2172,33 @@ def _load_persisted_keypoint_coordinate_context(
     )
     if context.record != expected_context:
         _fail("Persisted keypoint context differs from exact live source/transform evidence.")
-    batch_nodes = (
-        run_group,
-        _child(run_group, "source_crop_row_ids", label="crop rows"),
-        _child(run_group, "instance_key", label="keypoint identity"),
-        _child(run_group, "source_acquisition_frame_index", label="keypoint time"),
-        placement,
-        roi_frame_node,
-        bbox_roi_frame_node,
-        point_normalized_frame_node,
-        model_frame_node,
-        matrix,
-        authority_node,
-        point_normalized_matrix,
-        point_normalized_authority_node,
-        source._rowset_node,
-        _child(source._rowset_node, "instance_key", label="crop identity"),
-        _child(
+    batch_nodes = tuple(
+        node
+        for node in (
+            run_group,
+            _child(run_group, "source_crop_row_ids", label="crop rows"),
+            _child(run_group, "instance_key", label="keypoint identity"),
+            _child(run_group, "source_acquisition_frame_index", label="keypoint time"),
+            placement,
+            roi_frame_node,
+            bbox_roi_frame_node,
+            point_normalized_frame_node,
+            model_frame_node,
+            matrix,
+            authority_node,
+            point_normalized_matrix,
+            point_normalized_authority_node,
             source._rowset_node,
-            "source_acquisition_frame_index",
-            label="crop time",
-        ),
-        source._placement_node,
-        source._roi_images_node,
+            _child(source._rowset_node, "instance_key", label="crop identity"),
+            _child(
+                source._rowset_node,
+                "source_acquisition_frame_index",
+                label="crop time",
+            ),
+            source._placement_node,
+            source._roi_images_node,
+        )
+        if node is not None
     )
     return BoundKeypointCoordinateContext(
         source=source,
@@ -2809,6 +2933,8 @@ def _bindings(
 def publish_keypoint_coordinate_surfaces(
     root_node: Any,
     run_path: str,
+    *,
+    _resolved_crop_source: Any | None = None,
 ) -> BoundKeypointCoordinateSurfaces:
     """Transactionally publish and freshly load all canonical keypoint surfaces."""
 
@@ -2817,6 +2943,7 @@ def publish_keypoint_coordinate_surfaces(
         run_path,
         require_complete=False,
         expected_selector_eligible=False,
+        resolved_crop_source=_resolved_crop_source,
     )
     arrays = _validate_geometry(context)
     run = context._run_group
@@ -2839,6 +2966,7 @@ def publish_keypoint_coordinate_surfaces(
             context.run_path,
             require_complete=False,
             expected_selector_eligible=False,
+            resolved_crop_source=_resolved_crop_source,
         )
     except BaseException as exc:
         try:
@@ -2850,13 +2978,13 @@ def publish_keypoint_coordinate_surfaces(
         raise
 
 
-def _load_persisted_historical_crop_successor_binding(
+def _load_persisted_sealed_crop_successor_binding(
     root_node: Any,
     run: Any,
     *,
     run_path: str,
 ) -> Any:
-    """Rebind one successor-only crop adapter from exact persisted evidence."""
+    """Rebind one sealed crop source from exact persisted successor evidence."""
 
     from pathlib import Path
 
@@ -2867,10 +2995,10 @@ def _load_persisted_historical_crop_successor_binding(
         KEYPOINT_COORDINATE_SUCCESSOR_KIND,
         load_coordinate_successor_authority,
     )
-    from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
-        HISTORICAL_BBOX_NORMALIZATION_ATTR,
-        bind_historical_geometry_only_crop_source,
-        load_historical_bbox_normalization_from_successor,
+    from fisheye.shared.zarr.sealed_geometry_crop_profile import (
+        SEALED_GEOMETRY_BBOX_NORMALIZATION_ATTR,
+        bind_sealed_geometry_crop_successor_source,
+        load_sealed_geometry_bbox_normalization_from_successor,
     )
     from fisheye.shared.zarr.keypoint_manifest import (
         KEYPOINT_RUN_MANIFEST_ATTRIBUTE,
@@ -2889,16 +3017,16 @@ def _load_persisted_historical_crop_successor_binding(
             run,
             attr_name="coordinate_successor_padded_crop_lineage",
         )
-        adapter = bind_persisted_coordinate_record(
+        crop_evidence = bind_persisted_coordinate_record(
             run,
             attr_name="coordinate_successor_historical_crop_adapter",
         )
         bbox_normalization = bind_persisted_coordinate_record(
             run,
-            attr_name=HISTORICAL_BBOX_NORMALIZATION_ATTR,
+            attr_name=SEALED_GEOMETRY_BBOX_NORMALIZATION_ATTR,
         )
     except Exception as exc:
-        _fail(f"Historical keypoint crop successor authority is invalid: {exc}.")
+        _fail(f"Sealed keypoint crop successor authority is invalid: {exc}.")
 
     authority_payload = authority["payload"]
     expected_padded = {
@@ -2908,7 +3036,7 @@ def _load_persisted_historical_crop_successor_binding(
     if authority_payload["coordinate_records"].get(
         "padded_crop_lineage"
     ) != expected_padded:
-        _fail("Historical keypoint crop successor padded lineage is stale.")
+        _fail("Sealed keypoint crop successor padded lineage is stale.")
     expected_bbox_normalization = {
         "record_ref": bbox_normalization.record_ref,
         "record_sha256": bbox_normalization.record_sha256,
@@ -2916,11 +3044,14 @@ def _load_persisted_historical_crop_successor_binding(
     if authority_payload["coordinate_records"].get(
         "historical_bbox_normalization"
     ) != expected_bbox_normalization:
-        _fail("Historical keypoint bbox-normalization authority is stale.")
-    adapter_record = padded.record.get("source_crop_adapter")
-    if not isinstance(adapter_record, Mapping) or adapter.record != adapter_record:
+        _fail("Sealed keypoint bbox-normalization authority is stale.")
+    crop_evidence_record = padded.record.get("source_crop_adapter")
+    if (
+        not isinstance(crop_evidence_record, Mapping)
+        or crop_evidence.record != crop_evidence_record
+    ):
         _fail(
-            "Historical keypoint crop successor adapter differs from its "
+            "Sealed keypoint crop successor evidence differs from its "
             "authority-bound padded lineage."
         )
 
@@ -2929,21 +3060,21 @@ def _load_persisted_historical_crop_successor_binding(
     if (
         source_authority.get("family") != "keypoints_runs"
         or type(source_run_path) is not str
-        or source_run_path != adapter_record.get("source_run_path")
+        or source_run_path != crop_evidence_record.get("source_run_path")
     ):
-        _fail("Historical keypoint crop successor source path is inconsistent.")
+        _fail("Sealed keypoint crop successor source path is inconsistent.")
     source_run = _node(
         root_node,
         source_run_path,
-        label="historical keypoint source core",
+        label="sealed keypoint source core",
     )
     source_manifest = source_run.attrs.get(KEYPOINT_RUN_MANIFEST_ATTRIBUTE)
     if not isinstance(source_manifest, Mapping):
-        _fail("Historical keypoint source core lacks its run manifest.")
+        _fail("Sealed keypoint source core lacks its run manifest.")
     source_errors = validate_keypoint_run_manifest(source_manifest)
     if source_errors:
         _fail(
-            "Historical keypoint source core manifest is invalid: "
+            "Sealed keypoint source core manifest is invalid: "
             + "; ".join(source_errors)
         )
     source_payload = source_manifest["payload"]
@@ -2957,7 +3088,7 @@ def _load_persisted_historical_crop_successor_binding(
         or source_authority.get("logical_content_digest")
         != source_logical.get("digest")
     ):
-        _fail("Historical keypoint source manifest changed after publication.")
+        _fail("Sealed keypoint source manifest changed after publication.")
 
     try:
         preprocessing = keypoint_preprocessing_from_manifest(
@@ -2969,10 +3100,10 @@ def _load_persisted_historical_crop_successor_binding(
         identity = archive_identity(root_node)
         if identity.kind != "local_store_root":
             _fail(
-                "Persisted historical keypoint crop successors require a stable "
+                "Persisted sealed keypoint crop successors require a stable "
                 "local archive identity."
             )
-        binding = bind_historical_geometry_only_crop_source(
+        binding = bind_sealed_geometry_crop_successor_source(
             analysis_zarr=Path(identity.key[0]),
             root=root_node,
             crop_reference=source_payload["source_crop_snapshot"],
@@ -2981,7 +3112,7 @@ def _load_persisted_historical_crop_successor_binding(
                 name: _child(
                     source_run,
                     name,
-                    label=f"historical keypoint source {name}",
+                    label=f"sealed keypoint source {name}",
                 )
                 for name in (
                     "source_crop_row_ids",
@@ -2993,7 +3124,7 @@ def _load_persisted_historical_crop_successor_binding(
             source_run_path=source_run_path,
             model_input_transform=transform,
         )
-        binding = load_historical_bbox_normalization_from_successor(
+        binding = load_sealed_geometry_bbox_normalization_from_successor(
             binding,
             root=root_node,
             successor_run=run,
@@ -3002,9 +3133,9 @@ def _load_persisted_historical_crop_successor_binding(
     except KeypointCoordinatePublicationError:
         raise
     except Exception as exc:
-        _fail(f"Persisted historical keypoint crop cannot be rebound: {exc}.")
-    if binding.as_record() != adapter_record:
-        _fail("Persisted historical keypoint crop adapter evidence changed.")
+        _fail(f"Persisted sealed keypoint crop cannot be rebound: {exc}.")
+    if binding.as_record() != crop_evidence_record:
+        _fail("Persisted sealed keypoint crop successor evidence changed.")
     return binding
 
 
@@ -3014,6 +3145,7 @@ def _load_persisted_keypoint_coordinate_surfaces_impl(
     *,
     require_complete: bool,
     expected_selector_eligible: bool,
+    resolved_crop_source: Any | None = None,
 ) -> BoundKeypointCoordinateSurfaces:
     """Freshly verify a graph under an explicit completion-state policy."""
 
@@ -3022,6 +3154,7 @@ def _load_persisted_keypoint_coordinate_surfaces_impl(
         run_path,
         require_complete=require_complete,
         expected_selector_eligible=expected_selector_eligible,
+        resolved_crop_source=resolved_crop_source,
     )
     run = context._run_group
     if getattr(run, "attrs", {}).get("coordinate_contract") != "canonical_v2":
@@ -3055,8 +3188,9 @@ def _load_persisted_keypoint_coordinate_surfaces(
     *,
     require_complete: bool,
     expected_selector_eligible: bool,
+    resolved_crop_source: Any | None = None,
 ) -> BoundKeypointCoordinateSurfaces:
-    """Verify one graph, reinstalling only its sealed successor adapter."""
+    """Verify one graph through the shared profile-aware crop resolver."""
 
     path = _canonical_path(
         run_path,
@@ -3064,29 +3198,25 @@ def _load_persisted_keypoint_coordinate_surfaces(
         label="keypoint rowset",
     )
     run = _node(root_node, path, label="keypoint rowset")
-    adapter_attr = "coordinate_successor_historical_crop_adapter"
-    if require_complete and adapter_attr in getattr(run, "attrs", {}):
-        binding = _load_persisted_historical_crop_successor_binding(
+    crop_evidence_attr = "coordinate_successor_historical_crop_adapter"
+    if require_complete and crop_evidence_attr in getattr(run, "attrs", {}):
+        # The attr name is frozen persisted v1 evidence. Validate it, but do
+        # not install or invoke a loader replacement; the ordinary resolver
+        # below opens the sealed crop profile directly.
+        binding = _load_persisted_sealed_crop_successor_binding(
             root_node,
             run,
             run_path=path,
         )
-        from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
-            historical_geometry_only_crop_loader,
-        )
-
-        with historical_geometry_only_crop_loader(binding):
-            return _load_persisted_keypoint_coordinate_surfaces_impl(
-                root_node,
-                path,
-                require_complete=require_complete,
-                expected_selector_eligible=expected_selector_eligible,
-            )
+        if resolved_crop_source is not None:
+            _fail("Complete successor loading does not accept a crop-source override.")
+        resolved_crop_source = binding.source
     return _load_persisted_keypoint_coordinate_surfaces_impl(
         root_node,
         path,
         require_complete=require_complete,
         expected_selector_eligible=expected_selector_eligible,
+        resolved_crop_source=resolved_crop_source,
     )
 
 

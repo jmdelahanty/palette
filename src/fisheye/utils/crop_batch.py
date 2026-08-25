@@ -300,8 +300,9 @@ def _build_plan(
             zarr_path=zarr_path,
             status="invalid",
             reason=(
-                "future-canonical ordinary crop requires crop_storage_mode=materialized; "
-                "geometry_only crop creation is an isolated legacy workflow"
+                "the materialized-crop publication profile requires "
+                "crop_storage_mode=materialized; geometry-only sealed crops use "
+                "their dedicated publication profile"
             ),
             source_type=resolved_type,
             source_path=resolved_path,
@@ -319,9 +320,9 @@ def _build_plan(
             zarr_path=zarr_path,
             status="invalid",
             reason=(
-                "future-canonical ordinary crop requires an exact "
-                "detect_runs/<run> source; refined and sparse sources are isolated "
-                "until they publish a canonical row-selection contract"
+                "the materialized-crop publication profile requires an exact "
+                "detect_runs/<run> source; refined and sparse sources require a "
+                "profile with an explicit row-selection contract"
             ),
             source_type=resolved_type,
             source_path=resolved_path,
@@ -563,8 +564,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         choices=["materialized", "geometry_only"],
         default=None,
         help=(
-            "Crop persistence mode. Future ordinary runs require materialized; "
-            "geometry_only is rejected as an isolated legacy workflow."
+            "Crop persistence mode for this materialized-crop publisher. "
+            "Geometry-only sealed crops use their dedicated publisher."
         ),
     )
     parser.add_argument(
@@ -573,10 +574,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=None,
         choices=["auto", "refined", "detect", "manual", "filtered", "interpolated"],
         help=(
-            "Detection source (default: config value, otherwise detect). Future "
-            "ordinary crop writes require an exact detect_runs/<run> source; "
-            "auto/refined/sparse sources are rejected until they publish canonical "
-            "row-selection lineage."
+            "Detection source (default: config value, otherwise detect). The "
+            "materialized-crop profile requires an exact detect_runs/<run> source; "
+            "auto/refined/sparse sources require an explicit row-selection profile."
         ),
     )
     parser.add_argument(

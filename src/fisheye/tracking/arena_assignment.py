@@ -6,13 +6,15 @@ Currently implements spatial arena assignment (one subject per ROI).
 TODO: Add trajectory-based tracking for free-swimming fish within arenas.
 """
 
-import numpy as np
-import zarr
-import time
+import re
 import sys
-from typing import Dict, Optional, Any, List, Tuple, Sequence, Mapping
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Dict, Optional, Any, List, Tuple, Sequence, Mapping
+
+import numpy as np
+import zarr
 from rich.console import Console
 from rich.panel import Panel
 
@@ -28,7 +30,27 @@ from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
+from ..shared.zarr.keypoint_bundle_activation import (
+    resolve_active_keypoint_bundle_from_root,
+)
+from ..shared.observation_coordinate_publication import (
+    CROP_GEOMETRY_SELECTION_ATTR,
+    load_persisted_source_camera_position_surface,
+    resolve_source_detection_rowset_from_position_coordinates,
+)
+from ..shared.zarr.crop_manifest import CROP_RUN_MANIFEST_ATTRIBUTE
+from ..shared.zarr.arena_geometry_selection import (
+    resolve_active_arena_geometry_circle,
+)
+from ..shared.zarr_run_completion import (
+    COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+    is_run_complete_in_parent,
+    is_run_selector_eligible,
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    require_runs_parent,
+)
 from ..shared.zarr_io import open_zarr_root
 from .api import (
     TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA,
@@ -39,6 +61,7 @@ from ..shared.system_metadata import get_environment_info
 
 _ARENA_ASSIGN_STATUS_SOURCE = "runtime_arena_assignment"
 _UNKNOWN_SOURCE_VALUES = {"", "unknown", "none", "null"}
+_EXACT_RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _clean_source_text(value: Any) -> Optional[str]:
@@ -97,6 +120,176 @@ def _source_detect_run_from_attrs(attrs: Mapping[str, Any]) -> Optional[str]:
     ):
         return source_type
     return None
+
+
+def _source_refined_run_from_attrs(attrs: Mapping[str, Any]) -> Optional[str]:
+    for key in ("source_refined_run", "source_refined_detect_run"):
+        direct = _clean_source_text(attrs.get(key))
+        if direct:
+            return direct
+    for container_name in ("inputs", "source_refs"):
+        container = attrs.get(container_name)
+        if isinstance(container, Mapping):
+            for key in ("source_refined_run", "source_refined_detect_run"):
+                value = _clean_source_text(container.get(key))
+                if value:
+                    return value
+    provenance = attrs.get("provenance")
+    inputs = provenance.get("inputs") if isinstance(provenance, Mapping) else None
+    if isinstance(inputs, Mapping):
+        for key in ("source_refined_run", "source_refined_detect_run"):
+            value = _clean_source_text(inputs.get(key))
+            if value:
+                return value
+    return None
+
+
+def _source_detect_run_from_refined(
+    root: zarr.Group,
+    refined_run_name: str,
+) -> Optional[str]:
+    parent = root.get("refined_detect_runs")
+    if parent is None or refined_run_name not in parent:
+        return None
+    group = parent[refined_run_name]
+    source = _source_detect_run_from_attrs(group.attrs)
+    if source:
+        return source
+    working = _clean_source_text(group.attrs.get("source_working_refined_run"))
+    if working and working in parent:
+        return _source_detect_run_from_attrs(parent[working].attrs)
+    return None
+
+
+def _declares_canonical_crop_position_profile(attrs: Mapping[str, Any]) -> bool:
+    """Return whether a crop must pass the shared position-authority resolver."""
+
+    return bool(
+        CROP_GEOMETRY_SELECTION_ATTR in attrs
+        or isinstance(attrs.get(CROP_RUN_MANIFEST_ATTRIBUTE), Mapping)
+    )
+
+
+def _canonical_crop_assignment_lineage(
+    root: zarr.Group,
+    rowset_path: str,
+) -> tuple[Optional[str], str]:
+    """Resolve assignment lineage only through the shared position gate."""
+
+    surface = load_persisted_source_camera_position_surface(root, rowset_path)
+    detection_path = resolve_source_detection_rowset_from_position_coordinates(
+        surface.coordinates
+    )
+    parts = detection_path.split("/")
+    if len(parts) != 2 or not parts[1]:
+        raise ValueError(
+            "Canonical crop position authority resolved malformed detection lineage."
+        )
+    if parts[0] == "detect_runs":
+        return None, parts[1]
+    if parts[0] != "refined_detect_runs":
+        raise ValueError(
+            "Canonical crop position authority resolved unsupported detection lineage."
+        )
+    refined_run = parts[1]
+    source_detect = _source_detect_run_from_refined(root, refined_run)
+    if not source_detect:
+        raise ValueError(
+            "Canonical crop position authority's refined-detection source lacks "
+            "its exact detect-run lineage."
+        )
+    return refined_run, source_detect
+
+
+def _selected_keypoint_source_rowset(
+    root: zarr.Group,
+    selection: str,
+) -> str:
+    """Resolve one authorized keypoint selection to its exact crop rowset."""
+
+    requested = str(selection).strip().strip("/")
+    if not requested:
+        raise ValueError("--source-keypoint-run must be nonempty.")
+    if requested.startswith("refined/"):
+        family = "refined_keypoints_runs"
+        run_name = requested.split("/", 1)[1]
+    elif requested.startswith("refined_keypoints_runs/"):
+        family = "refined_keypoints_runs"
+        run_name = requested.split("/", 1)[1]
+    elif requested.startswith("keypoints_runs/"):
+        family = "keypoints_runs"
+        run_name = requested.split("/", 1)[1]
+    else:
+        family = "keypoints_runs"
+        run_name = requested
+    if _EXACT_RUN_NAME.fullmatch(run_name) is None:
+        raise ValueError(f"Unsafe keypoint run selection: {selection!r}.")
+    parent = root.get(family)
+    if parent is None or run_name not in parent:
+        raise ValueError(f"Selected keypoint authority is absent: {family}/{run_name}.")
+    group = parent[run_name]
+    if not is_run_complete_in_parent(parent, group, legacy_default=False):
+        raise ValueError(f"Selected keypoint authority is incomplete: {family}/{run_name}.")
+
+    authorized_by_bundle = False
+    if family == "refined_keypoints_runs":
+        active = resolve_active_keypoint_bundle_from_root(root)
+        if active is not None:
+            member = active.get("refined_keypoints")
+            authorized_by_bundle = (
+                isinstance(member, Mapping)
+                and member.get("run_path") == f"{family}/{run_name}"
+            )
+    if not authorized_by_bundle and not is_run_selector_eligible(group):
+        raise ValueError(
+            f"Selected keypoint authority is not active or selector-eligible: "
+            f"{family}/{run_name}."
+        )
+
+    raw_group = group
+    if family == "refined_keypoints_runs":
+        raw_run = _clean_source_text(group.attrs.get("source_keypoints_run"))
+        raw_parent = root.get("keypoints_runs")
+        if not raw_run or raw_parent is None or raw_run not in raw_parent:
+            raise ValueError(
+                "Selected refined keypoint authority lacks its exact canonical base run."
+            )
+        raw_group = raw_parent[raw_run]
+        if not is_run_complete_in_parent(raw_parent, raw_group, legacy_default=False):
+            raise ValueError("Selected refined keypoint base run is incomplete.")
+    crop_run = _clean_source_text(raw_group.attrs.get("source_crop_run"))
+    crop_parent = root.get("crop_runs")
+    if not crop_run or crop_parent is None or crop_run not in crop_parent:
+        raise ValueError("Selected keypoint authority lacks its exact source crop run.")
+    crop_group = crop_parent[crop_run]
+    if not is_run_complete_in_parent(crop_parent, crop_group, legacy_default=False):
+        raise ValueError("Selected keypoint source crop run is incomplete.")
+    return f"crop_runs/{crop_run}"
+
+
+def _arena_assignment_run_group(
+    root: zarr.Group,
+    *,
+    console: Console,
+    exact_run_name: Optional[str],
+) -> Tuple[zarr.Group, str]:
+    if exact_run_name is None:
+        return get_run_group(root, "arena_assignment", console)
+    run_name = str(exact_run_name).strip()
+    if _EXACT_RUN_NAME.fullmatch(run_name) is None:
+        raise ValueError(f"Unsafe arena-assignment run name: {exact_run_name!r}.")
+    parent = require_runs_parent(
+        root,
+        "arena_assignment_runs",
+        completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+    )
+    if run_name in parent:
+        raise FileExistsError(f"Refusing existing arena-assignment run: {run_name}.")
+    run = parent.create_group(run_name)
+    console.print(
+        f"Created run group: [cyan]arena_assignment_runs/{run_name}[/cyan]"
+    )
+    return run, run_name
 
 
 def _count_from_domains(
@@ -352,6 +545,40 @@ def get_single_dish_roi_from_mask(root: zarr.Group, console: Console) -> Optiona
     Returns:
         List with single ROI dictionary, or None if no dish mask found
     """
+    selected_circle = resolve_active_arena_geometry_circle(root)
+    if selected_circle is not None:
+        x = int(selected_circle.center_x_px - selected_circle.radius_px)
+        y = int(selected_circle.center_y_px - selected_circle.radius_px)
+        width = int(selected_circle.radius_px * 2)
+        height = int(selected_circle.radius_px * 2)
+        console.print(
+            "[green]\u2713 Using active registered arena geometry as single ROI[/green]"
+        )
+        console.print(
+            "  Selection: "
+            f"{selected_circle.selection_run} "
+            f"(candidate {selected_circle.candidate_run})"
+        )
+        console.print(
+            "  Circle center: "
+            f"[{selected_circle.center_x_px}, {selected_circle.center_y_px}], "
+            f"radius: {selected_circle.radius_px}"
+        )
+        console.print(f"  Bounding box: x={x}, y={y}, w={width}, h={height}")
+        return [{
+            "id": 0,
+            "roi_pixels": [x, y, width, height],
+            "source": "active_registered_arena_geometry_circle",
+            "image_shape": [
+                selected_circle.native_height_px,
+                selected_circle.native_width_px,
+            ],
+            "selection_run": selected_circle.selection_run,
+            "selection_record_sha256": selected_circle.selection_record_sha256,
+            "candidate_run": selected_circle.candidate_run,
+            "camera_serial": selected_circle.camera_serial,
+        }]
+
     # Try to get dish mask from analysis_metadata
     if 'analysis_metadata' not in root:
         return None
@@ -472,7 +699,10 @@ def assign_arenas_spatial(
     config: Dict[str, Any],
     console: Optional[Console] = None,
     source_rowset_path: Optional[str] = None,
+    source_keypoint_run: Optional[str] = None,
     tracking_method: Optional[str] = None,
+    arena_assignment_run_name: Optional[str] = None,
+    tracking_run_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Assign detections to arenas based on spatial location (sub-dish ROIs).
@@ -494,6 +724,8 @@ def assign_arenas_spatial(
         source_rowset_path: Optional exact rowset to assign. Use this when a
             downstream crop/keypoint rowset, not refined-detect instances, is
             the row identity that consumers must track.
+        source_keypoint_run: Optional canonical or ``refined/`` keypoint
+            authority. Its exact source crop rowset is resolved fail-closed.
         tracking_method: Optional method registered by ``fisheye.tracking.api``.
         
     Returns:
@@ -518,6 +750,15 @@ def assign_arenas_spatial(
     start_time = time.perf_counter()
     
     root = open_zarr_root(zarr_path, mode='a')
+    if source_rowset_path is not None and source_keypoint_run is not None:
+        raise ValueError(
+            "source_rowset_path and source_keypoint_run are mutually exclusive."
+        )
+    if source_keypoint_run is not None:
+        source_rowset_path = _selected_keypoint_source_rowset(
+            root,
+            source_keypoint_run,
+        )
     tracking_config = config.get("tracking", {})
     if not isinstance(tracking_config, Mapping):
         raise ValueError("config['tracking'] must be a mapping when provided.")
@@ -671,7 +912,11 @@ def assign_arenas_spatial(
     console.print(f"\nAssigning arenas based on [cyan]{len(subdish_masks)}[/cyan] ROI(s) ({param_source})")
     
     # Create run group
-    assign_group, run_group_name = get_run_group(root, 'arena_assignment', console)
+    assign_group, run_group_name = _arena_assignment_run_group(
+        root,
+        console=console,
+        exact_run_name=arena_assignment_run_name,
+    )
     arena_parent = root.get("arena_assignment_runs")
     if arena_parent is not None:
         mark_run_started(assign_group, run_name=run_group_name, stage="arena_assignment")
@@ -690,8 +935,25 @@ def assign_arenas_spatial(
         parts = source_rowset_path.split("/")
         head = parts[0] if parts else ""
         if head == "crop_runs":
-            refined_run_name = _clean_source_text(detection_group.attrs.get("source_refined_run"))
-            source_detect_run = _source_detect_run_from_attrs(detection_group.attrs)
+            if _declares_canonical_crop_position_profile(detection_group.attrs):
+                refined_run_name, source_detect_run = (
+                    _canonical_crop_assignment_lineage(
+                        root,
+                        source_rowset_path,
+                    )
+                )
+            else:
+                refined_run_name = _source_refined_run_from_attrs(
+                    detection_group.attrs
+                )
+                source_detect_run = _source_detect_run_from_attrs(
+                    detection_group.attrs
+                )
+                if refined_run_name and not source_detect_run:
+                    source_detect_run = _source_detect_run_from_refined(
+                        root,
+                        refined_run_name,
+                    )
             assignment_source = "explicit_crop_rows"
         elif head == "refined_detect_runs":
             if len(parts) < 2:
@@ -1020,6 +1282,7 @@ def assign_arenas_spatial(
                         source_group=detection_group,
                     ),
                 ),
+                exact_run_name=tracking_run_name,
                 console=console,
             )
         )
@@ -1202,14 +1465,32 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Assign arena IDs to fish detections")
     parser.add_argument("zarr_path", help="Path to zarr archive")
-    parser.add_argument("--config", default="configs/fisheye/default.yaml",
-                       help="Configuration file")
     parser.add_argument(
+        "--config",
+        default=str(Path(__file__).resolve().parents[3] / "configs/fisheye/default.yaml"),
+                       help="Configuration file")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument(
         "--source-rowset",
         help=(
             "Exact rowset to assign, e.g. crop_runs/<run>. Use this when "
             "downstream keypoints/track kinematics are aligned to crop rows."
         ),
+    )
+    source.add_argument(
+        "--source-keypoint-run",
+        help=(
+            "Selected canonical keypoint run, or refined/<run>. The exact "
+            "source crop rowset is resolved and revalidated before writing."
+        ),
+    )
+    parser.add_argument(
+        "--arena-run-name",
+        help="Exact immutable arena-assignment output run name.",
+    )
+    parser.add_argument(
+        "--tracking-run-name",
+        help="Exact immutable tracking output run name.",
     )
     parser.add_argument(
         "--tracking-method",
@@ -1231,7 +1512,10 @@ if __name__ == "__main__":
         config,
         console=console,
         source_rowset_path=args.source_rowset,
+        source_keypoint_run=args.source_keypoint_run,
         tracking_method=args.tracking_method,
+        arena_assignment_run_name=args.arena_run_name,
+        tracking_run_name=args.tracking_run_name,
     )
     
     if results.get("status") == "missing":

@@ -89,12 +89,6 @@ from fisheye.shared.directed_transform_v2 import (
 )
 from fisheye.shared.pixel_frame_authority import (
     ARRAY_VALUES_CANONICALIZATION,
-    CROP_PLACEMENT_OWNERSHIP_ATTR,
-    CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR,
-    CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR,
-    CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR,
-    CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
-    CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     BoundPixelFrameAuthority,
     load_crop_placement_ownership,
     load_roi_pixel_frame_authority,
@@ -2039,7 +2033,7 @@ def prepare_refined_subject_mask_coordinate_context(
             convention="continuous",
             source_frame=source.continuous_frame,
             target_camera=source.continuous_chain.source_camera_frame_authority,
-            ownership_attr=CROP_PLACEMENT_OWNERSHIP_ATTR,
+            ownership_attr=source.source.placement_ownership_attr,
             authority_attr=TRANSFORM_AUTHORITY_ATTR,
             transform_attr=DIRECTED_TRANSFORM_V2_ATTR,
         )
@@ -2048,7 +2042,7 @@ def prepare_refined_subject_mask_coordinate_context(
             convention="pixel_center",
             source_frame=source.pixel_center_frame,
             target_camera=source.pixel_center_chain.source_camera_frame_authority,
-            ownership_attr=CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+            ownership_attr=source.source.placement_pixel_center_ownership_attr,
             authority_attr=TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR,
             transform_attr=DIRECTED_TRANSFORM_V2_PIXEL_CENTER_ATTR,
         )
@@ -2057,7 +2051,7 @@ def prepare_refined_subject_mask_coordinate_context(
             convention="pixel_edge_half_open",
             source_frame=source.pixel_edge_frame,
             target_camera=source.pixel_edge_chain.source_camera_frame_authority,
-            ownership_attr=CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+            ownership_attr=source.source.placement_pixel_edge_ownership_attr,
             authority_attr=TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
             transform_attr=DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
         )
@@ -2273,25 +2267,9 @@ def _load_refined_subject_mask_coordinate_context(
         _fail("Refined dense mask extent changed from the exact raw ROI extent.")
     rows_node = selection["source_crop_row_ids"]
     placement = selection["source_crop_xywh"]
-    historical_padded_source = (
-        "coordinate_successor_historical_crop_adapter"
-        in getattr(source._run_group, "attrs", {})
-    )
-    continuous_ownership_attr = (
-        CROP_PLACEMENT_PADDED_OWNERSHIP_ATTR
-        if historical_padded_source
-        else CROP_PLACEMENT_OWNERSHIP_ATTR
-    )
-    center_ownership_attr = (
-        CROP_PLACEMENT_PADDED_PIXEL_CENTER_OWNERSHIP_ATTR
-        if historical_padded_source
-        else CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR
-    )
-    edge_ownership_attr = (
-        CROP_PLACEMENT_PADDED_PIXEL_EDGE_OWNERSHIP_ATTR
-        if historical_padded_source
-        else CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR
-    )
+    continuous_ownership_attr = source.source.placement_ownership_attr
+    center_ownership_attr = source.source.placement_pixel_center_ownership_attr
+    edge_ownership_attr = source.source.placement_pixel_edge_ownership_attr
 
     def load_frame_and_chain(
         frame_name: str,

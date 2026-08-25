@@ -230,10 +230,14 @@ class BoundCoordinateRecord:
     record_ref: str
     record_sha256: str
     attr_name: str
-    digest_attr_name: str
+    digest_attr_name: str | None
     _archive_identity: ArchiveIdentity = field(repr=False, compare=False)
     _node: Any = field(repr=False, compare=False)
     _record: Mapping[str, Any] = field(repr=False, compare=False)
+    _embedded_payload_keys: tuple[str, str] | None = field(
+        repr=False,
+        compare=False,
+    )
     _verification_seal: object = field(repr=False, compare=False)
 
     def __init__(
@@ -242,10 +246,11 @@ class BoundCoordinateRecord:
         record_ref: str,
         record_sha256: str,
         attr_name: str,
-        digest_attr_name: str,
+        digest_attr_name: str | None,
         archive: ArchiveIdentity,
         node: Any,
         record: Mapping[str, Any],
+        embedded_payload_keys: tuple[str, str] | None = None,
         _seal: object | None = None,
     ) -> None:
         if _seal is not _BOUND_COORDINATE_RECORD_SEAL:
@@ -259,6 +264,7 @@ class BoundCoordinateRecord:
         object.__setattr__(self, "_archive_identity", archive)
         object.__setattr__(self, "_node", node)
         object.__setattr__(self, "_record", copy.deepcopy(dict(record)))
+        object.__setattr__(self, "_embedded_payload_keys", embedded_payload_keys)
         object.__setattr__(self, "_verification_seal", _seal)
 
     @property
@@ -299,6 +305,67 @@ def bind_persisted_coordinate_record(
     )
 
 
+def _bind_persisted_manifest_coordinate_record(
+    node: Any,
+    *,
+    attr_name: str = "run_manifest",
+    payload_key: str = "payload",
+    payload_digest_key: str = "payload_digest",
+) -> BoundCoordinateRecord:
+    """Bind one immutable manifest whose digest is embedded in its envelope.
+
+    The full manifest remains the live persisted record.  ``record_sha256`` is
+    the manifest's canonical payload digest, while verification also requires
+    the complete envelope to remain byte-for-byte equivalent to the initially
+    bound canonical JSON value.  Semantic profile validation remains the
+    responsibility of the profile resolver before this generic proof is built.
+    """
+
+    if not isinstance(attr_name, str) or _ATTR_NAME_RE.fullmatch(attr_name) is None:
+        raise CoordinateRecordError(
+            "Manifest coordinate record attr name must be canonical snake_case."
+        )
+    if not isinstance(payload_key, str) or _ATTR_NAME_RE.fullmatch(payload_key) is None:
+        raise CoordinateRecordError("Manifest payload key must be canonical snake_case.")
+    if (
+        not isinstance(payload_digest_key, str)
+        or _ATTR_NAME_RE.fullmatch(payload_digest_key) is None
+    ):
+        raise CoordinateRecordError(
+            "Manifest payload digest key must be canonical snake_case."
+        )
+    attrs = _attrs(node)
+    if attr_name not in attrs:
+        raise CoordinateRecordError(
+            f"Persisted manifest coordinate record attr {attr_name!r} is missing."
+        )
+    record = _canonical_record(attrs[attr_name])
+    payload = record.get(payload_key)
+    if type(payload) is not dict:
+        raise CoordinateRecordError("Manifest coordinate payload must be an exact object.")
+    digest = hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+    stored_digest = record.get(payload_digest_key)
+    if (
+        not isinstance(stored_digest, str)
+        or _SHA256_RE.fullmatch(stored_digest) is None
+        or stored_digest != digest
+    ):
+        raise CoordinateRecordError(
+            "Manifest coordinate payload digest is missing, malformed, or stale."
+        )
+    return BoundCoordinateRecord(
+        record_ref=f"/{_path(node)}@{attr_name}",
+        record_sha256=digest,
+        attr_name=attr_name,
+        digest_attr_name=None,
+        archive=archive_identity(node),
+        node=node,
+        record=record,
+        embedded_payload_keys=(payload_key, payload_digest_key),
+        _seal=_BOUND_COORDINATE_RECORD_SEAL,
+    )
+
+
 def verify_bound_coordinate_record(value: Any) -> BoundCoordinateRecord:
     """Re-read the exact persisted node and reject forged or stale bindings."""
 
@@ -308,11 +375,20 @@ def verify_bound_coordinate_record(value: Any) -> BoundCoordinateRecord:
         is not _BOUND_COORDINATE_RECORD_SEAL
     ):
         raise CoordinateRecordError("A sealed persisted coordinate record is required.")
-    current = bind_persisted_coordinate_record(
-        value._node,
-        attr_name=value.attr_name,
-        digest_attr_name=value.digest_attr_name,
-    )
+    if value._embedded_payload_keys is None:
+        current = bind_persisted_coordinate_record(
+            value._node,
+            attr_name=value.attr_name,
+            digest_attr_name=value.digest_attr_name,
+        )
+    else:
+        payload_key, payload_digest_key = value._embedded_payload_keys
+        current = _bind_persisted_manifest_coordinate_record(
+            value._node,
+            attr_name=value.attr_name,
+            payload_key=payload_key,
+            payload_digest_key=payload_digest_key,
+        )
     try:
         current_archive = archive_identity(value._node)
     except ArchiveIdentityError as exc:

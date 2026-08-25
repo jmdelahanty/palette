@@ -15,9 +15,13 @@ import numpy as np
 import zarr
 
 from fisheye.shared.hybrid_crop_provider import (
-    validate_hybrid_crop_signed_identity,
+    validate_hybrid_provider_strict_crop_geometry,
 )
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.keypoint_terminal_pixel_evidence import (
+    DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE,
+    validate_direct_hybrid_terminal_pixel_evidence,
+)
 from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.shared.zarr.benchmark_runtime import sha256_array
 from fisheye.shared.zarr.clipped_keypoint_finalization import (
@@ -60,6 +64,7 @@ WHOLE_RECORDING_KEYPOINT_FINALIZATION_SCHEMA_ID = (
     "palette.keypoint.whole_recording_production_finalization"
 )
 WHOLE_RECORDING_KEYPOINT_FINALIZATION_SCHEMA_VERSION = 1
+DIRECT_HYBRID_TERMINAL_RECEIPT_SCHEMA_VERSION = 2
 _SOURCE_ARRAY_PATHS = (
     "instance_key",
     "source_crop_row_ids",
@@ -104,10 +109,14 @@ def _load_terminal(
 ) -> tuple[dict[str, Any], Any, dict[str, Any]]:
     artifact = terminal_artifact.expanduser().resolve()
     receipt = _read_json(artifact / TERMINAL_RECEIPT_NAME)
+    receipt_version = receipt.get("schema_version")
     if (
         receipt.get("schema_id") != WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_ID
-        or receipt.get("schema_version")
-        != WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_VERSION
+        or receipt_version
+        not in (
+            WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_VERSION,
+            DIRECT_HYBRID_TERMINAL_RECEIPT_SCHEMA_VERSION,
+        )
     ):
         raise ValueError("Terminal receipt schema mismatch.")
     payload = receipt.get("payload")
@@ -123,14 +132,21 @@ def _load_terminal(
         raise ValueError("Terminal receipt binds a different analysis archive.")
     if payload.get("crop_run") != expected_crop_run:
         raise ValueError("Terminal receipt binds a different crop run.")
-    cache = payload.get("cache")
-    if not isinstance(cache, dict):
-        raise ValueError("Terminal receipt lacks cache evidence.")
-    cache_manifest = Path(cache.get("manifest_path", "")).expanduser().resolve()
-    if not cache_manifest.is_file() or _sha256_file(cache_manifest) != cache.get(
-        "manifest_sha256"
-    ):
-        raise ValueError("Terminal cache manifest changed after inference.")
+    if receipt_version == WHOLE_RECORDING_KEYPOINT_TERMINAL_SCHEMA_VERSION:
+        cache = payload.get("cache")
+        if not isinstance(cache, dict):
+            raise ValueError("Terminal receipt lacks cache evidence.")
+        cache_manifest = Path(cache.get("manifest_path", "")).expanduser().resolve()
+        if not cache_manifest.is_file() or _sha256_file(cache_manifest) != cache.get(
+            "manifest_sha256"
+        ):
+            raise ValueError("Terminal cache manifest changed after inference.")
+    else:
+        evidence = validate_direct_hybrid_terminal_pixel_evidence(
+            payload.get("pixel_evidence")
+        )
+        if evidence.get("provider_run") != expected_crop_run:
+            raise ValueError("Terminal pixel evidence binds a different crop provider.")
     root = zarr.open_group(
         str(artifact), mode="r", zarr_format=3, use_consolidated=True
     )
@@ -229,27 +245,66 @@ def _require_terminal_crop_provider_compatible(
         )
 
     payload = terminal_receipt.get("payload")
-    cache = payload.get("cache") if isinstance(payload, Mapping) else None
-    if not isinstance(cache, Mapping):
-        raise ValueError("Terminal receipt lacks cache evidence.")
-    cache_manifest_path = Path(str(cache.get("manifest_path") or "")).expanduser().resolve()
-    cache_manifest = _read_json(cache_manifest_path)
-    cache_source = cache_manifest.get("source")
-    observed_reference = (
-        cache_source.get("crop_run_reference")
-        if isinstance(cache_source, Mapping)
-        else None
-    )
+    receipt_version = terminal_receipt.get("schema_version")
+    pixel_evidence: Mapping[str, Any] | None = None
+    if receipt_version == DIRECT_HYBRID_TERMINAL_RECEIPT_SCHEMA_VERSION:
+        if not isinstance(payload, Mapping):
+            raise ValueError("Terminal receipt lacks its payload.")
+        pixel_evidence = validate_direct_hybrid_terminal_pixel_evidence(
+            payload.get("pixel_evidence")
+        )
+        if (
+            pixel_evidence.get("profile")
+            != DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE
+            or pixel_evidence.get("provider_run") != provider_run
+            or pixel_evidence.get("geometry_crop_run") != crop.run_id
+            or pixel_evidence.get("geometry_crop_manifest_digest")
+            != canonical_json_sha256(crop.manifest)
+        ):
+            raise ValueError(
+                "Direct-hybrid terminal evidence binds different provider or geometry."
+            )
+        observed_reference = pixel_evidence.get("provider_reference")
+    else:
+        cache = payload.get("cache") if isinstance(payload, Mapping) else None
+        if not isinstance(cache, Mapping):
+            raise ValueError("Terminal receipt lacks cache evidence.")
+        cache_manifest_path = Path(
+            str(cache.get("manifest_path") or "")
+        ).expanduser().resolve()
+        cache_manifest = _read_json(cache_manifest_path)
+        cache_source = cache_manifest.get("source")
+        observed_reference = (
+            cache_source.get("crop_run_reference")
+            if isinstance(cache_source, Mapping)
+            else None
+        )
     if observed_reference != reference:
         raise ValueError(
             "Terminal cache binds a different signed crop-provider reference."
         )
 
     provider_record_sha256 = str(provider.attrs.get("provider_record_sha256") or "")
-    signed = validate_hybrid_crop_signed_identity(
+    resolved = validate_hybrid_provider_strict_crop_geometry(
         provider,
+        crop,
         expected_provider_record_sha256=provider_record_sha256,
     )
+    if pixel_evidence is not None:
+        observed_binding = pixel_evidence.get("provider_binding")
+        expected_binding = {
+            name: resolved[name]
+            for name in (
+                "provider_record_sha256",
+                "source_pixel_fingerprint",
+                "source_rowset_fingerprint",
+                "source_row_signature_spec_digest",
+            )
+        }
+        if observed_binding != expected_binding:
+            raise ValueError(
+                "Direct-hybrid terminal evidence differs from the live signed provider."
+            )
     preprocessing = payload.get("preprocessing")
     document = (
         preprocessing.get("document")
@@ -259,10 +314,10 @@ def _require_terminal_crop_provider_compatible(
     roi_provider = document.get("roi_provider") if isinstance(document, Mapping) else None
     expected_terminal_provider = {
         "crop_run": provider_run,
-        "record_sha256": signed["provider_record_sha256"],
-        "source_pixel_fingerprint": signed["source_pixel_fingerprint"],
-        "source_rowset_fingerprint": signed["source_rowset_fingerprint"],
-        "source_row_signature_spec_digest": signed[
+        "record_sha256": resolved["provider_record_sha256"],
+        "source_pixel_fingerprint": resolved["source_pixel_fingerprint"],
+        "source_rowset_fingerprint": resolved["source_rowset_fingerprint"],
+        "source_row_signature_spec_digest": resolved[
             "source_row_signature_spec_digest"
         ],
     }
@@ -274,50 +329,20 @@ def _require_terminal_crop_provider_compatible(
             "Terminal preprocessing evidence differs from the live signed provider."
         )
 
-    crop_payload = crop.manifest.get("payload")
-    crop_source = (
-        crop_payload.get("source_refined_snapshot")
-        if isinstance(crop_payload, Mapping)
-        else None
-    )
-    if not isinstance(crop_source, Mapping) or provider.attrs.get(
-        "source_refined_run_id"
-    ) != crop_source.get("run_id"):
-        raise ValueError(
-            "Terminal pixel provider and crop-v2 bind different refined sources."
-        )
-
-    exact_paths = (
-        "instance_key",
-        "source_refined_row_ids",
-        "frame_indices",
-        "source_acquisition_frame_index",
-        "roi_coordinates_full",
-        "roi_sizes_full",
-    )
-    mismatched: list[str] = []
-    for path in exact_paths:
-        if path not in provider or not np.array_equal(
-            np.asarray(provider[path][...]),
-            np.asarray(crop.arrays[path][...]),
-        ):
-            mismatched.append(path)
-    if mismatched:
-        raise ValueError(
-            "Terminal pixel provider differs from crop-v2 geometry at: "
-            + ", ".join(mismatched)
-        )
     return {
         "mode": "signed_hybrid_pixels_with_strict_crop_v2_geometry",
         "geometry_crop_run": crop.run_id,
         "geometry_crop_manifest_digest": crop.manifest["payload_digest"],
         "terminal_crop_run": provider_run,
         "terminal_crop_reference": reference,
-        "provider_record_sha256": signed["provider_record_sha256"],
-        "source_pixel_fingerprint": signed["source_pixel_fingerprint"],
-        "source_rowset_fingerprint": signed["source_rowset_fingerprint"],
+        "terminal_pixel_evidence_profile": (
+            pixel_evidence.get("profile") if pixel_evidence is not None else None
+        ),
+        "provider_record_sha256": resolved["provider_record_sha256"],
+        "source_pixel_fingerprint": resolved["source_pixel_fingerprint"],
+        "source_rowset_fingerprint": resolved["source_rowset_fingerprint"],
         "ordered_geometry_coverage_exact": True,
-        "exact_geometry_paths": list(exact_paths),
+        "exact_geometry_paths": list(resolved["exact_geometry_paths"]),
     }
 
 

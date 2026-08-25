@@ -19,7 +19,11 @@ from fisheye.shared.zarr_run_completion import (
 
 
 STAGE_RUN_PARENTS: Mapping[str, tuple[str, ...]] = {
-    "refined_keypoints": ("refined_keypoints_runs",),
+    # ``refined_keypoints`` is the workflow's curated keypoint-authority
+    # dependency.  Its resolver below accepts either the refined member of an
+    # active keypoint bundle or an explicitly selected canonical raw run (the
+    # clipped importer uses the latter for canonical passthrough).
+    "refined_keypoints": ("refined_keypoints_runs", "keypoints_runs"),
     "refined_subject_masks": ("refined_subject_masks_runs",),
     "tracks": ("tracking_runs",),
     **DERIVED_ANALYSIS_AVAILABILITY_RUN_PARENTS,
@@ -33,6 +37,19 @@ TRACK_KINEMATICS_INTERACTIVE_ARTIFACT = (
     "visualizations/track_kinematics_summary_track_0_interactive"
 )
 TRACK_KINEMATICS_INTERACTIVE_RENDERER = "palette-track-kinematics-summary-v1"
+KEYPOINT_BUNDLE_AUTHORITY_ATTR = "keypoint_bundle_authority"
+KEYPOINT_BUNDLE_AUTHORITY_GENERATION_ATTR = (
+    "keypoint_bundle_authority_generation"
+)
+KEYPOINT_BUNDLE_AUTHORITY_LEASE_ATTR = "keypoint_bundle_authority_lease"
+SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR = "subject_mask_authority"
+SUBJECT_MASK_BUNDLE_AUTHORITY_GENERATION_ATTR = (
+    "subject_mask_authority_generation"
+)
+SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR = "subject_mask_authority_lease"
+SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR = (
+    "subject_mask_bundle_selector_eligible"
+)
 
 
 @dataclass(frozen=True)
@@ -157,6 +174,490 @@ def _resolve_metadata_run_name(
             "selector activation may be in progress"
         )
     return run_name, None
+
+
+def _available_selected_run(
+    root: Path,
+    *,
+    stage_id: str,
+    relative_parent: str,
+    run_name: str,
+    encoded_run_name: str,
+    reason: str,
+    allow_selector_ineligible: bool = False,
+) -> StageAvailability:
+    """Validate one already-authorized exact run using metadata files only."""
+
+    parent = root / relative_parent
+    run_path = parent / run_name
+    relative_run_path = f"{relative_parent}/{run_name}"
+    if not (parent / "zarr.json").is_file() or not (
+        run_path / "zarr.json"
+    ).is_file():
+        return StageAvailability(
+            stage_id=stage_id,
+            available=False,
+            artifact_path=relative_run_path,
+            run_name=encoded_run_name,
+            reason="selected authority member metadata is missing",
+        )
+    parent_attrs = _attrs(parent)
+    run_attrs = _attrs(run_path)
+    if not is_run_complete_in_parent_attrs(
+        parent_attrs,
+        run_attrs,
+        legacy_default=False,
+    ):
+        return StageAvailability(
+            stage_id=stage_id,
+            available=False,
+            artifact_path=relative_run_path,
+            run_name=encoded_run_name,
+            reason="selected authority member is not complete",
+            completion_status=_completion_status(run_attrs),
+        )
+    if not allow_selector_ineligible and not is_run_selector_eligible_attrs(
+        run_attrs
+    ):
+        return StageAvailability(
+            stage_id=stage_id,
+            available=False,
+            artifact_path=relative_run_path,
+            run_name=encoded_run_name,
+            reason="selected authority member is not selector-eligible",
+            completion_status=_completion_status(run_attrs),
+        )
+    return StageAvailability(
+        stage_id=stage_id,
+        available=True,
+        artifact_path=relative_run_path,
+        run_name=encoded_run_name,
+        reason=reason,
+        completion_status=_completion_status(run_attrs),
+    )
+
+
+def _active_keypoint_bundle_refined_path(root: Path) -> str | None:
+    attrs = _attrs(root)
+    if KEYPOINT_BUNDLE_AUTHORITY_LEASE_ATTR in attrs:
+        return None
+    authority = attrs.get(KEYPOINT_BUNDLE_AUTHORITY_ATTR)
+    generation = attrs.get(KEYPOINT_BUNDLE_AUTHORITY_GENERATION_ATTR)
+    if (
+        not isinstance(authority, Mapping)
+        or authority.get("schema_id") != "palette.keypoint.bundle_authority"
+        or authority.get("schema_version") != 1
+        or type(generation) is not int
+        or generation <= 0
+        or authority.get("generation") != generation
+    ):
+        return None
+    members = authority.get("members")
+    refined = (
+        members.get("refined_keypoints") if isinstance(members, Mapping) else None
+    )
+    run_path = refined.get("run_path") if isinstance(refined, Mapping) else None
+    if (
+        not isinstance(run_path, str)
+        or not run_path.startswith("refined_keypoints_runs/")
+        or len(PurePosixPath(run_path).parts) != 2
+    ):
+        return None
+    return run_path
+
+
+def _keypoint_authority_availability(
+    root: Path,
+    *,
+    requested_run: str | None,
+) -> StageAvailability:
+    """Resolve refined-bundle or clipped canonical-passthrough keypoints."""
+
+    requested = str(requested_run or "latest").strip().strip("/")
+    root_attrs = _attrs(root)
+    authority_present = KEYPOINT_BUNDLE_AUTHORITY_ATTR in root_attrs
+    if KEYPOINT_BUNDLE_AUTHORITY_LEASE_ATTR in root_attrs:
+        return StageAvailability(
+            stage_id="refined_keypoints",
+            available=False,
+            reason="keypoint bundle activation lease is present",
+        )
+    active_refined_path = _active_keypoint_bundle_refined_path(root)
+    if authority_present and active_refined_path is None:
+        return StageAvailability(
+            stage_id="refined_keypoints",
+            available=False,
+            reason="keypoint bundle authority is malformed or incomplete",
+        )
+    if requested.lower() == "latest" and active_refined_path is not None:
+        run_name = PurePosixPath(active_refined_path).name
+        return _available_selected_run(
+            root,
+            stage_id="refined_keypoints",
+            relative_parent="refined_keypoints_runs",
+            run_name=run_name,
+            encoded_run_name=f"refined/{run_name}",
+            reason="active keypoint-bundle refined authority is available",
+            allow_selector_ineligible=True,
+        )
+
+    explicit_family: str | None = None
+    explicit_name = requested
+    if requested.startswith("refined/"):
+        explicit_family = "refined_keypoints_runs"
+        explicit_name = requested.split("/", 1)[1]
+    elif requested.startswith("refined_keypoints_runs/"):
+        explicit_family = "refined_keypoints_runs"
+        explicit_name = requested.split("/", 1)[1]
+    elif requested.startswith("keypoints_runs/"):
+        explicit_family = "keypoints_runs"
+        explicit_name = requested.split("/", 1)[1]
+
+    families = (
+        (explicit_family,)
+        if explicit_family is not None
+        else ("refined_keypoints_runs", "keypoints_runs")
+    )
+    for family in families:
+        assert family is not None
+        parent = root / family
+        if not (parent / "zarr.json").is_file():
+            continue
+        if requested.lower() == "latest":
+            name, error = _resolve_metadata_run_name(
+                parent,
+                _attrs(parent),
+                "latest",
+                parent_relative_path=family,
+            )
+            if name is None or error is not None:
+                continue
+        else:
+            name = _safe_run_name(explicit_name)
+            member_path = f"{family}/{name}"
+            allow_ineligible = member_path == active_refined_path
+            result = _available_selected_run(
+                root,
+                stage_id="refined_keypoints",
+                relative_parent=family,
+                run_name=name,
+                encoded_run_name=(f"refined/{name}" if family.startswith("refined_") else name),
+                reason=(
+                    "active keypoint-bundle refined authority is available"
+                    if allow_ineligible
+                    else "selected canonical keypoint authority is available"
+                ),
+                allow_selector_ineligible=allow_ineligible,
+            )
+            if result.available or explicit_family is not None:
+                return result
+            continue
+        return _available_selected_run(
+            root,
+            stage_id="refined_keypoints",
+            relative_parent=family,
+            run_name=name,
+            encoded_run_name=(f"refined/{name}" if family.startswith("refined_") else name),
+            reason=(
+                "persisted refined keypoint authority is available"
+                if family.startswith("refined_")
+                else "persisted canonical keypoint passthrough authority is available"
+            ),
+        )
+    return StageAvailability(
+        stage_id="refined_keypoints",
+        available=False,
+        reason=(
+            "no active keypoint bundle, refined selector, or canonical raw "
+            "keypoint selector is available"
+        ),
+    )
+
+
+def _keypoint_crop_lineage(
+    root: Path,
+    *,
+    selected_keypoint_run: str,
+) -> tuple[str, int | None, str | None] | StageAvailability:
+    """Resolve the exact crop rowset named by one selected keypoint authority."""
+
+    keypoints = _keypoint_authority_availability(
+        root,
+        requested_run=selected_keypoint_run,
+    )
+    if not keypoints.available or not keypoints.artifact_path:
+        return StageAvailability(
+            stage_id="tracks",
+            available=False,
+            reason=(
+                "selected keypoint dependency is unavailable: "
+                f"{keypoints.reason}"
+            ),
+        )
+    keypoint_path = root / keypoints.artifact_path
+    keypoint_attrs = _attrs(keypoint_path)
+    if keypoints.artifact_path.startswith("refined_keypoints_runs/"):
+        raw_name = str(keypoint_attrs.get("source_keypoints_run") or "").strip()
+        if not raw_name or "/" in raw_name:
+            return StageAvailability(
+                stage_id="tracks",
+                available=False,
+                artifact_path=keypoints.artifact_path,
+                run_name=keypoints.run_name,
+                reason="selected refined keypoint authority lacks its exact base run",
+            )
+        raw_parent = root / "keypoints_runs"
+        raw_path = raw_parent / raw_name
+        if not (raw_parent / "zarr.json").is_file() or not (
+            raw_path / "zarr.json"
+        ).is_file():
+            return StageAvailability(
+                stage_id="tracks",
+                available=False,
+                artifact_path=f"keypoints_runs/{raw_name}",
+                run_name=keypoints.run_name,
+                reason="selected refined keypoint base-run metadata is missing",
+            )
+        raw_attrs = _attrs(raw_path)
+        if not is_run_complete_in_parent_attrs(
+            _attrs(raw_parent),
+            raw_attrs,
+            legacy_default=False,
+        ):
+            return StageAvailability(
+                stage_id="tracks",
+                available=False,
+                artifact_path=f"keypoints_runs/{raw_name}",
+                run_name=keypoints.run_name,
+                reason="selected refined keypoint base run is incomplete",
+            )
+        keypoint_attrs = raw_attrs
+
+    crop_name = str(keypoint_attrs.get("source_crop_run") or "").strip()
+    if not crop_name or "/" in crop_name:
+        return StageAvailability(
+            stage_id="tracks",
+            available=False,
+            artifact_path=keypoints.artifact_path,
+            run_name=keypoints.run_name,
+            reason="selected keypoint authority lacks its exact source crop run",
+        )
+    crop_path = root / "crop_runs" / crop_name
+    if not (crop_path / "zarr.json").is_file():
+        return StageAvailability(
+            stage_id="tracks",
+            available=False,
+            artifact_path=f"crop_runs/{crop_name}",
+            run_name=keypoints.run_name,
+            reason="selected keypoint source-crop metadata is missing",
+        )
+    crop_attrs = _attrs(crop_path)
+    refined_name = str(
+        crop_attrs.get("source_refined_run")
+        or crop_attrs.get("source_refined_detect_run")
+        or ""
+    ).strip()
+    if not refined_name:
+        source = crop_attrs.get("source_refined_snapshot")
+        if not isinstance(source, Mapping):
+            manifest = crop_attrs.get("run_manifest")
+            payload = manifest.get("payload") if isinstance(manifest, Mapping) else None
+            source = (
+                payload.get("source_refined_snapshot")
+                if isinstance(payload, Mapping)
+                else None
+            )
+        refined_name = (
+            str(source.get("run_id") or "").strip()
+            if isinstance(source, Mapping)
+            else ""
+        )
+    if refined_name and "/" in refined_name:
+        return StageAvailability(
+            stage_id="tracks",
+            available=False,
+            artifact_path=f"crop_runs/{crop_name}",
+            run_name=keypoints.run_name,
+            reason="selected keypoint source-crop refined lineage is malformed",
+        )
+    row_count_value = keypoint_attrs.get("keypoints_processed")
+    row_count = (
+        int(row_count_value)
+        if type(row_count_value) is int and row_count_value >= 0
+        else None
+    )
+    return f"crop_runs/{crop_name}", row_count, refined_name or None
+
+
+def _tracking_authority_availability(
+    root: Path,
+    *,
+    requested_run: str | None,
+    selected_keypoint_run: str,
+) -> StageAvailability:
+    """Require selected tracks to bind the selected keypoint crop authority."""
+
+    selected = discover_stage_availability(
+        root,
+        "tracks",
+        requested_run=requested_run,
+    )
+    if not selected.available or not selected.artifact_path:
+        return selected
+    lineage = _keypoint_crop_lineage(
+        root,
+        selected_keypoint_run=selected_keypoint_run,
+    )
+    if isinstance(lineage, StageAvailability):
+        return lineage
+    expected_path, expected_rows, expected_refined = lineage
+    tracking_attrs = _attrs(root / selected.artifact_path)
+    actual_path = str(tracking_attrs.get("source_rowset_path") or "").strip().strip("/")
+    actual_refined = str(tracking_attrs.get("source_refined_run") or "").strip()
+    actual_rows_value = tracking_attrs.get("source_rowset_row_count")
+    actual_rows = (
+        int(actual_rows_value)
+        if type(actual_rows_value) is int and actual_rows_value >= 0
+        else None
+    )
+    mismatches: list[str] = []
+    if actual_path != expected_path:
+        mismatches.append(
+            f"source_rowset_path={actual_path!r}, expected {expected_path!r}"
+        )
+    if expected_refined is not None and actual_refined != expected_refined:
+        mismatches.append(
+            f"source_refined_run={actual_refined!r}, expected {expected_refined!r}"
+        )
+    if (
+        expected_rows is not None
+        and actual_rows is not None
+        and actual_rows != expected_rows
+    ):
+        mismatches.append(
+            f"source_rowset_row_count={actual_rows}, expected {expected_rows}"
+        )
+    if mismatches:
+        return StageAvailability(
+            stage_id="tracks",
+            available=False,
+            artifact_path=selected.artifact_path,
+            run_name=selected.run_name,
+            reason=(
+                "selected tracking authority does not match the selected "
+                "keypoint crop lineage: " + "; ".join(mismatches)
+            ),
+            completion_status=selected.completion_status,
+        )
+    return StageAvailability(
+        stage_id="tracks",
+        available=True,
+        artifact_path=selected.artifact_path,
+        run_name=selected.run_name,
+        reason="persisted tracking authority matches the selected keypoint crop lineage",
+        completion_status=selected.completion_status,
+    )
+
+
+def _active_subject_mask_bundle_selection(
+    root: Path,
+) -> tuple[str, str] | None:
+    attrs = _attrs(root)
+    if SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR in attrs:
+        return None
+    authority = attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR)
+    generation = attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_GENERATION_ATTR)
+    if (
+        not isinstance(authority, Mapping)
+        or authority.get("schema_id") != "palette.subject_mask.bundle_authority"
+        or authority.get("schema_version") != 1
+        or type(generation) is not int
+        or generation <= 0
+        or authority.get("generation") != generation
+    ):
+        return None
+    bundle_id = authority.get("bundle_id")
+    bundle_path = authority.get("bundle_path")
+    members = authority.get("members")
+    refined = members.get("refined") if isinstance(members, Mapping) else None
+    refined_path = refined.get("run_path") if isinstance(refined, Mapping) else None
+    if (
+        not isinstance(bundle_id, str)
+        or bundle_path != f"subject_mask_bundle_runs/{bundle_id}"
+        or not isinstance(refined_path, str)
+        or not refined_path.startswith("refined_subject_masks_runs/")
+        or len(PurePosixPath(refined_path).parts) != 2
+    ):
+        return None
+    return bundle_id, refined_path
+
+
+def _subject_mask_authority_availability(
+    root: Path,
+    *,
+    requested_run: str | None,
+) -> StageAvailability | None:
+    root_attrs = _attrs(root)
+    authority_present = SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR in root_attrs
+    if SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR in root_attrs:
+        return StageAvailability(
+            stage_id="refined_subject_masks",
+            available=False,
+            reason="subject-mask bundle activation lease is present",
+        )
+    active = _active_subject_mask_bundle_selection(root)
+    if authority_present and active is None:
+        return StageAvailability(
+            stage_id="refined_subject_masks",
+            available=False,
+            reason="subject-mask bundle authority is malformed or incomplete",
+        )
+    if active is None:
+        return None
+    bundle_id, refined_path = active
+    requested = str(requested_run or "latest").strip().strip("/")
+    refined_name = PurePosixPath(refined_path).name
+    accepted = {
+        "latest",
+        bundle_id,
+        f"bundle/{bundle_id}",
+        refined_name,
+        refined_path,
+    }
+    if requested not in accepted:
+        return None
+    bundle_attrs = _attrs(root / "subject_mask_bundle_runs" / bundle_id)
+    refined_attrs = _attrs(root / refined_path)
+    if (
+        bundle_attrs.get(SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR) is not True
+        or refined_attrs.get(SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR) is not True
+    ):
+        return StageAvailability(
+            stage_id="refined_subject_masks",
+            available=False,
+            artifact_path=f"subject_mask_bundle_runs/{bundle_id}",
+            run_name=f"bundle/{bundle_id}",
+            reason="active subject-mask bundle readiness metadata is incomplete",
+        )
+    member = _available_selected_run(
+        root,
+        stage_id="refined_subject_masks",
+        relative_parent="refined_subject_masks_runs",
+        run_name=refined_name,
+        encoded_run_name=f"bundle/{bundle_id}",
+        reason="active subject-mask bundle authority is available",
+        allow_selector_ineligible=True,
+    )
+    if not member.available:
+        return member
+    return StageAvailability(
+        stage_id="refined_subject_masks",
+        available=True,
+        artifact_path=f"subject_mask_bundle_runs/{bundle_id}",
+        run_name=f"bundle/{bundle_id}",
+        reason="active subject-mask bundle authority is available",
+        completion_status=member.completion_status,
+    )
 
 
 def _track_kinematics_visualization_availability(
@@ -353,6 +854,26 @@ def discover_stage_availability(
 
     canonical = canonical_stage_id(stage_id)
     root = Path(zarr_path)
+    if canonical == "refined_keypoints":
+        return _keypoint_authority_availability(
+            root,
+            requested_run=requested_run,
+        )
+    if canonical == "refined_subject_masks":
+        bundle_status = _subject_mask_authority_availability(
+            root,
+            requested_run=requested_run,
+        )
+        if bundle_status is not None:
+            return bundle_status
+    if canonical == "tracks" and dependency_runs:
+        selected_keypoints = dependency_runs.get("refined_keypoints")
+        if selected_keypoints:
+            return _tracking_authority_availability(
+                root,
+                requested_run=requested_run,
+                selected_keypoint_run=selected_keypoints,
+            )
     if canonical == TRACK_KINEMATICS_VISUALIZATION_STAGE:
         return _track_kinematics_visualization_availability(
             root,

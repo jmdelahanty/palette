@@ -38,11 +38,10 @@ from fisheye.shared.zarr.coordinate_successor_files import (
     metadata_tree_sha256,
     validate_payload_file_equivalence,
 )
-from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
+from fisheye.shared.zarr.sealed_geometry_crop_profile import (
     bind_persisted_padded_placement_record,
     bind_persisted_run_attribute_record,
-    bind_historical_geometry_only_crop_source,
-    historical_geometry_only_crop_loader,
+    bind_sealed_geometry_crop_successor_source,
     stamp_persisted_padded_placement_provenance,
 )
 from fisheye.shared.zarr.manifest_digest import (
@@ -705,7 +704,7 @@ def inspect_subject_mask_coordinate_successor_source(
     crop_reference = raw_manifest["payload"]["coordinate_dependencies"]["document"][
         "crop"
     ]
-    historical_crop = bind_historical_geometry_only_crop_source(
+    sealed_crop = bind_sealed_geometry_crop_successor_source(
         analysis_zarr=archive,
         root=root,
         crop_reference=crop_reference,
@@ -748,7 +747,7 @@ def inspect_subject_mask_coordinate_successor_source(
             "refined_semantic_normalization": (
                 refined_semantic_normalization
             ),
-            "historical_crop_adapter": historical_crop.as_record(),
+            "historical_crop_adapter": sealed_crop.as_record(),
             "model_artifact": inference["model_artifact"],
             "selectors_before": _selector_snapshot(root),
             "selector_eligible": False,
@@ -852,36 +851,35 @@ def _refined_dependencies(
     return dependencies
 
 
-def _publish_refined_with_historical_crop(
+def _publish_refined_with_sealed_crop(
     root: Any,
     *,
     refined_run_path: str,
     refined_owner: str,
     raw_run_path: str,
     mask_labels: list[str],
-    historical_crop: Any,
+    sealed_crop: Any,
 ) -> Any:
-    """Prepare and publish refined surfaces under one crop-adapter scope."""
+    """Prepare and publish refined surfaces through the shared crop resolver."""
 
-    with historical_geometry_only_crop_loader(historical_crop):
-        stamp_persisted_padded_placement_provenance(
-            root[refined_run_path],
-            historical_crop,
-        )
-        prepare_refined_subject_mask_coordinate_context(
-            root,
-            refined_run_path,
-            expected_publication_owner=refined_owner,
-            source_subject_mask_path=raw_run_path,
-            mask_labels=mask_labels,
-            assignment_keypoint_surfaces=None,
-            source_selector_eligible=False,
-        )
-        return publish_refined_subject_mask_coordinate_surfaces(
-            root,
-            refined_run_path,
-            expected_publication_owner=refined_owner,
-        )
+    stamp_persisted_padded_placement_provenance(
+        root[refined_run_path],
+        sealed_crop,
+    )
+    prepare_refined_subject_mask_coordinate_context(
+        root,
+        refined_run_path,
+        expected_publication_owner=refined_owner,
+        source_subject_mask_path=raw_run_path,
+        mask_labels=mask_labels,
+        assignment_keypoint_surfaces=None,
+        source_selector_eligible=False,
+    )
+    return publish_refined_subject_mask_coordinate_surfaces(
+        root,
+        refined_run_path,
+        expected_publication_owner=refined_owner,
+    )
 
 
 def publish_subject_mask_coordinate_successors(
@@ -978,7 +976,7 @@ def publish_subject_mask_coordinate_successors(
         crop_reference = raw_manifest["payload"]["coordinate_dependencies"]["document"][
             "crop"
         ]
-        historical_crop = bind_historical_geometry_only_crop_source(
+        sealed_crop = bind_sealed_geometry_crop_successor_source(
             analysis_zarr=archive,
             root=root,
             crop_reference=crop_reference,
@@ -1022,9 +1020,9 @@ def publish_subject_mask_coordinate_successors(
                     "subject_mask_model_artifact": inference["model_artifact"],
                     "mask_labels": _labels(raw_manifest),
                     "provenance": inference["provenance"],
-                    "coordinate_successor_historical_crop_adapter": historical_crop.as_record(),
+                    "coordinate_successor_historical_crop_adapter": sealed_crop.as_record(),
                     "coordinate_successor_historical_crop_adapter_sha256": canonical_json_sha256(
-                        historical_crop.as_record()
+                        sealed_crop.as_record()
                     ),
                     **raw_semantic_normalization["resolved_run_attrs"],
                     _HISTORICAL_SEMANTIC_NORMALIZATION_ATTR: raw_semantic_normalization,
@@ -1033,27 +1031,28 @@ def publish_subject_mask_coordinate_successors(
                     ),
                 }
             )
-            stamp_persisted_padded_placement_provenance(raw_run, historical_crop)
+            stamp_persisted_padded_placement_provenance(raw_run, sealed_crop)
             mark_run_started(raw_run, run_name=raw_target_id, stage="subject_masks")
             crop_path = raw_manifest["payload"]["coordinate_dependencies"]["document"][
                 "crop"
             ]["run_path"]
-            with historical_geometry_only_crop_loader(historical_crop):
-                prepare_subject_mask_coordinate_context(
-                    root,
-                    f"{_RAW_FAMILY}/{raw_target_id}",
-                    expected_publication_owner=raw_owner,
-                    crop_path=crop_path,
-                    mask_labels=_labels(raw_manifest),
-                    model_input_transform=inference["model_input_transform"],
-                    model_artifact=inference["model_artifact"],
-                    mask_probability_threshold=inference["mask_probability_threshold"],
-                )
-                raw_surfaces = publish_subject_mask_coordinate_surfaces(
-                    root,
-                    f"{_RAW_FAMILY}/{raw_target_id}",
-                    expected_publication_owner=raw_owner,
-                )
+            prepare_subject_mask_coordinate_context(
+                root,
+                f"{_RAW_FAMILY}/{raw_target_id}",
+                expected_publication_owner=raw_owner,
+                crop_path=crop_path,
+                mask_labels=_labels(raw_manifest),
+                model_input_transform=inference["model_input_transform"],
+                model_artifact=inference["model_artifact"],
+                mask_probability_threshold=inference["mask_probability_threshold"],
+                _resolved_crop_source=sealed_crop.source,
+            )
+            raw_surfaces = publish_subject_mask_coordinate_surfaces(
+                root,
+                f"{_RAW_FAMILY}/{raw_target_id}",
+                expected_publication_owner=raw_owner,
+                _resolved_crop_source=sealed_crop.source,
+            )
             # The subject-mask publisher's bound context is the pre-stamping
             # context snapshot. Reopen the exact subgroup after publication so
             # an older Zarr metadata cache cannot restore pre-publication attrs
@@ -1061,7 +1060,7 @@ def publish_subject_mask_coordinate_successors(
             root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
             raw_run = root[f"{_RAW_FAMILY}/{raw_target_id}"]
             raw_run.attrs["coordinate_successor_padded_crop_lineage"] = {
-                "source_crop_adapter": historical_crop.as_record(),
+                "source_crop_adapter": sealed_crop.as_record(),
                 "placement_ownership": bind_persisted_padded_placement_record(raw_run),
             }
             raw_run.attrs["coordinate_successor_padded_crop_lineage_sha256"] = (
@@ -1241,18 +1240,18 @@ def publish_subject_mask_coordinate_successors(
             )
             # Refined context preparation reloads the selected raw coordinate
             # metadata (without scanning its probability raster). Keep the
-            # same sealed historical crop adapter active for that reload and
-            # for the publisher's second context load. Refreshing the archive
+            # shared sealed-crop resolver for that reload and the publisher's
+            # second context load. Refreshing the archive
             # root also prevents pre-lifecycle metadata cached by the earlier
             # copy from restoring source run attrs.
             root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
-            refined_surfaces = _publish_refined_with_historical_crop(
+            refined_surfaces = _publish_refined_with_sealed_crop(
                 root,
                 refined_run_path=f"{_REFINED_FAMILY}/{refined_target_id}",
                 refined_owner=refined_owner,
                 raw_run_path=f"{_RAW_FAMILY}/{raw_target_id}",
                 mask_labels=_labels(refined_manifest),
-                historical_crop=historical_crop,
+                sealed_crop=sealed_crop,
             )
             root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
             refined_run = root[f"{_REFINED_FAMILY}/{refined_target_id}"]

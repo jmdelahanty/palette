@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import sys
@@ -17,6 +18,10 @@ import numpy as np
 import zarr
 
 from fisheye.shared.keypoint_summary import build_frame_keypoint_counts
+from fisheye.shared.hybrid_crop_provider import (
+    HYBRID_CROP_RUN_SCHEMA_ID,
+    validate_hybrid_crop_signed_identity,
+)
 from fisheye.shared.row_lineage import (
     ROW_IDENTITY_ARRAYS,
     ROW_IDENTITY_MODE_SCHEMA,
@@ -27,6 +32,14 @@ from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr.chunk_profiles import (
     create_geometry_preload_array,
     geometry_preload_chunks_for_data,
+)
+from fisheye.shared.zarr.crop_shadow import open_persisted_crop_geometry_publication
+from fisheye.shared.zarr.metadata_equivalence import (
+    validate_direct_consolidated_subtree,
+)
+from fisheye.shared.zarr_helpers import (
+    archive_metadata_publication_lock,
+    reconsolidate_zarr_metadata,
 )
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
@@ -44,6 +57,9 @@ from fisheye.shared.zarr_run_completion import (
 KEYPOINT_SHARD_PARENT = "keypoint_shard_runs"
 KEYPOINT_OUTPUT_PARENT = "keypoints_runs"
 FINALIZER_SCHEMA = "palette_keypoint_shard_collection_finalizer_v1"
+KEYPOINT_FINALIZATION_CONSOLIDATION_POLICY = (
+    "keypoint_shard_collection_finalization_v1"
+)
 DEFAULT_CANONICAL_KEYPOINT_ROW_SHARD_ROWS = 131_072
 DEFAULT_CANONICAL_KEYPOINT_FRAME_SHARD_ROWS = 131_072
 
@@ -69,14 +85,20 @@ REQUIRED_ROW_ARRAYS: tuple[str, ...] = (
 
 COUNT_ARRAYS: tuple[str, ...] = ("frame_counts", "n_rois", "n_keypoints")
 
-CROP_REBASE_IDENTITY_ARRAYS: tuple[str, ...] = (
+CROP_REBASE_REQUIRED_AUTHORITY_ARRAYS: tuple[str, ...] = (
     "instance_key",
-    "source_clip_indices",
-    "source_clip_local_frame_indices",
     "source_refined_row_ids",
-    "source_detect_row_index",
     "frame_indices",
     "roi_coordinates_full",
+)
+
+CROP_REBASE_CORROBORATION_ARRAYS: tuple[str, ...] = (
+    "source_acquisition_frame_index",
+    "roi_sizes_full",
+    "source_crop_xywh",
+    "bbox_img_xyxy",
+    "bbox_norm_coords",
+    "bbox_roi_xyxy",
 )
 
 CROP_REBASE_COPY_ARRAYS: tuple[str, ...] = (
@@ -280,7 +302,12 @@ def _write_array_like(
         target.create_array(name, **kwargs)
 
 
-def _resolve_shard(root: zarr.Group, shard_name: str) -> Shard:
+def _resolve_shard(
+    root: zarr.Group,
+    shard_name: str,
+    *,
+    crop_identity_cache: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+) -> Shard:
     shard_parent = root.get(KEYPOINT_SHARD_PARENT)
     if shard_parent is None:
         raise ValueError(f"Missing {KEYPOINT_SHARD_PARENT} group.")
@@ -317,21 +344,47 @@ def _resolve_shard(root: zarr.Group, shard_name: str) -> Shard:
     if crop_group is None:
         raise ValueError(f"{KEYPOINT_SHARD_PARENT}/{shard_name} references missing crop_runs/{source_crop_run}.")
     if "frame_indices" not in crop_group:
-        raise ValueError(f"crop_runs/{source_crop_run} is missing required array 'frame_indices'.")
-    crop_rows = int(crop_group["frame_indices"].shape[0])
-    crop_row_ids = _as_array(group, SOURCE_CROP_ROW_IDS_ARRAY).astype(np.int64, copy=False).reshape(-1)
-    if crop_row_ids.size and (int(crop_row_ids.min()) < 0 or int(crop_row_ids.max()) >= crop_rows):
-        raise ValueError(f"{KEYPOINT_SHARD_PARENT}/{shard_name} has source_crop_row_ids outside crop row range.")
-    crop_frames = _as_array(crop_group, "frame_indices").astype(np.int64, copy=False).reshape(-1)
-    shard_frames = _as_array(group, "frame_indices").astype(np.int64, copy=False).reshape(-1)
-    if not np.array_equal(shard_frames, crop_frames[crop_row_ids]):
-        raise ValueError(f"{KEYPOINT_SHARD_PARENT}/{shard_name} source_crop_row_ids do not match crop frames.")
-    crop_keys = _validated_instance_keys(
-        crop_group,
-        label=f"crop_runs/{source_crop_run}",
-        expected_rows=crop_rows,
-        require_unique=False,
+        raise ValueError(
+            f"crop_runs/{source_crop_run} is missing required array 'frame_indices'."
+        )
+    if crop_identity_cache is None:
+        crop_identity_cache = {}
+    cached_identity = crop_identity_cache.get(source_crop_run)
+    if cached_identity is None:
+        crop_rows = int(crop_group["frame_indices"].shape[0])
+        crop_frames = (
+            _as_array(crop_group, "frame_indices")
+            .astype(np.int64, copy=False)
+            .reshape(-1)
+        )
+        crop_keys = _validated_instance_keys(
+            crop_group,
+            label=f"crop_runs/{source_crop_run}",
+            expected_rows=crop_rows,
+            require_unique=True,
+        )
+        cached_identity = (crop_frames, crop_keys)
+        crop_identity_cache[source_crop_run] = cached_identity
+    crop_frames, crop_keys = cached_identity
+    crop_rows = int(crop_frames.shape[0])
+    crop_row_ids = (
+        _as_array(group, SOURCE_CROP_ROW_IDS_ARRAY)
+        .astype(np.int64, copy=False)
+        .reshape(-1)
     )
+    if crop_row_ids.size and (
+        int(crop_row_ids.min()) < 0 or int(crop_row_ids.max()) >= crop_rows
+    ):
+        raise ValueError(
+            f"{KEYPOINT_SHARD_PARENT}/{shard_name} has source_crop_row_ids outside crop row range."
+        )
+    shard_frames = (
+        _as_array(group, "frame_indices").astype(np.int64, copy=False).reshape(-1)
+    )
+    if not np.array_equal(shard_frames, crop_frames[crop_row_ids]):
+        raise ValueError(
+            f"{KEYPOINT_SHARD_PARENT}/{shard_name} source_crop_row_ids do not match crop frames."
+        )
     shard_keys = _validated_instance_keys(
         group,
         label=f"{KEYPOINT_SHARD_PARENT}/{shard_name}",
@@ -368,7 +421,11 @@ def _load_shards(root: zarr.Group, shard_names: Sequence[str], *, target_crop_ru
         raise ValueError("At least one --shard-run is required.")
     if len(set(shard_names)) != len(shard_names):
         raise ValueError("Duplicate shard run names were supplied.")
-    shards = [_resolve_shard(root, name) for name in shard_names]
+    crop_identity_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    shards = [
+        _resolve_shard(root, name, crop_identity_cache=crop_identity_cache)
+        for name in shard_names
+    ]
 
     source_crop_runs = {shard.source_crop_run for shard in shards}
     if len(source_crop_runs) != 1 and not target_crop_run:
@@ -418,23 +475,78 @@ def _sort_and_validate_row_arrays(row_arrays: Mapping[str, np.ndarray]) -> tuple
     return sorted_rows, order
 
 
-def _row_identity_from_group(group: zarr.Group, row_ids: np.ndarray, names: Sequence[str]) -> list[tuple[Any, ...]]:
-    identities: list[tuple[Any, ...]] = []
-    arrays = {name: _as_array(group, name) for name in names}
-    row_ids = np.asarray(row_ids, dtype=np.int64).reshape(-1)
-    for row_id in row_ids:
-        parts: list[Any] = []
-        for name in names:
-            value = arrays[name][int(row_id)]
-            if np.ndim(value) == 0:
-                parts.append(np.asarray(value).item())
-            else:
-                parts.append(tuple(np.asarray(value).reshape(-1).tolist()))
-        identities.append(tuple(parts))
-    return identities
+def _validate_rebase_profile_authorities(
+    *,
+    archive: Path,
+    target_crop_run: str,
+    target_group: zarr.Group,
+    source_groups: Mapping[str, zarr.Group],
+) -> None:
+    target_manifest = target_group.attrs.get("run_manifest")
+    target_refined_run: str | None = None
+    if isinstance(target_manifest, Mapping):
+        publication = open_persisted_crop_geometry_publication(
+            archive,
+            run_id=target_crop_run,
+        )
+        payload = publication.manifest.get("payload")
+        refined = (
+            payload.get("source_refined_snapshot")
+            if isinstance(payload, Mapping)
+            else None
+        )
+        if isinstance(refined, Mapping):
+            target_refined_run = str(refined.get("run_id") or "").strip() or None
+
+    for source_run, source_group in source_groups.items():
+        if str(source_group.attrs.get("schema_id") or "") != HYBRID_CROP_RUN_SCHEMA_ID:
+            continue
+        provider_digest = str(
+            source_group.attrs.get("provider_record_sha256") or ""
+        ).strip()
+        validate_hybrid_crop_signed_identity(
+            source_group,
+            expected_provider_record_sha256=provider_digest,
+        )
+        source_refined_run = str(
+            source_group.attrs.get("source_refined_detect_run") or ""
+        ).strip()
+        if target_refined_run is not None and source_refined_run != target_refined_run:
+            raise ValueError(
+                f"Signed hybrid crop crop_runs/{source_run} binds refined run "
+                f"{source_refined_run!r}, but crop_runs/{target_crop_run} binds "
+                f"{target_refined_run!r}."
+            )
 
 
-def _resolve_crop_rebase(root: zarr.Group, shards: Sequence[Shard], target_crop_run: str | None) -> CropRebase | None:
+def _target_rows_for_instance_keys(
+    *,
+    sorted_target_keys: np.ndarray,
+    target_key_order: np.ndarray,
+    source_keys: np.ndarray,
+    source_label: str,
+    target_crop_run: str,
+) -> np.ndarray:
+    positions = np.searchsorted(sorted_target_keys, source_keys)
+    in_range = positions < sorted_target_keys.shape[0]
+    matches = np.zeros(source_keys.shape[0], dtype=bool)
+    matches[in_range] = sorted_target_keys[positions[in_range]] == source_keys[in_range]
+    if not np.all(matches):
+        first = int(np.flatnonzero(~matches)[0])
+        raise ValueError(
+            f"Could not map {source_label} row {first} by instance_key into "
+            f"crop_runs/{target_crop_run}."
+        )
+    return target_key_order[positions].astype(np.int64, copy=False)
+
+
+def _resolve_crop_rebase(
+    root: zarr.Group,
+    shards: Sequence[Shard],
+    target_crop_run: str | None,
+    *,
+    archive: Path,
+) -> CropRebase | None:
     if not target_crop_run:
         return None
     crop_parent = root.get("crop_runs")
@@ -478,46 +590,107 @@ def _resolve_crop_rebase(root: zarr.Group, shards: Sequence[Shard], target_crop_
             mapping_mode=DIRECT_SAME_CROP_MAPPING_MODE,
         )
 
-    missing_target = [name for name in CROP_REBASE_IDENTITY_ARRAYS if name not in target_group]
+    missing_target = [
+        name
+        for name in CROP_REBASE_REQUIRED_AUTHORITY_ARRAYS
+        if name not in target_group
+    ]
     if missing_target:
-        raise ValueError(f"target crop run crop_runs/{target_crop_run} missing identity arrays: {missing_target}")
+        raise ValueError(
+            f"target crop run crop_runs/{target_crop_run} missing authority arrays: "
+            f"{missing_target}"
+        )
 
     target_total = int(target_group["frame_indices"].shape[0])
-    target_row_ids = np.arange(target_total, dtype=np.int64)
-    target_identities = _row_identity_from_group(target_group, target_row_ids, CROP_REBASE_IDENTITY_ARRAYS)
-    target_map: dict[tuple[Any, ...], int] = {}
-    duplicate_count = 0
-    for idx, identity in enumerate(target_identities):
-        if identity in target_map:
-            duplicate_count += 1
-            continue
-        target_map[identity] = int(idx)
-    if duplicate_count:
-        raise ValueError(
-            f"target crop run crop_runs/{target_crop_run} has {duplicate_count} duplicate crop row identities."
+    target_keys = _validated_instance_keys(
+        target_group,
+        label=f"crop_runs/{target_crop_run}",
+        expected_rows=target_total,
+        require_unique=True,
+    )
+    target_key_order = np.argsort(target_keys, kind="stable")
+    sorted_target_keys = target_keys[target_key_order]
+    source_groups: dict[str, zarr.Group] = {}
+    for shard in shards:
+        source_group = crop_parent.get(shard.source_crop_run)
+        if source_group is None:
+            raise ValueError(
+                f"source crop run not found: crop_runs/{shard.source_crop_run}"
+            )
+        source_groups[shard.source_crop_run] = source_group
+    _validate_rebase_profile_authorities(
+        archive=archive,
+        target_crop_run=str(target_crop_run),
+        target_group=target_group,
+        source_groups=source_groups,
+    )
+
+    target_authority = {
+        name: _as_array(target_group, name)
+        for name in (
+            *CROP_REBASE_REQUIRED_AUTHORITY_ARRAYS,
+            *CROP_REBASE_CORROBORATION_ARRAYS,
         )
+        if name in target_group
+    }
+    source_authority: dict[str, dict[str, np.ndarray]] = {}
+    source_keys_by_run: dict[str, np.ndarray] = {}
+    for source_run, source_group in source_groups.items():
+        missing_source = [
+            name
+            for name in CROP_REBASE_REQUIRED_AUTHORITY_ARRAYS
+            if name not in source_group
+        ]
+        if missing_source:
+            raise ValueError(
+                f"source crop run crop_runs/{source_run} missing authority arrays: "
+                f"{missing_source}"
+            )
+        source_total = int(source_group["frame_indices"].shape[0])
+        source_keys_by_run[source_run] = _validated_instance_keys(
+            source_group,
+            label=f"crop_runs/{source_run}",
+            expected_rows=source_total,
+            require_unique=True,
+        )
+        source_authority[source_run] = {
+            name: _as_array(source_group, name)
+            for name in (
+                *CROP_REBASE_REQUIRED_AUTHORITY_ARRAYS,
+                *CROP_REBASE_CORROBORATION_ARRAYS,
+            )
+            if name in source_group and name in target_authority
+        }
 
     rebased_chunks: list[np.ndarray] = []
     source_crop_runs: list[str] = []
     for shard in shards:
         source_crop_runs.append(shard.source_crop_run)
-        source_group = crop_parent.get(shard.source_crop_run)
-        if source_group is None:
-            raise ValueError(f"source crop run not found: crop_runs/{shard.source_crop_run}")
-        missing_source = [name for name in CROP_REBASE_IDENTITY_ARRAYS if name not in source_group]
-        if missing_source:
-            raise ValueError(f"source crop run crop_runs/{shard.source_crop_run} missing identity arrays: {missing_source}")
-        source_rows = _as_array(shard.group, SOURCE_CROP_ROW_IDS_ARRAY).astype(np.int64, copy=False).reshape(-1)
-        source_identities = _row_identity_from_group(source_group, source_rows, CROP_REBASE_IDENTITY_ARRAYS)
-        mapped = np.full(source_rows.shape[0], -1, dtype=np.int64)
-        for row_idx, identity in enumerate(source_identities):
-            target_row = target_map.get(identity)
-            if target_row is None:
+        source_rows = (
+            _as_array(shard.group, SOURCE_CROP_ROW_IDS_ARRAY)
+            .astype(np.int64, copy=False)
+            .reshape(-1)
+        )
+        source_keys = source_keys_by_run[shard.source_crop_run][source_rows]
+        source_label = f"{KEYPOINT_SHARD_PARENT}/{shard.name}"
+        mapped = _target_rows_for_instance_keys(
+            sorted_target_keys=sorted_target_keys,
+            target_key_order=target_key_order,
+            source_keys=source_keys,
+            source_label=source_label,
+            target_crop_run=str(target_crop_run),
+        )
+        for name, source_values in source_authority[shard.source_crop_run].items():
+            if name == "instance_key":
+                continue
+            if not np.array_equal(
+                source_values[source_rows],
+                target_authority[name][mapped],
+            ):
                 raise ValueError(
-                    f"Could not map {KEYPOINT_SHARD_PARENT}/{shard.name} row {row_idx} "
-                    f"from crop_runs/{shard.source_crop_run} into crop_runs/{target_crop_run}."
+                    f"{source_label} authority array {name!r} disagrees with "
+                    f"crop_runs/{target_crop_run} after instance_key mapping."
                 )
-            mapped[row_idx] = int(target_row)
         rebased_chunks.append(mapped)
     target_rows = np.concatenate(rebased_chunks, axis=0) if rebased_chunks else np.zeros(0, dtype=np.int64)
     return CropRebase(
@@ -715,6 +888,74 @@ def _load_shard_names_from_file(path: Path) -> list[str]:
     raise ValueError(f"Could not read shard run list from {path}; expected list or mapping with shard_runs.")
 
 
+def _snapshot_attrs(attrs: Any, names: Sequence[str]) -> dict[str, tuple[bool, Any]]:
+    return {
+        name: (name in attrs, copy.deepcopy(attrs.get(name)))
+        for name in names
+    }
+
+
+def _restore_attrs(attrs: Any, snapshot: Mapping[str, tuple[bool, Any]]) -> None:
+    for name, (present, value) in snapshot.items():
+        if present:
+            attrs[name] = copy.deepcopy(value)
+        elif name in attrs:
+            del attrs[name]
+
+
+def _validate_published_keypoint_visibility(
+    archive: Path,
+    *,
+    run_name: str,
+) -> dict[str, Any]:
+    run_path = f"{KEYPOINT_OUTPUT_PARENT}/{run_name}"
+    receipt = validate_direct_consolidated_subtree(
+        archive,
+        subtree_path=run_path,
+    )
+    direct = open_zarr_root(archive, mode="r", use_consolidated=False)
+    consolidated = open_zarr_root(archive, mode="r", use_consolidated=True)
+    direct_parent = direct[KEYPOINT_OUTPUT_PARENT]
+    consolidated_parent = consolidated[KEYPOINT_OUTPUT_PARENT]
+    selector_names = ("latest", "latest_complete", "latest_pending")
+    for name in selector_names:
+        direct_present = name in direct_parent.attrs
+        consolidated_present = name in consolidated_parent.attrs
+        if direct_present != consolidated_present or (
+            direct_present
+            and direct_parent.attrs.get(name) != consolidated_parent.attrs.get(name)
+        ):
+            raise RuntimeError(
+                "Keypoint selector differs between direct and consolidated "
+                f"metadata: {name!r}."
+            )
+    for label, root, parent in (
+        ("direct", direct, direct_parent),
+        ("consolidated", consolidated, consolidated_parent),
+    ):
+        run = parent[run_name]
+        if (
+            parent.attrs.get("latest") != run_name
+            or parent.attrs.get("latest_complete") != run_name
+            or run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != "complete"
+            or run.attrs.get("stage_selector_eligible") is not True
+            or root.attrs.get("current_keypoint_group_path") != run_path
+        ):
+            raise RuntimeError(
+                f"{label} keypoint publication is not selected, complete, "
+                "selector eligible, and current."
+            )
+    return {
+        "policy": KEYPOINT_FINALIZATION_CONSOLIDATION_POLICY,
+        "subtree_equivalence": receipt.to_json(),
+        "selectors": {
+            name: copy.deepcopy(direct_parent.attrs.get(name))
+            for name in selector_names
+            if name in direct_parent.attrs
+        },
+    }
+
+
 def finalize_keypoint_shards(
     *,
     zarr_path: str | Path,
@@ -732,7 +973,12 @@ def finalize_keypoint_shards(
     root = open_zarr_root(archive, mode="r" if dry_run else "a")
     shards = _load_shards(root, [str(name) for name in shard_runs], target_crop_run=target_crop_run)
     row_arrays = _merged_row_arrays(shards)
-    rebase = _resolve_crop_rebase(root, shards, target_crop_run)
+    rebase = _resolve_crop_rebase(
+        root,
+        shards,
+        target_crop_run,
+        archive=archive,
+    )
     row_arrays = _apply_crop_rebase(row_arrays, rebase)
     row_arrays, sort_order = _sort_and_validate_row_arrays(row_arrays)
     source_crop_run = rebase.target_crop_run if rebase is not None else shards[0].source_crop_run
@@ -792,15 +1038,31 @@ def finalize_keypoint_shards(
         KEYPOINT_OUTPUT_PARENT,
         completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     )
-    if resolved_output_run in parent:
-        if not overwrite:
-            raise ValueError(f"{KEYPOINT_OUTPUT_PARENT}/{resolved_output_run} already exists. Pass --overwrite to replace it.")
-        del parent[resolved_output_run]
-
-    start = time.perf_counter()
-    run_group = parent.create_group(resolved_output_run)
-    mark_run_started(run_group, run_name=resolved_output_run, stage="keypoints")
-    note_pending_latest(parent, resolved_output_run)
+    selector_names = ("latest", "latest_complete", "latest_pending")
+    with archive_metadata_publication_lock(archive):
+        if resolved_output_run in parent:
+            if not overwrite:
+                raise ValueError(f"{KEYPOINT_OUTPUT_PARENT}/{resolved_output_run} already exists. Pass --overwrite to replace it.")
+            selected_by = [
+                name
+                for name in ("latest", "latest_complete")
+                if parent.attrs.get(name) == resolved_output_run
+            ]
+            if selected_by:
+                raise ValueError(
+                    f"Cannot overwrite selector-visible {KEYPOINT_OUTPUT_PARENT}/"
+                    f"{resolved_output_run}; selected by {selected_by}."
+                )
+            del parent[resolved_output_run]
+        selector_snapshot = _snapshot_attrs(parent.attrs, selector_names)
+        current_snapshot = _snapshot_attrs(
+            root.attrs,
+            ("current_keypoint_group_path",),
+        )
+        start = time.perf_counter()
+        run_group = parent.create_group(resolved_output_run)
+        mark_run_started(run_group, run_name=resolved_output_run, stage="keypoints")
+        note_pending_latest(parent, resolved_output_run)
     try:
         for name, data in row_arrays.items():
             source_array = shards[0].group.get(name)
@@ -910,19 +1172,57 @@ def finalize_keypoint_shards(
             cwd=Path.cwd(),
         )
         run_group.attrs[RUN_PROVENANCE_ATTR] = run_provenance
-        mark_run_complete(
-            run_group,
-            parent_group=parent,
-            run_name=resolved_output_run,
-            run_provenance=run_provenance,
-        )
-        root.attrs["current_keypoint_group_path"] = run_group.path
         duration = time.perf_counter() - start
         run_group.attrs["finalization_duration_seconds"] = float(duration)
         result["finalization_duration_seconds"] = float(duration)
+        with archive_metadata_publication_lock(archive):
+            mark_run_complete(
+                run_group,
+                parent_group=parent,
+                run_name=resolved_output_run,
+                run_provenance=run_provenance,
+            )
+            root.attrs["current_keypoint_group_path"] = run_group.path
+            consolidation = reconsolidate_zarr_metadata(
+                archive,
+                policy=KEYPOINT_FINALIZATION_CONSOLIDATION_POLICY,
+                fail_on_error=True,
+            )
+            visibility = _validate_published_keypoint_visibility(
+                archive,
+                run_name=resolved_output_run,
+            )
+        result["metadata_publication"] = {
+            **visibility,
+            "consolidation": consolidation,
+        }
         return result
     except Exception as exc:
-        mark_run_failed(run_group, error=str(exc))
+        rollback_errors: list[str] = []
+        try:
+            with archive_metadata_publication_lock(archive):
+                mark_run_failed(
+                    run_group,
+                    parent_group=parent,
+                    run_name=resolved_output_run,
+                    error=str(exc),
+                )
+                run_group.attrs["stage_selector_eligible"] = False
+                _restore_attrs(parent.attrs, selector_snapshot)
+                _restore_attrs(root.attrs, current_snapshot)
+                reconsolidate_zarr_metadata(
+                    archive,
+                    policy=f"{KEYPOINT_FINALIZATION_CONSOLIDATION_POLICY}_rollback",
+                    fail_on_error=True,
+                )
+        except Exception as rollback_exc:
+            rollback_errors.append(
+                f"{type(rollback_exc).__name__}: {rollback_exc}"
+            )
+        if rollback_errors and hasattr(exc, "add_note"):
+            exc.add_note(
+                "Keypoint publication rollback errors: " + "; ".join(rollback_errors)
+            )
         raise
 
 

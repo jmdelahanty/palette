@@ -56,7 +56,10 @@ from fisheye.shared.coordinate_frame_record import (
     BoundPhysicalFrameCalibration,
     array_payload_sha256,
 )
-from fisheye.shared.coordinate_record import bind_persisted_coordinate_record
+from fisheye.shared.coordinate_record import (
+    bind_persisted_coordinate_record,
+    verify_bound_coordinate_record,
+)
 from fisheye.shared.coordinate_descriptor import COORDINATE_DESCRIPTOR_ATTR
 from fisheye.shared.coordinate_identity import (
     TRACK_SAMPLE_INTERPOLATION_DTYPE,
@@ -98,6 +101,11 @@ from fisheye.shared.observation_coordinate_publication import (
     load_collection_proxy_successor_source_rowset,
     load_persisted_source_camera_position_surface,
     require_bound_source_camera_position_surface,
+    resolve_source_detection_rowset_from_position_coordinates,
+)
+from fisheye.shared.zarr.crop_manifest import (
+    CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    CROP_RUN_MANIFEST_SCHEMA_ID,
 )
 from fisheye.shared.stage_provenance import (
     build_stage_provenance,
@@ -414,6 +422,9 @@ TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR = (
 TRACK_POSITION_LINEAGE_SCHEMA_ID = "palette.track_position_lineage"
 TRACK_POSITION_LINEAGE_SCHEMA_VERSION = 1
 TRACK_POSITION_LINEAGE_DIRECT_CROP_V1 = "direct_crop_selection_v1"
+TRACK_POSITION_LINEAGE_GEOMETRY_ONLY_CROP_V2 = (
+    "sealed_geometry_only_crop_v2"
+)
 TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1 = (
     "verified_collection_proxy_successor_v1"
 )
@@ -914,7 +925,10 @@ def _track_kinematics_source_refs(
         == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
     ):
         lineage_mode = inputs.get("position_lineage_mode")
-        if lineage_mode == TRACK_POSITION_LINEAGE_DIRECT_CROP_V1:
+        if lineage_mode in {
+            TRACK_POSITION_LINEAGE_DIRECT_CROP_V1,
+            TRACK_POSITION_LINEAGE_GEOMETRY_ONLY_CROP_V2,
+        }:
             detection_value = inputs.get("detection_path")
             if detection_value not in (None, ""):
                 refs["source_detection_path"] = str(detection_value)
@@ -1261,6 +1275,19 @@ def resolve_detection_from_path(root: zarr.Group, path: str) -> DetectionResolut
         parent_path = "/".join(parts[:2])
         parent_group = root[parent_path]
         source_detect_run = parent_group.attrs.get("source_detect_run")
+        if not source_detect_run:
+            manifest = parent_group.attrs.get("run_manifest")
+            payload = manifest.get("payload") if isinstance(manifest, Mapping) else None
+            source_detection = (
+                payload.get("source_detection")
+                if isinstance(payload, Mapping)
+                else None
+            )
+            source_detect_run = (
+                source_detection.get("run_id")
+                if isinstance(source_detection, Mapping)
+                else None
+            )
         return DetectionResolution(
             group=group,
             path=path,
@@ -1661,82 +1688,27 @@ def load_canonical_offline_position_source(
     )
 
 
-def _canonical_crop_detection_rowset_path(
+def _crop_position_lineage_mode(
     coordinates: BoundCanonicalCoordinateDescriptor,
 ) -> str:
-    """Return the exact detection rowset selected by one canonical crop.
-
-    The crop publication record is already digest-bound by the canonical
-    coordinate descriptor.  Future track publication projects that exact
-    authority instead of reconstructing detection lineage from crop attrs or
-    independently selected detection runs.
-    """
+    """Classify one already resolved crop position surface for publication."""
 
     coordinates = require_bound_canonical_coordinate_descriptor(coordinates)
-    matches: list[str] = []
-    expected_leaves = (
-        "instance_key",
-        "source_acquisition_frame_index",
-        "bbox_norm_coords",
-        "bbox_img_xyxy",
-        "centers_img_xy",
-    )
+    manifest_count = 0
+    selection_count = 0
     for bound_record in coordinates.lineage_records:
         bound_record.assert_verified()
-        record = bound_record.record
-        if record.get("schema_id") != CROP_GEOMETRY_SELECTION_SCHEMA_ID:
-            continue
-        if (
-            record.get("schema_version")
-            != CROP_GEOMETRY_SELECTION_SCHEMA_VERSION
-            or record.get("operation") != CROP_GEOMETRY_SELECTION_OPERATION
-        ):
-            raise ValueError(
-                "Canonical crop position lineage uses an unsupported selection "
-                "record version or operation."
-            )
-        source_rowset = record.get("source_rowset")
-        if type(source_rowset) is not dict:
-            raise ValueError(
-                "Canonical crop selection lacks one exact source rowset record."
-            )
-        rowset_path: str | None = None
-        for leaf in expected_leaves:
-            payload = source_rowset.get(leaf)
-            array_ref = payload.get("array_ref") if type(payload) is dict else None
-            suffix = f"/{leaf}"
-            if (
-                not isinstance(array_ref, str)
-                or not array_ref.startswith("/")
-                or not array_ref.endswith(suffix)
-            ):
-                raise ValueError(
-                    "Canonical crop selection source-rowset array references are "
-                    "missing or malformed."
-                )
-            candidate = array_ref[1 : -len(suffix)]
-            if not candidate or (rowset_path is not None and candidate != rowset_path):
-                raise ValueError(
-                    "Canonical crop selection source arrays do not share one exact "
-                    "detection rowset."
-                )
-            rowset_path = candidate
-        assert rowset_path is not None
-        if not (
-            rowset_path.startswith("detect_runs/")
-            or rowset_path.startswith("refined_detect_runs/")
-        ):
-            raise ValueError(
-                "Canonical crop selection does not identify a supported future "
-                "detection rowset."
-            )
-        matches.append(rowset_path)
-    if len(matches) != 1:
-        raise ValueError(
-            "Canonical crop position lineage must contain exactly one bound crop "
-            "geometry selection record."
-        )
-    return matches[0]
+        schema_id = bound_record.record.get("schema_id")
+        manifest_count += int(schema_id == CROP_RUN_MANIFEST_SCHEMA_ID)
+        selection_count += int(schema_id == CROP_GEOMETRY_SELECTION_SCHEMA_ID)
+    if manifest_count == 1 and selection_count == 0:
+        return TRACK_POSITION_LINEAGE_GEOMETRY_ONLY_CROP_V2
+    if selection_count == 1 and manifest_count == 0:
+        return TRACK_POSITION_LINEAGE_DIRECT_CROP_V1
+    raise ValueError(
+        "Canonical crop position surface does not declare exactly one supported "
+        "publication-profile lineage."
+    )
 
 
 def _offline_position_source_inputs(
@@ -5942,7 +5914,10 @@ def _motion_run_derivation_record(
             )
         else:
             lineage_mode = inputs.get("position_lineage_mode")
-            if lineage_mode == TRACK_POSITION_LINEAGE_DIRECT_CROP_V1:
+            if lineage_mode in {
+                TRACK_POSITION_LINEAGE_DIRECT_CROP_V1,
+                TRACK_POSITION_LINEAGE_GEOMETRY_ONLY_CROP_V2,
+            }:
                 required_inputs = set(
                     _REQUIRED_CANONICAL_OFFLINE_DIRECT_V2_INPUT_KEYS
                 )
@@ -6017,7 +5992,9 @@ def _motion_run_derivation_record(
             publication_schema_version
             == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
         ):
-            exact_detection_path = _canonical_crop_detection_rowset_path(source)
+            exact_detection_path = (
+                resolve_source_detection_rowset_from_position_coordinates(source)
+            )
             if (
                 record["source_refs"].get("source_detection_path")
                 != exact_detection_path
@@ -6050,17 +6027,25 @@ def _motion_run_derivation_record(
                     "Track motion manifest v2 requires one explicit verified "
                     "collection-proxy successor lineage."
                 )
-        else:
-            exact_detection_path = _canonical_crop_detection_rowset_path(source)
+        elif (
+            inputs.get("position_lineage_mode")
+            in {
+                TRACK_POSITION_LINEAGE_DIRECT_CROP_V1,
+                TRACK_POSITION_LINEAGE_GEOMETRY_ONLY_CROP_V2,
+            }
+        ):
+            exact_detection_path = (
+                resolve_source_detection_rowset_from_position_coordinates(source)
+            )
             if (
-                inputs.get("position_lineage_mode")
-                != TRACK_POSITION_LINEAGE_DIRECT_CROP_V1
-                or record["source_refs"].get("source_detection_path")
+                record["source_refs"].get("source_detection_path")
                 != exact_detection_path
             ):
                 raise ValueError(
-                    "Track motion manifest v2 direct-crop lineage is invalid."
+                    "Track motion manifest v2 crop-profile lineage is invalid."
                 )
+        else:
+            raise ValueError("Track motion manifest v2 position lineage is invalid.")
     else:
         _validate_online_input_inventory(
             method=record["method"],
@@ -6122,6 +6107,48 @@ def _motion_v2_position_lineage_record(
         f"/{position_rowset_path}",
     )
     lineage_mode = inputs.get("position_lineage_mode")
+    if lineage_mode == TRACK_POSITION_LINEAGE_GEOMETRY_ONLY_CROP_V2:
+        lineage_manifests = [
+            record
+            for record in source.lineage_records
+            if record.record.get("schema_id") == CROP_RUN_MANIFEST_SCHEMA_ID
+        ]
+        if len(lineage_manifests) != 1:
+            raise ValueError(
+                "Manifest v2 geometry-only crop lineage contract is invalid."
+            )
+        manifest_authority = verify_bound_coordinate_record(lineage_manifests[0])
+        manifest_record = manifest_authority.record
+        payload = manifest_record.get("payload")
+        detection_rowset_path = (
+            resolve_source_detection_rowset_from_position_coordinates(source)
+        )
+        if (
+            manifest_authority.archive_identity != archive_identity(position_rowset)
+            or manifest_authority.record_ref
+            != f"/{position_rowset_path}@run_manifest"
+            or manifest_record.get("schema_id") != CROP_RUN_MANIFEST_SCHEMA_ID
+            or manifest_record.get("schema_version")
+            != CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+            or not isinstance(payload, Mapping)
+            or payload.get("run_id") != position_rowset_path.split("/", 1)[1]
+            or source_refs.get("source_detection_path")
+            != detection_rowset_path
+        ):
+            raise ValueError(
+                "Manifest v2 geometry-only crop lineage contract is invalid."
+            )
+        return {
+            "schema_id": TRACK_POSITION_LINEAGE_SCHEMA_ID,
+            "schema_version": TRACK_POSITION_LINEAGE_SCHEMA_VERSION,
+            "mode": TRACK_POSITION_LINEAGE_GEOMETRY_ONLY_CROP_V2,
+            "position_rowset_ref": f"/{position_rowset_path}",
+            "crop_manifest": {
+                "record_ref": manifest_authority.record_ref,
+                "record_sha256": manifest_authority.record_sha256,
+            },
+            "refined_detection_rowset_ref": f"/{detection_rowset_path}",
+        }
     if lineage_mode == TRACK_POSITION_LINEAGE_DIRECT_CROP_V1:
         selection = bind_persisted_coordinate_record(
             position_rowset,
@@ -6135,7 +6162,9 @@ def _motion_v2_position_lineage_record(
             if record.record.get("schema_id")
             == CROP_GEOMETRY_SELECTION_SCHEMA_ID
         ]
-        detection_rowset_path = _canonical_crop_detection_rowset_path(source)
+        detection_rowset_path = (
+            resolve_source_detection_rowset_from_position_coordinates(source)
+        )
         if (
             len(lineage_selections) != 1
             or lineage_selections[0].record_ref != selection.record_ref
@@ -8748,7 +8777,11 @@ def _validate_motion_core_numeric_invariants(
     )
     expected_resultant = np.zeros(seconds.size, dtype=np.float32)
     for index, second in enumerate(seconds):
-        mask = (seconds_per_sample == second) & heading_finite
+        mask = (
+            (seconds_per_sample == second)
+            & heading_finite
+            & validity["angular_sample_valid"]
+        )
         valid_angles = heading_radians_kernel[mask]
         if valid_angles.size:
             mean_vector = np.mean(np.exp(1j * valid_angles))
@@ -11651,6 +11684,7 @@ def _load_bound_track_motion_run_impl(
         manifest.get("position_lineage_mode")
         not in {
             TRACK_POSITION_LINEAGE_DIRECT_CROP_V1,
+            TRACK_POSITION_LINEAGE_GEOMETRY_ONLY_CROP_V2,
             TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1,
         }
         or not isinstance(source_authority.get("position_lineage"), Mapping)
@@ -13934,6 +13968,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 position_crop_run=position_crop_run,
             )
             detection_path_offline = None
+            offline_position_lineage_mode = (
+                TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+            )
             source_detection_run_id = successor_tracking.expected_detect_run
             offline_publication_schema_version = (
                 TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
@@ -13952,8 +13989,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 f"(historical_tracking_rowset={tracking_source_rowset_path})"
             )
         else:
-            detection_path_offline = _canonical_crop_detection_rowset_path(
+            offline_position_lineage_mode = _crop_position_lineage_mode(
                 canonical_position_surface.coordinates
+            )
+            detection_path_offline = (
+                resolve_source_detection_rowset_from_position_coordinates(
+                    canonical_position_surface.coordinates
+                )
             )
             detection_offline = resolve_detection_from_path(
                 root,
@@ -13964,7 +14006,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             )
             source_detection_run_id = None
             offline_publication_schema_version = (
-                TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
+                TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+                if offline_position_lineage_mode
+                == TRACK_POSITION_LINEAGE_GEOMETRY_ONLY_CROP_V2
+                else TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
             )
             expected_refined_run = (
                 detection_offline.run_name if detection_offline.is_refined else None
@@ -14296,6 +14341,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             )
                         else:
                             offline_inputs["detection_path"] = detection_path_offline
+                            if (
+                                offline_position_lineage_mode
+                                == TRACK_POSITION_LINEAGE_GEOMETRY_ONLY_CROP_V2
+                            ):
+                                offline_inputs["position_lineage_mode"] = (
+                                    offline_position_lineage_mode
+                                )
                         if metrics_metadata:
                             offline_inputs["chaser_metrics"] = metrics_metadata
                         if swim_bout_mirror:

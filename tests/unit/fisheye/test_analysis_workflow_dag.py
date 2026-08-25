@@ -17,6 +17,7 @@ from fisheye.analysis_workflows import (
     load_analysis_workflow,
     plan_analysis_workflow,
 )
+from fisheye.utils.plan_analysis_workflow import build_availability
 
 
 def _write_zarr_metadata(path: Path, attributes: dict[str, object] | None = None) -> None:
@@ -42,6 +43,8 @@ def test_core_behavior_profile_declares_portable_and_framewise_resolutions() -> 
     assert workflow.temporal_policy.eye_trace_resolution == "framewise"
     assert workflow.temporal_policy.tail_trace_resolution == "framewise"
     assert workflow.node_by_id["tail_kinematics"].runnable is True
+    assert workflow.node_by_id["tracks"].runnable is True
+    assert workflow.node_by_id["tracks"].depends_on == ("refined_keypoints",)
     assert workflow.node_by_id["tail_traces"].depends_on == (
         "subject_shape",
         "tail_kinematics",
@@ -257,7 +260,7 @@ def test_tail_plan_uses_staged_process_shard_backend() -> None:
     assert plan.node_by_id["tail_traces"].action == "run"
 
 
-def test_track_kinematics_plan_blocks_without_tracking_authority() -> None:
+def test_track_kinematics_plan_materializes_missing_tracking_authority() -> None:
     workflow = load_analysis_workflow(default_core_behavior_profile_path())
     availability = {
         "refined_keypoints": StageAvailability(
@@ -284,10 +287,10 @@ def test_track_kinematics_plan_blocks_without_tracking_authority() -> None:
         targets=("track_kinematics",),
     )
 
-    assert plan.ready is False
-    assert plan.node_by_id["tracks"].action == "blocked"
-    assert plan.node_by_id["track_kinematics"].action == "blocked"
-    assert plan.node_by_id["track_kinematics"].reason == "blocked by tracks"
+    assert plan.ready is True
+    assert plan.node_by_id["tracks"].action == "run"
+    assert plan.node_by_id["track_kinematics"].action == "run"
+    assert plan.execution_order == ("tracks", "track_kinematics")
 
 
 def test_workflow_rejects_dependency_cycles() -> None:
@@ -340,6 +343,235 @@ def test_availability_resolver_discovers_tracking_authority(tmp_path: Path) -> N
     assert status.available is True
     assert status.run_name == "tracking_a"
     assert status.artifact_path == "tracking_runs/tracking_a"
+
+
+def _write_keypoint_crop_tracking_lineage(
+    root: Path,
+    *,
+    tracking_crop: str,
+) -> None:
+    _write_zarr_metadata(root)
+    _write_zarr_metadata(
+        root / "keypoints_runs",
+        {"latest": "canonical_a", "latest_complete": "canonical_a"},
+    )
+    _write_zarr_metadata(
+        root / "keypoints_runs" / "canonical_a",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "source_crop_run": "crop_geometry_a",
+            "keypoints_processed": 4,
+        },
+    )
+    _write_zarr_metadata(
+        root / "crop_runs" / "crop_geometry_a",
+        {
+            "status": "complete",
+            "artifact_class": "geometry_only_analysis",
+            "stage_selector_eligible": False,
+            "run_manifest": {
+                "payload": {
+                    "source_refined_snapshot": {"run_id": "refined_a"}
+                }
+            },
+        },
+    )
+    _write_zarr_metadata(
+        root / "tracking_runs",
+        {"latest": "tracking_a", "latest_complete": "tracking_a"},
+    )
+    _write_zarr_metadata(
+        root / "tracking_runs" / "tracking_a",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "source_rowset_path": f"crop_runs/{tracking_crop}",
+            "source_rowset_row_count": 4,
+            "source_refined_run": "refined_a",
+        },
+    )
+
+
+def test_tracking_availability_rejects_selected_keypoint_crop_mismatch(
+    tmp_path: Path,
+) -> None:
+    _write_keypoint_crop_tracking_lineage(
+        tmp_path,
+        tracking_crop="crop_hybrid_old",
+    )
+
+    status = discover_stage_availability(
+        tmp_path,
+        "tracks",
+        dependency_runs={"refined_keypoints": "canonical_a"},
+    )
+
+    assert status.available is False
+    assert status.run_name == "tracking_a"
+    assert "does not match the selected keypoint crop lineage" in status.reason
+    assert "crop_geometry_a" in status.reason
+
+
+def test_workflow_availability_passes_keypoint_lineage_to_tracking_gate(
+    tmp_path: Path,
+) -> None:
+    _write_keypoint_crop_tracking_lineage(
+        tmp_path,
+        tracking_crop="crop_geometry_a",
+    )
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+
+    statuses = build_availability(workflow, tmp_path)
+
+    assert statuses["refined_keypoints"].available is True
+    assert statuses["tracks"].available is True
+    assert statuses["tracks"].run_name == "tracking_a"
+    assert "matches the selected keypoint crop lineage" in statuses["tracks"].reason
+
+
+def test_keypoint_authority_resolver_accepts_clipped_canonical_passthrough(
+    tmp_path: Path,
+) -> None:
+    _write_zarr_metadata(tmp_path)
+    parent = tmp_path / "keypoints_runs"
+    _write_zarr_metadata(
+        parent,
+        {"latest": "canonical_a", "latest_complete": "canonical_a"},
+    )
+    _write_zarr_metadata(
+        parent / "canonical_a",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        },
+    )
+
+    status = discover_stage_availability(tmp_path, "refined_keypoints")
+
+    assert status.available is True
+    assert status.run_name == "canonical_a"
+    assert status.artifact_path == "keypoints_runs/canonical_a"
+    assert "canonical keypoint passthrough" in status.reason
+
+
+def test_keypoint_authority_resolver_prefers_active_refined_bundle_member(
+    tmp_path: Path,
+) -> None:
+    _write_zarr_metadata(
+        tmp_path,
+        {
+            "keypoint_bundle_authority_generation": 1,
+            "keypoint_bundle_authority": {
+                "schema_id": "palette.keypoint.bundle_authority",
+                "schema_version": 1,
+                "generation": 1,
+                "members": {
+                    "refined_keypoints": {
+                        "run_path": "refined_keypoints_runs/refined_a"
+                    }
+                },
+            },
+        },
+    )
+    parent = tmp_path / "refined_keypoints_runs"
+    _write_zarr_metadata(parent)
+    _write_zarr_metadata(
+        parent / "refined_a",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        },
+    )
+
+    status = discover_stage_availability(tmp_path, "refined_keypoints")
+
+    assert status.available is True
+    assert status.run_name == "refined/refined_a"
+    assert status.artifact_path == "refined_keypoints_runs/refined_a"
+    assert "active keypoint-bundle" in status.reason
+
+
+def test_subject_mask_resolver_uses_active_root_bundle_authority(
+    tmp_path: Path,
+) -> None:
+    bundle_id = "bundle_a"
+    _write_zarr_metadata(
+        tmp_path,
+        {
+            "subject_mask_authority_generation": 1,
+            "subject_mask_authority": {
+                "schema_id": "palette.subject_mask.bundle_authority",
+                "schema_version": 1,
+                "generation": 1,
+                "bundle_id": bundle_id,
+                "bundle_path": f"subject_mask_bundle_runs/{bundle_id}",
+                "members": {
+                    "refined": {
+                        "run_path": "refined_subject_masks_runs/refined_a"
+                    }
+                },
+            },
+        },
+    )
+    bundle_parent = tmp_path / "subject_mask_bundle_runs"
+    _write_zarr_metadata(bundle_parent)
+    _write_zarr_metadata(
+        bundle_parent / bundle_id,
+        {
+            "palette_run_completion_status": "complete",
+            "subject_mask_bundle_selector_eligible": True,
+        },
+    )
+    refined_parent = tmp_path / "refined_subject_masks_runs"
+    _write_zarr_metadata(refined_parent)
+    _write_zarr_metadata(
+        refined_parent / "refined_a",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+            "subject_mask_bundle_selector_eligible": True,
+        },
+    )
+
+    status = discover_stage_availability(tmp_path, "refined_subject_masks")
+
+    assert status.available is True
+    assert status.run_name == "bundle/bundle_a"
+    assert status.artifact_path == "subject_mask_bundle_runs/bundle_a"
+    assert "active subject-mask bundle" in status.reason
+
+
+@pytest.mark.parametrize(
+    ("stage_id", "attributes", "reason"),
+    (
+        (
+            "refined_keypoints",
+            {"keypoint_bundle_authority_lease": {"owner": "test"}},
+            "activation lease",
+        ),
+        (
+            "refined_subject_masks",
+            {
+                "subject_mask_authority_generation": 1,
+                "subject_mask_authority": {"schema_id": "wrong"},
+            },
+            "malformed or incomplete",
+        ),
+    ),
+)
+def test_authority_resolvers_fail_closed_on_in_progress_or_malformed_root_state(
+    tmp_path: Path,
+    stage_id: str,
+    attributes: dict[str, object],
+    reason: str,
+) -> None:
+    _write_zarr_metadata(tmp_path, attributes)
+
+    status = discover_stage_availability(tmp_path, stage_id)
+
+    assert status.available is False
+    assert reason in status.reason
 
 
 def test_visualization_availability_is_tied_to_selected_track_run(
