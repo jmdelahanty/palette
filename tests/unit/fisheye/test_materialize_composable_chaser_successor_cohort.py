@@ -225,6 +225,12 @@ def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> No
     assert entry["output_run_names"]["spatial_occupancy"] == (
         cohort.SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN
     )
+    assert entry["output_run_names"]["spatial_plot_bundle"] == (
+        cohort.SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME
+    )
+    assert entry["spatial_occupancy_successor"]["mode"] == (
+        "materialize_missing_receipt_bound_v2"
+    )
     assert entry["output_run_names"]["dashboard_bundle"] == (
         cohort.DASHBOARD_RECIPE_BUNDLE_NAME
     )
@@ -234,6 +240,40 @@ def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> No
     assert cohort.load_cohort_task(successor)["task_sha256"] == successor[
         "task_sha256"
     ]
+
+
+def test_task_successor_reuses_existing_exact_spatial_science(tmp_path: Path) -> None:
+    archive, _raw_h5, snapshot = _fixture(tmp_path)
+    original = cohort.plan_cohort_task(
+        snapshot, operations_root=tmp_path / "operations"
+    )
+    recording_id = original["entries"][0]["recording_id"]
+    _write_group(
+        archive
+        / "analysis/chaser_spatial_occupancy_runs"
+        / cohort.SPATIAL_OCCUPANCY_RUN,
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+            "production_authority": False,
+            "registry_update": False,
+            "selection": "none",
+            "palette_run_name": cohort.SPATIAL_OCCUPANCY_RUN,
+            "recording_id": recording_id,
+        },
+    )
+
+    successor = cohort.successor_cohort_task(original)
+
+    entry = successor["entries"][0]
+    assert entry["output_run_names"]["spatial_occupancy"] == (
+        cohort.SPATIAL_OCCUPANCY_RUN
+    )
+    assert entry["spatial_occupancy_successor"] == {
+        "mode": "reuse_existing_exact_complete_v1",
+        "exact_run_name": cohort.SPATIAL_OCCUPANCY_RUN,
+        "plot_bundle": cohort.SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME,
+    }
 
 
 def test_run_one_rejects_changed_frozen_input_metadata(tmp_path: Path) -> None:
@@ -316,6 +356,16 @@ def test_receipt_bound_successor_dry_run_passes_targeted_receipts(tmp_path: Path
         "keypoint_relative_frame_validation_receipt",
         "detection_relative_frame_validation_receipt",
     ]
+    for source in (
+        "semantic_selection",
+        "keypoint_radial",
+        "detection_radial",
+        "controller",
+        "bout",
+        "escape",
+        "spatial_occupancy",
+    ):
+        assert f"{source}_exact_child_validation_receipt" in names
     spatial = next(
         stage for stage in result["stages"] if stage["stage"] == "spatial_occupancy"
     )
@@ -332,10 +382,32 @@ def test_receipt_bound_successor_dry_run_passes_targeted_receipts(tmp_path: Path
             stage["command"].index("--keypoint-relative-frame-receipt") + 1
         ]
         assert commit in keypoint_receipt
-    assert dashboard["command"][-2:] == [
-        "--bundle-name",
-        cohort.DASHBOARD_RECIPE_BUNDLE_NAME,
-    ]
+    for option in (
+        "--semantic-selection-receipt",
+        "--keypoint-radial-receipt",
+        "--detection-radial-receipt",
+    ):
+        assert option in spatial["command"]
+        assert option not in detailed["command"]
+    for option in (
+        "--controller-validation-receipt",
+        "--bout-validation-receipt",
+        "--escape-validation-receipt",
+    ):
+        assert option in dashboard["command"]
+        assert option in detailed["command"]
+    assert dashboard["command"][
+        dashboard["command"].index("--bundle-name") + 1
+    ] == cohort.DASHBOARD_RECIPE_BUNDLE_NAME
+    occupancy_plot = next(
+        stage
+        for stage in result["stages"]
+        if stage["stage"] == "spatial_occupancy_plots"
+    )
+    assert occupancy_plot["command"][
+        occupancy_plot["command"].index("--bundle-name") + 1
+    ] == cohort.SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME
+    assert "--source-validation-receipt" in occupancy_plot["command"]
 
 
 def test_reused_plot_receipt_is_content_verified(tmp_path: Path) -> None:

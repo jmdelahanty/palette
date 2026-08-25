@@ -36,6 +36,10 @@ from fisheye.analysis_workflows.resolved_epoch_selection import (
     ResolvedEpochSelection,
     resolve_exact_stimulus_epoch_selection,
 )
+from fisheye.analysis_workflows.exact_immutable_child_validation_receipt import (
+    VERIFICATION_MODE as EXACT_CHILD_VERIFICATION_MODE,
+    read_exact_immutable_child_validation_receipt,
+)
 from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
     atomic_publish_run_group,
@@ -1067,10 +1071,14 @@ class ProtocolSemanticChaserSelectionSourceHandle:
         }
 
     def assert_current(self) -> None:
+        receipt_path = self.metadata_equivalence.get("receipt_path")
         refreshed = load_protocol_semantic_chaser_selection_source_handle(
             self.analysis_zarr,
             run_name=self.run_name,
             expected_recording_id=self.recording_id,
+            direct_validation_receipt=(
+                str(receipt_path) if receipt_path is not None else None
+            ),
         )
         if refreshed.manifest_sha256 != self.manifest_sha256:
             _fail("Semantic selection publication changed after handle creation.")
@@ -1083,6 +1091,7 @@ def load_protocol_semantic_chaser_selection_source_handle(
     expected_recording_id: str | None = None,
     use_consolidated: bool = True,
     deep_audit: bool = False,
+    direct_validation_receipt: str | Path | None = None,
 ) -> ProtocolSemanticChaserSelectionSourceHandle:
     if type(use_consolidated) is not bool:
         _fail("use_consolidated must be one exact boolean.")
@@ -1090,16 +1099,43 @@ def load_protocol_semantic_chaser_selection_source_handle(
     name = _run_name(run_name)
     run_path = f"{RUNS_PREFIX}{name}"
     try:
-        metadata = validate_direct_consolidated_subtree(
-            archive,
-            subtree_path=run_path,
-        ).to_json()
-        root = open_zarr_root(
-            archive,
-            mode="r",
-            use_consolidated=use_consolidated,
-        )
-        run = root[run_path]
+        if direct_validation_receipt is None:
+            metadata = validate_direct_consolidated_subtree(
+                archive,
+                subtree_path=run_path,
+            ).to_json()
+            root = open_zarr_root(
+                archive,
+                mode="r",
+                use_consolidated=use_consolidated,
+            )
+            run = root[run_path]
+            source_archive = archive
+        else:
+            receipt_path = Path(direct_validation_receipt).expanduser().resolve()
+            receipt = read_exact_immutable_child_validation_receipt(
+                receipt_path,
+                expected_analysis_zarr=archive,
+                expected_run_path=run_path,
+                expected_recording_id=expected_recording_id,
+                expected_manifest_attr=MANIFEST_ATTR,
+                expected_manifest_digest_attr=MANIFEST_DIGEST_ATTR,
+            )
+            metadata = {
+                "verification_mode": EXACT_CHILD_VERIFICATION_MODE,
+                "receipt_path": str(receipt_path),
+                "receipt_sha256": receipt["record_sha256"],
+                "direct_metadata_inventory_sha256": receipt[
+                    "direct_metadata_inventory"
+                ]["inventory_sha256"],
+                "archive_root_consolidated_metadata_reparse": False,
+            }
+            run = open_zarr_root(
+                archive / run_path,
+                mode="r",
+                use_consolidated=False,
+            )
+            source_archive = None
     except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
         raise ProtocolSemanticChaserSelectionPublicationError(
             f"Unable to open exact semantic selection run: {exc}"
@@ -1116,7 +1152,7 @@ def load_protocol_semantic_chaser_selection_source_handle(
         expected_run_path=run_path,
         verify_content_hashes=deep_audit,
         run=run,
-        source_archive=archive,
+        source_archive=source_archive,
     )
     return ProtocolSemanticChaserSelectionSourceHandle(
         analysis_zarr=archive,

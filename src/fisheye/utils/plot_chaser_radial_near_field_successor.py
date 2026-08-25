@@ -125,12 +125,14 @@ def render(
     *,
     run_name: str,
     output_stem: str | Path,
+    source_validation_receipt: str | Path | None = None,
 ) -> dict[str, Any]:
     handle = load_composable_chaser_successor_source_handle(
         analysis_zarr,
         successor_kind="chaser_radial_near_field",
         run_name=run_name,
         deep_audit=True,
+        direct_validation_receipt=source_validation_receipt,
     )
     scientific = handle.scientific_manifest
     epoch_registry = _labels(scientific, "epoch_role")
@@ -259,6 +261,12 @@ def render(
             "manifest_sha256": handle.manifest_sha256,
             "scientific_payload_sha256": handle.scientific_payload_sha256,
             "deep_content_audit": True,
+            "verification_mode": handle.metadata_equivalence.get(
+                "verification_mode", "direct_consolidated_equivalence"
+            ),
+            "validation_receipt_sha256": handle.metadata_equivalence.get(
+                "receipt_sha256"
+            ),
             "relative_frame": dict(scientific["sources"]["relative_frame"]),
             "protocol_semantic_selection": dict(
                 scientific["sources"]["protocol_semantic_selection"]
@@ -282,13 +290,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--analysis-zarr", required=True)
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--output-stem", required=True)
+    parser.add_argument("--source-validation-receipt")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     result = render(
-        args.analysis_zarr, run_name=args.run_name, output_stem=args.output_stem
+        args.analysis_zarr,
+        run_name=args.run_name,
+        output_stem=args.output_stem,
+        source_validation_receipt=args.source_validation_receipt,
     )
     print(json.dumps(result, sort_keys=True, indent=2, allow_nan=False))
     return 0

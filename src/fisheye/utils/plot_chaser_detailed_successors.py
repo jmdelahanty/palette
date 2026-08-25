@@ -776,8 +776,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--detection-relative-frame-run", required=True)
     parser.add_argument("--keypoint-relative-frame-receipt")
     parser.add_argument("--detection-relative-frame-receipt")
+    parser.add_argument("--controller-validation-receipt")
+    parser.add_argument("--bout-validation-receipt")
+    parser.add_argument("--escape-validation-receipt")
     parser.add_argument("--keypoint-radial-run", required=True)
     parser.add_argument("--detection-radial-run", required=True)
+    parser.add_argument("--keypoint-radial-validation-receipt")
+    parser.add_argument("--detection-radial-validation-receipt")
     parser.add_argument("--expected-recording-id", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--bundle-name", required=True)
@@ -819,6 +824,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.overwrite and any(path.exists() for path in expected):
         raise FileExistsError("Detailed plot output already exists; pass --overwrite explicitly.")
 
+    exact_child_receipts = (
+        args.controller_validation_receipt,
+        args.bout_validation_receipt,
+        args.escape_validation_receipt,
+        args.keypoint_radial_validation_receipt,
+        args.detection_radial_validation_receipt,
+    )
+    if any(value is not None for value in exact_child_receipts) and not all(
+        value is not None for value in exact_child_receipts
+    ):
+        _fail("All five exact-child source receipts must be supplied together.")
     controller, bout, escape = tuple(
         load_composable_chaser_successor_source_handle(
             archive,
@@ -827,8 +843,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_recording_id=args.expected_recording_id,
             use_consolidated=True,
             deep_audit=True,
+            direct_validation_receipt=source_receipt,
         )
-        for kind in _CHAIN_KINDS
+        for kind, source_receipt in zip(
+            _CHAIN_KINDS, exact_child_receipts[:3], strict=True
+        )
     )
     receipt_values = (
         args.keypoint_relative_frame_receipt,
@@ -875,6 +894,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_recording_id=args.expected_recording_id,
         use_consolidated=True,
         deep_audit=True,
+        direct_validation_receipt=args.keypoint_radial_validation_receipt,
     )
     radial_detection = load_composable_chaser_successor_source_handle(
         archive,
@@ -883,6 +903,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_recording_id=args.expected_recording_id,
         use_consolidated=True,
         deep_audit=True,
+        direct_validation_receipt=args.detection_radial_validation_receipt,
     )
     outputs = render_detailed_bundle(
         controller,
@@ -907,16 +928,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             "run_path": controller.run_path,
             "manifest_sha256": controller.manifest_sha256,
             "scientific_payload_sha256": controller.scientific_payload_sha256,
+            "verification_mode": controller.metadata_equivalence.get(
+                "verification_mode", "direct_consolidated_equivalence"
+            ),
+            "validation_receipt_sha256": controller.metadata_equivalence.get(
+                "receipt_sha256"
+            ),
         },
         "generalized_chaser_bout_response": {
             "run_path": bout.run_path,
             "manifest_sha256": bout.manifest_sha256,
             "scientific_payload_sha256": bout.scientific_payload_sha256,
+            "verification_mode": bout.metadata_equivalence.get(
+                "verification_mode", "direct_consolidated_equivalence"
+            ),
+            "validation_receipt_sha256": bout.metadata_equivalence.get(
+                "receipt_sha256"
+            ),
         },
         "chaser_escape_freeze": {
             "run_path": escape.run_path,
             "manifest_sha256": escape.manifest_sha256,
             "scientific_payload_sha256": escape.scientific_payload_sha256,
+            "verification_mode": escape.metadata_equivalence.get(
+                "verification_mode", "direct_consolidated_equivalence"
+            ),
+            "validation_receipt_sha256": escape.metadata_equivalence.get(
+                "receipt_sha256"
+            ),
         },
         "relative_frame_keypoint": {
             "run_path": relative_keypoint.run_path,
@@ -940,11 +979,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             "run_path": radial_keypoint.run_path,
             "manifest_sha256": radial_keypoint.manifest_sha256,
             "scientific_payload_sha256": radial_keypoint.scientific_payload_sha256,
+            "verification_mode": radial_keypoint.metadata_equivalence.get(
+                "verification_mode", "direct_consolidated_equivalence"
+            ),
+            "validation_receipt_sha256": radial_keypoint.metadata_equivalence.get(
+                "receipt_sha256"
+            ),
         },
         "radial_detection": {
             "run_path": radial_detection.run_path,
             "manifest_sha256": radial_detection.manifest_sha256,
             "scientific_payload_sha256": radial_detection.scientific_payload_sha256,
+            "verification_mode": radial_detection.metadata_equivalence.get(
+                "verification_mode", "direct_consolidated_equivalence"
+            ),
+            "validation_receipt_sha256": radial_detection.metadata_equivalence.get(
+                "receipt_sha256"
+            ),
         },
     }
     output_records = [

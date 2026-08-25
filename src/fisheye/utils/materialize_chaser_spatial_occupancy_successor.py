@@ -38,6 +38,9 @@ def run(
     expected_recording_id: str,
     keypoint_relative_frame_receipt: str | Path | None = None,
     detection_relative_frame_receipt: str | Path | None = None,
+    semantic_selection_receipt: str | Path | None = None,
+    keypoint_radial_receipt: str | Path | None = None,
+    detection_radial_receipt: str | Path | None = None,
     bin_width_mm: float = 2.0,
     apply: bool = False,
     scratch_root: str | Path | None = None,
@@ -86,6 +89,7 @@ def run(
         expected_recording_id=expected_recording_id,
         use_consolidated=True,
         deep_audit=True,
+        direct_validation_receipt=semantic_selection_receipt,
     )
     radial_keypoint = load_composable_chaser_successor_source_handle(
         archive,
@@ -94,6 +98,7 @@ def run(
         expected_recording_id=expected_recording_id,
         use_consolidated=True,
         deep_audit=True,
+        direct_validation_receipt=keypoint_radial_receipt,
     )
     radial_detection = load_composable_chaser_successor_source_handle(
         archive,
@@ -102,6 +107,7 @@ def run(
         expected_recording_id=expected_recording_id,
         use_consolidated=True,
         deep_audit=True,
+        direct_validation_receipt=detection_radial_receipt,
     )
     prepared = prepare_chaser_spatial_occupancy_successor_from_handles(
         relative_keypoint,
@@ -166,6 +172,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-recording-id", required=True)
     parser.add_argument("--keypoint-relative-frame-receipt")
     parser.add_argument("--detection-relative-frame-receipt")
+    parser.add_argument("--semantic-selection-receipt")
+    parser.add_argument("--keypoint-radial-receipt")
+    parser.add_argument("--detection-radial-receipt")
     parser.add_argument("--bin-width-mm", type=float, default=2.0)
     parser.add_argument("--scratch-root")
     parser.add_argument(
@@ -188,6 +197,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_recording_id=args.expected_recording_id,
         keypoint_relative_frame_receipt=args.keypoint_relative_frame_receipt,
         detection_relative_frame_receipt=args.detection_relative_frame_receipt,
+        semantic_selection_receipt=args.semantic_selection_receipt,
+        keypoint_radial_receipt=args.keypoint_radial_receipt,
+        detection_radial_receipt=args.detection_radial_receipt,
         bin_width_mm=args.bin_width_mm,
         apply=args.apply,
         scratch_root=args.scratch_root,

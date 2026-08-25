@@ -352,8 +352,13 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("analysis_zarr", type=Path)
     parser.add_argument("--run-name", required=True)
+    parser.add_argument(
+        "--bundle-name",
+        help="Output bundle basename; defaults to the exact source run name.",
+    )
     parser.add_argument("--expected-recording-id", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--source-validation-receipt")
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -362,10 +367,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if _RUN_NAME_RE.fullmatch(args.run_name) is None:
         _fail("run_name must be one exact non-selector child name.")
+    bundle_name = args.bundle_name or args.run_name
+    if _RUN_NAME_RE.fullmatch(bundle_name) is None:
+        _fail("bundle_name must be one exact safe output basename.")
     archive = args.analysis_zarr.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
-    stem = output_dir / f"{args.run_name}_heatmaps"
-    receipt_path = output_dir / f"{args.run_name}_spatial_occupancy_plot_receipt.json"
+    stem = output_dir / f"{bundle_name}_heatmaps"
+    receipt_path = output_dir / f"{bundle_name}_spatial_occupancy_plot_receipt.json"
     expected = (stem.with_suffix(".png"), stem.with_suffix(".pdf"), receipt_path)
     if not args.overwrite and any(path.exists() for path in expected):
         raise FileExistsError("Spatial occupancy plot output already exists.")
@@ -376,6 +384,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_recording_id=args.expected_recording_id,
         use_consolidated=True,
         deep_audit=True,
+        direct_validation_receipt=args.source_validation_receipt,
     )
     png, pdf = render_spatial_occupancy_heatmaps(handle, output_stem=stem)
     plot_parameters = spatial_occupancy_plot_parameters(handle)
@@ -385,6 +394,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "manifest_sha256": handle.manifest_sha256,
         "scientific_payload_sha256": handle.scientific_payload_sha256,
         "deep_content_audit": True,
+        "verification_mode": handle.metadata_equivalence.get(
+            "verification_mode", "direct_consolidated_equivalence"
+        ),
+        "validation_receipt_sha256": handle.metadata_equivalence.get(
+            "receipt_sha256"
+        ),
     }
     outputs = [
         {
@@ -400,6 +415,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "plot_recipe_id": PLOT_RECIPE_ID,
         "recording_id": handle.recording_id,
         "run_name": args.run_name,
+        "bundle_name": bundle_name,
         "source_binding": source_binding,
         "source_binding_sha256": canonical_json_sha256(source_binding),
         "outputs": outputs,

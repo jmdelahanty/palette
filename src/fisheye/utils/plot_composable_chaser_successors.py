@@ -333,6 +333,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--expected-recording-id", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--controller-validation-receipt")
+    parser.add_argument("--bout-validation-receipt")
+    parser.add_argument("--escape-validation-receipt")
     parser.add_argument(
         "--bundle-name",
         help="Output bundle basename; defaults to the exact successor run name.",
@@ -355,6 +358,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     expected_outputs = (stem.with_suffix(".png"), stem.with_suffix(".pdf"), receipt_path)
     if not args.overwrite and any(path.exists() for path in expected_outputs):
         raise FileExistsError("Plot output already exists; pass --overwrite explicitly.")
+    source_receipts = (
+        args.controller_validation_receipt,
+        args.bout_validation_receipt,
+        args.escape_validation_receipt,
+    )
+    if any(value is not None for value in source_receipts) and not all(
+        value is not None for value in source_receipts
+    ):
+        _fail("All three exact-child source receipts must be supplied together.")
     handles = tuple(
         load_composable_chaser_successor_source_handle(
             archive,
@@ -363,8 +375,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_recording_id=args.expected_recording_id,
             use_consolidated=True,
             deep_audit=True,
+            direct_validation_receipt=source_receipt,
         )
-        for kind in _KINDS
+        for kind, source_receipt in zip(_KINDS, source_receipts, strict=True)
     )
     controller, bout, escape = handles
     png, pdf = render_dashboard(controller, bout, escape, output_stem=stem)
@@ -374,6 +387,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "run_path": handle.run_path,
             "manifest_sha256": handle.manifest_sha256,
             "scientific_payload_sha256": handle.scientific_payload_sha256,
+            "verification_mode": handle.metadata_equivalence.get(
+                "verification_mode", "direct_consolidated_equivalence"
+            ),
+            "validation_receipt_sha256": handle.metadata_equivalence.get(
+                "receipt_sha256"
+            ),
         }
         for handle in handles
     }

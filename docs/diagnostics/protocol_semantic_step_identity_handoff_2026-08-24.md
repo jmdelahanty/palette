@@ -686,8 +686,17 @@ The local receipt-bound successor now:
 - feeds those bounded handles to paired keypoint/detection spatial occupancy
   and detailed trace plots while retaining the existing strict deep-audit path
   for older tasks;
-- creates a new spatial-occupancy run name rather than changing the existing
-  immutable v1 scientific payload; and
+- independently streams every manifest-declared array once and seals the
+  semantic selection, composable chain, radial/near-field, and spatial
+  occupancy exact children in
+  `palette.analysis.exact_immutable_child.validation_receipt` v1 receipts;
+- validates those children's complete direct metadata generations and then
+  direct-loads their exact immutable paths, avoiding the archive-root document
+  while typed consumers still rehash every loaded scientific array;
+- reuses the already-complete immutable v1 spatial-occupancy scientific
+  payload where it exists and gives the new plot recipe a distinct bundle
+  identity, so adopting the receipt path does not republish identical science;
+  and
 - removes archive-root metadata parsing from execution-time frozen-task
   revalidation. Recording identity is instead checked against the already
   frozen exact archive path/basename, raw-H5 stat binding, and all frozen input
@@ -704,7 +713,7 @@ non-finite JSON value. Existing provider-epoch cohort receipts already retain
 their exact histogram bin edges, counts, fractions, denominators, and dropped
 value reasons.
 
-The successor of frozen cohort task
+The first successor of frozen cohort task
 `0cb0a8b77d7f77e851b7f6543da5a760c42ab2743949476504eba7afd7dced8b`
 is:
 
@@ -731,7 +740,38 @@ row-major slabs, retaining the publisher's completed scientific schema audit
 as the publication authority while independently rehashing every declared
 array. A new high-metadata canary is required for this streaming successor.
 
-This remains experimental implementation evidence. A commit-pinned
+The second commit-pinned task-2 canary (`153743213[2]`, commit `66aeb9a2`) was
+also operator-terminated, this time after the relative-frame receipts completed
+at low memory. The spatial materializer then reached about 6.6 GiB while its
+semantic-selection and radial source loaders still reparsed the 1.46 GB
+archive-root consolidated document. No v2 occupancy successor or versioned
+plot was written. This isolated the remaining cost to exact immutable
+non-relative source loading and motivated the generalized exact-child receipt
+above.
+
+The current successor task is:
+
+`/tmp/goodbatbadbat_composable_chaser_cohort_task_exact_child_receipts_v3_20260825.json`
+
+It has digest
+`d7f68da9933e0b847391205fd2a0695d2451b17aad97f87c9285e633a1d50abf`.
+All 80 existing complete v1 spatial-occupancy children passed direct
+completion, recording, run-name, manifest-digest, and selector-ineligible
+checks and are retained as exact scientific sources. Those entries are
+`plot_only`. Only task indices 77--80 lack that child and remain `resume` for
+the receipt-bound v2 spatial successor. The spatial plot bundle has a separate
+versioned identity, so old plot files and receipts cannot be mistaken for the
+new self-contained recipe.
+
+The generic receipt and direct-load paths, cohort routing, and plot provenance
+passed 47 focused tests in memory-bounded outside-sandbox batches. Both new
+receipt tests make the archive-root metadata unreadable, successfully load and
+deep-audit the exact child, and then reject changed array content. Static
+compilation, Ruff, and diff checks pass. The aggregate semantic test process
+was terminated by cumulative local memory pressure, so that file was split
+into smaller batches; every collected test then completed successfully.
+
+This remains experimental implementation evidence. A new commit-pinned
 high-metadata canary, required CI, and review of the first generated occupancy
 and detailed figures are still required. No selector, registry authority,
 production publication, or shared checkout has been changed.

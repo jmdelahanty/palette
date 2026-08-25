@@ -2,16 +2,18 @@
 
 ## Goal
 
-Eliminate the remaining one-time post-publication rehash used to create a
-reusable chaser relative-frame validation receipt. The current receipt-bound
-consumer path already removes repeated archive-root consolidated-metadata
-parsing and reloads only the arrays a consumer requests. This deferred step
-would let the immutable producer emit the same evidence while those arrays and
-their content digests are already in hand.
+Eliminate the remaining one-time post-publication rehash used to create
+reusable exact-child validation receipts. The current receipt-bound consumer
+path already removes repeated archive-root consolidated-metadata parsing for
+relative-frame, semantic-selection, composable-successor, radial/near-field,
+and spatial-occupancy children. Consumers rehash the arrays they load; initial
+receipt creation independently streams every manifest-declared array. This
+deferred step would let each immutable producer emit the same evidence while
+those arrays and their content digests are already in hand.
 
 ## Proposed successor
 
-Add a versioned relative-frame publisher/finalizer that:
+Add a versioned common immutable-child publisher/finalizer that:
 
 1. computes every declared array content digest during the existing staged
    write/validation pass;
@@ -24,9 +26,10 @@ Add a versioned relative-frame publisher/finalizer that:
    making it a selector or scientific authority.
 
 The producer-authored receipt must have the same or a strictly versioned
-stronger validation semantics as
-`palette.analysis.chaser_relative_frame.reusable_validation_receipt` v1. It
-must not be synthesized before final completion metadata is durable.
+stronger validation semantics as the applicable existing receipt:
+`palette.analysis.chaser_relative_frame.reusable_validation_receipt` v1 or
+`palette.analysis.exact_immutable_child.validation_receipt` v1. It must not be
+synthesized before final completion metadata is durable.
 
 ## Acceptance evidence
 

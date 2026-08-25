@@ -9,6 +9,9 @@ import zarr
 from fisheye.analysis_workflows.composable_epoch_selection_adapter import (
     EpochRoleBinding,
 )
+from fisheye.analysis_workflows.exact_immutable_child_validation_receipt import (
+    ensure_exact_immutable_child_validation_receipt,
+)
 from fisheye.analysis_workflows.protocol_semantic_chaser_selection import (
     CHASER_WINDOW_ROLES,
     STEP_END_INCLUSIVE,
@@ -386,3 +389,38 @@ def test_position_suite_epochs_require_the_exact_semantic_source(
             (("legacy_alias", 0),),
             semantic_selection=handle,
         )
+
+
+def test_exact_child_receipt_loads_semantic_selection_without_root_parse(
+    tmp_path: Path,
+) -> None:
+    archive, _selection, selections, plan = _plan(tmp_path)
+    publish_protocol_semantic_chaser_selection_run(
+        plan,
+        scratch_root=tmp_path / "scratch-receipt",
+    )
+    receipt_path = tmp_path / "semantic-exact-child-receipt.json"
+    receipt = ensure_exact_immutable_child_validation_receipt(
+        archive,
+        run_path=plan.run_path,
+        manifest_attr=MANIFEST_ATTR,
+        manifest_digest_attr=MANIFEST_DIGEST_ATTR,
+        palette_commit="b" * 40,
+        output_json=receipt_path,
+        expected_recording_id="recording_1",
+    )
+
+    (archive / "zarr.json").write_text("root metadata must not be parsed")
+    handle = load_protocol_semantic_chaser_selection_source_handle(
+        archive,
+        run_name=plan.run_name,
+        expected_recording_id="recording_1",
+        deep_audit=True,
+        direct_validation_receipt=receipt_path,
+    )
+
+    assert handle.selection_identity_sha256 == selections.identity_sha256
+    assert handle.metadata_equivalence["receipt_sha256"] == receipt["record_sha256"]
+    assert handle.metadata_equivalence[
+        "archive_root_consolidated_metadata_reparse"
+    ] is False

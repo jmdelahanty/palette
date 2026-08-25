@@ -41,6 +41,10 @@ from fisheye.analysis_workflows.gaze_tracking_successor import (
 from fisheye.analysis_workflows.generalized_bout_response_successor import (
     PreparedGeneralizedBoutResponse,
 )
+from fisheye.analysis_workflows.exact_immutable_child_validation_receipt import (
+    VERIFICATION_MODE as EXACT_CHILD_VERIFICATION_MODE,
+    read_exact_immutable_child_validation_receipt,
+)
 from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
     atomic_publish_run_group,
@@ -721,12 +725,16 @@ class ComposableChaserSuccessorSourceHandle:
         )
 
     def assert_current(self) -> None:
+        receipt_path = self.metadata_equivalence.get("receipt_path")
         refreshed = load_composable_chaser_successor_source_handle(
             self.analysis_zarr,
             successor_kind=self.successor_kind,
             run_name=self.run_name,
             expected_recording_id=self.recording_id,
             deep_audit=self.deep_audited,
+            direct_validation_receipt=(
+                str(receipt_path) if receipt_path is not None else None
+            ),
         )
         if refreshed.manifest_sha256 != self.manifest_sha256:
             _fail("Published successor changed after handle creation.")
@@ -740,6 +748,7 @@ def load_composable_chaser_successor_source_handle(
     expected_recording_id: str | None = None,
     use_consolidated: bool = True,
     deep_audit: bool = False,
+    direct_validation_receipt: str | Path | None = None,
 ) -> ComposableChaserSuccessorSourceHandle:
     """Load one exact successor run without selector discovery."""
 
@@ -751,13 +760,36 @@ def load_composable_chaser_successor_source_handle(
     parent_path = parent_by_kind[successor_kind]
     run_path = f"{parent_path}/{name}"
     try:
-        metadata = validate_direct_consolidated_subtree(
-            archive, subtree_path=run_path
-        ).to_json()
-        root = open_zarr_root(
-            archive, mode="r", use_consolidated=use_consolidated
-        )
-        run = root[run_path]
+        if direct_validation_receipt is None:
+            metadata = validate_direct_consolidated_subtree(
+                archive, subtree_path=run_path
+            ).to_json()
+            root = open_zarr_root(
+                archive, mode="r", use_consolidated=use_consolidated
+            )
+            run = root[run_path]
+        else:
+            receipt_path = Path(direct_validation_receipt).expanduser().resolve()
+            receipt = read_exact_immutable_child_validation_receipt(
+                receipt_path,
+                expected_analysis_zarr=archive,
+                expected_run_path=run_path,
+                expected_recording_id=expected_recording_id,
+                expected_manifest_attr=MANIFEST_ATTR,
+                expected_manifest_digest_attr=MANIFEST_DIGEST_ATTR,
+            )
+            metadata = {
+                "verification_mode": EXACT_CHILD_VERIFICATION_MODE,
+                "receipt_path": str(receipt_path),
+                "receipt_sha256": receipt["record_sha256"],
+                "direct_metadata_inventory_sha256": receipt[
+                    "direct_metadata_inventory"
+                ]["inventory_sha256"],
+                "archive_root_consolidated_metadata_reparse": False,
+            }
+            run = open_zarr_root(
+                archive / run_path, mode="r", use_consolidated=False
+            )
     except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
         raise ComposableChaserSuccessorPublicationError(
             f"Unable to open exact successor run: {exc}"

@@ -77,6 +77,10 @@ SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN = (
     "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260825_"
     "exact_epochs_receipt_bound_v2"
 )
+SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME = (
+    "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260825_"
+    "exact_epochs_recipe_v2"
+)
 DASHBOARD_RECIPE_BUNDLE_NAME = (
     "goodbatbadbat_chaser_dashboard_activity_orthogonal_recipe_v2"
 )
@@ -650,16 +654,33 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
         output_names = dict(
             _mapping(entry["output_run_names"], field="output run names")
         )
+        archive = Path(_text(entry["analysis_zarr"], field="analysis Zarr"))
+        recording_id = _text(entry["recording_id"], field="recording identity")
+        existing_spatial_path = (
+            "analysis/chaser_spatial_occupancy_runs/"
+            f"{SPATIAL_OCCUPANCY_RUN}"
+        )
+        if _existing_complete_output(
+            archive,
+            existing_spatial_path,
+            recording_id,
+        ):
+            spatial_occupancy_run = SPATIAL_OCCUPANCY_RUN
+            spatial_occupancy_mode = "reuse_existing_exact_complete_v1"
+        else:
+            spatial_occupancy_run = SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN
+            spatial_occupancy_mode = "materialize_missing_receipt_bound_v2"
         output_names.update(
             {
-                "spatial_occupancy": SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN,
+                "spatial_occupancy": spatial_occupancy_run,
+                "spatial_plot_bundle": SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME,
                 "dashboard_bundle": DASHBOARD_RECIPE_BUNDLE_NAME,
                 "detailed_bundle": DETAILED_RECIPE_BUNDLE_NAME,
             }
         )
         spatial_path = (
             "analysis/chaser_spatial_occupancy_runs/"
-            f"{SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN}"
+            f"{spatial_occupancy_run}"
         )
         output_paths = [
             str(path)
@@ -667,7 +688,6 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
             if not str(path).startswith("analysis/chaser_spatial_occupancy_runs/")
         ]
         output_paths.append(spatial_path)
-        archive = Path(_text(entry["analysis_zarr"], field="analysis Zarr"))
         existing_paths = [
             path for path in output_paths if (archive / path / "zarr.json").is_file()
         ]
@@ -681,7 +701,7 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
             plot_dir
             / "spatial_occupancy"
             / (
-                f"{SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN}_"
+                f"{SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME}_"
                 "spatial_occupancy_plot_receipt.json"
             ),
         )
@@ -704,6 +724,11 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
                 "relative_frame_validation": {
                     "mode": RELATIVE_FRAME_VALIDATION_MODE,
                     "receipt_directory": "source_validation_receipts",
+                },
+                "spatial_occupancy_successor": {
+                    "mode": spatial_occupancy_mode,
+                    "exact_run_name": spatial_occupancy_run,
+                    "plot_bundle": SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME,
                 },
                 "successor_of_entry_task_sha256": previous_digest,
             }
@@ -959,6 +984,10 @@ def run_one(
     spatial_occupancy_run = _exact_name(
         outputs.get("spatial_occupancy", SPATIAL_OCCUPANCY_RUN),
         field="spatial occupancy run",
+    )
+    spatial_plot_bundle = _exact_name(
+        outputs.get("spatial_plot_bundle", spatial_occupancy_run),
+        field="spatial occupancy plot bundle",
     )
     dashboard_bundle = _exact_name(
         outputs.get("dashboard_bundle", outputs["successors"]),
@@ -1269,13 +1298,101 @@ def run_one(
             ),
         )
 
+    exact_child_receipts: dict[str, Path] = {}
+    if receipt_bound_relative:
+        assert relative_receipt_dir is not None
+        exact_child_specs = (
+            (
+                "semantic_selection",
+                (
+                    "analysis/protocol_semantic_chaser_selection_runs/"
+                    f"{outputs['semantic_selection']}"
+                ),
+                "protocol_semantic_chaser_selection_manifest",
+                "protocol_semantic_chaser_selection_manifest_sha256",
+            ),
+            (
+                "keypoint_radial",
+                f"analysis/chaser_radial_near_field_runs/{outputs['keypoint_radial']}",
+                "composable_chaser_successor_manifest",
+                "composable_chaser_successor_manifest_sha256",
+            ),
+            (
+                "detection_radial",
+                f"analysis/chaser_radial_near_field_runs/{outputs['detection_radial']}",
+                "composable_chaser_successor_manifest",
+                "composable_chaser_successor_manifest_sha256",
+            ),
+            (
+                "controller",
+                f"analysis/controller_chase_trial_runs/{outputs['successors']}",
+                "composable_chaser_successor_manifest",
+                "composable_chaser_successor_manifest_sha256",
+            ),
+            (
+                "bout",
+                (
+                    "analysis/generalized_chaser_bout_response_runs/"
+                    f"{outputs['successors']}"
+                ),
+                "composable_chaser_successor_manifest",
+                "composable_chaser_successor_manifest_sha256",
+            ),
+            (
+                "escape",
+                f"analysis/chaser_escape_freeze_runs/{outputs['successors']}",
+                "composable_chaser_successor_manifest",
+                "composable_chaser_successor_manifest_sha256",
+            ),
+        )
+        for key, run_path, manifest_attr, manifest_digest_attr in exact_child_specs:
+            receipt_path = (
+                relative_receipt_dir
+                / f"{key}.exact_child_validation_receipt.json"
+            )
+            exact_child_receipts[key] = receipt_path
+            stages.append(
+                _invoke(
+                    stage=f"{key}_exact_child_validation_receipt",
+                    command=_stage_command(
+                        py,
+                        "fisheye.utils.seal_exact_immutable_child_validation_receipt",
+                        archive,
+                        "--run-path",
+                        run_path,
+                        "--manifest-attr",
+                        manifest_attr,
+                        "--manifest-digest-attr",
+                        manifest_digest_attr,
+                        "--palette-commit",
+                        commit,
+                        "--output-json",
+                        receipt_path,
+                        "--expected-recording-id",
+                        recording_id,
+                    ),
+                    log_dir=receipt_dir,
+                    apply=apply,
+                )
+            )
+
+    relative_receipt_flags: tuple[object, ...] = ()
     occupancy_receipt_flags: tuple[object, ...] = ()
     if receipt_bound_relative:
-        occupancy_receipt_flags = (
+        relative_receipt_flags = (
             "--keypoint-relative-frame-receipt",
             relative_receipts["keypoint"],
             "--detection-relative-frame-receipt",
             relative_receipts["detection"],
+        )
+        occupancy_receipt_flags = (
+            *relative_receipt_flags,
+            "--semantic-selection-receipt",
+            exact_child_receipts["semantic_selection"],
+            "--keypoint-radial-receipt",
+            exact_child_receipts["keypoint_radial"],
+            "--detection-radial-receipt",
+            exact_child_receipts["detection_radial"],
         )
     execute_if_missing(
         "spatial_occupancy",
@@ -1310,9 +1427,43 @@ def run_one(
         ),
     )
 
+    if receipt_bound_relative:
+        assert relative_receipt_dir is not None
+        spatial_source_receipt = (
+            relative_receipt_dir / "spatial_occupancy.exact_child_validation_receipt.json"
+        )
+        exact_child_receipts["spatial_occupancy"] = spatial_source_receipt
+        stages.append(
+            _invoke(
+                stage="spatial_occupancy_exact_child_validation_receipt",
+                command=_stage_command(
+                    py,
+                    "fisheye.utils.seal_exact_immutable_child_validation_receipt",
+                    archive,
+                    "--run-path",
+                    (
+                        "analysis/chaser_spatial_occupancy_runs/"
+                        f"{spatial_occupancy_run}"
+                    ),
+                    "--manifest-attr",
+                    "composable_chaser_successor_manifest",
+                    "--manifest-digest-attr",
+                    "composable_chaser_successor_manifest_sha256",
+                    "--palette-commit",
+                    commit,
+                    "--output-json",
+                    spatial_source_receipt,
+                    "--expected-recording-id",
+                    recording_id,
+                ),
+                log_dir=receipt_dir,
+                apply=apply,
+            )
+        )
+
     spatial_receipt = (
         spatial_plot_dir
-        / f"{spatial_occupancy_run}_spatial_occupancy_plot_receipt.json"
+        / f"{spatial_plot_bundle}_spatial_occupancy_plot_receipt.json"
     )
     if _validated_plot_receipt(
         spatial_receipt,
@@ -1332,10 +1483,20 @@ def run_one(
                     archive,
                     "--run-name",
                     spatial_occupancy_run,
+                    "--bundle-name",
+                    spatial_plot_bundle,
                     "--expected-recording-id",
                     recording_id,
                     "--output-dir",
                     spatial_plot_dir,
+                    *(
+                        (
+                            "--source-validation-receipt",
+                            exact_child_receipts["spatial_occupancy"],
+                        )
+                        if receipt_bound_relative
+                        else ()
+                    ),
                 ),
                 log_dir=receipt_dir,
                 apply=apply,
@@ -1365,6 +1526,18 @@ def run_one(
                     plot_dir,
                     "--bundle-name",
                     dashboard_bundle,
+                    *(
+                        (
+                            "--controller-validation-receipt",
+                            exact_child_receipts["controller"],
+                            "--bout-validation-receipt",
+                            exact_child_receipts["bout"],
+                            "--escape-validation-receipt",
+                            exact_child_receipts["escape"],
+                        )
+                        if receipt_bound_relative
+                        else ()
+                    ),
                 ),
                 log_dir=receipt_dir,
                 apply=apply,
@@ -1391,7 +1564,23 @@ def run_one(
                     outputs["keypoint_relative"],
                     "--detection-relative-frame-run",
                     outputs["detection_relative"],
-                    *occupancy_receipt_flags,
+                    *relative_receipt_flags,
+                    *(
+                        (
+                            "--controller-validation-receipt",
+                            exact_child_receipts["controller"],
+                            "--bout-validation-receipt",
+                            exact_child_receipts["bout"],
+                            "--escape-validation-receipt",
+                            exact_child_receipts["escape"],
+                            "--keypoint-radial-validation-receipt",
+                            exact_child_receipts["keypoint_radial"],
+                            "--detection-radial-validation-receipt",
+                            exact_child_receipts["detection_radial"],
+                        )
+                        if receipt_bound_relative
+                        else ()
+                    ),
                     "--keypoint-radial-run",
                     outputs["keypoint_radial"],
                     "--detection-radial-run",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 
 import numpy as np
 import pytest
@@ -10,6 +11,9 @@ from fisheye.analysis_workflows.composable_chaser_successor_publication import (
     build_composable_chaser_successor_publication_plan,
     load_composable_chaser_successor_source_handle,
     publish_composable_chaser_successor_run,
+)
+from fisheye.analysis_workflows.exact_immutable_child_validation_receipt import (
+    ensure_exact_immutable_child_validation_receipt,
 )
 from fisheye.analysis_workflows.controller_trial_successor import (
     prepare_controller_trial_successor,
@@ -191,3 +195,75 @@ def test_deep_audited_handle_rehydrates_exact_prepared_dependency(tmp_path) -> N
     )
     with pytest.raises(TypeError):
         handle.scientific_manifest["policy"]["fallback"] = "infer"  # type: ignore[index]
+
+
+def test_exact_child_receipt_avoids_root_parse_and_rejects_array_change(
+    tmp_path,
+) -> None:
+    archive = _archive(tmp_path)
+    prepared = prepare_controller_trial_successor(_trial_source())
+    plan = build_composable_chaser_successor_publication_plan(
+        archive, run_name="controller-v1", prepared=prepared
+    )
+    publish_composable_chaser_successor_run(
+        plan,
+        scratch_root=tmp_path / "scratch",
+    )
+    receipt_path = tmp_path / "exact-child-receipt.json"
+    receipt = ensure_exact_immutable_child_validation_receipt(
+        archive,
+        run_path=plan.run_path,
+        manifest_attr="composable_chaser_successor_manifest",
+        manifest_digest_attr="composable_chaser_successor_manifest_sha256",
+        palette_commit="a" * 40,
+        output_json=receipt_path,
+        expected_recording_id="recording-1",
+    )
+
+    (archive / "zarr.json").write_text("root metadata must not be parsed")
+    handle = load_composable_chaser_successor_source_handle(
+        archive,
+        successor_kind="controller_chase_trials",
+        run_name="controller-v1",
+        expected_recording_id="recording-1",
+        deep_audit=True,
+        direct_validation_receipt=receipt_path,
+    )
+    assert handle.scientific_payload_sha256 == prepared.payload_digest
+    assert handle.metadata_equivalence["receipt_sha256"] == receipt["record_sha256"]
+    assert handle.metadata_equivalence[
+        "archive_root_consolidated_metadata_reparse"
+    ] is False
+
+    child = open_zarr_root(
+        archive / plan.run_path,
+        mode="a",
+        use_consolidated=False,
+    )
+    child["logged_trial_id"][0] = 999
+    with pytest.raises(ComposableChaserSuccessorPublicationError, match="content digest"):
+        load_composable_chaser_successor_source_handle(
+            archive,
+            successor_kind="controller_chase_trials",
+            run_name="controller-v1",
+            expected_recording_id="recording-1",
+            deep_audit=True,
+            direct_validation_receipt=receipt_path,
+        )
+
+    metadata_path = archive / plan.run_path / "zarr.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["attributes"]["receipt_tamper_marker"] = True
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    with pytest.raises(
+        ComposableChaserSuccessorPublicationError,
+        match="metadata generation changed",
+    ):
+        load_composable_chaser_successor_source_handle(
+            archive,
+            successor_kind="controller_chase_trials",
+            run_name="controller-v1",
+            expected_recording_id="recording-1",
+            deep_audit=True,
+            direct_validation_receipt=receipt_path,
+        )

@@ -210,17 +210,21 @@ def test_publication_deep_audit_rehydrate_and_plot(tmp_path: Path) -> None:
             str(archive),
             "--run-name",
             "spatial-v1",
+            "--bundle-name",
+            "spatial-recipe-v2",
             "--expected-recording-id",
             "recording",
             "--output-dir",
             str(output_dir),
         ]
     ) == 0
-    receipt = output_dir / "spatial-v1_spatial_occupancy_plot_receipt.json"
+    receipt = output_dir / "spatial-recipe-v2_spatial_occupancy_plot_receipt.json"
     assert receipt.is_file()
     receipt_record = json.loads(receipt.read_text(encoding="utf-8"))
     parameters = receipt_record["plot_parameters"]
     assert receipt_record["schema_version"] == 2
+    assert receipt_record["run_name"] == "spatial-v1"
+    assert receipt_record["bundle_name"] == "spatial-recipe-v2"
     assert parameters["scientific_coordinates"]["x_bin_widths_mm"] == [
         5.0,
         5.0,
