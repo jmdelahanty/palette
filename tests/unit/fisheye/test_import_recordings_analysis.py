@@ -161,7 +161,8 @@ def test_main_logs_recording_failure_and_returns_nonzero(monkeypatch, tmp_path: 
     registry_path = tmp_path / "registry.sqlite"
     registry_path.touch()
 
-    def _fake_process(*_args, **_kwargs):
+    def _fake_process(_plan, _opts, *, logger):
+        assert logger is not None
         return SimpleNamespace(
             ok=False,
             failed_step="detect_yolo",
@@ -204,10 +205,14 @@ def test_main_dry_run_with_register_does_not_open_registry(monkeypatch, tmp_path
     cams.mkdir(parents=True, exist_ok=True)
     (cams / "Cam2010093_foo.mp4").touch()
 
-    def _unexpected_registry(*_args, **_kwargs):
-        raise AssertionError("Registry should not be opened during dry-run")
+    def _unexpected_process(*_args, **_kwargs):
+        raise AssertionError("pipeline should not run during dry-run")
 
-    monkeypatch.setattr(analysis_import, "Registry", _unexpected_registry)
+    monkeypatch.setattr(
+        analysis_import,
+        "process_recording_analysis_pipeline",
+        _unexpected_process,
+    )
 
     rc = analysis_import.main(
         [
@@ -234,7 +239,8 @@ def test_main_forwards_keypoint_stage_toggles_to_pipeline(monkeypatch, tmp_path:
 
     captured: dict[str, object] = {}
 
-    def _fake_process(_plan, opts, **_kwargs):
+    def _fake_process(_plan, opts, *, logger):
+        assert logger is None
         captured["run_keypoints"] = opts.run_keypoints
         captured["refine_keypoints"] = opts.refine_keypoints
         captured["keypoints_config"] = opts.keypoints_config
@@ -278,7 +284,8 @@ def test_main_recording_only_forwards_none_h5_to_pipeline(monkeypatch, tmp_path:
     registry_path.touch()
     captured: dict[str, object] = {}
 
-    def _fake_process(plan, opts, **_kwargs):
+    def _fake_process(plan, opts, *, logger):
+        assert logger is None
         captured["h5_path"] = plan.h5_path
         captured["import_stimulus"] = opts.import_opts.import_stimulus
         return SimpleNamespace(

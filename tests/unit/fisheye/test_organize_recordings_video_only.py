@@ -6,6 +6,24 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.utils import organize_recordings
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+)
+
+
+def _identity_fields(
+    *,
+    recording_id: str = "2026-03-09_colleague_set_001_cam2010093",
+    session_uuid: str = "2026-03-09_colleague_set_001",
+    camera_id: str = "2010093",
+) -> dict[str, str]:
+    return {
+        SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
+        "recording_id": recording_id,
+        "session_uuid": session_uuid,
+        "camera_id": camera_id,
+    }
 
 
 def test_build_video_only_plan_defaults_and_renames_cam_file(tmp_path: Path) -> None:
@@ -20,7 +38,7 @@ def test_build_video_only_plan_defaults_and_renames_cam_file(tmp_path: Path) -> 
     plan = organize_recordings._build_video_only_plan(
         {
             "source_video": str(video_path),
-            "session_uuid": "2026-03-09_colleague_set_001",
+            **_identity_fields(),
             "recording_name": "Colleague Set 001",
             "dish_design": "cedar",
         },
@@ -69,7 +87,10 @@ def test_main_video_only_apply_moves_file_and_writes_manifest(tmp_path: Path, mo
             handle,
             fieldnames=[
                 "source_video",
+                SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+                "recording_id",
                 "session_uuid",
+                "organizer_recording_id",
                 "recording_name",
                 "dish_design",
                 "rig_id",
@@ -84,7 +105,8 @@ def test_main_video_only_apply_moves_file_and_writes_manifest(tmp_path: Path, mo
         writer.writerow(
             {
                 "source_video": "Cam2010093.mp4",
-                "session_uuid": "2026-03-09_colleague_set_001",
+                **_identity_fields(),
+                "organizer_recording_id": "colleague_source_family",
                 "recording_name": "Colleague Set 001",
                 "dish_design": "cedar",
                 "rig_id": "omnifin0",
@@ -120,7 +142,6 @@ def test_main_video_only_apply_moves_file_and_writes_manifest(tmp_path: Path, mo
             "--log-dir",
             str(tmp_path / "logs"),
             "--apply",
-            "--write-manifest",
         ],
     )
 
@@ -146,6 +167,13 @@ def test_main_video_only_apply_moves_file_and_writes_manifest(tmp_path: Path, mo
 
     manifest_path = dest_dir / "recording_manifest.json"
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload[SOURCE_RECORDING_IDENTITY_PROFILE_ATTR] == (
+        SOURCE_RECORDING_IDENTITY_PROFILE
+    )
+    assert payload["recording_id"] == "2026-03-09_colleague_set_001_cam2010093"
+    assert payload["session_uuid"] == "2026-03-09_colleague_set_001"
+    assert payload["camera_id"] == "2010093"
+    assert payload["organizer_recording_id"] == "colleague_source_family"
     assert payload["artifact_schema_id"] == "video_only_v1"
     assert payload["recording_type"] == "behavior"
     assert payload["recording_subtype"] == "free"
@@ -166,3 +194,60 @@ def test_main_video_only_apply_moves_file_and_writes_manifest(tmp_path: Path, mo
         "derived/Cam2010093_2026-03-09_colleague_set_001_pipeline_perf.csv",
         "derived/Cam2010093_2026-03-09_colleague_set_001_acquisition_cadence_probe.csv",
     ]
+
+
+def test_video_only_apply_rejects_unmarked_identity_before_moving_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_root = tmp_path / "staging"
+    source_root.mkdir()
+    video_path = source_root / "Cam2010093.mp4"
+    video_path.write_bytes(b"video")
+    metadata_csv = tmp_path / "unmarked.csv"
+    metadata_csv.write_text(
+        "source_video,recording_id,session_uuid,camera_id\n"
+        "Cam2010093.mp4,recording_cam2010093,session,2010093\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "organize_recordings.py",
+            str(source_root),
+            "--video-only",
+            "--metadata-csv",
+            str(metadata_csv),
+            "--dest-root",
+            str(tmp_path / "recordings"),
+            "--log-dir",
+            str(tmp_path / "logs"),
+            "--apply",
+            "--write-manifest",
+        ],
+    )
+
+    assert organize_recordings.main() == 1
+    assert video_path.exists()
+    assert not (tmp_path / "recordings").exists()
+
+
+def test_video_only_camera_cross_check_ignores_unrelated_filename_digits(
+    tmp_path: Path,
+) -> None:
+    video_path = tmp_path / "experiment_20260825.mp4"
+    video_path.write_bytes(b"video")
+
+    plan = organize_recordings._build_video_only_plan(
+        {
+            "source_video": str(video_path),
+            **_identity_fields(camera_id="2010093"),
+            "recording_name": "recording",
+            "dish_design": "cedar",
+        },
+        dest_root=tmp_path / "recordings",
+        rename_cams=True,
+    )
+
+    assert plan.camera_id == "2010093"

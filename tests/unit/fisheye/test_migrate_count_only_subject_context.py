@@ -11,6 +11,10 @@ from fisheye.registry.db import Registry
 from fisheye.shared.experiment_setup import resolve_experiment_setup
 from fisheye.shared.subject_metadata import resolve_subject_metadata
 from fisheye.shared.subject_metadata import publish_subject_metadata
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+)
 from fisheye.utils.migrate_count_only_subject_context import (
     LEGACY_IDENTITY_SCOPE,
     LEGACY_SOURCE,
@@ -232,6 +236,39 @@ def test_migration_publishes_count_only_authority_and_removes_placeholders(
         assert int(row["dpf_at_acquisition_effective"]) == 5
         assert row["subject_id"] is None
         assert row["subject_ids_json"] is None
+
+
+def test_historical_placeholder_migration_fences_current_profile(
+    tmp_path: Path,
+) -> None:
+    registry_path, analysis_path, _ = _registry_fixture(tmp_path)
+    plan = build_plan(
+        registry_path,
+        select_targets(registry_path, all_placeholders=True),
+        reviewer=REVIEWER,
+        reason=REASON,
+    )
+    root = zarr.open_group(str(analysis_path), mode="r+", use_consolidated=False)
+    root.attrs[SOURCE_RECORDING_IDENTITY_PROFILE_ATTR] = (
+        SOURCE_RECORDING_IDENTITY_PROFILE
+    )
+
+    result = apply_plan(registry_path, plan)
+
+    assert result["disposition_counts"] == {"error": 1}
+    reopened = zarr.open_group(
+        str(analysis_path), mode="r", use_consolidated=False
+    )
+    assert "analysis/subject_metadata_runs" not in reopened
+    assert "analysis/experiment_setup_runs" not in reopened
+    registry = Registry(registry_path)
+    try:
+        assert registry.conn.execute(
+            "SELECT COUNT(*) FROM recording_subjects WHERE recording_id = ?",
+            (RECORDING_ID,),
+        ).fetchone()[0] == 2
+    finally:
+        registry.close()
 
 
 def test_migration_is_idempotent_after_placeholder_cleanup(tmp_path: Path) -> None:

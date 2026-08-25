@@ -4,7 +4,21 @@ import json
 from pathlib import Path
 
 import zarr
+import pytest
 
+from fisheye.shared.recording_import_receipt import RecordingImportReceipt
+from fisheye.shared.source_recording_identity import (
+    SOURCE_ANALYSIS_CLASSIFICATION,
+    SOURCE_RECORDING_ID_MAPPING_PROFILE,
+    SOURCE_RECORDING_ID_MAPPING_PROFILE_ATTR,
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+    SourceRecordingIdentity,
+    SourceRecordingIdentityClaim,
+    SourceRecordingIdentityError,
+    load_strict_json_object,
+    recording_id_from_session_camera,
+)
 from fisheye.utils import import_recording_analysis as mod
 
 
@@ -19,6 +33,82 @@ def _opts() -> mod.RecordingImportOptions:
         stimulus_quiet=True,
         allow_preflight_failures=False,
     )
+
+
+def _write_current_manifest(
+    recording_dir: Path,
+    *,
+    recording_id: str | None = None,
+    session_uuid: str = "session",
+    camera_id: str = "2010093",
+    **context: object,
+) -> dict[str, object]:
+    recording_dir.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {
+        SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
+        "recording_id": recording_id or recording_dir.name,
+        "session_uuid": session_uuid,
+        "camera_id": camera_id,
+        **context,
+    }
+    (recording_dir / "recording_manifest.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    return payload
+
+
+def _resolved_identity_claim() -> SourceRecordingIdentityClaim:
+    identity = SourceRecordingIdentity.from_mapping(
+        {
+            SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
+            "recording_id": "recording-a",
+            "session_uuid": "session-a",
+            "camera_id": "2010093",
+        }
+    )
+    return SourceRecordingIdentityClaim.create(identity)
+
+
+def _acquisition_authority_updates() -> dict[str, object]:
+    return {
+        "root_attrs_updated": 1,
+        "raw_video_attrs_updated": 1,
+        "authority_path": "analysis/acquisition_camera_frames/2010093",
+        "ownership_record_ref": "analysis/acquisition_camera_frames/2010093",
+        "ownership_record_sha256": "a" * 64,
+        "frame_record_ref": "analysis/acquisition_camera_frames/2010093",
+        "frame_record_sha256": "b" * 64,
+    }
+
+
+def test_source_identity_mapping_profile_is_exact_and_reproducible() -> None:
+    recording_id = recording_id_from_session_camera(
+        session_uuid="session-a",
+        camera_id="2010093",
+    )
+    payload = {
+        SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
+        SOURCE_RECORDING_ID_MAPPING_PROFILE_ATTR: (
+            SOURCE_RECORDING_ID_MAPPING_PROFILE
+        ),
+        "recording_id": recording_id,
+        "session_uuid": "session-a",
+        "camera_id": "2010093",
+    }
+
+    identity = SourceRecordingIdentity.from_mapping(payload)
+    assert identity.manifest_fields() == payload
+    assert identity.analysis_root_fields()[
+        SOURCE_RECORDING_ID_MAPPING_PROFILE_ATTR
+    ] == SOURCE_RECORDING_ID_MAPPING_PROFILE
+
+    for field, value in (
+        ("recording_id", "opaque-wrong-id"),
+        (SOURCE_RECORDING_ID_MAPPING_PROFILE_ATTR, "unsupported.mapping"),
+    ):
+        malformed = {**payload, field: value}
+        with pytest.raises(SourceRecordingIdentityError):
+            SourceRecordingIdentity.from_mapping(malformed)
 
 
 def test_process_recording_import_returns_stimulus_failure(monkeypatch, tmp_path: Path) -> None:
@@ -169,8 +259,10 @@ def test_ensure_analysis_archive_sets_purpose(monkeypatch, tmp_path: Path) -> No
     fake_root = _FakeGroup()
     monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
 
+    recording_dir = tmp_path / "rec"
+    _write_current_manifest(recording_dir, session_uuid="source_session")
     plan = mod.RecordingAnalysisPlan(
-        recording_dir=tmp_path / "rec",
+        recording_dir=recording_dir,
         h5_path=tmp_path / "rec" / "raw" / "session.h5",
         cam_video=tmp_path / "rec" / "cams" / "cam.mp4",
         zarr_path=tmp_path / "rec" / "zarr" / "rec_analysis.zarr",
@@ -179,13 +271,18 @@ def test_ensure_analysis_archive_sets_purpose(monkeypatch, tmp_path: Path) -> No
     mod.ensure_analysis_archive(plan)
 
     assert fake_root.attrs.get("zarr_purpose") == "analysis"
-    assert fake_root.attrs.get("session_uuid") == "rec"
+    assert fake_root.attrs.get("session_uuid") == "source_session"
     assert fake_root.attrs.get("recording_id") == "rec"
     assert fake_root.attrs.get("recording_name") == "rec"
     assert fake_root.attrs.get("recording_type") == "behavior"
     assert fake_root.attrs.get("recording_subtype") == "free"
     assert fake_root.attrs.get("behavior_mode") == "free"
     assert fake_root.attrs.get("artifact_schema_id") == "recording_analysis_v1"
+    assert fake_root.attrs.get(SOURCE_RECORDING_IDENTITY_PROFILE_ATTR) == (
+        SOURCE_RECORDING_IDENTITY_PROFILE
+    )
+    for key, value in SOURCE_ANALYSIS_CLASSIFICATION.items():
+        assert fake_root.attrs.get(key) == value
     assert fake_root.attrs.get(mod.PALETTE_STORE_EPOCH_ATTR) == (
         mod.PALETTE_STORE_EPOCH_FAIL_CLOSED_COMPLETION
     )
@@ -233,8 +330,10 @@ def test_ensure_analysis_archive_marks_recording_only_context(monkeypatch, tmp_p
     fake_root = _FakeGroup()
     monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
 
+    recording_dir = tmp_path / "rec"
+    _write_current_manifest(recording_dir)
     plan = mod.RecordingAnalysisPlan(
-        recording_dir=tmp_path / "rec",
+        recording_dir=recording_dir,
         h5_path=None,
         cam_video=tmp_path / "rec" / "cams" / "cam.mp4",
         zarr_path=tmp_path / "rec" / "zarr" / "rec_analysis.zarr",
@@ -263,9 +362,11 @@ def test_ensure_analysis_archive_copies_recording_manifest_context(monkeypatch, 
     (recording_dir / "recording_manifest.json").write_text(
         json.dumps(
             {
-                "recording_id": "sickyfish_2026_02_23_16_23_35",
-                "session_uuid": "sickyfish_2026_02_23_16_23_35_cam2010093",
+                SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
+                "recording_id": recording_dir.name,
+                "session_uuid": "sickyfish_2026_02_23_16_23_35",
                 "recording_name": "sickyfish_2026_02_23_16_23_35_cam2010093",
+                "organizer_recording_id": "sickyfish_source_family",
                 "session_start_iso8601_utc": "2026-02-23T21:23:35Z",
                 "camera_id": "2010093",
                 "dish_design": "polar",
@@ -289,7 +390,8 @@ def test_ensure_analysis_archive_copies_recording_manifest_context(monkeypatch, 
     mod.ensure_analysis_archive(plan)
 
     assert fake_root.attrs.get("recording_id") == recording_dir.name
-    assert fake_root.attrs.get("organizer_recording_id") == "sickyfish_2026_02_23_16_23_35"
+    assert fake_root.attrs.get("session_uuid") == "sickyfish_2026_02_23_16_23_35"
+    assert fake_root.attrs.get("organizer_recording_id") == "sickyfish_source_family"
     assert fake_root.attrs.get("camera_id") == "2010093"
     assert fake_root.attrs.get("dish_design") == "polar"
     assert fake_root.attrs.get("protocol_name") == "sickyfish"
@@ -309,28 +411,181 @@ def test_ensure_analysis_archive_rejects_conflicting_camera_identity(
 
     class _FakeGroup:
         def __init__(self) -> None:
-            self.attrs = _FakeAttrs(camera_id="2010094")
+            self.attrs = _FakeAttrs(
+                {
+                    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
+                    "recording_id": "rec",
+                    "session_uuid": "session",
+                    "camera_id": "2010094",
+                    **SOURCE_ANALYSIS_CLASSIFICATION,
+                }
+            )
 
     recording_dir = tmp_path / "rec"
     recording_dir.mkdir()
     (recording_dir / "recording_manifest.json").write_text(
-        json.dumps({"camera_id": "2010093"}),
+        json.dumps(
+            {
+                SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
+                "recording_id": "rec",
+                "session_uuid": "session",
+                "camera_id": "2010093",
+            }
+        ),
         encoding="utf-8",
     )
+    zarr_path = recording_dir / "zarr" / "rec_analysis.zarr"
+    zarr_path.mkdir(parents=True)
     monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: _FakeGroup())
     plan = mod.RecordingAnalysisPlan(
         recording_dir=recording_dir,
         h5_path=None,
         cam_video=recording_dir / "cams" / "cam.mp4",
-        zarr_path=recording_dir / "zarr" / "rec_analysis.zarr",
+        zarr_path=zarr_path,
     )
 
     try:
         mod.ensure_analysis_archive(plan)
     except ValueError as exc:
-        assert "camera_id conflicts" in str(exc)
+        assert "camera_id" in str(exc)
     else:
         raise AssertionError("expected conflicting archive and manifest camera IDs to fail")
+
+
+@pytest.mark.parametrize(
+    "raw_manifest",
+    [
+        "{}",
+        (
+            '{"source_recording_identity_profile":'
+            '"palette.source_recording_identity.v2","recording_id":7,'
+            '"session_uuid":"session","camera_id":"2010093"}'
+        ),
+        (
+            '{"source_recording_identity_profile":'
+            '"palette.source_recording_identity.v2","recording_id":"rec",'
+            '"recording_id":"other","session_uuid":"session",'
+            '"camera_id":"2010093"}'
+        ),
+        (
+            '{"source_recording_identity_profile":'
+            '"palette.source_recording_identity.v2","recording_id":"rec",'
+            '"session_uuid":"session","camera_id":"2010093","bad":NaN}'
+        ),
+    ],
+    ids=("unmarked", "non_string_identity", "duplicate_key", "nonfinite"),
+)
+def test_new_analysis_archive_rejects_noncurrent_identity_before_output_creation(
+    monkeypatch,
+    tmp_path: Path,
+    raw_manifest: str,
+) -> None:
+    recording_dir = tmp_path / "rec"
+    recording_dir.mkdir()
+    (recording_dir / "recording_manifest.json").write_text(
+        raw_manifest, encoding="utf-8"
+    )
+    zarr_path = recording_dir / "zarr" / "rec_analysis.zarr"
+
+    def _unexpected_open(*_args, **_kwargs):
+        raise AssertionError("Zarr must not be opened before identity validation")
+
+    monkeypatch.setattr(mod.zarr, "open_group", _unexpected_open)
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording_dir,
+        h5_path=None,
+        cam_video=recording_dir / "cams" / "cam.mp4",
+        zarr_path=zarr_path,
+    )
+
+    with pytest.raises(SourceRecordingIdentityError):
+        mod.ensure_analysis_archive(plan)
+
+    assert not zarr_path.parent.exists()
+
+
+def test_source_recording_identity_json_reader_enforces_byte_bound(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "recording_manifest.json"
+    manifest_path.write_text(json.dumps({"padding": "x" * 64}), encoding="utf-8")
+
+    with pytest.raises(SourceRecordingIdentityError, match="exceeds 32 bytes"):
+        load_strict_json_object(manifest_path, max_bytes=32)
+
+
+def test_existing_current_analysis_archive_replays_exact_identity(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _FakeAttrs(dict):
+        def put(self, payload):
+            self.clear()
+            self.update(payload)
+
+    recording_dir = tmp_path / "recording_cam2010093"
+    manifest = _write_current_manifest(
+        recording_dir,
+        recording_id="recording_cam2010093",
+        session_uuid="session",
+    )
+    zarr_path = recording_dir / "zarr" / "recording_analysis.zarr"
+    zarr_path.mkdir(parents=True)
+    attrs = _FakeAttrs(
+        {
+            SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
+            "recording_id": manifest["recording_id"],
+            "session_uuid": manifest["session_uuid"],
+            "camera_id": manifest["camera_id"],
+            **SOURCE_ANALYSIS_CLASSIFICATION,
+        }
+    )
+    fake_root = type("FakeRoot", (), {"attrs": attrs})()
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
+    monkeypatch.setattr(
+        mod,
+        "write_acquisition_video_stream_inventory",
+        lambda *_args, **_kwargs: {},
+    )
+
+    result = mod.ensure_analysis_archive(
+        mod.RecordingAnalysisPlan(
+            recording_dir=recording_dir,
+            h5_path=None,
+            cam_video=recording_dir / "cams" / "cam.mp4",
+            zarr_path=zarr_path,
+        )
+    )
+
+    assert result == {}
+    assert attrs["recording_id"] == "recording_cam2010093"
+    assert attrs["session_uuid"] == "session"
+
+
+def test_existing_unprofiled_root_rejects_current_manifest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _FakeAttrs(dict):
+        def put(self, _payload):
+            raise AssertionError("mixed identity must fail before attribute mutation")
+
+    recording_dir = tmp_path / "recording_cam2010093"
+    _write_current_manifest(recording_dir)
+    zarr_path = recording_dir / "zarr" / "recording_analysis.zarr"
+    zarr_path.mkdir(parents=True)
+    fake_root = type("FakeRoot", (), {"attrs": _FakeAttrs()})()
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
+
+    with pytest.raises(SourceRecordingIdentityError, match="unprofiled"):
+        mod.ensure_analysis_archive(
+            mod.RecordingAnalysisPlan(
+                recording_dir=recording_dir,
+                h5_path=None,
+                cam_video=recording_dir / "cams" / "cam.mp4",
+                zarr_path=zarr_path,
+            )
+        )
 
 
 def test_apply_video_metadata_stamps_source_h5_fingerprint(monkeypatch, tmp_path: Path) -> None:
@@ -381,6 +636,10 @@ def test_apply_video_metadata_stamps_source_h5_fingerprint(monkeypatch, tmp_path
     raw = root["raw_video"]
     assert updates["root_attrs_updated"] > 0
     assert updates["raw_video_attrs_updated"] > 0
+    assert updates["ownership_record_ref"]
+    assert updates["ownership_record_sha256"]
+    assert updates["frame_record_ref"]
+    assert updates["frame_record_sha256"]
     assert root.attrs["source_h5"] == "session.h5"
     assert raw.attrs["source_h5"] == "session.h5"
     assert root.attrs["source_h5_fingerprint_strategy"] == "stat_v1"
@@ -519,6 +778,9 @@ def test_ensure_analysis_archive_imports_acquisition_video_stream_inventory(
     (recording_dir / "recording_manifest.json").write_text(
         json.dumps(
             {
+                SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
+                "recording_id": recording_dir.name,
+                "session_uuid": "source_session",
                 "camera_id": "2010093",
                 "video_streams": {
                     "schema_id": "orange_runtime_video_streams_v1",
@@ -763,3 +1025,254 @@ def test_process_recording_import_allows_failed_preflight_when_overridden(monkey
 
     assert result.ok
     assert seen["ensure"] is True
+
+
+def test_process_recording_import_mints_receipt_only_after_publication_steps(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    recording_dir = tmp_path / "recording-a"
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording_dir,
+        h5_path=None,
+        cam_video=recording_dir / "cams" / "Cam2010093.mp4",
+        zarr_path=recording_dir / "zarr" / "recording-a.zarr",
+    )
+    opts = _opts()
+    opts.import_video_metadata = True
+    order: list[str] = []
+    real_publish = mod.publish_recording_import_receipt
+    _write_current_manifest(
+        recording_dir,
+        recording_id="recording-a",
+        session_uuid="session-a",
+    )
+
+    monkeypatch.setattr(
+        mod,
+        "ensure_analysis_archive",
+        lambda _plan: order.append("archive") or None,
+    )
+    monkeypatch.setattr(
+        mod,
+        "apply_video_metadata",
+        lambda _plan, *, overwrite: order.append("acquisition")
+        or _acquisition_authority_updates(),
+    )
+    monkeypatch.setattr(
+        mod,
+        "apply_acquisition_frame_clock",
+        lambda _plan: order.append("frame_clock") or {},
+    )
+    monkeypatch.setattr(
+        mod,
+        "collect_regular_source_recording_identity",
+        lambda _path: order.append("identity") or _resolved_identity_claim(),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_consolidate_current_source_publication",
+        lambda _plan, *, crop_ledger_sha256: order.append("consolidate"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "git_identity",
+        lambda **_kwargs: {"git_sha": "1" * 40, "git_dirty": False},
+    )
+    monkeypatch.setattr(
+        mod,
+        "publish_recording_import_receipt",
+        lambda path, receipt: order.append("receipt")
+        or real_publish(path, receipt),
+    )
+
+    result = mod.process_recording_import(plan, opts, logger=None)
+
+    assert result.ok is True
+    assert isinstance(result.receipt, RecordingImportReceipt)
+    assert result.receipt_path is not None
+    assert RecordingImportReceipt.from_path(result.receipt_path) == result.receipt
+    assert order == [
+        "archive",
+        "acquisition",
+        "frame_clock",
+        "consolidate",
+        "identity",
+        "identity",
+        "receipt",
+    ]
+
+
+def test_process_recording_import_rejects_dirty_receipt_producer(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    recording_dir = tmp_path / "recording-a"
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording_dir,
+        h5_path=None,
+        cam_video=recording_dir / "cams" / "Cam2010093.mp4",
+        zarr_path=recording_dir / "zarr" / "recording-a.zarr",
+    )
+    opts = _opts()
+    opts.import_video_metadata = True
+    ensure_called = False
+    _write_current_manifest(
+        recording_dir,
+        recording_id="recording-a",
+        session_uuid="session-a",
+    )
+    def unexpected_ensure(_plan: mod.RecordingAnalysisPlan) -> None:
+        nonlocal ensure_called
+        ensure_called = True
+
+    monkeypatch.setattr(mod, "ensure_analysis_archive", unexpected_ensure)
+    monkeypatch.setattr(
+        mod,
+        "apply_video_metadata",
+        lambda _plan, *, overwrite: _acquisition_authority_updates(),
+    )
+    monkeypatch.setattr(mod, "apply_acquisition_frame_clock", lambda _plan: {})
+    monkeypatch.setattr(
+        mod,
+        "collect_regular_source_recording_identity",
+        lambda _path: _resolved_identity_claim(),
+    )
+    monkeypatch.setattr(
+        mod,
+        "git_identity",
+        lambda **_kwargs: {"git_sha": "1" * 40, "git_dirty": True},
+    )
+
+    result = mod.process_recording_import(plan, opts, logger=None)
+
+    assert result.ok is False
+    assert result.failed_step == "recording_import_preflight"
+    assert "clean commit-pinned" in (result.error or "")
+    assert ensure_called is False
+    assert not (plan.zarr_path / ".imports").exists()
+
+
+def test_current_import_requires_acquisition_authority_before_archive_write(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    recording_dir = tmp_path / "recording-a"
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording_dir,
+        h5_path=None,
+        cam_video=recording_dir / "cams" / "Cam2010093.mp4",
+        zarr_path=recording_dir / "zarr" / "recording-a.zarr",
+    )
+    _write_current_manifest(
+        recording_dir,
+        recording_id="recording-a",
+        session_uuid="session-a",
+    )
+    monkeypatch.setattr(
+        mod,
+        "ensure_analysis_archive",
+        lambda _plan: (_ for _ in ()).throw(
+            AssertionError("current import must fail before archive mutation")
+        ),
+    )
+
+    result = mod.process_recording_import(plan, _opts(), logger=None)
+
+    assert result.ok is False
+    assert result.failed_step == "recording_import_preflight"
+    assert "acquisition authority" in (result.error or "")
+    assert not plan.zarr_path.exists()
+
+
+def test_process_recording_import_does_not_rewrite_sealed_current_source(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    recording_dir = tmp_path / "recording-a"
+    zarr_path = recording_dir / "zarr" / "recording-a.zarr"
+    zarr_path.mkdir(parents=True)
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording_dir,
+        h5_path=None,
+        cam_video=recording_dir / "cams" / "Cam2010093.mp4",
+        zarr_path=zarr_path,
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_source_recording_identity_profile",
+        lambda _path: mod.SOURCE_RECORDING_IDENTITY_PROFILE,
+    )
+    monkeypatch.setattr(
+        mod,
+        "recording_import_receipt_paths",
+        lambda _path: (zarr_path / ".imports" / f"{'a' * 64}.json",),
+    )
+    monkeypatch.setattr(
+        mod,
+        "ensure_analysis_archive",
+        lambda _plan: (_ for _ in ()).throw(
+            AssertionError("sealed import must fail before archive mutation")
+        ),
+    )
+
+    result = mod.process_recording_import(plan, _opts(), logger=None)
+
+    assert result.ok is False
+    assert result.failed_step == "recording_import_sealed"
+    assert "receipt-bound registry refresh" in (result.error or "")
+
+
+def test_late_crop_validation_failure_prevents_receipt_mint(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    recording_dir = tmp_path / "recording-a"
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording_dir,
+        h5_path=None,
+        cam_video=recording_dir / "cams" / "Cam2010093.mp4",
+        zarr_path=recording_dir / "zarr" / "recording-a.zarr",
+    )
+    opts = _opts()
+    opts.import_video_metadata = True
+    _write_current_manifest(
+        recording_dir,
+        recording_id="recording-a",
+        session_uuid="session-a",
+    )
+    monkeypatch.setattr(
+        mod,
+        "git_identity",
+        lambda **_kwargs: {"git_sha": "1" * 40, "git_dirty": False},
+    )
+    monkeypatch.setattr(
+        mod,
+        "ensure_analysis_archive",
+        lambda _plan: {
+            "streams": {
+                "crop": {
+                    "canonical_ledger": {
+                        "canonical_ledger_record_sha256": "c" * 64
+                    }
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "apply_video_metadata",
+        lambda _plan, *, overwrite: _acquisition_authority_updates(),
+    )
+    monkeypatch.setattr(mod, "apply_acquisition_frame_clock", lambda _plan: {})
+    monkeypatch.setattr(
+        mod,
+        "consolidate_metadata_capture_expected_warnings",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("consolidation failed")),
+    )
+
+    result = mod.process_recording_import(plan, opts, logger=None)
+
+    assert result.ok is False
+    assert result.failed_step == "consolidate_current_source_publication"
+    assert not (plan.zarr_path / ".imports").exists()

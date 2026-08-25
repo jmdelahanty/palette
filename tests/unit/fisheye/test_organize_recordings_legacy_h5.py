@@ -6,6 +6,14 @@ import h5py
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.utils import organize_recordings
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+    SOURCE_RECORDING_ID_MAPPING_PROFILE,
+    SOURCE_RECORDING_ID_MAPPING_PROFILE_ATTR,
+    SourceRecordingIdentityError,
+    recording_id_from_session_camera,
+)
 
 
 def _write_h5(path: Path, *, session_uuid: str, camera_id: str) -> None:
@@ -61,6 +69,36 @@ def test_legacy_h5_plan_preserves_batch_root_sidecars(tmp_path: Path) -> None:
     )
     assert plan.meta["num_dishes"] == 1
     assert plan.meta["fish_per_dish"] == 4
+    assert plan.meta["recording_id"] == recording_id_from_session_camera(
+        session_uuid="session_arena_1",
+        camera_id="2010093",
+    )
+    assert plan.meta["recording_id"] != h5_path.stem
+    assert plan.meta[SOURCE_RECORDING_ID_MAPPING_PROFILE_ATTR] == (
+        SOURCE_RECORDING_ID_MAPPING_PROFILE
+    )
+
+
+def test_h5_plan_rejects_explicit_and_ipc_camera_disagreement(
+    tmp_path: Path,
+) -> None:
+    h5_path = tmp_path / "recording.h5"
+    with h5py.File(h5_path, "w") as h5:
+        h5.attrs["session_uuid"] = "session"
+        h5.attrs["camera_id"] = "2010093"
+        h5.attrs["ipc_source_name"] = "/shm_cam_2010094"
+
+    try:
+        organize_recordings._build_plan(
+            h5_path,
+            dest_root=tmp_path / "recordings",
+            cam_root=None,
+            rename_cams=True,
+        )
+    except SourceRecordingIdentityError as exc:
+        assert "ipc_source_name" in str(exc)
+    else:
+        raise AssertionError("expected H5 camera disagreement to fail")
 
 
 def test_video_only_plan_finds_sidecars_in_organized_raw_directory(tmp_path: Path) -> None:
@@ -81,9 +119,10 @@ def test_video_only_plan_finds_sidecars_in_organized_raw_directory(tmp_path: Pat
         {
             "source_video": str(video),
             "source_camera_metadata_csv": str(metadata),
+            SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
             "camera_id": "2010093",
             "session_uuid": "legacy_video_only",
-            "recording_id": "legacy_video_only",
+            "recording_id": "legacy_video_only_cam2010093",
             "recording_name": "legacy_video_only",
             "dish_design": "cedar",
         },

@@ -16,6 +16,7 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import socket
 import sqlite3
 import sys
 import tempfile
@@ -25,6 +26,12 @@ import uuid
 
 class RegistryShadowPublishError(RuntimeError):
     """Raised when a registry shadow mutation cannot be published safely."""
+
+
+REGISTRY_WRITER_HOST_ENV = "PALETTE_REGISTRY_WRITER_HOST"
+REGISTRY_WRITER_LOCK_PATH_ENV = "PALETTE_REGISTRY_WRITER_LOCK_PATH"
+REGISTRY_SHADOW_TEMP_ROOT_ENV = "PALETTE_REGISTRY_SHADOW_TEMP_ROOT"
+REGISTRY_SHADOW_BACKUP_DIR_ENV = "PALETTE_REGISTRY_SHADOW_BACKUP_DIR"
 
 
 @dataclass(frozen=True)
@@ -195,6 +202,115 @@ def _publication_lock(canonical: Path) -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+@contextmanager
+def _host_writer_lock(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _configured_shadow_paths(
+    canonical: Path,
+) -> tuple[Path, Path, Path]:
+    temporary_root = Path(tempfile.gettempdir()).resolve()
+    if canonical.is_relative_to(temporary_root):
+        token = hashlib.sha256(str(canonical).encode("utf-8")).hexdigest()[:16]
+        return (
+            temporary_root / f"palette-registry-writer-{token}.lock",
+            canonical.parent / ".palette-registry-shadow-tmp",
+            canonical.parent / ".palette-registry-backups",
+        )
+
+    configured = {
+        REGISTRY_WRITER_HOST_ENV: os.environ.get(REGISTRY_WRITER_HOST_ENV),
+        REGISTRY_WRITER_LOCK_PATH_ENV: os.environ.get(
+            REGISTRY_WRITER_LOCK_PATH_ENV
+        ),
+        REGISTRY_SHADOW_TEMP_ROOT_ENV: os.environ.get(
+            REGISTRY_SHADOW_TEMP_ROOT_ENV
+        ),
+        REGISTRY_SHADOW_BACKUP_DIR_ENV: os.environ.get(
+            REGISTRY_SHADOW_BACKUP_DIR_ENV
+        ),
+    }
+    missing = [name for name, value in configured.items() if not value]
+    if missing:
+        raise RegistryShadowPublishError(
+            "shared registry publication requires explicit single-writer "
+            "configuration: " + ", ".join(sorted(missing))
+        )
+    expected_host = str(configured[REGISTRY_WRITER_HOST_ENV])
+    current_host = socket.gethostname()
+    if current_host != expected_host:
+        raise RegistryShadowPublishError(
+            "registry publication is restricted to the designated writer host: "
+            f"expected={expected_host!r}, current={current_host!r}"
+        )
+    return (
+        Path(str(configured[REGISTRY_WRITER_LOCK_PATH_ENV])).expanduser().resolve(),
+        Path(str(configured[REGISTRY_SHADOW_TEMP_ROOT_ENV])).expanduser().resolve(),
+        Path(str(configured[REGISTRY_SHADOW_BACKUP_DIR_ENV])).expanduser().resolve(),
+    )
+
+
+def shadow_synchronize_recording_import(
+    *,
+    canonical_registry: str | Path,
+    zarr_path: Path,
+    receipt: object | None,
+    decided_by: str,
+) -> RegistryShadowPublication:
+    """Synchronize one import without opening the shared registry writable.
+
+    Non-temporary registries require a designated host, a host-local mutex, a
+    node-local candidate directory, and a durable backup directory.  The
+    existing NFS-side publication lock and source hash checks remain a second
+    fence, but cooperating callers must all use this gateway.
+    """
+
+    canonical = Path(canonical_registry).expanduser().resolve()
+    target = Path(zarr_path).expanduser().resolve()
+    if type(decided_by) is not str or not decided_by.strip():
+        raise RegistryShadowPublishError("decided_by must be non-empty text")
+    host_lock, local_temp_root, backup_dir = _configured_shadow_paths(canonical)
+    local_temp_root.mkdir(parents=True, exist_ok=True)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / (
+        f"{canonical.name}.before-recording-import-{uuid.uuid4().hex}.sqlite"
+    )
+
+    def mutate(candidate: Path) -> Mapping[str, Any]:
+        from fisheye.registry.db import Registry
+
+        registry = Registry(candidate)
+        try:
+            dataset_id = registry.synchronize_recording_import(
+                zarr_path=target,
+                receipt=receipt,
+                decided_by=decided_by,
+            )
+        finally:
+            registry.close()
+        return {
+            "operation": "synchronize_recording_import",
+            "dataset_id": dataset_id,
+            "zarr_path": str(target),
+            "decided_by": decided_by,
+        }
+
+    with _host_writer_lock(host_lock):
+        return publish_registry_shadow(
+            canonical_registry=canonical,
+            backup_path=backup,
+            mutate=mutate,
+            local_temp_root=local_temp_root,
+        )
+
+
 def publish_registry_shadow(
     *,
     canonical_registry: str | Path,
@@ -303,9 +419,14 @@ def publish_registry_shadow(
 
 
 __all__ = [
+    "REGISTRY_SHADOW_BACKUP_DIR_ENV",
+    "REGISTRY_SHADOW_TEMP_ROOT_ENV",
+    "REGISTRY_WRITER_HOST_ENV",
+    "REGISTRY_WRITER_LOCK_PATH_ENV",
     "RegistryShadowPublication",
     "RegistryShadowPublishError",
     "RegistryValidation",
     "publish_registry_shadow",
+    "shadow_synchronize_recording_import",
     "validate_registry_sqlite",
 ]

@@ -14,6 +14,10 @@ DEST_ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
 JOB_DRY_RUN=0
 REGISTER=1
 REGISTRY="${PALETTE_REGISTRY:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
+WRITER_HOST="${PALETTE_REGISTRY_WRITER_HOST:-}"
+WRITER_LOCK_PATH="${PALETTE_REGISTRY_WRITER_LOCK_PATH:-/tmp/palette-registry-writer.lock}"
+SHADOW_TEMP_ROOT="${PALETTE_REGISTRY_SHADOW_TEMP_ROOT:-/tmp/palette-registry-shadows}"
+SHADOW_BACKUP_DIR="${PALETTE_REGISTRY_SHADOW_BACKUP_DIR:-}"
 RECORDING_ONLY=0
 ALLOW_PREFLIGHT_FAILURES=0
 RUN_VIDEO_DIAGNOSTICS=1
@@ -51,6 +55,7 @@ Options:
   --no-register                  Do not scan imported/skipped analysis Zarrs
   --registry PATH                Registry SQLite path used with --register
                                 (default: $PALETTE_REGISTRY or /groups/.../palette_registry.sqlite)
+  --writer-host HOST             Designated registry writer host; required with --register
   --recording-only               Import Orange external_ipc video-only recordings
                                 without H5; selects the no-H5 organizer mode
   --allow-preflight-failures     Do not block import on manifest preflight fail
@@ -78,6 +83,7 @@ while [[ $# -gt 0 ]]; do
     --register) REGISTER=1; shift;;
     --no-register) REGISTER=0; shift;;
     --registry) REGISTRY="$2"; shift 2;;
+    --writer-host) WRITER_HOST="$2"; shift 2;;
     --recording-only) RECORDING_ONLY=1; shift;;
     --allow-preflight-failures) ALLOW_PREFLIGHT_FAILURES=1; shift;;
     --run-video-diagnostics) RUN_VIDEO_DIAGNOSTICS=1; shift;;
@@ -108,6 +114,17 @@ fi
 
 if [[ "$REGISTER" == "1" && -z "$REGISTRY" ]]; then
   echo "--register requires --registry PATH" >&2
+  exit 2
+fi
+if [[ -z "$SHADOW_BACKUP_DIR" ]]; then
+  SHADOW_BACKUP_DIR="$(dirname -- "$REGISTRY")/backups"
+fi
+if [[ "$REGISTER" == "1" && -z "$WRITER_HOST" ]]; then
+  echo "--register requires --writer-host or PALETTE_REGISTRY_WRITER_HOST" >&2
+  exit 2
+fi
+if [[ -n "$WRITER_HOST" && ! "$WRITER_HOST" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Unsafe --writer-host value: $WRITER_HOST" >&2
   exit 2
 fi
 
@@ -153,6 +170,10 @@ quoted_run_dir="$(printf '%q' "$RUN_DIR")"
 quoted_dest_root="$(printf '%q' "$DEST_ROOT")"
 quoted_repo_root="$(printf '%q' "$REPO_ROOT")"
 quoted_registry="$(printf '%q' "$REGISTRY")"
+quoted_writer_host="$(printf '%q' "$WRITER_HOST")"
+quoted_writer_lock_path="$(printf '%q' "$WRITER_LOCK_PATH")"
+quoted_shadow_temp_root="$(printf '%q' "$SHADOW_TEMP_ROOT")"
+quoted_shadow_backup_dir="$(printf '%q' "$SHADOW_BACKUP_DIR")"
 
 cat >"$JOB_SCRIPT" <<JOBSCRIPT
 #!/usr/bin/env bash
@@ -164,6 +185,10 @@ RUN_DIR=${quoted_run_dir}
 DEST_ROOT=${quoted_dest_root}
 REPO_ROOT=${quoted_repo_root}
 REGISTRY=${quoted_registry}
+export PALETTE_REGISTRY_WRITER_HOST=${quoted_writer_host}
+export PALETTE_REGISTRY_WRITER_LOCK_PATH=${quoted_writer_lock_path}
+export PALETTE_REGISTRY_SHADOW_TEMP_ROOT=${quoted_shadow_temp_root}
+export PALETTE_REGISTRY_SHADOW_BACKUP_DIR=${quoted_shadow_backup_dir}
 JOB_DRY_RUN=${JOB_DRY_RUN}
 REGISTER=${REGISTER}
 RECORDING_ONLY=${RECORDING_ONLY}
@@ -248,6 +273,9 @@ BSUB_ARGS=(
   -oo "${RUN_DIR}/%J.out"
   -eo "${RUN_DIR}/%J.err"
 )
+if [[ "$REGISTER" == "1" ]]; then
+  BSUB_ARGS+=(-R "select[hname==${WRITER_HOST}] span[hosts=1]")
+fi
 if [[ -n "$QUEUE" ]]; then
   BSUB_ARGS+=(-q "$QUEUE")
 fi
@@ -265,6 +293,9 @@ echo "job_dry_run=$JOB_DRY_RUN"
 echo "register=$REGISTER"
 if [[ -n "$REGISTRY" ]]; then
   echo "registry=$REGISTRY"
+fi
+if [[ -n "$WRITER_HOST" ]]; then
+  echo "registry_writer_host=$WRITER_HOST"
 fi
 echo "submit_command=$BSUB_CMD"
 

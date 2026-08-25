@@ -30,6 +30,9 @@ from fisheye.registry.identity import (
     RegistryIdentityError,
     read_registry_identity,
 )
+from fisheye.registry.recording_identity_authority import (
+    RecordingIdentityAuthorityError,
+)
 from fisheye.registry.maintenance import (
     _backfill_keypoint_profiles,
     _backfill_eye_mask_profiles,
@@ -81,6 +84,10 @@ from fisheye.registry.maintenance import (
 )
 from fisheye.registry.status_ledger import upsert_recording_step_status
 from fisheye.shared.stage_provenance import build_stage_provenance
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+)
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR,
@@ -4377,6 +4384,54 @@ def test_backfill_recording_entities_and_integrity_for_behavior_manifest(tmp_pat
     issues = _check_registry_integrity(registry)
     recording_issue_codes = [issue.code for issue in issues if issue.code.startswith("recording_")]
     assert recording_issue_codes == []
+    registry.close()
+
+
+def test_recording_entity_backfill_rejects_unbound_current_profile(
+    tmp_path: Path,
+) -> None:
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
+    recording_dir = tmp_path / "recordings" / "recording-current"
+    zarr_path = recording_dir / "zarr" / "recording-current.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w", zarr_format=3)
+    root.attrs[SOURCE_RECORDING_IDENTITY_PROFILE_ATTR] = (
+        SOURCE_RECORDING_IDENTITY_PROFILE
+    )
+    recording_dir.joinpath("recording_manifest.json").write_text(
+        json.dumps(
+            {
+                SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: (
+                    SOURCE_RECORDING_IDENTITY_PROFILE
+                ),
+                "recording_id": "recording-current",
+                "session_uuid": "session-current",
+                "camera_id": "camera-current",
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry.upsert_dataset(
+        dataset_id="legacy-current-row",
+        session_uuid=None,
+        zarr_path=zarr_path,
+    )
+    before = registry.conn.execute(
+        "SELECT recording_id, session_uuid, artifact_kind FROM datasets "
+        "WHERE dataset_id = 'legacy-current-row';"
+    ).fetchone()
+
+    with pytest.raises(
+        RecordingIdentityAuthorityError,
+        match="receipt-bound finalization",
+    ):
+        _backfill_recording_entities(registry, dry_run=False)
+
+    after = registry.conn.execute(
+        "SELECT recording_id, session_uuid, artifact_kind FROM datasets "
+        "WHERE dataset_id = 'legacy-current-row';"
+    ).fetchone()
+    assert tuple(after) == tuple(before)
+    assert registry.conn.execute("SELECT COUNT(*) FROM recordings;").fetchone()[0] == 0
     registry.close()
 
 

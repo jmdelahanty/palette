@@ -83,6 +83,9 @@ done
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || fail "unsafe --run-id: $RUN_ID"
 [[ "${#ZARR_PATHS[@]}" -gt 0 ]] || fail "provide at least one --zarr-path"
 [[ "$MEM_GB" =~ ^[1-9][0-9]*$ ]] || fail "--mem-gb must be positive"
+if [[ "$APPLY" == "1" ]]; then
+  fail "--apply is disabled until this maintenance path uses the shared registry shadow-publication gateway"
+fi
 [[ -f "$REGISTRY" ]] || fail "registry not found: $REGISTRY"
 [[ -x "$PALETTE_REPO/scripts/py" ]] || fail "Palette scripts/py is not executable: $PALETTE_REPO"
 SOURCE_MAINTENANCE="$SOURCE_REPO/src/fisheye/registry/maintenance.py"

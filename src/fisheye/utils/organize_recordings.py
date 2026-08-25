@@ -47,6 +47,17 @@ from fisheye.shared.recording_geometry_bundle import (
     iter_recording_geometry_bundle_files,
     publish_recording_geometry_bundle,
 )
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+    SOURCE_RECORDING_ID_MAPPING_PROFILE,
+    SOURCE_RECORDING_ID_MAPPING_PROFILE_ATTR,
+    SourceRecordingIdentity,
+    SourceRecordingIdentityError,
+    load_source_recording_identity,
+    recording_id_from_session_camera,
+    require_source_identity_text,
+)
 
 try:
     from fisheye.diagnostics.video.container import check_hevc_keyframe_flags
@@ -90,6 +101,10 @@ class RecordingGeometryApplyError(RuntimeError):
     """Raised before ordinary recording moves when geometry preservation fails."""
 
 
+class RecordingIdentityApplyError(RuntimeError):
+    """Raised before moves when a plan lacks current canonical identity."""
+
+
 @dataclass(frozen=True)
 class VideoDiagnosticsHookResult:
     manifest_payload: Dict[str, object]
@@ -102,25 +117,67 @@ class H5DiagnosticsHookResult:
     warnings: List[str] = field(default_factory=list)
 
 
+def _bind_current_source_identity(
+    meta: Dict[str, Any],
+    *,
+    recording_id: object,
+    session_uuid: object,
+    camera_id: object,
+    recording_id_mapping_profile: object | None = None,
+) -> SourceRecordingIdentity:
+    declaration = {
+        SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
+        "recording_id": recording_id,
+        "session_uuid": session_uuid,
+        "camera_id": camera_id,
+    }
+    if recording_id_mapping_profile is not None:
+        declaration[SOURCE_RECORDING_ID_MAPPING_PROFILE_ATTR] = (
+            recording_id_mapping_profile
+        )
+    identity = SourceRecordingIdentity.from_mapping(declaration)
+    meta.update(identity.manifest_fields())
+    return identity
+
+
+def _bind_mapped_source_identity(
+    meta: Dict[str, Any],
+    *,
+    session_uuid: object,
+    camera_id: object,
+) -> SourceRecordingIdentity:
+    identity = _bind_current_source_identity(
+        meta,
+        recording_id=recording_id_from_session_camera(
+            session_uuid=session_uuid,
+            camera_id=camera_id,
+        ),
+        session_uuid=session_uuid,
+        camera_id=camera_id,
+        recording_id_mapping_profile=SOURCE_RECORDING_ID_MAPPING_PROFILE,
+    )
+    return identity
+
+
 def _derive_camera_id(ipc_source_name: object) -> Optional[str]:
     if ipc_source_name is None:
         return None
     text = _normalize_attr(ipc_source_name)
     if text is None:
         return None
-    match = re.search(r"cam_(\d+)", text)
+    match = re.search(r"(?:^|[/_-])cam[_-]?(\d+)(?:$|[^0-9])", text, re.IGNORECASE)
     if match:
         return match.group(1)
-    digits = re.findall(r"\d+", text)
-    return digits[-1] if digits else None
+    return None
 
 
 def _derive_camera_id_from_path(path: Path) -> Optional[str]:
-    match = re.search(r"Cam(\d+)", path.name, flags=re.IGNORECASE)
-    if match:
-        return match.group(1)
-    digits = re.findall(r"\d+", path.stem)
-    return digits[-1] if digits else None
+    match = re.search(
+        r"(?:^|[^A-Za-z0-9])Cam(\d+)(?=$|[^0-9])",
+        path.name,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1) if match else None
 
 
 def _sanitize_for_filename(value: str) -> str:
@@ -253,16 +310,27 @@ def _read_camera_context(h5_path: Path) -> Tuple[Optional[str], Dict[str, Any]]:
             )
             for key in keys:
                 if key in root:
-                    _set_meta_if_present(meta, key, root.get(key))
+                    if key in {"session_uuid", "camera_id"}:
+                        meta[key] = require_source_identity_text(
+                            root.get(key), field=f"H5 {key}"
+                        )
+                    else:
+                        _set_meta_if_present(meta, key, root.get(key))
             _augment_h5_manifest_context(h5, meta)
             camera_id = meta.get("camera_id")
-            if not camera_id:
-                derived = _derive_camera_id(meta.get("ipc_source_name"))
-                if derived:
-                    meta["camera_id"] = derived
-                    meta["camera_id_source"] = "ipc_source_name"
+            derived = _derive_camera_id(meta.get("ipc_source_name"))
+            if camera_id and derived and camera_id != derived:
+                raise SourceRecordingIdentityError(
+                    "H5 camera_id conflicts with ipc_source_name camera: "
+                    f"{camera_id!r} != {derived!r}"
+                )
+            if not camera_id and derived:
+                meta["camera_id"] = derived
+                meta["camera_id_source"] = "ipc_source_name"
                 camera_id = derived
             return camera_id, meta
+    except SourceRecordingIdentityError:
+        raise
     except Exception as exc:
         meta["error"] = f"failed to read H5: {exc}"
         return None, meta
@@ -412,10 +480,17 @@ def _build_video_only_plan(
     dest_root: Path,
     rename_cams: bool,
 ) -> RecordingPlan:
+    identity = SourceRecordingIdentity.from_mapping(row)
     video_path = Path(row["source_video"]).expanduser().resolve()
-    camera_id = row.get("camera_id") or _derive_camera_id_from_path(video_path)
-    session_uuid = row.get("session_uuid") or row.get("recording_id") or video_path.stem
-    recording_name = row.get("recording_name") or session_uuid or video_path.stem
+    derived_camera_id = _derive_camera_id_from_path(video_path)
+    if derived_camera_id is not None and derived_camera_id != identity.camera_id:
+        raise SourceRecordingIdentityError(
+            "camera_id conflicts with the unambiguous camera ID in source_video: "
+            f"{identity.camera_id!r} != {derived_camera_id!r}"
+        )
+    camera_id = identity.camera_id
+    session_uuid = identity.session_uuid
+    recording_name = row.get("recording_name") or identity.recording_id
     folder_name = _sanitize_for_filename(recording_name)
     dest_dir = dest_root / folder_name
 
@@ -489,7 +564,8 @@ def _build_video_only_plan(
 
     meta: Dict[str, str] = {
         "session_uuid": session_uuid,
-        "recording_id": row.get("recording_id") or session_uuid,
+        "recording_id": identity.recording_id,
+        SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
         "recording_name": recording_name,
         "recording_type": row.get("recording_type") or "behavior",
         "recording_subtype": row.get("recording_subtype") or "free",
@@ -509,6 +585,7 @@ def _build_video_only_plan(
         "dpf_at_acquisition",
         "num_dishes",
         "fish_per_dish",
+        "organizer_recording_id",
     ):
         value = row.get(key)
         if value:
@@ -1178,9 +1255,15 @@ def _build_external_ipc_plan(
         derived_files=derived_files,
     )
 
-    session_id = str(session.get("session_id") or batch_root.name)
-    meta.setdefault("session_uuid", _choose_session_tag(meta, h5_path))
-    meta.setdefault("recording_id", meta.get("session_uuid") or name)
+    session_id = session.get("session_id")
+    producer_session_uuid = meta.get("session_uuid")
+    if producer_session_uuid is not None and producer_session_uuid != session_id:
+        raise SourceRecordingIdentityError(
+            "external IPC H5 session_uuid must exactly match "
+            f"recording_session.json session_id: {producer_session_uuid!r} != "
+            f"{session_id!r}"
+        )
+    meta["session_uuid"] = session_id
     meta.setdefault("recording_name", name)
     meta.setdefault("recording_type", "behavior")
     meta.setdefault("recording_subtype", "free")
@@ -1211,8 +1294,14 @@ def _build_external_ipc_plan(
             geometry_bundle_source=_recording_geometry_bundle_source(batch_root),
         )
 
+    _bind_mapped_source_identity(
+        meta,
+        session_uuid=meta.get("session_uuid"),
+        camera_id=camera_id,
+    )
+
     outputs = _external_ipc_output_for_camera(session, camera_id)
-    session_tag = _sanitize_for_filename(_choose_session_tag(meta, h5_path))
+    session_tag = _sanitize_for_filename(session_id)
     cam_base = f"Cam{camera_id}_{session_tag}" if rename_cams else f"Cam{camera_id}"
     _append_external_ipc_video_artifacts(
         batch_root=batch_root,
@@ -1279,9 +1368,14 @@ def _build_external_ipc_recording_only_plan(
         derived_files=derived_files,
     )
 
+    session_id = session.get("session_id")
+    recording_id = recording_id_from_session_camera(
+        session_uuid=session_id,
+        camera_id=str(camera_id),
+    )
     meta: Dict[str, Any] = {
-        "session_uuid": recording_name,
-        "recording_id": recording_name,
+        "session_uuid": session_id,
+        "recording_id": recording_id,
         "recording_name": recording_name,
         "recording_type": "behavior",
         "recording_subtype": "free",
@@ -1289,7 +1383,7 @@ def _build_external_ipc_recording_only_plan(
         "artifact_schema_id": "orange_external_ipc_video_only_v1",
         "camera_id": str(camera_id),
         "recording_backend": "external_ipc",
-        "orange_session_id": str(session.get("session_id") or batch_root.name),
+        "orange_session_id": session_id,
         "orange_producer": str(session.get("producer") or ""),
         "orange_recording_mode": str(session.get("mode") or ""),
     }
@@ -1310,6 +1404,11 @@ def _build_external_ipc_recording_only_plan(
         meta,
         "software_version",
         _runtime_snapshot_software_version(batch_root / "recording_snapshot.json"),
+    )
+    _bind_mapped_source_identity(
+        meta,
+        session_uuid=session_id,
+        camera_id=str(camera_id),
     )
 
     session_tag = _sanitize_for_filename(recording_name)
@@ -1506,6 +1605,16 @@ def _build_plan(
     else:
         missing.append("camera_id (missing in H5 attrs)")
 
+    session_uuid = meta.get("session_uuid")
+    if not session_uuid:
+        missing.append("session_uuid (missing in H5 attrs)")
+    if camera_id and session_uuid:
+        _bind_mapped_source_identity(
+            meta,
+            session_uuid=session_uuid,
+            camera_id=camera_id,
+        )
+
     return RecordingPlan(
         name=name,
         source_dir=h5_path.parent,
@@ -1615,8 +1724,25 @@ def _write_manifest(
     log_path: Optional[Path],
 ) -> Optional[str]:
     manifest_path = plan.dest_dir / "recording_manifest.json"
+    try:
+        identity = SourceRecordingIdentity.from_mapping(plan.meta)
+    except SourceRecordingIdentityError as exc:
+        return f"Current source-recording identity is invalid for {plan.name}: {exc}"
+    if plan.camera_id != identity.camera_id:
+        return (
+            f"Current source-recording identity camera_id conflicts with the plan "
+            f"for {plan.name}."
+        )
     if manifest_path.exists():
-        return f"Manifest exists, skipping: {manifest_path}"
+        try:
+            _, existing_identity = load_source_recording_identity(
+                manifest_path
+            )
+        except SourceRecordingIdentityError as exc:
+            return f"Existing manifest identity is invalid for {plan.name}: {exc}"
+        if existing_identity != identity:
+            return f"Existing manifest identity conflicts with the plan for {plan.name}."
+        return f"Manifest exists, identity matches, skipping: {manifest_path}"
 
     files = {
         "raw": [f"raw/{file.dest_name}" for file in plan.raw_files],
@@ -1642,12 +1768,11 @@ def _write_manifest(
         files["raw"].append(f"{RECORDING_GEOMETRY_BUNDLE_RELATIVE_PATH.as_posix()}/")
     snapshot_path = plan.dest_dir / "derived" / "recording_snapshot.json"
     payload = {
+        **identity.manifest_fields(),
         "recording_name": plan.meta.get("recording_name") or plan.name,
         "organized_utc": organized_utc,
         "organize_run_id": run_id,
         "organize_log": str(log_path) if log_path else None,
-        "session_uuid": plan.meta.get("session_uuid"),
-        "recording_id": plan.meta.get("recording_id"),
         "session_start_iso8601_utc": plan.meta.get("session_start_iso8601_utc"),
         "recording_type": plan.meta.get("recording_type"),
         "recording_subtype": plan.meta.get("recording_subtype"),
@@ -1655,7 +1780,7 @@ def _write_manifest(
         "artifact_schema_id": plan.meta.get("artifact_schema_id"),
         "rig_id": plan.meta.get("rig_id"),
         "arena_id": plan.meta.get("arena_id"),
-        "camera_id": plan.camera_id,
+        "organizer_recording_id": plan.meta.get("organizer_recording_id"),
         "canvas_name": plan.meta.get("canvas_name"),
         "protocol_name_from_definition": (
             plan.meta.get("protocol_name_from_definition")
@@ -1752,6 +1877,56 @@ def _apply_plan(
     warnings: List[str] = []
     moved: Set[Path] = set()
     planned_destinations: Set[Path] = set()
+
+    # Identity is an artifact-creation precondition. Validate every plan before
+    # geometry publication, directory creation, or ordinary file movement.
+    recording_ids: Set[str] = set()
+    session_cameras: Set[Tuple[str, str]] = set()
+    destination_roots: Set[Path] = set()
+    for plan in plans:
+        try:
+            identity = SourceRecordingIdentity.from_mapping(plan.meta)
+        except SourceRecordingIdentityError as exc:
+            raise RecordingIdentityApplyError(
+                f"Current source-recording identity is invalid for {plan.name}: {exc}"
+            ) from exc
+        if plan.camera_id != identity.camera_id:
+            raise RecordingIdentityApplyError(
+                f"Current source-recording identity camera_id conflicts with the plan "
+                f"for {plan.name}."
+            )
+        identity_key = (identity.session_uuid, identity.camera_id)
+        destination_root = plan.dest_dir.resolve()
+        if identity.recording_id in recording_ids:
+            raise RecordingIdentityApplyError(
+                f"Duplicate recording_id in apply batch: {identity.recording_id}"
+            )
+        if identity_key in session_cameras:
+            raise RecordingIdentityApplyError(
+                "Duplicate (session_uuid, camera_id) in apply batch: "
+                f"{identity_key!r}"
+            )
+        if destination_root in destination_roots:
+            raise RecordingIdentityApplyError(
+                f"Duplicate recording destination in apply batch: {destination_root}"
+            )
+        recording_ids.add(identity.recording_id)
+        session_cameras.add(identity_key)
+        destination_roots.add(destination_root)
+        manifest_path = plan.dest_dir / "recording_manifest.json"
+        if manifest_path.exists():
+            try:
+                _, existing_identity = load_source_recording_identity(
+                    manifest_path
+                )
+            except SourceRecordingIdentityError as exc:
+                raise RecordingIdentityApplyError(
+                    f"Existing manifest identity is invalid for {plan.name}: {exc}"
+                ) from exc
+            if existing_identity != identity:
+                raise RecordingIdentityApplyError(
+                    f"Existing manifest identity conflicts with the plan for {plan.name}."
+                )
 
     # Geometry is a recording-bound authority.  Prove every shared source
     # before moving any ordinary artifact so a malformed/partial bundle cannot
@@ -2516,7 +2691,10 @@ def main() -> int:
     parser.add_argument(
         "--write-manifest",
         action="store_true",
-        help="Write recording_manifest.json into each recording folder during --apply.",
+        help=(
+            "Compatibility flag; --apply always writes the required "
+            "recording_manifest.json."
+        ),
     )
     parser.add_argument(
         "--video-only",
@@ -2631,7 +2809,10 @@ def main() -> int:
         return 1
 
     effective_write_manifest = bool(
-        args.write_manifest or args.run_video_diagnostics or args.run_h5_diagnostics
+        args.apply
+        or args.write_manifest
+        or args.run_video_diagnostics
+        or args.run_h5_diagnostics
     )
 
     if args.process_all:
@@ -2707,15 +2888,17 @@ def main() -> int:
                 rows = _load_video_only_rows(
                     args.metadata_csv.expanduser().resolve(), source_root=source_path
                 )
+                plans = [
+                    _build_video_only_plan(
+                        row,
+                        dest_root=args.dest_root,
+                        rename_cams=args.rename_cams,
+                    )
+                    for row in rows
+                ]
             except Exception as exc:
-                print(f"Failed to read metadata CSV: {exc}", file=sys.stderr)
+                print(f"Failed to build video-only plans: {exc}", file=sys.stderr)
                 return 1
-            plans = [
-                _build_video_only_plan(
-                    row, dest_root=args.dest_root, rename_cams=args.rename_cams
-                )
-                for row in rows
-            ]
             print(f"Found {len(plans)} video-only recording(s) from metadata CSV.")
         elif args.external_ipc_recording_only:
             try:
@@ -2816,10 +2999,19 @@ def main() -> int:
                             )
                             snapshot_payload = None
 
-            plans = [
-                _build_plan(h5_path, args.dest_root, cam_root, args.rename_cams)
-                for h5_path in h5_files
-            ]
+            try:
+                plans = [
+                    _build_plan(
+                        h5_path,
+                        args.dest_root,
+                        cam_root,
+                        args.rename_cams,
+                    )
+                    for h5_path in h5_files
+                ]
+            except SourceRecordingIdentityError as exc:
+                print(f"Failed to build H5 plans: {exc}", file=sys.stderr)
+                return 1
 
             print(f"Found {len(plans)} H5 recording(s).")
         _apply_plan_metadata_overrides(
@@ -2866,13 +3058,17 @@ def main() -> int:
                     run_id=run_id,
                     log_path=log_path,
                 )
-            except RecordingGeometryApplyError as exc:
+            except (RecordingGeometryApplyError, RecordingIdentityApplyError) as exc:
                 print(str(exc), file=sys.stderr)
                 if logger:
                     logger.log(
                         "batch_apply_failed",
                         batch_source=str(source_path),
-                        reason="recording_geometry_preservation_failed",
+                        reason=(
+                            "recording_geometry_preservation_failed"
+                            if isinstance(exc, RecordingGeometryApplyError)
+                            else "recording_identity_preflight_failed"
+                        ),
                         message=str(exc),
                     )
                     logger.log("run_end", status="failed")
