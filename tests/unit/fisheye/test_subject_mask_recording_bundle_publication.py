@@ -13,11 +13,17 @@ import zarr
 
 from fisheye.analysis.subject_shape_storage import (
     SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+    SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID,
 )
+from fisheye.analysis.subject_shape_io import resolve_canonical_subject_shape_run
+from fisheye.analysis.tail_kinematics_runs import _resolve_tail_kinematics_sources
 from fisheye.analysis.subject_shape_runs import write_subject_shape_run_group
 from fisheye.analysis_workflows.materializers.subject_shape import (
     build_subject_shape_materialization_plan,
     materialize_subject_shape,
+)
+from fisheye.analysis_workflows.runtime_verification import (
+    verify_persisted_stage_output,
 )
 from fisheye.cluster.subject_masks.publish_recording_bundle import (
     _refined_arrays,
@@ -41,8 +47,10 @@ from fisheye.shared.subject_shape_coordinate_publication import (
     SubjectShapeCoordinatePublicationError,
     activate_subject_shape_coordinate_publication,
     load_completed_ineligible_subject_shape_coordinate_publication,
+    load_persisted_subject_shape_coordinate_publication,
     selector_snapshot,
 )
+from fisheye.shared.eye_geometry_source import resolve_eye_geometry_source
 from fisheye.shared.subject_mask_worker_receipt import (
     RAW_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
     REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
@@ -1370,7 +1378,10 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
     }
     assert publication.manifest.record["schema_version"] == 2
     assert publication.derivation.record["schema_version"] == 2
-    with pytest.raises(SubjectShapeCoordinatePublicationError, match="unpromoted"):
+    with pytest.raises(
+        SubjectShapeCoordinatePublicationError,
+        match="supported access-aware",
+    ):
         activate_subject_shape_coordinate_publication(
             mutable,
             shape_parent,
@@ -1391,6 +1402,83 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
     assert active_shape_source.active is True
     assert active_shape_source.source_digest == shape_source.source_digest
     shape_source.assert_verified()
+
+    supported_result = materialize_subject_shape(
+        analysis,
+        scratch_root=tmp_path / "shape_bundle_supported_scratch",
+        refined_run=None,
+        subject_mask_bundle_id="bundle_coordinate_v4",
+        run_name="shape_bundle_v5_supported",
+        storage_profile=SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID,
+        components=("subject_body", "swim_bladder", "eye_left", "eye_right"),
+        block_rows=2,
+        output_shard_rows=4,
+        execution_backend="serial_driver",
+        scheduler="single-threaded",
+        num_workers=1,
+        shard_copy_workers=1,
+        native_threads=1,
+        copy_backend="python",
+        apply=True,
+        check_capacity=False,
+    )
+    assert supported_result["status"] == "complete"
+    selected_root = zarr.open_group(
+        str(analysis), mode="r", use_consolidated=True
+    )
+    selected_parent = selected_root["analysis/subject_shape_runs"]
+    assert selected_parent.attrs["latest"] == "shape_bundle_v5_supported"
+    assert selected_parent.attrs["latest_complete"] == "shape_bundle_v5_supported"
+    selected_run = selected_parent["shape_bundle_v5_supported"]
+    assert selected_run.attrs["stage_selector_eligible"] is True
+    assert SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR not in selected_run.attrs
+    selected_publication = load_persisted_subject_shape_coordinate_publication(
+        selected_root,
+        "analysis/subject_shape_runs/shape_bundle_v5_supported",
+    )
+    assert selected_publication.source_binding is not None
+    assert selected_publication.source_binding.record_sha256 == shape_source.source_digest
+    workflow_verification = verify_persisted_stage_output(
+        analysis,
+        "subject_shape",
+        requested_run="shape_bundle_v5_supported",
+        dependency_runs={"refined_subject_masks": "bundle/bundle_coordinate_v4"},
+    )
+    assert workflow_verification.available is True
+    assert workflow_verification.run_name == "shape_bundle_v5_supported"
+    wrong_bundle_verification = verify_persisted_stage_output(
+        analysis,
+        "subject_shape",
+        requested_run="shape_bundle_v5_supported",
+        dependency_runs={"refined_subject_masks": "bundle/another_bundle"},
+    )
+    assert wrong_bundle_verification.available is False
+    assert "planned bundle authority" in (wrong_bundle_verification.reason or "")
+    resolved_run, resolved_name, resolved_path, resolved_publication = (
+        resolve_canonical_subject_shape_run(
+            selected_root,
+            "shape_bundle_v5_supported",
+        )
+    )
+    assert resolved_run.path == "analysis/subject_shape_runs/shape_bundle_v5_supported"
+    assert resolved_name == "shape_bundle_v5_supported"
+    assert resolved_path == resolved_publication.run_path
+    eye_source = resolve_eye_geometry_source(
+        selected_root,
+        subject_shape_run="shape_bundle_v5_supported",
+        refined_subject_run=None,
+        prefer_subject_shape=True,
+        prefer_subject=True,
+    )
+    assert eye_source.run_name == "shape_bundle_v5_supported"
+    tail_name, tail_group, tail_sources = _resolve_tail_kinematics_sources(
+        selected_root,
+        "shape_bundle_v5_supported",
+    )
+    assert tail_name == "shape_bundle_v5_supported"
+    assert tail_group.path == resolved_run.path
+    assert tail_sources.row_count == selected_publication.row_identity.leading_dimension
+
     reloaded = zarr.open_group(str(analysis), mode="a", use_consolidated=False)
     load_completed_ineligible_subject_shape_coordinate_publication(
         reloaded,
@@ -1407,6 +1495,24 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
             "analysis/subject_shape_runs/shape_bundle_v5",
             expected_publication_owner=owner,
         )
+
+    supported_binding = reloaded[
+        "analysis/subject_shape_runs/shape_bundle_v5_supported/coordinate_records/"
+        "source_binding"
+    ]
+    supported_binding.attrs[SUBJECT_SHAPE_SOURCE_BINDING_ATTR] = {
+        "tampered": True
+    }
+    failed_workflow_verification = verify_persisted_stage_output(
+        analysis,
+        "subject_shape",
+        requested_run="shape_bundle_v5_supported",
+        dependency_runs={"refined_subject_masks": "bundle/bundle_coordinate_v4"},
+    )
+    assert failed_workflow_verification.available is False
+    assert "strict subject-shape authority verification failed" in (
+        failed_workflow_verification.reason or ""
+    )
 
 
 def test_recording_bundle_composes_multiple_raw_clip_shards_without_reordering(
