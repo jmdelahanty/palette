@@ -8,12 +8,18 @@ import pytest
 from fisheye.analysis.chaser_distance_runs import ChaserDistanceWindow
 from fisheye.analysis_workflows.materializers.provider_epoch_behavior_summary import (
     ProviderEpochBehaviorSummaryError,
+    _bind_protocol_semantic_row_identity,
     _bind_track_id,
     _make_per_epoch_fish,
     _safe_name,
     _source_bindings_sha256,
     _swim_bout_binding,
+    _windows_from_protocol_semantic_binding,
 )
+from fisheye.analysis_workflows.protocol_semantic_chaser_selection import (
+    CHASER_WINDOW_ROLES,
+)
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 def _window() -> ChaserDistanceWindow:
@@ -26,6 +32,123 @@ def _window() -> ChaserDistanceWindow:
         end_time_s=1.0,
         duration_s=1.0,
     )
+
+
+def _semantic_selection_and_binding() -> tuple[SimpleNamespace, dict[str, object]]:
+    source_labels = ("pre_event", "training_event", "post_event")
+    intervals = tuple(
+        SimpleNamespace(
+            window_id=index,
+            label=label,
+            start_frame=index * 10,
+            end_frame=(index + 1) * 10,
+            source_interval_digest=str(index + 1) * 64,
+        )
+        for index, label in enumerate(source_labels)
+    )
+    selection = SimpleNamespace(
+        selection_record={"selection_sha256": "a" * 64},
+        fps=10.0,
+        intervals=intervals,
+    )
+    epochs = [
+        {
+            "analysis_role": role,
+            "window_id": index,
+            "source_label": source_labels[index],
+            "start_frame": index * 10,
+            "end_frame_exclusive": (index + 1) * 10,
+            "source_interval_sha256": str(index + 1) * 64,
+        }
+        for index, role in enumerate(CHASER_WINDOW_ROLES)
+    ]
+    roles = [
+        {
+            "analysis_role": role,
+            "source_window_id": index,
+            "source_interval_sha256": str(index + 1) * 64,
+            "selected_start_frame": index * 10,
+            "selected_end_frame_exclusive": (index + 1) * 10,
+            "protocol_semantic_hash": f"sha256:{'b' * 64}",
+            "protocol_semantic_step_index": 1,
+            "protocol_semantic_step_ref": (
+                "protocol_semantic_snapshot@recipe.steps[1]"
+            ),
+        }
+        for index, role in enumerate(CHASER_WINDOW_ROLES)
+    ]
+    binding: dict[str, object] = {
+        "protocol_semantic_hash": f"sha256:{'b' * 64}",
+        "roles": list(CHASER_WINDOW_ROLES),
+        "source_epoch_selection": selection.selection_record,
+        "selector_eligible": False,
+        "production_authority": False,
+        "position_suite_epochs": epochs,
+        "position_suite_epochs_sha256": canonical_json_sha256(epochs),
+        "semantic_role_bindings": roles,
+        "semantic_role_bindings_sha256": canonical_json_sha256(roles),
+    }
+    return selection, binding
+
+
+def test_protocol_semantic_windows_use_roles_and_selected_half_open_bounds() -> None:
+    selection, binding = _semantic_selection_and_binding()
+
+    windows = _windows_from_protocol_semantic_binding(selection, binding)
+
+    assert tuple(window.label for window in windows) == CHASER_WINDOW_ROLES
+    assert [(window.start_frame, window.end_frame) for window in windows] == [
+        (0, 9),
+        (10, 19),
+        (20, 29),
+    ]
+    assert [window.duration_s for window in windows] == [1.0, 1.0, 1.0]
+
+
+def test_protocol_semantic_windows_reject_rehashed_source_mismatch() -> None:
+    selection, binding = _semantic_selection_and_binding()
+    epochs = list(binding["position_suite_epochs"])
+    epochs[1] = {**epochs[1], "source_interval_sha256": "f" * 64}
+    binding["position_suite_epochs"] = epochs
+    binding["position_suite_epochs_sha256"] = canonical_json_sha256(epochs)
+
+    with pytest.raises(ProviderEpochBehaviorSummaryError, match="exact source"):
+        _windows_from_protocol_semantic_binding(selection, binding)
+
+
+def test_protocol_semantic_identity_is_repeated_on_each_summary_row() -> None:
+    _selection, binding = _semantic_selection_and_binding()
+    rows = np.zeros(
+        3,
+        dtype=[("window_id", np.int32), ("bout_count", np.int32)],
+    )
+    rows["window_id"] = [0, 1, 2]
+
+    bound = _bind_protocol_semantic_row_identity(rows, binding=binding)
+
+    assert [value.rstrip(b"\x00") for value in bound["analysis_role"]] == [
+        role.encode("utf-8") for role in CHASER_WINDOW_ROLES
+    ]
+    assert bound["protocol_semantic_step_index"].tolist() == [1, 1, 1]
+    assert all(
+        value.rstrip(b"\x00") == f"sha256:{'b' * 64}".encode("utf-8")
+        for value in bound["protocol_semantic_hash"]
+    )
+
+
+def test_protocol_semantic_identity_rejects_noncanonical_hash() -> None:
+    _selection, binding = _semantic_selection_and_binding()
+    binding["protocol_semantic_hash"] = "sha256:not-a-digest"
+    roles = list(binding["semantic_role_bindings"])
+    roles[0] = {
+        **roles[0],
+        "protocol_semantic_hash": "sha256:not-a-digest",
+    }
+    binding["semantic_role_bindings"] = roles
+    rows = np.zeros(1, dtype=[("window_id", np.int32)])
+
+    with pytest.raises(ProviderEpochBehaviorSummaryError, match="incomplete"):
+        _bind_protocol_semantic_row_identity(rows, binding=binding)
 
 
 def test_provider_epoch_summary_uses_valid_tracked_time_and_motion_validity() -> None:

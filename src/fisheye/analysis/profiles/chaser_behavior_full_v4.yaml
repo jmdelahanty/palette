@@ -1,0 +1,158 @@
+schema_id: palette.chaser_analysis_profile
+schema_version: 2
+profile_id: chaser_behavior_full_v4
+profile_version: 4
+profile_scope: full
+
+# Version 4 is the immutable semantic/provider successor graph. It does not
+# change any v1-v3 scientific schema in place.
+policies:
+  position: explicit_position_provider_binding_required_v1
+  body_frame: explicit_body_frame_provider_binding_required_v1
+  motion: derive_from_exact_position_and_timing_v1
+  bout: explicit_swim_bout_run_and_signal_level_required_v1
+  geometry: exact_registered_arena_and_chaser_geometry_v1
+  trial: exact_logged_trial_authority_required_v1
+  plot_recipe: full_applicable_recipe_catalog_v1
+  temporal_alignment: explicit_temporal_alignment_requirement_required_v1
+
+modules:
+  - id: stimulus_epochs
+    implementation: fisheye.analysis.stimulus_epoch_runs
+    schema_id: palette.stimulus_epoch_windows.v1
+    schema_version: 1
+    depends_on: []
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: required
+    required_capabilities: []
+
+  - id: detection_occupancy
+    implementation: fisheye.analysis.detection_occupancy_runs
+    schema_id: palette.detection_occupancy.v1
+    schema_version: 1
+    depends_on: [stimulus_epochs]
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: required
+    required_capabilities: [position_series]
+
+  - id: chaser_distance
+    implementation: fisheye.analysis.chaser_distance_runs
+    schema_id: palette.chaser_distance.v1
+    schema_version: 1
+    depends_on: [stimulus_epochs]
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: required
+    required_capabilities:
+      [position_series, positioned_chaser, temporal_authority,
+       chaser_temporal_alignment]
+
+  - id: chaser_quadrant_occupancy
+    implementation: fisheye.analysis.chaser_quadrant_occupancy
+    schema_id: palette.chaser.quadrant_occupancy.v1
+    schema_version: 1
+    depends_on: [chaser_distance]
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: required
+    required_capabilities: [position_series, positioned_chaser, chaser_geometry]
+
+  - id: chaser_near_field_occupancy
+    implementation: fisheye.analysis.chaser_near_field_occupancy
+    schema_id: palette.chaser.near_field_occupancy.v2
+    schema_version: 2
+    depends_on: [chaser_quadrant_occupancy]
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: required
+    required_capabilities: [position_series, positioned_chaser, chaser_geometry]
+
+  - id: chaser_epoch_behavior_summary
+    implementation: fisheye.analysis.chaser_epoch_behavior_summary
+    schema_id: palette.chaser.epoch_behavior_summary.v2
+    schema_version: 2
+    depends_on: [chaser_distance]
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: conditional_required
+    required_capabilities:
+      [position_series, motion_series, temporal_authority, swim_bouts]
+
+  - id: chaser_egocentric_bearing
+    implementation: fisheye.analysis.chaser_egocentric_bearing
+    schema_id: palette.chaser_egocentric_bearing.v1
+    schema_version: 1
+    depends_on: [chaser_distance]
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: conditional_required
+    required_capabilities: [position_series, positioned_chaser, body_frame]
+
+  - id: controller_chase_trials
+    implementation: fisheye.analysis.controller_trial_successor
+    schema_id: palette.analysis.controller_chase_trials
+    schema_version: 1
+    depends_on: [chaser_distance]
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: conditional_required
+    required_capabilities:
+      [positioned_chaser, temporal_authority, chase_trials]
+
+  - id: chaser_gaze_tracking_v2
+    implementation: fisheye.analysis.gaze_tracking_successor
+    schema_id: palette.analysis.chaser_gaze_tracking
+    schema_version: 2
+    depends_on: [chaser_egocentric_bearing]
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: conditional_required
+    required_capabilities:
+      [position_series, positioned_chaser, body_frame, eye_orientation]
+
+  - id: generalized_chaser_bout_response
+    implementation: fisheye.analysis.generalized_bout_response_successor
+    schema_id: palette.analysis.generalized_chaser_bout_response
+    schema_version: 1
+    depends_on: [chaser_distance, controller_chase_trials]
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: conditional_required
+    required_capabilities:
+      [position_series, positioned_chaser, motion_series, swim_bouts,
+       chase_trials, temporal_authority]
+
+  - id: chaser_escape_freeze_v2
+    implementation: fisheye.analysis.escape_freeze_successor
+    schema_id: palette.analysis.chaser_escape_freeze
+    schema_version: 2
+    depends_on: [controller_chase_trials, generalized_chaser_bout_response]
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: conditional_required
+    required_capabilities:
+      [position_series, positioned_chaser, motion_series, swim_bouts,
+       chase_trials, temporal_authority]
+
+  - id: chaser_radial_occupancy
+    implementation: fisheye.analysis.chaser_radial_occupancy
+    schema_id: palette.chaser_radial_occupancy.v1
+    schema_version: 1
+    depends_on: [chaser_distance]
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: required
+    required_capabilities: [position_series, positioned_chaser, chaser_geometry]
+
+  - id: chaser_response_regimes
+    implementation: fisheye.analysis.chaser_response_regimes
+    schema_id: palette.chaser_response_regimes.v1
+    schema_version: 1
+    depends_on: [chaser_distance]
+    execution_cardinality: recording
+    default_enabled: true
+    requirement_class: required
+    required_capabilities:
+      [position_series, positioned_chaser, motion_series, temporal_authority]

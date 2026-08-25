@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import zarr
+
 from fisheye.analysis_workflows.chaser_input_provenance_proxy_source_handle import (
     load_chaser_input_provenance_proxy_source_handle,
 )
@@ -12,6 +14,10 @@ from fisheye.shared.zarr.chaser_input_provenance_proxy_schema import (
 from fisheye.utils.materialize_chaser_input_provenance_proxy import run
 from tests.unit.fisheye.test_provider_chaser_stimulus_source_handle import (
     _published_candidate,
+)
+from tests.unit.fisheye.test_stimulus_coordinate_v6_adapter import (
+    _write_raw_chaser_h5,
+    _write_v6_fixture,
 )
 
 
@@ -82,3 +88,39 @@ def test_cli_dry_run_then_publish_and_strict_readback(tmp_path: Path) -> None:
         published["acquisition_projection_record_sha256"]
     )
     handle.assert_current()
+
+
+def test_cli_plans_from_exact_frame_bound_raw_h5_pair(tmp_path: Path) -> None:
+    raw_artifact = _write_raw_chaser_h5(
+        tmp_path / "citrus" / "session-1.h5"
+    )
+    companion = tmp_path / "session.stimulus_coordinate_v6.h5"
+    _write_v6_fixture(companion, raw_h5_artifact=raw_artifact)
+    archive = tmp_path / "analysis.zarr"
+    root = zarr.open_group(archive, mode="w")
+    root.attrs["recording_id"] = "recording-42"
+
+    planned = run(argparse.Namespace(
+        analysis_zarr=archive,
+        source_run_name=None,
+        frame_bound_companion_h5=companion,
+        recording_bundle_root=tmp_path,
+        output_run_name="frame_bound_proxy_v1",
+        scratch_root=tmp_path / "scratch",
+        expected_recording_id="recording-42",
+        expected_source_manifest_sha256=None,
+        expected_camera_serial="CAM-42",
+        expected_acquisition_camera_id="CAM-42",
+        expected_shaman_numeric_camera_id=0,
+        expected_source_total_frames=2,
+        copy_backend="python",
+        apply=False,
+        json=True,
+    ))
+
+    assert planned["status"] == "planned_no_writes"
+    assert planned["plan"]["selector_eligible"] is False
+    assert planned["plan"]["selection"] == "none"
+    assert planned["source_run_path"].endswith(
+        "session-1.h5#/tracking_data/chaser_states"
+    )

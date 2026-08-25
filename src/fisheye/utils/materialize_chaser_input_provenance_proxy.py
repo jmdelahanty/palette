@@ -20,6 +20,9 @@ from fisheye.analysis_workflows.materializers.chaser_input_provenance_proxy impo
 from fisheye.analysis_workflows.provider_chaser_stimulus_source_handle import (
     load_provider_chaser_stimulus_source_handle,
 )
+from fisheye.shared.frame_bound_acquisition_identity import (
+    load_paired_frame_bound_chaser_source,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -30,11 +33,18 @@ def _parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("analysis_zarr", type=Path)
-    parser.add_argument("--source-run-name", required=True)
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument("--source-run-name")
+    source_group.add_argument("--frame-bound-companion-h5", type=Path)
+    parser.add_argument("--recording-bundle-root", type=Path)
     parser.add_argument("--output-run-name", required=True)
     parser.add_argument("--scratch-root", type=Path, required=True)
     parser.add_argument("--expected-recording-id")
     parser.add_argument("--expected-source-manifest-sha256")
+    parser.add_argument("--expected-camera-serial")
+    parser.add_argument("--expected-acquisition-camera-id")
+    parser.add_argument("--expected-shaman-numeric-camera-id", type=int)
+    parser.add_argument("--expected-source-total-frames", type=int)
     parser.add_argument(
         "--copy-backend",
         choices=("python", "rsync"),
@@ -51,13 +61,52 @@ def _parser() -> argparse.ArgumentParser:
 
 def run(args: argparse.Namespace) -> dict[str, object]:
     archive = args.analysis_zarr.expanduser().resolve()
-    source = load_provider_chaser_stimulus_source_handle(
-        archive,
-        run_name=args.source_run_name,
-        expected_recording_id=args.expected_recording_id,
-        expected_manifest_sha256=args.expected_source_manifest_sha256,
-        use_consolidated=True,
-    )
+    companion_h5 = getattr(args, "frame_bound_companion_h5", None)
+    if companion_h5 is None:
+        source = load_provider_chaser_stimulus_source_handle(
+            archive,
+            run_name=args.source_run_name,
+            expected_recording_id=args.expected_recording_id,
+            expected_manifest_sha256=args.expected_source_manifest_sha256,
+            use_consolidated=True,
+        )
+    else:
+        required = {
+            "recording_bundle_root": getattr(args, "recording_bundle_root", None),
+            "expected_recording_id": getattr(args, "expected_recording_id", None),
+            "expected_camera_serial": getattr(args, "expected_camera_serial", None),
+            "expected_acquisition_camera_id": getattr(
+                args, "expected_acquisition_camera_id", None
+            ),
+            "expected_shaman_numeric_camera_id": getattr(
+                args, "expected_shaman_numeric_camera_id", None
+            ),
+            "expected_source_total_frames": getattr(
+                args, "expected_source_total_frames", None
+            ),
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise ValueError(
+                "Frame-bound companion input requires explicit "
+                + ", ".join(sorted(missing))
+                + "."
+            )
+        source = load_paired_frame_bound_chaser_source(
+            companion_h5,
+            recording_bundle_root=required["recording_bundle_root"],
+            expected_recording_id=required["expected_recording_id"],
+            expected_camera_serial=required["expected_camera_serial"],
+            expected_acquisition_camera_id=(
+                required["expected_acquisition_camera_id"]
+            ),
+            expected_shaman_numeric_camera_id=(
+                required["expected_shaman_numeric_camera_id"]
+            ),
+            expected_source_total_frames=(
+                required["expected_source_total_frames"]
+            ),
+        )
     result = select_chaser_input_provenance_proxy(source)
     prepared = prepare_chaser_input_provenance_proxy(result)
     if args.apply:

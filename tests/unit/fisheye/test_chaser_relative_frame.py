@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from fisheye.analysis_workflows.chaser_relative_frame import (
+    ACTIVE_ORTHOGONAL_POSITION_VALIDITY_POLICY,
     AcquisitionFrameKeys,
     BodyFrameInput,
     ChaserObservations,
@@ -269,7 +270,7 @@ def test_invalid_selection_occurrence_active_and_coordinates_have_reason_codes()
 
     assert result.relative_reason_code[0].tolist() == ["selection_excluded"] * 2
     assert result.relative_reason_code[1].tolist() == ["fish_invalid", "occurrence_excluded"]
-    assert result.relative_reason_code[2].tolist() == ["chaser_invalid", "chaser_inactive"]
+    assert result.relative_reason_code[2].tolist() == ["chaser_invalid", "valid"]
     assert result.relative_reason_code[3, 0] == "nonfinite_coordinate"
     assert np.isnan(result.distance_px[3, 0])
 
@@ -323,6 +324,26 @@ def test_optional_trial_ids_and_active_state_are_preserved() -> None:
 
     np.testing.assert_array_equal(result.chaser_trial_ids, trial_ids)
     np.testing.assert_array_equal(result.chaser_active, active)
+
+
+def test_controller_activity_can_be_orthogonal_to_position_validity() -> None:
+    active = np.asarray(
+        [[False, False], [True, False], [False, True], [False, False]],
+        dtype=bool,
+    )
+    result = compute_chaser_relative_frame(
+        _base_input(
+            active=active,
+        )
+    )
+
+    assert result.relative_valid.all()
+    assert np.isfinite(result.distance_physical).all()
+    np.testing.assert_array_equal(result.chaser_active, active)
+    assert (
+        result.active_position_validity_policy
+        == ACTIVE_ORTHOGONAL_POSITION_VALIDITY_POLICY
+    )
 
 
 def test_body_frame_bearing_quadrants_use_y_down_axes_without_flip() -> None:

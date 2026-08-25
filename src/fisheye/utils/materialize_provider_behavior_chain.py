@@ -70,7 +70,14 @@ from fisheye.shared.subject_position_preparation import prepare_subject_position
 
 
 TASK_SCHEMA_ID = "palette.provider_behavior_chain_task"
-TASK_SCHEMA_VERSION = 1
+LEGACY_TASK_SCHEMA_VERSION = 1
+SEMANTIC_TASK_SCHEMA_VERSION = 2
+# Preserve the original constant for legacy task producers.
+TASK_SCHEMA_VERSION = LEGACY_TASK_SCHEMA_VERSION
+SUPPORTED_TASK_SCHEMA_VERSIONS = (
+    LEGACY_TASK_SCHEMA_VERSION,
+    SEMANTIC_TASK_SCHEMA_VERSION,
+)
 RESULT_SCHEMA_ID = "palette.provider_behavior_chain_result"
 RESULT_SCHEMA_VERSION = 1
 LINEAR_ONLY_DISPOSITION = "linear_motion_and_swim_bouts_only_heading_excluded_v1"
@@ -104,9 +111,11 @@ def _run_name(value: Any, *, label: str) -> str:
 def load_task(path: str | Path) -> dict[str, Any]:
     source = Path(path).expanduser().resolve()
     payload = _object(json.loads(source.read_text(encoding="utf-8")), label="task")
+    schema_version = payload.get("schema_version")
     if (
         payload.get("schema_id") != TASK_SCHEMA_ID
-        or payload.get("schema_version") != TASK_SCHEMA_VERSION
+        or type(schema_version) is not int
+        or schema_version not in SUPPORTED_TASK_SCHEMA_VERSIONS
     ):
         raise ProviderBehaviorChainError("Task schema identity is unsupported.")
     payload["recording_id"] = _text(payload.get("recording_id"), label="recording_id")
@@ -134,6 +143,20 @@ def load_task(path: str | Path) -> dict[str, Any]:
         outputs[key] = _run_name(outputs.get(key), label=f"output_runs.{key}")
     payload["source_runs"] = sources
     payload["output_runs"] = outputs
+    semantic_run = payload.get("protocol_semantic_selection_run")
+    if schema_version == LEGACY_TASK_SCHEMA_VERSION and semantic_run is not None:
+        raise ProviderBehaviorChainError(
+            "protocol_semantic_selection_run requires provider behavior chain task v2."
+        )
+    if schema_version == SEMANTIC_TASK_SCHEMA_VERSION and semantic_run is None:
+        raise ProviderBehaviorChainError(
+            "Provider behavior chain task v2 requires protocol_semantic_selection_run."
+        )
+    if semantic_run is not None:
+        payload["protocol_semantic_selection_run"] = _run_name(
+            semantic_run,
+            label="protocol_semantic_selection_run",
+        )
     fps = payload.get("fps")
     if isinstance(fps, bool) or not isinstance(fps, (int, float)) or float(fps) <= 0:
         raise ProviderBehaviorChainError("fps must be one positive number.")
@@ -385,6 +408,9 @@ def _summary(task: Mapping[str, Any], scratch: Path) -> dict[str, Any]:
         scratch_root=scratch / "epoch_summary",
         run_name=run_name,
         epoch_run_name=outputs["stimulus_epochs_v2"],
+        protocol_semantic_selection_run_name=task.get(
+            "protocol_semantic_selection_run"
+        ),
         motion_run=outputs["motion"],
         swim_bout_run_name=outputs["swim_bouts"],
         track_id=0,

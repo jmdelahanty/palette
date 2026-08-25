@@ -54,6 +54,8 @@ CHASER_RELATIVE_FRAME_REASON_CODES = {
     0: "valid",
     1: "selection_excluded",
     2: "occurrence_excluded",
+    # Read compatibility only. Current writers cannot emit this category: a
+    # controller's active state is orthogonal to measurable position geometry.
     3: "chaser_inactive",
     4: "fish_invalid",
     5: "chaser_invalid",

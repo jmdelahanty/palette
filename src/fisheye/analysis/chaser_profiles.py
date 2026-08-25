@@ -75,6 +75,12 @@ CHASER_RUNNER_IMPLEMENTATIONS: Mapping[str, str] = {
     "provider_chaser_position_suite": (
         "fisheye.analysis.provider_chaser_position_suite"
     ),
+    "controller_chase_trials": "fisheye.analysis.controller_trial_successor",
+    "generalized_chaser_bout_response": (
+        "fisheye.analysis.generalized_bout_response_successor"
+    ),
+    "chaser_gaze_tracking_v2": "fisheye.analysis.gaze_tracking_successor",
+    "chaser_escape_freeze_v2": "fisheye.analysis.escape_freeze_successor",
 }
 
 
@@ -710,6 +716,12 @@ def full_chaser_analysis_profile_v3_path() -> Path:
     return Path(__file__).resolve().parent / "profiles" / "chaser_behavior_full_v3.yaml"
 
 
+def full_chaser_analysis_profile_v4_path() -> Path:
+    """Return the composable semantic/provider successor profile."""
+
+    return Path(__file__).resolve().parent / "profiles" / "chaser_behavior_full_v4.yaml"
+
+
 def position_chaser_analysis_profile_path() -> Path:
     return (
         Path(__file__).resolve().parent / "profiles" / "chaser_position_suite_v1.yaml"
@@ -739,6 +751,7 @@ __all__ = [
     "default_goodcopbadcop_source_profile_path",
     "full_chaser_analysis_profile_path",
     "full_chaser_analysis_profile_v3_path",
+    "full_chaser_analysis_profile_v4_path",
     "position_chaser_analysis_profile_path",
     "load_chaser_analysis_profile",
     "load_chaser_protocol_profile",

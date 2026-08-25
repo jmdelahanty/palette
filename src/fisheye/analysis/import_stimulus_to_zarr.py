@@ -97,6 +97,7 @@ from rich.console import Console
 
 from fisheye.shared.archive_identity import archive_identity
 from fisheye.shared.coordinate_reference import canonical_node_path
+from fisheye.shared.coordinate_identity import identity_array_content_sha256
 from .chaser_state_interpolator import (
     analyze_frame_gaps,
     interpolate_metadata,
@@ -128,6 +129,24 @@ from fisheye.shared.subject_metadata import (
 from fisheye.shared.proof_verification import (
     proof_verification_operation,
     proof_verification_scope,
+)
+from fisheye.shared.protocol_semantic_contract import (
+    PALETTE_PROTOCOL_RECIPE_SCHEMA_ID,
+    PALETTE_PROTOCOL_RECIPE_SCHEMA_VERSION,
+    PALETTE_PROTOCOL_SNAPSHOT_SCHEMA_ID,
+    PALETTE_PROTOCOL_SNAPSHOT_SCHEMA_VERSION,
+    ProtocolSemanticSnapshot,
+    ProtocolStepIdentity,
+    read_protocol_semantic_snapshot,
+    validate_protocol_semantic_snapshot,
+)
+from fisheye.shared.protocol_execution_contract import (
+    CHASER_PHASE_NAMES,
+    PALETTE_PROTOCOL_EXECUTION_SCHEMA_ID,
+    PALETTE_PROTOCOL_EXECUTION_SCHEMA_VERSION,
+    ProtocolExecutionIndex,
+    build_protocol_frame_correspondence_proxy_payload,
+    read_protocol_execution_index,
 )
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.selector_activation import (
@@ -824,6 +843,626 @@ def _read_protocol_snapshot(h5: h5py.File) -> Tuple[Optional[str], Optional[Dict
     return text, payload if isinstance(payload, dict) else None
 
 
+def _materialize_protocol_semantic_snapshot(
+    run_group: zarr.Group,
+    snapshot: ProtocolSemanticSnapshot | None,
+) -> None:
+    """Publish the exact producer semantic contract without bloating attrs.
+
+    The full JSON documents are byte arrays so consolidated metadata only
+    carries bounded, human-readable recipe metadata.  ``legacy_missing`` is an
+    explicit state; Palette never derives a substitute producer semantic hash
+    from ``protocol_json``.
+    """
+
+    if snapshot is None:
+        if (
+            "protocol_semantic_snapshot" in run_group
+            or "protocol_semantic_hash" in run_group.attrs
+        ):
+            raise ValueError(
+                "Refusing to replace existing protocol semantic identity with "
+                "legacy_missing."
+            )
+        run_group.attrs["protocol_semantic_status"] = "legacy_missing"
+        return
+
+    child_name = "protocol_semantic_snapshot"
+    if child_name in run_group:
+        raise ValueError(
+            "Protocol semantic snapshot already exists; immutable identity must "
+            "use an idempotent no-op or a new stimulus run."
+        )
+    group = run_group.create_group(child_name)
+    recipe = snapshot.recipe_record()
+    _update_attrs_json_safe(
+        group,
+        {
+            "schema_id": PALETTE_PROTOCOL_SNAPSHOT_SCHEMA_ID,
+            "schema_version": PALETTE_PROTOCOL_SNAPSHOT_SCHEMA_VERSION,
+            "source": "citrus_h5_protocol_snapshot",
+            "protocol_semantic_hash": snapshot.semantic_hash,
+            "protocol_trial_index_sha256": snapshot.trial_index_sha256,
+            "protocol_trial_index_integrity_status": (
+                snapshot.trial_index_integrity_status
+            ),
+            "source_snapshot_schema_version": snapshot.snapshot_schema_version,
+            "source_snapshot_policy_id": snapshot.snapshot_policy_id,
+            "source_trial_index_schema_version": (
+                snapshot.trial_index_schema_version
+            ),
+            "recipe": recipe,
+        },
+    )
+    if snapshot.trial_index_integrity_status == (
+        "palette_computed_not_producer_asserted"
+    ):
+        group.attrs["palette_computed_trial_index_sha256"] = (
+            snapshot.trial_index_sha256
+        )
+    else:
+        group.attrs["protocol_trial_index_hash"] = snapshot.trial_index_sha256
+    for array_name, text in (
+        ("protocol_semantic_json_utf8", snapshot.semantic_json),
+        ("protocol_trial_index_json_utf8", snapshot.trial_index_json),
+    ):
+        values = np.frombuffer(text.encode("utf-8"), dtype=np.uint8).copy()
+        group.create_array(
+            array_name,
+            data=values,
+            chunks=(min(int(values.size), 1 << 20),),
+            overwrite=True,
+        )
+        stored = np.asarray(group[array_name][:], dtype=np.uint8)
+        if stored.shape != values.shape or stored.tobytes() != values.tobytes():
+            raise ValueError(
+                f"Stored protocol semantic array {array_name!r} did not round-trip "
+                "the exact producer UTF-8 bytes."
+            )
+
+    _update_attrs_json_safe(
+        run_group,
+        {
+            "protocol_semantic_status": "verified",
+            "protocol_semantic_hash": snapshot.semantic_hash,
+            "protocol_semantic_snapshot_path": child_name,
+            "protocol_recipe_schema_id": PALETTE_PROTOCOL_RECIPE_SCHEMA_ID,
+            "protocol_recipe_schema_version": PALETTE_PROTOCOL_RECIPE_SCHEMA_VERSION,
+            "protocol_recipe_step_count": snapshot.step_count,
+            "protocol_recipe_mode_sequence": list(snapshot.mode_sequence),
+            "protocol_recipe_label": snapshot.recipe_label,
+        },
+    )
+
+
+def _materialize_protocol_execution_index(
+    run_group: zarr.Group,
+    execution: ProtocolExecutionIndex | None,
+    *,
+    frame_metadata: np.ndarray | None = None,
+) -> None:
+    """Persist exact finalized execution bytes without inventing row mapping."""
+
+    if execution is None:
+        return
+    child_name = "protocol_execution"
+    if child_name in run_group:
+        raise ValueError(
+            "Protocol execution evidence already exists; immutable evidence "
+            "requires a new stimulus run."
+        )
+    group = run_group.create_group(child_name)
+    group.attrs.update(
+        {
+            "schema_id": PALETTE_PROTOCOL_EXECUTION_SCHEMA_ID,
+            "schema_version": PALETTE_PROTOCOL_EXECUTION_SCHEMA_VERSION,
+            "source": "citrus_h5_protocol_execution",
+            "source_schema_id": "citrus.protocol.execution_index",
+            "source_schema_version": 1,
+            "source_policy_id": (
+                "citrus.protocol.execution_index."
+                "half_open_stimulus_frames.v1"
+            ),
+            "status": execution.status,
+            "execution_index_hash": execution.execution_hash,
+            "protocol_trial_index_hash": execution.protocol_trial_index_hash,
+            "authoritative_interval_axis": "stimulus_frame_num",
+            "camera_frame_role": "correspondence_only",
+            "acquisition_containment_status": (
+                "unavailable_without_sealed_stimulus_to_acquisition_mapping"
+            ),
+        }
+    )
+    values = np.frombuffer(execution.execution_json.encode("utf-8"), dtype=np.uint8).copy()
+    group.create_array(
+        "execution_index_json_utf8",
+        data=values,
+        chunks=(min(int(values.size), 1 << 20),),
+        overwrite=True,
+    )
+    stored = np.asarray(group["execution_index_json_utf8"][:], dtype=np.uint8)
+    if stored.shape != values.shape or stored.tobytes() != values.tobytes():
+        raise ValueError(
+            "Stored protocol execution bytes did not round-trip exactly."
+        )
+    run_group.attrs.update(
+        {
+            "protocol_execution_status": execution.status,
+            "protocol_execution_hash": execution.execution_hash,
+            "protocol_execution_path": child_name,
+            "protocol_interval_axis": "stimulus_frame_num",
+            "protocol_camera_frame_role": "correspondence_only",
+            "protocol_acquisition_containment_status": (
+                "unavailable_without_sealed_stimulus_to_acquisition_mapping"
+            ),
+            "protocol_selector_eligibility": (
+                "blocked_missing_sealed_stimulus_to_acquisition_mapping"
+            ),
+        }
+    )
+    if frame_metadata is not None:
+        _materialize_protocol_frame_correspondence_proxy(
+            group,
+            execution=execution,
+            frame_metadata=frame_metadata,
+        )
+
+
+def _protocol_frame_correspondence_proxy_payload(
+    execution: ProtocolExecutionIndex,
+    *,
+    raw_stimulus: np.ndarray,
+    raw_camera: np.ndarray,
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    """Build the exact arrays and bounded manifest for one sealed proxy."""
+    return build_protocol_frame_correspondence_proxy_payload(
+        execution,
+        raw_stimulus=raw_stimulus,
+        raw_camera=raw_camera,
+    )
+
+
+def _materialize_protocol_frame_correspondence_proxy(
+    execution_group: zarr.Group,
+    *,
+    execution: ProtocolExecutionIndex,
+    frame_metadata: np.ndarray,
+) -> None:
+    """Seal per-row camera correspondence without claiming acquisition identity."""
+
+    if frame_metadata.dtype.names is None:
+        raise ValueError(
+            "Protocol frame correspondence requires structured frame metadata."
+        )
+    stimulus_field = _resolve_struct_field(frame_metadata, "stimulus_frame_num")
+    camera_field = _resolve_struct_field(
+        frame_metadata,
+        "triggering_camera_frame_id",
+        "camera_frame_id",
+    )
+    arrays, manifest = _protocol_frame_correspondence_proxy_payload(
+        execution,
+        raw_stimulus=np.asarray(frame_metadata[stimulus_field]),
+        raw_camera=np.asarray(frame_metadata[camera_field]),
+    )
+    proxy = execution_group.create_group("frame_correspondence_proxy")
+    for name, values in arrays.items():
+        proxy.create_array(
+            name,
+            data=values,
+            chunks=pick_chunks(values.shape),
+            overwrite=True,
+        )
+    manifest_sha256 = sha256(
+        strict_json_dumps(manifest).encode("utf-8")
+    ).hexdigest()
+    proxy.attrs.update(
+        {
+            **manifest,
+            "manifest_sha256": manifest_sha256,
+            "coverage_status": (
+                "complete"
+                if manifest["missing_realized_stimulus_frame_count"] == 0
+                else "incomplete_proxy"
+            ),
+        }
+    )
+
+
+def _validate_protocol_frame_correspondence_proxy(
+    execution_group: zarr.Group,
+    *,
+    execution: ProtocolExecutionIndex,
+    frame_metadata: np.ndarray,
+) -> None:
+    """Rebuild and verify one proxy against the exact source H5 row evidence."""
+
+    if frame_metadata.dtype.names is None:
+        raise RuntimeError(
+            "Exact source protocol frame metadata is not structured."
+        )
+    stimulus_field = _resolve_struct_field(frame_metadata, "stimulus_frame_num")
+    camera_field = _resolve_struct_field(
+        frame_metadata,
+        "triggering_camera_frame_id",
+        "camera_frame_id",
+    )
+    expected_arrays, expected_manifest = (
+        _protocol_frame_correspondence_proxy_payload(
+            execution,
+            raw_stimulus=np.asarray(frame_metadata[stimulus_field]),
+            raw_camera=np.asarray(frame_metadata[camera_field]),
+        )
+    )
+    proxy = execution_group.get("frame_correspondence_proxy")
+    if proxy is None or not isinstance(proxy, zarr.Group):
+        raise RuntimeError(
+            "Consolidated protocol execution lacks its correspondence proxy."
+        )
+    expected_names = set(expected_arrays)
+    observed_names = set(str(name) for name in proxy.array_keys())
+    if observed_names != expected_names:
+        raise RuntimeError(
+            "Protocol correspondence proxy exposes an unexpected array set."
+        )
+    for name, expected in expected_arrays.items():
+        observed = np.asarray(proxy[name][:])
+        declared = expected_manifest["arrays"][name]
+        if (
+            observed.dtype != expected.dtype
+            or observed.shape != expected.shape
+            or not np.array_equal(observed, expected)
+            or identity_array_content_sha256(observed)
+            != declared["content_sha256"]
+        ):
+            raise RuntimeError(
+                f"Protocol correspondence proxy array {name!r} differs from "
+                "the exact source H5 rows."
+            )
+    for name, expected in expected_manifest.items():
+        if proxy.attrs.get(name) != expected:
+            raise RuntimeError(
+                f"Protocol correspondence proxy manifest field {name!r} differs."
+            )
+    expected_manifest_sha256 = sha256(
+        strict_json_dumps(expected_manifest).encode("utf-8")
+    ).hexdigest()
+    expected_coverage = (
+        "complete"
+        if expected_manifest["missing_realized_stimulus_frame_count"] == 0
+        else "incomplete_proxy"
+    )
+    if (
+        proxy.attrs.get("manifest_sha256") != expected_manifest_sha256
+        or proxy.attrs.get("coverage_status") != expected_coverage
+    ):
+        raise RuntimeError(
+            "Protocol correspondence proxy seal or coverage status differs."
+        )
+
+
+def _validate_protocol_semantic_steps(
+    run_group: zarr.Group,
+    snapshot: ProtocolSemanticSnapshot,
+) -> tuple[zarr.Group, list[tuple[zarr.Group, ProtocolStepIdentity]]]:
+    """Validate every materialized step before any semantic attrs are written."""
+
+    steps_group = run_group.get("steps")
+    if steps_group is None:
+        raise ValueError(
+            "A verified protocol semantic snapshot requires materialized stimulus steps."
+        )
+    step_names = set(_zarr_group_keys(steps_group))
+    expected_names = {f"step_{step.step_index}" for step in snapshot.steps}
+    if step_names != expected_names:
+        raise ValueError(
+            "Materialized stimulus steps differ from the producer semantic recipe: "
+            f"expected {sorted(expected_names)}, observed {sorted(step_names)}."
+        )
+    existing_parent_status = steps_group.attrs.get("protocol_semantic_status")
+    existing_parent_hash = steps_group.attrs.get("protocol_semantic_hash")
+    if existing_parent_status not in (None, "verified"):
+        raise ValueError(
+            "Materialized steps carry incompatible protocol semantic status "
+            f"{existing_parent_status!r}."
+        )
+    if existing_parent_hash not in (None, snapshot.semantic_hash):
+        raise ValueError(
+            "Materialized steps are already bound to a different producer "
+            "protocol semantic hash."
+        )
+
+    validated: list[tuple[zarr.Group, ProtocolStepIdentity]] = []
+    for identity in snapshot.steps:
+        step = steps_group[f"step_{identity.step_index}"]
+        attrs = step.attrs
+        existing_status = attrs.get("protocol_semantic_status")
+        existing_hash = attrs.get("protocol_semantic_hash")
+        if existing_status not in (None, "verified"):
+            raise ValueError(
+                "Materialized stimulus step carries incompatible protocol "
+                f"semantic status at step_index={identity.step_index}."
+            )
+        if existing_hash not in (None, snapshot.semantic_hash):
+            raise ValueError(
+                "Materialized stimulus step is already bound to a different "
+                f"semantic hash at step_index={identity.step_index}."
+            )
+        observed_index = int(attrs.get("step_index", -1))
+        observed_mode_id = int(attrs.get("stimulus_mode_id", -1))
+        observed_mode = str(attrs.get("stimulus_mode") or "").strip().upper()
+        try:
+            observed_duration = float(attrs.get("duration_s"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Materialized stimulus step {identity.step_index} has no valid duration."
+            ) from exc
+        if (
+            observed_index != identity.step_index
+            or observed_mode_id != identity.stimulus_mode_id
+            or observed_mode != identity.stimulus_mode
+            or not np.isclose(
+                observed_duration,
+                identity.duration_s,
+                rtol=0.0,
+                atol=1e-9,
+            )
+        ):
+            raise ValueError(
+                "Materialized stimulus step does not match the producer semantic "
+                f"recipe at step_index={identity.step_index}."
+            )
+        validated.append((step, identity))
+
+    return steps_group, validated
+
+
+def _bind_protocol_semantic_steps(
+    run_group: zarr.Group,
+    snapshot: ProtocolSemanticSnapshot,
+) -> None:
+    """Bind every materialized step to the exact producer recipe row."""
+
+    steps_group, validated = _validate_protocol_semantic_steps(run_group, snapshot)
+
+    _update_attrs_json_safe(
+        steps_group,
+        {
+            "protocol_semantic_status": "verified",
+            "protocol_semantic_hash": snapshot.semantic_hash,
+            "protocol_recipe_schema_id": PALETTE_PROTOCOL_RECIPE_SCHEMA_ID,
+            "protocol_recipe_schema_version": PALETTE_PROTOCOL_RECIPE_SCHEMA_VERSION,
+            "protocol_recipe_step_count": snapshot.step_count,
+            "protocol_recipe_mode_sequence": list(snapshot.mode_sequence),
+            "protocol_recipe_label": snapshot.recipe_label,
+        },
+    )
+    for step, identity in validated:
+        _update_attrs_json_safe(
+            step,
+            {
+                "protocol_semantic_status": "verified",
+                "protocol_semantic_hash": snapshot.semantic_hash,
+                "protocol_semantic_step_index": identity.step_index,
+                "protocol_semantic_step_ref": (
+                    f"protocol_semantic_snapshot@recipe.steps[{identity.step_index}]"
+                ),
+                "stimulus_family": identity.stimulus_family,
+                "protocol_trial_index_status": identity.index_status,
+                "display_context": identity.display_context,
+                "resolved_color_rgba8": (
+                    list(identity.resolved_color_rgba8)
+                    if identity.resolved_color_rgba8 is not None
+                    else None
+                ),
+            },
+        )
+        if identity.resolved_color_rgba8 is None:
+            try:
+                del step.attrs["resolved_color_rgba8"]
+            except KeyError:
+                pass
+
+
+def _protocol_semantic_storage_state(
+    run_group: zarr.Group,
+    snapshot: ProtocolSemanticSnapshot | None,
+) -> str:
+    """Classify and validate one run's stored semantic state without mutation."""
+
+    status = run_group.attrs.get("protocol_semantic_status")
+    semantic_attr_names = {
+        "protocol_semantic_hash",
+        "protocol_semantic_snapshot_path",
+        "protocol_recipe_schema_id",
+        "protocol_recipe_schema_version",
+        "protocol_recipe_step_count",
+        "protocol_recipe_mode_sequence",
+        "protocol_recipe_label",
+    }
+    present_attrs = {name for name in semantic_attr_names if name in run_group.attrs}
+    has_child = "protocol_semantic_snapshot" in run_group
+
+    if status is None:
+        if present_attrs or has_child:
+            raise ValueError(
+                "Stimulus run contains partial protocol semantic metadata without "
+                "an explicit status."
+            )
+        return "missing"
+
+    if status == "legacy_missing":
+        if snapshot is not None:
+            raise ValueError(
+                "Stimulus run is marked legacy_missing but its source H5 now "
+                "contains a modern semantic snapshot; use a new immutable run."
+            )
+        if present_attrs or has_child:
+            raise ValueError(
+                "legacy_missing stimulus run contains contradictory semantic identity."
+            )
+        steps_group = run_group.get("steps")
+        if steps_group is not None and steps_group.attrs.get(
+            "protocol_semantic_status"
+        ) not in (None, "legacy_missing"):
+            raise ValueError(
+                "legacy_missing stimulus run has contradictory step semantic status."
+            )
+        return "legacy_missing"
+
+    if status != "verified":
+        raise ValueError(f"Unknown protocol_semantic_status {status!r}.")
+    if snapshot is None:
+        raise ValueError(
+            "Verified stimulus semantic identity cannot be rebound from a legacy H5."
+        )
+    required_attrs = semantic_attr_names
+    missing_attrs = sorted(required_attrs - present_attrs)
+    if missing_attrs or not has_child:
+        raise ValueError(
+            "Verified stimulus run has partial semantic storage; missing "
+            + ", ".join(missing_attrs + ([] if has_child else ["protocol_semantic_snapshot"]))
+            + "."
+        )
+    if run_group.attrs.get("protocol_semantic_hash") != snapshot.semantic_hash:
+        raise ValueError(
+            "Stored stimulus semantic hash differs from the exact source H5; use "
+            "a new immutable run."
+        )
+    if run_group.attrs.get("protocol_semantic_snapshot_path") != (
+        "protocol_semantic_snapshot"
+    ):
+        raise ValueError("Stored protocol semantic snapshot path is inconsistent.")
+    if (
+        run_group.attrs.get("protocol_recipe_schema_id")
+        != PALETTE_PROTOCOL_RECIPE_SCHEMA_ID
+        or run_group.attrs.get("protocol_recipe_schema_version")
+        != PALETTE_PROTOCOL_RECIPE_SCHEMA_VERSION
+        or run_group.attrs.get("protocol_recipe_step_count") != snapshot.step_count
+        or list(run_group.attrs.get("protocol_recipe_mode_sequence", []))
+        != list(snapshot.mode_sequence)
+        or run_group.attrs.get("protocol_recipe_label") != snapshot.recipe_label
+    ):
+        raise ValueError("Stored protocol recipe attrs do not match the exact source H5.")
+
+    child = run_group["protocol_semantic_snapshot"]
+    if (
+        child.attrs.get("schema_id") != PALETTE_PROTOCOL_SNAPSHOT_SCHEMA_ID
+        or child.attrs.get("schema_version") != PALETTE_PROTOCOL_SNAPSHOT_SCHEMA_VERSION
+        or child.attrs.get("protocol_semantic_hash") != snapshot.semantic_hash
+        or child.attrs.get("protocol_trial_index_sha256")
+        != snapshot.trial_index_sha256
+        or child.attrs.get("protocol_trial_index_integrity_status")
+        != snapshot.trial_index_integrity_status
+        or child.attrs.get("source_snapshot_schema_version")
+        != snapshot.snapshot_schema_version
+        or child.attrs.get("source_snapshot_policy_id")
+        != snapshot.snapshot_policy_id
+        or child.attrs.get("source_trial_index_schema_version")
+        != snapshot.trial_index_schema_version
+        or child.attrs.get("source") != "citrus_h5_protocol_snapshot"
+        or child.attrs.get("recipe") != snapshot.recipe_record()
+    ):
+        raise ValueError("Stored protocol semantic snapshot attrs are inconsistent.")
+    if snapshot.trial_index_integrity_status == (
+        "producer_asserted_exact_bytes"
+    ):
+        if child.attrs.get("protocol_trial_index_hash") != snapshot.trial_index_sha256:
+            raise ValueError("Stored producer trial-index hash is inconsistent.")
+    elif child.attrs.get("palette_computed_trial_index_sha256") != (
+        snapshot.trial_index_sha256
+    ):
+        raise ValueError("Stored Palette trial-index digest is inconsistent.")
+    try:
+        semantic_values = np.asarray(child["protocol_semantic_json_utf8"][:])
+        trial_values = np.asarray(child["protocol_trial_index_json_utf8"][:])
+        if (
+            semantic_values.dtype != np.dtype(np.uint8)
+            or semantic_values.ndim != 1
+            or trial_values.dtype != np.dtype(np.uint8)
+            or trial_values.ndim != 1
+        ):
+            raise ValueError(
+                "Stored protocol semantic snapshot arrays must be one-dimensional uint8."
+            )
+        semantic_text = semantic_values.tobytes().decode("utf-8")
+        trial_text = trial_values.tobytes().decode("utf-8")
+    except (KeyError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            "Stored protocol semantic snapshot arrays are missing or malformed."
+        ) from exc
+    if semantic_text != snapshot.semantic_json or trial_text != snapshot.trial_index_json:
+        raise ValueError(
+            "Stored protocol semantic snapshot bytes differ from the exact source H5."
+        )
+    reloaded = validate_protocol_semantic_snapshot(
+        semantic_hash=snapshot.semantic_hash,
+        semantic_json=semantic_text,
+        trial_index_json=trial_text,
+        trial_index_hash=(
+            snapshot.trial_index_sha256
+            if snapshot.snapshot_schema_version == 2
+            else None
+        ),
+        snapshot_schema_version=snapshot.snapshot_schema_version,
+        snapshot_policy_id=snapshot.snapshot_policy_id,
+    )
+    if reloaded.recipe_record() != snapshot.recipe_record():
+        raise ValueError("Stored protocol semantic recipe did not reload exactly.")
+
+    steps_group, validated = _validate_protocol_semantic_steps(run_group, snapshot)
+    if (
+        steps_group.attrs.get("protocol_semantic_status") != "verified"
+        or steps_group.attrs.get("protocol_semantic_hash") != snapshot.semantic_hash
+    ):
+        raise ValueError("Stored stimulus steps lack verified semantic parent binding.")
+    for step, identity in validated:
+        expected_color = (
+            list(identity.resolved_color_rgba8)
+            if identity.resolved_color_rgba8 is not None
+            else None
+        )
+        observed_color = step.attrs.get("resolved_color_rgba8")
+        if (
+            step.attrs.get("protocol_semantic_status") != "verified"
+            or step.attrs.get("protocol_semantic_hash") != snapshot.semantic_hash
+            or step.attrs.get("protocol_semantic_step_index") != identity.step_index
+            or step.attrs.get("protocol_semantic_step_ref")
+            != f"protocol_semantic_snapshot@recipe.steps[{identity.step_index}]"
+            or step.attrs.get("stimulus_family") != identity.stimulus_family
+            or step.attrs.get("protocol_trial_index_status") != identity.index_status
+            or step.attrs.get("display_context") != identity.display_context
+            or observed_color != expected_color
+        ):
+            raise ValueError(
+                "Stored stimulus step semantic binding is incomplete or inconsistent "
+                f"at step_index={identity.step_index}."
+            )
+    return "verified"
+
+
+def _stimulus_run_is_published(
+    runs_parent: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    run_name: str,
+) -> bool:
+    selector_names = {
+        str(value)
+        for value in (
+            runs_parent.attrs.get("latest"),
+            runs_parent.attrs.get("latest_complete"),
+            runs_parent.attrs.get("authoritative_run"),
+        )
+        if value not in (None, "")
+    }
+    return bool(
+        run_name in selector_names
+        or run_group.attrs.get(RUN_COMPLETION_STATUS_ATTR) == RUN_STATUS_COMPLETE
+        or run_group.attrs.get("stage_selector_eligible") is True
+    )
+
+
 def _protocol_steps_list(protocol: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not isinstance(protocol, dict):
         return []
@@ -1123,12 +1762,34 @@ def _materialize_stimulus_steps(
     protocol: Optional[Dict[str, Any]],
     arena_config: Dict[str, Any],
     metadata: np.ndarray,
+    protocol_semantic_snapshot: ProtocolSemanticSnapshot | None = None,
+    protocol_execution_index: ProtocolExecutionIndex | None = None,
     moving_grating_camera_offset_deg: float = 0.0,
     console: Optional[Console],
 ) -> None:
     """Write canonical source-derived step metadata under a stimulus run."""
 
+    if protocol_execution_index is not None:
+        if protocol_semantic_snapshot is None:
+            raise ValueError(
+                "Finalized protocol execution requires its semantic snapshot."
+            )
+        if protocol_execution_index.status != "complete":
+            raise ValueError(
+                "Only a complete finalized protocol execution can materialize "
+                "an exact full-recipe stimulus run."
+            )
+        if len(protocol_execution_index.steps) != protocol_semantic_snapshot.step_count:
+            raise ValueError(
+                "Finalized protocol execution does not cover the semantic recipe."
+            )
+
     if events_data is None or events_data.dtype.names is None:
+        if protocol_semantic_snapshot is not None:
+            raise ValueError(
+                "A verified protocol semantic snapshot requires structured H5 "
+                "step events."
+            )
         return
 
     event_names = _normalize_event_names(events_data)
@@ -1136,6 +1797,11 @@ def _materialize_stimulus_steps(
     camera_frames_raw = _structured_column(events_data, "camera_frame_id", "camera_frame_num", "triggering_camera_frame_id")
     stimulus_modes_raw = _structured_column(events_data, "stimulus_mode_id", "stimulus_mode")
     if event_names.size == 0 or step_indices_raw is None or camera_frames_raw is None:
+        if protocol_semantic_snapshot is not None:
+            raise ValueError(
+                "A verified protocol semantic snapshot requires named step events "
+                "with step indices and camera-frame bounds."
+            )
         return
 
     step_indices = np.asarray(step_indices_raw, dtype=np.int32)
@@ -1149,26 +1815,62 @@ def _materialize_stimulus_steps(
     starts: Dict[int, int] = {}
     ends: Dict[int, int] = {}
     modes: Dict[int, int] = {}
+    end_modes: Dict[int, int] = {}
+    duplicate_starts: set[int] = set()
+    duplicate_ends: set[int] = set()
     for i, name in enumerate(event_names):
         step_index = int(step_indices[i])
         if str(name).strip() == EVENT_STEP_START:
+            if step_index in starts:
+                duplicate_starts.add(step_index)
             starts[step_index] = int(camera_frames[i])
             modes[step_index] = int(stimulus_modes[i])
         elif str(name).strip() == EVENT_STEP_END:
+            if step_index in ends:
+                duplicate_ends.add(step_index)
             ends[step_index] = int(camera_frames[i])
+            end_modes[step_index] = int(stimulus_modes[i])
 
     if not starts:
+        if protocol_semantic_snapshot is not None:
+            raise ValueError(
+                "A verified protocol semantic snapshot has no matching STEP_START "
+                "events."
+            )
         return
-
-    _delete_zarr_child_if_exists(run_group, "steps")
-    steps_group = run_group.create_group("steps")
-    steps_group.attrs["metadata_schema_version"] = 1
-    steps_group.attrs["source"] = "h5_events_and_protocol_snapshot"
+    if protocol_semantic_snapshot is not None:
+        if duplicate_starts or duplicate_ends:
+            raise ValueError(
+                "Verified protocol step events contain duplicate boundaries: "
+                f"starts={sorted(duplicate_starts)}, ends={sorted(duplicate_ends)}."
+            )
+        expected_indices = set(range(protocol_semantic_snapshot.step_count))
+        if set(starts) != expected_indices or set(ends) != expected_indices:
+            raise ValueError(
+                "H5 STEP_START/STEP_END rows do not cover the exact producer "
+                "semantic protocol recipe."
+            )
+        for identity in protocol_semantic_snapshot.steps:
+            if (
+                modes.get(identity.step_index) != identity.stimulus_mode_id
+                or end_modes.get(identity.step_index) != identity.stimulus_mode_id
+            ):
+                raise ValueError(
+                    "H5 STEP_START/STEP_END mode IDs do not match the exact "
+                    "producer semantic recipe at "
+                    f"step_index={identity.step_index}."
+                )
 
     protocol_steps = _protocol_steps_list(protocol)
     inferred_fps = _infer_camera_fps(metadata)
+    step_specs: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
     for step_index in sorted(starts):
         protocol_step = protocol_steps[step_index] if 0 <= step_index < len(protocol_steps) else {}
+        semantic_identity = (
+            protocol_semantic_snapshot.steps[step_index]
+            if protocol_semantic_snapshot is not None
+            else None
+        )
         step_params = {
             key: value for key, value in protocol_step.items()
             if key not in ("name", "step_name", "step_index")
@@ -1177,23 +1879,162 @@ def _materialize_stimulus_steps(
         start_frame = int(starts[step_index])
         end_frame = int(ends.get(step_index, start_frame + 1))
         mode_id = int(modes.get(step_index, protocol_step.get("stimulus_mode_id", 0) or 0))
-        mode_name = str(protocol_step.get("stimulus_mode_str") or STIMULUS_MODE.get(mode_id, f"UNKNOWN_{mode_id}"))
+        mode_name = str(
+            protocol_step.get("stimulus_mode_str")
+            or STIMULUS_MODE.get(mode_id, f"UNKNOWN_{mode_id}")
+        )
         duration_s = _first_float(protocol_step.get("duration_seconds"), protocol_step.get("duration_s"))
+        if duration_s is None and semantic_identity is not None:
+            duration_s = semantic_identity.duration_s
         if duration_s is None and inferred_fps is not None and inferred_fps > 0:
             duration_s = max(0.0, (end_frame - start_frame) / inferred_fps)
-
-        step_group = steps_group.create_group(f"step_{step_index}")
-        _update_attrs_json_safe(step_group, {
+        if end_frame < start_frame:
+            raise ValueError(
+                f"Stimulus step {step_index} ends before it starts in H5 events."
+            )
+        attrs = {
             "metadata_schema_version": 1,
             "step_index": step_index,
             "step_name": step_name,
             "stimulus_mode_id": mode_id,
             "stimulus_mode": mode_name,
-            "start_camera_frame": start_frame,
-            "end_camera_frame": end_frame,
             "duration_s": duration_s,
             "raw_protocol_params_json": _json_dumps_safe(step_params),
-        })
+        }
+        if protocol_execution_index is None:
+            attrs.update(
+                {
+                    "start_camera_frame": start_frame,
+                    "end_camera_frame": end_frame,
+                }
+            )
+        else:
+            realized = protocol_execution_index.steps[step_index]
+            if (
+                realized.step_index != step_index
+                or realized.stimulus_mode_id != mode_id
+            ):
+                raise ValueError(
+                    "Finalized execution identity differs from the semantic recipe "
+                    f"at step_index={step_index}."
+                )
+            attrs.update(
+                {
+                    "authoritative_interval_axis": "stimulus_frame_num",
+                    "start_stimulus_frame_inclusive": (
+                        realized.interval.start_stimulus_frame_inclusive
+                    ),
+                    "end_stimulus_frame_exclusive": (
+                        realized.interval.end_stimulus_frame_exclusive
+                    ),
+                    "first_camera_frame_id_correspondence": (
+                        realized.interval.first_camera_frame_id
+                    ),
+                    "last_camera_frame_id_correspondence": (
+                        realized.interval.last_camera_frame_id
+                    ),
+                    "camera_frame_role": "correspondence_only",
+                    "execution_completion_status": realized.completion_status,
+                    "execution_end_reason": realized.end_reason,
+                }
+            )
+        if semantic_identity is not None:
+            if (
+                mode_id != semantic_identity.stimulus_mode_id
+                or mode_name != semantic_identity.stimulus_mode
+                or duration_s is None
+                or not np.isclose(
+                    float(duration_s),
+                    semantic_identity.duration_s,
+                    rtol=0.0,
+                    atol=1e-9,
+                )
+            ):
+                raise ValueError(
+                    "H5 events/protocol definition do not match the verified "
+                    f"semantic recipe at step_index={step_index}."
+                )
+        step_specs.append((step_index, attrs, step_params))
+
+    for previous, current in zip(step_specs, step_specs[1:]):
+        if protocol_execution_index is None:
+            previous_end = int(previous[1]["end_camera_frame"])
+            current_start = int(current[1]["start_camera_frame"])
+            overlaps = current_start <= previous_end
+            interval_name = "camera-frame"
+        else:
+            previous_end = int(previous[1]["end_stimulus_frame_exclusive"])
+            current_start = int(current[1]["start_stimulus_frame_inclusive"])
+            overlaps = current_start < previous_end
+            interval_name = "stimulus-frame"
+        if overlaps:
+            raise ValueError(
+                f"Materialized stimulus step {interval_name} bounds overlap or "
+                "are not ordered."
+            )
+
+    _delete_zarr_child_if_exists(run_group, "steps")
+    steps_group = run_group.create_group("steps")
+    steps_group.attrs["metadata_schema_version"] = 1
+    steps_group.attrs["source"] = (
+        "citrus_protocol_execution_index"
+        if protocol_execution_index is not None
+        else "h5_events_and_protocol_snapshot"
+    )
+    if protocol_execution_index is None:
+        steps_group.attrs["camera_frame_bounds"] = (
+            "raw_h5_step_start_and_step_end_event_frames"
+        )
+        steps_group.attrs["step_end_interval_semantics"] = (
+            "producer_contract_pending"
+        )
+    else:
+        steps_group.attrs.update(
+            {
+                "authoritative_interval_axis": "stimulus_frame_num",
+                "interval_policy_id": (
+                    "citrus.protocol.execution_index."
+                    "half_open_stimulus_frames.v1"
+                ),
+                "camera_frame_role": "correspondence_only",
+                "protocol_execution_hash": protocol_execution_index.execution_hash,
+                "protocol_execution_status": protocol_execution_index.status,
+                "acquisition_containment_status": (
+                    "unavailable_without_sealed_stimulus_to_acquisition_mapping"
+                ),
+            }
+        )
+
+    for step_index, attrs, step_params in step_specs:
+        mode_name = str(attrs["stimulus_mode"])
+        step_group = steps_group.create_group(f"step_{step_index}")
+        _update_attrs_json_safe(step_group, attrs)
+
+        if protocol_execution_index is not None:
+            realized = protocol_execution_index.steps[step_index]
+            if realized.chaser_phases is not None:
+                phases_group = step_group.create_group("execution_phases")
+                phases_group.attrs.update(
+                    {
+                        "authoritative_interval_axis": "stimulus_frame_num",
+                        "camera_frame_role": "correspondence_only",
+                        "phase_names": list(CHASER_PHASE_NAMES),
+                    }
+                )
+                for phase_name in CHASER_PHASE_NAMES:
+                    phase = realized.chaser_phases[phase_name]
+                    phase_group = phases_group.create_group(phase_name)
+                    phase_group.attrs.update(
+                        {
+                            **phase.to_record(),
+                            "authoritative_interval_axis": "stimulus_frame_num",
+                            "camera_frame_role": "correspondence_only",
+                            "acquisition_containment_status": (
+                                "unavailable_without_sealed_"
+                                "stimulus_to_acquisition_mapping"
+                            ),
+                        }
+                    )
 
         if mode_name == "MOVING_GRATING":
             _write_moving_grating_step_metadata(
@@ -1203,6 +2044,11 @@ def _materialize_stimulus_steps(
             )
         elif mode_name == "CONCENTRIC_GRATING":
             _write_concentric_grating_step_metadata(h5, step_group, step_params, arena_config)
+
+    if protocol_semantic_snapshot is not None:
+        _bind_protocol_semantic_steps(run_group, protocol_semantic_snapshot)
+    else:
+        steps_group.attrs["protocol_semantic_status"] = "legacy_missing"
 
     _log(console, f"[green]✓ Materialized {len(starts)} canonical stimulus step metadata groups[/green]")
 
@@ -1364,8 +2210,11 @@ def backfill_stimulus_step_metadata(
     - ``analysis/stimulus_runs/<run>/steps/step_<i>``
     - ``analysis/stimulus_runs/<run>/stimulus_coordinates``
     - missing ``protocol_json`` attrs, when available
+    - a verified producer protocol-semantic snapshot and exact step bindings
 
-    Default mode is a dry-run. Pass ``apply=True`` to write.
+    Default mode is a dry-run. Pass ``apply=True`` to write. Completed or
+    selector-visible runs are immutable and are reported as requiring a new
+    successor stimulus run rather than modified in place.
     """
 
     zarr_path = Path(zarr_path).expanduser()
@@ -1418,13 +2267,6 @@ def backfill_stimulus_step_metadata(
             add_detail("skipped_non_group_run", run_name=run_name)
             continue
 
-        need_steps = bool(overwrite or not _zarr_child_exists(run_group, run_path, "steps"))
-        need_coordinates = bool(overwrite or not _zarr_child_exists(run_group, run_path, "stimulus_coordinates"))
-        need_protocol = bool(overwrite or "protocol_json" not in run_group.attrs)
-        if not need_steps and not need_coordinates and not need_protocol:
-            add_detail("skipped_existing", run_name=run_name)
-            continue
-
         h5_path, h5_reason = _resolve_stimulus_backfill_h5(zarr_path, run_group, source_h5=source_h5)
         if h5_path is None:
             status = "skipped_ambiguous_h5" if h5_reason.startswith("ambiguous") else "skipped_missing_h5"
@@ -1433,9 +2275,35 @@ def backfill_stimulus_step_metadata(
 
         try:
             with h5py.File(h5_path, "r") as h5:
+                semantic_snapshot = read_protocol_semantic_snapshot(h5)
+                semantic_state = _protocol_semantic_storage_state(
+                    run_group,
+                    semantic_snapshot,
+                )
+                need_semantic = semantic_state == "missing"
+                need_steps = bool(
+                    overwrite
+                    or not _zarr_child_exists(run_group, run_path, "steps")
+                )
+                need_coordinates = bool(
+                    overwrite
+                    or not _zarr_child_exists(
+                        run_group,
+                        run_path,
+                        "stimulus_coordinates",
+                    )
+                )
+                need_protocol = bool(
+                    overwrite or "protocol_json" not in run_group.attrs
+                )
                 events_data = h5["/events"][:] if "/events" in h5 else None
                 step_count = _count_step_start_events(events_data)
                 if need_steps and step_count == 0:
+                    if semantic_snapshot is not None:
+                        raise ValueError(
+                            "Verified protocol semantic snapshot has no materializable "
+                            "STEP_START events."
+                        )
                     add_detail(
                         "skipped_no_step_events",
                         run_name=run_name,
@@ -1451,6 +2319,75 @@ def backfill_stimulus_step_metadata(
                 )
                 arena_config = _read_h5_arena_config(h5) or {}
 
+                semantic_detail = {
+                    "protocol_semantic_source_status": (
+                        "verified" if semantic_snapshot is not None else "legacy_missing"
+                    ),
+                    "protocol_semantic_existing_state": semantic_state,
+                    "protocol_semantic_hash": (
+                        semantic_snapshot.semantic_hash
+                        if semantic_snapshot is not None
+                        else None
+                    ),
+                    "protocol_recipe_label": (
+                        semantic_snapshot.recipe_label
+                        if semantic_snapshot is not None
+                        else None
+                    ),
+                    "protocol_recipe_mode_sequence": (
+                        list(semantic_snapshot.mode_sequence)
+                        if semantic_snapshot is not None
+                        else None
+                    ),
+                    "protocol_recipe_step_count": (
+                        semantic_snapshot.step_count
+                        if semantic_snapshot is not None
+                        else None
+                    ),
+                }
+
+                if not need_steps and not need_coordinates and not need_protocol and not need_semantic:
+                    add_detail(
+                        "skipped_existing",
+                        run_name=run_name,
+                        source_h5=str(h5_path),
+                        **semantic_detail,
+                    )
+                    continue
+
+                if _stimulus_run_is_published(
+                    runs_parent,
+                    run_group,
+                    run_name=run_name,
+                ):
+                    add_detail(
+                        "requires_immutable_successor",
+                        run_name=run_name,
+                        source_h5=str(h5_path),
+                        reason=(
+                            "completed or selector-visible stimulus runs are immutable; "
+                            "re-import the exact H5 under a new run name"
+                        ),
+                        write_steps=need_steps,
+                        write_stimulus_coordinates=need_coordinates,
+                        write_protocol_json=bool(
+                            need_protocol and protocol_text is not None
+                        ),
+                        write_protocol_semantic_snapshot=need_semantic,
+                        **semantic_detail,
+                    )
+                    continue
+
+                if (
+                    semantic_snapshot is not None
+                    and need_semantic
+                    and not need_steps
+                ):
+                    _validate_protocol_semantic_steps(
+                        run_group,
+                        semantic_snapshot,
+                    )
+
                 planned_status = "would_overwrite" if overwrite else "would_backfill"
                 written_status = "overwritten" if overwrite else "backfilled"
                 if not apply:
@@ -1462,7 +2399,10 @@ def backfill_stimulus_step_metadata(
                         write_steps=need_steps,
                         write_stimulus_coordinates=need_coordinates,
                         write_protocol_json=bool(need_protocol and protocol_text is not None),
+                        write_protocol_semantic_snapshot=need_semantic,
+                        bind_existing_steps=bool(need_semantic and not need_steps),
                         moving_grating_camera_offset_deg=float(moving_grating_camera_offset_deg),
+                        **semantic_detail,
                     )
                     continue
 
@@ -1478,9 +2418,24 @@ def backfill_stimulus_step_metadata(
                         protocol=protocol_payload,
                         arena_config=arena_config,
                         metadata=frame_metadata,
+                        protocol_semantic_snapshot=semantic_snapshot,
                         moving_grating_camera_offset_deg=float(moving_grating_camera_offset_deg),
                         console=console,
                     )
+                elif need_semantic and semantic_snapshot is not None:
+                    _bind_protocol_semantic_steps(run_group, semantic_snapshot)
+
+                if need_semantic:
+                    _materialize_protocol_semantic_snapshot(
+                        run_group,
+                        semantic_snapshot,
+                    )
+                    if semantic_snapshot is None:
+                        steps_group = run_group.get("steps")
+                        if steps_group is not None:
+                            steps_group.attrs[
+                                "protocol_semantic_status"
+                            ] = "legacy_missing"
                 add_detail(
                     written_status,
                     run_name=run_name,
@@ -1489,7 +2444,10 @@ def backfill_stimulus_step_metadata(
                     wrote_steps=need_steps,
                     wrote_stimulus_coordinates=need_coordinates,
                     wrote_protocol_json=bool(need_protocol and protocol_text is not None),
+                    wrote_protocol_semantic_snapshot=need_semantic,
+                    bound_existing_steps=bool(need_semantic and not need_steps),
                     moving_grating_camera_offset_deg=float(moving_grating_camera_offset_deg),
+                    **semantic_detail,
                 )
         except Exception as exc:
             add_detail("error", run_name=run_name, source_h5=str(h5_path), reason=str(exc))
@@ -1889,6 +2847,9 @@ def _consolidate_and_verify_stimulus_publication(
     run_name: str,
     expect_coordinate_surfaces: bool,
     expect_physical_authority: bool,
+    expected_protocol_semantic_snapshot: ProtocolSemanticSnapshot | None,
+    expected_protocol_execution_index: ProtocolExecutionIndex | None,
+    expected_protocol_frame_metadata: np.ndarray | None,
 ) -> None:
     """Publish and verify the final immutable selector metadata generation."""
 
@@ -1913,6 +2874,116 @@ def _consolidate_and_verify_stimulus_publication(
         raise RuntimeError(
             "Consolidated stimulus metadata does not expose the selected run "
             "as complete and selector-eligible."
+        )
+    expected_semantic_status = (
+        (
+            "verified"
+            if expected_protocol_semantic_snapshot is not None
+            else "legacy_missing"
+        )
+    )
+    if run_group.attrs.get("protocol_semantic_status") != expected_semantic_status:
+        raise RuntimeError(
+            "Consolidated stimulus metadata does not expose the expected protocol "
+            "semantic status."
+        )
+    if expected_protocol_semantic_snapshot is None:
+        if "protocol_semantic_snapshot" in run_group:
+            raise RuntimeError(
+                "Legacy stimulus publication unexpectedly exposes a semantic snapshot."
+            )
+    else:
+        if (
+            run_group.attrs.get("protocol_semantic_hash")
+            != expected_protocol_semantic_snapshot.semantic_hash
+        ):
+            raise RuntimeError(
+                "Consolidated stimulus metadata exposes the wrong protocol semantic hash."
+            )
+        snapshot_group = run_group.get("protocol_semantic_snapshot")
+        if snapshot_group is None:
+            raise RuntimeError(
+                "Consolidated stimulus publication lacks its semantic snapshot arrays."
+            )
+        semantic_text = np.asarray(
+            snapshot_group["protocol_semantic_json_utf8"][:], dtype=np.uint8
+        ).tobytes().decode("utf-8")
+        trial_text = np.asarray(
+            snapshot_group["protocol_trial_index_json_utf8"][:], dtype=np.uint8
+        ).tobytes().decode("utf-8")
+        reloaded_snapshot = validate_protocol_semantic_snapshot(
+            semantic_hash=expected_protocol_semantic_snapshot.semantic_hash,
+            semantic_json=semantic_text,
+            trial_index_json=trial_text,
+            trial_index_hash=(
+                expected_protocol_semantic_snapshot.trial_index_sha256
+                if expected_protocol_semantic_snapshot.snapshot_schema_version == 2
+                else None
+            ),
+            snapshot_schema_version=(
+                expected_protocol_semantic_snapshot.snapshot_schema_version
+            ),
+            snapshot_policy_id=expected_protocol_semantic_snapshot.snapshot_policy_id,
+        )
+        if (
+            semantic_text != expected_protocol_semantic_snapshot.semantic_json
+            or trial_text != expected_protocol_semantic_snapshot.trial_index_json
+            or reloaded_snapshot.recipe_record()
+            != expected_protocol_semantic_snapshot.recipe_record()
+        ):
+            raise RuntimeError(
+                "Consolidated protocol semantic snapshot bytes or recipe differ "
+                "from the exact source H5 snapshot."
+            )
+        try:
+            _protocol_semantic_storage_state(
+                run_group,
+                expected_protocol_semantic_snapshot,
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "Consolidated stimulus protocol semantic storage did not reload "
+                "and bind exactly."
+            ) from exc
+    if expected_protocol_execution_index is None:
+        if "protocol_execution" in run_group:
+            raise RuntimeError(
+                "Legacy stimulus publication unexpectedly exposes protocol execution."
+            )
+    else:
+        execution_group = run_group.get("protocol_execution")
+        if execution_group is None:
+            raise RuntimeError(
+                "Consolidated stimulus publication lacks protocol execution evidence."
+            )
+        execution_text = np.asarray(
+            execution_group["execution_index_json_utf8"][:],
+            dtype=np.uint8,
+        ).tobytes().decode("utf-8")
+        observed_hash = "sha256:" + sha256(execution_text.encode("utf-8")).hexdigest()
+        if (
+            execution_text != expected_protocol_execution_index.execution_json
+            or observed_hash != expected_protocol_execution_index.execution_hash
+            or execution_group.attrs.get("execution_index_hash") != observed_hash
+            or execution_group.attrs.get("authoritative_interval_axis")
+            != "stimulus_frame_num"
+            or execution_group.attrs.get("camera_frame_role")
+            != "correspondence_only"
+            or run_group.attrs.get("protocol_selector_eligibility")
+            != "blocked_missing_sealed_stimulus_to_acquisition_mapping"
+        ):
+            raise RuntimeError(
+                "Consolidated protocol execution evidence differs from the exact source."
+            )
+        if expected_protocol_frame_metadata is None:
+            raise RuntimeError(
+                "Protocol execution publication lacks exact source frame metadata "
+                "for correspondence-proxy verification."
+            )
+        _validate_protocol_frame_correspondence_proxy(
+            execution_group,
+            execution=expected_protocol_execution_index,
+            frame_metadata=expected_protocol_frame_metadata,
         )
     if expect_coordinate_surfaces:
         chaser_group = run_group["tracking_data/chaser_states"]
@@ -1962,6 +3033,16 @@ def import_stimulus_to_zarr(
     # Keep this exact read-only handle alive through the final publication
     # recheck. No path reopen or cached preflight evidence is accepted.
     with h5py.File(resolved_h5.expanduser().resolve(), "r") as h5:
+        protocol_semantic_snapshot = read_protocol_semantic_snapshot(h5)
+        protocol_execution_index = (
+            read_protocol_execution_index(
+                h5,
+                snapshot=protocol_semantic_snapshot,
+            )
+            if protocol_semantic_snapshot is not None
+            and protocol_semantic_snapshot.snapshot_schema_version == 2
+            else None
+        )
         coordinate_preflight = preflight_stimulus_coordinate_contract(
             h5,
             source_h5=resolved_h5,
@@ -1975,6 +3056,8 @@ def import_stimulus_to_zarr(
             repair_chaser_gaps=repair_chaser_gaps,
             console=console,
             coordinate_preflight=coordinate_preflight,
+            protocol_semantic_snapshot=protocol_semantic_snapshot,
+            protocol_execution_index=protocol_execution_index,
         )
 
 
@@ -1987,6 +3070,8 @@ def _import_stimulus_from_open_h5(
     repair_chaser_gaps: bool,
     console: Optional[Console],
     coordinate_preflight: StimulusCoordinatePreflight,
+    protocol_semantic_snapshot: ProtocolSemanticSnapshot | None,
+    protocol_execution_index: ProtocolExecutionIndex | None,
 ) -> str:
     """Stage and publish one run while its verified source handle remains open."""
 
@@ -2283,7 +3368,19 @@ def _import_stimulus_from_open_h5(
         protocol_text, protocol_payload = _read_protocol_snapshot(h5)
         if protocol_text is not None:
             run_group.attrs["protocol_json"] = protocol_text
-        if events_data is not None and protocol_payload is not None:
+        if protocol_semantic_snapshot is not None:
+            _materialize_stimulus_steps(
+                run_group,
+                h5=h5,
+                events_data=events_data,
+                protocol=protocol_payload,
+                arena_config=arena_config or {},
+                metadata=frame_metadata,
+                protocol_semantic_snapshot=protocol_semantic_snapshot,
+                protocol_execution_index=protocol_execution_index,
+                console=console,
+            )
+        elif events_data is not None and protocol_payload is not None:
             _materialize_stimulus_steps(
                 run_group,
                 h5=h5,
@@ -2293,6 +3390,15 @@ def _import_stimulus_from_open_h5(
                 metadata=frame_metadata,
                 console=console,
             )
+        _materialize_protocol_semantic_snapshot(
+            run_group,
+            protocol_semantic_snapshot,
+        )
+        _materialize_protocol_execution_index(
+            run_group,
+            protocol_execution_index,
+            frame_metadata=frame_metadata,
+        )
 
         # Keep the exact arena-config payload run-local for inspection. The
         # selected calibration helper below is the interpretation authority.
@@ -2379,6 +3485,56 @@ def _import_stimulus_from_open_h5(
             h5,
             preflight=coordinate_preflight,
         )
+        reloaded_protocol_semantic_snapshot = read_protocol_semantic_snapshot(h5)
+        reloaded_protocol_execution_index = (
+            read_protocol_execution_index(
+                h5,
+                snapshot=reloaded_protocol_semantic_snapshot,
+            )
+            if reloaded_protocol_semantic_snapshot is not None
+            and reloaded_protocol_semantic_snapshot.snapshot_schema_version == 2
+            else None
+        )
+        if (
+            (reloaded_protocol_semantic_snapshot is None)
+            != (protocol_semantic_snapshot is None)
+            or (
+                reloaded_protocol_semantic_snapshot is not None
+                and protocol_semantic_snapshot is not None
+                and (
+                    reloaded_protocol_semantic_snapshot.semantic_hash
+                    != protocol_semantic_snapshot.semantic_hash
+                    or reloaded_protocol_semantic_snapshot.semantic_json
+                    != protocol_semantic_snapshot.semantic_json
+                    or reloaded_protocol_semantic_snapshot.trial_index_json
+                    != protocol_semantic_snapshot.trial_index_json
+                    or reloaded_protocol_semantic_snapshot.recipe_record()
+                    != protocol_semantic_snapshot.recipe_record()
+                )
+            )
+        ):
+            raise ValueError(
+                "Citrus protocol semantic snapshot changed during stimulus import."
+            )
+        if (
+            (reloaded_protocol_execution_index is None)
+            != (protocol_execution_index is None)
+            or (
+                reloaded_protocol_execution_index is not None
+                and protocol_execution_index is not None
+                and (
+                    reloaded_protocol_execution_index.execution_hash
+                    != protocol_execution_index.execution_hash
+                    or reloaded_protocol_execution_index.execution_json
+                    != protocol_execution_index.execution_json
+                    or reloaded_protocol_execution_index.status
+                    != protocol_execution_index.status
+                )
+            )
+        ):
+            raise ValueError(
+                "Citrus protocol execution index changed during stimulus import."
+            )
         if physical_authority is not None:
             publish_source_camera_physical_authority(
                 root,
@@ -2478,6 +3634,11 @@ def _import_stimulus_from_open_h5(
         run_name=run_name,
         expect_coordinate_surfaces=bool(coordinate_preflight.surfaces),
         expect_physical_authority=physical_authority is not None,
+        expected_protocol_semantic_snapshot=protocol_semantic_snapshot,
+        expected_protocol_execution_index=protocol_execution_index,
+        expected_protocol_frame_metadata=(
+            frame_metadata if protocol_execution_index is not None else None
+        ),
     )
     _log_after_commit(
         console,

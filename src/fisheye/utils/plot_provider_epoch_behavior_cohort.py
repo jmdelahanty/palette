@@ -6,9 +6,10 @@ immutable generation selected by its publication manifest or the exact two
 Parquet parts named by that manifest.  It does not resolve a selector, write
 to a Zarr archive, update the registry, or mutate the source tables.
 
-The figures use the semantic epoch labels ``pre_event``, ``training_event``,
-and ``post_event``.  Epoch colors are neutral presentation colors; they do
-not encode a behavioral class or the color of an experimental stimulus.
+Legacy figures use ``pre_event``, ``training_event``, and ``post_event``.
+Semantic-v2 figures use ``chaser_pre``, ``chaser_training``, and
+``chaser_post``. Epoch colors are neutral presentation colors; they do not
+encode a behavioral class or the color of an experimental stimulus.
 """
 
 from __future__ import annotations
@@ -37,7 +38,11 @@ from fisheye.utils.export_provider_epoch_behavior_cohort import (
     ARROW_ENVELOPE_SCHEMA_ID,
     ARROW_ENVELOPE_SCHEMA_VERSION,
     EXPORT_SCHEMA_ID,
-    EXPORT_SCHEMA_VERSION,
+    LEGACY_EXPORT_SCHEMA_VERSION,
+    SEMANTIC_ARROW_ENVELOPE_SCHEMA_VERSION,
+    SEMANTIC_EPOCH_BINDING_MODE,
+    SEMANTIC_EXPORT_SCHEMA_VERSION,
+    SEMANTIC_ROLES,
     TABLE_BOUTS,
     TABLE_FISH,
     TABLE_NAMES,
@@ -46,7 +51,9 @@ from fisheye.utils.export_provider_epoch_behavior_cohort import (
 
 
 PLOT_SCHEMA_ID = "palette.provider_epoch_behavior_cohort_plots"
-PLOT_SCHEMA_VERSION = 3
+LEGACY_PLOT_SCHEMA_VERSION = 3
+SEMANTIC_PLOT_SCHEMA_VERSION = 4
+PLOT_SCHEMA_VERSION = LEGACY_PLOT_SCHEMA_VERSION
 ANALYSIS_UNIT_DECISION_SCHEMA_ID = "palette.provider_epoch_analysis_unit_decision"
 ANALYSIS_UNIT_DECISION_SCHEMA_VERSION = 1
 DEFAULT_ANALYSIS_UNIT_MODE = "subject_id"
@@ -55,6 +62,7 @@ RECORDING_ANALYSIS_UNIT_POLICY_ID = (
     "operator_asserted_recording_unit_for_duplicate_acquisition_uuid_incident_v1"
 )
 EXPECTED_EPOCH_LABELS = ("pre_event", "training_event", "post_event")
+SEMANTIC_EXPECTED_EPOCH_LABELS = SEMANTIC_ROLES
 EXPECTED_EPOCH_IDS = (0, 1, 2)
 EXPECTED_EPOCH_IDENTITIES = tuple(zip(EXPECTED_EPOCH_IDS, EXPECTED_EPOCH_LABELS))
 PLOT_METRICS = {
@@ -73,6 +81,9 @@ NEUTRAL_EPOCH_COLORS = {
     "training_event": "#8B8B72",
     "post_event": "#B0A37A",
 }
+SEMANTIC_NEUTRAL_EPOCH_COLORS = dict(
+    zip(SEMANTIC_EXPECTED_EPOCH_LABELS, NEUTRAL_EPOCH_COLORS.values())
+)
 _PREFIX_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
 
@@ -136,6 +147,26 @@ class ValidatedCohort:
         return str(self.manifest["metric_disposition"])
 
     @property
+    def export_schema_version(self) -> int:
+        return int(self.manifest["export_schema_version"])
+
+    @property
+    def epoch_labels(self) -> tuple[str, ...]:
+        return (
+            SEMANTIC_EXPECTED_EPOCH_LABELS
+            if self.export_schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION
+            else EXPECTED_EPOCH_LABELS
+        )
+
+    @property
+    def epoch_colors(self) -> Mapping[str, str]:
+        return (
+            SEMANTIC_NEUTRAL_EPOCH_COLORS
+            if self.export_schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION
+            else NEUTRAL_EPOCH_COLORS
+        )
+
+    @property
     def n_recording_animal_sessions(self) -> int:
         return len(self.units)
 
@@ -155,6 +186,7 @@ class BoutDistributionData:
     pooled_values_by_metric_epoch: Mapping[str, tuple[np.ndarray, ...]]
     analysis_unit_values_by_metric_epoch: Mapping[str, tuple[np.ndarray, ...]]
     metrics: Mapping[str, Mapping[str, Any]]
+    epoch_labels: tuple[str, ...] = EXPECTED_EPOCH_LABELS
 
     @property
     def subject_values_by_metric_epoch(self) -> Mapping[str, tuple[np.ndarray, ...]]:
@@ -239,6 +271,20 @@ def _require_sha256(value: object, *, label: str) -> str:
     assert text is not None
     if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
         raise ProviderEpochBehaviorPlotError(f"{label} must be a lowercase SHA-256.")
+    return text
+
+
+def _require_prefixed_sha256(value: object, *, label: str) -> str:
+    text = _as_text(value, label=label)
+    assert text is not None
+    if (
+        len(text) != 71
+        or not text.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in text[7:])
+    ):
+        raise ProviderEpochBehaviorPlotError(
+            f"{label} must be 'sha256:' plus 64 lowercase hexadecimal digits."
+        )
     return text
 
 
@@ -454,13 +500,155 @@ def _validate_analysis_unit_decision(
     )
 
 
+def _semantic_lineage_roles(
+    manifest: Mapping[str, Any],
+) -> dict[tuple[str, int], dict[str, Mapping[str, Any]]]:
+    lineage = manifest.get("source_lineage")
+    if not isinstance(lineage, list) or len(lineage) != manifest.get(
+        "recording_count"
+    ):
+        raise ProviderEpochBehaviorPlotError(
+            "Semantic cohort source lineage is absent or incomplete."
+        )
+    result: dict[tuple[str, int], dict[str, Mapping[str, Any]]] = {}
+    for item in lineage:
+        if not isinstance(item, Mapping):
+            raise ProviderEpochBehaviorPlotError(
+                "Semantic cohort source lineage contains a malformed record."
+            )
+        recording_id = _as_text(
+            item.get("recording_id"),
+            label="source lineage recording_id",
+        )
+        track_id = _as_int(item.get("track_id"), label="source lineage track_id")
+        assert recording_id is not None
+        unit_key = (recording_id, track_id)
+        refs = item.get("source_refs")
+        source_refs_sha256 = item.get("source_refs_sha256")
+        if (
+            unit_key in result
+            or item.get("summary_schema_version")
+            != SEMANTIC_EXPORT_SCHEMA_VERSION
+            or item.get("epoch_binding_mode") != SEMANTIC_EPOCH_BINDING_MODE
+            or not isinstance(refs, Mapping)
+            or refs.get("epoch_binding_mode") != SEMANTIC_EPOCH_BINDING_MODE
+            or _require_sha256(
+                source_refs_sha256,
+                label="source lineage source_refs_sha256",
+            )
+            != canonical_json_sha256(refs)
+        ):
+            raise ProviderEpochBehaviorPlotError(
+                "Semantic cohort source lineage identity is invalid."
+            )
+        semantic = refs.get("protocol_semantic_selection")
+        if (
+            not isinstance(semantic, Mapping)
+            or semantic.get("roles") != list(SEMANTIC_ROLES)
+            or semantic.get("selector_eligible") is not False
+            or semantic.get("production_authority") is not False
+        ):
+            raise ProviderEpochBehaviorPlotError(
+                "Semantic cohort lineage lacks its exact selector-ineligible selection."
+            )
+        selection_run = _as_text(
+            semantic.get("run_name"),
+            label="protocol semantic selection run",
+        )
+        selection_manifest = _require_sha256(
+            semantic.get("manifest_sha256"),
+            label="protocol semantic selection manifest",
+        )
+        semantic_hash = _require_prefixed_sha256(
+            semantic.get("protocol_semantic_hash"),
+            label="protocol semantic hash",
+        )
+        records = semantic.get("semantic_role_bindings")
+        summary_run = _as_text(
+            item.get("summary_run"),
+            label="source lineage summary_run",
+        )
+        source_summary_sha256 = _require_sha256(
+            item.get("source_summary_sha256"),
+            label="source lineage source_summary_sha256",
+        )
+        if (
+            not isinstance(records, list)
+            or tuple(
+                record.get("analysis_role")
+                if isinstance(record, Mapping)
+                else None
+                for record in records
+            )
+            != SEMANTIC_ROLES
+            or canonical_json_sha256(records)
+            != semantic.get("semantic_role_bindings_sha256")
+        ):
+            raise ProviderEpochBehaviorPlotError(
+                "Semantic cohort lineage role bindings are stale."
+            )
+        by_role: dict[str, Mapping[str, Any]] = {}
+        seen_window_ids: set[int] = set()
+        for role_index, raw in enumerate(records):
+            assert isinstance(raw, Mapping)
+            role = str(raw["analysis_role"])
+            window_id = raw.get("source_window_id")
+            selected_start = raw.get("selected_start_frame")
+            selected_end = raw.get("selected_end_frame_exclusive")
+            step_index = raw.get("protocol_semantic_step_index")
+            step_ref = raw.get("protocol_semantic_step_ref")
+            if (
+                type(window_id) is not int
+                or window_id < 0
+                or window_id in seen_window_ids
+                or type(selected_start) is not int
+                or type(selected_end) is not int
+                or selected_end <= selected_start
+                or type(step_index) is not int
+                or step_index < 0
+                or step_ref
+                != f"protocol_semantic_snapshot@recipe.steps[{step_index}]"
+                or raw.get("protocol_semantic_hash") != semantic_hash
+            ):
+                raise ProviderEpochBehaviorPlotError(
+                    "Semantic cohort lineage role identity is malformed."
+                )
+            seen_window_ids.add(window_id)
+            by_role[role] = {
+                **dict(raw),
+                "role_index": role_index,
+                "protocol_semantic_selection_run": selection_run,
+                "protocol_semantic_selection_manifest_sha256": (
+                    selection_manifest
+                ),
+                "summary_run": summary_run,
+                "source_summary_sha256": source_summary_sha256,
+                "source_refs_sha256": source_refs_sha256,
+            }
+        result[unit_key] = by_role
+    return result
+
+
 def _validate_publication_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     """Validate the shared exact publication and the cohort-specific contract."""
 
     if manifest.get("export_schema_id") != EXPORT_SCHEMA_ID:
         raise ProviderEpochBehaviorPlotError("The source is not a provider-epoch cohort export.")
-    if manifest.get("export_schema_version") != EXPORT_SCHEMA_VERSION:
+    export_schema_version = manifest.get("export_schema_version")
+    if (
+        type(export_schema_version) is not int
+        or export_schema_version
+        not in {LEGACY_EXPORT_SCHEMA_VERSION, SEMANTIC_EXPORT_SCHEMA_VERSION}
+    ):
         raise ProviderEpochBehaviorPlotError("The provider-epoch cohort export schema version is unsupported.")
+    if export_schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION and (
+        manifest.get("epoch_binding_mode") != SEMANTIC_EPOCH_BINDING_MODE
+        or manifest.get("protocol_to_acquisition_alignment")
+        != "sealed_epoch_selection_proxy_not_physical_presentation"
+    ):
+        raise ProviderEpochBehaviorPlotError(
+            "The semantic cohort does not declare its exact proxy-alignment boundary."
+        )
     if manifest.get("selector_eligible") is not False:
         raise ProviderEpochBehaviorPlotError("Plotting requires a selector-ineligible cohort export.")
     if manifest.get("metric_disposition") != "linear_only":
@@ -477,7 +665,15 @@ def _validate_publication_manifest(manifest: Mapping[str, Any]) -> dict[str, Any
     if type(manifest.get("recording_count")) is not int or manifest["recording_count"] <= 0:
         raise ProviderEpochBehaviorPlotError("The cohort manifest must contain a positive recording count.")
 
-    contracts = table_contracts_for_disposition("linear_only")
+    contracts = table_contracts_for_disposition(
+        "linear_only",
+        schema_version=export_schema_version,
+    )
+    arrow_envelope_version = (
+        SEMANTIC_ARROW_ENVELOPE_SCHEMA_VERSION
+        if export_schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION
+        else ARROW_ENVELOPE_SCHEMA_VERSION
+    )
     try:
         validate_derived_manifest_envelope(
             manifest,
@@ -485,7 +681,7 @@ def _validate_publication_manifest(manifest: Mapping[str, Any]) -> dict[str, Any
             table_names=TABLE_NAMES,
             contracts=contracts,
             arrow_envelope_schema_id=ARROW_ENVELOPE_SCHEMA_ID,
-            arrow_envelope_schema_version=ARROW_ENVELOPE_SCHEMA_VERSION,
+            arrow_envelope_schema_version=arrow_envelope_version,
         )
     except (TypeError, ValueError) as exc:
         raise ProviderEpochBehaviorPlotError(
@@ -497,11 +693,21 @@ def _validate_publication_manifest(manifest: Mapping[str, Any]) -> dict[str, Any
         raise ProviderEpochBehaviorPlotError("The exact cohort generation must be selector-ineligible.")
     if manifest.get("output_tables") != list(TABLE_NAMES):
         raise ProviderEpochBehaviorPlotError("The cohort must contain exactly the two provider-epoch tables.")
+    if export_schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION:
+        _semantic_lineage_roles(manifest)
     return dict(manifest)
 
 
-def _validate_table_schema(table: Any, table_name: str) -> None:
-    contracts = table_contracts_for_disposition("linear_only")
+def _validate_table_schema(
+    table: Any,
+    table_name: str,
+    *,
+    schema_version: int,
+) -> None:
+    contracts = table_contracts_for_disposition(
+        "linear_only",
+        schema_version=schema_version,
+    )
     if table_name not in contracts:
         raise ProviderEpochBehaviorPlotError(f"Unknown cohort table: {table_name}")
     try:
@@ -519,13 +725,68 @@ def _table_rows(table: Any) -> list[dict[str, Any]]:
         raise ProviderEpochBehaviorPlotError("Cohort tables must be PyArrow tables.") from exc
 
 
+def _validate_semantic_cohort_row(
+    row: Mapping[str, Any],
+    *,
+    role: Mapping[str, Any],
+    recording_id: str,
+) -> None:
+    role_name = str(role["analysis_role"])
+    row_start = row.get("start_frame", row.get("epoch_start_frame"))
+    row_end = row.get("end_frame", row.get("epoch_end_frame"))
+    if (
+        row.get("epoch_binding_mode") != SEMANTIC_EPOCH_BINDING_MODE
+        or row.get("protocol_semantic_selection_run")
+        != role["protocol_semantic_selection_run"]
+        or row.get("protocol_semantic_selection_manifest_sha256")
+        != role["protocol_semantic_selection_manifest_sha256"]
+        or row.get("summary_run") != role["summary_run"]
+        or row.get("source_summary_sha256") != role["source_summary_sha256"]
+        or row.get("source_refs_sha256") != role["source_refs_sha256"]
+        or row.get("epoch_id") != role["source_window_id"]
+        or row.get("epoch_index") != role["role_index"]
+        or row.get("epoch_label") != role_name
+        or row.get("analysis_role") != role_name
+        or row.get("protocol_semantic_hash")
+        != role["protocol_semantic_hash"]
+        or row.get("protocol_semantic_step_index")
+        != role["protocol_semantic_step_index"]
+        or row.get("protocol_semantic_step_ref")
+        != role["protocol_semantic_step_ref"]
+        or row_start != role["selected_start_frame"]
+        or row_end != int(role["selected_end_frame_exclusive"]) - 1
+    ):
+        raise ProviderEpochBehaviorPlotError(
+            f"{recording_id}: cohort row protocol-semantic identity is stale."
+        )
+
+
 def _validate_rows(
     manifest: Mapping[str, Any],
     bouts_table: Any,
     fish_table: Any,
 ) -> tuple[PlotUnit, ...]:
-    _validate_table_schema(bouts_table, TABLE_BOUTS)
-    _validate_table_schema(fish_table, TABLE_FISH)
+    schema_version = int(manifest["export_schema_version"])
+    _validate_table_schema(
+        bouts_table,
+        TABLE_BOUTS,
+        schema_version=schema_version,
+    )
+    _validate_table_schema(
+        fish_table,
+        TABLE_FISH,
+        schema_version=schema_version,
+    )
+    expected_labels = (
+        SEMANTIC_EXPECTED_EPOCH_LABELS
+        if schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION
+        else EXPECTED_EPOCH_LABELS
+    )
+    semantic_lineage = (
+        _semantic_lineage_roles(manifest)
+        if schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION
+        else {}
+    )
     expected_row_counts = manifest["row_counts_by_table"]
     if not isinstance(expected_row_counts, Mapping):
         raise ProviderEpochBehaviorPlotError("The cohort row-count inventory is missing.")
@@ -550,11 +811,37 @@ def _validate_rows(
         epoch_label = _as_text(row.get("epoch_label"), label="epoch_label")
         assert epoch_label is not None
         subject_id = _as_text(row.get("subject_id"), label="subject_id", allow_none=True)
-        if epoch_index != epoch_id or (epoch_id, epoch_label) not in EXPECTED_EPOCH_IDENTITIES:
-            raise ProviderEpochBehaviorPlotError(
-                f"{recording_id}: epoch identity must be the ordered pre/training/post contract."
-            )
         unit_key = (recording_id, track_id)
+        if epoch_index not in EXPECTED_EPOCH_IDS or epoch_label != expected_labels[
+            epoch_index
+        ]:
+            raise ProviderEpochBehaviorPlotError(
+                (
+                    f"{recording_id}: epoch identity must be the ordered "
+                    "chaser pre/training/post contract."
+                    if schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION
+                    else (
+                        f"{recording_id}: epoch identity must be the ordered "
+                        "pre/training/post contract."
+                    )
+                )
+            )
+        if schema_version == LEGACY_EXPORT_SCHEMA_VERSION:
+            if epoch_id != epoch_index:
+                raise ProviderEpochBehaviorPlotError(
+                    f"{recording_id}: legacy epoch ID/index identity is invalid."
+                )
+        else:
+            roles = semantic_lineage.get(unit_key)
+            if roles is None or epoch_label not in roles:
+                raise ProviderEpochBehaviorPlotError(
+                    f"{recording_id}: semantic cohort row has no exact source lineage."
+                )
+            _validate_semantic_cohort_row(
+                row,
+                role=roles[epoch_label],
+                recording_id=recording_id,
+            )
         if unit_key not in expected_by_unit:
             expected_by_unit[unit_key] = {}
             subject_by_unit[unit_key] = subject_id
@@ -562,11 +849,11 @@ def _validate_rows(
             raise ProviderEpochBehaviorPlotError(
                 f"{recording_id}, track {track_id}: subject_id changes across epochs."
             )
-        if epoch_id in expected_by_unit[unit_key]:
+        if epoch_index in expected_by_unit[unit_key]:
             raise ProviderEpochBehaviorPlotError(
-                f"{recording_id}, track {track_id}: duplicate epoch row {epoch_id}."
+                f"{recording_id}, track {track_id}: duplicate epoch row {epoch_index}."
             )
-        expected_by_unit[unit_key][epoch_id] = row
+        expected_by_unit[unit_key][epoch_index] = row
 
     expected_epochs = set(EXPECTED_EPOCH_IDS)
     for unit_key, rows in expected_by_unit.items():
@@ -581,6 +868,7 @@ def _validate_rows(
         assert recording_id is not None
         track_id = _as_int(row.get("track_id"), label="track_id")
         epoch_id = _as_int(row.get("epoch_id"), label="epoch_id")
+        epoch_index = _as_int(row.get("epoch_index"), label="epoch_index")
         epoch_label = _as_text(row.get("epoch_label"), label="epoch_label")
         assert epoch_label is not None
         bout_source_row = _as_int(row.get("bout_source_row"), label="bout_source_row")
@@ -590,8 +878,20 @@ def _validate_rows(
         bout_keys.add(key)
         if (recording_id, track_id) not in expected_by_unit:
             raise ProviderEpochBehaviorPlotError("A bout row has no matching recording/track epoch summary.")
-        if epoch_id not in expected_epochs or epoch_label != EXPECTED_EPOCH_LABELS[epoch_id]:
+        if epoch_index not in expected_epochs or epoch_label != expected_labels[epoch_index]:
             raise ProviderEpochBehaviorPlotError("A bout row has an invalid epoch identity.")
+        fish_row = expected_by_unit[(recording_id, track_id)][epoch_index]
+        if epoch_id != fish_row["epoch_id"]:
+            raise ProviderEpochBehaviorPlotError(
+                "Bout and epoch-summary source-window identities differ."
+            )
+        if schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION:
+            roles = semantic_lineage[(recording_id, track_id)]
+            _validate_semantic_cohort_row(
+                row,
+                role=roles[epoch_label],
+                recording_id=recording_id,
+            )
         fish_subject = subject_by_unit[(recording_id, track_id)]
         bout_subject = _as_text(row.get("subject_id"), label="subject_id", allow_none=True)
         if fish_subject != bout_subject:
@@ -612,8 +912,8 @@ def _validate_rows(
                 track_id=track_id,
                 values_by_metric={
                     metric: tuple(
-                        _as_number(rows[epoch_id].get(metric), label=f"{metric} {recording_id} epoch {epoch_id}")
-                        for epoch_id in EXPECTED_EPOCH_IDS
+                        _as_number(rows[epoch_index].get(metric), label=f"{metric} {recording_id} epoch {epoch_index}")
+                        for epoch_index in EXPECTED_EPOCH_IDS
                     )
                     for metric in metric_names
                 },
@@ -841,7 +1141,7 @@ def _subject_level_matrix(
     for subject_id in sorted(sessions_by_subject):
         sessions = sessions_by_subject[subject_id]
         row: list[float] = []
-        for epoch_index in range(len(EXPECTED_EPOCH_LABELS)):
+        for epoch_index in range(len(data.epoch_labels)):
             values = [
                 unit.values_by_metric[metric][epoch_index]
                 for unit in sessions
@@ -925,24 +1225,24 @@ def _distribution_data(
         }
 
     for row in rows:
-        epoch_id = _as_int(row.get("epoch_id"), label="epoch_id")
+        epoch_index = _as_int(row.get("epoch_index"), label="epoch_index")
         recording_id = _as_text(row.get("recording_id"), label="recording_id")
         assert recording_id is not None
         track_id = _as_int(row.get("track_id"), label="track_id")
-        subject_key = (recording_id, track_id, epoch_id)
+        subject_key = (recording_id, track_id, epoch_index)
         for metric in DISTRIBUTION_METRICS:
             audit = metric_audit[metric]
-            audit["total_bout_count_by_epoch"][epoch_id] += 1
+            audit["total_bout_count_by_epoch"][epoch_index] += 1
             value, reason = _distribution_observation(row, metric)
             if value is None:
-                audit["dropped_bout_count_by_epoch"][epoch_id] += 1
-                reasons = audit["dropped_reason_counts_by_epoch"][epoch_id]
+                audit["dropped_bout_count_by_epoch"][epoch_index] += 1
+                reasons = audit["dropped_reason_counts_by_epoch"][epoch_index]
                 assert isinstance(reasons, dict)
                 assert reason is not None
                 reasons[reason] = int(reasons.get(reason, 0)) + 1
                 continue
-            pooled_values[metric][epoch_id].append(value)
-            audit["valid_bout_count_by_epoch"][epoch_id] += 1
+            pooled_values[metric][epoch_index].append(value)
+            audit["valid_bout_count_by_epoch"][epoch_index] += 1
             session_values[metric].setdefault(subject_key, []).append(value)
 
     subject_by_unit = {
@@ -1019,6 +1319,7 @@ def _distribution_data(
         },
         analysis_unit_values_by_metric_epoch=subject_values,
         metrics=metric_audit,
+        epoch_labels=data.epoch_labels,
     )
 
 
@@ -1137,18 +1438,46 @@ def _shared_log_histogram_summary(
     }
 
 
-def _configure_axis(ax: Any, *, ylabel: str) -> None:
-    ax.set_xticks(np.arange(len(EXPECTED_EPOCH_LABELS)))
-    ax.set_xticklabels(("Pre-event", "Training event", "Post-event"))
+def _epoch_colors(epoch_labels: Sequence[str]) -> Mapping[str, str]:
+    if tuple(epoch_labels) == SEMANTIC_EXPECTED_EPOCH_LABELS:
+        return SEMANTIC_NEUTRAL_EPOCH_COLORS
+    if tuple(epoch_labels) == EXPECTED_EPOCH_LABELS:
+        return NEUTRAL_EPOCH_COLORS
+    raise ProviderEpochBehaviorPlotError("Unknown epoch-label color contract.")
+
+
+def _epoch_display_labels(epoch_labels: Sequence[str]) -> tuple[str, ...]:
+    if tuple(epoch_labels) == SEMANTIC_EXPECTED_EPOCH_LABELS:
+        return ("Chaser pre", "Chaser training", "Chaser post")
+    if tuple(epoch_labels) == EXPECTED_EPOCH_LABELS:
+        return ("Pre-event", "Training event", "Post-event")
+    raise ProviderEpochBehaviorPlotError("Unknown epoch-label display contract.")
+
+
+def _configure_axis(
+    ax: Any,
+    *,
+    ylabel: str,
+    epoch_labels: Sequence[str],
+) -> None:
+    ax.set_xticks(np.arange(len(epoch_labels)))
+    ax.set_xticklabels(_epoch_display_labels(epoch_labels))
     ax.set_xlabel("Stimulus epoch")
     ax.set_ylabel(ylabel)
     ax.grid(axis="y", color="#D1D5DB", alpha=0.65, linewidth=0.7)
     ax.set_axisbelow(True)
 
 
-def _draw_epoch_band(ax: Any, *, y_min: float, y_max: float) -> None:
-    for index, label in enumerate(EXPECTED_EPOCH_LABELS):
-        ax.axvspan(index - 0.5, index + 0.5, color=NEUTRAL_EPOCH_COLORS[label], alpha=0.08, linewidth=0)
+def _draw_epoch_band(
+    ax: Any,
+    *,
+    y_min: float,
+    y_max: float,
+    epoch_labels: Sequence[str],
+) -> None:
+    colors = _epoch_colors(epoch_labels)
+    for index, label in enumerate(epoch_labels):
+        ax.axvspan(index - 0.5, index + 0.5, color=colors[label], alpha=0.08, linewidth=0)
     if np.isfinite(y_min) and np.isfinite(y_max) and y_min != y_max:
         ax.set_ylim(y_min, y_max)
 
@@ -1195,7 +1524,12 @@ def _render_grouped_metric(
     mean_array = np.asarray([np.nan if value is None else value for value in means], dtype=np.float64)
     sem_array = np.asarray([0.0 if value is None else value for value in sems], dtype=np.float64)
     observed = np.isfinite(mean_array)
-    _draw_epoch_band(ax, y_min=low, y_max=high)
+    _draw_epoch_band(
+        ax,
+        y_min=low,
+        y_max=high,
+        epoch_labels=data.epoch_labels,
+    )
     if observed.any():
         ax.errorbar(
             np.arange(3)[observed],
@@ -1210,7 +1544,7 @@ def _render_grouped_metric(
             zorder=5,
         )
         ax.legend(frameon=False, loc="best")
-    _configure_axis(ax, ylabel=ylabel)
+    _configure_axis(ax, ylabel=ylabel, epoch_labels=data.epoch_labels)
     ax.set_title(title)
     fig.tight_layout()
     fig.savefig(path, format=path.suffix.lstrip("."), dpi=160, metadata={"Date": None})
@@ -1261,10 +1595,19 @@ def _render_grouped_speed_duration(
         mean_array = np.asarray([np.nan if value is None else value for value in means], dtype=np.float64)
         sem_array = np.asarray([0.0 if value is None else value for value in sems], dtype=np.float64)
         observed = np.isfinite(mean_array)
-        _draw_epoch_band(axis, y_min=low, y_max=high)
+        _draw_epoch_band(
+            axis,
+            y_min=low,
+            y_max=high,
+            epoch_labels=data.epoch_labels,
+        )
         if observed.any():
             axis.errorbar(np.arange(3)[observed], mean_array[observed], yerr=sem_array[observed], color="#1F2937", marker="o", markersize=5, linewidth=2.0, capsize=3, label="Mean ± SEM", zorder=5)
-        _configure_axis(axis, ylabel=PLOT_METRICS[metric][1])
+        _configure_axis(
+            axis,
+            ylabel=PLOT_METRICS[metric][1],
+            epoch_labels=data.epoch_labels,
+        )
         axis.set_title(PLOT_METRICS[metric][0])
         stats[metric] = {
             "metric": metric,
@@ -1306,8 +1649,17 @@ def _save_individual_formats(data: ValidatedCohort, output_dir: Path, prefix: st
                 ax.plot(np.arange(3)[observed], values[observed], color="#4B5563", alpha=0.28, linewidth=0.8, marker="o", markersize=2.8)
         low = min(all_values) if all_values else 0.0
         high = max(all_values) if all_values else 1.0
-        _draw_epoch_band(ax, y_min=low, y_max=high)
-        _configure_axis(ax, ylabel=PLOT_METRICS["bout_rate_per_min"][1])
+        _draw_epoch_band(
+            ax,
+            y_min=low,
+            y_max=high,
+            epoch_labels=data.epoch_labels,
+        )
+        _configure_axis(
+            ax,
+            ylabel=PLOT_METRICS["bout_rate_per_min"][1],
+            epoch_labels=data.epoch_labels,
+        )
         ax.set_title("Bout rate for each recording × animal session")
         ax.text(0.99, 0.98, f"n = {data.n_recording_animal_sessions} recording×animal sessions", transform=ax.transAxes, ha="right", va="top", fontsize=8, color="#4B5563")
         fig.tight_layout()
@@ -1369,7 +1721,8 @@ def _render_pooled_bout_ecdf(
         dpi=160,
     )
     for axis, metric in zip(axes[0], DISTRIBUTION_METRICS):
-        for epoch_id, epoch_label in enumerate(EXPECTED_EPOCH_LABELS):
+        colors = _epoch_colors(distributions.epoch_labels)
+        for epoch_id, epoch_label in enumerate(distributions.epoch_labels):
             values = np.sort(distributions.pooled_values_by_metric_epoch[metric][epoch_id])
             if values.size == 0:
                 continue
@@ -1377,7 +1730,7 @@ def _render_pooled_bout_ecdf(
                 values,
                 np.arange(1, values.size + 1, dtype=np.float64) / values.size,
                 where="post",
-                color=NEUTRAL_EPOCH_COLORS[epoch_label],
+                color=colors[epoch_label],
                 linewidth=2.0,
                 label=f"{epoch_label.replace('_', ' ')} (n={values.size:,})",
             )
@@ -1443,7 +1796,11 @@ def _render_subject_balanced_distributions(
                     boxprops={"color": "#4B5563", "linewidth": 1.0},
                 )
                 for patch in box["boxes"]:
-                    patch.set_facecolor(NEUTRAL_EPOCH_COLORS[EXPECTED_EPOCH_LABELS[epoch_id]])
+                    patch.set_facecolor(
+                        _epoch_colors(distributions.epoch_labels)[
+                            distributions.epoch_labels[epoch_id]
+                        ]
+                    )
                     patch.set_alpha(0.55)
                 jitter = np.linspace(-0.12, 0.12, values.size) if values.size > 1 else np.zeros(1)
                 axis.scatter(
@@ -1456,12 +1813,13 @@ def _render_subject_balanced_distributions(
                     edgecolors="white",
                     zorder=3,
                 )
-        axis.set_xticks(np.arange(len(EXPECTED_EPOCH_LABELS)))
+        axis.set_xticks(np.arange(len(distributions.epoch_labels)))
         axis.set_xticklabels(
             [
-                f"Pre-event\nn={values_by_epoch[0].size:,} {unit_label}",
-                f"Training event\nn={values_by_epoch[1].size:,} {unit_label}",
-                f"Post-event\nn={values_by_epoch[2].size:,} {unit_label}",
+                f"{label}\nn={values_by_epoch[index].size:,} {unit_label}"
+                for index, label in enumerate(
+                    _epoch_display_labels(distributions.epoch_labels)
+                )
             ]
         )
         axis.set_xlabel("Stimulus epoch")
@@ -1469,7 +1827,12 @@ def _render_subject_balanced_distributions(
         axis.set_title(DISTRIBUTION_METRICS[metric][0])
         axis.grid(axis="y", color="#D1D5DB", alpha=0.65, linewidth=0.7)
         axis.set_axisbelow(True)
-        _draw_epoch_band(axis, y_min=low, y_max=high)
+        _draw_epoch_band(
+            axis,
+            y_min=low,
+            y_max=high,
+            epoch_labels=distributions.epoch_labels,
+        )
     fig.suptitle(title, y=0.99)
     fig.text(
         0.5,
@@ -1492,6 +1855,7 @@ def _render_log_histograms(
     plt: Any,
     title: str,
     note: str,
+    epoch_labels: Sequence[str],
 ) -> None:
     """Render one bounded, fraction-normalized log histogram per metric."""
 
@@ -1508,7 +1872,8 @@ def _render_log_histograms(
         fractions_by_epoch = summary["bin_fractions_by_epoch"]
         valid_counts = summary["valid_input_count_by_epoch"]
         observed_max_fraction = 0.0
-        for epoch_id, epoch_label in enumerate(EXPECTED_EPOCH_LABELS):
+        colors = _epoch_colors(epoch_labels)
+        for epoch_id, epoch_label in enumerate(epoch_labels):
             fractions = np.asarray(fractions_by_epoch[epoch_id], dtype=np.float64)
             if not np.any(fractions):
                 continue
@@ -1521,7 +1886,7 @@ def _render_log_histograms(
                 fractions,
                 width=np.diff(edges),
                 align="edge",
-                color=NEUTRAL_EPOCH_COLORS[epoch_label],
+                color=colors[epoch_label],
                 alpha=0.58,
                 edgecolor="white",
                 linewidth=0.35,
@@ -1641,6 +2006,7 @@ def _save_distribution_formats(
                 "Pooled bouts are descriptive only; bars show fractions of valid bouts per shared "
                 "log-spaced bin; no clipping or density normalization."
             ),
+            epoch_labels=distributions.epoch_labels,
         )
         _render_log_histograms(
             analysis_unit_histogram_summaries,
@@ -1648,6 +2014,7 @@ def _save_distribution_formats(
             plt=plt,
             title=balanced_title,
             note=balanced_note,
+            epoch_labels=distributions.epoch_labels,
         )
         generated.extend((ecdf_path, subject_path, pooled_histogram_path, balanced_histogram_path))
     for summary in pooled_histogram_summaries.values():
@@ -1753,7 +2120,11 @@ def render_provider_epoch_behavior_cohort(
             )
     unsigned_receipt: dict[str, Any] = {
         "schema_id": PLOT_SCHEMA_ID,
-        "schema_version": PLOT_SCHEMA_VERSION,
+        "schema_version": (
+            SEMANTIC_PLOT_SCHEMA_VERSION
+            if data.export_schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION
+            else LEGACY_PLOT_SCHEMA_VERSION
+        ),
         "cohort_id": data.cohort_id,
         "analysis_run_id": data.analysis_run_id,
         "generation_id": data.generation_id,
@@ -1762,7 +2133,7 @@ def render_provider_epoch_behavior_cohort(
         "selector_eligible": False,
         "source_manifest_sha256": source_manifest_sha256,
         "source_tables": dict(data.source_tables),
-        "expected_epoch_labels": list(EXPECTED_EPOCH_LABELS),
+        "expected_epoch_labels": list(data.epoch_labels),
         "n_recordings": data.n_recordings,
         "n_subjects": data.n_subjects,
         "recording_count": data.n_recording_animal_sessions,
@@ -1789,7 +2160,7 @@ def render_provider_epoch_behavior_cohort(
             "unique_subject_id" if analysis_unit_mode == DEFAULT_ANALYSIS_UNIT_MODE else "recording_id"
         ),
         "uncertainty": "standard_error_of_mean",
-        "epoch_colors": dict(NEUTRAL_EPOCH_COLORS),
+        "epoch_colors": dict(data.epoch_colors),
         "metrics": plot_stats,
         "distribution_metrics": dict(distributions.metrics),
         "analysis_unit_decision": (
@@ -1898,6 +2269,19 @@ def render_provider_epoch_behavior_cohort(
             "Mean bout speed is bout_path_length_mm / bout_duration_s only when both inputs are finite and strictly positive.",
         ],
     }
+    if data.export_schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION:
+        unsigned_receipt.update(
+            {
+                "epoch_binding_mode": data.manifest["epoch_binding_mode"],
+                "source_export_schema_version": data.export_schema_version,
+                "protocol_to_acquisition_alignment": data.manifest[
+                    "protocol_to_acquisition_alignment"
+                ],
+                "protocol_semantic_row_identity": (
+                    "analysis_role_hash_step_index_step_ref"
+                ),
+            }
+        )
     if analysis_unit_mode == RECORDING_ANALYSIS_UNIT_MODE:
         unsigned_receipt["scientific_notes"].extend(
             [
@@ -2047,11 +2431,15 @@ if __name__ == "__main__":  # pragma: no cover
 
 __all__ = [
     "EXPECTED_EPOCH_LABELS",
+    "LEGACY_PLOT_SCHEMA_VERSION",
     "NEUTRAL_EPOCH_COLORS",
     "PLOT_SCHEMA_ID",
     "PLOT_SCHEMA_VERSION",
     "PlotUnit",
     "ProviderEpochBehaviorPlotError",
+    "SEMANTIC_EXPECTED_EPOCH_LABELS",
+    "SEMANTIC_NEUTRAL_EPOCH_COLORS",
+    "SEMANTIC_PLOT_SCHEMA_VERSION",
     "ValidatedCohort",
     "plot_provider_epoch_behavior_cohort",
     "plot_provider_epoch_behavior_cohort_parquet",

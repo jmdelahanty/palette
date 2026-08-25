@@ -8201,6 +8201,7 @@ class RegistryMigrationMixin:
             );
             """
         )
+
         cur.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_analytics_reports_status
@@ -8270,6 +8271,127 @@ class RegistryMigrationMixin:
             LEFT JOIN analytics_collections ac
               ON ac.collection_id = ae.collection_id
              AND ac.manifest_sha256 = ae.collection_manifest_sha256;
+            """
+        )
+
+    def _ensure_stimulus_protocol_semantic_columns(self) -> None:
+        """Add nullable producer-semantic identity without rewriting legacy rows."""
+
+        self._ensure_columns(
+            "recording_stimulus_runs",
+            {
+                "protocol_semantic_status": "TEXT",
+                "protocol_semantic_hash": "TEXT",
+                "palette_computed_trial_index_sha256": "TEXT",
+                "protocol_trial_index_sha256": "TEXT",
+                "producer_protocol_trial_index_hash": "TEXT",
+                "protocol_trial_index_integrity_status": "TEXT",
+                "protocol_snapshot_schema_version": "INTEGER",
+                "protocol_snapshot_policy_id": "TEXT",
+                "protocol_trial_index_schema_version": "INTEGER",
+                "protocol_execution_status": "TEXT",
+                "protocol_execution_hash": "TEXT",
+                "protocol_interval_axis": "TEXT",
+                "protocol_acquisition_containment_status": "TEXT",
+                "protocol_frame_correspondence_proxy_status": "TEXT",
+                "protocol_frame_correspondence_proxy_manifest_sha256": "TEXT",
+                "protocol_frame_correspondence_proxy_missing_count": "INTEGER",
+                "protocol_recipe_schema_id": "TEXT",
+                "protocol_recipe_schema_version": "INTEGER",
+                "protocol_recipe_step_count": "INTEGER",
+                "protocol_recipe_mode_sequence_json": "TEXT",
+                "protocol_recipe_label": "TEXT",
+            },
+        )
+        self._ensure_columns(
+            "recording_stimulus_steps",
+            {
+                "protocol_semantic_status": "TEXT",
+                "protocol_semantic_hash": "TEXT",
+                "protocol_semantic_step_index": "INTEGER",
+                "protocol_semantic_step_ref": "TEXT",
+                "protocol_semantic_stimulus_mode_id": "INTEGER",
+                "protocol_semantic_duration_s": "REAL",
+                "stimulus_family": "TEXT",
+                "display_context": "TEXT",
+                "protocol_trial_index_status": "TEXT",
+                "resolved_color_rgba8_json": "TEXT",
+                "start_stimulus_frame_inclusive": "INTEGER",
+                "end_stimulus_frame_exclusive": "INTEGER",
+                "first_camera_frame_id_correspondence": "INTEGER",
+                "last_camera_frame_id_correspondence": "INTEGER",
+                "authoritative_interval_axis": "TEXT",
+                "execution_completion_status": "TEXT",
+                "execution_end_reason": "TEXT",
+                "protocol_execution_phases_json": "TEXT",
+            },
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_stimulus_runs_semantic
+            ON recording_stimulus_runs(
+                protocol_semantic_status,
+                protocol_semantic_hash,
+                protocol_recipe_label,
+                dataset_id,
+                stimulus_run_id
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_stimulus_steps_semantic
+            ON recording_stimulus_steps(
+                protocol_semantic_hash,
+                stimulus_family,
+                display_context,
+                dataset_id,
+                stimulus_run_id,
+                protocol_semantic_step_index
+            );
+            """
+        )
+        self.conn.execute("DROP VIEW IF EXISTS recording_stimulus_mode_counts;")
+        self.conn.execute(
+            """
+            CREATE VIEW recording_stimulus_mode_counts AS
+            SELECT
+                rsr.dataset_id,
+                rsr.recording_id,
+                rsr.stimulus_run_id,
+                rsr.protocol_hash,
+                rsr.protocol_name,
+                rsr.is_latest,
+                rsr.protocol_semantic_status,
+                rsr.protocol_semantic_hash,
+                rsr.palette_computed_trial_index_sha256,
+                rsr.protocol_trial_index_sha256,
+                rsr.producer_protocol_trial_index_hash,
+                rsr.protocol_trial_index_integrity_status,
+                rsr.protocol_snapshot_schema_version,
+                rsr.protocol_snapshot_policy_id,
+                rsr.protocol_trial_index_schema_version,
+                rsr.protocol_execution_status,
+                rsr.protocol_execution_hash,
+                rsr.protocol_interval_axis,
+                rsr.protocol_acquisition_containment_status,
+                rsr.protocol_frame_correspondence_proxy_status,
+                rsr.protocol_frame_correspondence_proxy_manifest_sha256,
+                rsr.protocol_frame_correspondence_proxy_missing_count,
+                rsr.protocol_recipe_schema_id,
+                rsr.protocol_recipe_schema_version,
+                rsr.protocol_recipe_step_count,
+                rsr.protocol_recipe_mode_sequence_json,
+                rsr.protocol_recipe_label,
+                rsm.stimulus_mode,
+                rsm.step_count,
+                rsm.total_duration_s,
+                rsr.source_zarr_path,
+                rsr.extracted_utc
+            FROM recording_stimulus_runs rsr
+            JOIN recording_stimulus_modes rsm
+              ON rsm.dataset_id = rsr.dataset_id
+             AND rsm.stimulus_run_id = rsr.stimulus_run_id;
             """
         )
 
@@ -8524,3 +8646,9 @@ class RegistryMigrationMixin:
             identity_provenance=REGISTRY_IDENTITY_SCHEMA_MANAGED,
             minted_at_utc=utc_now(),
         )
+
+    def _migration_072_stimulus_protocol_semantic_identity(self) -> None:
+        """Expose exact producer protocol identity and step bindings for queries."""
+
+        self._migration_061_stimulus_protocol_registry()
+        self._ensure_stimulus_protocol_semantic_columns()

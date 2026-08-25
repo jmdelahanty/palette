@@ -12,7 +12,7 @@ from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 
 from fisheye.analysis.import_stimulus_to_zarr import backfill_stimulus_step_metadata
 
@@ -41,6 +41,7 @@ def _print_detail(summary: dict, *, verbose: bool) -> None:
         "would_overwrite",
         "backfilled",
         "overwritten",
+        "requires_immutable_successor",
         "skipped_missing_h5",
         "skipped_ambiguous_h5",
         "skipped_no_step_events",
@@ -57,6 +58,15 @@ def _print_detail(summary: dict, *, verbose: bool) -> None:
         source_h5 = detail.get("source_h5")
         if source_h5:
             parts.append(f"h5={source_h5}")
+        semantic_status = detail.get("protocol_semantic_source_status")
+        if semantic_status:
+            parts.append(f"semantic_status={semantic_status}")
+        semantic_hash = detail.get("protocol_semantic_hash")
+        if semantic_hash:
+            parts.append(f"semantic_hash={semantic_hash}")
+        recipe = detail.get("protocol_recipe_label")
+        if recipe:
+            parts.append(f"recipe={recipe!r}")
         reason = detail.get("reason")
         if reason:
             parts.append(str(reason))
@@ -135,6 +145,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "would_overwrite",
         "backfilled",
         "overwritten",
+        "requires_immutable_successor",
         "skipped_existing",
         "skipped_missing_h5",
         "skipped_ambiguous_h5",

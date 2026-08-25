@@ -48,7 +48,7 @@ PREPARED_CHASER_RELATIVE_FRAME_SCHEMA_ID = (
 )
 PREPARED_CHASER_RELATIVE_FRAME_SCHEMA_VERSION = 1
 FLATTEN_POLICY_ID = "acquisition_frame_major_chaser_axis_minor_v1"
-COMPUTATION_ID = "compute_chaser_relative_frame_v1"
+COMPUTATION_ID = "compute_chaser_relative_frame_v2_activity_orthogonal"
 MAX_CONTEXT_RECORD_BYTES = 65_536
 
 _INPUT_PROVENANCE_PROJECTION_FIELDS = frozenset(
@@ -295,6 +295,7 @@ class ChaserRelativeFramePublicationContext:
     acquisition_projection_record: Mapping[str, Any]
     analysis_profile_record: Mapping[str, Any]
     acquisition_projection_publication_record: Mapping[str, Any] | None = None
+    controller_state_record: Mapping[str, Any] | None = None
     arena_geometry_record: Mapping[str, Any] | None = None
     arena_to_source_camera_transform_record: Mapping[str, Any] | None = None
 
@@ -338,6 +339,17 @@ class ChaserRelativeFramePublicationContext:
                 "acquisition_projection_publication_record",
                 MappingProxyType(publication_record),
             )
+        controller_state = self.controller_state_record
+        if controller_state is not None:
+            controller_record = _strict_json_record(
+                controller_state,
+                field="controller_state_record",
+            )
+            object.__setattr__(
+                self,
+                "controller_state_record",
+                MappingProxyType(controller_record),
+            )
 
         subject = self.subject_identity_record
         if subject.get("subject_id") != self.fish_identity:
@@ -379,6 +391,7 @@ class ChaserRelativeFramePublicationContext:
             "chaser_occurrence_record",
             "acquisition_projection_record",
             "acquisition_projection_publication_record",
+            "controller_state_record",
             "arena_geometry_record",
             "arena_to_source_camera_transform_record",
         ):
@@ -392,7 +405,7 @@ class ChaserRelativeFramePublicationContext:
         return {"record": plain, "sha256": canonical_json_sha256(plain)}
 
     def as_manifest(self) -> dict[str, Any]:
-        return {
+        manifest = {
             "fish_identity": self.fish_identity,
             "subject_identity": self._envelope(self.subject_identity_record),
             "temporal_selection": self._envelope(self.temporal_selection_record),
@@ -419,6 +432,11 @@ class ChaserRelativeFramePublicationContext:
                 else self._envelope(self.arena_to_source_camera_transform_record)
             ),
         }
+        if self.controller_state_record is not None:
+            manifest["controller_state"] = self._envelope(
+                self.controller_state_record
+            )
+        return manifest
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,6 +529,10 @@ def validate_prepared_chaser_relative_frame(
     ):
         records[name] = _require_binding_envelope(
             context.get(name), field=f"context.{name}"
+        )
+    if context.get("controller_state") is not None:
+        records["controller_state"] = _require_binding_envelope(
+            context.get("controller_state"), field="context.controller_state"
         )
     publication = context.get("acquisition_projection_publication")
     if records["acquisition_projection"].get("policy_id") == (
@@ -1045,6 +1067,19 @@ def prepare_chaser_relative_frame(
             "frame_key_name": result.timing_policy.frame_key_name,
             "track_sample_key_name": result.timing_policy.track_sample_key_name,
             "timestamp_field": result.timing_policy.timestamp_field,
+        },
+        "active_position_validity_policy": {
+            "policy_id": result.active_position_validity_policy,
+            "active_state_present": result.chaser_active is not None,
+            "active_state_surface": (
+                "base/active_state_code"
+                if result.chaser_active is not None
+                else None
+            ),
+            "position_validity_semantics": (
+                "controller activity is preserved as evidence and does not "
+                "invalidate otherwise finite selected occurring fish/chaser geometry"
+            ),
         },
         "array_declarations": _array_declarations(base, body_arrays),
         "metadata_policy": {

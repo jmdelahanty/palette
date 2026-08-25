@@ -33,6 +33,7 @@ from fisheye.analysis_workflows.chaser_input_provenance_proxy_source_handle impo
     load_chaser_input_provenance_proxy_source_handle,
 )
 from fisheye.analysis_workflows.chaser_relative_frame import (
+    ACTIVE_ORTHOGONAL_POSITION_VALIDITY_POLICY,
     AcquisitionFrameKeys,
     ChaserObservations,
     ChaserRelativeFrameInput,
@@ -78,6 +79,7 @@ CHASER_OCCURRENCE_POLICY_ID = "native_sample_declared_chaser_axis_v1"
 TEMPORAL_SELECTION_ID = "all_proxy_represented_input_acquisition_frames_v1"
 COORDINATE_POLICY_ID = "typed_arena_to_source_camera_y_down_v1"
 TIMING_POLICY_ID = "acquisition_frame_domain_without_camera_timestamps_v1"
+CONTROLLER_STATE_POLICY_ID = "exact_logged_chase_trial_id_and_active_state_v1"
 
 
 class ChaserProxyRelativeFrameAdapterError(ValueError):
@@ -235,6 +237,191 @@ def _frame_source_rows(
     if np.any(selected_rows[selected] != rows[selected]) or np.any(selected_rows[missing] != -1):
         _fail("Proxy selected native sample row semantics are inconsistent.")
     return rows
+
+
+def _exact_logged_controller_state(
+    root: Any,
+    *,
+    proxy: ChaserInputProvenanceProxySourceHandle,
+    native: ProviderChaserStimulusSourceHandle,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Project exact logged controller fields through sealed source-row lineage.
+
+    This successor boundary intentionally has no compatibility path.  It does
+    not infer trials from contiguous active intervals, ``is_chasing``, phase
+    labels, stimulus windows, or neighboring rows.
+    """
+
+    selected = np.asarray(proxy.selected, dtype=bool)
+    if selected.shape != (proxy.dimensions.n_frames,) or not np.all(selected):
+        _fail(
+            "Exact controller-state projection requires one selected native "
+            "sample for every represented acquisition frame; legacy filling "
+            "or interval reconstruction is prohibited."
+        )
+    run_rows = np.asarray(
+        proxy.selected_source_stimulus_run_row_index,
+        dtype=np.int64,
+    )
+    source_rows = np.asarray(
+        proxy.array("selected_source_stimulus_source_row_index"),
+        dtype=np.int64,
+    )
+    expected_shape = (proxy.dimensions.n_frames, proxy.dimensions.n_chasers)
+    if run_rows.shape != expected_shape or source_rows.shape != expected_shape:
+        _fail("Controller source-row lineage does not preserve the chaser pair axis.")
+    if np.any(run_rows < 0) or np.any(source_rows < 0):
+        _fail("A selected controller row lacks exact nonnegative source lineage.")
+
+    states_path = f"{native.source_stimulus_run_path}/tracking_data/chaser_states"
+    required = (
+        "chase_trial_id",
+        "chase_sequence_active",
+        "chaser_index",
+        "stimulus_frame_num",
+        "source_row_indices",
+        "timestamp_ns_session",
+    )
+    values: dict[str, np.ndarray] = {}
+    try:
+        states = root[states_path]
+        for name in required:
+            node = states[name]
+            array = np.asarray(node[:])
+            if array.ndim != 1 or array.dtype.hasobject:
+                _fail(f"Exact controller field {name!r} is not a typed 1-D array.")
+            values[name] = array
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        _fail(
+            "Exact producer-logged controller fields are unavailable; legacy "
+            f"trial reconstruction is prohibited: {exc}."
+        )
+    row_count = values["chase_trial_id"].size
+    if row_count <= 0 or any(value.size != row_count for value in values.values()):
+        _fail("Exact controller arrays do not share one non-empty source-row axis.")
+    if np.any(run_rows >= row_count):
+        _fail("Controller run-row lineage leaves the exact stimulus state table.")
+
+    flat_rows = run_rows.reshape(-1)
+    logged_chaser = np.asarray(values["chaser_index"][flat_rows], dtype=np.int64)
+    expected_chaser = np.asarray(proxy.array("selected_chaser_index"), dtype=np.int64)
+    if expected_chaser.shape != expected_shape or not np.array_equal(
+        logged_chaser.reshape(expected_shape), expected_chaser
+    ):
+        _fail("Controller source rows do not preserve exact chaser identity.")
+    logged_stimulus_frame = np.asarray(
+        values["stimulus_frame_num"][flat_rows], dtype=np.int64
+    ).reshape(expected_shape)
+    selected_stimulus_frame = np.asarray(
+        proxy.array("selected_stimulus_frame_num"), dtype=np.int64
+    )
+    if selected_stimulus_frame.shape != (proxy.dimensions.n_frames,) or not np.array_equal(
+        logged_stimulus_frame,
+        np.broadcast_to(selected_stimulus_frame[:, None], expected_shape),
+    ):
+        _fail("Controller source rows do not preserve exact stimulus-frame identity.")
+    logged_source_row = np.asarray(
+        values["source_row_indices"][flat_rows], dtype=np.int64
+    ).reshape(expected_shape)
+    if not np.array_equal(logged_source_row, source_rows):
+        _fail("Controller source rows do not preserve exact original row identity.")
+
+    raw_trial = np.asarray(values["chase_trial_id"][flat_rows])
+    if raw_trial.dtype.kind not in {"i", "u"}:
+        _fail("Producer-logged chase_trial_id is not integer typed.")
+    if raw_trial.dtype.kind == "u" and np.any(
+        raw_trial > np.iinfo(np.int64).max
+    ):
+        _fail("Producer-logged chase_trial_id exceeds the supported int64 domain.")
+    trial = raw_trial.astype(np.int64, copy=True).reshape(expected_shape)
+
+    raw_active = np.asarray(values["chase_sequence_active"][flat_rows])
+    if raw_active.dtype.kind not in {"b", "i", "u"} or np.any(
+        (raw_active != 0) & (raw_active != 1)
+    ):
+        _fail("Producer-logged chase_sequence_active is not exact binary evidence.")
+    active = raw_active.astype(bool, copy=True).reshape(expected_shape)
+    if np.any(active & (trial <= 0)):
+        _fail(
+            "An explicitly active controller row lacks a strictly positive "
+            "producer-logged chase_trial_id; legacy contiguous-interval trial "
+            "reconstruction is prohibited."
+        )
+    # Zero is the producer's no-trial sentinel.  The relative-frame schema uses
+    # -1 for an unavailable optional trial identity, while preserving positive
+    # IDs on explicitly inactive boundary rows as evidence.
+    trial[trial == 0] = -1
+    if np.any(trial < -1):
+        _fail("Producer-logged chase_trial_id contains unsupported negative values.")
+
+    raw_timestamp = np.asarray(values["timestamp_ns_session"][flat_rows])
+    if raw_timestamp.dtype.kind not in {"i", "u"}:
+        _fail("Producer-logged timestamp_ns_session is not integer typed.")
+    if raw_timestamp.dtype.kind == "u" and np.any(
+        raw_timestamp > np.iinfo(np.int64).max
+    ):
+        _fail("Producer-logged timestamp_ns_session exceeds the int64 domain.")
+    mapped_timestamp = raw_timestamp.astype(np.int64, copy=True).reshape(
+        expected_shape
+    )
+    if np.any(mapped_timestamp < 0):
+        _fail("Producer-logged timestamp_ns_session contains a negative value.")
+    if not np.all(mapped_timestamp == mapped_timestamp[:, :1]):
+        _fail(
+            "Exact chaser rows disagree on timestamp_ns_session for one "
+            "stimulus/acquisition frame."
+        )
+    timestamp_ns = mapped_timestamp[:, 0].copy()
+    if timestamp_ns.size > 1 and np.any(np.diff(timestamp_ns) <= 0):
+        _fail("Mapped timestamp_ns_session is not strictly increasing.")
+    proxy_timestamp = np.asarray(
+        proxy.array("selected_timestamp_ns_session"), dtype=np.int64
+    )
+    if proxy_timestamp.shape != timestamp_ns.shape or not np.array_equal(
+        proxy_timestamp, timestamp_ns
+    ):
+        _fail(
+            "Proxy timestamp_ns_session differs from the exact mapped "
+            "producer rows."
+        )
+
+    record = _record(
+        "palette.chaser_relative_frame.controller_state_binding",
+        proxy.recording_id,
+        policy_id=CONTROLLER_STATE_POLICY_ID,
+        source_stimulus_run_path=native.source_stimulus_run_path,
+        source_state_path=states_path,
+        source_row_count=int(row_count),
+        source_fields={
+            "trial_id": "chase_trial_id",
+            "active": "chase_sequence_active",
+            "chaser_identity": "chaser_index",
+            "stimulus_frame_identity": "stimulus_frame_num",
+            "original_row_identity": "source_row_indices",
+            "session_timestamp": "timestamp_ns_session",
+        },
+        source_array_sha256={
+            name: array_values_sha256(value) for name, value in values.items()
+        },
+        mapped_run_row_index_sha256=array_values_sha256(run_rows),
+        mapped_source_row_index_sha256=array_values_sha256(source_rows),
+        mapped_timestamp_ns_session_sha256=array_values_sha256(timestamp_ns),
+        mapped_timestamp_policy=(
+            "exact_equal_across_chasers_strictly_increasing_no_interpolation"
+        ),
+        active_row_count=int(np.count_nonzero(active)),
+        positive_logged_trial_ids=sorted(
+            int(value) for value in np.unique(trial[active]).tolist()
+        ),
+        zero_trial_id_semantics="no_trial_identity",
+        position_validity_policy=ACTIVE_ORTHOGONAL_POSITION_VALIDITY_POLICY,
+        activity_semantics=(
+            "logged_controller_state_preserved_as_trial_evidence_not_a_gate_on_"
+            "finite_fish_to_chaser_position_geometry"
+        ),
+        fallback="prohibited_fail_closed",
+    )
+    return trial, active, timestamp_ns, record
 
 
 def _configured_chasers(
@@ -464,6 +651,9 @@ def prepare_proxy_relative_frame(
         _fail("Native provider and recording timing use different frame domains.")
 
     frame_rows = _frame_source_rows(proxy, native)
+    trial_ids, controller_active, timestamp_ns, controller_state_record = (
+        _exact_logged_controller_state(root, proxy=proxy, native=native)
+    )
     selected = np.asarray(proxy.selected, dtype=bool)
     if not np.array_equal(
         np.asarray(proxy.array("selected_chaser_index")),
@@ -537,12 +727,33 @@ def prepare_proxy_relative_frame(
         pixels_per_unit=1.0 / coordinate.mm_per_pixel,
         unit="mm",
     )
-    timing_id = timing.clock_run_path
+    session_timestamp_record = _record(
+        "palette.chaser_relative_frame.session_timestamp_authority",
+        proxy.recording_id,
+        source_array_ref=(
+            f"{proxy.run_path}/arrays/selected_timestamp_ns_session"
+        ),
+        source_array_sha256=array_values_sha256(timestamp_ns),
+        controller_state_binding_sha256=canonical_json_sha256(
+            controller_state_record
+        ),
+        recording_timing_authority_ref=timing.clock_run_path,
+        recording_timing_authority_sha256=timing.sha256,
+        clock_domain="citrus_session_monotonic_ns",
+        frame_binding="exact_acquisition_frame_id",
+        cross_chaser_policy="exact_equality_required",
+        interpolation="prohibited",
+    )
+    controller_state_record = {
+        **controller_state_record,
+        "session_timestamp_authority": session_timestamp_record,
+    }
+    timing_id = str(session_timestamp_record["source_array_ref"])
     timing_policy = TimingPolicy(
         timing_authority_id=timing_id,
-        timing_digest=timing.sha256,
+        timing_digest=canonical_json_sha256(session_timestamp_record),
         recording_id=proxy.recording_id,
-        timestamp_field=None,
+        timestamp_field="timestamp_ns_session",
         policy_id=TIMING_POLICY_ID,
     )
     frame_keys = AcquisitionFrameKeys(
@@ -551,7 +762,7 @@ def prepare_proxy_relative_frame(
         track_sample_id=frames.copy(),
         row_axis_authority_id=row_axis_id,
         row_axis_authority_digest=row_axis_digest,
-        timestamp_ns=None,
+        timestamp_ns=timestamp_ns,
     )
     position_authority = native.source_authority["position"]
     fish_authority = ProviderSourceAuthority(
@@ -595,6 +806,8 @@ def prepare_proxy_relative_frame(
                 dtype=np.int64,
             ),
             authority=chaser_authority,
+            trial_ids=trial_ids,
+            active=controller_active,
         ),
         selection_membership=selection_membership,
         occurrence_membership=occurrence,
@@ -656,6 +869,7 @@ def prepare_proxy_relative_frame(
         chaser_occurrence_record=occurrence_record,
         acquisition_projection_record=_plain(proxy.acquisition_projection_record),
         acquisition_projection_publication_record=publication_binding,
+        controller_state_record=controller_state_record,
         analysis_profile_record=profile_record,
         arena_geometry_record=arena_record,
         arena_to_source_camera_transform_record=transform_record,
