@@ -66,6 +66,13 @@ from .acquisition_batches import (
 from .migration_bodies import RegistryMigrationMixin
 from .migrations import bind_migrations
 from . import identity as registry_identity
+from .stimulus_protocol_storage import (
+    RECORDING_STIMULUS_RUN_INSERT_SQL,
+    RECORDING_STIMULUS_RUN_SEMANTIC_COLUMNS,
+    RECORDING_STIMULUS_STEP_INSERT_SQL,
+    RECORDING_STIMULUS_STEP_SEMANTIC_COLUMNS,
+    recording_stimulus_payload,
+)
 from .temp_store_guard import assert_temp_store_registration_allowed
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 EYE_MASK_REGISTRY_WRITES_RETIRED_MESSAGE = (
@@ -5935,140 +5942,23 @@ class Registry(
                 (str(dataset_id),),
             )
             for record in recording_runs:
-                payload = {**dict(record), "dataset_id": str(dataset_id)}
-                for name in (
-                    "protocol_semantic_status",
-                    "protocol_semantic_hash",
-                    "palette_computed_trial_index_sha256",
-                    "protocol_trial_index_sha256",
-                    "producer_protocol_trial_index_hash",
-                    "protocol_trial_index_integrity_status",
-                    "protocol_snapshot_schema_version",
-                    "protocol_snapshot_policy_id",
-                    "protocol_trial_index_schema_version",
-                    "protocol_execution_status",
-                    "protocol_execution_hash",
-                    "protocol_interval_axis",
-                    "protocol_acquisition_containment_status",
-                    "protocol_frame_correspondence_proxy_status",
-                    "protocol_frame_correspondence_proxy_manifest_sha256",
-                    "protocol_frame_correspondence_proxy_missing_count",
-                    "protocol_recipe_schema_id",
-                    "protocol_recipe_schema_version",
-                    "protocol_recipe_step_count",
-                    "protocol_recipe_mode_sequence_json",
-                    "protocol_recipe_label",
-                ):
-                    payload.setdefault(name, None)
+                payload = recording_stimulus_payload(
+                    record,
+                    dataset_id=str(dataset_id),
+                    semantic_columns=RECORDING_STIMULUS_RUN_SEMANTIC_COLUMNS,
+                )
                 self.conn.execute(
-                    """
-                    INSERT INTO recording_stimulus_runs (
-                        dataset_id, recording_id, stimulus_run_id, protocol_hash,
-                        protocol_name, is_latest, step_count, source_path,
-                        source_metadata_sha256, source_zarr_path, extracted_utc,
-                        protocol_semantic_status, protocol_semantic_hash,
-                        palette_computed_trial_index_sha256,
-                        protocol_trial_index_sha256,
-                        producer_protocol_trial_index_hash,
-                        protocol_trial_index_integrity_status,
-                        protocol_snapshot_schema_version,
-                        protocol_snapshot_policy_id,
-                        protocol_trial_index_schema_version,
-                        protocol_execution_status, protocol_execution_hash,
-                        protocol_interval_axis,
-                        protocol_acquisition_containment_status,
-                        protocol_frame_correspondence_proxy_status,
-                        protocol_frame_correspondence_proxy_manifest_sha256,
-                        protocol_frame_correspondence_proxy_missing_count,
-                        protocol_recipe_schema_id, protocol_recipe_schema_version,
-                        protocol_recipe_step_count,
-                        protocol_recipe_mode_sequence_json, protocol_recipe_label
-                    ) VALUES (
-                        :dataset_id, :recording_id, :stimulus_run_id, :protocol_hash,
-                        :protocol_name, :is_latest, :step_count, :source_path,
-                        :source_metadata_sha256, :source_zarr_path, :extracted_utc,
-                        :protocol_semantic_status, :protocol_semantic_hash,
-                        :palette_computed_trial_index_sha256,
-                        :protocol_trial_index_sha256,
-                        :producer_protocol_trial_index_hash,
-                        :protocol_trial_index_integrity_status,
-                        :protocol_snapshot_schema_version,
-                        :protocol_snapshot_policy_id,
-                        :protocol_trial_index_schema_version,
-                        :protocol_execution_status, :protocol_execution_hash,
-                        :protocol_interval_axis,
-                        :protocol_acquisition_containment_status,
-                        :protocol_frame_correspondence_proxy_status,
-                        :protocol_frame_correspondence_proxy_manifest_sha256,
-                        :protocol_frame_correspondence_proxy_missing_count,
-                        :protocol_recipe_schema_id, :protocol_recipe_schema_version,
-                        :protocol_recipe_step_count,
-                        :protocol_recipe_mode_sequence_json, :protocol_recipe_label
-                    );
-                    """,
+                    RECORDING_STIMULUS_RUN_INSERT_SQL,
                     payload,
                 )
             for record in recording_steps:
-                payload = {**dict(record), "dataset_id": str(dataset_id)}
-                for name in (
-                    "protocol_semantic_status",
-                    "protocol_semantic_hash",
-                    "protocol_semantic_step_index",
-                    "protocol_semantic_step_ref",
-                    "protocol_semantic_stimulus_mode_id",
-                    "protocol_semantic_duration_s",
-                    "stimulus_family",
-                    "display_context",
-                    "protocol_trial_index_status",
-                    "resolved_color_rgba8_json",
-                    "start_stimulus_frame_inclusive",
-                    "end_stimulus_frame_exclusive",
-                    "first_camera_frame_id_correspondence",
-                    "last_camera_frame_id_correspondence",
-                    "authoritative_interval_axis",
-                    "execution_completion_status",
-                    "execution_end_reason",
-                    "protocol_execution_phases_json",
-                ):
-                    payload.setdefault(name, None)
+                payload = recording_stimulus_payload(
+                    record,
+                    dataset_id=str(dataset_id),
+                    semantic_columns=RECORDING_STIMULUS_STEP_SEMANTIC_COLUMNS,
+                )
                 self.conn.execute(
-                    """
-                    INSERT INTO recording_stimulus_steps (
-                        dataset_id, stimulus_run_id, step_index, step_name,
-                        stimulus_mode, start_camera_frame, end_camera_frame,
-                        duration_s, step_attrs_json, protocol_semantic_status,
-                        protocol_semantic_hash, protocol_semantic_step_index,
-                        protocol_semantic_step_ref,
-                        protocol_semantic_stimulus_mode_id,
-                        protocol_semantic_duration_s, stimulus_family,
-                        display_context, protocol_trial_index_status,
-                        resolved_color_rgba8_json,
-                        start_stimulus_frame_inclusive,
-                        end_stimulus_frame_exclusive,
-                        first_camera_frame_id_correspondence,
-                        last_camera_frame_id_correspondence,
-                        authoritative_interval_axis,
-                        execution_completion_status, execution_end_reason,
-                        protocol_execution_phases_json
-                    ) VALUES (
-                        :dataset_id, :stimulus_run_id, :step_index, :step_name,
-                        :stimulus_mode, :start_camera_frame, :end_camera_frame,
-                        :duration_s, :step_attrs_json, :protocol_semantic_status,
-                        :protocol_semantic_hash, :protocol_semantic_step_index,
-                        :protocol_semantic_step_ref,
-                        :protocol_semantic_stimulus_mode_id,
-                        :protocol_semantic_duration_s, :stimulus_family,
-                        :display_context, :protocol_trial_index_status,
-                        :resolved_color_rgba8_json,
-                        :start_stimulus_frame_inclusive,
-                        :end_stimulus_frame_exclusive,
-                        :first_camera_frame_id_correspondence,
-                        :last_camera_frame_id_correspondence,
-                        :authoritative_interval_axis,
-                        :execution_completion_status, :execution_end_reason,
-                        :protocol_execution_phases_json
-                    );
-                    """,
+                    RECORDING_STIMULUS_STEP_INSERT_SQL,
                     payload,
                 )
             for record in recording_modes:

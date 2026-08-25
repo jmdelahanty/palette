@@ -1,9 +1,11 @@
 # Protocol Semantic Step Identity Contract
 
 <!-- contract-meta
-status: implemented-v2-ingestion-sealed-proxy-exact-join-blocked
+status: active
+implementation: partial
 version: 2
 last_updated: 2026-08-24
+last_verified: 2026-08-25
 -->
 
 ## Purpose
