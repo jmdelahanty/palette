@@ -27,8 +27,11 @@ from matplotlib import pyplot as plt  # noqa: E402
 import numpy as np
 
 from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
-    ChaserRelativeFrameSourceHandle,
     load_chaser_relative_frame_source_handle,
+)
+from fisheye.analysis_workflows.chaser_relative_frame_validation_receipt import (
+    DETAILED_PLOT_BASE_ARRAY_NAMES,
+    load_chaser_relative_frame_targeted_source_handle,
 )
 from fisheye.analysis_workflows.composable_chaser_successor_publication import (
     ComposableChaserSuccessorSourceHandle,
@@ -39,8 +42,9 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 RECEIPT_SCHEMA_ID = "palette.analysis.chaser_detailed_plot_bundle.receipt"
-RECEIPT_SCHEMA_VERSION = 1
-PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v1"
+RECEIPT_SCHEMA_VERSION = 2
+PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v2"
+PLOT_DPI = 180
 _RUN_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _CHAIN_KINDS = (
     "controller_chase_trials",
@@ -99,7 +103,7 @@ def _save_figure(figure: Any, output_stem: Path) -> tuple[Path, Path]:
     temporary_png = png.with_name(f".{png.name}.tmp")
     temporary_pdf = pdf.with_name(f".{pdf.name}.tmp")
     try:
-        figure.savefig(temporary_png, dpi=180, format="png")
+        figure.savefig(temporary_png, dpi=PLOT_DPI, format="png")
         figure.savefig(temporary_pdf, format="pdf")
         os.replace(temporary_png, png)
         os.replace(temporary_pdf, pdf)
@@ -114,8 +118,8 @@ def verify_detailed_plot_inputs(
     controller: ComposableChaserSuccessorSourceHandle,
     bout: ComposableChaserSuccessorSourceHandle,
     escape: ComposableChaserSuccessorSourceHandle,
-    relative_keypoint: ChaserRelativeFrameSourceHandle,
-    relative_detection: ChaserRelativeFrameSourceHandle,
+    relative_keypoint: Any,
+    relative_detection: Any,
     radial_keypoint: ComposableChaserSuccessorSourceHandle,
     radial_detection: ComposableChaserSuccessorSourceHandle,
 ) -> None:
@@ -512,7 +516,7 @@ def render_trial_escape_details(
 
 def render_trial_distance_traces(
     controller: ComposableChaserSuccessorSourceHandle,
-    relative: ChaserRelativeFrameSourceHandle,
+    relative: Any,
     *,
     output_stem: Path,
 ) -> tuple[Path, Path]:
@@ -591,12 +595,145 @@ def render_trial_distance_traces(
     return _save_figure(figure, output_stem)
 
 
+def detailed_plot_parameters(
+    controller: ComposableChaserSuccessorSourceHandle,
+    bout: ComposableChaserSuccessorSourceHandle,
+    escape: ComposableChaserSuccessorSourceHandle,
+    radial_keypoint: ComposableChaserSuccessorSourceHandle,
+    radial_detection: ComposableChaserSuccessorSourceHandle,
+) -> dict[str, Any]:
+    """Return every numerical coordinate and rendering choice in the bundle."""
+
+    band = _array(bout, "summary_distance_bin_index").astype(np.int64)
+    low = _array(bout, "summary_distance_bin_start_mm").astype(np.float64)
+    high = _array(bout, "summary_distance_bin_end_mm").astype(np.float64)
+    if not (band.size == low.size == high.size):
+        _fail("Bout plot distance-bin columns have different lengths.")
+    distance_bins: dict[int, dict[str, Any]] = {}
+    for code, start, end in zip(band, low, high, strict=True):
+        record = {
+            "bin_index": int(code),
+            "start_mm_inclusive": float(start),
+            "end_mm_exclusive": float(end) if np.isfinite(end) else None,
+        }
+        previous = distance_bins.setdefault(int(code), record)
+        if previous != record:
+            _fail("Bout plot distance-bin evidence is inconsistent.")
+
+    radial_handles = (radial_keypoint, radial_detection)
+    cdf_parameters = []
+    cdf_rows = []
+    for handle in radial_handles:
+        thresholds = _array(handle, "cdf_threshold_mm").astype(np.float64)
+        if np.any(~np.isfinite(thresholds)):
+            _fail("Radial CDF plot contains non-finite thresholds.")
+        rows = _radial_cdf_rows(handle)
+        cdf_rows.append(rows)
+        config = handle.scientific_manifest.get("config")
+        provider = handle.scientific_manifest.get("position_provider")
+        if not isinstance(config, Mapping) or not isinstance(provider, Mapping):
+            _fail("Radial plot config or provider authority is absent.")
+        cdf_parameters.append(
+            {
+                "provider_id": str(provider["provider_id"]),
+                "cdf_thresholds_mm": [
+                    float(value) for value in np.unique(thresholds)
+                ],
+                "radial_config": _plain(config),
+            }
+        )
+    if set(cdf_rows[0]) != set(cdf_rows[1]) or not cdf_rows[0]:
+        _fail("Provider CDF plot strata are empty or mismatched.")
+    cdf_panel_count = len(cdf_rows[0])
+    cdf_columns = min(3, cdf_panel_count)
+    cdf_rows_count = int(math.ceil(cdf_panel_count / cdf_columns))
+
+    sweep_thresholds = _array(
+        escape, "sweep_speed_threshold_mm_s"
+    ).astype(np.float64)
+    if np.any(~np.isfinite(sweep_thresholds)):
+        _fail("Escape plot threshold sweep contains non-finite values.")
+    trial_count = int(_array(controller, "trial_ordinal").size)
+    if trial_count <= 0:
+        _fail("Detailed trace plot has no exact trials.")
+    trace_columns = min(2, trial_count)
+    trace_rows = int(math.ceil(trial_count / trace_columns))
+    return {
+        "scientific_coordinates": {
+            "provider_distance_cdf": cdf_parameters,
+            "bout_distance_bins": [distance_bins[key] for key in sorted(distance_bins)],
+            "escape_speed_thresholds_mm_s": [
+                float(value) for value in np.unique(sweep_thresholds)
+            ],
+            "escape_response_class_registry": _plain(
+                _registry(escape.scientific_manifest, "response_class")
+            ),
+            "trial_trace_time_reference": "timestamp_ns_minus_exact_trigger_timestamp_ns",
+            "trial_trace_distance_array": "relative_distance_physical",
+            "trial_trace_membership_overlay": "logged_active_trial_member",
+            "missing_value_policy": "remain_missing_no_interpolation",
+        },
+        "rendering": {
+            "png_dpi": PLOT_DPI,
+            "pdf_mode": "vector",
+            "constrained_layout": True,
+            "provider_distance_cdf": {
+                "subplot_grid": [cdf_rows_count, cdf_columns],
+                "figure_size_inches": [
+                    5.2 * cdf_columns,
+                    3.7 * cdf_rows_count,
+                ],
+                "shared_x_axis": True,
+                "shared_y_axis": True,
+                "y_limits": [-0.02, 1.02],
+                "line_marker": "o",
+                "marker_size_points": 3.0,
+                "line_width_points": 1.4,
+                "provider_colors": ["#1f77b4", "#d95f02"],
+            },
+            "bout_response_details": {
+                "subplot_grid": [2, 2],
+                "figure_size_inches": [15.0, 10.0],
+                "colormap": "viridis",
+                "matrix_aspect": "auto",
+                "annotation_formats": [".1f", ".1f", ".2f", ".3f"],
+            },
+            "trial_escape_details": {
+                "subplot_grid": [3, 2],
+                "figure_size_inches": [15.0, 13.0],
+                "event_colormap": "plasma",
+                "scatter_size_points_squared": 55.0,
+                "fraction_y_limits": [-0.05, 1.05],
+            },
+            "trial_distance_traces": {
+                "subplot_grid": [trace_rows, trace_columns],
+                "figure_size_inches": [
+                    7.2 * trace_columns,
+                    3.8 * trace_rows,
+                ],
+                "distance_line_width_points": 1.2,
+                "distance_color": "#1f77b4",
+                "active_member_marker_size_points_squared": 4.0,
+                "active_member_color": "#d95f02",
+                "active_member_alpha": 0.55,
+                "trigger_line_x_seconds": 0.0,
+            },
+        },
+        "output_families": [
+            "provider_distance_cdf",
+            "bout_response_details",
+            "trial_escape_details",
+            "trial_distance_traces",
+        ],
+    }
+
+
 def render_detailed_bundle(
     controller: ComposableChaserSuccessorSourceHandle,
     bout: ComposableChaserSuccessorSourceHandle,
     escape: ComposableChaserSuccessorSourceHandle,
-    relative_keypoint: ChaserRelativeFrameSourceHandle,
-    relative_detection: ChaserRelativeFrameSourceHandle,
+    relative_keypoint: Any,
+    relative_detection: Any,
     radial_keypoint: ComposableChaserSuccessorSourceHandle,
     radial_detection: ComposableChaserSuccessorSourceHandle,
     *,
@@ -637,6 +774,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--relative-frame-run", required=True)
     parser.add_argument("--detection-relative-frame-run", required=True)
+    parser.add_argument("--keypoint-relative-frame-receipt")
+    parser.add_argument("--detection-relative-frame-receipt")
     parser.add_argument("--keypoint-radial-run", required=True)
     parser.add_argument("--detection-radial-run", required=True)
     parser.add_argument("--expected-recording-id", required=True)
@@ -691,18 +830,44 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         for kind in _CHAIN_KINDS
     )
-    relative_keypoint = load_chaser_relative_frame_source_handle(
-        archive,
-        run_name=relative_run,
-        expected_recording_id=args.expected_recording_id,
-        use_consolidated=True,
+    receipt_values = (
+        args.keypoint_relative_frame_receipt,
+        args.detection_relative_frame_receipt,
     )
-    relative_detection = load_chaser_relative_frame_source_handle(
-        archive,
-        run_name=detection_relative_run,
-        expected_recording_id=args.expected_recording_id,
-        use_consolidated=True,
-    )
+    if any(value is not None for value in receipt_values) and not all(
+        value is not None for value in receipt_values
+    ):
+        _fail("Keypoint and detection relative-frame receipts must be supplied together.")
+    if all(value is not None for value in receipt_values):
+        relative_keypoint = load_chaser_relative_frame_targeted_source_handle(
+            args.keypoint_relative_frame_receipt,
+            required_base_arrays=DETAILED_PLOT_BASE_ARRAY_NAMES,
+            collapsed_frame_arrays=(),
+            expected_analysis_zarr=archive,
+            expected_recording_id=args.expected_recording_id,
+            expected_run_name=relative_run,
+        )
+        relative_detection = load_chaser_relative_frame_targeted_source_handle(
+            args.detection_relative_frame_receipt,
+            required_base_arrays=DETAILED_PLOT_BASE_ARRAY_NAMES,
+            collapsed_frame_arrays=(),
+            expected_analysis_zarr=archive,
+            expected_recording_id=args.expected_recording_id,
+            expected_run_name=detection_relative_run,
+        )
+    else:
+        relative_keypoint = load_chaser_relative_frame_source_handle(
+            archive,
+            run_name=relative_run,
+            expected_recording_id=args.expected_recording_id,
+            use_consolidated=True,
+        )
+        relative_detection = load_chaser_relative_frame_source_handle(
+            archive,
+            run_name=detection_relative_run,
+            expected_recording_id=args.expected_recording_id,
+            use_consolidated=True,
+        )
     radial_keypoint = load_composable_chaser_successor_source_handle(
         archive,
         successor_kind="chaser_radial_near_field",
@@ -730,6 +895,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=output_dir,
         bundle_name=bundle_name,
     )
+    plot_parameters = detailed_plot_parameters(
+        controller,
+        bout,
+        escape,
+        radial_keypoint,
+        radial_detection,
+    )
     source_bindings = {
         "controller_chase_trials": {
             "run_path": controller.run_path,
@@ -751,12 +923,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             "manifest_sha256": relative_keypoint.manifest_sha256,
             "payload_sha256": relative_keypoint.payload_digest,
             "verification_mode": relative_keypoint.verification_mode,
+            "validation_receipt_sha256": getattr(
+                relative_keypoint, "receipt_digest", None
+            ),
         },
         "relative_frame_detection": {
             "run_path": relative_detection.run_path,
             "manifest_sha256": relative_detection.manifest_sha256,
             "payload_sha256": relative_detection.payload_digest,
             "verification_mode": relative_detection.verification_mode,
+            "validation_receipt_sha256": getattr(
+                relative_detection, "receipt_digest", None
+            ),
         },
         "radial_keypoint": {
             "run_path": radial_keypoint.run_path,
@@ -782,9 +960,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "source_bindings": source_bindings,
         "source_bindings_sha256": canonical_json_sha256(source_bindings),
         "outputs": output_records,
+        "plot_parameters": plot_parameters,
+        "plot_parameters_sha256": canonical_json_sha256(plot_parameters),
         "plot_policy": {
             "source_selection": "explicit_exact_run_names_only_no_selector_discovery",
-            "source_validation": "deep_array_content_audit",
+            "source_validation": (
+                "deep_successor_audits_plus_receipt_bound_targeted_relative_array_rehash"
+                if getattr(relative_keypoint, "receipt_digest", None) is not None
+                else "deep_array_content_audit"
+            ),
             "scientific_arrays": "persisted_arrays_only",
             "plot_transforms": "sorting_masking_and_exact_trigger_time_subtraction_only",
             "interpolation": "prohibited",
@@ -818,6 +1002,7 @@ __all__ = [
     "RECEIPT_SCHEMA_VERSION",
     "ChaserDetailedPlotError",
     "main",
+    "detailed_plot_parameters",
     "render_bout_response_details",
     "render_detailed_bundle",
     "render_provider_distance_cdf",

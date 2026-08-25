@@ -10,6 +10,7 @@ import pytest
 
 from fisheye.utils.plot_chaser_detailed_successors import (
     ChaserDetailedPlotError,
+    detailed_plot_parameters,
     render_detailed_bundle,
     verify_detailed_plot_inputs,
 )
@@ -170,6 +171,9 @@ def _inputs() -> tuple[
             "event_peak_speed_mm_s": np.asarray([24.0]),
             "event_distance_at_onset_mm": np.asarray([10.0]),
             "event_recaptured": np.asarray([True]),
+            "sweep_speed_threshold_mm_s": np.asarray(
+                [10.0, 20.0, 10.0, 20.0]
+            ),
         },
     )
 
@@ -200,6 +204,7 @@ def _inputs() -> tuple[
                     "epoch_role": {"1": "chaser_pre"},
                     "behavior_role": {"1": "aggressive"},
                 },
+                "config": {"near_zone_radius_mm": 5.0},
             },
             arrays={
                 "cdf_epoch_role_code": np.asarray([1, 1], dtype=np.int64),
@@ -222,12 +227,26 @@ def _inputs() -> tuple[
 
 
 def test_render_detailed_bundle_writes_eight_figures(tmp_path: Path) -> None:
+    inputs = _inputs()
     outputs = render_detailed_bundle(
-        *_inputs(), output_dir=tmp_path, bundle_name="detailed"
+        *inputs, output_dir=tmp_path, bundle_name="detailed"
+    )
+    parameters = detailed_plot_parameters(
+        inputs[0], inputs[1], inputs[2], inputs[5], inputs[6]
     )
 
     assert len(outputs) == 8
     assert all(path.is_file() and path.stat().st_size > 0 for path in outputs)
+    assert parameters["scientific_coordinates"]["bout_distance_bins"][1][
+        "end_mm_exclusive"
+    ] is None
+    assert parameters["scientific_coordinates"]["provider_distance_cdf"][0][
+        "cdf_thresholds_mm"
+    ] == [5.0, 10.0]
+    assert parameters["rendering"]["trial_distance_traces"]["subplot_grid"] == [
+        1,
+        2,
+    ]
 
 
 def test_detailed_bundle_rejects_duplicate_position_provider() -> None:

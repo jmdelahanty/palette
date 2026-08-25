@@ -32,7 +32,10 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 RECEIPT_SCHEMA_ID = "palette.analysis.composable_chaser_successor.plot_receipt"
-RECEIPT_SCHEMA_VERSION = 1
+RECEIPT_SCHEMA_VERSION = 2
+PLOT_RECIPE_ID = "composable_chaser_dashboard_v2"
+PLOT_DPI = 180
+PLOT_FIGURE_SIZE_INCHES = (15.0, 10.0)
 _RUN_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _KINDS = (
     "controller_chase_trials",
@@ -207,6 +210,76 @@ def _sweep_panel(ax: Any, escape: ComposableChaserSuccessorSourceHandle) -> None
         ax.legend(fontsize=7)
 
 
+def dashboard_plot_parameters(
+    controller: ComposableChaserSuccessorSourceHandle,
+    bout: ComposableChaserSuccessorSourceHandle,
+    escape: ComposableChaserSuccessorSourceHandle,
+) -> dict[str, Any]:
+    """Return the complete numerical and rendering recipe for the dashboard."""
+
+    _verify_chain(controller, bout, escape)
+    band = _array(bout, "summary_distance_bin_index").astype(np.int64)
+    low = _array(bout, "summary_distance_bin_start_mm").astype(np.float64)
+    high = _array(bout, "summary_distance_bin_end_mm").astype(np.float64)
+    if not (band.size == low.size == high.size):
+        _fail("Bout distance-bin columns have different lengths.")
+    distance_bins: dict[int, dict[str, Any]] = {}
+    for code, start, end in zip(band, low, high, strict=True):
+        record = {
+            "bin_index": int(code),
+            "start_mm_inclusive": float(start),
+            "end_mm_exclusive": float(end) if np.isfinite(end) else None,
+        }
+        previous = distance_bins.setdefault(int(code), record)
+        if previous != record:
+            _fail("Bout distance-bin evidence is inconsistent across summary rows.")
+    sweep_thresholds = _array(
+        escape, "sweep_speed_threshold_mm_s"
+    ).astype(np.float64)
+    if np.any(~np.isfinite(sweep_thresholds)):
+        _fail("Escape threshold sweep contains a non-finite threshold.")
+    response_registry = escape.scientific_manifest.get(
+        "identity_registries", {}
+    )
+    if isinstance(response_registry, Mapping):
+        response_registry = response_registry.get("response_class", {})
+    if not isinstance(response_registry, Mapping):
+        response_registry = {}
+    return {
+        "scientific_coordinates": {
+            "bout_distance_bins": [distance_bins[key] for key in sorted(distance_bins)],
+            "escape_speed_thresholds_mm_s": [
+                float(value) for value in np.unique(sweep_thresholds)
+            ],
+            "response_class_codes": [0, 1, 2, 3],
+            "response_class_labels": [
+                str(response_registry.get(str(code), label))
+                for code, label in enumerate(
+                    ("insufficient", "escape", "freeze", "other")
+                )
+            ],
+            "trial_x_coordinate": "acquisition_frame_id",
+            "bout_rate_denominator": "valid_exposure_minutes",
+            "escape_rate_denominator": "valid_trial_minutes",
+        },
+        "rendering": {
+            "figure_size_inches": list(PLOT_FIGURE_SIZE_INCHES),
+            "subplot_grid": [2, 2],
+            "png_dpi": PLOT_DPI,
+            "constrained_layout": True,
+            "trial_bar_height": 0.62,
+            "trial_bar_alpha": 0.82,
+            "trial_colormap": "tab10",
+            "bout_line_marker": "o",
+            "bout_line_width_points": 1.4,
+            "response_colors": ["#999999", "#d95f02", "#1b9e77", "#7570b3"],
+            "sweep_line_marker": "o",
+            "sweep_line_width_points": 1.3,
+        },
+        "missing_value_policy": "invalid_no_interpolation",
+    }
+
+
 def render_dashboard(
     controller: ComposableChaserSuccessorSourceHandle,
     bout: ComposableChaserSuccessorSourceHandle,
@@ -217,7 +290,12 @@ def render_dashboard(
     """Render one exact dashboard to PNG and PDF."""
 
     _verify_chain(controller, bout, escape)
-    figure, axes = plt.subplots(2, 2, figsize=(15, 10), constrained_layout=True)
+    figure, axes = plt.subplots(
+        2,
+        2,
+        figsize=PLOT_FIGURE_SIZE_INCHES,
+        constrained_layout=True,
+    )
     _trial_panel(axes[0, 0], controller)
     _bout_panel(axes[0, 1], bout)
     _response_panel(axes[1, 0], escape)
@@ -238,7 +316,7 @@ def render_dashboard(
     temporary_png = png.with_name(f".{png.name}.tmp")
     temporary_pdf = pdf.with_name(f".{pdf.name}.tmp")
     try:
-        figure.savefig(temporary_png, dpi=180, format="png")
+        figure.savefig(temporary_png, dpi=PLOT_DPI, format="png")
         figure.savefig(temporary_pdf, format="pdf")
         os.replace(temporary_png, png)
         os.replace(temporary_pdf, pdf)
@@ -255,6 +333,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--expected-recording-id", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--bundle-name",
+        help="Output bundle basename; defaults to the exact successor run name.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -263,10 +345,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if _RUN_NAME_RE.fullmatch(args.run_name) is None:
         _fail("run_name must be one exact non-selector child name.")
+    bundle_name = args.bundle_name or args.run_name
+    if _RUN_NAME_RE.fullmatch(bundle_name) is None:
+        _fail("bundle_name must be one safe exact output basename.")
     archive = args.analysis_zarr.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
-    stem = output_dir / f"{args.run_name}_dashboard"
-    receipt_path = output_dir / f"{args.run_name}_plot_receipt.json"
+    stem = output_dir / f"{bundle_name}_dashboard"
+    receipt_path = output_dir / f"{bundle_name}_plot_receipt.json"
     expected_outputs = (stem.with_suffix(".png"), stem.with_suffix(".pdf"), receipt_path)
     if not args.overwrite and any(path.exists() for path in expected_outputs):
         raise FileExistsError("Plot output already exists; pass --overwrite explicitly.")
@@ -283,6 +368,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     controller, bout, escape = handles
     png, pdf = render_dashboard(controller, bout, escape, output_stem=stem)
+    plot_parameters = dashboard_plot_parameters(controller, bout, escape)
     source_bindings = {
         handle.successor_kind: {
             "run_path": handle.run_path,
@@ -302,11 +388,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     body = {
         "schema_id": RECEIPT_SCHEMA_ID,
         "schema_version": RECEIPT_SCHEMA_VERSION,
+        "plot_recipe_id": PLOT_RECIPE_ID,
         "recording_id": controller.recording_id,
         "run_name": args.run_name,
+        "bundle_name": bundle_name,
         "source_bindings": source_bindings,
         "source_bindings_sha256": canonical_json_sha256(source_bindings),
         "outputs": outputs,
+        "plot_parameters": plot_parameters,
+        "plot_parameters_sha256": canonical_json_sha256(plot_parameters),
         "plot_policy": {
             "source_selection": "explicit_run_names_only_no_selector_discovery",
             "source_validation": "strict_loader_deep_array_content_audit",
@@ -332,7 +422,9 @@ if __name__ == "__main__":  # pragma: no cover
 __all__ = [
     "RECEIPT_SCHEMA_ID",
     "RECEIPT_SCHEMA_VERSION",
+    "PLOT_RECIPE_ID",
     "ComposableChaserPlotError",
+    "dashboard_plot_parameters",
     "main",
     "render_dashboard",
 ]

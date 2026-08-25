@@ -6,6 +6,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -23,7 +24,10 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 RECEIPT_SCHEMA_ID = "palette.analysis.chaser_radial_near_field.plot_receipt"
-RECEIPT_SCHEMA_VERSION = 1
+RECEIPT_SCHEMA_VERSION = 2
+PLOT_RECIPE_ID = "chaser_radial_near_field_summary_v2"
+PLOT_DPI = 180
+PLOT_FIGURE_SIZE_INCHES = (16.0, 10.0)
 
 
 class ChaserRadialNearFieldPlotError(ValueError):
@@ -43,6 +47,77 @@ def _labels(manifest: Mapping[str, Any], name: str) -> Mapping[str, str]:
     if not isinstance(value, Mapping):
         raise ChaserRadialNearFieldPlotError(f"Missing {name!r} registry.")
     return {str(key): str(item) for key, item in value.items()}
+
+
+def _plain(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def radial_near_field_plot_parameters(handle: Any) -> dict[str, Any]:
+    """Return the complete numerical and rendering recipe for one plot."""
+
+    scientific = handle.scientific_manifest
+
+    def array(name: str) -> np.ndarray:
+        return np.asarray(handle.array(name))
+
+    starts = array("radial_bin_start_mm").astype(np.float64)
+    ends = array("radial_bin_end_mm").astype(np.float64)
+    if starts.size != ends.size or np.any(~np.isfinite(starts)) or np.any(
+        ~np.isfinite(ends)
+    ):
+        raise ChaserRadialNearFieldPlotError(
+            "Radial plot bin boundaries are absent or non-finite."
+        )
+    bins = sorted({(float(start), float(end)) for start, end in zip(starts, ends)})
+    config = scientific.get("config")
+    if not isinstance(config, Mapping):
+        raise ChaserRadialNearFieldPlotError("Radial scientific config is absent.")
+    return {
+        "scientific_coordinates": {
+            "radial_bins_mm": [
+                {
+                    "start_inclusive_mm": start,
+                    "end_exclusive_mm": end,
+                    "center_for_plot_mm": (start + end) / 2.0,
+                }
+                for start, end in bins
+            ],
+            "near_zone_radius_mm": float(config["near_zone_radius_mm"]),
+            "config": _plain(config),
+            "epoch_registry": dict(_labels(scientific, "epoch_role")),
+            "behavior_registry": dict(_labels(scientific, "behavior_role")),
+            "chaser_registry": dict(_labels(scientific, "chaser")),
+        },
+        "normalization_and_scale": {
+            "distance_summary": "median_with_25th_and_75th_percentiles_mm",
+            "radial_selection": "persisted_area_corrected_geometric_selection_index",
+            "near_fraction_denominator": "valid_distance_rows",
+            "entry_rate_denominator": "valid_session_time_minutes",
+            "near_fraction_y_min": 0.0,
+            "radial_reference_line": 0.0,
+            "missing_value_policy": "remain_missing_no_interpolation",
+        },
+        "rendering": {
+            "figure_size_inches": list(PLOT_FIGURE_SIZE_INCHES),
+            "subplot_grid": [2, 2],
+            "png_dpi": PLOT_DPI,
+            "constrained_layout": True,
+            "distance_errorbar_format": "o",
+            "distance_errorbar_capsize_points": 4.0,
+            "radial_line_marker": "o",
+            "radial_line_width_points": 1.2,
+            "near_fraction_color": "#4c78a8",
+            "paired_bar_width": 0.38,
+            "label_rotation_degrees": 30.0,
+        },
+    }
 
 
 def render(
@@ -80,7 +155,13 @@ def render(
         for e, b, c in zip(epoch, behavior, chaser, strict=True)
     ]
     x = np.arange(len(labels))
-    figure, axes = plt.subplots(2, 2, figsize=(16, 10), constrained_layout=True)
+    plot_parameters = radial_near_field_plot_parameters(handle)
+    figure, axes = plt.subplots(
+        2,
+        2,
+        figsize=PLOT_FIGURE_SIZE_INCHES,
+        constrained_layout=True,
+    )
 
     valid = np.isfinite(median) & np.isfinite(p25) & np.isfinite(p75)
     axes[0, 0].errorbar(
@@ -151,9 +232,17 @@ def render(
     stem.parent.mkdir(parents=True, exist_ok=True)
     png = stem.with_suffix(".png")
     pdf = stem.with_suffix(".pdf")
-    figure.savefig(png, dpi=180)
-    figure.savefig(pdf)
-    plt.close(figure)
+    temporary_png = png.with_name(f".{png.name}.tmp")
+    temporary_pdf = pdf.with_name(f".{pdf.name}.tmp")
+    try:
+        figure.savefig(temporary_png, dpi=PLOT_DPI, format="png")
+        figure.savefig(temporary_pdf, format="pdf")
+        os.replace(temporary_png, png)
+        os.replace(temporary_pdf, pdf)
+    finally:
+        plt.close(figure)
+        temporary_png.unlink(missing_ok=True)
+        temporary_pdf.unlink(missing_ok=True)
     files = {
         "png": {"path": str(png), "sha256": _file_sha256(png)},
         "pdf": {"path": str(pdf), "sha256": _file_sha256(pdf)},
@@ -161,6 +250,7 @@ def render(
     body = {
         "schema_id": RECEIPT_SCHEMA_ID,
         "schema_version": RECEIPT_SCHEMA_VERSION,
+        "plot_recipe_id": PLOT_RECIPE_ID,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "recording_id": handle.recording_id,
         "source": {
@@ -176,6 +266,8 @@ def render(
             "position_provider": dict(provider),
         },
         "files": files,
+        "plot_parameters": plot_parameters,
+        "plot_parameters_sha256": canonical_json_sha256(plot_parameters),
         "selector_eligible": False,
         "production_authority": False,
     }
@@ -204,3 +296,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
+
+
+__all__ = [
+    "PLOT_RECIPE_ID",
+    "RECEIPT_SCHEMA_ID",
+    "RECEIPT_SCHEMA_VERSION",
+    "ChaserRadialNearFieldPlotError",
+    "radial_near_field_plot_parameters",
+    "render",
+]

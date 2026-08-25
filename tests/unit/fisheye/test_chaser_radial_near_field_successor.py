@@ -229,3 +229,8 @@ def test_successor_publication_deep_audits_and_rehydrates(tmp_path) -> None:
     assert Path(plot["files"]["png"]["path"]).is_file()
     assert Path(plot["files"]["pdf"]["path"]).is_file()
     assert plot["source"]["manifest_sha256"] == handle.manifest_sha256
+    assert plot["schema_version"] == 2
+    assert plot["plot_parameters"]["scientific_coordinates"][
+        "near_zone_radius_mm"
+    ] == 5.0
+    assert plot["plot_parameters"]["rendering"]["png_dpi"] == 180

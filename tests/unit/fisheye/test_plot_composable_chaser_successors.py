@@ -9,6 +9,7 @@ import pytest
 
 from fisheye.utils.plot_composable_chaser_successors import (
     ComposableChaserPlotError,
+    dashboard_plot_parameters,
     render_dashboard,
 )
 
@@ -97,10 +98,21 @@ def _handles() -> tuple[_Handle, _Handle, _Handle]:
 
 
 def test_render_dashboard_writes_png_and_pdf(tmp_path: Path) -> None:
-    png, pdf = render_dashboard(*_handles(), output_stem=tmp_path / "dashboard")
+    handles = _handles()
+    png, pdf = render_dashboard(*handles, output_stem=tmp_path / "dashboard")
+    parameters = dashboard_plot_parameters(*handles)
 
     assert png.is_file() and png.stat().st_size > 0
     assert pdf.is_file() and pdf.stat().st_size > 0
+    assert parameters["scientific_coordinates"]["bout_distance_bins"] == [
+        {"bin_index": 0, "start_mm_inclusive": 0.0, "end_mm_exclusive": 8.0},
+        {"bin_index": 1, "start_mm_inclusive": 8.0, "end_mm_exclusive": None},
+    ]
+    assert parameters["scientific_coordinates"]["escape_speed_thresholds_mm_s"] == [
+        10.0,
+        20.0,
+    ]
+    assert parameters["rendering"]["png_dpi"] == 180
 
 
 def test_render_dashboard_rejects_stale_dependency(tmp_path: Path) -> None:

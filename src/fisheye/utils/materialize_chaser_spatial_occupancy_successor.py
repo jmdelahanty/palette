@@ -10,6 +10,9 @@ from typing import Sequence
 from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
     load_chaser_relative_frame_source_handle,
 )
+from fisheye.analysis_workflows.chaser_relative_frame_validation_receipt import (
+    load_chaser_relative_frame_targeted_source_handle,
+)
 from fisheye.analysis_workflows.chaser_spatial_occupancy_successor import (
     prepare_chaser_spatial_occupancy_successor_from_handles,
 )
@@ -33,24 +36,50 @@ def run(
     keypoint_radial_run: str,
     detection_radial_run: str,
     expected_recording_id: str,
+    keypoint_relative_frame_receipt: str | Path | None = None,
+    detection_relative_frame_receipt: str | Path | None = None,
     bin_width_mm: float = 2.0,
     apply: bool = False,
     scratch_root: str | Path | None = None,
     copy_backend: str = "python",
 ) -> dict[str, object]:
     archive = Path(analysis_zarr).expanduser().resolve()
-    relative_keypoint = load_chaser_relative_frame_source_handle(
-        archive,
-        run_name=keypoint_relative_frame_run,
-        expected_recording_id=expected_recording_id,
-        use_consolidated=True,
+    receipt_values = (
+        keypoint_relative_frame_receipt,
+        detection_relative_frame_receipt,
     )
-    relative_detection = load_chaser_relative_frame_source_handle(
-        archive,
-        run_name=detection_relative_frame_run,
-        expected_recording_id=expected_recording_id,
-        use_consolidated=True,
-    )
+    if any(value is not None for value in receipt_values) and not all(
+        value is not None for value in receipt_values
+    ):
+        raise ValueError(
+            "keypoint and detection relative-frame receipts must be supplied together."
+        )
+    if all(value is not None for value in receipt_values):
+        relative_keypoint = load_chaser_relative_frame_targeted_source_handle(
+            keypoint_relative_frame_receipt,
+            expected_analysis_zarr=archive,
+            expected_recording_id=expected_recording_id,
+            expected_run_name=keypoint_relative_frame_run,
+        )
+        relative_detection = load_chaser_relative_frame_targeted_source_handle(
+            detection_relative_frame_receipt,
+            expected_analysis_zarr=archive,
+            expected_recording_id=expected_recording_id,
+            expected_run_name=detection_relative_frame_run,
+        )
+    else:
+        relative_keypoint = load_chaser_relative_frame_source_handle(
+            archive,
+            run_name=keypoint_relative_frame_run,
+            expected_recording_id=expected_recording_id,
+            use_consolidated=True,
+        )
+        relative_detection = load_chaser_relative_frame_source_handle(
+            archive,
+            run_name=detection_relative_frame_run,
+            expected_recording_id=expected_recording_id,
+            use_consolidated=True,
+        )
     semantic = load_protocol_semantic_chaser_selection_source_handle(
         archive,
         run_name=semantic_selection_run,
@@ -102,6 +131,16 @@ def run(
             }
             for record in prepared.manifest["sources"]["position_providers"]
         ],
+        "relative_frame_verification": [
+            {
+                "run_path": relative.run_path,
+                "verification_mode": relative.verification_mode,
+                "validation_receipt_sha256": getattr(
+                    relative, "receipt_digest", None
+                ),
+            }
+            for relative in (relative_keypoint, relative_detection)
+        ],
         "selector_eligible": False,
         "production_authority": False,
         "registry_update": False,
@@ -125,6 +164,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keypoint-radial-run", required=True)
     parser.add_argument("--detection-radial-run", required=True)
     parser.add_argument("--expected-recording-id", required=True)
+    parser.add_argument("--keypoint-relative-frame-receipt")
+    parser.add_argument("--detection-relative-frame-receipt")
     parser.add_argument("--bin-width-mm", type=float, default=2.0)
     parser.add_argument("--scratch-root")
     parser.add_argument(
@@ -145,6 +186,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         keypoint_radial_run=args.keypoint_radial_run,
         detection_radial_run=args.detection_radial_run,
         expected_recording_id=args.expected_recording_id,
+        keypoint_relative_frame_receipt=args.keypoint_relative_frame_receipt,
+        detection_relative_frame_receipt=args.detection_relative_frame_receipt,
         bin_width_mm=args.bin_width_mm,
         apply=args.apply,
         scratch_root=args.scratch_root,

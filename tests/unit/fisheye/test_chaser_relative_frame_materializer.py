@@ -16,6 +16,11 @@ from fisheye.analysis_workflows.chaser_relative_frame_storage import (
     ChaserRelativeFramePublicationContext,
     prepare_chaser_relative_frame,
 )
+from fisheye.analysis_workflows.chaser_relative_frame_validation_receipt import (
+    ChaserRelativeFrameValidationReceiptError,
+    ensure_chaser_relative_frame_validation_receipt,
+    load_chaser_relative_frame_targeted_source_handle,
+)
 from fisheye.analysis_workflows.materializers.chaser_relative_frame import (
     MANIFEST_ATTR,
     MANIFEST_DIGEST_ATTR,
@@ -311,3 +316,59 @@ def test_direct_and_consolidated_declarations_are_equivalent(tmp_path):
     assert direct["valid"] is True
     assert consolidated["valid"] is True
     assert direct["manifest_sha256"] == consolidated["manifest_sha256"]
+
+
+def test_reusable_receipt_targets_arrays_without_archive_root_reparse(tmp_path):
+    archive, prepared, _result = _publish(tmp_path, body=True)
+    receipt_path = tmp_path / "receipts" / "relative.json"
+
+    created = ensure_chaser_relative_frame_validation_receipt(
+        archive,
+        run_name="candidate-v1",
+        palette_commit="a" * 40,
+        output_json=receipt_path,
+        expected_recording_id="recording-1",
+    )
+    reused = ensure_chaser_relative_frame_validation_receipt(
+        archive,
+        run_name="candidate-v1",
+        palette_commit="a" * 40,
+        output_json=receipt_path,
+        expected_recording_id="recording-1",
+    )
+    # Reuse is deliberately independent of the archive-root consolidated
+    # metadata document; only the sealed immutable child is reopened.
+    (archive / "zarr.json").write_text("{not valid root metadata", encoding="utf-8")
+    handle = load_chaser_relative_frame_targeted_source_handle(
+        receipt_path,
+        expected_analysis_zarr=archive,
+        expected_recording_id="recording-1",
+        expected_run_name="candidate-v1",
+    )
+
+    assert created["mode"] == "created"
+    assert reused["mode"] == "reused_exact"
+    assert created["manifest_sha256"] == canonical_json_sha256(
+        created["run_manifest"]
+    )
+    assert created["validation_policy"]["archive_root_consolidated_metadata_reparse"] is False
+    assert handle.verification_mode == "receipt_bound_targeted_array_rehash_v1"
+    np.testing.assert_array_equal(
+        handle.frame_array("acquisition_frame_id"),
+        np.asarray([10, 11, 12], dtype=np.int64),
+    )
+    assert handle.receipt_digest == created["record_sha256"]
+
+    run = open_zarr_root(
+        archive / PARENT_PATH / "candidate-v1",
+        mode="a",
+        use_consolidated=False,
+    )
+    fish = np.asarray(run["base/fish_position_xy_px"][...])
+    fish[0, 0] += 1.0
+    run["base/fish_position_xy_px"][...] = fish
+    with pytest.raises(
+        ChaserRelativeFrameValidationReceiptError,
+        match="content digest changed",
+    ):
+        load_chaser_relative_frame_targeted_source_handle(receipt_path)

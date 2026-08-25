@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
 
 import numpy as np
@@ -217,3 +218,14 @@ def test_publication_deep_audit_rehydrate_and_plot(tmp_path: Path) -> None:
     ) == 0
     receipt = output_dir / "spatial-v1_spatial_occupancy_plot_receipt.json"
     assert receipt.is_file()
+    receipt_record = json.loads(receipt.read_text(encoding="utf-8"))
+    parameters = receipt_record["plot_parameters"]
+    assert receipt_record["schema_version"] == 2
+    assert parameters["scientific_coordinates"]["x_bin_widths_mm"] == [
+        5.0,
+        5.0,
+        5.0,
+        5.0,
+    ]
+    assert parameters["normalization_and_scale"]["density_multiplier_to_percent"] == 100.0
+    assert parameters["rendering"]["png_dpi"] == 180

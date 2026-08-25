@@ -661,6 +661,67 @@ required CI is unrun, no real v6 companion has exercised the end-to-end loader,
 the controlled four-camera run is pending, and the branch is not merge-ready or
 production-eligible.
 
+## Receipt-bound cohort plotting checkpoint: 2026-08-25
+
+The first spatial-occupancy cohort attempt exposed an archive-lifecycle cost,
+not an occupancy-histogram cost. One analysis-root `zarr.json` is
+1,460,024,783 bytes while each completed relative-frame child is about 49.5
+MiB and its direct child metadata document is about 54 KiB. Repeated strict
+consumers reparsed the root consolidated metadata and the failed worker reached
+about 11.5 GiB RSS before plotting. Validation had already happened at
+publication, but there was no reusable receipt accepted by the session-time
+relative-frame consumers.
+
+The local receipt-bound successor now:
+
+- performs one complete direct-subtree audit of every declared relative-frame
+  array and seals the exact child manifest, completion authority, provenance,
+  direct metadata inventory, archive/run/recording identity, and Palette
+  commit in
+  `palette.analysis.chaser_relative_frame.reusable_validation_receipt` v1;
+- revalidates the small immutable child metadata generation on reuse and
+  content-rehashes only the exact arrays requested by the consumer; it never
+  reparses archive-root consolidated metadata during receipt reuse;
+- feeds those bounded handles to paired keypoint/detection spatial occupancy
+  and detailed trace plots while retaining the existing strict deep-audit path
+  for older tasks;
+- creates a new spatial-occupancy run name rather than changing the existing
+  immutable v1 scientific payload; and
+- removes archive-root metadata parsing from execution-time frozen-task
+  revalidation. Recording identity is instead checked against the already
+  frozen exact archive path/basename, raw-H5 stat binding, and all frozen input
+  child-metadata digests.
+
+Every current chaser plot receipt is now a versioned self-contained recipe.
+The dashboard, detailed bundle, radial/near-field summary, and paired-provider
+spatial heatmaps repeat and digest their exact scientific plotting coordinates
+(including distance/radial/CDF/occupancy bin boundaries and escape thresholds),
+normalizations, missing-value policy, color limits, provider/epoch order,
+figure sizes, subplot layouts, colormaps, line/marker settings, and PNG DPI.
+Open-ended distance-bin boundaries are represented as JSON `null`, never a
+non-finite JSON value. Existing provider-epoch cohort receipts already retain
+their exact histogram bin edges, counts, fractions, denominators, and dropped
+value reasons.
+
+The successor of frozen cohort task
+`0cb0a8b77d7f77e851b7f6543da5a760c42ab2743949476504eba7afd7dced8b`
+is:
+
+`/tmp/goodbatbadbat_composable_chaser_cohort_task_receipt_bound_v2_20260825.json`
+
+It contains 84 exact entries, has task digest
+`66a4ef4f5bc2f415fa29ab37bb1701cdce567cb3519d22016e5368caf8f06bac`,
+and retains selector-ineligible/no-production/no-registry/no-selector safety.
+It was derived without reparsing archive roots in 8.10 seconds with 37,864 KiB
+maximum RSS; all 84 entries reuse their completed upstream outputs and remain
+`resume` only for the new receipts, v2 occupancy successor, and versioned plot
+recipes.
+
+This remains experimental implementation evidence. A commit-pinned
+high-metadata canary, required CI, and review of the first generated occupancy
+and detailed figures are still required. No selector, registry authority,
+production publication, or shared checkout has been changed.
+
 ## Acceptance boundary
 
 This branch is not complete, not merge-ready, and not production-eligible.

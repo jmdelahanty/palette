@@ -26,7 +26,7 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 TASK_SCHEMA_ID = "palette.composable_chaser_successor_cohort_task"
-TASK_SCHEMA_VERSION = 1
+TASK_SCHEMA_VERSION = 2
 RECEIPT_SCHEMA_ID = "palette.composable_chaser_successor_cohort_receipt"
 RECEIPT_SCHEMA_VERSION = 1
 
@@ -73,6 +73,17 @@ SPATIAL_OCCUPANCY_RUN = (
     "exact_epochs_v1"
 )
 DETAILED_BUNDLE_NAME = "goodbatbadbat_chaser_detailed_activity_orthogonal_v2"
+SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN = (
+    "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260825_"
+    "exact_epochs_receipt_bound_v2"
+)
+DASHBOARD_RECIPE_BUNDLE_NAME = (
+    "goodbatbadbat_chaser_dashboard_activity_orthogonal_recipe_v2"
+)
+DETAILED_RECIPE_BUNDLE_NAME = (
+    "goodbatbadbat_chaser_detailed_activity_orthogonal_recipe_v3"
+)
+RELATIVE_FRAME_VALIDATION_MODE = "reusable_direct_subtree_receipt_v1"
 
 MOTION_BOUT_PAIRS = (
     (
@@ -564,7 +575,10 @@ def load_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
         if not path.is_file():
             raise FileNotFoundError(f"Cohort task does not exist: {path}")
         task = dict(_mapping(json.loads(path.read_bytes()), field="cohort task"))
-    if task.get("schema_id") != TASK_SCHEMA_ID or task.get("schema_version") != 1:
+    if task.get("schema_id") != TASK_SCHEMA_ID or task.get("schema_version") not in {
+        1,
+        TASK_SCHEMA_VERSION,
+    }:
         _fail("Cohort task schema is unsupported.")
     persisted = _digest(task.get("task_sha256"), field="cohort task digest")
     if _task_digest(task) != persisted:
@@ -599,10 +613,9 @@ def _revalidate_entry(entry: Mapping[str, Any]) -> None:
     archive = Path(_text(entry.get("analysis_zarr"), field="analysis Zarr"))
     if not archive.is_dir():
         _fail(f"Frozen analysis Zarr is absent: {archive}")
-    root_attrs, _root_sha = _zarr_attrs(archive, field="analysis Zarr root")
-    recording_id = _recording_identity(root_attrs, archive)
-    if recording_id != entry.get("recording_id"):
-        _fail("Frozen recording identity has changed.")
+    recording_id = _text(entry.get("recording_id"), field="recording identity")
+    if archive.name != f"{recording_id}_analysis.zarr":
+        _fail("Frozen recording identity disagrees with the archive basename.")
     raw = _mapping(entry.get("raw_h5"), field="raw-H5 binding")
     raw_path = Path(_text(raw.get("path"), field="raw-H5 path"))
     if not raw_path.is_file():
@@ -624,6 +637,117 @@ def _revalidate_entry(entry: Mapping[str, Any]) -> None:
         metadata = archive / group_path / "zarr.json"
         if not metadata.is_file() or _sha256_file(metadata) != expected:
             _fail(f"Frozen input metadata changed: {group_path}")
+
+
+def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
+    """Create the receipt-bound plotting successor of one exact frozen task."""
+
+    previous = load_cohort_task(source)
+    previous_digest = previous["task_sha256"]
+    entries = []
+    for raw_entry in previous["entries"]:
+        entry = dict(_mapping(raw_entry, field="cohort entry"))
+        output_names = dict(
+            _mapping(entry["output_run_names"], field="output run names")
+        )
+        output_names.update(
+            {
+                "spatial_occupancy": SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN,
+                "dashboard_bundle": DASHBOARD_RECIPE_BUNDLE_NAME,
+                "detailed_bundle": DETAILED_RECIPE_BUNDLE_NAME,
+            }
+        )
+        spatial_path = (
+            "analysis/chaser_spatial_occupancy_runs/"
+            f"{SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN}"
+        )
+        output_paths = [
+            str(path)
+            for path in entry.get("output_group_paths", [])
+            if not str(path).startswith("analysis/chaser_spatial_occupancy_runs/")
+        ]
+        output_paths.append(spatial_path)
+        archive = Path(_text(entry["analysis_zarr"], field="analysis Zarr"))
+        existing_paths = [
+            path for path in output_paths if (archive / path / "zarr.json").is_file()
+        ]
+        plot_dir = Path(_text(entry["plot_output_dir"], field="plot output dir"))
+        expected_plot_receipts = (
+            plot_dir
+            / f"{DASHBOARD_RECIPE_BUNDLE_NAME}_plot_receipt.json",
+            plot_dir
+            / "detailed"
+            / f"{DETAILED_RECIPE_BUNDLE_NAME}_receipt.json",
+            plot_dir
+            / "spatial_occupancy"
+            / (
+                f"{SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN}_"
+                "spatial_occupancy_plot_receipt.json"
+            ),
+        )
+        if len(existing_paths) == len(output_paths):
+            status = (
+                "complete"
+                if all(path.is_file() for path in expected_plot_receipts)
+                else "plot_only"
+            )
+        elif existing_paths:
+            status = "resume"
+        else:
+            status = "ready"
+        entry.update(
+            {
+                "status": status,
+                "output_run_names": output_names,
+                "output_group_paths": output_paths,
+                "existing_output_group_paths": existing_paths,
+                "relative_frame_validation": {
+                    "mode": RELATIVE_FRAME_VALIDATION_MODE,
+                    "receipt_directory": "source_validation_receipts",
+                },
+                "successor_of_entry_task_sha256": previous_digest,
+            }
+        )
+        entries.append(json_attr_safe(entry))
+
+    status_counts: dict[str, int] = {}
+    for entry in entries:
+        status = str(entry["status"])
+        status_counts[status] = status_counts.get(status, 0) + 1
+    task = json_attr_safe(
+        {
+            **{
+                key: value
+                for key, value in previous.items()
+                if key
+                not in {
+                    "task_sha256",
+                    "created_at_utc",
+                    "schema_version",
+                    "entries",
+                    "status_counts",
+                    "runnable_task_indices",
+                }
+            },
+            "schema_version": TASK_SCHEMA_VERSION,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "selection_policy": {
+                **dict(previous["selection_policy"]),
+                "successor_of_task_sha256": previous_digest,
+                "relative_frame_validation": RELATIVE_FRAME_VALIDATION_MODE,
+                "plot_recipe_provenance": "self_contained_exact_parameters_v2",
+            },
+            "status_counts": status_counts,
+            "runnable_task_indices": [
+                int(entry["task_index"])
+                for entry in entries
+                if entry["status"] != "complete"
+            ],
+            "entries": entries,
+        }
+    )
+    task["task_sha256"] = _task_digest(task)
+    return task
 
 
 def _existing_complete_output(archive: Path, group_path: str, recording_id: str) -> bool:
@@ -667,7 +791,12 @@ def _existing_complete_output(archive: Path, group_path: str, recording_id: str)
     return True
 
 
-def _validated_plot_receipt(path: Path, *, recording_id: str) -> bool:
+def _validated_plot_receipt(
+    path: Path,
+    *,
+    recording_id: str,
+    require_self_contained_recipe: bool = False,
+) -> bool:
     if not path.exists():
         return False
     if not path.is_file():
@@ -685,6 +814,19 @@ def _validated_plot_receipt(path: Path, *, recording_id: str) -> bool:
         _fail(f"Plot receipt digest is stale: {path}")
     if receipt.get("recording_id") != recording_id:
         _fail(f"Plot receipt recording identity mismatch: {path}")
+    if require_self_contained_recipe:
+        parameters = receipt.get("plot_parameters")
+        if (
+            not isinstance(receipt.get("plot_recipe_id"), str)
+            or not receipt["plot_recipe_id"]
+            or not isinstance(parameters, Mapping)
+            or canonical_json_sha256(parameters)
+            != _digest(
+                receipt.get("plot_parameters_sha256"),
+                field="plot parameters digest",
+            )
+        ):
+            _fail(f"Plot receipt lacks its exact self-contained recipe: {path}")
     if (
         receipt.get("selector_eligible") is not False
         or receipt.get("production_authority") is not False
@@ -818,6 +960,28 @@ def run_one(
         outputs.get("spatial_occupancy", SPATIAL_OCCUPANCY_RUN),
         field="spatial occupancy run",
     )
+    dashboard_bundle = _exact_name(
+        outputs.get("dashboard_bundle", outputs["successors"]),
+        field="dashboard bundle",
+    )
+    relative_validation_raw = entry.get("relative_frame_validation")
+    if relative_validation_raw is None:
+        receipt_bound_relative = False
+        relative_receipt_dir = None
+    else:
+        relative_validation = _mapping(
+            relative_validation_raw, field="relative-frame validation policy"
+        )
+        if relative_validation.get("mode") != RELATIVE_FRAME_VALIDATION_MODE:
+            _fail("Relative-frame validation mode is unsupported.")
+        receipt_directory = _exact_name(
+            relative_validation.get("receipt_directory"),
+            field="relative-frame receipt directory",
+        )
+        receipt_bound_relative = True
+        relative_receipt_dir = plot_dir / receipt_directory
+        if apply:
+            relative_receipt_dir.mkdir(parents=True, exist_ok=True)
     raw_h5 = _mapping(entry["raw_h5"], field="raw-H5 binding")
     geometry = _mapping(entry["geometry"], field="geometry binding")
     keypoint_proxy = _mapping(entry["keypoint_proxy"], field="keypoint proxy")
@@ -976,6 +1140,41 @@ def run_one(
             ),
         )
 
+    relative_receipts: dict[str, Path] = {}
+    if receipt_bound_relative:
+        assert relative_receipt_dir is not None
+        for provider, relative_key in (
+            ("keypoint", "keypoint_relative"),
+            ("detection", "detection_relative"),
+        ):
+            relative_name = _exact_name(
+                outputs[relative_key], field=f"{provider} relative-frame run"
+            )
+            receipt_path = (
+                relative_receipt_dir / f"{relative_name}.validation_receipt.json"
+            )
+            relative_receipts[provider] = receipt_path
+            stages.append(
+                _invoke(
+                    stage=f"{provider}_relative_frame_validation_receipt",
+                    command=_stage_command(
+                        py,
+                        "fisheye.utils.seal_chaser_relative_frame_validation_receipt",
+                        archive,
+                        "--run-name",
+                        relative_name,
+                        "--palette-commit",
+                        commit,
+                        "--output-json",
+                        receipt_path,
+                        "--expected-recording-id",
+                        recording_id,
+                    ),
+                    log_dir=receipt_dir,
+                    apply=apply,
+                )
+            )
+
     successor_groups = (
         f"analysis/controller_chase_trial_runs/{outputs['successors']}",
         f"analysis/generalized_chaser_bout_response_runs/{outputs['successors']}",
@@ -1070,6 +1269,14 @@ def run_one(
             ),
         )
 
+    occupancy_receipt_flags: tuple[object, ...] = ()
+    if receipt_bound_relative:
+        occupancy_receipt_flags = (
+            "--keypoint-relative-frame-receipt",
+            relative_receipts["keypoint"],
+            "--detection-relative-frame-receipt",
+            relative_receipts["detection"],
+        )
     execute_if_missing(
         "spatial_occupancy",
         f"analysis/chaser_spatial_occupancy_runs/{spatial_occupancy_run}",
@@ -1084,6 +1291,7 @@ def run_one(
             outputs["keypoint_relative"],
             "--detection-relative-frame-run",
             outputs["detection_relative"],
+            *occupancy_receipt_flags,
             "--semantic-selection-run",
             outputs["semantic_selection"],
             "--keypoint-radial-run",
@@ -1106,7 +1314,11 @@ def run_one(
         spatial_plot_dir
         / f"{spatial_occupancy_run}_spatial_occupancy_plot_receipt.json"
     )
-    if _validated_plot_receipt(spatial_receipt, recording_id=recording_id):
+    if _validated_plot_receipt(
+        spatial_receipt,
+        recording_id=recording_id,
+        require_self_contained_recipe=receipt_bound_relative,
+    ):
         stages.append(
             {"stage": "spatial_occupancy_plots", "mode": "reused_exact_receipt"}
         )
@@ -1130,8 +1342,12 @@ def run_one(
             )
         )
 
-    dashboard_receipt = plot_dir / f"{outputs['successors']}_plot_receipt.json"
-    if _validated_plot_receipt(dashboard_receipt, recording_id=recording_id):
+    dashboard_receipt = plot_dir / f"{dashboard_bundle}_plot_receipt.json"
+    if _validated_plot_receipt(
+        dashboard_receipt,
+        recording_id=recording_id,
+        require_self_contained_recipe=receipt_bound_relative,
+    ):
         stages.append({"stage": "dashboard_plots", "mode": "reused_exact_receipt"})
     else:
         stages.append(
@@ -1147,13 +1363,19 @@ def run_one(
                     recording_id,
                     "--output-dir",
                     plot_dir,
+                    "--bundle-name",
+                    dashboard_bundle,
                 ),
                 log_dir=receipt_dir,
                 apply=apply,
             )
         )
     detailed_receipt = detailed_dir / f"{outputs['detailed_bundle']}_receipt.json"
-    if _validated_plot_receipt(detailed_receipt, recording_id=recording_id):
+    if _validated_plot_receipt(
+        detailed_receipt,
+        recording_id=recording_id,
+        require_self_contained_recipe=receipt_bound_relative,
+    ):
         stages.append({"stage": "detailed_plots", "mode": "reused_exact_receipt"})
     else:
         stages.append(
@@ -1169,6 +1391,7 @@ def run_one(
                     outputs["keypoint_relative"],
                     "--detection-relative-frame-run",
                     outputs["detection_relative"],
+                    *occupancy_receipt_flags,
                     "--keypoint-radial-run",
                     outputs["keypoint_radial"],
                     "--detection-radial-run",
@@ -1216,6 +1439,12 @@ def _parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--registry-snapshot", type=Path, required=True)
     plan_parser.add_argument("--operations-root", type=Path, required=True)
     plan_parser.add_argument("--output", type=Path, required=True)
+    successor_parser = subparsers.add_parser(
+        "successor",
+        help="derive the receipt-bound self-contained-plot task successor",
+    )
+    successor_parser.add_argument("task", type=Path)
+    successor_parser.add_argument("--output", type=Path, required=True)
     validate_parser = subparsers.add_parser("validate", help="validate a frozen task")
     validate_parser.add_argument("task", type=Path)
     run_parser = subparsers.add_parser("run-one", help="run one frozen task entry")
@@ -1237,6 +1466,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.registry_snapshot,
             operations_root=args.operations_root,
         )
+        write_json_atomic(args.output.expanduser().resolve(), result)
+    elif args.command == "successor":
+        result = successor_cohort_task(args.task)
         write_json_atomic(args.output.expanduser().resolve(), result)
     elif args.command == "validate":
         task = load_cohort_task(args.task)
@@ -1272,4 +1504,5 @@ __all__ = [
     "main",
     "plan_cohort_task",
     "run_one",
+    "successor_cohort_task",
 ]

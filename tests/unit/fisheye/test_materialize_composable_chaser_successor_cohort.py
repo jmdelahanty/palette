@@ -207,6 +207,35 @@ def test_task_digest_rejects_mutation(tmp_path: Path) -> None:
         cohort.load_cohort_task(task)
 
 
+def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> None:
+    _archive, _raw_h5, snapshot = _fixture(tmp_path)
+    original = cohort.plan_cohort_task(
+        snapshot, operations_root=tmp_path / "operations"
+    )
+    successor = cohort.successor_cohort_task(original)
+
+    assert successor["schema_version"] == 2
+    assert successor["selection_policy"]["successor_of_task_sha256"] == original[
+        "task_sha256"
+    ]
+    entry = successor["entries"][0]
+    assert entry["relative_frame_validation"]["mode"] == (
+        cohort.RELATIVE_FRAME_VALIDATION_MODE
+    )
+    assert entry["output_run_names"]["spatial_occupancy"] == (
+        cohort.SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN
+    )
+    assert entry["output_run_names"]["dashboard_bundle"] == (
+        cohort.DASHBOARD_RECIPE_BUNDLE_NAME
+    )
+    assert entry["output_run_names"]["detailed_bundle"] == (
+        cohort.DETAILED_RECIPE_BUNDLE_NAME
+    )
+    assert cohort.load_cohort_task(successor)["task_sha256"] == successor[
+        "task_sha256"
+    ]
+
+
 def test_run_one_rejects_changed_frozen_input_metadata(tmp_path: Path) -> None:
     archive, _raw_h5, snapshot = _fixture(tmp_path)
     task = cohort.plan_cohort_task(snapshot, operations_root=tmp_path / "operations")
@@ -262,6 +291,47 @@ def test_run_one_dry_run_renders_complete_serial_chain(tmp_path: Path) -> None:
     assert result["safety"] == cohort.EXPECTED_SAFETY
     assert not (tmp_path / "scratch").exists()
     assert not (tmp_path / "receipts").exists()
+
+
+def test_receipt_bound_successor_dry_run_passes_targeted_receipts(tmp_path: Path) -> None:
+    _archive, _raw_h5, snapshot = _fixture(tmp_path)
+    original = cohort.plan_cohort_task(
+        snapshot, operations_root=tmp_path / "operations"
+    )
+    task = cohort.successor_cohort_task(original)
+    repo, commit = _clean_repo(tmp_path)
+
+    result = cohort.run_one(
+        task,
+        task_index=1,
+        palette_repo=repo,
+        palette_commit=commit,
+        scratch_root=tmp_path / "scratch",
+        receipt_root=tmp_path / "receipts",
+        apply=False,
+    )
+
+    names = [stage["stage"] for stage in result["stages"]]
+    assert names[6:8] == [
+        "keypoint_relative_frame_validation_receipt",
+        "detection_relative_frame_validation_receipt",
+    ]
+    spatial = next(
+        stage for stage in result["stages"] if stage["stage"] == "spatial_occupancy"
+    )
+    detailed = next(
+        stage for stage in result["stages"] if stage["stage"] == "detailed_plots"
+    )
+    dashboard = next(
+        stage for stage in result["stages"] if stage["stage"] == "dashboard_plots"
+    )
+    for stage in (spatial, detailed):
+        assert "--keypoint-relative-frame-receipt" in stage["command"]
+        assert "--detection-relative-frame-receipt" in stage["command"]
+    assert dashboard["command"][-2:] == [
+        "--bundle-name",
+        cohort.DASHBOARD_RECIPE_BUNDLE_NAME,
+    ]
 
 
 def test_reused_plot_receipt_is_content_verified(tmp_path: Path) -> None:

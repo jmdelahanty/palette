@@ -105,6 +105,8 @@ class SpatialPositionProviderInput:
     fish_position_authority: Mapping[str, Any]
     fish_xy_px: np.ndarray
     fish_valid: np.ndarray
+    relative_frame_verification_mode: str = "direct_prepared_input_no_receipt"
+    relative_frame_validation_receipt_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,6 +384,19 @@ def prepare_chaser_spatial_occupancy_successor(
                 "relative_frame": {
                     "run_path": provider.relative_frame_run_path,
                     "manifest_sha256": provider.relative_frame_manifest_sha256,
+                    "verification_mode": _text(
+                        provider.relative_frame_verification_mode,
+                        field="relative-frame verification mode",
+                    ),
+                    "validation_receipt_sha256": (
+                        _digest(
+                            provider.relative_frame_validation_receipt_sha256,
+                            field="relative-frame validation receipt digest",
+                        )
+                        if provider.relative_frame_validation_receipt_sha256
+                        is not None
+                        else None
+                    ),
                 },
                 "radial_near_field": {
                     "run_path": provider.radial_run_path,
@@ -496,6 +511,9 @@ def chaser_spatial_occupancy_input_from_handles(
     from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
         ChaserRelativeFrameSourceHandle,
     )
+    from fisheye.analysis_workflows.chaser_relative_frame_validation_receipt import (
+        ChaserRelativeFrameTargetedSourceHandle,
+    )
     from fisheye.analysis_workflows.composable_chaser_successor_publication import (
         ComposableChaserSuccessorSourceHandle,
     )
@@ -505,8 +523,18 @@ def chaser_spatial_occupancy_input_from_handles(
 
     relatives = (relative_keypoint, relative_detection)
     radials = (radial_keypoint, radial_detection)
-    if any(type(value) is not ChaserRelativeFrameSourceHandle for value in relatives):
-        raise TypeError("relative providers must be strict relative-frame handles.")
+    deep_handles = all(
+        type(value) is ChaserRelativeFrameSourceHandle for value in relatives
+    )
+    targeted_handles = all(
+        type(value) is ChaserRelativeFrameTargetedSourceHandle
+        for value in relatives
+    )
+    if not (deep_handles or targeted_handles):
+        raise TypeError(
+            "relative providers must be a matched pair of strict deep-audit or "
+            "receipt-bound targeted handles."
+        )
     if type(semantic_selection) is not ProtocolSemanticChaserSelectionSourceHandle:
         raise TypeError("semantic_selection must be one strict semantic handle.")
     if any(type(value) is not ComposableChaserSuccessorSourceHandle for value in radials):
@@ -532,7 +560,11 @@ def chaser_spatial_occupancy_input_from_handles(
     if len(recording_ids) != 1 or len(archives) != 1:
         _fail("Spatial occupancy sources belong to different recordings or archives.")
 
-    views = tuple(load_chaser_relative_distance_view(value) for value in relatives)
+    views = (
+        tuple(load_chaser_relative_distance_view(value) for value in relatives)
+        if deep_handles
+        else relatives
+    )
     for name in (
         "acquisition_frame_id",
         "timestamp_ns",
@@ -600,6 +632,10 @@ def chaser_spatial_occupancy_input_from_handles(
             relative_frame_manifest_sha256=relative.manifest_sha256,
             radial_run_path=radial.run_path,
             radial_manifest_sha256=radial.manifest_sha256,
+            relative_frame_verification_mode=relative.verification_mode,
+            relative_frame_validation_receipt_sha256=(
+                relative.receipt_digest if targeted_handles else None
+            ),
             fish_position_authority=relative.source_authorities["fish_position"],
             fish_xy_px=view.frame_array("fish_position_xy_px"),
             fish_valid=view.frame_array("fish_position_valid"),

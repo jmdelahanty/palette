@@ -27,8 +27,10 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 RECEIPT_SCHEMA_ID = "palette.analysis.chaser_spatial_occupancy.plot_receipt"
-RECEIPT_SCHEMA_VERSION = 1
-PLOT_RECIPE_ID = "paired_provider_exact_epoch_spatial_occupancy_heatmap_v1"
+RECEIPT_SCHEMA_VERSION = 2
+PLOT_RECIPE_ID = "paired_provider_exact_epoch_spatial_occupancy_heatmap_v2"
+PLOT_DPI = 180
+PLOT_FIGURE_SIZE_INCHES = (15.0, 15.0)
 _RUN_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 
 
@@ -155,6 +157,78 @@ def _validate_plot_arrays(
     }
 
 
+def spatial_occupancy_plot_parameters(
+    handle: ComposableChaserSuccessorSourceHandle,
+) -> dict[str, Any]:
+    """Return the complete numerical and rendering recipe for one plot."""
+
+    values = _validate_plot_arrays(handle)
+    density_percent = values["density"] * 100.0
+    difference = density_percent[1] - density_percent[0]
+    finite_density = density_percent[np.isfinite(density_percent)]
+    if not finite_density.size or float(np.max(finite_density)) <= 0:
+        _fail("Spatial occupancy has no positive density to plot.")
+    density_max = float(np.max(finite_density))
+    difference_limit = float(np.max(np.abs(difference)))
+    if difference_limit <= 0:
+        difference_limit = max(
+            density_max * 1e-6, np.finfo(np.float64).eps
+        )
+    arena = handle.scientific_manifest.get("arena")
+    grid = handle.scientific_manifest.get("grid")
+    sources = handle.scientific_manifest.get("sources")
+    if (
+        not isinstance(arena, Mapping)
+        or not isinstance(grid, Mapping)
+        or not isinstance(sources, Mapping)
+        or not isinstance(sources.get("position_providers"), Sequence)
+    ):
+        _fail("Spatial occupancy plot authorities are incomplete.")
+    x_edges = values["x_edges"]
+    y_edges = values["y_edges"]
+    return {
+        "scientific_coordinates": {
+            "x_bin_edges_mm": [float(value) for value in x_edges],
+            "y_bin_edges_mm": [float(value) for value in y_edges],
+            "x_bin_widths_mm": [float(value) for value in np.diff(x_edges)],
+            "y_bin_widths_mm": [float(value) for value in np.diff(y_edges)],
+            "declared_grid": {str(key): value for key, value in grid.items()},
+            "arena_radius_mm": float(arena["radius_mm"]),
+            "coordinate_orientation": "+x_right_+y_down",
+            "epoch_order": ["chaser_pre", "chaser_training", "chaser_post"],
+            "provider_order": [
+                str(record["provider_id"])
+                for record in sources["position_providers"]
+            ],
+        },
+        "normalization_and_scale": {
+            "plotted_source_array": "occupancy_density_valid_in_arena",
+            "density_multiplier_to_percent": 100.0,
+            "density_color_min_percent_per_bin": 0.0,
+            "density_color_max_percent_per_bin": density_max,
+            "provider_difference": "detection_minus_keypoint_percentage_points_per_bin",
+            "difference_color_limits_percentage_points_per_bin": [
+                -difference_limit,
+                difference_limit,
+            ],
+            "coverage_annotation_array": "in_arena_coverage_fraction_candidate",
+            "missing_position_policy": "remain_missing_no_interpolation",
+        },
+        "rendering": {
+            "figure_size_inches": list(PLOT_FIGURE_SIZE_INCHES),
+            "subplot_grid": [3, 3],
+            "png_dpi": PLOT_DPI,
+            "density_colormap": "viridis",
+            "difference_colormap": "coolwarm",
+            "pcolormesh_shading": "auto",
+            "axis_aspect": "equal",
+            "y_axis_display": "reversed_to_preserve_+y_down_image_coordinates",
+            "arena_outline_linewidth_points": 1.0,
+            "constrained_layout": True,
+        },
+    }
+
+
 def render_spatial_occupancy_heatmaps(
     handle: ComposableChaserSuccessorSourceHandle,
     *,
@@ -163,15 +237,14 @@ def render_spatial_occupancy_heatmaps(
     """Render keypoint, detection, and matched-provider difference heatmaps."""
 
     values = _validate_plot_arrays(handle)
+    parameters = spatial_occupancy_plot_parameters(handle)
     density = values["density"] * 100.0
     difference = density[1] - density[0]
-    finite_density = density[np.isfinite(density)]
-    if not finite_density.size or float(np.max(finite_density)) <= 0:
-        _fail("Spatial occupancy has no positive density to plot.")
-    vmax = float(np.max(finite_density))
-    diff_limit = float(np.max(np.abs(difference)))
-    if diff_limit <= 0:
-        diff_limit = max(vmax * 1e-6, np.finfo(np.float64).eps)
+    scale = parameters["normalization_and_scale"]
+    vmax = float(scale["density_color_max_percent_per_bin"])
+    diff_limit = float(
+        scale["difference_color_limits_percentage_points_per_bin"][1]
+    )
     x_edges = values["x_edges"]
     y_edges = values["y_edges"]
     arena = handle.scientific_manifest.get("arena")
@@ -182,7 +255,12 @@ def render_spatial_occupancy_heatmaps(
     provider_ids = [str(record["provider_id"]) for record in providers]
     epoch_labels = ("pre", "training", "post")
 
-    figure, axes = plt.subplots(3, 3, figsize=(15, 15), constrained_layout=True)
+    figure, axes = plt.subplots(
+        3,
+        3,
+        figsize=PLOT_FIGURE_SIZE_INCHES,
+        constrained_layout=True,
+    )
     density_images = []
     difference_images = []
     for epoch_index, epoch_label in enumerate(epoch_labels):
@@ -259,7 +337,7 @@ def render_spatial_occupancy_heatmaps(
     temporary_png = png.with_name(f".{png.name}.tmp")
     temporary_pdf = pdf.with_name(f".{pdf.name}.tmp")
     try:
-        figure.savefig(temporary_png, dpi=180, format="png")
+        figure.savefig(temporary_png, dpi=PLOT_DPI, format="png")
         figure.savefig(temporary_pdf, format="pdf")
         os.replace(temporary_png, png)
         os.replace(temporary_pdf, pdf)
@@ -300,6 +378,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         deep_audit=True,
     )
     png, pdf = render_spatial_occupancy_heatmaps(handle, output_stem=stem)
+    plot_parameters = spatial_occupancy_plot_parameters(handle)
     source_binding = {
         "successor_kind": handle.successor_kind,
         "run_path": handle.run_path,
@@ -324,6 +403,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "source_binding": source_binding,
         "source_binding_sha256": canonical_json_sha256(source_binding),
         "outputs": outputs,
+        "plot_parameters": plot_parameters,
+        "plot_parameters_sha256": canonical_json_sha256(plot_parameters),
         "plot_policy": {
             "source_selection": "explicit_exact_run_name_no_selector_discovery",
             "source_validation": "deep_array_content_audit",
@@ -362,4 +443,5 @@ __all__ = [
     "ChaserSpatialOccupancyPlotError",
     "main",
     "render_spatial_occupancy_heatmaps",
+    "spatial_occupancy_plot_parameters",
 ]
