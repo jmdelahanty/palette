@@ -728,7 +728,12 @@ def materialize_subject_shape_access_aware_storage(
         profile=profile,
     )
     entry_by_path = {entry.declaration.path: entry for entry in receipt.entries}
-    destination_run = zarr.open_group(str(destination), mode="w", zarr_format=3)
+    destination_run = zarr.open_group(
+        str(destination),
+        mode="w",
+        zarr_format=3,
+        use_consolidated=False,
+    )
     _copy_group_attributes(source_run, destination_run)
     hashes: dict[str, str] = {}
     for path, source_array in _iter_arrays(source_run):
