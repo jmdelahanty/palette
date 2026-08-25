@@ -758,10 +758,11 @@ It has digest
 All 80 existing complete v1 spatial-occupancy children passed direct
 completion, recording, run-name, manifest-digest, and selector-ineligible
 checks and are retained as exact scientific sources. Those entries are
-`plot_only`. Only task indices 77--80 lack that child and remain `resume` for
-the receipt-bound v2 spatial successor. The spatial plot bundle has a separate
-versioned identity, so old plot files and receipts cannot be mistaken for the
-new self-contained recipe.
+`plot_only`. Task indices 77--80 lack the semantic selection and the entire
+downstream relative-frame/composable/radial/spatial chain, not merely the
+spatial child. The spatial plot bundle has a separate versioned identity, so
+old plot files and receipts cannot be mistaken for the new self-contained
+recipe.
 
 The generic receipt and direct-load paths, cohort routing, and plot provenance
 passed 47 focused tests in memory-bounded outside-sandbox batches. Both new
@@ -771,10 +772,45 @@ compilation, Ruff, and diff checks pass. The aggregate semantic test process
 was terminated by cumulative local memory pressure, so that file was split
 into smaller batches; every collected test then completed successfully.
 
-This remains experimental implementation evidence. A new commit-pinned
-high-metadata canary, required CI, and review of the first generated occupancy
-and detailed figures are still required. No selector, registry authority,
-production publication, or shared checkout has been changed.
+Commit `cad2f5f405b95e41b0814ea1eecdaaa98fb12a79` was pushed and deployed at:
+
+`/groups/johnson/johnsonlab/jeremy/gitrepos/palette-worktrees/protocol-semantic-step-identity-20260824-cad2f5f4`
+
+The third high-metadata task-2 canary (`153743280[2]`) completed successfully
+in 35 seconds with 349 MiB maximum RSS. It reused the exact immutable v1
+spatial science, created nine commit-specific source receipts, and generated
+the versioned dashboard, four detailed plot families in PNG/PDF, and paired
+provider spatial heatmaps in PNG/PDF. The heatmap receipt records a 2 mm grid,
+the complete x/y bin edges and widths, provider/epoch order, arena radius,
+normalization, observed color limits, colormaps, layout, and 180 DPI. The
+canary was inspected visually before cohort release.
+
+The remaining 79 plot-only entries ran as LSF array `153743282` with eight
+concurrent workers. All 79 completed, none failed, and the maximum observed RSS
+was 347 MiB. Together with the canary, the cohort audit rehashed 960 plot
+outputs and validated 240 self-contained plot receipts across 80 recordings.
+It also checked the self-digests, recording identities, and Palette commit of
+all 720 source-receipt envelopes; each commit-pinned worker had already
+revalidated those receipts against the current exact child metadata before
+plotting. The durable frozen task copy is:
+
+`/groups/johnson/johnsonlab/jeremy/operations/goodbatbadbat_spatial_occupancy_exact_child_receipts_20260825/composable_chaser_successors_exactchild_plotonly79_cad2f5f4_20260825/cohort_task.json`
+
+All generated plots are below:
+
+`/groups/johnson/johnsonlab/jeremy/operations/goodbatbadbat_chaser_successors_20260825_exact_trials_session_time_activity_orthogonal_v3/cohort_plots`
+
+Task-77 canary `153743285[77]` reproduced the scientific exclusion for the
+four-camera `2026-08-12T21-14-36/37Z` set. It stopped at semantic selection
+with `Raw semantic step bounds overlap or are not strictly ordered`, used only
+282 MiB, and wrote no downstream chaser publication. Indices 78--80 were not
+submitted. No alternative legacy convention or inferred ordering was added;
+all four recordings remain explicitly blocked from these chaser products.
+
+This remains experimental implementation evidence. Required CI is still
+unconfirmed, and scientific review of the generated figures is still required.
+No selector, registry authority, production publication, or shared checkout
+has been changed.
 
 ## Acceptance boundary
 
