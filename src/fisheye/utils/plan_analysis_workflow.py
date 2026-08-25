@@ -70,24 +70,25 @@ def build_availability(
         else:
             requested_run = workflow.run_selection.get(stage_id)
             dependency_runs: dict[str, str] = {}
-            if node.kind == "visualization":
-                missing_dependencies: list[str] = []
-                for dependency_id in node.depends_on:
-                    dependency_node = workflow.node_by_id[dependency_id]
-                    dependency_stage = dependency_node.stage_id
-                    dependency_status = (
-                        statuses.get(dependency_stage)
-                        if dependency_stage is not None
-                        else None
-                    )
-                    if (
-                        dependency_status is None
-                        or not dependency_status.available
-                        or not dependency_status.run_name
-                    ):
+            missing_dependencies: list[str] = []
+            for dependency_id in node.depends_on:
+                dependency_node = workflow.node_by_id[dependency_id]
+                dependency_stage = dependency_node.stage_id
+                dependency_status = (
+                    statuses.get(dependency_stage)
+                    if dependency_stage is not None
+                    else None
+                )
+                if (
+                    dependency_status is None
+                    or not dependency_status.available
+                    or not dependency_status.run_name
+                ):
+                    if node.kind == "visualization":
                         missing_dependencies.append(dependency_id)
-                    else:
-                        dependency_runs[dependency_id] = dependency_status.run_name
+                else:
+                    dependency_runs[dependency_id] = dependency_status.run_name
+            if node.kind == "visualization":
                 if missing_dependencies:
                     statuses[stage_id] = StageAvailability(
                         stage_id=stage_id,

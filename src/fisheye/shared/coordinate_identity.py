@@ -48,6 +48,10 @@ from fisheye.shared.archive_identity import (
     archive_identity,
     require_same_archive,
 )
+from fisheye.shared.coordinate_record import (
+    BoundCoordinateRecord,
+    verify_bound_coordinate_record,
+)
 from fisheye.shared.proof_verification import verify_persisted_proof
 
 
@@ -65,7 +69,7 @@ ROW_IDENTITY_KEY_CONTENT_CANONICALIZATION = "numpy_dtype_shape_c_order_bytes_v1"
 ROW_IDENTITY_CONTRACT_REF_ATTR = "row_identity_contract_ref"
 ROW_IDENTITY_CONTRACT_SHA256_ATTR = "row_identity_contract_sha256"
 ROW_IDENTITY_LOCAL_CONTRACT_REF = "@row_identity_contract"
-
+MANIFEST_ROW_IDENTITY_ATTR = "run_manifest"
 TRACK_SAMPLE_TIME_LINEAGE_ATTR = "track_sample_time_lineage"
 TRACK_SAMPLE_TIME_LINEAGE_DIGEST_ATTR = "track_sample_time_lineage_sha256"
 TRACK_SAMPLE_TIME_LINEAGE_SCHEMA_ID = "palette.track_sample_time_lineage"
@@ -333,6 +337,11 @@ class BoundSourceRowTemporalAuthority:
     _source_rowset_node: Any = field(repr=False, compare=False)
     _source_frame_index_node: Any = field(repr=False, compare=False)
     _verification_seal: object = field(repr=False, compare=False)
+    _manifest_authority: BoundCoordinateRecord | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def archive_identity(self) -> ArchiveIdentity:
@@ -428,6 +437,11 @@ class BoundRowIdentityContract:
     _rowset_node: Any = field(repr=False, compare=False)
     _key_array_node: Any = field(repr=False, compare=False)
     _verification_seal: object = field(repr=False, compare=False)
+    _manifest_authority: BoundCoordinateRecord | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def leading_dimension(self) -> int:
@@ -477,7 +491,9 @@ class BoundRowIdentityContract:
                     ),
                 )
             )
-        if self.record_ref != f"/{self.rowset_path}@{ROW_IDENTITY_CONTRACT_ATTR}":
+        if self._manifest_authority is None and self.record_ref != (
+            f"/{self.rowset_path}@{ROW_IDENTITY_CONTRACT_ATTR}"
+        ):
             raise RowIdentityContractError(
                 (
                     _issue(
@@ -487,7 +503,10 @@ class BoundRowIdentityContract:
                     ),
                 )
             )
-        if self.record_sha256 != self.contract.digest():
+        if (
+            self._manifest_authority is None
+            and self.record_sha256 != self.contract.digest()
+        ):
             raise RowIdentityContractError(
                 (
                     _issue(
@@ -525,12 +544,52 @@ class BoundRowIdentityContract:
                     ),
                 )
             )
-        current = validate_stamped_row_identity(
-            self._rowset_node,
-            self._key_array_node,
-            verify_values=True,
-            track_time_lineage=self.track_time_lineage,
-        )
+        if self._manifest_authority is None:
+            current = validate_stamped_row_identity(
+                self._rowset_node,
+                self._key_array_node,
+                verify_values=True,
+                track_time_lineage=self.track_time_lineage,
+            )
+        else:
+            authority = verify_bound_coordinate_record(self._manifest_authority)
+            if (
+                authority.archive_identity != self._archive_identity
+                or authority.record_ref != self.record_ref
+                or authority.record_sha256 != self.record_sha256
+                or authority.record_ref != f"/{self.rowset_path}@run_manifest"
+                or self.contract.domain != OBSERVATION_INSTANCE_DOMAIN
+                or self.track_time_lineage is not None
+            ):
+                raise RowIdentityContractError(
+                    (
+                        _issue(
+                            "manifest_row_identity_authority_mismatch",
+                            "$.record_ref",
+                            "Manifest-bound observation identity no longer matches its exact authority.",
+                        ),
+                    )
+                )
+            try:
+                key_values = np.array(
+                    self._key_array_node[:],
+                    copy=True,
+                    order="C",
+                )
+                current = build_row_identity_contract(
+                    domain=OBSERVATION_INSTANCE_DOMAIN,
+                    values=key_values,
+                )
+            except Exception as exc:
+                raise RowIdentityContractError(
+                    (
+                        _issue(
+                            "manifest_row_identity_live_array_invalid",
+                            "$.key_array",
+                            f"Manifest-bound instance identity is invalid: {exc}.",
+                        ),
+                    )
+                ) from exc
         if current != self.contract:
             raise RowIdentityContractError(
                 (
@@ -1704,6 +1763,55 @@ def load_bound_source_row_temporal_authority(
         _archive_identity=identity,
         _source_rowset_node=source_rowset_node,
         _source_frame_index_node=source_acquisition_frame_index_node,
+        _manifest_authority=None,
+        _verification_seal=_BOUND_SOURCE_ROW_TEMPORAL_AUTHORITY_SEAL,
+    )
+
+
+def _bind_manifest_source_row_temporal_authority(
+    source_rowset_node: Any,
+    source_acquisition_frame_index_node: Any,
+    *,
+    source_row_identity: BoundRowIdentityContract,
+    acquisition_frame: Any,
+    manifest_authority: BoundCoordinateRecord,
+) -> BoundSourceRowTemporalAuthority:
+    """Bind acquisition time through one already validated immutable manifest."""
+
+    authority = verify_bound_coordinate_record(manifest_authority)
+    identity = require_bound_row_identity_contract(source_row_identity)
+    record, archive = _build_source_row_temporal_authority_record(
+        source_rowset_node,
+        source_acquisition_frame_index_node,
+        source_row_identity=identity,
+        acquisition_frame=acquisition_frame,
+    )
+    rowset_path = _persisted_node_path(source_rowset_node, label="source_rowset")
+    if (
+        authority.archive_identity != archive
+        or authority.record_ref != f"/{rowset_path}@run_manifest"
+        or identity.record_ref != authority.record_ref
+        or identity.record_sha256 != authority.record_sha256
+    ):
+        raise RowIdentityContractError(
+            (
+                _issue(
+                    "manifest_temporal_authority_mismatch",
+                    "$.manifest_authority",
+                    "Manifest-bound temporal evidence does not own the exact source rowset and identity.",
+                ),
+            )
+        )
+    return BoundSourceRowTemporalAuthority(
+        record=record,
+        record_ref=authority.record_ref,
+        record_sha256=authority.record_sha256,
+        source_row_identity=identity,
+        acquisition_frame=acquisition_frame,
+        _archive_identity=archive,
+        _source_rowset_node=source_rowset_node,
+        _source_frame_index_node=source_acquisition_frame_index_node,
+        _manifest_authority=authority,
         _verification_seal=_BOUND_SOURCE_ROW_TEMPORAL_AUTHORITY_SEAL,
     )
 
@@ -1798,12 +1906,21 @@ def require_bound_source_row_temporal_authority(
             )
         )
     def verify() -> None:
-        current = load_bound_source_row_temporal_authority(
-            value._source_rowset_node,
-            value._source_frame_index_node,
-            source_row_identity=value.source_row_identity,
-            acquisition_frame=value.acquisition_frame,
-        )
+        if value._manifest_authority is None:
+            current = load_bound_source_row_temporal_authority(
+                value._source_rowset_node,
+                value._source_frame_index_node,
+                source_row_identity=value.source_row_identity,
+                acquisition_frame=value.acquisition_frame,
+            )
+        else:
+            current = _bind_manifest_source_row_temporal_authority(
+                value._source_rowset_node,
+                value._source_frame_index_node,
+                source_row_identity=value.source_row_identity,
+                acquisition_frame=value.acquisition_frame,
+                manifest_authority=value._manifest_authority,
+            )
         if (
             current.record != value.record
             or current.record_ref != value.record_ref
@@ -2634,6 +2751,59 @@ def load_bound_row_identity_contract(
         _archive_identity=archive_identity(rowset_node),
         _rowset_node=rowset_node,
         _key_array_node=key_array_node,
+        _manifest_authority=None,
+        _verification_seal=_BOUND_ROW_IDENTITY_SEAL,
+    )
+    bound.assert_verified()
+    return bound
+
+
+def _bind_manifest_row_identity_contract(
+    rowset_node: Any,
+    key_array_node: Any,
+    *,
+    manifest_authority: BoundCoordinateRecord,
+) -> BoundRowIdentityContract:
+    """Bind observation identity without adding attrs to an immutable rowset."""
+
+    authority = verify_bound_coordinate_record(manifest_authority)
+    identity = require_same_archive(rowset_node, key_array_node)
+    rowset_path = _persisted_node_path(rowset_node, label="rowset")
+    key_array_path = _persisted_node_path(key_array_node, label="key_array")
+    _require_key_array_node_ref(
+        rowset_node,
+        key_array_node,
+        expected_ref=INSTANCE_KEY_ARRAY_REF,
+    )
+    if (
+        authority.archive_identity != identity
+        or authority.record_ref != f"/{rowset_path}@run_manifest"
+    ):
+        raise RowIdentityContractError(
+            (
+                _issue(
+                    "manifest_row_identity_authority_mismatch",
+                    "$.manifest_authority",
+                    "Manifest authority does not own the exact observation rowset.",
+                ),
+            )
+        )
+    values = np.array(key_array_node[:], copy=True, order="C")
+    contract = build_row_identity_contract(
+        domain=OBSERVATION_INSTANCE_DOMAIN,
+        values=values,
+    )
+    bound = BoundRowIdentityContract(
+        contract=contract,
+        rowset_path=rowset_path,
+        key_array_path=key_array_path,
+        record_ref=authority.record_ref,
+        record_sha256=authority.record_sha256,
+        track_time_lineage=None,
+        _archive_identity=identity,
+        _rowset_node=rowset_node,
+        _key_array_node=key_array_node,
+        _manifest_authority=authority,
         _verification_seal=_BOUND_ROW_IDENTITY_SEAL,
     )
     bound.assert_verified()
@@ -2664,6 +2834,7 @@ def stamp_and_bind_row_identity_contract(
 __all__ = [
     "INSTANCE_KEY_ARRAY_REF",
     "INSTANCE_KEY_MODE",
+    "MANIFEST_ROW_IDENTITY_ATTR",
     "OBSERVATION_INSTANCE_DOMAIN",
     "ROW_IDENTITY_CONTRACT_ATTR",
     "ROW_IDENTITY_CONTRACT_CANONICALIZATION",

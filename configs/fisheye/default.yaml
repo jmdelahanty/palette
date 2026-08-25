@@ -56,7 +56,7 @@ crop:
   - 384
   padding_mode: zero_outside_source_frame
   scheduler: distributed
-  source_type: detect              # future-canonical ordinary crops require detect_runs/<run>
+  source_type: detect              # materialized crop profile requires detect_runs/<run>
   num_workers: 5
   # External-video crop write path (analysis zarrs without imported raw frames)
   external_write_backend: kvikio

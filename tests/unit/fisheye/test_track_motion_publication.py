@@ -30,6 +30,7 @@ def _fresh_full_motion_run(
     fps: float = 1.0,
     smooth_seconds: float = 1.0,
     headings_deg: np.ndarray | None = None,
+    keypoint_success: np.ndarray | None = None,
     hysteresis_enabled: bool = False,
     source_rows: np.ndarray | None = None,
     source_position_dtype: np.dtype | type = np.float64,
@@ -45,6 +46,11 @@ def _fresh_full_motion_run(
         np.zeros(2, dtype=np.float32)
         if headings_deg is None
         else np.asarray(headings_deg)
+    )
+    source_keypoint_success = (
+        np.ones(2, dtype=bool)
+        if keypoint_success is None
+        else np.asarray(keypoint_success, dtype=bool)
     )
     crop_parent = _WritableGroup(
         path="crop_runs",
@@ -66,7 +72,7 @@ def _fresh_full_motion_run(
     )
     usability_node = keypoint.create_array(
         "heading_usable",
-        data=np.ones(2, dtype=bool),
+        data=source_keypoint_success,
     )
     keypoint.create_array(
         "instance_key",
@@ -129,7 +135,7 @@ def _fresh_full_motion_run(
         frames=frames,
         positions_px=np.asarray(source.coordinates.coordinate_node[:])[source_rows],
         headings_deg=source_heading_values[source_rows],
-        keypoint_success=np.ones(source_rows.shape, dtype=bool),
+        keypoint_success=source_keypoint_success[source_rows],
         detection_source=None,
         fps=fps,
         smooth_seconds=smooth_seconds,
@@ -1163,6 +1169,23 @@ def test_full_motion_fps_60_publishes_unique_second_bin_identity(
     assert seconds.tolist() == [0]
     assert track["speed_per_second_px"].shape == (1,)
     assert track["heading_per_second_degrees"].shape == (1,)
+    run.attrs["stage_selector_eligible"] = True
+    mod.load_bound_track_motion_run(root, run)
+
+
+def test_full_motion_heading_per_second_excludes_unusable_heading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, track, _sealed, _physical = _fresh_full_motion_run(
+        monkeypatch,
+        fps=60.0,
+        smooth_seconds=1.0 / 60.0,
+        headings_deg=np.asarray([10.0, 170.0], dtype=np.float32),
+        keypoint_success=np.asarray([True, False], dtype=bool),
+    )
+
+    assert track["heading_per_second_degrees"][:].tolist() == [10.0]
+    assert track["heading_per_second_resultant"][:].tolist() == [1.0]
     run.attrs["stage_selector_eligible"] = True
     mod.load_bound_track_motion_run(root, run)
 

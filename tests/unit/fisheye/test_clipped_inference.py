@@ -1600,6 +1600,21 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
 
     hybrid_run = str(target["hybrid_crop_run"])
     geometry_run = str(target["geometry_crop_run"])
+    fragments = {
+        fragment["fragment_id"]: fragment
+        for fragment in plan.lsf_workflow.to_json()["metadata"]["fragments"]
+    }
+    keypoint_fragment = fragments[f"keypoints:{target_safe}"]
+    assert keypoint_fragment["requires"] == [
+        f"hybrid_crop_provider:{target_safe}",
+        f"crop_snapshot:{target_safe}",
+    ]
+    assert keypoint_fragment["metadata"]["crop_run"] == geometry_run
+    assert keypoint_fragment["metadata"]["geometry_crop_run"] == geometry_run
+    assert keypoint_fragment["metadata"]["pixel_crop_run"] == hybrid_run
+    assert keypoint_fragment["metadata"]["finalization_mapping_mode"] == (
+        "identity_rebase"
+    )
     hybrid_command = " ".join(jobs[f"hybrid_crop:{target_safe}"].command)
     assert "build_hybrid_acquisition_offline_crop_run" in hybrid_command
     assert f"--run-name {hybrid_run}" in hybrid_command
@@ -1615,16 +1630,16 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
     preflight_key = f"keypoint_finalize_preflight:{target_safe}"
     preflight = " ".join(jobs[preflight_key].command)
     assert jobs[preflight_key].dependency.upstream_job_keys == (
-        f"hybrid_crop:{target_safe}",
+        f"crop_snapshot_publish:{target_safe}",
     )
     assert jobs[f"keypoints_array:{target_safe}"].dependency.upstream_job_keys == (
         preflight_key,
     )
     assert "fisheye.utils.finalize_keypoint_shards" in preflight
-    assert f"--target-crop-run {hybrid_run}" in preflight
+    assert f"--target-crop-run {geometry_run}" in preflight
     assert "--preflight-target-only" in preflight
     assert "--expected-target-row-count 200" in preflight
-    assert target["keypoint_finalization_mapping_mode"] == ("direct_same_crop_row_ids")
+    assert target["keypoint_finalization_mapping_mode"] == "identity_rebase"
 
     keypoint_tasks = _execution_tasks(jobs[f"keypoints_array:{target_safe}"])
     mask_tasks = _execution_tasks(jobs[f"subject_masks_array:{target_safe}"])
@@ -1654,7 +1669,7 @@ def test_downstream_scope_uses_one_recording_crop_provider_and_clip_row_arrays(
     )
 
     finalize = " ".join(jobs[f"keypoint_finalize:{target_safe}"].command)
-    assert f"--target-crop-run {hybrid_run}" in finalize
+    assert f"--target-crop-run {geometry_run}" in finalize
     assert "merge_clipped_proxy_crop_runs" not in finalize
     package = _execution_tasks(jobs[f"mask_package_array:{target_safe}"])[
         f"mask_package:{target_safe}:clip_000000"

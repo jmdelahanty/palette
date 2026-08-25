@@ -444,7 +444,7 @@ cropped ROI tensors needed by downstream consumers.
 
 | Array | Shape | DType | Notes |
 | ----- | ----- | ----- | ----- |
-| `roi_images` | `(n_rois, h, w)` | `uint8` | Cropped grayscale patches. Required for future ordinary runs; absent only on historical `geometry_only` compatibility runs. |
+| `roi_images` | `(n_rois, h, w)` | `uint8` | Cropped grayscale patches. Required by the materialized crop profile and absent from the sealed geometry-only profile. |
 | `roi_coordinates_full` | `(n_rois, 2)` | `int32` | Source-camera `points_xy` compatibility surface for each ROI top-left. Canonical ordinary runs bind it to the observation `instance_key` rows and exact `source_crop_xywh[:, :2]` payload with a digest-checked derivation; it is directly suitable for source-camera overlay. |
 | `roi_coordinates_ds` *(historical only)* | `(n_rois, 2)` | `int32` | Ambiguous downsampled offsets retained only for legacy reads; future ordinary writers do not reconstruct them from a resolution ratio. |
 | `instance_key` | `(n_rois,)` | `uint64` | Exact observation identity copied from the selected canonical detection rowset. |
@@ -493,12 +493,13 @@ Parent-group pointer semantics for historical mixed-mode archives:
 - `crop_runs.attrs["latest_any"]` tracks the latest run regardless of storage
   mode.
 
-Future ordinary-writer policy:
+Supported crop publication profiles:
 
-- Direct, batch, Palette CLI, launcher, and flat-cache workflows default to
-  materialized output from an exact `detect_runs/<run>` source.
-- New ordinary crop runs reject `geometry_only` before run creation. Historical
-  geometry-only groups remain explicit read-compatibility surfaces.
+- Direct, batch, Palette CLI, launcher, and flat-cache workflows that select
+  the materialized profile write pixels with coordinates from an exact
+  `detect_runs/<run>` source.
+- The sealed geometry-only profile stores coordinates and signed pixel-origin
+  authority separately. Both profiles resolve through the shared consumer gate.
 - New ordinary crop runs reject refined and legacy sparse sources until those
   producers publish an exact canonical row-selection contract.
 - Canonical ordinary crop runs persist `roi_images`, instance identity,

@@ -63,13 +63,12 @@ from fisheye.shared.zarr.keypoint_publication_mode import (
 )
 from fisheye.shared.zarr.keypoint_schema import KEYPOINT_SCHEMA_V2, KeypointDimensions
 from fisheye.shared.zarr.keypoint_storage import plan_keypoint_storage
-from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
-    HISTORICAL_BBOX_NORMALIZATION_ATTR,
-    bind_historical_bbox_normalization_to_successor,
+from fisheye.shared.zarr.sealed_geometry_crop_profile import (
+    SEALED_GEOMETRY_BBOX_NORMALIZATION_ATTR,
+    bind_sealed_geometry_bbox_normalization_to_successor,
     bind_persisted_padded_placement_record,
     bind_persisted_run_attribute_record,
-    bind_historical_geometry_only_crop_source,
-    historical_geometry_only_crop_loader,
+    bind_sealed_geometry_crop_successor_source,
     stamp_persisted_padded_placement_provenance,
 )
 from fisheye.shared.zarr.array_contracts import ArrayContract, DTypeContract
@@ -330,7 +329,7 @@ def _read_successor_source_array(run: Any, name: str) -> np.ndarray:
     return np.ascontiguousarray(values)
 
 
-def _derive_historical_image_coordinates(
+def _derive_sealed_crop_image_coordinates(
     roi_values: np.ndarray,
     placement: np.ndarray,
     *,
@@ -358,7 +357,7 @@ def _derive_historical_image_coordinates(
     return result.reshape(values.shape) if bbox else result
 
 
-def _normalize_historical_image_coordinates(
+def _normalize_source_image_coordinates(
     values: np.ndarray,
     *,
     width: int,
@@ -435,10 +434,10 @@ def _plan_keypoint_auxiliaries(
     *,
     source_run: Any,
     source_manifest: Mapping[str, Any],
-    historical_crop: Any,
+    sealed_crop: Any,
 ) -> _KeypointAuxiliaryMaterializationPlan:
     rows = _read_successor_source_array(source_run, "source_crop_row_ids")
-    placement_source = historical_crop.source._rowset_node["source_crop_xywh"]
+    placement_source = sealed_crop.source._rowset_node["source_crop_xywh"]
     placement = np.ascontiguousarray(np.asarray(placement_source[rows]))
     expected_count = int(rows.shape[0])
     if rows.dtype != np.dtype("<i8") or rows.ndim != 1 or expected_count == 0:
@@ -449,13 +448,13 @@ def _plan_keypoint_auxiliaries(
         raise ValueError(
             "Historical crop placement does not cover every keypoint source row."
         )
-    roi_width = int(historical_crop.source.roi_frame.endpoint.width)
-    roi_height = int(historical_crop.source.roi_frame.endpoint.height)
-    # The adapter has already validated the full crop. Re-check the selected
-    # placement values here so this preflight is the exact apply input.
+    roi_width = int(sealed_crop.source.roi_frame.endpoint.width)
+    roi_height = int(sealed_crop.source.roi_frame.endpoint.height)
+    # The profile branch has already validated the full crop. Re-check the
+    # selected placement values here so this preflight is the exact apply input.
     if placement.dtype != np.dtype("<f4") or not np.isfinite(placement).all():
         raise ValueError(
-            "Selected historical crop placement is not exact finite float32 xywh."
+            "Selected sealed crop placement is not exact finite float32 xywh."
         )
     keypoints_roi = _read_successor_source_array(source_run, "keypoints_roi")
     keypoints_img = _read_successor_source_array(source_run, "keypoints_img")
@@ -472,10 +471,10 @@ def _plan_keypoint_auxiliaries(
         raise ValueError(
             "Historical keypoint image arrays do not match ROI array shapes."
         )
-    expected_keypoints_img = _derive_historical_image_coordinates(
+    expected_keypoints_img = _derive_sealed_crop_image_coordinates(
         keypoints_roi, placement, roi_width=roi_width, roi_height=roi_height
     )
-    expected_bbox_img = _derive_historical_image_coordinates(
+    expected_bbox_img = _derive_sealed_crop_image_coordinates(
         bbox_roi, placement, roi_width=roi_width, roi_height=roi_height
     )
     if keypoints_img.dtype != keypoints_roi.dtype or not np.array_equal(
@@ -490,15 +489,15 @@ def _plan_keypoint_auxiliaries(
         raise ValueError(
             "Historical pose_bbox_xyxy_img is not an exact dtype-preserving ROI+placement derivation."
         )
-    keypoints_norm = _normalize_historical_image_coordinates(
+    keypoints_norm = _normalize_source_image_coordinates(
         expected_keypoints_img,
-        width=historical_crop.source.crop_geometry.source_geometry.frame_evidence.source_camera_frame.endpoint.width,
-        height=historical_crop.source.crop_geometry.source_geometry.frame_evidence.source_camera_frame.endpoint.height,
+        width=sealed_crop.source.crop_geometry.source_geometry.frame_evidence.source_camera_frame.endpoint.width,
+        height=sealed_crop.source.crop_geometry.source_geometry.frame_evidence.source_camera_frame.endpoint.height,
     )
-    bbox_norm = _normalize_historical_image_coordinates(
+    bbox_norm = _normalize_source_image_coordinates(
         expected_bbox_img,
-        width=historical_crop.source.crop_geometry.source_geometry.frame_evidence.bbox_source_camera_frame.endpoint.width,
-        height=historical_crop.source.crop_geometry.source_geometry.frame_evidence.bbox_source_camera_frame.endpoint.height,
+        width=sealed_crop.source.crop_geometry.source_geometry.frame_evidence.bbox_source_camera_frame.endpoint.width,
+        height=sealed_crop.source.crop_geometry.source_geometry.frame_evidence.bbox_source_camera_frame.endpoint.height,
     )
     profile = storage_profile_from_manifest(
         source_manifest["payload"]["storage_plan"]["storage_profile"]
@@ -606,7 +605,7 @@ def inspect_keypoint_coordinate_successor_source(
     if not isinstance(transform_value, Mapping):
         raise ValueError("Raw keypoint preprocessing lacks model_input_transform.")
     transform = model_input_transform_from_attrs(dict(transform_value))
-    historical_crop = bind_historical_geometry_only_crop_source(
+    sealed_crop = bind_sealed_geometry_crop_successor_source(
         analysis_zarr=archive,
         root=root,
         crop_reference=payload["source_crop_snapshot"],
@@ -628,7 +627,7 @@ def inspect_keypoint_coordinate_successor_source(
     auxiliary_plan = _plan_keypoint_auxiliaries(
         source_run=source,
         source_manifest=manifest,
-        historical_crop=historical_crop,
+        sealed_crop=sealed_crop,
     )
     crop = payload["source_crop_snapshot"]
     return json_attr_safe(
@@ -647,7 +646,7 @@ def inspect_keypoint_coordinate_successor_source(
             "source_metadata_tree_sha256": metadata_tree_sha256(source_path),
             "source_authority_digest": canonical_json_sha256(authority),
             "source_crop_path": crop["run_path"],
-            "historical_crop_adapter": historical_crop.as_record(),
+            "historical_crop_adapter": sealed_crop.as_record(),
             "auxiliary_materialization": auxiliary_plan.as_record(),
             "preprocessing_input_mode": _submitted_input_mode(preprocessing),
             "model_input_transform": transform.to_attrs(),
@@ -825,7 +824,7 @@ def publish_keypoint_coordinate_successor(
             raise RuntimeError(
                 "Keypoint semantic attrs changed between dry-run and apply."
             )
-        historical_crop = bind_historical_geometry_only_crop_source(
+        sealed_crop = bind_sealed_geometry_crop_successor_source(
             analysis_zarr=archive,
             root=root,
             crop_reference=source_manifest["payload"]["source_crop_snapshot"],
@@ -844,7 +843,7 @@ def publish_keypoint_coordinate_successor(
         auxiliary_plan = _plan_keypoint_auxiliaries(
             source_run=source,
             source_manifest=source_manifest,
-            historical_crop=historical_crop,
+            sealed_crop=sealed_crop,
         )
         if auxiliary_plan.as_record() != checked["auxiliary_materialization"]:
             raise RuntimeError(
@@ -864,8 +863,8 @@ def publish_keypoint_coordinate_successor(
                 f"{KEYPOINT_COORDINATE_AUXILIARY_ATTR}_sha256",
                 "coordinate_successor_padded_crop_lineage",
                 "coordinate_successor_padded_crop_lineage_sha256",
-                HISTORICAL_BBOX_NORMALIZATION_ATTR,
-                f"{HISTORICAL_BBOX_NORMALIZATION_ATTR}_sha256",
+                SEALED_GEOMETRY_BBOX_NORMALIZATION_ATTR,
+                f"{SEALED_GEOMETRY_BBOX_NORMALIZATION_ATTR}_sha256",
                 RUN_COMPLETED_AT_ATTR,
                 "palette_run_failed_at_utc",
                 "palette_run_error",
@@ -881,9 +880,9 @@ def publish_keypoint_coordinate_successor(
                     "coordinate_contract": "coordinate_successor_preparing",
                     "coordinate_successor_policy": KEYPOINT_COORDINATE_SUCCESSOR_PUBLICATION_POLICY,
                     "coordinate_successor_source_run_path": f"keypoints_runs/{source_id}",
-                    "coordinate_successor_historical_crop_adapter": historical_crop.as_record(),
+                    "coordinate_successor_historical_crop_adapter": sealed_crop.as_record(),
                     "coordinate_successor_historical_crop_adapter_sha256": canonical_json_sha256(
-                        historical_crop.as_record()
+                        sealed_crop.as_record()
                     ),
                     **semantic_attrs,
                     ATOMIC_PUBLICATION_OWNER_ATTR: owner,
@@ -915,9 +914,9 @@ def publish_keypoint_coordinate_successor(
             run.attrs[f"{KEYPOINT_COORDINATE_AUXILIARY_ATTR}_sha256"] = (
                 canonical_json_sha256(run.attrs[KEYPOINT_COORDINATE_AUXILIARY_ATTR])
             )
-            stamp_persisted_padded_placement_provenance(run, historical_crop)
-            publication_crop = bind_historical_bbox_normalization_to_successor(
-                historical_crop,
+            stamp_persisted_padded_placement_provenance(run, sealed_crop)
+            publication_crop = bind_sealed_geometry_bbox_normalization_to_successor(
+                sealed_crop,
                 root=root,
                 successor_run=run,
                 successor_run_path=f"keypoints_runs/{successor_id}",
@@ -930,18 +929,20 @@ def publish_keypoint_coordinate_successor(
             transform = model_input_transform_from_attrs(
                 dict(preprocessing.document["model_input_transform"])
             )
-            with historical_geometry_only_crop_loader(publication_crop):
-                prepare_keypoint_coordinate_context(
-                    root,
-                    f"keypoints_runs/{successor_id}",
-                    crop_path=str(payload["source_crop_snapshot"]["run_path"]),
-                    model_input_transform=transform,
-                    preprocessing_input_mode=_submitted_input_mode(preprocessing),
-                    model_artifact=artifact,
-                )
-                surfaces = publish_keypoint_coordinate_surfaces(
-                    root, f"keypoints_runs/{successor_id}"
-                )
+            prepare_keypoint_coordinate_context(
+                root,
+                f"keypoints_runs/{successor_id}",
+                crop_path=str(payload["source_crop_snapshot"]["run_path"]),
+                model_input_transform=transform,
+                preprocessing_input_mode=_submitted_input_mode(preprocessing),
+                model_artifact=artifact,
+                _resolved_crop_source=publication_crop.source,
+            )
+            surfaces = publish_keypoint_coordinate_surfaces(
+                root,
+                f"keypoints_runs/{successor_id}",
+                _resolved_crop_source=publication_crop.source,
+            )
             # Zarr group objects retain their own metadata snapshot.  The
             # coordinate publisher reloads the target and returns that exact
             # freshly verified group; continuing through the older preflight
@@ -949,7 +950,7 @@ def publish_keypoint_coordinate_successor(
             # attrs on the next write.
             run = surfaces.context._run_group
             run.attrs["coordinate_successor_padded_crop_lineage"] = {
-                "source_crop_adapter": historical_crop.as_record(),
+                "source_crop_adapter": sealed_crop.as_record(),
                 "placement_ownership": bind_persisted_padded_placement_record(run),
             }
             run.attrs["coordinate_successor_padded_crop_lineage_sha256"] = (
@@ -964,7 +965,7 @@ def publish_keypoint_coordinate_successor(
                 run, attr_name=KEYPOINT_COORDINATE_AUXILIARY_ATTR
             )
             bbox_normalization_record = bind_persisted_run_attribute_record(
-                run, attr_name=HISTORICAL_BBOX_NORMALIZATION_ATTR
+                run, attr_name=SEALED_GEOMETRY_BBOX_NORMALIZATION_ATTR
             )
             authority = build_coordinate_successor_authority(
                 kind=KEYPOINT_COORDINATE_SUCCESSOR_KIND,
@@ -1030,14 +1031,13 @@ def publish_keypoint_coordinate_successor(
                     "Keypoint selectors changed during successor publication."
                 )
             published_run = published[f"keypoints_runs/{successor_id}"]
-            with historical_geometry_only_crop_loader(publication_crop):
-                published_surfaces = (
-                    require_bound_ineligible_keypoint_coordinate_surfaces(
-                        load_persisted_ineligible_keypoint_coordinate_surfaces(
-                            published, f"keypoints_runs/{successor_id}"
-                        )
+            published_surfaces = (
+                require_bound_ineligible_keypoint_coordinate_surfaces(
+                    load_persisted_ineligible_keypoint_coordinate_surfaces(
+                        published, f"keypoints_runs/{successor_id}"
                     )
                 )
+            )
             load_coordinate_successor_authority(
                 published_run,
                 expected_kind=KEYPOINT_COORDINATE_SUCCESSOR_KIND,

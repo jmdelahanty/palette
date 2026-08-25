@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Import one explicitly approved, camera-matched analysis calibration.
+"""Import or repair one explicitly approved, camera-matched calibration.
 
 The command is dry-run by default.  ``--apply`` copies the donor's complete
 ``analysis/calibration`` subtree into a target analysis Zarr and writes a
-sidecar receipt.  It does not infer a donor: both Zarrs and the expected camera
-serial must be supplied explicitly.
+sidecar receipt.  Modern coordinate records are rebuilt from the exact source
+H5 evidence so they bind the target recording's acquisition authority instead
+of retaining the donor recording's binding.  ``--repair-existing`` performs
+that rebinding for a calibration previously copied by this tool.  It does not
+infer a donor: both Zarrs and the expected camera serial must be supplied
+explicitly.
 """
 
 from __future__ import annotations
@@ -20,11 +24,30 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import h5py
 import numpy as np
 import zarr
 
+from fisheye.shared.coordinate_frame_record import (
+    PHYSICAL_FRAME_CALIBRATION_ATTR,
+    SELECTED_CAMERA_FRAME_EVIDENCE_ATTR,
+    parse_physical_frame_calibration_record,
+    parse_selected_camera_frame_evidence_record,
+)
+from fisheye.shared.selected_calibration import (
+    SOURCE_ARENA_CONFIG_DATASET_PATH,
+    VerifiedSelectedCameraSourceEvidence,
+    build_selected_camera_source_evidence_from_h5_values,
+)
+from fisheye.shared.source_camera_physical_authority import (
+    load_source_camera_physical_authority,
+    rebind_source_camera_physical_authority,
+    validate_source_camera_physical_authority_rebind,
+)
+
 MODULE_NAME = "fisheye.utils.import_donor_analysis_calibration"
-RECEIPT_SCHEMA = "palette.donor_analysis_calibration_import.v1"
+RECEIPT_SCHEMA = "palette.donor_analysis_calibration_import.v2"
+SOURCE_KIND = "operator_verified_donor_calibration"
 
 
 def _utc_now() -> str:
@@ -36,6 +59,13 @@ def _open_group(path: Path, *, mode: str) -> zarr.Group:
         return zarr.open_group(str(path), mode=mode, use_consolidated=False)
     except TypeError:
         return zarr.open_group(str(path), mode=mode, consolidated=False)
+
+
+def _open_consolidated(path: Path) -> zarr.Group:
+    try:
+        return zarr.open_group(str(path), mode="r", use_consolidated=True)
+    except TypeError:
+        return zarr.open_group(str(path), mode="r", consolidated=True)
 
 
 def _sha256_file(path: Path) -> str:
@@ -118,12 +148,146 @@ def _source_geometry(recording_dir: Path, camera_serial: str) -> dict[str, Any]:
     return {"path": str(snapshot_path), "width": width, "height": height}
 
 
+def _verified_donor_camera_evidence(
+    calibration: zarr.Group,
+    *,
+    expected_camera: str,
+) -> VerifiedSelectedCameraSourceEvidence:
+    selected = calibration.get("coordinate_frames/selected_camera_evidence")
+    if not isinstance(selected, zarr.Group):
+        raise ValueError("donor selected-camera coordinate evidence is missing")
+    raw_record = selected.attrs.get(SELECTED_CAMERA_FRAME_EVIDENCE_ATTR)
+    parsed_record = parse_selected_camera_frame_evidence_record(raw_record)
+    if parsed_record.camera_id != expected_camera:
+        raise ValueError("donor selected-camera evidence names another camera")
+
+    source_h5 = Path(
+        str(parsed_record.source_camera.get("source_h5_path") or "")
+    ).expanduser()
+    if not source_h5.is_absolute() or not source_h5.is_file():
+        raise FileNotFoundError(
+            f"donor selected-camera source H5 is unavailable: {source_h5}"
+        )
+    source_h5 = source_h5.resolve()
+    with h5py.File(source_h5, "r") as handle:
+        actual = Path(str(handle.filename)).expanduser().resolve()
+        try:
+            descriptor = handle.id.get_vfd_handle()
+            if isinstance(descriptor, tuple):
+                descriptor = descriptor[0]
+            open_stat = os.fstat(int(descriptor))
+            path_stat = os.stat(source_h5)
+        except (AttributeError, OSError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "unable to bind the donor source H5 handle to its exact file"
+            ) from exc
+        if actual != source_h5 or (
+            open_stat.st_dev,
+            open_stat.st_ino,
+        ) != (path_stat.st_dev, path_stat.st_ino):
+            raise ValueError("donor source H5 changed while it was opened")
+        if SOURCE_ARENA_CONFIG_DATASET_PATH not in handle or not isinstance(
+            handle[SOURCE_ARENA_CONFIG_DATASET_PATH], h5py.Dataset
+        ):
+            raise ValueError(
+                f"donor source H5 lacks {SOURCE_ARENA_CONFIG_DATASET_PATH}"
+            )
+        camera_group_path = f"/calibration_snapshot/{expected_camera}"
+        if camera_group_path not in handle or not isinstance(
+            handle[camera_group_path], h5py.Group
+        ):
+            raise ValueError(
+                f"donor source H5 lacks exact camera group {camera_group_path}"
+            )
+        camera_group = handle[camera_group_path]
+        verified = build_selected_camera_source_evidence_from_h5_values(
+            source_h5_path=str(source_h5),
+            arena_config_raw=handle[SOURCE_ARENA_CONFIG_DATASET_PATH][()],
+            camera_group_path=camera_group_path,
+            camera_group_attrs=dict(camera_group.attrs),
+            expected_camera_id=expected_camera,
+        )
+    if verified.to_dict() != parsed_record.source_camera:
+        raise ValueError(
+            "donor persisted selected-camera evidence differs from the exact "
+            "source H5 nodes"
+        )
+    return verified
+
+
+def _validate_existing_import(
+    target_root: zarr.Group,
+    *,
+    donor_path: Path,
+    expected_camera: str,
+    preflight: Mapping[str, Any],
+    evidence: VerifiedSelectedCameraSourceEvidence,
+) -> dict[str, Any]:
+    calibration = target_root.get("analysis/calibration")
+    if not isinstance(calibration, zarr.Group):
+        raise ValueError("target has no existing analysis/calibration to repair")
+    attrs = dict(calibration.attrs)
+    if attrs.get("imported_by") != MODULE_NAME:
+        raise ValueError("existing target calibration was not imported by this tool")
+    if Path(str(attrs.get("immediate_donor_zarr") or "")).resolve() != donor_path:
+        raise ValueError("existing target calibration names another immediate donor")
+    if attrs.get("operator_configuration_verified") is not True:
+        raise ValueError(
+            "existing target donor configuration was not operator verified"
+        )
+    for field in ("active_camera_id", "primary_camera_id"):
+        if str(attrs.get(field) or "") != expected_camera:
+            raise ValueError(f"existing target {field} names another camera")
+    for field in ("pixels_per_mm_camera", "pixel_to_mm"):
+        if _positive_float(attrs.get(field), field=field) != float(preflight[field]):
+            raise ValueError(f"existing target {field} differs from the donor")
+    matrix = np.asarray(calibration["homography_matrix"][:], dtype=np.float64)
+    if not np.array_equal(matrix, np.asarray(preflight["homography_matrix"])):
+        raise ValueError("existing target homography differs from the donor")
+
+    selected = calibration.get("coordinate_frames/selected_camera_evidence")
+    physical = calibration.get("coordinate_frames/source_camera_physical_mm")
+    if not isinstance(selected, zarr.Group) or not isinstance(physical, zarr.Group):
+        raise ValueError("existing target coordinate calibration records are missing")
+    selected_record = parse_selected_camera_frame_evidence_record(
+        selected.attrs.get(SELECTED_CAMERA_FRAME_EVIDENCE_ATTR)
+    )
+    if selected_record.source_camera != evidence.to_dict():
+        raise ValueError(
+            "existing target selected-camera evidence differs from the exact donor H5"
+        )
+    physical_record = parse_physical_frame_calibration_record(
+        physical.attrs.get(PHYSICAL_FRAME_CALIBRATION_ATTR)
+    )
+    if (
+        physical_record.camera_id != expected_camera
+        or physical_record.pixels_per_mm_camera != evidence.pixels_per_mm_camera
+    ):
+        raise ValueError("existing target physical record differs from donor evidence")
+    try:
+        bound = load_source_camera_physical_authority(target_root)
+    except (KeyError, ValueError) as exc:
+        validate_source_camera_physical_authority_rebind(
+            target_root,
+            source_camera_evidence=evidence,
+        )
+        return {
+            "target_authority_status": "requires_rebind",
+            "target_authority_error": str(exc),
+        }
+    return {
+        "target_authority_status": "already_valid",
+        "target_authority_record_sha256": bound.manifest.record_sha256,
+    }
+
+
 def _preflight(
     target_zarr: Path,
     donor_zarr: Path,
     *,
     expected_camera: str,
-) -> dict[str, Any]:
+    repair_existing: bool,
+) -> tuple[dict[str, Any], VerifiedSelectedCameraSourceEvidence]:
     target_zarr = target_zarr.expanduser().resolve()
     donor_zarr = donor_zarr.expanduser().resolve()
     if not target_zarr.is_dir():
@@ -143,9 +307,13 @@ def _preflight(
     if not target_recording_id:
         raise ValueError("target Zarr has no recording_id")
     target_group_path = target_zarr / "analysis" / "calibration"
-    if target_group_path.exists():
+    if target_group_path.exists() and not repair_existing:
         raise FileExistsError(
             f"target analysis/calibration already exists: {target_group_path}"
+        )
+    if repair_existing and not target_group_path.exists():
+        raise FileNotFoundError(
+            f"target analysis/calibration does not exist: {target_group_path}"
         )
 
     donor_root = _open_group(donor_zarr, mode="r")
@@ -155,6 +323,13 @@ def _preflight(
     )
     if not isinstance(calibration, zarr.Group):
         raise ValueError(f"donor has no analysis/calibration group: {donor_zarr}")
+    donor_authority = load_source_camera_physical_authority(donor_root)
+    if donor_authority.camera_id != expected_camera:
+        raise ValueError("donor physical authority names another camera")
+    evidence = _verified_donor_camera_evidence(
+        calibration,
+        expected_camera=expected_camera,
+    )
     attrs = dict(calibration.attrs)
     for field in ("active_camera_id", "primary_camera_id"):
         if str(attrs.get(field) or "") != expected_camera:
@@ -169,6 +344,14 @@ def _preflight(
     if not math.isclose(pixels_per_mm * pixel_to_mm, 1.0, rel_tol=1e-12, abs_tol=1e-12):
         raise ValueError(
             "donor pixels_per_mm_camera and pixel_to_mm are not reciprocal"
+        )
+    if (
+        evidence.pixels_per_mm_camera != pixels_per_mm
+        or donor_authority.mm_per_pixel != pixel_to_mm
+    ):
+        raise ValueError(
+            "donor calibration attrs, selected-camera evidence, and physical "
+            "authority do not share one exact camera scale"
         )
 
     native_width = int(attrs.get("native_width_px") or 0)
@@ -201,7 +384,7 @@ def _preflight(
     donor_files = _tree_manifest(donor_path)
     if not donor_files:
         raise ValueError(f"donor calibration tree is empty: {donor_path}")
-    return {
+    result = {
         "target_zarr": str(target_zarr),
         "target_recording_id": target_recording_id,
         "donor_zarr": str(donor_zarr),
@@ -220,6 +403,17 @@ def _preflight(
         "donor_tree_sha256": _tree_digest(donor_files),
         "donor_files": donor_files,
     }
+    if repair_existing:
+        result.update(
+            _validate_existing_import(
+                target_root,
+                donor_path=donor_zarr,
+                expected_camera=expected_camera,
+                preflight=result,
+                evidence=evidence,
+            )
+        )
+    return result, evidence
 
 
 def import_donor_calibration(
@@ -229,16 +423,22 @@ def import_donor_calibration(
     expected_camera: str,
     operator_note: str,
     apply: bool = False,
+    repair_existing: bool = False,
 ) -> dict[str, Any]:
     if not operator_note.strip():
         raise ValueError("operator_note must describe why donor reuse is valid")
     target_path = Path(target_zarr).expanduser().resolve()
     donor_path = Path(donor_zarr).expanduser().resolve()
-    preflight = _preflight(
-        target_path, donor_path, expected_camera=str(expected_camera).strip()
+    preflight, evidence = _preflight(
+        target_path,
+        donor_path,
+        expected_camera=str(expected_camera).strip(),
+        repair_existing=bool(repair_existing),
     )
-    receipt_path = (
-        target_path.parent / f"{target_path.name}_calibration_import_receipt.json"
+    receipt_path = target_path.parent / (
+        f"{target_path.name}_calibration_authority_repair_receipt.json"
+        if repair_existing
+        else f"{target_path.name}_calibration_import_receipt.json"
     )
     result = {
         "status": "planned" if not apply else "in_progress",
@@ -247,24 +447,44 @@ def import_donor_calibration(
         "generated_at_utc": _utc_now(),
         "host": socket.gethostname(),
         "operator_note": operator_note.strip(),
+        "operation": "repair_existing" if repair_existing else "import",
         "receipt_path": str(receipt_path),
         **preflight,
     }
     if not apply:
         return result
 
-    source_group_path = donor_path / "analysis" / "calibration"
     target_group_path = target_path / "analysis" / "calibration"
-    temporary = target_group_path.with_name(
-        f".{target_group_path.name}.donor-import-{os.getpid()}.incomplete"
-    )
-    if temporary.exists():
-        raise FileExistsError(f"temporary import path already exists: {temporary}")
-    shutil.copytree(source_group_path, temporary, copy_function=shutil.copy2)
-    os.replace(temporary, target_group_path)
+    if not repair_existing:
+        source_group_path = donor_path / "analysis" / "calibration"
+        temporary = target_group_path.with_name(
+            f".{target_group_path.name}.donor-import-{os.getpid()}.incomplete"
+        )
+        if temporary.exists():
+            raise FileExistsError(f"temporary import path already exists: {temporary}")
+        shutil.copytree(source_group_path, temporary, copy_function=shutil.copy2)
+        os.replace(temporary, target_group_path)
 
     target_root = _open_group(target_path, mode="r+")
     calibration = target_root["analysis/calibration"]
+    if preflight.get("target_authority_status") == "already_valid":
+        authority = load_source_camera_physical_authority(target_root)
+    else:
+        authority = rebind_source_camera_physical_authority(
+            target_root,
+            source_camera_evidence=evidence,
+            source_kind=SOURCE_KIND,
+            provenance={
+                "generated_by": MODULE_NAME,
+                "immediate_donor_zarr": str(donor_path),
+                "immediate_donor_recording_id": preflight["donor_recording_id"],
+                "source_h5": evidence.source_h5_path,
+                "operator_configuration_verified": True,
+                "operator_configuration_verification_note": operator_note.strip(),
+                "target_recording_id": preflight["target_recording_id"],
+            },
+        )
+
     calibration.attrs.update(
         {
             "immediate_donor_zarr": str(donor_path),
@@ -278,18 +498,43 @@ def import_donor_calibration(
             "imported_by": MODULE_NAME,
         }
     )
+    if repair_existing:
+        calibration.attrs.update(
+            {
+                "physical_authority_repaired_at_utc": _utc_now(),
+                "physical_authority_repaired_by": MODULE_NAME,
+                "physical_authority_repair_note": operator_note.strip(),
+            }
+        )
 
     imported_matrix = np.asarray(calibration["homography_matrix"][:], dtype=np.float64)
     if not np.array_equal(imported_matrix, np.asarray(preflight["homography_matrix"])):
         raise RuntimeError("imported homography does not match donor")
     if str(calibration.attrs.get("active_camera_id") or "") != expected_camera:
         raise RuntimeError("imported calibration camera identity changed")
+    authority.assert_verified()
+    zarr.consolidate_metadata(str(target_path))
+    consolidated_root = _open_consolidated(target_path)
+    consolidated_authority = load_source_camera_physical_authority(consolidated_root)
+    if (
+        consolidated_authority.manifest.record_sha256
+        != authority.manifest.record_sha256
+    ):
+        raise RuntimeError(
+            "consolidated source-camera authority differs from direct metadata"
+        )
     result.update(
         {
             "status": "pass",
             "completed_at_utc": _utc_now(),
             "target_calibration_path": str(target_group_path),
             "target_file_count": len(_tree_manifest(target_group_path)),
+            "target_authority_record_ref": authority.manifest.record_ref,
+            "target_authority_record_sha256": authority.manifest.record_sha256,
+            "target_source_camera_frame_sha256": (
+                authority.physical_frame.source_camera_pixels.record_sha256
+            ),
+            "consolidated_metadata_validated": True,
         }
     )
     receipt_path.write_text(
@@ -305,6 +550,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--expected-camera", required=True)
     parser.add_argument("--operator-note", required=True)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--repair-existing", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -314,6 +560,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_camera=args.expected_camera,
             operator_note=args.operator_note,
             apply=bool(args.apply),
+            repair_existing=bool(args.repair_existing),
         )
     except Exception as exc:
         if args.json:

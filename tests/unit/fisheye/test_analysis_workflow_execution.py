@@ -150,7 +150,7 @@ def _analysis_execution_plan(tmp_path: Path):
         "refined_keypoints": _status(
             "refined_keypoints",
             available=True,
-            run_name="refined_kp_a",
+            run_name="refined/refined_kp_a",
         ),
         "refined_subject_masks": _status(
             "refined_subject_masks",
@@ -289,7 +289,7 @@ def test_output_run_override_is_used_by_downstream_commands(tmp_path: Path) -> N
     workflow = load_analysis_workflow(default_core_behavior_profile_path())
     availability = {
         "refined_keypoints": _status(
-            "refined_keypoints", available=True, run_name="refined_kp_a"
+            "refined_keypoints", available=True, run_name="refined/refined_kp_a"
         ),
         "track_kinematics": _status(
             "track_kinematics", available=True, run_name="track_a"
@@ -323,7 +323,7 @@ def test_visualization_refuses_independent_output_run_override(tmp_path: Path) -
     workflow = load_analysis_workflow(default_core_behavior_profile_path())
     availability = {
         "refined_keypoints": _status(
-            "refined_keypoints", available=True, run_name="refined_kp_a"
+            "refined_keypoints", available=True, run_name="refined/refined_kp_a"
         ),
         "track_kinematics": _status(
             "track_kinematics", available=True, run_name="track_a"
@@ -357,7 +357,7 @@ def _kinematics_samples_execution_plan(tmp_path: Path):
     workflow = load_analysis_workflow(default_core_behavior_profile_path())
     availability = {
         "refined_keypoints": _status(
-            "refined_keypoints", available=True, run_name="refined_kp_a"
+            "refined_keypoints", available=True, run_name="refined/refined_kp_a"
         ),
         "track_kinematics": _status(
             "track_kinematics", available=True, run_name="track_a"
@@ -810,7 +810,7 @@ def test_execution_renders_staged_track_kinematics_materializer(tmp_path: Path) 
     availability = {
         "tracks": _status("tracks", available=True, run_name="tracking_a"),
         "refined_keypoints": _status(
-            "refined_keypoints", available=True, run_name="refined_kp_a"
+            "refined_keypoints", available=True, run_name="refined/refined_kp_a"
         ),
         "track_kinematics": _status("track_kinematics", available=False),
     }
@@ -834,6 +834,59 @@ def test_execution_renders_staged_track_kinematics_materializer(tmp_path: Path) 
     assert command.argv[command.argv.index("--shard-workers") + 1] == "5"
     assert "--apply" in command.argv
     assert "--" in command.argv
+
+
+def test_execution_composes_clipped_tracking_and_active_mask_bundle(
+    tmp_path: Path,
+) -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    availability = {
+        "refined_keypoints": _status(
+            "refined_keypoints",
+            available=True,
+            run_name="canonical_clipped_a",
+        ),
+        "tracks": _status("tracks", available=False),
+        "track_kinematics": _status("track_kinematics", available=False),
+        "refined_subject_masks": _status(
+            "refined_subject_masks",
+            available=True,
+            run_name="bundle/masks_bundle_a",
+        ),
+        "subject_shape": _status("subject_shape", available=False),
+    }
+    plan = plan_analysis_workflow(
+        workflow,
+        availability,
+        targets=("track_kinematics", "subject_shape"),
+    )
+
+    execution = build_workflow_execution_plan(
+        workflow,
+        plan,
+        zarr_path=tmp_path / "clipped_analysis.zarr",
+        execution_id="clipped_a",
+        num_workers=4,
+        python_executable="python",
+    )
+
+    commands = {command.node_id: command for command in execution.commands}
+    tracks = commands["tracks"].argv
+    assert "fisheye.tracking.arena_assignment" in tracks
+    assert tracks[tracks.index("--source-keypoint-run") + 1] == (
+        "canonical_clipped_a"
+    )
+    assert tracks[tracks.index("--arena-run-name") + 1] == (
+        "arena_assignment_tracks_clipped_a"
+    )
+    assert tracks[tracks.index("--tracking-run-name") + 1] == "tracks_clipped_a"
+
+    motion = commands["track_kinematics"].argv
+    assert motion[motion.index("--keypoint-run") + 1] == "canonical_clipped_a"
+
+    shape = commands["subject_shape"].argv
+    assert shape[shape.index("--subject-mask-bundle-id") + 1] == "masks_bundle_a"
+    assert "--refined-run" not in shape
 
 
 def test_dry_run_writes_report_without_creating_stage_outputs(tmp_path: Path) -> None:
@@ -884,7 +937,7 @@ def test_apply_verifies_completed_run_before_reporting_success(
     workflow = load_analysis_workflow(default_core_behavior_profile_path())
     availability = {
         "refined_keypoints": _status(
-            "refined_keypoints", available=True, run_name="refined_kp_a"
+            "refined_keypoints", available=True, run_name="refined/refined_kp_a"
         ),
         "track_kinematics": _status(
             "track_kinematics", available=True, run_name="track_a"

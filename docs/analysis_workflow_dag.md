@@ -55,7 +55,7 @@ exporter.
 There are four node kinds:
 
 - `prerequisite`: an input authority that this workflow must reuse, such as
-  curated keypoints or dense refined subject masks;
+  the selected keypoint authority or active recording subject-mask bundle;
 - `analysis`: a canonical analysis stage from
   `fisheye.registry.stage_catalog`;
 - `visualization`: a bounded persisted renderer attached to an exact analysis
@@ -68,8 +68,9 @@ dependencies represented inside the profile, and dependency cycles.
 
 ```mermaid
 flowchart LR
-  TR[tracking identities] --> TK[track kinematics]
-  RK[refined keypoints] --> TK[track kinematics]
+  RK[keypoint authority] --> TR[tracking identities]
+  TR --> TK[track kinematics]
+  RK --> TK
   TK --> SB[swim bouts]
   TK --> KS[10 Hz kinematic samples]
   TK --> AS[5 s activity/spatial summaries]
@@ -77,8 +78,7 @@ flowchart LR
   SB --> BK[bout kinematics]
   TK --> BK
 
-  RK --> EA[eye angles]
-  RM[refined subject masks] --> SS[subject shape]
+  RM[active subject-mask bundle] --> SS[subject shape]
   SS --> EA
   EA --> ET[framewise eye traces]
   EA --> BK
@@ -92,7 +92,9 @@ flowchart LR
 Targets select a dependency closure. For example, planning only
 `kinematics_samples` does not inspect or schedule the eye and tail branches.
 When more than one target shares a dependency, that dependency appears once in
-the stable topological order.
+the stable topological order. A reused downstream authority closes its branch:
+missing ancestors of that already-complete authority remain visible in the
+structural plan but are not recreated during execution.
 
 ## Read-only planning
 
@@ -119,6 +121,19 @@ scripts/plan_analysis_workflow /path/to/recording_analysis.zarr \
   --stage-run track_kinematics=my_calibrated_track_run
 ```
 
+The core profile's keypoint prerequisite is an authority role, not a hardcoded
+storage family. Planning first accepts the refined member of an active
+keypoint bundle, then a maintained refined selector, and finally a
+selector-eligible `keypoints_runs/<run>` canonical passthrough. The last form
+is how clipped inference avoids manufacturing a no-op refined-keypoint copy.
+Any present-but-malformed root authority or activation lease blocks planning.
+
+Subject masks resolve through `subject_mask_authority` at the archive root.
+The planner verifies the active bundle and refined member readiness metadata,
+then passes `bundle/<bundle_id>` to subject shape. It does not reinterpret the
+bundle member's intentionally false legacy stage selector as an error or set a
+parallel `refined_subject_masks_runs.latest` pointer.
+
 Useful planning controls include:
 
 ```bash
@@ -135,14 +150,17 @@ scripts/plan_analysis_workflow /path/to/recording_analysis.zarr \
   --available-stage eye_angles=analysis/eye_angle_runs/eye_registry_run
 ```
 
-For the current Sleepyfish canary, pinning its calibrated track run allows the
-planner to reuse keypoints, refined subject masks, and track kinematics. It
-then schedules swim bouts, bout kinematics, eye angles, and subject shape.
+For a completed Sleepyfish archive, pinning its calibrated track run allows the
+planner to reuse keypoint, mask, and motion authorities before scheduling the
+remaining products. A newly processed clipped archive can instead resolve its
+canonical keypoints and active mask bundle and schedule tracking plus the same
+downstream nodes in one plan.
 
 ## Fail-closed execution
 
 The executor supports these canonical analysis stages in the core profile:
 
+- `tracks` (exact keypoint-source crop rowset, single subject per arena);
 - `track_kinematics`;
 - `swim_bouts`;
 - `track_kinematics_visualization`;
@@ -164,11 +182,20 @@ observation to exactly one `track_id` through unique `instance_key` plus camera
 frame, and emits bounded long-form body-normalized parts. `instance_key`
 remains an observation identity, never an animal or track identifier.
 
-Track identities are a required persisted prerequisite rather than an
-analysis-workflow output. Planning a new track-kinematics run therefore blocks
-when no `tracking_runs` authority is present. Create lineage-matched tracking
-from arena assignment first; an already complete track-kinematics run remains
-reusable without rerunning that prerequisite.
+Track identities are composable in the same workflow. When no selected
+`tracking_runs` authority exists, the `tracks` node resolves the exact source
+crop declared by the selected keypoint authority, runs spatial arena assignment
+for the recording's experiment setup, and publishes exact-named
+`single_subject_per_arena` tracking. Canonical clipped keypoints and original
+refined keypoints therefore use the same tracking writer and downstream motion
+infrastructure. Single-dish assignment first resolves the active, complete
+`analysis/arena_geometry_selection` native-camera circle through the shared
+selection contract and records the exact selection, candidate, and record
+digest in its arena definition. A present but malformed or half-activated
+modern selection fails closed; the legacy `analysis_metadata.dish_mask` path
+is used only when the modern selection family is absent. An already complete
+track-kinematics run remains reusable without recreating its tracking
+ancestors.
 
 The track-kinematics visualization stage writes the bounded PNG snapshot and
 interactive explorer contract inside its selected track-kinematics run. It

@@ -23,6 +23,7 @@ import re
 from typing import Any, Mapping, Sequence
 
 from fisheye.shared.coordinate_identity import (
+    MANIFEST_ROW_IDENTITY_ATTR,
     ROW_IDENTITY_CONTRACT_ATTR,
     RowIdentityContract,
     RowIdentityContractError,
@@ -1661,8 +1662,19 @@ def _parse_canonical_row_identity(
     record = _parse_digest_bound_record_ref(value, path=path, issues=issues)
     if record is None:
         return None
-    if not record.record_ref.endswith(f"@{ROW_IDENTITY_CONTRACT_ATTR}"):
-        issues.append(_issue("row_identity_record_ref_invalid", f"{path}.record_ref", f"Row identity must reference @{ROW_IDENTITY_CONTRACT_ATTR}."))
+    allowed_suffixes = (
+        f"@{ROW_IDENTITY_CONTRACT_ATTR}",
+        f"@{MANIFEST_ROW_IDENTITY_ATTR}",
+    )
+    if not record.record_ref.endswith(allowed_suffixes):
+        issues.append(
+            _issue(
+                "row_identity_record_ref_invalid",
+                f"{path}.record_ref",
+                "Row identity must reference a row-identity contract or one "
+                "resolver-validated immutable run manifest.",
+            )
+        )
         return None
     return CanonicalRowIdentityRef(
         record_ref=record.record_ref,

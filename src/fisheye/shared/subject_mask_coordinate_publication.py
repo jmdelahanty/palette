@@ -1,9 +1,9 @@
-"""Canonical coordinate publication for future-normal raw subject masks.
+"""Canonical coordinate publication for raw subject masks.
 
-The raw U-Net writer consumes one exact canonical materialized crop and keeps
-its numerical inference kernels in ROI-local pixels.  This module binds that
-existing output to the selected crop's observation identity, acquisition time,
-ROI extent, component labels, and direction-labelled ROI-to-camera placement.
+The raw U-Net writer resolves one supported crop-coordinate profile and keeps
+its numerical inference kernels in ROI-local pixels. This module binds that
+output to the selected crop's observation identity, acquisition time, ROI
+extent, component labels, and direction-labelled ROI-to-camera placement.
 """
 
 from __future__ import annotations
@@ -63,6 +63,7 @@ from fisheye.shared.directed_transform_v2 import (
 )
 from fisheye.shared.keypoint_coordinate_publication import (
     BoundKeypointCropSource,
+    _resolve_keypoint_crop_source,
     load_persisted_keypoint_crop_source,
     require_direct_keypoint_crop_pixel_source,
 )
@@ -73,9 +74,6 @@ from fisheye.shared.model_input_transform import (
 )
 from fisheye.shared.pixel_frame_authority import (
     ARRAY_VALUES_CANONICALIZATION,
-    CROP_PLACEMENT_OWNERSHIP_ATTR,
-    CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
-    CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     BoundPixelFrameAuthority,
     load_crop_placement_ownership,
     load_roi_pixel_frame_authority,
@@ -907,8 +905,8 @@ def _require_run_inference_attrs(
 def load_persisted_subject_mask_crop_source(
     root_node: Any,
     crop_path: str,
-) -> BoundKeypointCropSource:
-    """Load the shared exact canonical materialized-crop publication."""
+) -> Any:
+    """Resolve one supported crop profile through the shared consumer gate."""
 
     try:
         return load_persisted_keypoint_crop_source(root_node, crop_path)
@@ -1241,6 +1239,7 @@ def prepare_subject_mask_coordinate_context(
     model_input_transform: ModelInputTransform,
     model_artifact: Mapping[str, Any],
     mask_probability_threshold: float,
+    _resolved_crop_source: Any | None = None,
 ) -> BoundSubjectMaskCoordinateContext:
     """Bind exact crop selection, identity, frames, and transforms pre-inference."""
 
@@ -1258,7 +1257,11 @@ def prepare_subject_mask_coordinate_context(
         run,
         expected=expected_publication_owner,
     )
-    source = load_persisted_subject_mask_crop_source(root_node, crop_path)
+    source = _resolve_keypoint_crop_source(
+        root_node,
+        crop_path,
+        resolved_source=_resolved_crop_source,
+    )
     labels = _labels(mask_labels)
     _validate_output_selection(source, run)
     native_shape = (
@@ -1461,7 +1464,7 @@ def prepare_subject_mask_coordinate_context(
             continuous_node,
             convention="continuous",
             target_camera=camera,
-            ownership_attr=CROP_PLACEMENT_OWNERSHIP_ATTR,
+            ownership_attr=source.placement_ownership_attr,
             authority_attr=TRANSFORM_AUTHORITY_ATTR,
             transform_attr=DIRECTED_TRANSFORM_V2_ATTR,
         )
@@ -1469,7 +1472,7 @@ def prepare_subject_mask_coordinate_context(
             pixel_center_node,
             convention="pixel_center",
             target_camera=pixel_center_camera,
-            ownership_attr=CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+            ownership_attr=source.placement_pixel_center_ownership_attr,
             authority_attr=TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR,
             transform_attr=DIRECTED_TRANSFORM_V2_PIXEL_CENTER_ATTR,
         )
@@ -1477,7 +1480,7 @@ def prepare_subject_mask_coordinate_context(
             pixel_edge_node,
             convention="pixel_edge_half_open",
             target_camera=pixel_edge_camera,
-            ownership_attr=CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+            ownership_attr=source.placement_pixel_edge_ownership_attr,
             authority_attr=TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
             transform_attr=DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
         )
@@ -1510,6 +1513,7 @@ def prepare_subject_mask_coordinate_context(
             require_complete=False,
             expected_selector_eligible=False,
             expected_publication_owner=publication_owner,
+            resolved_crop_source=_resolved_crop_source,
         )
     except BaseException as exc:
         failures: list[str] = []
@@ -1560,51 +1564,46 @@ def _load_subject_mask_coordinate_context(
     require_complete: bool,
     expected_selector_eligible: bool,
     expected_publication_owner: str | None = None,
+    resolved_crop_source: Any | None = None,
 ) -> BoundSubjectMaskCoordinateContext:
-    """Load one context, including its sealed successor-only crop adapter."""
+    """Load one context through the shared profile-aware crop resolver."""
 
     path = _canonical_path(
         run_path, prefix="subject_mask_runs/", label="subject-mask rowset"
     )
     run = _node(root_node, path, label="subject-mask rowset")
-    adapter_attr = "coordinate_successor_historical_crop_adapter"
-    if require_complete and adapter_attr in getattr(run, "attrs", {}):
-        binding = _load_persisted_historical_crop_successor_binding(
+    crop_evidence_attr = "coordinate_successor_historical_crop_adapter"
+    if require_complete and crop_evidence_attr in getattr(run, "attrs", {}):
+        # This is frozen persisted v1 evidence. Validate it independently;
+        # ordinary crop resolution below opens the sealed profile directly.
+        binding = _load_persisted_sealed_crop_successor_binding(
             root_node,
             run,
             run_path=path,
         )
-        from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
-            historical_geometry_only_crop_loader,
-        )
-
-        with historical_geometry_only_crop_loader(binding):
-            return _load_subject_mask_coordinate_context_impl(
-                root_node,
-                path,
-                require_complete=require_complete,
-                expected_selector_eligible=expected_selector_eligible,
-                expected_publication_owner=expected_publication_owner,
-            )
+        if resolved_crop_source is not None:
+            _fail("Complete successor loading does not accept a crop-source override.")
+        resolved_crop_source = binding.source
     return _load_subject_mask_coordinate_context_impl(
         root_node,
         path,
         require_complete=require_complete,
         expected_selector_eligible=expected_selector_eligible,
         expected_publication_owner=expected_publication_owner,
+        resolved_crop_source=resolved_crop_source,
     )
 
 
-def _load_persisted_historical_crop_successor_binding(
+def _load_persisted_sealed_crop_successor_binding(
     root_node: Any,
     run: Any,
     *,
     run_path: str,
 ) -> Any:
-    """Rebuild the exact historical crop adapter from successor-bound evidence."""
+    """Rebuild the exact sealed crop source from successor-bound evidence."""
 
-    from fisheye.shared.zarr.historical_geometry_only_crop_adapter import (
-        bind_historical_geometry_only_crop_source,
+    from fisheye.shared.zarr.sealed_geometry_crop_profile import (
+        bind_sealed_geometry_crop_successor_source,
     )
 
     try:
@@ -1625,45 +1624,48 @@ def _load_persisted_historical_crop_successor_binding(
             run,
             attr_name="coordinate_successor_padded_crop_lineage",
         )
-        adapter = bind_persisted_coordinate_record(
+        crop_evidence = bind_persisted_coordinate_record(
             run,
             attr_name="coordinate_successor_historical_crop_adapter",
         )
     except Exception as exc:
-        _fail(f"Historical crop successor authority is invalid: {exc}.")
+        _fail(f"Sealed crop successor authority is invalid: {exc}.")
 
     authority_records = authority["payload"]["coordinate_records"]
     if authority_records.get("padded_crop_lineage") != _record_pointer(padded):
-        _fail("Historical crop successor padded-lineage authority is stale.")
-    adapter_record = padded.record.get("source_crop_adapter")
-    if not isinstance(adapter_record, Mapping) or adapter.record != adapter_record:
+        _fail("Sealed crop successor padded-lineage authority is stale.")
+    crop_evidence_record = padded.record.get("source_crop_adapter")
+    if (
+        not isinstance(crop_evidence_record, Mapping)
+        or crop_evidence.record != crop_evidence_record
+    ):
         _fail(
-            "Historical crop successor adapter differs from its authority-bound "
+            "Sealed crop successor evidence differs from its authority-bound "
             "padded lineage."
         )
 
     source_run_path = authority["payload"]["source"].get("run_path")
     if (
         type(source_run_path) is not str
-        or source_run_path != adapter_record.get("source_run_path")
+        or source_run_path != crop_evidence_record.get("source_run_path")
     ):
-        _fail("Historical crop successor source path is inconsistent.")
+        _fail("Sealed crop successor source path is inconsistent.")
     source_run = _node(
         root_node,
         source_run_path,
-        label="historical subject-mask source core",
+        label="sealed subject-mask source core",
     )
     source_manifest = source_run.attrs.get(SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE)
     if not isinstance(source_manifest, Mapping):
-        _fail("Historical subject-mask source core lacks its run manifest.")
+        _fail("Sealed subject-mask source core lacks its run manifest.")
     source_errors = validate_subject_mask_core_run_manifest(source_manifest)
     if source_errors:
         _fail(
-            "Historical subject-mask source core manifest is invalid: "
+            "Sealed subject-mask source core manifest is invalid: "
             + "; ".join(source_errors)
         )
     source_arrays = {
-        name: _child(source_run, name, label=f"historical source {name}")
+        name: _child(source_run, name, label=f"sealed source {name}")
         for name in (
             "source_crop_row_ids",
             "instance_key",
@@ -1680,15 +1682,15 @@ def _load_persisted_historical_crop_successor_binding(
             "document"
         ]["crop"]
         transform = model_input_transform_from_attrs(
-            dict(adapter_record["model_input_transform"])
+            dict(crop_evidence_record["model_input_transform"])
         )
         identity = archive_identity(root_node)
         if identity.kind != "local_store_root":
             _fail(
-                "Persisted historical crop successors require a stable local archive "
+                "Persisted sealed crop successors require a stable local archive "
                 "identity."
             )
-        binding = bind_historical_geometry_only_crop_source(
+        binding = bind_sealed_geometry_crop_successor_source(
             analysis_zarr=Path(identity.key[0]),
             root=root_node,
             crop_reference=crop_reference,
@@ -1700,9 +1702,9 @@ def _load_persisted_historical_crop_successor_binding(
     except SubjectMaskCoordinatePublicationError:
         raise
     except Exception as exc:
-        _fail(f"Persisted historical crop successor cannot be rebound: {exc}.")
-    if binding.as_record() != adapter_record:
-        _fail("Persisted historical crop successor adapter evidence changed.")
+        _fail(f"Persisted sealed crop successor cannot be rebound: {exc}.")
+    if binding.as_record() != crop_evidence_record:
+        _fail("Persisted sealed crop successor evidence changed.")
     return binding
 
 
@@ -1713,6 +1715,7 @@ def _load_subject_mask_coordinate_context_impl(
     require_complete: bool,
     expected_selector_eligible: bool,
     expected_publication_owner: str | None = None,
+    resolved_crop_source: Any | None = None,
 ) -> BoundSubjectMaskCoordinateContext:
     path = _canonical_path(
         run_path, prefix="subject_mask_runs/", label="subject-mask rowset"
@@ -1736,7 +1739,11 @@ def _load_subject_mask_coordinate_context_impl(
         attr_name=SUBJECT_MASK_COORDINATE_CONTEXT_ATTR,
     )
     source_path = context.record.get("source_crop_path")
-    source = load_persisted_subject_mask_crop_source(root_node, source_path)
+    source = _resolve_keypoint_crop_source(
+        root_node,
+        source_path,
+        resolved_source=resolved_crop_source,
+    )
     _validate_output_selection(source, run)
     labels_record = bind_persisted_coordinate_record(
         run,
@@ -1870,7 +1877,7 @@ def _load_subject_mask_coordinate_context_impl(
         "roi_local_continuous",
         convention="continuous",
         target_camera=camera,
-        ownership_attr=CROP_PLACEMENT_OWNERSHIP_ATTR,
+        ownership_attr=source.placement_ownership_attr,
         authority_attr=TRANSFORM_AUTHORITY_ATTR,
         transform_attr=DIRECTED_TRANSFORM_V2_ATTR,
     )
@@ -1878,7 +1885,7 @@ def _load_subject_mask_coordinate_context_impl(
         "roi_local_pixel_center",
         convention="pixel_center",
         target_camera=pixel_center_camera,
-        ownership_attr=CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+        ownership_attr=source.placement_pixel_center_ownership_attr,
         authority_attr=TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR,
         transform_attr=DIRECTED_TRANSFORM_V2_PIXEL_CENTER_ATTR,
     )
@@ -1886,7 +1893,7 @@ def _load_subject_mask_coordinate_context_impl(
         "roi_local_pixel_edge_half_open",
         convention="pixel_edge_half_open",
         target_camera=pixel_edge_camera,
-        ownership_attr=CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+        ownership_attr=source.placement_pixel_edge_ownership_attr,
         authority_attr=TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
         transform_attr=DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
     )
@@ -3325,6 +3332,7 @@ def publish_subject_mask_coordinate_surfaces(
     run_path: str,
     *,
     expected_publication_owner: str,
+    _resolved_crop_source: Any | None = None,
 ) -> BoundSubjectMaskCoordinateSurfaces:
     path = _canonical_path(
         run_path, prefix="subject_mask_runs/", label="subject-mask rowset"
@@ -3340,6 +3348,7 @@ def publish_subject_mask_coordinate_surfaces(
         require_complete=False,
         expected_selector_eligible=False,
         expected_publication_owner=expected_publication_owner,
+        resolved_crop_source=_resolved_crop_source,
     )
     nodes = _validate_surface_metadata(context)
     companions, payloads = _validate_companion_metadata_and_values(context, nodes)

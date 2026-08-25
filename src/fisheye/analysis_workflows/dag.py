@@ -195,8 +195,26 @@ def plan_analysis_workflow(
         )
 
     target_ready = all(planned[target].action != "blocked" for target in selected_targets)
+    # A persisted downstream authority closes its branch: recreating missing
+    # ancestors would be both unnecessary and a surprising mutation.  Keep the
+    # full structural plan for provenance, but execute only run nodes reached
+    # before the first reused authority on each selected target branch.
+    execution_required: set[str] = set()
+
+    def require_execution(node_id: str) -> None:
+        node_plan = planned[node_id]
+        if node_plan.action != "run" or node_id in execution_required:
+            return
+        execution_required.add(node_id)
+        for dependency in node_plan.depends_on:
+            require_execution(dependency)
+
+    for target in selected_targets:
+        require_execution(target)
     execution_order = tuple(
-        node_id for node_id in ordered if planned[node_id].action == "run"
+        node_id
+        for node_id in ordered
+        if node_id in execution_required
     )
     return WorkflowPlan(
         workflow_id=workflow.workflow_id,
