@@ -68,6 +68,10 @@ DETECTION_RADIAL_RUN = (
     "goodbatbadbat_chaser_radial_near_field_detection_bbox_centroid_20260825_"
     "exact_session_time_activity_orthogonal_v2"
 )
+SPATIAL_OCCUPANCY_RUN = (
+    "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260825_"
+    "exact_epochs_v1"
+)
 DETAILED_BUNDLE_NAME = "goodbatbadbat_chaser_detailed_activity_orthogonal_v2"
 
 MOTION_BOUT_PAIRS = (
@@ -323,6 +327,7 @@ def _output_groups() -> tuple[str, ...]:
         f"analysis/chaser_escape_freeze_runs/{SUCCESSOR_RUN}",
         f"analysis/chaser_radial_near_field_runs/{KEYPOINT_RADIAL_RUN}",
         f"analysis/chaser_radial_near_field_runs/{DETECTION_RADIAL_RUN}",
+        f"analysis/chaser_spatial_occupancy_runs/{SPATIAL_OCCUPANCY_RUN}",
     )
 
 
@@ -421,10 +426,19 @@ def _plan_entry(
     ).resolve()
     detailed_receipt = plot_dir / "detailed" / f"{DETAILED_BUNDLE_NAME}_receipt.json"
     dashboard_receipt = plot_dir / f"{SUCCESSOR_RUN}_plot_receipt.json"
+    spatial_receipt = (
+        plot_dir
+        / "spatial_occupancy"
+        / f"{SPATIAL_OCCUPANCY_RUN}_spatial_occupancy_plot_receipt.json"
+    )
     if len(existing_outputs) == len(output_groups):
         status = (
             "complete"
-            if detailed_receipt.is_file() and dashboard_receipt.is_file()
+            if (
+                detailed_receipt.is_file()
+                and dashboard_receipt.is_file()
+                and spatial_receipt.is_file()
+            )
             else "plot_only"
         )
     elif existing_outputs:
@@ -466,6 +480,7 @@ def _plan_entry(
                 "successors": SUCCESSOR_RUN,
                 "keypoint_radial": KEYPOINT_RADIAL_RUN,
                 "detection_radial": DETECTION_RADIAL_RUN,
+                "spatial_occupancy": SPATIAL_OCCUPANCY_RUN,
                 "detailed_bundle": DETAILED_BUNDLE_NAME,
             },
             "output_group_paths": list(output_groups),
@@ -792,11 +807,17 @@ def run_one(
         receipt_dir.mkdir(parents=True, exist_ok=True)
     plot_dir = Path(str(entry["plot_output_dir"]))
     detailed_dir = plot_dir / "detailed"
+    spatial_plot_dir = plot_dir / "spatial_occupancy"
     if apply:
         plot_dir.mkdir(parents=True, exist_ok=True)
         detailed_dir.mkdir(parents=True, exist_ok=True)
+        spatial_plot_dir.mkdir(parents=True, exist_ok=True)
 
     outputs = _mapping(entry["output_run_names"], field="output run names")
+    spatial_occupancy_run = _exact_name(
+        outputs.get("spatial_occupancy", SPATIAL_OCCUPANCY_RUN),
+        field="spatial occupancy run",
+    )
     raw_h5 = _mapping(entry["raw_h5"], field="raw-H5 binding")
     geometry = _mapping(entry["geometry"], field="geometry binding")
     keypoint_proxy = _mapping(entry["keypoint_proxy"], field="keypoint proxy")
@@ -1047,6 +1068,66 @@ def run_one(
                 copy_backend,
                 "--apply",
             ),
+        )
+
+    execute_if_missing(
+        "spatial_occupancy",
+        f"analysis/chaser_spatial_occupancy_runs/{spatial_occupancy_run}",
+        _stage_command(
+            py,
+            "fisheye.utils.materialize_chaser_spatial_occupancy_successor",
+            "--analysis-zarr",
+            archive,
+            "--run-name",
+            spatial_occupancy_run,
+            "--keypoint-relative-frame-run",
+            outputs["keypoint_relative"],
+            "--detection-relative-frame-run",
+            outputs["detection_relative"],
+            "--semantic-selection-run",
+            outputs["semantic_selection"],
+            "--keypoint-radial-run",
+            outputs["keypoint_radial"],
+            "--detection-radial-run",
+            outputs["detection_radial"],
+            "--expected-recording-id",
+            recording_id,
+            "--bin-width-mm",
+            2.0,
+            "--scratch-root",
+            scratch / "spatial_occupancy",
+            "--copy-backend",
+            copy_backend,
+            "--apply",
+        ),
+    )
+
+    spatial_receipt = (
+        spatial_plot_dir
+        / f"{spatial_occupancy_run}_spatial_occupancy_plot_receipt.json"
+    )
+    if _validated_plot_receipt(spatial_receipt, recording_id=recording_id):
+        stages.append(
+            {"stage": "spatial_occupancy_plots", "mode": "reused_exact_receipt"}
+        )
+    else:
+        stages.append(
+            _invoke(
+                stage="spatial_occupancy_plots",
+                command=_stage_command(
+                    py,
+                    "fisheye.utils.plot_chaser_spatial_occupancy_successor",
+                    archive,
+                    "--run-name",
+                    spatial_occupancy_run,
+                    "--expected-recording-id",
+                    recording_id,
+                    "--output-dir",
+                    spatial_plot_dir,
+                ),
+                log_dir=receipt_dir,
+                apply=apply,
+            )
         )
 
     dashboard_receipt = plot_dir / f"{outputs['successors']}_plot_receipt.json"

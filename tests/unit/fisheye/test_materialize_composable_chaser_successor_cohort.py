@@ -253,6 +253,8 @@ def test_run_one_dry_run_renders_complete_serial_chain(tmp_path: Path) -> None:
         "composable_successors",
         "keypoint_radial_near_field",
         "detection_radial_near_field",
+        "spatial_occupancy",
+        "spatial_occupancy_plots",
         "dashboard_plots",
         "detailed_plots",
     ]
@@ -323,6 +325,8 @@ def test_bsub_submitter_renders_pinned_array_without_submission(
 
     assert "mode=dry_run_no_submission" in completed.stdout
     assert "recording_count=1" in completed.stdout
+    assert "array_indices=1-1" in completed.stdout
+    assert "selected_recording_count=1" in completed.stdout
     run_dir = run_root / "composable_chaser_successors_fixture"
     job_script = (run_dir / "run_one_recording.sh").read_text(encoding="utf-8")
     assert "LSB_JOBINDEX" in job_script

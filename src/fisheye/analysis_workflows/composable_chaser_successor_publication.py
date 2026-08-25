@@ -26,6 +26,9 @@ from fisheye.analysis_workflows.controller_trial_successor import (
 from fisheye.analysis_workflows.chaser_radial_near_field_successor import (
     PreparedChaserRadialNearField,
 )
+from fisheye.analysis_workflows.chaser_spatial_occupancy_successor import (
+    PreparedChaserSpatialOccupancy,
+)
 from fisheye.analysis_workflows.escape_freeze_successor import (
     PreparedEscapeFreeze,
 )
@@ -109,6 +112,10 @@ _TYPE_INFO: Mapping[type[Any], tuple[str, str]] = MappingProxyType(
         PreparedChaserRadialNearField: (
             "chaser_radial_near_field",
             "analysis/chaser_radial_near_field_runs",
+        ),
+        PreparedChaserSpatialOccupancy: (
+            "chaser_spatial_occupancy",
+            "analysis/chaser_spatial_occupancy_runs",
         ),
     }
 )
@@ -675,6 +682,14 @@ class ComposableChaserSuccessorSourceHandle:
                 n_epoch_chaser_rows=int(dimensions["n_epoch_chaser_rows"]),
                 n_radial_rows=int(dimensions["n_radial_rows"]),
                 n_cdf_rows=int(dimensions["n_cdf_rows"]),
+                **values,
+            )
+        if self.successor_kind == "chaser_spatial_occupancy":
+            return PreparedChaserSpatialOccupancy(
+                n_providers=int(dimensions["n_providers"]),
+                n_epochs=int(dimensions["n_epochs"]),
+                grid_rows=int(dimensions["grid_rows"]),
+                grid_columns=int(dimensions["grid_columns"]),
                 **values,
             )
         _fail(f"Unsupported successor kind {self.successor_kind!r}.")

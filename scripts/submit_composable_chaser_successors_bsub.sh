@@ -13,6 +13,7 @@ MEM_GB=16
 MAX_ACTIVE=8
 WALLTIME="6:00"
 COPY_BACKEND="rsync"
+ARRAY_INDICES=""
 SUBMIT=0
 
 fail() {
@@ -46,6 +47,8 @@ Options:
   --max-active N          Maximum simultaneous array workers (default: 8).
   --walltime H:MM         Per-recording wall time (default: 6:00).
   --copy-backend NAME     rsync or python (default: rsync).
+  --array-indices SPEC    Optional LSF indices/ranges, e.g. 1-76,81-84.
+                          Default submits every recording index.
   --submit                Submit the array. Default is a no-write rendering.
   -h, --help              Show this help.
 USAGE
@@ -65,6 +68,7 @@ while (($#)); do
     --max-active) MAX_ACTIVE="$2"; shift 2 ;;
     --walltime) WALLTIME="$2"; shift 2 ;;
     --copy-backend) COPY_BACKEND="$2"; shift 2 ;;
+    --array-indices) ARRAY_INDICES="$2"; shift 2 ;;
     --submit) SUBMIT=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "Unknown argument: $1" ;;
@@ -94,6 +98,30 @@ VALIDATION_JSON="$(PYTHONPATH="$PALETTE_REPO/src" "$PALETTE_REPO/scripts/py" -m 
 RECORDING_COUNT="$(printf '%s' "$VALIDATION_JSON" | "$PALETTE_REPO/scripts/py" -c 'import json,sys; print(json.load(sys.stdin)["recording_count"])')"
 TASK_SHA256="$(printf '%s' "$VALIDATION_JSON" | "$PALETTE_REPO/scripts/py" -c 'import json,sys; print(json.load(sys.stdin)["task_sha256"])')"
 [[ "$RECORDING_COUNT" =~ ^[1-9][0-9]*$ ]] || fail "Frozen task has no recordings"
+
+if [[ -z "$ARRAY_INDICES" ]]; then
+  ARRAY_INDICES="1-${RECORDING_COUNT}"
+fi
+[[ "$ARRAY_INDICES" =~ ^[1-9][0-9]*(-[1-9][0-9]*)?(,[1-9][0-9]*(-[1-9][0-9]*)?)*$ ]] \
+  || fail "--array-indices must contain positive comma-separated indices/ranges"
+SELECTED_RECORDING_COUNT="$("$PALETTE_REPO/scripts/py" -c '
+import sys
+limit = int(sys.argv[1])
+seen = set()
+for item in sys.argv[2].split(","):
+    bounds = [int(value) for value in item.split("-")]
+    start = bounds[0]
+    end = bounds[-1]
+    if start > end or end > limit:
+        raise SystemExit("array index range leaves the frozen task")
+    for index in range(start, end + 1):
+        if index in seen:
+            raise SystemExit("array index ranges overlap")
+        seen.add(index)
+print(len(seen))
+' "$RECORDING_COUNT" "$ARRAY_INDICES")"
+[[ "$SELECTED_RECORDING_COUNT" =~ ^[1-9][0-9]*$ ]] \
+  || fail "--array-indices selects no recordings"
 
 if [[ -z "$RUN_ID" ]]; then
   RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -134,7 +162,7 @@ chmod 0755 "$JOB_SCRIPT"
 
 MEM_MB="$((MEM_GB * 1024))"
 BSUB_ARGS=(
-  -J "chaser_successors_${RUN_ID}[1-${RECORDING_COUNT}]%${MAX_ACTIVE}"
+  -J "chaser_successors_${RUN_ID}[${ARRAY_INDICES}]%${MAX_ACTIVE}"
   -n "$NCORES"
   -M "$MEM_MB"
   -R "rusage[mem=${MEM_MB}]"
@@ -152,6 +180,8 @@ BSUB_COMMAND=(bsub "${BSUB_ARGS[@]}" bash "$JOB_SCRIPT")
   printf 'run_id=%s\n' "$RUN_ID"
   printf 'task_sha256=%s\n' "$TASK_SHA256"
   printf 'recording_count=%s\n' "$RECORDING_COUNT"
+  printf 'array_indices=%s\n' "$ARRAY_INDICES"
+  printf 'selected_recording_count=%s\n' "$SELECTED_RECORDING_COUNT"
   printf 'palette_repo=%s\n' "$PALETTE_REPO"
   printf 'palette_commit=%s\n' "$PALETTE_COMMIT"
   printf 'selector_eligible=false\n'
@@ -163,6 +193,8 @@ BSUB_COMMAND=(bsub "${BSUB_ARGS[@]}" bash "$JOB_SCRIPT")
 printf 'run_dir=%s\n' "$RUN_DIR"
 printf 'task_sha256=%s\n' "$TASK_SHA256"
 printf 'recording_count=%s\n' "$RECORDING_COUNT"
+printf 'array_indices=%s\n' "$ARRAY_INDICES"
+printf 'selected_recording_count=%s\n' "$SELECTED_RECORDING_COUNT"
 printf 'palette_commit=%s\n' "$PALETTE_COMMIT"
 printf 'bsub_command='; printf '%q ' "${BSUB_COMMAND[@]}"; printf '\n'
 
