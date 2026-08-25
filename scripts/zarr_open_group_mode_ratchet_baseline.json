@@ -1,5 +1,5 @@
 {
-  "bare_call_count": 222,
+  "bare_call_count": 221,
   "entries": {
     "src/fisheye/analysis/analyze_goodcopbadcop_approach_avoidance.py::roles::735bd058ae5cee80f754": 1,
     "src/fisheye/analysis/analyze_goodcopbadcop_bout_kinematics_distance.py::load::d1aedb517384921480ea": 1,
@@ -93,7 +93,6 @@
     "src/fisheye/shared/crop_image_source.py::CropImageSource._activate_temporary_cache::0ed8982c617b75a864e8": 2,
     "src/fisheye/shared/crop_image_source.py::_open_crop_parent::a918baef947169d1489e": 1,
     "src/fisheye/shared/refined_detect_curation.py::_open_named_child_group::dd905ec4095597befcc4": 1,
-    "src/fisheye/shared/subject_shape_storage.py::materialize_subject_shape_storage_candidate::404163958c04e9b8b8fc": 1,
     "src/fisheye/shared/zarr/body_frame_publication.py::publish_selector_ineligible_body_frame_snapshot::077add9c25f89424b245": 1,
     "src/fisheye/shared/zarr/canonical_detection_benchmark.py::materialize_detection_benchmark_candidate::077add9c25f89424b245": 1,
     "src/fisheye/shared/zarr/canonical_detection_shadow.py::publish_legacy_canonical_detection_shadow::077add9c25f89424b245": 1,

@@ -414,6 +414,7 @@ def _publication_validation(
         "binding_status",
         "physical_storage_layout",
         "storage_profile_id",
+        "storage_access_aware",
         "storage_candidate",
     }
     expected_fields = base_fields | ({"canonical_validation"} if phase == "final" else set())
@@ -437,6 +438,7 @@ def _publication_validation(
         or value["require_sharded"] is not (not candidate)
         or value["binding_status"] != expected_binding
         or value["storage_profile_id"] != expected_profile
+        or value["storage_access_aware"] is not candidate
         or value["storage_candidate"] is not candidate
     ):
         raise ValueError(f"Subject-shape publication {phase} validation did not pass.")
