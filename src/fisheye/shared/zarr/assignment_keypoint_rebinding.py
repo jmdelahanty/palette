@@ -332,21 +332,21 @@ def inspect_assignment_keypoint_rebinding(
                 ],
                 "bundle_coordinate_authority_digest": bundle.authority_digest,
                 "refined_run_path": bundle.refined_run_path,
-                "assignment_collection_digest": canonical_json_sha256(collection),
+                "assignment_collection_digest": canonical_json_sha256(
+                    json_attr_safe(collection)
+                ),
                 "historical_keypoint_run_path": historical_path,
             },
             "canonical_keypoint_source": {
                 "authority_profile": ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE,
                 "run_path": canonical_path,
                 "run_manifest_payload_digest": canonical_manifest["payload_digest"],
-                "run_manifest_document_digest": canonical_json_sha256(
-                    canonical_manifest
-                ),
+                "run_manifest_document_digest": canonical_source.manifest_digest,
                 "keypoint_bundle_authority_generation": active_authority[
                     "generation"
                 ],
-                "keypoint_bundle_authority_digest": canonical_json_sha256(
-                    active_authority
+                "keypoint_bundle_authority_digest": (
+                    canonical_source.active_keypoint_bundle_authority_digest
                 ),
                 "coordinate_successor_authority_digest": (
                     canonical_source.successor_authority_digest
@@ -644,7 +644,9 @@ def load_assignment_keypoint_rebinding_manifest(
         or bundle.authority_digest
         != subject.get("bundle_coordinate_authority_digest")
         or bundle.refined_run_path != subject.get("refined_run_path")
-        or canonical_json_sha256(bundle.assignment_keypoint_collection)
+        or canonical_json_sha256(
+            json_attr_safe(bundle.assignment_keypoint_collection)
+        )
         != subject.get("assignment_collection_digest")
     ):
         _fail("Subject-mask authority changed after assignment rebinding.")
@@ -657,7 +659,7 @@ def load_assignment_keypoint_rebinding_manifest(
     authority = source.active_keypoint_bundle_authority
     raw_manifest = source.manifest
     if (
-        canonical_json_sha256(authority)
+        source.active_keypoint_bundle_authority_digest
         != keypoints.get("keypoint_bundle_authority_digest")
         or authority.get("generation")
         != keypoints.get("keypoint_bundle_authority_generation")
@@ -667,7 +669,7 @@ def load_assignment_keypoint_rebinding_manifest(
         or not isinstance(raw_manifest, Mapping)
         or raw_manifest.get("payload_digest")
         != keypoints.get("run_manifest_payload_digest")
-        or canonical_json_sha256(raw_manifest)
+        or source.manifest_digest
         != keypoints.get("run_manifest_document_digest")
     ):
         _fail("Canonical keypoint authority changed after assignment rebinding.")

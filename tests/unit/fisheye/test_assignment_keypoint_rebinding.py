@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
+from types import MappingProxyType, SimpleNamespace
 
 import numpy as np
 
@@ -11,6 +14,7 @@ from fisheye.shared.zarr.assignment_keypoint_rebinding import (
     ASSIGNMENT_KEYPOINT_REBINDING_SCHEMA_VERSION,
     _assignment_collection_source_run,
     _chunked_equivalence,
+    inspect_assignment_keypoint_rebinding,
     validate_assignment_keypoint_rebinding_manifest,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
@@ -185,3 +189,163 @@ def test_rebinding_manifest_is_closed_and_digest_sealed() -> None:
         "payload fields are not exact" in error
         for error in validate_assignment_keypoint_rebinding_manifest(expanded)
     )
+
+
+def test_inspection_uses_resolver_digests_for_immutable_documents(
+    monkeypatch: object,
+    tmp_path: object,
+) -> None:
+    archive = tmp_path / "analysis.zarr"
+    archive.mkdir()
+
+    def digest(values: np.ndarray) -> str:
+        return hashlib.sha256(
+            np.ascontiguousarray(values).tobytes(order="C")
+        ).hexdigest()
+
+    identity = {
+        "source_crop_row_ids": np.asarray([0, 1], dtype=np.int64),
+        "instance_key": np.asarray([10, 11], dtype=np.uint64),
+        "source_acquisition_frame_index": np.asarray([20, 21], dtype=np.int64),
+    }
+    keypoints = np.asarray(
+        [
+            [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+            [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]],
+        ],
+        dtype=np.float32,
+    )
+    pose_success = np.asarray([True, False], dtype=np.bool_)
+    canonical_arrays = {
+        **identity,
+        "keypoints_roi": keypoints,
+        "pose_success": pose_success,
+    }
+    historical_arrays = {
+        **identity,
+        "keypoints_roi": keypoints.astype(np.float64),
+        "detection_success": pose_success,
+    }
+
+    class Group(dict[str, object]):
+        def __init__(
+            self,
+            values: dict[str, object],
+            *,
+            path: str,
+            attrs: dict[str, object] | None = None,
+        ) -> None:
+            super().__init__(values)
+            self.path = path
+            self.attrs = attrs or {}
+
+    labels = ["swim_bladder", "eye_left", "eye_right"]
+    historical = Group(
+        historical_arrays,
+        path="keypoints_runs/historical",
+        attrs={
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "keypoint_labels": labels,
+        },
+    )
+    canonical = Group(
+        canonical_arrays,
+        path="keypoints_runs/canonical",
+    )
+    array_declarations = {
+        name: {
+            "digest_algorithm": "sha256_c_contiguous_bytes_v1",
+            "sha256": digest(values),
+        }
+        for name, values in canonical_arrays.items()
+    }
+    manifest_document = {
+        "payload_digest": "a" * 64,
+        "payload": {
+            "logical_content": {"document": {"arrays": array_declarations}},
+            "source_crop_snapshot": {"run_path": "crop_runs/canonical"},
+            "pose_model_schema_binding": {
+                "pose_schema": {"keypoint_labels": labels}
+            },
+        },
+    }
+    manifest_digest = "b" * 64
+    authority_digest = "c" * 64
+    successor_digest = "d" * 64
+    source = SimpleNamespace(
+        run_group=canonical,
+        manifest=MappingProxyType(manifest_document),
+        manifest_digest=manifest_digest,
+        active_keypoint_bundle_authority=MappingProxyType({"generation": 7}),
+        active_keypoint_bundle_authority_digest=authority_digest,
+        successor_authority_digest=successor_digest,
+    )
+    collection = MappingProxyType(
+        {
+            "schema_id": "palette.subject_mask.assignment_keypoint_collection",
+            "schema_version": 1,
+            "mode": "exact_worker_partition",
+            "row_policy": "ordered_contiguous_recording_crop_rows_v1",
+            "n_rois": 2,
+            "workers": [
+                {
+                    "global_row_interval": {"start_row": 0, "stop_row": 2},
+                    "assignment": {
+                        "assignment_keypoint_group": "keypoints_runs",
+                        "assignment_keypoints_run": "historical",
+                        "assignment_keypoint_success_dataset": "detection_success",
+                    },
+                }
+            ],
+        }
+    )
+    bundle = SimpleNamespace(
+        assignment_keypoint_collection=collection,
+        crop_run_path="crop_runs/canonical",
+        bundle_manifest={
+            "payload_digest": "e" * 64,
+            "payload": {
+                "cross_binding": {
+                    "raw_refined_identity_array_values_sha256": {
+                        name: digest(values) for name, values in identity.items()
+                    }
+                }
+            },
+        },
+        recording_identity="recording",
+        camera_identity="camera",
+        n_rois=2,
+        bundle_id="bundle",
+        authority_digest="f" * 64,
+        refined_run_path="refined_subject_masks_runs/refined",
+    )
+
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding."
+        "load_recording_subject_mask_coordinate_authority",
+        lambda *_args, **_kwargs: bundle,
+    )
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding."
+        "load_keypoint_coordinate_successor_source",
+        lambda *_args, **_kwargs: source,
+    )
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding.open_zarr_root",
+        lambda *_args, **_kwargs: {"keypoints_runs/historical": historical},
+    )
+
+    result = inspect_assignment_keypoint_rebinding(
+        analysis_zarr=archive,
+        subject_mask_bundle_id="bundle",
+        keypoint_run_id="canonical",
+        rebinding_run_id="rebind_001",
+        block_rows=1,
+    )
+
+    keypoint_source = result["payload"]["canonical_keypoint_source"]
+    assert keypoint_source["run_manifest_document_digest"] == manifest_digest
+    assert keypoint_source["keypoint_bundle_authority_digest"] == authority_digest
+    assert keypoint_source["coordinate_successor_authority_digest"] == successor_digest
+    json.dumps(result, allow_nan=False)
