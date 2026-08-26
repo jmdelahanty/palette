@@ -237,6 +237,10 @@ def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> No
     assert entry["output_run_names"]["detailed_bundle"] == (
         cohort.DETAILED_RECIPE_BUNDLE_NAME
     )
+    assert entry["output_run_names"]["detailed_bundle"].endswith("recipe_v4")
+    assert successor["selection_policy"]["plot_recipe_provenance"] == (
+        "self_contained_exact_parameters_v3"
+    )
     assert cohort.load_cohort_task(successor)["task_sha256"] == successor[
         "task_sha256"
     ]
@@ -436,6 +440,39 @@ def test_reused_plot_receipt_is_content_verified(tmp_path: Path) -> None:
     output.write_bytes(b"changed")
     with pytest.raises(cohort.ComposableChaserCohortError, match="differs"):
         cohort._validated_plot_receipt(receipt_path, recording_id="recording-1")
+
+
+def test_reused_detailed_receipt_requires_exact_recipe_identity(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "figure.png"
+    output.write_bytes(b"figure bytes")
+    receipt_path = tmp_path / "receipt.json"
+    receipt = {
+        "recording_id": "recording-1",
+        "plot_recipe_id": "sealed_chaser_detailed_plot_bundle_v2",
+        "selector_eligible": False,
+        "production_authority": False,
+        "registry_update": False,
+        "outputs": [
+            {
+                "path": str(output),
+                "sha256": cohort._sha256_file(output),
+                "size_bytes": output.stat().st_size,
+            }
+        ],
+    }
+    receipt["payload_sha256"] = canonical_json_sha256(receipt)
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    with pytest.raises(
+        cohort.ComposableChaserCohortError, match="recipe identity mismatch"
+    ):
+        cohort._validated_plot_receipt(
+            receipt_path,
+            recording_id="recording-1",
+            expected_plot_recipe_id=cohort.DETAILED_PLOT_RECIPE_ID,
+        )
 
 
 def test_bsub_submitter_renders_pinned_array_without_submission(

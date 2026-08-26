@@ -69,6 +69,8 @@ DETAILED_PLOT_BASE_ARRAY_NAMES = (
     "timestamp_ns",
     "timestamp_valid",
     "selection_member",
+    "fish_position_xy_px",
+    "fish_position_valid",
     "chaser_identity_code",
     "chaser_occurrence_member",
     "chaser_behavior_role_code",

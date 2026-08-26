@@ -53,6 +53,9 @@ class _Relative:
         }
         frame = np.arange(self.n_frames, dtype=np.int64)
         identities = np.tile(np.asarray([1, 2]), self.n_frames)
+        fish_xy = np.column_stack(
+            (100.0 + frame.astype(float), 200.0 + frame.astype(float))
+        )
         self.values = {
             "acquisition_frame_id": np.repeat(frame, 2),
             "relative_distance_physical": np.column_stack(
@@ -62,6 +65,8 @@ class _Relative:
             "timestamp_ns": np.repeat(frame * 10_000_000, 2),
             "timestamp_valid": np.ones(self.n_rows, dtype=bool),
             "selection_member": np.ones(self.n_rows, dtype=bool),
+            "fish_position_xy_px": np.repeat(fish_xy, self.n_chasers, axis=0),
+            "fish_position_valid": np.ones(self.n_rows, dtype=bool),
             "chaser_identity_code": identities,
             "chaser_occurrence_member": np.ones(self.n_rows, dtype=bool),
             "chaser_behavior_role_code": identities.copy(),
@@ -72,7 +77,10 @@ class _Relative:
         }
 
     def base_frame_chaser(self, name: str) -> np.ndarray:
-        return self.values[name].reshape(self.n_frames, self.n_chasers)
+        values = self.values[name]
+        return values.reshape(
+            (self.n_frames, self.n_chasers) + values.shape[1:]
+        )
 
     def base_array(self, name: str) -> np.ndarray:
         return self.values[name]
@@ -204,6 +212,35 @@ def _inputs() -> tuple[
                     "epoch_role": {"1": "chaser_pre"},
                     "behavior_role": {"1": "aggressive"},
                 },
+                "epoch_records": [
+                    {
+                        "window_id": 0,
+                        "analysis_role": "chaser_pre",
+                        "start_frame": 0,
+                        "end_frame_exclusive": 2,
+                    },
+                    {
+                        "window_id": 1,
+                        "analysis_role": "chaser_training",
+                        "start_frame": 2,
+                        "end_frame_exclusive": 4,
+                    },
+                    {
+                        "window_id": 2,
+                        "analysis_role": "chaser_post",
+                        "start_frame": 4,
+                        "end_frame_exclusive": 6,
+                    },
+                ],
+                "arena": {
+                    "center_x_px": 100.0,
+                    "center_y_px": 200.0,
+                    "radius_px": 50.0,
+                    "radius_mm": 40.0,
+                    "coordinate_space": (
+                        "source_camera_continuous_pixel_xy_top_left_y_down"
+                    ),
+                },
                 "config": {"near_zone_radius_mm": 5.0},
             },
             arrays={
@@ -212,6 +249,22 @@ def _inputs() -> tuple[
                 "cdf_chaser_identity_code": np.asarray([1, 1], dtype=np.int64),
                 "cdf_threshold_mm": np.asarray([5.0, 10.0]),
                 "cdf_fraction_at_or_below": np.asarray([0.1, 0.3]),
+                "metric_epoch_role_code": np.asarray([1], dtype=np.int64),
+                "metric_behavior_role_code": np.asarray([1], dtype=np.int64),
+                "metric_chaser_identity_code": np.asarray([1], dtype=np.int64),
+                "metric_distance_p25_mm": np.asarray([8.0]),
+                "metric_distance_p50_mm": np.asarray([10.0]),
+                "metric_distance_p75_mm": np.asarray([12.0]),
+                "metric_near_zone_fraction_valid": np.asarray([0.1]),
+                "metric_near_zone_dwell_s": np.asarray([1.5]),
+                "metric_near_zone_entry_rate_per_min_valid_time": np.asarray([0.5]),
+                "metric_valid_distance_frame_count": np.asarray([100], dtype=np.int64),
+                "radial_epoch_role_code": np.asarray([1, 1], dtype=np.int64),
+                "radial_behavior_role_code": np.asarray([1, 1], dtype=np.int64),
+                "radial_chaser_identity_code": np.asarray([1, 1], dtype=np.int64),
+                "radial_bin_start_mm": np.asarray([0.0, 5.0]),
+                "radial_bin_end_mm": np.asarray([5.0, 10.0]),
+                "radial_selection_index_geometric": np.asarray([0.2, -0.1]),
             },
         )
 
@@ -226,7 +279,7 @@ def _inputs() -> tuple[
     )
 
 
-def test_render_detailed_bundle_writes_eight_figures(tmp_path: Path) -> None:
+def test_render_detailed_bundle_writes_fourteen_files(tmp_path: Path) -> None:
     inputs = _inputs()
     outputs = render_detailed_bundle(
         *inputs, output_dir=tmp_path, bundle_name="detailed"
@@ -235,7 +288,7 @@ def test_render_detailed_bundle_writes_eight_figures(tmp_path: Path) -> None:
         inputs[0], inputs[1], inputs[2], inputs[5], inputs[6]
     )
 
-    assert len(outputs) == 8
+    assert len(outputs) == 14
     assert all(path.is_file() and path.stat().st_size > 0 for path in outputs)
     assert parameters["scientific_coordinates"]["bout_distance_bins"][1][
         "end_mm_exclusive"
@@ -246,6 +299,14 @@ def test_render_detailed_bundle_writes_eight_figures(tmp_path: Path) -> None:
     assert parameters["rendering"]["trial_distance_traces"]["subplot_grid"] == [
         1,
         2,
+    ]
+    assert parameters["rendering"]["provider_epoch_distance_traces"][
+        "subplot_grid"
+    ] == [4, 2]
+    assert parameters["output_families"][-3:] == [
+        "provider_radial_near_field_summary",
+        "provider_epoch_distance_traces",
+        "provider_epoch_trajectory_overlays",
     ]
 
 
@@ -277,6 +338,25 @@ def test_detailed_bundle_rejects_mismatched_chaser_arrays() -> None:
     inputs[4].values["chaser_position_xy_px"][0, 0] += 1.0
 
     with pytest.raises(ChaserDetailedPlotError, match="chaser/timing evidence"):
+        verify_detailed_plot_inputs(*inputs)
+
+
+def test_detailed_bundle_rejects_mismatched_epoch_evidence() -> None:
+    inputs = list(_inputs())
+    inputs[-1].scientific_manifest["epoch_records"][1]["end_frame_exclusive"] = 5
+
+    with pytest.raises(ChaserDetailedPlotError, match="epoch_records"):
+        verify_detailed_plot_inputs(*inputs)
+
+
+def test_detailed_bundle_rejects_nonrepeated_fish_position() -> None:
+    inputs = list(_inputs())
+    inputs[3].values["fish_position_xy_px"] = inputs[3].values[
+        "fish_position_xy_px"
+    ].copy()
+    inputs[3].values["fish_position_xy_px"][1, 0] += 1.0
+
+    with pytest.raises(ChaserDetailedPlotError, match="repeated identically"):
         verify_detailed_plot_inputs(*inputs)
 
 

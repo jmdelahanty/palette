@@ -24,6 +24,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
+from matplotlib.patches import Circle  # noqa: E402
 import numpy as np
 
 from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
@@ -42,9 +43,10 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 RECEIPT_SCHEMA_ID = "palette.analysis.chaser_detailed_plot_bundle.receipt"
-RECEIPT_SCHEMA_VERSION = 2
-PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v2"
+RECEIPT_SCHEMA_VERSION = 3
+PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v3"
 PLOT_DPI = 180
+DENSE_DISPLAY_ALGORITHM = "all_exact_source_rows_rasterized_no_interpolation_v1"
 _RUN_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _CHAIN_KINDS = (
     "controller_chase_trials",
@@ -185,6 +187,14 @@ def verify_detailed_plot_inputs(
             != canonical_json_sha256(_plain(values[1]))
         ):
             _fail(f"Provider comparison has mismatched {source_name} bindings.")
+    for manifest_name in ("epoch_records", "arena"):
+        values = [handle.scientific_manifest.get(manifest_name) for handle in radial]
+        if any(value is None for value in values) or (
+            canonical_json_sha256({manifest_name: _plain(values[0])})
+            != canonical_json_sha256({manifest_name: _plain(values[1])})
+        ):
+            _fail(f"Provider comparison has mismatched {manifest_name} evidence.")
+    _epoch_records(radial_keypoint)
     for policy_name in ("coordinate_policy", "scale_policy"):
         values = [relative.manifest.get(policy_name) for relative in (relative_keypoint, relative_detection)]
         if not all(isinstance(value, Mapping) for value in values) or (
@@ -211,6 +221,12 @@ def verify_detailed_plot_inputs(
                 "Provider comparison does not preserve identical chaser/timing "
                 f"evidence array {array_name!r}."
             )
+    for relative in (relative_keypoint, relative_detection):
+        _collapsed_frame_scalar(relative, "acquisition_frame_id")
+        _collapsed_frame_scalar(relative, "timestamp_ns")
+        _collapsed_frame_scalar(relative, "timestamp_valid")
+        _collapsed_frame_scalar(relative, "selection_member")
+        _collapsed_fish_frame(relative)
 
 
 def _radial_cdf_rows(handle: Any) -> dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]]:
@@ -227,6 +243,111 @@ def _radial_cdf_rows(handle: Any) -> dict[tuple[int, int, int], tuple[np.ndarray
         order = np.argsort(threshold[mask])
         result[key] = (threshold[mask][order], fraction[mask][order])
     return result
+
+
+def _epoch_records(handle: Any) -> tuple[dict[str, Any], ...]:
+    raw = handle.scientific_manifest.get("epoch_records")
+    if not isinstance(raw, (list, tuple)) or not raw:
+        _fail("Radial successor lacks exact epoch records for detailed plotting.")
+    records = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            _fail("A radial epoch record is not a mapping.")
+        start = item.get("start_frame")
+        end = item.get("end_frame_exclusive")
+        window_id = item.get("window_id")
+        role = item.get("analysis_role")
+        if (
+            type(start) is not int
+            or type(end) is not int
+            or end <= start
+            or type(window_id) is not int
+            or type(role) is not str
+            or not role
+        ):
+            _fail("A radial epoch record has an invalid exact half-open boundary.")
+        records.append(
+            {
+                "window_id": window_id,
+                "analysis_role": role,
+                "start_frame_inclusive": start,
+                "end_frame_exclusive": end,
+            }
+        )
+    records.sort(key=lambda item: (item["start_frame_inclusive"], item["window_id"]))
+    if len({item["window_id"] for item in records}) != len(records):
+        _fail("Radial epoch records contain duplicate window identities.")
+    if any(
+        left["end_frame_exclusive"] > right["start_frame_inclusive"]
+        for left, right in zip(records, records[1:], strict=False)
+    ):
+        _fail("Radial epoch records overlap.")
+    return tuple(records)
+
+
+def _collapsed_frame_scalar(relative: Any, name: str) -> np.ndarray:
+    values = np.asarray(relative.base_frame_chaser(name))
+    if values.ndim != 2 or values.shape != (relative.n_frames, relative.n_chasers):
+        _fail(f"Relative-frame scalar {name!r} has an invalid frame/chaser shape.")
+    if not np.all(values == values[:, :1]):
+        _fail(f"Relative-frame scalar {name!r} is not repeated identically per chaser.")
+    return values[:, 0]
+
+
+def _collapsed_fish_frame(relative: Any) -> tuple[np.ndarray, np.ndarray]:
+    positions = np.asarray(
+        relative.base_frame_chaser("fish_position_xy_px"), dtype=np.float64
+    )
+    valid = np.asarray(relative.base_frame_chaser("fish_position_valid"), dtype=bool)
+    expected_position_shape = (relative.n_frames, relative.n_chasers, 2)
+    expected_valid_shape = (relative.n_frames, relative.n_chasers)
+    if positions.shape != expected_position_shape or valid.shape != expected_valid_shape:
+        _fail("Fish-position arrays do not preserve frame/chaser/source-xy shape.")
+    if not np.all(valid == valid[:, :1]):
+        _fail("Fish-position validity is not repeated identically per chaser.")
+    repeated = positions[:, :1, :]
+    if not np.all((positions == repeated) | (np.isnan(positions) & np.isnan(repeated))):
+        _fail("Fish-position values are not repeated identically per chaser.")
+    collapsed = positions[:, 0, :]
+    collapsed_valid = valid[:, 0] & np.all(np.isfinite(collapsed), axis=1)
+    return collapsed, collapsed_valid
+
+
+def _radial_metric_rows(handle: Any) -> dict[tuple[int, int, int], dict[str, float]]:
+    columns = {
+        "epoch": _array(handle, "metric_epoch_role_code").astype(np.int64),
+        "behavior": _array(handle, "metric_behavior_role_code").astype(np.int64),
+        "chaser": _array(handle, "metric_chaser_identity_code").astype(np.int64),
+        "distance_p25_mm": _array(handle, "metric_distance_p25_mm").astype(np.float64),
+        "distance_p50_mm": _array(handle, "metric_distance_p50_mm").astype(np.float64),
+        "distance_p75_mm": _array(handle, "metric_distance_p75_mm").astype(np.float64),
+        "near_fraction": _array(handle, "metric_near_zone_fraction_valid").astype(np.float64),
+        "near_dwell_s": _array(handle, "metric_near_zone_dwell_s").astype(np.float64),
+        "entry_rate_per_min": _array(
+            handle, "metric_near_zone_entry_rate_per_min_valid_time"
+        ).astype(np.float64),
+        "valid_distance_count": _array(
+            handle, "metric_valid_distance_frame_count"
+        ).astype(np.int64),
+    }
+    lengths = {value.size for value in columns.values()}
+    if len(lengths) != 1 or not next(iter(lengths)):
+        _fail("Radial metric summary columns have different or empty lengths.")
+    rows: dict[tuple[int, int, int], dict[str, float]] = {}
+    for index in range(columns["epoch"].size):
+        key = (
+            int(columns["epoch"][index]),
+            int(columns["behavior"][index]),
+            int(columns["chaser"][index]),
+        )
+        if key in rows:
+            _fail("Radial metric summary contains a duplicated stratum.")
+        rows[key] = {
+            name: float(values[index])
+            for name, values in columns.items()
+            if name not in {"epoch", "behavior", "chaser"}
+        }
+    return rows
 
 
 def render_provider_distance_cdf(
@@ -287,6 +408,447 @@ def render_provider_distance_cdf(
     figure.suptitle(
         f"First-class position-provider distance CDF comparison · {radial_keypoint.recording_id}\n"
         "matched chaser/timestamp arrays and semantic/geometry authorities · no interpolation",
+        fontsize=13,
+    )
+    return _save_figure(figure, output_stem)
+
+
+def _stratum_labels(handle: Any, keys: Sequence[tuple[int, int, int]]) -> list[str]:
+    epoch_registry = _registry(handle.scientific_manifest, "epoch_role")
+    behavior_registry = _registry(handle.scientific_manifest, "behavior_role")
+    return [
+        (
+            f"{epoch_registry.get(str(epoch), f'epoch {epoch}')}\n"
+            f"{behavior_registry.get(str(behavior), f'role {behavior}')} · "
+            f"chaser {chaser}"
+        )
+        for epoch, behavior, chaser in keys
+    ]
+
+
+def render_provider_radial_near_field_summary(
+    radial_keypoint: ComposableChaserSuccessorSourceHandle,
+    radial_detection: ComposableChaserSuccessorSourceHandle,
+    *,
+    output_stem: Path,
+) -> tuple[Path, Path]:
+    """Render persisted paired-provider distance, ring, and near-field summaries."""
+
+    handles = (radial_keypoint, radial_detection)
+    provider_ids = [
+        str(handle.scientific_manifest["position_provider"]["provider_id"])
+        for handle in handles
+    ]
+    rows = tuple(_radial_metric_rows(handle) for handle in handles)
+    if set(rows[0]) != set(rows[1]) or not rows[0]:
+        _fail("Paired radial metric products expose different or empty strata.")
+    keys = sorted(rows[0])
+    labels = _stratum_labels(radial_keypoint, keys)
+    x = np.arange(len(keys), dtype=np.float64)
+    offsets = (-0.18, 0.18)
+    colors = ("#1f77b4", "#d95f02")
+
+    figure, axes = plt.subplots(2, 2, figsize=(17, 11), constrained_layout=True)
+    for provider_index, (provider_id, provider_rows) in enumerate(
+        zip(provider_ids, rows, strict=True)
+    ):
+        median = np.asarray(
+            [provider_rows[key]["distance_p50_mm"] for key in keys], dtype=float
+        )
+        p25 = np.asarray(
+            [provider_rows[key]["distance_p25_mm"] for key in keys], dtype=float
+        )
+        p75 = np.asarray(
+            [provider_rows[key]["distance_p75_mm"] for key in keys], dtype=float
+        )
+        valid = np.isfinite(median) & np.isfinite(p25) & np.isfinite(p75)
+        axes[0, 0].errorbar(
+            x[valid] + offsets[provider_index],
+            median[valid],
+            yerr=np.vstack((median[valid] - p25[valid], p75[valid] - median[valid])),
+            fmt="o",
+            capsize=3,
+            color=colors[provider_index],
+            label=provider_id,
+        )
+        near_fraction = np.asarray(
+            [provider_rows[key]["near_fraction"] for key in keys], dtype=float
+        )
+        axes[1, 0].bar(
+            x + offsets[provider_index],
+            near_fraction,
+            width=0.34,
+            color=colors[provider_index],
+            alpha=0.78,
+            label=provider_id,
+        )
+        dwell = np.asarray(
+            [provider_rows[key]["near_dwell_s"] for key in keys], dtype=float
+        )
+        axes[1, 1].bar(
+            x + offsets[provider_index],
+            dwell,
+            width=0.34,
+            color=colors[provider_index],
+            alpha=0.62,
+            label=f"{provider_id} · dwell",
+        )
+
+    axes[0, 0].set_title("Simple distance: median and interquartile range")
+    axes[0, 0].set_ylabel("fish–chaser distance (mm)")
+    axes[0, 0].legend(fontsize=7)
+
+    radial_keys = []
+    radial_rows = []
+    for handle in handles:
+        epoch = _array(handle, "radial_epoch_role_code").astype(np.int64)
+        behavior = _array(handle, "radial_behavior_role_code").astype(np.int64)
+        chaser = _array(handle, "radial_chaser_identity_code").astype(np.int64)
+        start = _array(handle, "radial_bin_start_mm").astype(np.float64)
+        end = _array(handle, "radial_bin_end_mm").astype(np.float64)
+        selection = _array(handle, "radial_selection_index_geometric").astype(
+            np.float64
+        )
+        if not (
+            epoch.size
+            == behavior.size
+            == chaser.size
+            == start.size
+            == end.size
+            == selection.size
+        ):
+            _fail("Paired radial selection columns have different lengths.")
+        keys_for_provider = sorted(
+            set(zip(epoch.tolist(), behavior.tolist(), chaser.tolist()))
+        )
+        radial_keys.append(keys_for_provider)
+        radial_rows.append((epoch, behavior, chaser, start, end, selection))
+    if radial_keys[0] != radial_keys[1] or radial_keys[0] != keys or not radial_keys[0]:
+        _fail("Paired radial selection products expose different or empty strata.")
+    stratum_colors = plt.get_cmap("tab10")
+    for provider_index, (provider_id, columns) in enumerate(
+        zip(provider_ids, radial_rows, strict=True)
+    ):
+        epoch, behavior, chaser, start, end, selection = columns
+        for stratum_index, key in enumerate(radial_keys[0]):
+            mask = (epoch == key[0]) & (behavior == key[1]) & (chaser == key[2])
+            order = np.argsort(start[mask])
+            center = (start[mask][order] + end[mask][order]) / 2.0
+            values = selection[mask][order]
+            finite = np.isfinite(center) & np.isfinite(values)
+            axes[0, 1].plot(
+                center[finite],
+                values[finite],
+                color=stratum_colors(stratum_index % 10),
+                linestyle=("-", "--")[provider_index],
+                linewidth=1.15,
+                label=(
+                    f"{labels[stratum_index].replace(chr(10), ' · ')} · {provider_id}"
+                ),
+            )
+    axes[0, 1].axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
+    axes[0, 1].set_title("Area-corrected moving-chaser radial selection")
+    axes[0, 1].set_xlabel("fish–chaser distance (mm)")
+    axes[0, 1].set_ylabel("geometric selection index")
+    axes[0, 1].legend(fontsize=5.8, ncols=2)
+
+    near_radius = float(
+        radial_keypoint.scientific_manifest["config"]["near_zone_radius_mm"]
+    )
+    axes[1, 0].set_title(f"Near-field occupancy (≤{near_radius:g} mm)")
+    axes[1, 0].set_ylabel("fraction of valid distance rows")
+    axes[1, 0].set_ylim(bottom=0.0)
+
+    entry_axis = axes[1, 1].twinx()
+    for provider_index, (provider_id, provider_rows) in enumerate(
+        zip(provider_ids, rows, strict=True)
+    ):
+        rates = np.asarray(
+            [provider_rows[key]["entry_rate_per_min"] for key in keys], dtype=float
+        )
+        entry_axis.plot(
+            x + offsets[provider_index],
+            rates,
+            marker=("o", "s")[provider_index],
+            color=colors[provider_index],
+            linewidth=1.1,
+            label=f"{provider_id} · entries/min",
+        )
+    axes[1, 1].set_title("Exact-session-time near-field visits")
+    axes[1, 1].set_ylabel("dwell (s)")
+    entry_axis.set_ylabel("entries/min valid time")
+    left_handles, left_labels = axes[1, 1].get_legend_handles_labels()
+    right_handles, right_labels = entry_axis.get_legend_handles_labels()
+    axes[1, 1].legend(
+        left_handles + right_handles,
+        left_labels + right_labels,
+        fontsize=6,
+        ncols=2,
+    )
+
+    for ax in (axes[0, 0], axes[1, 0], axes[1, 1]):
+        ax.set_xticks(x, labels, rotation=30, ha="right", fontsize=7)
+    for ax in axes.reshape(-1):
+        ax.grid(axis="y", alpha=0.2)
+    figure.suptitle(
+        f"Paired-provider chaser distance, radial rings, and near field · "
+        f"{radial_keypoint.recording_id}\n"
+        "persisted summaries · exact session time · no interpolation · selector-ineligible",
+        fontsize=13,
+    )
+    return _save_figure(figure, output_stem)
+
+
+def render_provider_epoch_distance_traces(
+    relative_keypoint: Any,
+    relative_detection: Any,
+    radial_keypoint: ComposableChaserSuccessorSourceHandle,
+    *,
+    output_stem: Path,
+) -> tuple[Path, Path]:
+    """Render full-recording and exact-epoch distance traces for both providers."""
+
+    relatives = (relative_keypoint, relative_detection)
+    provider_ids = [
+        str(relative.source_authorities["fish_position"]["provider_id"])
+        for relative in relatives
+    ]
+    epochs = _epoch_records(radial_keypoint)
+    frame_id = _collapsed_frame_scalar(relative_keypoint, "acquisition_frame_id").astype(
+        np.int64
+    )
+    timestamp = _collapsed_frame_scalar(relative_keypoint, "timestamp_ns").astype(
+        np.int64
+    )
+    timestamp_valid = _collapsed_frame_scalar(
+        relative_keypoint, "timestamp_valid"
+    ).astype(bool)
+    selection_member = _collapsed_frame_scalar(
+        relative_keypoint, "selection_member"
+    ).astype(bool)
+    if not np.any(timestamp_valid):
+        _fail("Distance traces have no exact valid session timestamp.")
+    reference_ns = int(timestamp[np.flatnonzero(timestamp_valid)[0]])
+    time_s = (timestamp.astype(np.float64) - float(reference_ns)) / 1e9
+
+    identities = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_identity_code"), dtype=np.int64
+    )
+    roles = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_behavior_role_code"), dtype=np.int64
+    )
+    if not (
+        np.all(identities == identities[:1]) and np.all(roles == roles[:1])
+    ):
+        _fail("Distance traces have unstable chaser identity or behavior-role columns.")
+    behavior_registry = _registry(radial_keypoint.scientific_manifest, "behavior_role")
+    row_specs: list[tuple[str, np.ndarray]] = [
+        ("full recording", np.ones(frame_id.size, dtype=bool))
+    ]
+    for record in epochs:
+        row_specs.append(
+            (
+                str(record["analysis_role"]),
+                selection_member
+                & (frame_id >= int(record["start_frame_inclusive"]))
+                & (frame_id < int(record["end_frame_exclusive"])),
+            )
+        )
+    if any(not np.any(mask) for _, mask in row_specs):
+        _fail("A full-recording or exact-epoch distance panel has no source rows.")
+
+    figure, axes = plt.subplots(
+        len(row_specs),
+        relative_keypoint.n_chasers,
+        figsize=(15.5, 3.15 * len(row_specs)),
+        sharex=False,
+        sharey=True,
+        constrained_layout=True,
+        squeeze=False,
+    )
+    colors = ("#1f77b4", "#d95f02")
+    for row_index, (row_label, row_mask) in enumerate(row_specs):
+        row_indices = np.flatnonzero(row_mask)
+        for chaser_column in range(relative_keypoint.n_chasers):
+            ax = axes[row_index, chaser_column]
+            for provider_index, (provider_id, relative) in enumerate(
+                zip(provider_ids, relatives, strict=True)
+            ):
+                distance = np.asarray(
+                    relative.base_frame_chaser("relative_distance_physical"),
+                    dtype=np.float64,
+                )[:, chaser_column]
+                valid = np.asarray(
+                    relative.base_frame_chaser("relative_physical_valid"), dtype=bool
+                )[:, chaser_column]
+                occurrence = np.asarray(
+                    relative.base_frame_chaser("chaser_occurrence_member"), dtype=bool
+                )[:, chaser_column]
+                local_valid = (
+                    valid[row_indices]
+                    & occurrence[row_indices]
+                    & timestamp_valid[row_indices]
+                )
+                local_distance = distance[row_indices]
+                displayed_values = local_distance.copy()
+                displayed_values[~local_valid] = np.nan
+                ax.plot(
+                    time_s[row_indices],
+                    displayed_values,
+                    color=colors[provider_index],
+                    linewidth=0.9,
+                    alpha=0.82,
+                    rasterized=True,
+                    label=provider_id,
+                )
+            identity = int(identities[0, chaser_column])
+            role = behavior_registry.get(
+                str(int(roles[0, chaser_column])),
+                f"role {int(roles[0, chaser_column])}",
+            )
+            ax.set_title(f"{row_label} · {role} · chaser {identity}")
+            ax.set_xlabel("session time from first valid timestamp (s)")
+            ax.set_ylabel("distance (mm)")
+            ax.grid(alpha=0.2)
+            if row_index == 0 and chaser_column == 0:
+                ax.legend(fontsize=7)
+    figure.suptitle(
+        f"Full-recording and exact-epoch fish–chaser distance · "
+        f"{radial_keypoint.recording_id}\n"
+        "paired first-class providers · all exact rows rasterized · "
+        "missing rows break traces",
+        fontsize=13,
+    )
+    return _save_figure(figure, output_stem)
+
+
+def render_provider_epoch_trajectory_overlays(
+    relative_keypoint: Any,
+    relative_detection: Any,
+    radial_keypoint: ComposableChaserSuccessorSourceHandle,
+    *,
+    output_stem: Path,
+) -> tuple[Path, Path]:
+    """Render exact-epoch fish position samples with logged chaser overlays."""
+
+    relatives = (relative_keypoint, relative_detection)
+    provider_ids = [
+        str(relative.source_authorities["fish_position"]["provider_id"])
+        for relative in relatives
+    ]
+    epochs = _epoch_records(radial_keypoint)
+    arena = radial_keypoint.scientific_manifest.get("arena")
+    if not isinstance(arena, Mapping):
+        _fail("Trajectory overlay lacks its reviewed arena record.")
+    center_x = float(arena["center_x_px"])
+    center_y = float(arena["center_y_px"])
+    radius = float(arena["radius_px"])
+    if not all(np.isfinite(value) for value in (center_x, center_y, radius)) or radius <= 0:
+        _fail("Trajectory overlay arena circle is non-finite or nonpositive.")
+    frame_id = _collapsed_frame_scalar(relative_keypoint, "acquisition_frame_id").astype(
+        np.int64
+    )
+    selection_member = _collapsed_frame_scalar(
+        relative_keypoint, "selection_member"
+    ).astype(bool)
+    chaser_xy = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_position_xy_px"), dtype=np.float64
+    )
+    chaser_valid = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_position_valid"), dtype=bool
+    )
+    occurrence = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_occurrence_member"), dtype=bool
+    )
+    roles = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_behavior_role_code"), dtype=np.int64
+    )
+    identities = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_identity_code"), dtype=np.int64
+    )
+    if chaser_xy.shape != (relative_keypoint.n_frames, relative_keypoint.n_chasers, 2):
+        _fail("Trajectory chaser positions do not preserve frame/chaser/source-xy shape.")
+    if not (np.all(roles == roles[:1]) and np.all(identities == identities[:1])):
+        _fail("Trajectory overlay has unstable chaser identity or behavior roles.")
+    behavior_registry = _registry(radial_keypoint.scientific_manifest, "behavior_role")
+    chaser_colors = plt.get_cmap("tab10")
+
+    figure, axes = plt.subplots(
+        len(relatives),
+        len(epochs),
+        figsize=(16.5, 10.5),
+        constrained_layout=True,
+        squeeze=False,
+    )
+    for provider_index, (provider_id, relative) in enumerate(
+        zip(provider_ids, relatives, strict=True)
+    ):
+        fish_xy, fish_valid = _collapsed_fish_frame(relative)
+        for epoch_index, record in enumerate(epochs):
+            ax = axes[provider_index, epoch_index]
+            epoch_mask = (
+                selection_member
+                & (frame_id >= int(record["start_frame_inclusive"]))
+                & (frame_id < int(record["end_frame_exclusive"]))
+            )
+            epoch_rows = np.flatnonzero(epoch_mask)
+            if not epoch_rows.size:
+                _fail("An exact-epoch trajectory panel has no source rows.")
+            local_fish = fish_xy[epoch_rows]
+            local_fish_valid = fish_valid[epoch_rows]
+            ax.scatter(
+                local_fish[local_fish_valid, 0],
+                local_fish[local_fish_valid, 1],
+                color="#222222",
+                s=0.35,
+                alpha=0.18,
+                edgecolors="none",
+                rasterized=True,
+                label=f"fish · {provider_id}",
+            )
+            for chaser_column in range(relative_keypoint.n_chasers):
+                local_chaser = chaser_xy[epoch_rows, chaser_column]
+                local_valid = (
+                    chaser_valid[epoch_rows, chaser_column]
+                    & occurrence[epoch_rows, chaser_column]
+                )
+                role_code = int(roles[0, chaser_column])
+                role = behavior_registry.get(str(role_code), f"role {role_code}")
+                identity = int(identities[0, chaser_column])
+                ax.scatter(
+                    local_chaser[local_valid, 0],
+                    local_chaser[local_valid, 1],
+                    color=chaser_colors(chaser_column % 10),
+                    s=1.2,
+                    alpha=0.55,
+                    edgecolors="none",
+                    rasterized=True,
+                    label=f"{role} · chaser {identity}",
+                )
+            ax.add_patch(
+                Circle(
+                    (center_x, center_y),
+                    radius,
+                    fill=False,
+                    color="#666666",
+                    linewidth=0.9,
+                )
+            )
+            margin = radius * 1.03
+            ax.set_xlim(center_x - margin, center_x + margin)
+            ax.set_ylim(center_y + margin, center_y - margin)
+            ax.set_aspect("equal")
+            ax.set_title(f"{record['analysis_role']} · {provider_id}", fontsize=9)
+            ax.set_xlabel("source-camera x (px)")
+            ax.set_ylabel("source-camera y (px; +down)")
+            ax.grid(alpha=0.15)
+            if provider_index == 0 and epoch_index == 0:
+                ax.legend(fontsize=6)
+    figure.suptitle(
+        f"Exact-epoch fish position samples with logged chaser overlays · "
+        f"{radial_keypoint.recording_id}\n"
+        "reviewed circular-arena context · direct source-camera positions · "
+        "all valid exact rows rasterized",
         fontsize=13,
     )
     return _save_figure(figure, output_stem)
@@ -658,9 +1220,30 @@ def detailed_plot_parameters(
         _fail("Detailed trace plot has no exact trials.")
     trace_columns = min(2, trial_count)
     trace_rows = int(math.ceil(trial_count / trace_columns))
+    epoch_records = _epoch_records(radial_keypoint)
+    radial_metric_rows = tuple(_radial_metric_rows(handle) for handle in radial_handles)
+    if set(radial_metric_rows[0]) != set(radial_metric_rows[1]) or not radial_metric_rows[0]:
+        _fail("Provider radial summary plot strata are empty or mismatched.")
+    arena = radial_keypoint.scientific_manifest.get("arena")
+    if not isinstance(arena, Mapping):
+        _fail("Provider trajectory plot arena evidence is absent.")
     return {
         "scientific_coordinates": {
             "provider_distance_cdf": cdf_parameters,
+            "provider_radial_near_field_summary": {
+                "metric_arrays": {
+                    "distance_p25_mm": "metric_distance_p25_mm",
+                    "distance_p50_mm": "metric_distance_p50_mm",
+                    "distance_p75_mm": "metric_distance_p75_mm",
+                    "near_fraction": "metric_near_zone_fraction_valid",
+                    "near_dwell_s": "metric_near_zone_dwell_s",
+                    "entry_rate_per_min": (
+                        "metric_near_zone_entry_rate_per_min_valid_time"
+                    ),
+                    "radial_selection": "radial_selection_index_geometric",
+                },
+                "strata": [list(key) for key in sorted(radial_metric_rows[0])],
+            },
             "bout_distance_bins": [distance_bins[key] for key in sorted(distance_bins)],
             "escape_speed_thresholds_mm_s": [
                 float(value) for value in np.unique(sweep_thresholds)
@@ -671,6 +1254,17 @@ def detailed_plot_parameters(
             "trial_trace_time_reference": "timestamp_ns_minus_exact_trigger_timestamp_ns",
             "trial_trace_distance_array": "relative_distance_physical",
             "trial_trace_membership_overlay": "logged_active_trial_member",
+            "full_and_epoch_trace_time_reference": (
+                "timestamp_ns_minus_first_valid_recording_timestamp_ns"
+            ),
+            "full_and_epoch_trace_distance_array": "relative_distance_physical",
+            "exact_epoch_records": list(epoch_records),
+            "trajectory_position_arrays": {
+                "fish": "fish_position_xy_px",
+                "chaser": "chaser_position_xy_px",
+                "coordinate_space": "source_camera_continuous_pixel_xy_top_left_y_down",
+                "arena": _plain(arena),
+            },
             "missing_value_policy": "remain_missing_no_interpolation",
         },
         "rendering": {
@@ -718,12 +1312,40 @@ def detailed_plot_parameters(
                 "active_member_alpha": 0.55,
                 "trigger_line_x_seconds": 0.0,
             },
+            "provider_radial_near_field_summary": {
+                "subplot_grid": [2, 2],
+                "figure_size_inches": [17.0, 11.0],
+                "paired_provider_offsets": [-0.18, 0.18],
+                "provider_colors": ["#1f77b4", "#d95f02"],
+                "density_or_summary_recomputation": False,
+            },
+            "provider_epoch_distance_traces": {
+                "subplot_grid": [1 + len(epoch_records), 2],
+                "figure_size_inches": [15.5, 3.15 * (1 + len(epoch_records))],
+                "display_algorithm": DENSE_DISPLAY_ALGORITHM,
+                "all_exact_source_rows_retained": True,
+                "pdf_dense_lines_rasterized": True,
+            },
+            "provider_epoch_trajectory_overlays": {
+                "subplot_grid": [2, len(epoch_records)],
+                "figure_size_inches": [16.5, 10.5],
+                "display_algorithm": DENSE_DISPLAY_ALGORITHM,
+                "all_valid_source_rows_retained": True,
+                "fish_marker_size_points_squared": 0.35,
+                "chaser_marker_size_points_squared": 1.2,
+                "pdf_dense_points_rasterized": True,
+                "position_samples_connected_by_lines": False,
+                "quantitative_occupancy_inference": False,
+            },
         },
         "output_families": [
             "provider_distance_cdf",
             "bout_response_details",
             "trial_escape_details",
             "trial_distance_traces",
+            "provider_radial_near_field_summary",
+            "provider_epoch_distance_traces",
+            "provider_epoch_trajectory_overlays",
         ],
     }
 
@@ -740,7 +1362,7 @@ def render_detailed_bundle(
     output_dir: Path,
     bundle_name: str,
 ) -> tuple[Path, ...]:
-    """Validate all sources and render the four detailed figure families."""
+    """Validate all sources and render the seven detailed figure families."""
 
     verify_detailed_plot_inputs(
         controller,
@@ -760,6 +1382,21 @@ def render_detailed_bundle(
             render_trial_distance_traces,
             "trial_distance_traces",
             (controller, relative_keypoint),
+        ),
+        (
+            render_provider_radial_near_field_summary,
+            "provider_radial_near_field_summary",
+            (radial_keypoint, radial_detection),
+        ),
+        (
+            render_provider_epoch_distance_traces,
+            "provider_epoch_distance_traces",
+            (relative_keypoint, relative_detection, radial_keypoint),
+        ),
+        (
+            render_provider_epoch_trajectory_overlays,
+            "provider_epoch_trajectory_overlays",
+            (relative_keypoint, relative_detection, radial_keypoint),
         ),
     ):
         outputs.extend(
@@ -815,6 +1452,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "bout_response_details",
         "trial_escape_details",
         "trial_distance_traces",
+        "provider_radial_near_field_summary",
+        "provider_epoch_distance_traces",
+        "provider_epoch_trajectory_overlays",
     )
     expected = tuple(
         output_dir / f"{bundle_name}_{suffix}.{extension}"
@@ -1021,7 +1661,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else "deep_array_content_audit"
             ),
             "scientific_arrays": "persisted_arrays_only",
-            "plot_transforms": "sorting_masking_and_exact_trigger_time_subtraction_only",
+            "plot_transforms": (
+                "sorting_masking_exact_time_origin_subtraction_and_"
+                "dense_artist_rasterization_only"
+            ),
             "interpolation": "prohibited",
             "missing_rows": "remain_missing",
             "scientific_authority": False,
@@ -1057,6 +1700,9 @@ __all__ = [
     "render_bout_response_details",
     "render_detailed_bundle",
     "render_provider_distance_cdf",
+    "render_provider_epoch_distance_traces",
+    "render_provider_epoch_trajectory_overlays",
+    "render_provider_radial_near_field_summary",
     "render_trial_distance_traces",
     "render_trial_escape_details",
     "verify_detailed_plot_inputs",

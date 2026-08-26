@@ -85,8 +85,9 @@ DASHBOARD_RECIPE_BUNDLE_NAME = (
     "goodbatbadbat_chaser_dashboard_activity_orthogonal_recipe_v2"
 )
 DETAILED_RECIPE_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_detailed_activity_orthogonal_recipe_v3"
+    "goodbatbadbat_chaser_detailed_activity_orthogonal_recipe_v4"
 )
+DETAILED_PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v3"
 RELATIVE_FRAME_VALIDATION_MODE = "reusable_direct_subtree_receipt_v1"
 
 MOTION_BOUT_PAIRS = (
@@ -760,7 +761,7 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
                 **dict(previous["selection_policy"]),
                 "successor_of_task_sha256": previous_digest,
                 "relative_frame_validation": RELATIVE_FRAME_VALIDATION_MODE,
-                "plot_recipe_provenance": "self_contained_exact_parameters_v2",
+                "plot_recipe_provenance": "self_contained_exact_parameters_v3",
             },
             "status_counts": status_counts,
             "runnable_task_indices": [
@@ -821,6 +822,7 @@ def _validated_plot_receipt(
     *,
     recording_id: str,
     require_self_contained_recipe: bool = False,
+    expected_plot_recipe_id: str | None = None,
 ) -> bool:
     if not path.exists():
         return False
@@ -839,6 +841,11 @@ def _validated_plot_receipt(
         _fail(f"Plot receipt digest is stale: {path}")
     if receipt.get("recording_id") != recording_id:
         _fail(f"Plot receipt recording identity mismatch: {path}")
+    if (
+        expected_plot_recipe_id is not None
+        and receipt.get("plot_recipe_id") != expected_plot_recipe_id
+    ):
+        _fail(f"Plot receipt recipe identity mismatch: {path}")
     if require_self_contained_recipe:
         parameters = receipt.get("plot_parameters")
         if (
@@ -1548,6 +1555,7 @@ def run_one(
         detailed_receipt,
         recording_id=recording_id,
         require_self_contained_recipe=receipt_bound_relative,
+        expected_plot_recipe_id=DETAILED_PLOT_RECIPE_ID,
     ):
         stages.append({"stage": "detailed_plots", "mode": "reused_exact_receipt"})
     else:
