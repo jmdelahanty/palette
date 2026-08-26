@@ -183,6 +183,39 @@ CHASER_CANDIDATE_PROVIDER = ProviderDefinition(
 )
 
 
+CHASER_EXACT_SUCCESSOR_PROVIDER = ProviderDefinition(
+    provider_id="stimulus_chaser_exact_successors",
+    label="Chaser exact successors",
+    description=(
+        "Paired keypoint/detection views from sealed, selector-ineligible "
+        "protocol-semantic successors."
+    ),
+    component_key="chaser_exact_successors",
+    analyses=(
+        AnalysisDefinition(
+            "radial_near_field",
+            "Distance, rings, and near field",
+            "Paired-provider persisted radial and exact-time near-field summaries.",
+        ),
+        AnalysisDefinition(
+            "distance_traces",
+            "Full and exact-epoch distance",
+            "Full-session and exact protocol-epoch fish–chaser distance traces.",
+        ),
+        AnalysisDefinition(
+            "trajectory_overlays",
+            "Exact-epoch position overlays",
+            "Fish positions with exact logged chaser positions in the reviewed arena.",
+        ),
+        AnalysisDefinition(
+            "provenance",
+            "Provenance",
+            "Exact bundle, child-run identities, display projection, and authorities.",
+        ),
+    ),
+)
+
+
 BOUT_KINEMATICS_PROVIDER = ProviderDefinition(
     provider_id="bout_kinematics",
     label="Bout kinematics",
@@ -217,6 +250,7 @@ PROVIDERS: Mapping[str, ProviderDefinition] = {
     CORE_BEHAVIOR_PROVIDER.provider_id: CORE_BEHAVIOR_PROVIDER,
     CHASER_PROVIDER.provider_id: CHASER_PROVIDER,
     CHASER_CANDIDATE_PROVIDER.provider_id: CHASER_CANDIDATE_PROVIDER,
+    CHASER_EXACT_SUCCESSOR_PROVIDER.provider_id: CHASER_EXACT_SUCCESSOR_PROVIDER,
     BOUT_KINEMATICS_PROVIDER.provider_id: BOUT_KINEMATICS_PROVIDER,
 }
 
@@ -238,10 +272,12 @@ def group_specs_by_provider(
     ordered = sorted(
         options,
         key=lambda item: (
-            0
-            if "chaser-dashboard" in item.renderer
-            or "chaser-protocol-dashboard" in item.renderer
-            else 1,
+            (
+                0
+                if "chaser-dashboard" in item.renderer
+                or "chaser-protocol-dashboard" in item.renderer
+                else 1
+            ),
             0 if item.renderer == BOUT_HEADING_PLOT_RENDERER else 1,
             item.artifact_path,
         ),
@@ -275,6 +311,14 @@ def group_specs_by_provider(
         grouped["stimulus_chaser_candidate"].sort(
             key=lambda item: (
                 str(item.attrs.get("created_at_utc") or ""),
+                item.run_name,
+            ),
+            reverse=True,
+        )
+    if "stimulus_chaser_exact_successors" in grouped:
+        grouped["stimulus_chaser_exact_successors"].sort(
+            key=lambda item: (
+                str(item.attrs.get("palette_run_completed_at_utc") or ""),
                 item.run_name,
             ),
             reverse=True,

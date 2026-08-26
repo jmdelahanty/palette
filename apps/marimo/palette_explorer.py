@@ -67,6 +67,13 @@ def _():
         build_provider_chaser_candidate_bout_response_output,
         load_provider_chaser_candidate_projection,
     )
+    from apps.marimo.components.chaser_exact_successors import (
+        available_exact_chaser_successor_analysis_ids,
+        build_exact_distance_traces_output,
+        build_exact_radial_near_field_output,
+        build_exact_trajectory_overlays_output,
+        load_exact_chaser_successor_projection,
+    )
     from apps.marimo.components.recording_workspace import (
         RecordingExplorationWorkspace,
     )
@@ -87,6 +94,7 @@ def _():
         available_bout_analysis_ids,
         available_chaser_analysis_ids,
         available_provider_chaser_candidate_analysis_ids,
+        available_exact_chaser_successor_analysis_ids,
         build_arena_heatmap,
         build_bout_controls,
         build_bout_kinematics_output,
@@ -105,6 +113,9 @@ def _():
         build_fish_heading_output,
         build_provider_chaser_candidate_bearing_output,
         build_provider_chaser_candidate_bout_response_output,
+        build_exact_distance_traces_output,
+        build_exact_radial_near_field_output,
+        build_exact_trajectory_overlays_output,
         build_spatial_occupancy_output,
         build_spec_provenance_panel,
         build_static_artifacts_panel,
@@ -120,6 +131,7 @@ def _():
         load_core_behavior_projection,
         load_goodcopbadcop_view,
         load_provider_chaser_candidate_projection,
+        load_exact_chaser_successor_projection,
         mo,
         px,
         resolve_time_window_from_widgets,
@@ -341,6 +353,7 @@ def _(source_by_label, source_picker):
 def _(
     CoreBehaviorSource,
     analyses_for_provider,
+    available_exact_chaser_successor_analysis_ids,
     available_bout_analysis_ids,
     available_chaser_analysis_ids,
     available_provider_chaser_candidate_analysis_ids,
@@ -359,6 +372,10 @@ def _(
         available_ids = available_bout_analysis_ids(zarr_path, selected_spec)
     elif selected_provider.provider_id == "stimulus_chaser_candidate":
         available_ids = available_provider_chaser_candidate_analysis_ids(
+            zarr_path, selected_spec
+        )
+    elif selected_provider.provider_id == "stimulus_chaser_exact_successors":
+        available_ids = available_exact_chaser_successor_analysis_ids(
             zarr_path, selected_spec
         )
     else:
@@ -897,6 +914,34 @@ def _(
 
 
 @app.cell(hide_code=True)
+def _(
+    load_exact_chaser_successor_projection,
+    selected_analysis_id,
+    selected_provider,
+    selected_spec,
+    zarr_path,
+):
+    exact_chaser_projection = None
+    exact_chaser_projection_error = None
+    if (
+        selected_provider is not None
+        and selected_provider.provider_id == "stimulus_chaser_exact_successors"
+        and selected_spec is not None
+        and selected_analysis_id
+        in {"radial_near_field", "distance_traces", "trajectory_overlays"}
+    ):
+        try:
+            exact_chaser_projection = load_exact_chaser_successor_projection(
+                zarr_path,
+                selected_spec,
+                analysis_id=selected_analysis_id,
+            )
+        except Exception as exc:
+            exact_chaser_projection_error = f"{type(exc).__name__}: {exc}"
+    return exact_chaser_projection, exact_chaser_projection_error
+
+
+@app.cell(hide_code=True)
 def _(build_chaser_controls, chaser_loaded, mo, selected_analysis_id):
     analyses_with_controls = {
         "distance",
@@ -1002,6 +1047,9 @@ def _(
     build_egocentric_polar_heatmap_output,
     build_epoch_summary_output,
     build_escape_freeze_output,
+    build_exact_distance_traces_output,
+    build_exact_radial_near_field_output,
+    build_exact_trajectory_overlays_output,
     build_fish_heading_output,
     build_provider_chaser_candidate_bearing_output,
     build_provider_chaser_candidate_bout_response_output,
@@ -1016,6 +1064,8 @@ def _(
     chaser_gaze_view,
     chaser_loaded,
     chaser_window,
+    exact_chaser_projection,
+    exact_chaser_projection_error,
     go,
     mo,
     px,
@@ -1027,6 +1077,7 @@ def _(
     if selected_provider is None or selected_provider.provider_id not in {
         "stimulus_chaser",
         "stimulus_chaser_candidate",
+        "stimulus_chaser_exact_successors",
     }:
         chaser_output = mo.md("")
     elif chaser_error:
@@ -1034,6 +1085,11 @@ def _(
     elif candidate_projection_error:
         chaser_output = mo.callout(
             f"Candidate projection failed: `{candidate_projection_error}`",
+            kind="danger",
+        )
+    elif exact_chaser_projection_error:
+        chaser_output = mo.callout(
+            f"Exact successor projection failed closed: `{exact_chaser_projection_error}`",
             kind="danger",
         )
     elif selected_analysis_id == "static_artifacts" and selected_spec is not None:
@@ -1062,6 +1118,27 @@ def _(
         chaser_output = build_provider_chaser_candidate_bout_response_output(
             mo,
             candidate_projection,
+        )
+    elif (
+        selected_analysis_id == "radial_near_field"
+        and exact_chaser_projection is not None
+    ):
+        chaser_output = build_exact_radial_near_field_output(
+            mo, go, exact_chaser_projection
+        )
+    elif (
+        selected_analysis_id == "distance_traces"
+        and exact_chaser_projection is not None
+    ):
+        chaser_output = build_exact_distance_traces_output(
+            mo, go, exact_chaser_projection
+        )
+    elif (
+        selected_analysis_id == "trajectory_overlays"
+        and exact_chaser_projection is not None
+    ):
+        chaser_output = build_exact_trajectory_overlays_output(
+            mo, go, exact_chaser_projection
         )
     elif selected_analysis_id == "gaze_tracking" and chaser_gaze_view is not None:
         chaser_output = build_chaser_gaze_tracking_output(
@@ -1148,6 +1225,7 @@ def _(
     chaser_loaded,
     core_projection,
     core_source,
+    exact_chaser_projection,
     selected_analysis,
     selected_provider,
     selected_recording,
@@ -1163,7 +1241,13 @@ def _(
         core_source=core_source,
         core_projection=core_projection,
         chaser_view=(
-            chaser_gaze_view if chaser_gaze_view is not None else chaser_loaded
+            chaser_gaze_view
+            if chaser_gaze_view is not None
+            else (
+                exact_chaser_projection
+                if exact_chaser_projection is not None
+                else chaser_loaded
+            )
         ),
     )
     return (recording_workspace,)
