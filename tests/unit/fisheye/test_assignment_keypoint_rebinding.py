@@ -262,13 +262,27 @@ def test_inspection_uses_resolver_digests_for_immutable_documents(
     }
     manifest_document = {
         "payload_digest": "a" * 64,
-        "payload": {
-            "logical_content": {"document": {"arrays": array_declarations}},
-            "source_crop_snapshot": {"run_path": "crop_runs/canonical"},
-            "pose_model_schema_binding": {
-                "pose_schema": {"keypoint_labels": labels}
-            },
-        },
+        "payload": MappingProxyType(
+            {
+                "logical_content": MappingProxyType(
+                    {
+                        "document": MappingProxyType(
+                            {"arrays": MappingProxyType(array_declarations)}
+                        )
+                    }
+                ),
+                "source_crop_snapshot": MappingProxyType(
+                    {"run_path": "crop_runs/canonical"}
+                ),
+                "pose_model_schema_binding": MappingProxyType(
+                    {
+                        "pose_schema": MappingProxyType(
+                            {"keypoint_labels": tuple(labels)}
+                        )
+                    }
+                ),
+            }
+        ),
     }
     manifest_digest = "b" * 64
     authority_digest = "c" * 64

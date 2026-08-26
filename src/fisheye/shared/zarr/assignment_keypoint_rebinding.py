@@ -280,13 +280,24 @@ def inspect_assignment_keypoint_rebinding(
     pose_schema = canonical_manifest["payload"].get("pose_model_schema_binding", {}).get(
         "pose_schema"
     )
-    labels = (
+    labels_value = (
         pose_schema.get("keypoint_labels") if isinstance(pose_schema, Mapping) else None
     )
-    historical_labels = historical_run.attrs.get("keypoint_labels")
+    historical_labels_value = historical_run.attrs.get("keypoint_labels")
+    labels = (
+        list(labels_value)
+        if isinstance(labels_value, (list, tuple))
+        else None
+    )
+    historical_labels = (
+        list(historical_labels_value)
+        if isinstance(historical_labels_value, (list, tuple))
+        else None
+    )
     if (
         not isinstance(labels, list)
         or labels != historical_labels
+        or any(not isinstance(label, str) or not label for label in labels)
         or len(labels) != len(set(labels))
         or "eye_left" not in labels
         or "eye_right" not in labels
