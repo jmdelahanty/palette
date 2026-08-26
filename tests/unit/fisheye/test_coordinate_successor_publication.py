@@ -1629,9 +1629,7 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
         padded_lineage=padded_lineage,
         as_record=lambda: {"adapter_kind": "test_historical_adapter"},
     )
-    preprocessing = SimpleNamespace(
-        document={"model_input_transform": transform.to_attrs()}
-    )
+    preprocessing = _direct_hybrid_preprocessing()
     surfaces = SimpleNamespace(
         context=SimpleNamespace(
             context_record=SimpleNamespace(
@@ -1712,6 +1710,8 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
             "selectors_before": selectors,
             "historical_crop_adapter": binding.as_record(),
             "auxiliary_materialization": auxiliary_plan.as_record(),
+            "preprocessing_input_mode": "numpy-list",
+            "model_input_transform": transform.to_attrs(),
             "keypoint_semantic_attrs": keypoint_successor._keypoint_semantic_attrs(
                 source_manifest["payload"], model_artifact=model_artifact
             ),
@@ -1726,11 +1726,6 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
         keypoint_successor,
         "keypoint_preprocessing_from_manifest",
         lambda _value: preprocessing,
-    )
-    monkeypatch.setattr(
-        keypoint_successor,
-        "_resolve_preprocessing_runtime",
-        lambda _value: (transform, "tensor"),
     )
     monkeypatch.setattr(
         keypoint_successor,

@@ -864,9 +864,16 @@ def publish_keypoint_coordinate_successor(
         )
         payload = source_manifest["payload"]
         preprocessing = keypoint_preprocessing_from_manifest(payload["preprocessing"])
-        transform = model_input_transform_from_attrs(
-            dict(preprocessing.document["model_input_transform"])
+        transform, preprocessing_input_mode = _resolve_preprocessing_runtime(
+            preprocessing
         )
+        if (
+            transform.to_attrs() != checked["model_input_transform"]
+            or preprocessing_input_mode != checked["preprocessing_input_mode"]
+        ):
+            raise RuntimeError(
+                "Keypoint preprocessing runtime changed between dry-run and apply."
+            )
         artifact = _model_artifact(
             keypoint_model_path,
             pose_binding=payload["pose_model_schema_binding"],
