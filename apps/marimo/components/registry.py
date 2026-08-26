@@ -20,8 +20,25 @@ from fisheye.analysis.provider_chaser_distance_candidates import (
     SCHEMA_ID as PROVIDER_CHASER_CANDIDATE_SCHEMA_ID,
     validate_provider_chaser_distance_candidate,
 )
+from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
+    MANIFEST_ATTR as RELATIVE_FRAME_MANIFEST_ATTR,
+    MANIFEST_DIGEST_ATTR as RELATIVE_FRAME_MANIFEST_DIGEST_ATTR,
+)
+from fisheye.analysis_workflows.composable_chaser_successor_publication import (
+    MANIFEST_ATTR as COMPOSABLE_CHASER_MANIFEST_ATTR,
+    MANIFEST_DIGEST_ATTR as COMPOSABLE_CHASER_MANIFEST_DIGEST_ATTR,
+    STORAGE_SCHEMA_ID as COMPOSABLE_CHASER_STORAGE_SCHEMA_ID,
+    STORAGE_SCHEMA_VERSION as COMPOSABLE_CHASER_STORAGE_SCHEMA_VERSION,
+)
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr_run_completion import (
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_STATUS_COMPLETE,
+)
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, SPEC_MEDIA_TYPE
-from fisheye.shared.recording_artifact_inventory import build_recording_artifact_inventory
+from fisheye.shared.recording_artifact_inventory import (
+    build_recording_artifact_inventory,
+)
 from fisheye.utils.view_zarr_visualization import iter_visualization_artifacts
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.status_page.query import open_readonly_connection, resolve_registry_path
@@ -42,13 +59,15 @@ from fisheye.visualization.bout_kinematics_interactive import (
 )
 from .common import join_path, normalize_path
 
-
 TRACK_KINEMATICS_PLOT_RENDERER = "palette-track-kinematics-summary-v1"
 TRACK_KINEMATICS_INTERACTIVE_ARTIFACT = "track_kinematics_summary_track_0_interactive"
 PROVIDER_CHASER_CANDIDATE_RENDERER = (
     "palette-provider-chaser-distance-candidate-explorer-v1"
 )
 PROVIDER_CHASER_CANDIDATE_ARTIFACT = "provider_chaser_distance_candidate"
+CHASER_EXACT_SUCCESSOR_RENDERER = "palette-chaser-exact-successor-explorer-v1"
+CHASER_EXACT_SUCCESSOR_ARTIFACT = "chaser_exact_successor_bundle"
+CHASER_EXACT_SUCCESSOR_PARENT_PATH = "analysis/chaser_spatial_occupancy_runs"
 _PROVIDER_CHASER_CANDIDATE_FORBIDDEN_SELECTORS = frozenset(
     {
         "latest",
@@ -139,6 +158,15 @@ DEFAULT_RENDERER_REGISTRY: dict[str, RendererRegistration] = {
             "provider-aware chaser-distance candidate."
         ),
     ),
+    CHASER_EXACT_SUCCESSOR_RENDERER: RendererRegistration(
+        renderer=CHASER_EXACT_SUCCESSOR_RENDERER,
+        label="Exact chaser successors",
+        component_key="chaser_exact_successors",
+        description=(
+            "Read-only paired-provider views from one sealed spatial-occupancy "
+            "bundle and its exact relative-frame and radial children."
+        ),
+    ),
     LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER: RendererRegistration(
         renderer=LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
         label="Chaser dashboard",
@@ -175,9 +203,15 @@ def supported_renderer_ids(
 
 
 def _group_contains(group: object, key: str) -> bool:
-    if isinstance(group, zarr.Array) or (hasattr(group, "shape") and hasattr(group, "dtype")):
+    if isinstance(group, zarr.Array) or (
+        hasattr(group, "shape") and hasattr(group, "dtype")
+    ):
         return False
-    if not (isinstance(group, zarr.Group) or hasattr(group, "group_keys") or hasattr(group, "array_keys")):
+    if not (
+        isinstance(group, zarr.Group)
+        or hasattr(group, "group_keys")
+        or hasattr(group, "array_keys")
+    ):
         return False
     try:
         return key in group  # type: ignore[operator]
@@ -212,7 +246,9 @@ def _split_artifact_path(path: str) -> tuple[str, str]:
         parent = "/".join(parts[:-1])
         return parent, parts[-1] if parts else ""
     run_path = "/".join(parts[:visualizations_index])
-    artifact_name = parts[visualizations_index + 1] if visualizations_index + 1 < len(parts) else ""
+    artifact_name = (
+        parts[visualizations_index + 1] if visualizations_index + 1 < len(parts) else ""
+    )
     return run_path, artifact_name
 
 
@@ -228,9 +264,15 @@ def _chaser_distance_run_name(path: str | None) -> str | None:
 
 def _is_interactive_spec_candidate(artifact: Any, node: object) -> bool:
     attrs = getattr(node, "attrs", {})
-    if str(getattr(artifact, "artifact_role", "") or attrs.get("artifact_role") or "") == "interactive_spec":
+    if (
+        str(getattr(artifact, "artifact_role", "") or attrs.get("artifact_role") or "")
+        == "interactive_spec"
+    ):
         return True
-    if str(getattr(artifact, "media_type", "") or attrs.get("media_type") or "") == SPEC_MEDIA_TYPE:
+    if (
+        str(getattr(artifact, "media_type", "") or attrs.get("media_type") or "")
+        == SPEC_MEDIA_TYPE
+    ):
         return True
     if str(attrs.get("artifact_schema_id") or "") == INTERACTIVE_SPEC_SCHEMA_ID:
         return True
@@ -245,13 +287,17 @@ def _option_label(
     artifact_name: str,
     title: str,
 ) -> str:
-    renderer_label = registration.label if registration else (renderer or "Unknown renderer")
+    renderer_label = (
+        registration.label if registration else (renderer or "Unknown renderer")
+    )
     detail = run_name or artifact_name or title
     unsupported = "" if registration else " | unsupported"
     return f"{renderer_label} | {detail} | {artifact_name}{unsupported}"
 
 
-def _read_option(root: zarr.Group, zarr_path: Path, artifact_path: str) -> Optional[InteractiveSpecOption]:
+def _read_option(
+    root: zarr.Group, zarr_path: Path, artifact_path: str
+) -> Optional[InteractiveSpecOption]:
     chaser_run_name = _chaser_distance_run_name(artifact_path)
     if chaser_run_name is not None:
         # A verified base run does not seal its dashboard spec. Preflight the
@@ -278,7 +324,9 @@ def _read_option(root: zarr.Group, zarr_path: Path, artifact_path: str) -> Optio
         return None
     attrs = dict(getattr(node, "attrs", {}))
     schema_id = str(spec.get("schema_id") or attrs.get("plot_schema_id") or "").strip()
-    persisted_renderer = str(spec.get("renderer") or attrs.get("renderer") or "").strip()
+    persisted_renderer = str(
+        spec.get("renderer") or attrs.get("renderer") or ""
+    ).strip()
     renderer = effective_bout_renderer(persisted_renderer, schema_id)
     run_path, artifact_name = _split_artifact_path(artifact_path)
     fallback_run_name = normalize_path(run_path).split("/")[-1] if run_path else ""
@@ -342,7 +390,11 @@ def _inventory_interactive_artifact_paths(root: zarr.Group) -> list[str]:
                 role = str(artifact.get("artifact_role") or "")
                 media_type = str(artifact.get("media_type") or "")
                 schema_id = str(artifact.get("artifact_schema_id") or "")
-                if role != "interactive_spec" and media_type != SPEC_MEDIA_TYPE and schema_id != INTERACTIVE_SPEC_SCHEMA_ID:
+                if (
+                    role != "interactive_spec"
+                    and media_type != SPEC_MEDIA_TYPE
+                    and schema_id != INTERACTIVE_SPEC_SCHEMA_ID
+                ):
                     continue
                 relative_path = normalize_path(str(artifact.get("path") or ""))
                 if not relative_path:
@@ -491,6 +543,279 @@ def discover_provider_chaser_candidate_options(
     )
 
 
+def _valid_composable_successor_manifest(
+    run: Any,
+    *,
+    expected_kind: str,
+    expected_run_path: str,
+    expected_digest: str | None = None,
+) -> Mapping[str, Any] | None:
+    attrs = dict(getattr(run, "attrs", {}))
+    manifest = attrs.get(COMPOSABLE_CHASER_MANIFEST_ATTR)
+    digest = str(attrs.get(COMPOSABLE_CHASER_MANIFEST_DIGEST_ATTR) or "")
+    if not isinstance(manifest, Mapping) or len(digest) != 64:
+        return None
+    try:
+        current_digest = canonical_json_sha256(dict(manifest))
+    except Exception:
+        return None
+    if (
+        current_digest != digest
+        or (expected_digest is not None and digest != expected_digest)
+        or attrs.get("schema_id") != COMPOSABLE_CHASER_STORAGE_SCHEMA_ID
+        or attrs.get("schema_version") != COMPOSABLE_CHASER_STORAGE_SCHEMA_VERSION
+        or attrs.get("successor_kind") != expected_kind
+        or attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+        or attrs.get("stage_selector_eligible") is not False
+        or manifest.get("successor_kind") != expected_kind
+        or manifest.get("run_path") != expected_run_path
+        or manifest.get("selector_eligible") is not False
+        or manifest.get("selection") != "none"
+    ):
+        return None
+    return manifest
+
+
+def _exact_bound_child(
+    root: Any,
+    binding: Any,
+    *,
+    parent: str,
+    kind: str | None,
+    recording_id: str,
+) -> Mapping[str, Any] | None:
+    if not isinstance(binding, Mapping):
+        return None
+    path = str(binding.get("run_path") or "")
+    digest = str(binding.get("manifest_sha256") or "")
+    prefix = f"{parent}/"
+    name = path.removeprefix(prefix)
+    if (
+        not path.startswith(prefix)
+        or not name
+        or "/" in name
+        or name in {"latest", "default", "selected", ".", ".."}
+        or len(digest) != 64
+    ):
+        return None
+    try:
+        run = root[path]
+    except Exception:
+        return None
+    if kind is not None:
+        manifest = _valid_composable_successor_manifest(
+            run,
+            expected_kind=kind,
+            expected_run_path=path,
+            expected_digest=digest,
+        )
+        if manifest is None or manifest.get("recording_id") != recording_id:
+            return None
+        return manifest
+    attrs = dict(getattr(run, "attrs", {}))
+    manifest = attrs.get(RELATIVE_FRAME_MANIFEST_ATTR)
+    if not isinstance(manifest, Mapping):
+        return None
+    try:
+        current_digest = canonical_json_sha256(dict(manifest))
+    except Exception:
+        return None
+    if (
+        attrs.get(RELATIVE_FRAME_MANIFEST_DIGEST_ATTR) != digest
+        or current_digest != digest
+        or attrs.get("schema_id") != "palette.analysis.chaser_relative_frame"
+        or attrs.get("schema_version") != 1
+        or attrs.get("run_path") != path
+        or attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+        or attrs.get("stage_selector_eligible") is not False
+        or manifest.get("recording_id") != recording_id
+        or manifest.get("selector_eligible") is not False
+        or manifest.get("selection") != "none"
+    ):
+        return None
+    return manifest
+
+
+def discover_exact_chaser_successor_options(
+    zarr_path: Path | str,
+    *,
+    run_path_filter: Optional[str] = None,
+    artifact_filter: Optional[str] = None,
+) -> list[InteractiveSpecOption]:
+    """Discover complete paired-provider bundles without resolving selectors."""
+
+    archive = Path(zarr_path)
+    try:
+        root = open_zarr_root(archive, mode="r", use_consolidated=True)
+    except (OSError, TypeError, ValueError, RuntimeError):
+        # Exact successors are immutable published artifacts. Missing or stale
+        # consolidated metadata makes this capability undiscoverable; it is not
+        # normalized through an unconsolidated fallback.
+        return []
+    try:
+        parent = root[CHASER_EXACT_SUCCESSOR_PARENT_PATH]
+    except Exception:
+        return []
+    if {
+        "latest",
+        "latest_complete",
+        "selected",
+        "authoritative",
+        "default",
+    }.intersection(getattr(parent, "attrs", {})):
+        return []
+    run_wanted = normalize_path(str(run_path_filter)) if run_path_filter else None
+    artifact_wanted = normalize_path(str(artifact_filter)) if artifact_filter else None
+    options: list[InteractiveSpecOption] = []
+    for run_name in _group_names(parent):
+        run_path = f"{CHASER_EXACT_SUCCESSOR_PARENT_PATH}/{run_name}"
+        if run_wanted and run_wanted != run_path:
+            continue
+        run = parent[run_name]
+        manifest = _valid_composable_successor_manifest(
+            run,
+            expected_kind="chaser_spatial_occupancy",
+            expected_run_path=run_path,
+        )
+        if manifest is None:
+            continue
+        recording_id = str(manifest.get("recording_id") or "")
+        scientific = manifest.get("scientific_manifest")
+        sources = scientific.get("sources") if isinstance(scientific, Mapping) else None
+        providers = (
+            sources.get("position_providers") if isinstance(sources, Mapping) else None
+        )
+        if not isinstance(providers, list) or len(providers) != 2:
+            continue
+        roles = tuple(
+            value.get("provider_role") if isinstance(value, Mapping) else None
+            for value in providers
+        )
+        if roles != ("keypoint", "detection"):
+            continue
+        provider_ids: list[str] = []
+        valid = True
+        for record in providers:
+            if not isinstance(record, Mapping):
+                valid = False
+                break
+            relative = _exact_bound_child(
+                root,
+                record.get("relative_frame"),
+                parent="analysis/chaser_relative_frame_runs",
+                kind=None,
+                recording_id=recording_id,
+            )
+            radial = _exact_bound_child(
+                root,
+                record.get("radial_near_field"),
+                parent="analysis/chaser_radial_near_field_runs",
+                kind="chaser_radial_near_field",
+                recording_id=recording_id,
+            )
+            if relative is None or radial is None:
+                valid = False
+                break
+            relative_authorities = relative.get("source_authorities")
+            relative_fish = (
+                relative_authorities.get("fish_position")
+                if isinstance(relative_authorities, Mapping)
+                else None
+            )
+            radial_scientific = radial.get("scientific_manifest")
+            radial_provider = (
+                radial_scientific.get("position_provider")
+                if isinstance(radial_scientific, Mapping)
+                else None
+            )
+            radial_sources = (
+                radial_scientific.get("sources")
+                if isinstance(radial_scientific, Mapping)
+                else None
+            )
+            radial_relative = (
+                radial_sources.get("relative_frame")
+                if isinstance(radial_sources, Mapping)
+                else None
+            )
+            provider_id = str(record.get("provider_id") or "")
+            provider_digest = str(record.get("provider_digest") or "")
+            if (
+                not isinstance(relative_fish, Mapping)
+                or not isinstance(radial_provider, Mapping)
+                or not isinstance(radial_relative, Mapping)
+                or relative_fish.get("provider_id") != provider_id
+                or relative_fish.get("provider_digest") != provider_digest
+                or radial_provider.get("provider_id") != provider_id
+                or radial_provider.get("provider_digest") != provider_digest
+                or radial_provider.get("status") != "first_class_explicit_authority"
+                or dict(radial_relative) != dict(record.get("relative_frame") or {})
+            ):
+                valid = False
+                break
+            provider_ids.append(provider_id)
+        if not valid or len(set(provider_ids)) != 2:
+            continue
+        artifact_path = join_path(run_path, "interactive")
+        if artifact_wanted and artifact_wanted not in {
+            CHASER_EXACT_SUCCESSOR_ARTIFACT,
+            artifact_path,
+        }:
+            continue
+        attrs = dict(getattr(run, "attrs", {}))
+        digest = str(attrs[COMPOSABLE_CHASER_MANIFEST_DIGEST_ATTR])
+        title = f"Exact paired-provider chaser successors: {run_name}"
+        spec = {
+            "schema_id": "palette.chaser_exact_successor_explorer_spec",
+            "schema_version": 1,
+            "renderer": CHASER_EXACT_SUCCESSOR_RENDERER,
+            "title": title,
+            "run_name": run_name,
+            "bundle_status": "exact_selector_ineligible",
+            "bundle_manifest_sha256": digest,
+            "provider_ids": provider_ids,
+            "source_paths": {
+                "spatial_occupancy": run_path,
+                "position_providers": providers,
+            },
+            "adapter_semantics": (
+                "read_only_exact_children_no_selector_no_interpolation"
+            ),
+            "display_parameters": {
+                "distance_traces": {
+                    "algorithm": (
+                        "source_order_bucket_first_last_min_max_missing_break_v1"
+                    ),
+                    "max_points_per_series": 6000,
+                    "connect_missing_gaps": False,
+                },
+                "trajectory_overlays": {
+                    "algorithm": ("source_order_uniform_plus_coordinate_extrema_v1"),
+                    "max_points_per_series_per_epoch": 15000,
+                },
+                "scientific_recomputation": False,
+                "interpolation": "prohibited",
+            },
+        }
+        options.append(
+            InteractiveSpecOption(
+                zarr_path=archive,
+                artifact_path=artifact_path,
+                run_path=run_path,
+                artifact_name=CHASER_EXACT_SUCCESSOR_ARTIFACT,
+                renderer=CHASER_EXACT_SUCCESSOR_RENDERER,
+                schema_id=str(spec["schema_id"]),
+                title=title,
+                run_name=run_name,
+                label=f"Exact chaser successors | {run_name} | selector-ineligible",
+                is_supported=True,
+                attrs=attrs,
+                spec=spec,
+            )
+        )
+    return sorted(options, key=lambda item: item.run_name, reverse=True)
+
+
 def _discover_track_kinematics_specs_fast(
     root: zarr.Group,
     archive: Path,
@@ -500,7 +825,11 @@ def _discover_track_kinematics_specs_fast(
 ) -> list[InteractiveSpecOption]:
     run_path_wanted = normalize_path(str(run_path_filter)) if run_path_filter else None
     artifact_wanted = normalize_path(str(artifact_filter)) if artifact_filter else None
-    if artifact_wanted and "/" not in artifact_wanted and artifact_wanted != TRACK_KINEMATICS_INTERACTIVE_ARTIFACT:
+    if (
+        artifact_wanted
+        and "/" not in artifact_wanted
+        and artifact_wanted != TRACK_KINEMATICS_INTERACTIVE_ARTIFACT
+    ):
         return []
 
     if artifact_wanted and "/" in artifact_wanted:
@@ -508,9 +837,7 @@ def _discover_track_kinematics_specs_fast(
     else:
         candidate_paths = []
         try:
-            visualization_parent = root[
-                "analysis/track_kinematics_visualization_runs"
-            ]
+            visualization_parent = root["analysis/track_kinematics_visualization_runs"]
         except Exception:
             return []
         for scope in _group_names(visualization_parent):
@@ -531,8 +858,7 @@ def _discover_track_kinematics_specs_fast(
                         continue
                     render = render_parent[render_name]
                     if (
-                        render.attrs.get("palette_run_completion_status")
-                        != "complete"
+                        render.attrs.get("palette_run_completion_status") != "complete"
                         or render.attrs.get("stage_selector_eligible") is not True
                     ):
                         continue
@@ -560,10 +886,16 @@ def _discover_track_kinematics_specs_fast(
             )
             if run_path_wanted not in {option.run_path, source_run_path}:
                 continue
-        if artifact_wanted and artifact_wanted not in {option.artifact_name, option.artifact_path}:
+        if artifact_wanted and artifact_wanted not in {
+            option.artifact_name,
+            option.artifact_path,
+        }:
             continue
         options.append(option)
-    return sorted(options, key=lambda item: (not item.is_supported, item.run_path, item.artifact_name))
+    return sorted(
+        options,
+        key=lambda item: (not item.is_supported, item.run_path, item.artifact_name),
+    )
 
 
 def _discover_bout_kinematics_specs_fast(
@@ -603,10 +935,13 @@ def _discover_bout_kinematics_specs_fast(
                 if pointed_run in run_names and pointed_run not in preferred_run_names:
                     preferred_run_names.append(pointed_run)
             ordered_run_names = preferred_run_names + [
-                run_name for run_name in reversed(run_names) if run_name not in preferred_run_names
+                run_name
+                for run_name in reversed(run_names)
+                if run_name not in preferred_run_names
             ]
             run_paths = [
-                f"analysis/bout_kinematics_runs/{run_name}" for run_name in ordered_run_names
+                f"analysis/bout_kinematics_runs/{run_name}"
+                for run_name in ordered_run_names
             ]
         candidate_paths = []
         for run_path in run_paths:
@@ -641,13 +976,21 @@ def _discover_bout_kinematics_specs_fast(
             continue
         if run_path_wanted and option.run_path != run_path_wanted:
             continue
-        if artifact_wanted and artifact_wanted not in {option.artifact_name, option.artifact_path}:
+        if artifact_wanted and artifact_wanted not in {
+            option.artifact_name,
+            option.artifact_path,
+        }:
             continue
         options.append(option)
     run_order = {
-        run_path: index for index, run_path in enumerate(dict.fromkeys(option.run_path for option in options))
+        run_path: index
+        for index, run_path in enumerate(
+            dict.fromkeys(option.run_path for option in options)
+        )
     }
-    return sorted(options, key=lambda item: (run_order[item.run_path], item.artifact_name))
+    return sorted(
+        options, key=lambda item: (run_order[item.run_path], item.artifact_name)
+    )
 
 
 def discover_recording_explorer_spec_options(
@@ -668,6 +1011,7 @@ def discover_recording_explorer_spec_options(
     if renderer_wanted and renderer_wanted not in {
         TRACK_KINEMATICS_PLOT_RENDERER,
         PROVIDER_CHASER_CANDIDATE_RENDERER,
+        CHASER_EXACT_SUCCESSOR_RENDERER,
         *CHASER_DASHBOARD_RENDERERS,
         *BOUT_PLOT_RENDERERS,
         LEGACY_BOUT_PLOT_RENDERER,
@@ -697,6 +1041,14 @@ def discover_recording_explorer_spec_options(
                 artifact_filter=artifact_filter,
             )
         )
+    if renderer_wanted in {None, CHASER_EXACT_SUCCESSOR_RENDERER}:
+        options.extend(
+            discover_exact_chaser_successor_options(
+                archive,
+                run_path_filter=run_path_filter,
+                artifact_filter=artifact_filter,
+            )
+        )
     if renderer_wanted is None or renderer_wanted in CHASER_DASHBOARD_RENDERERS:
         options.extend(
             _discover_goodcopbadcop_chaser_specs_fast(
@@ -716,7 +1068,15 @@ def discover_recording_explorer_spec_options(
                 artifact_filter=artifact_filter,
             )
         )
-    return sorted(options, key=lambda item: (not item.is_supported, item.renderer, item.run_path, item.artifact_name))
+    return sorted(
+        options,
+        key=lambda item: (
+            not item.is_supported,
+            item.renderer,
+            item.run_path,
+            item.artifact_name,
+        ),
+    )
 
 
 def discover_interactive_spec_options(
@@ -746,6 +1106,12 @@ def discover_interactive_spec_options(
             run_path_filter=run_path_wanted,
             artifact_filter=artifact_wanted,
         )
+    if renderer_wanted == CHASER_EXACT_SUCCESSOR_RENDERER:
+        return discover_exact_chaser_successor_options(
+            archive,
+            run_path_filter=run_path_wanted,
+            artifact_filter=artifact_wanted,
+        )
     if renderer_wanted in {LEGACY_BOUT_PLOT_RENDERER, *BOUT_PLOT_RENDERERS}:
         return _discover_bout_kinematics_specs_fast(
             root,
@@ -769,11 +1135,22 @@ def discover_interactive_spec_options(
             continue
         if run_path_wanted and option.run_path != run_path_wanted:
             continue
-        if artifact_wanted and artifact_wanted not in {option.artifact_name, option.artifact_path}:
+        if artifact_wanted and artifact_wanted not in {
+            option.artifact_name,
+            option.artifact_path,
+        }:
             continue
         options.append(option)
     if inventory_paths:
-        return sorted(options, key=lambda item: (not item.is_supported, item.renderer, item.run_path, item.artifact_name))
+        return sorted(
+            options,
+            key=lambda item: (
+                not item.is_supported,
+                item.renderer,
+                item.run_path,
+                item.artifact_name,
+            ),
+        )
 
     for artifact in iter_visualization_artifacts(root):
         if normalize_path(artifact.path) in seen_paths:
@@ -791,10 +1168,21 @@ def discover_interactive_spec_options(
             continue
         if run_path_wanted and option.run_path != run_path_wanted:
             continue
-        if artifact_wanted and artifact_wanted not in {option.artifact_name, option.artifact_path}:
+        if artifact_wanted and artifact_wanted not in {
+            option.artifact_name,
+            option.artifact_path,
+        }:
             continue
         options.append(option)
-    return sorted(options, key=lambda item: (not item.is_supported, item.renderer, item.run_path, item.artifact_name))
+    return sorted(
+        options,
+        key=lambda item: (
+            not item.is_supported,
+            item.renderer,
+            item.run_path,
+            item.artifact_name,
+        ),
+    )
 
 
 def recording_id_from_analysis_zarr(zarr_path: Path | str) -> str:
@@ -832,7 +1220,9 @@ def _candidate_analysis_zarrs(
 
     def add_from_zarr_dir(zarr_dir: Path) -> None:
         if zarr_dir.is_dir():
-            candidates.update(path for path in zarr_dir.glob("*_analysis.zarr") if path.is_dir())
+            candidates.update(
+                path for path in zarr_dir.glob("*_analysis.zarr") if path.is_dir()
+            )
 
     if (root / "zarr").is_dir():
         add_from_zarr_dir(root / "zarr")
@@ -850,7 +1240,9 @@ def _candidate_analysis_zarrs(
             candidates.add(child)
             continue
         add_from_zarr_dir(child / "zarr")
-        candidates.update(path for path in child.glob("*_analysis.zarr") if path.is_dir())
+        candidates.update(
+            path for path in child.glob("*_analysis.zarr") if path.is_dir()
+        )
 
     if not candidates and root.is_dir():
         candidates.update(
@@ -949,15 +1341,25 @@ def discover_protocol_recording_options(
     candidates = {seed}
     registry_candidates: set[Path] = set()
     if registry_path is not None:
-        registry_candidates.update(_registry_analysis_zarrs(registry_path, name_contains=name_contains))
+        registry_candidates.update(
+            _registry_analysis_zarrs(registry_path, name_contains=name_contains)
+        )
         candidates.update(registry_candidates)
     elif recordings_root is not None or include_collection:
-        root = Path(recordings_root).expanduser() if recordings_root else infer_recordings_root_from_zarr_path(seed)
+        root = (
+            Path(recordings_root).expanduser()
+            if recordings_root
+            else infer_recordings_root_from_zarr_path(seed)
+        )
         candidates.update(_candidate_analysis_zarrs(root, name_contains=name_contains))
 
     options: list[RecordingSpecOption] = []
     for archive in sorted(candidates):
-        if registry_path is not None and lazy_registry_specs and archive in registry_candidates:
+        if (
+            registry_path is not None
+            and lazy_registry_specs
+            and archive in registry_candidates
+        ):
             recording_id = recording_id_from_analysis_zarr(archive)
             options.append(
                 RecordingSpecOption(
@@ -998,7 +1400,9 @@ def discover_protocol_recording_options(
             continue
         renderer_counts: dict[str, int] = {}
         for spec in spec_options:
-            renderer_counts[spec.renderer or "unknown"] = renderer_counts.get(spec.renderer or "unknown", 0) + 1
+            renderer_counts[spec.renderer or "unknown"] = (
+                renderer_counts.get(spec.renderer or "unknown", 0) + 1
+            )
         recording_id = recording_id_from_analysis_zarr(archive)
         supported_count = sum(1 for spec in spec_options if spec.is_supported)
         options.append(
@@ -1014,7 +1418,9 @@ def discover_protocol_recording_options(
     return sorted(options, key=lambda item: item.recording_id)
 
 
-def group_options_by_renderer(options: Iterable[InteractiveSpecOption]) -> dict[str, list[InteractiveSpecOption]]:
+def group_options_by_renderer(
+    options: Iterable[InteractiveSpecOption],
+) -> dict[str, list[InteractiveSpecOption]]:
     grouped: dict[str, list[InteractiveSpecOption]] = {}
     for option in options:
         grouped.setdefault(option.renderer or "unknown", []).append(option)
