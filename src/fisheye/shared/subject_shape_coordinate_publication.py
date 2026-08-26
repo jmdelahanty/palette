@@ -110,6 +110,7 @@ from fisheye.shared.zarr_run_completion import (
 from fisheye.shared.zarr.subject_shape_bundle_source import (
     SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
     BoundSubjectShapeBundleSource,
+    assignment_rebinding_run_id_from_source_record,
     load_subject_shape_bundle_source,
     require_bound_subject_shape_bundle_source,
 )
@@ -160,6 +161,8 @@ SUBJECT_SHAPE_STORAGE_PLAN_DIGEST_ATTR = "subject_shape_storage_plan_payload_sha
 SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR = "subject_shape_storage_profile_id"
 SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR = "subject_shape_storage_profile_role"
 SUBJECT_SHAPE_STORAGE_PROFILE_ROLE = "explicit_unpromoted_candidate"
+SUBJECT_SHAPE_SUPPORTED_STORAGE_PROFILE_ROLE = "supported_selector_publication"
+SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID = "subject_shape_access_aware_v1"
 SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR = "subject_shape_storage_candidate"
 SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR = (
     "subject_shape_storage_source_unbound_manifest"
@@ -181,6 +184,15 @@ SUBJECT_SHAPE_STORAGE_ARRAY_ATTRS = frozenset(
         "write_mode",
     }
 )
+
+
+def _uses_access_aware_subject_shape_storage(run: Any) -> bool:
+    return run.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR) in {
+        SUBJECT_SHAPE_STORAGE_PROFILE_ROLE,
+        SUBJECT_SHAPE_SUPPORTED_STORAGE_PROFILE_ROLE,
+    }
+
+
 SUBJECT_SHAPE_SCHEMA_VERSION = 1
 SUBJECT_SHAPE_DERIVATION_SCHEMA_ID = "palette.subject_shape_coordinate_derivation"
 SUBJECT_SHAPE_COMPONENT_SCHEMA_ID = "palette.mask_component_geometry_schema"
@@ -483,6 +495,11 @@ def load_exact_subject_shape_source(
         Path(_local_archive_path(root)),
         bundle_id=bundle_id,
         allow_inactive=True,
+        assignment_keypoint_rebinding_run_id=(
+            assignment_rebinding_run_id_from_source_record(
+                run.attrs.get(SUBJECT_SHAPE_SOURCE_BINDING_ATTR)
+            )
+        ),
     )
     if archive_identity(source.authority.refined_run) != archive_identity(run):
         _fail("Subject-shape and recording-bundle source span archives/stores.")
@@ -715,18 +732,14 @@ def _create_array(group: Any, name: str, values: np.ndarray) -> Any:
             )
         except (AttributeError, TypeError, ValueError):
             run = None
-        if (
-            run is not None
-            and run.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR)
-            == SUBJECT_SHAPE_STORAGE_PROFILE_ROLE
-        ):
+        if run is not None and _uses_access_aware_subject_shape_storage(run):
             # Import lazily to keep the logical coordinate contract independent
-            # of the optional physical candidate adapter.
+            # of either access-aware physical publication lifecycle.
             from fisheye.shared.subject_shape_storage import (
-                create_bound_subject_shape_candidate_array,
+                create_bound_subject_shape_access_aware_array,
             )
 
-            return create_bound_subject_shape_candidate_array(
+            return create_bound_subject_shape_access_aware_array(
                 run,
                 group,
                 name=name,
@@ -1633,11 +1646,8 @@ def _expected_subject_shape_array_attrs(
     *,
     phase: str,
 ) -> dict[str, frozenset[str]]:
-    candidate_storage = (
-        run.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR)
-        == SUBJECT_SHAPE_STORAGE_PROFILE_ROLE
-    )
-    physical_attrs = SUBJECT_SHAPE_STORAGE_ARRAY_ATTRS if candidate_storage else ()
+    access_aware_storage = _uses_access_aware_subject_shape_storage(run)
+    physical_attrs = SUBJECT_SHAPE_STORAGE_ARRAY_ATTRS if access_aware_storage else ()
     expected = {path: frozenset(physical_attrs) for path in array_paths}
     if phase == "unbound":
         return expected
@@ -4325,10 +4335,17 @@ def activate_subject_shape_coordinate_publication(
         run.attrs.get(SUBJECT_SHAPE_SOURCE_KIND_ATTR)
         == SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
     ):
-        _fail(
-            "Recording-bundle subject-shape v5 is an unpromoted candidate and "
-            "cannot become selector-visible through the historical activation path."
-        )
+        if (
+            run.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR)
+            != SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID
+            or run.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR)
+            != SUBJECT_SHAPE_SUPPORTED_STORAGE_PROFILE_ROLE
+            or SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR in run.attrs
+        ):
+            _fail(
+                "Recording-bundle subject-shape v5 can become selector-visible "
+                "only through its supported access-aware publication profile."
+            )
     if proof.run_path != expected_path or proof.selector_eligible is not False:
         _fail("Subject-shape activation proof names the wrong child/state.")
     _require_state(run, complete=True, eligible=False, expected_owner=owner)
@@ -4783,6 +4800,8 @@ __all__ = [
     "SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR",
     "SUBJECT_SHAPE_STORAGE_PROFILE_ROLE",
     "SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR",
+    "SUBJECT_SHAPE_SUPPORTED_STORAGE_PROFILE_ROLE",
+    "SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID",
     "SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR",
     "SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_SCHEMA_ID",
     "SUBJECT_SHAPE_TAIL_SAMPLE_AXIS_ATTR",

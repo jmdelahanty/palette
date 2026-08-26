@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -1078,6 +1079,197 @@ def test_eye_angle_canonical_resolution_uses_subject_shape_sealed_base_run(
     )
     assert context.instance_key_path == "keypoints_runs/kp_from_shape/instance_key"
     assert context.frame_indices_path.endswith("/source_acquisition_frame_index")
+
+
+def test_eye_angle_bundle_assignment_rebinding_uses_shared_successor_resolver(
+    monkeypatch,
+) -> None:
+    import zarr
+
+    root = zarr.group()
+    shape = _add_subject_shape_eye_geometry(root)
+    _refined, base = _add_eye_keypoint_sources(root)
+    publication = _install_synthetic_canonical_keypoint_publication(
+        monkeypatch,
+        shape=shape,
+        base=base,
+    )
+    surfaces = publication.source.context.assignment_keypoint_surfaces
+    base.create_array(
+        "pose_success",
+        data=np.asarray(base["detection_success"][:], dtype=bool),
+    )
+    del base["detection_success"]
+    keypoint_sha = eye_angle_analysis.array_values_sha256(base["keypoints_roi"])
+    success_sha = eye_angle_analysis.array_values_sha256(base["pose_success"])
+    payload = {
+        "assignment_state": "used",
+        "canonical_keypoint_source": {
+            "authority_profile": (
+                eye_angle_analysis.ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE
+            ),
+            "run_path": "keypoints_runs/kp_from_shape",
+            "run_manifest_payload_digest": "1" * 64,
+            "run_manifest_document_digest": "2" * 64,
+            "coordinate_successor_authority_digest": "3" * 64,
+            "keypoint_bundle_authority_digest": "4" * 64,
+        },
+        "equivalence": {
+            "keypoints_roi_to_keypoints_roi": {
+                "normalized_sha256": keypoint_sha,
+            },
+            "detection_success_to_pose_success": {
+                "normalized_sha256": success_sha,
+            },
+        },
+    }
+    rebinding = {
+        "schema_id": "palette.subject_mask.assignment_keypoint_rebinding_manifest",
+        "schema_version": 1,
+        "digest_algorithm": "sha256_canonical_json_v1",
+        "payload_digest": eye_angle_analysis._canonical_json_sha256(payload),
+        "payload": payload,
+    }
+    publication.source = SimpleNamespace(
+        archive_path=Path("/unused/in-memory.zarr"),
+        assignment_keypoint_rebinding_run_id="rebind_001",
+        assignment_keypoint_rebinding_manifest=rebinding,
+    )
+    monkeypatch.setattr(
+        eye_angle_analysis,
+        "load_keypoint_coordinate_successor_source",
+        lambda _archive, *, run_path: SimpleNamespace(
+            run_path=run_path,
+            run_group=base,
+            surfaces=surfaces,
+            manifest={"payload_digest": "1" * 64},
+            manifest_digest="2" * 64,
+            successor_authority_digest="3" * 64,
+            active_keypoint_bundle_authority_digest="4" * 64,
+        ),
+    )
+
+    context = eye_angle_analysis._resolve_eye_angle_inputs(
+        root,
+        subject_shape_run="shape_001",
+        refined_subject_run=None,
+        keypoint_run="kp_from_shape",
+    )
+
+    assert context.keypoint_run_name == "kp_from_shape"
+    assert context.detection_success_key == "pose_success"
+    assert context.detection_success_path.endswith("/pose_success")
+    authority = context.canonical_keypoint_authority
+    assert authority["schema_version"] == 2
+    assert authority["arrays"]["detection_success"]["source_dataset"] == (
+        "pose_success"
+    )
+    assert authority["arrays"]["detection_success"]["array_ref"].endswith(
+        "/pose_success"
+    )
+    assert authority["assignment_authority"] == {
+        "record_ref": (
+            "/subject_mask_assignment_keypoint_rebinding_runs/"
+            "rebind_001@run_manifest"
+        ),
+        "record_sha256": eye_angle_analysis._canonical_json_sha256(rebinding),
+    }
+    alignment = authority["ordered_row_alignment"]
+    subject_shape_authority = {
+        "source_subject_shape_run_ref": f"/{authority['subject_shape_run_path']}",
+        "canonical_publication": {
+            "row_identity_ref": alignment["subject_shape_row_identity"][
+                "record_ref"
+            ],
+            "row_identity_sha256": alignment["subject_shape_row_identity"][
+                "record_sha256"
+            ],
+            "assignment_keypoint_authority": authority[
+                "assignment_authority"
+            ],
+        },
+    }
+    label_pointer = surfaces.context.keypoint_label_authority
+    keypoint_identity = alignment["keypoint_row_identity"]
+    monkeypatch.setattr(
+        eye_angle_analysis,
+        "bind_persisted_coordinate_record",
+        lambda _group, *, attr_name: SimpleNamespace(
+            record_ref=label_pointer.record_ref,
+            record_sha256=label_pointer.record_sha256,
+            record={
+                "schema_id": eye_angle_analysis.KEYPOINT_LABEL_AUTHORITY_SCHEMA_ID,
+                "schema_version": (
+                    eye_angle_analysis.KEYPOINT_LABEL_AUTHORITY_SCHEMA_VERSION
+                ),
+                "axis0": {
+                    "role": eye_angle_analysis.OBSERVATION_INSTANCE_DOMAIN,
+                    "row_identity_ref": keypoint_identity["record_ref"],
+                    "row_identity_sha256": keypoint_identity["record_sha256"],
+                },
+                "axis1": {
+                    "role": "keypoint",
+                    "cardinality": len(context.keypoint_labels),
+                    "labels": list(context.keypoint_labels),
+                },
+                "coordinate_component_axis": {
+                    "axis": 2,
+                    "components": ["x", "y"],
+                },
+                "arrays": {
+                    "keypoints_roi": {
+                        "array_ref": (
+                            "/keypoints_runs/kp_from_shape/keypoints_roi"
+                        ),
+                        "shape": authority["arrays"]["keypoints_roi"]["shape"],
+                        "dtype": authority["arrays"]["keypoints_roi"]["dtype"],
+                        "keypoint_axis": 1,
+                    }
+                },
+            },
+        ),
+    )
+    reloaded, run_name, labels, validated = (
+        eye_angle_analysis._validate_staged_canonical_keypoint_source(
+            root,
+            authority=authority,
+            subject_shape_authority=subject_shape_authority,
+            expected_keypoint_run="kp_from_shape",
+            verify_payload=True,
+        )
+    )
+    assert reloaded.path == base.path
+    assert run_name == "kp_from_shape"
+    assert labels == tuple(context.keypoint_labels)
+    assert validated == authority
+
+
+def test_eye_angle_bundle_without_assignment_authority_fails_closed(
+    monkeypatch,
+) -> None:
+    import zarr
+
+    root = zarr.group()
+    shape = _add_subject_shape_eye_geometry(root)
+    _refined, base = _add_eye_keypoint_sources(root)
+    publication = _install_synthetic_canonical_keypoint_publication(
+        monkeypatch,
+        shape=shape,
+        base=base,
+    )
+    publication.source = SimpleNamespace(
+        archive_path=Path("/unused/in-memory.zarr"),
+        assignment_keypoint_rebinding_run_id=None,
+        assignment_keypoint_rebinding_manifest=None,
+    )
+
+    with pytest.raises(ValueError, match="does not seal a supported"):
+        eye_angle_analysis._resolve_eye_angle_inputs(
+            root,
+            subject_shape_run="shape_001",
+            refined_subject_run=None,
+            keypoint_run=None,
+        )
 
 
 def test_eye_angle_canonical_resolution_rejects_different_ordered_instance_keys(

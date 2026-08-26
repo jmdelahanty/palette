@@ -84,21 +84,19 @@ def build_availability(
                     or not dependency_status.available
                     or not dependency_status.run_name
                 ):
-                    if node.kind == "visualization":
-                        missing_dependencies.append(dependency_id)
+                    missing_dependencies.append(dependency_id)
                 else:
                     dependency_runs[dependency_id] = dependency_status.run_name
-            if node.kind == "visualization":
-                if missing_dependencies:
-                    statuses[stage_id] = StageAvailability(
-                        stage_id=stage_id,
-                        available=False,
-                        reason=(
-                            "visualization inputs are unavailable from dependencies: "
-                            + ", ".join(missing_dependencies)
-                        ),
-                    )
-                    continue
+            if missing_dependencies:
+                statuses[stage_id] = StageAvailability(
+                    stage_id=stage_id,
+                    available=False,
+                    reason=(
+                        "workflow dependency inputs are unavailable: "
+                        + ", ".join(missing_dependencies)
+                    ),
+                )
+                continue
             if node.output_run_from is not None:
                 requested_run = dependency_runs[node.output_run_from]
             statuses[stage_id] = discover_stage_availability(

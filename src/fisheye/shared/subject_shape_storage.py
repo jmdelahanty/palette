@@ -2,9 +2,9 @@
 
 The logical full-anatomy schema remains owned by
 ``subject_shape_coordinate_publication``.  This module only adapts that exact
-array inventory to the shared byte planner and Zarr-v3 array factory.  The
-profile is deliberately family-local and selector-ineligible until a later
-mounted-reader promotion gate.
+array inventory to the shared byte planner and Zarr-v3 array factory. The
+candidate and supported publication profiles share one physical policy while
+retaining distinct selector lifecycles.
 """
 
 from __future__ import annotations
@@ -35,6 +35,8 @@ from fisheye.shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR,
     SUBJECT_SHAPE_STORAGE_PROFILE_ROLE,
     SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR,
+    SUBJECT_SHAPE_SUPPORTED_STORAGE_PROFILE_ROLE,
+    SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID,
     SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR,
     SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_SCHEMA_ID,
     SUBJECT_SHAPE_MANIFEST_ATTR,
@@ -76,27 +78,44 @@ SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID = (
 SUBJECT_SHAPE_STORAGE_PROFILE_CHOICES = (
     SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE,
     SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+    SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID,
 )
 
 # Subject-shape geometry is normally resolved per displayed row.  A 128 KiB
 # inner target bounds random-frame amplification, while 8 MiB indexed shards
 # keep immutable full-duration object fanout low.  Tiny fixed semantic axes are
 # eager and remain one object under ``eager_max_bytes``.
-SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_V1 = StorageProfile(
-    profile_id=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
-    target_chunk_bytes=128 * KIB,
-    min_chunk_bytes=128 * KIB,
-    max_chunk_bytes=128 * KIB,
-    eager_max_bytes=8 * MIB,
-    target_shard_bytes=8 * MIB,
-    per_row_target_shard_bytes=8 * MIB,
-    max_shard_bytes=8 * MIB,
-    max_payload_objects=4_096,
-    codec_profile_id="zstd_fast_v1",
-    shard_immutable=True,
-    shard_owned_appends=True,
-    target_chunk_bytes_by_access=((AccessPattern.EAGER, 1 * MIB),),
+def _access_aware_profile(profile_id: str) -> StorageProfile:
+    return StorageProfile(
+        profile_id=profile_id,
+        target_chunk_bytes=128 * KIB,
+        min_chunk_bytes=128 * KIB,
+        max_chunk_bytes=128 * KIB,
+        eager_max_bytes=8 * MIB,
+        target_shard_bytes=8 * MIB,
+        per_row_target_shard_bytes=8 * MIB,
+        max_shard_bytes=8 * MIB,
+        max_payload_objects=4_096,
+        codec_profile_id="zstd_fast_v1",
+        shard_immutable=True,
+        shard_owned_appends=True,
+        target_chunk_bytes_by_access=((AccessPattern.EAGER, 1 * MIB),),
+    )
+
+
+SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_V1 = _access_aware_profile(
+    SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
 )
+SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_V1 = _access_aware_profile(
+    SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID
+)
+_ACCESS_AWARE_PROFILES = {
+    profile.profile_id: profile
+    for profile in (
+        SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_V1,
+        SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_V1,
+    )
+}
 
 _STATIC_AXIS_PATHS = frozenset(
     {
@@ -123,6 +142,27 @@ _RESERVED_ARRAY_ATTRIBUTES = frozenset(
 
 def is_subject_shape_storage_candidate(profile_id: str) -> bool:
     return str(profile_id) == SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
+
+
+def is_subject_shape_access_aware_storage(profile_id: str) -> bool:
+    return str(profile_id) in _ACCESS_AWARE_PROFILES
+
+
+def subject_shape_access_aware_storage_profile(profile_id: str) -> StorageProfile:
+    try:
+        return _ACCESS_AWARE_PROFILES[str(profile_id)]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported access-aware subject-shape profile {profile_id!r}."
+        ) from exc
+
+
+def _profile_role(profile_id: str) -> str:
+    return (
+        SUBJECT_SHAPE_STORAGE_PROFILE_ROLE
+        if is_subject_shape_storage_candidate(profile_id)
+        else SUBJECT_SHAPE_SUPPORTED_STORAGE_PROFILE_ROLE
+    )
 
 
 def _iter_arrays(group: Any, prefix: str = ""):
@@ -324,9 +364,9 @@ def build_subject_shape_storage_receipt(
 ) -> AnalysisStoragePlanReceipt:
     """Recompute one byte-derived plan from the exact maintained inventory."""
 
-    if profile != SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_V1:
+    if profile not in _ACCESS_AWARE_PROFILES.values():
         raise ValueError(
-            "Subject-shape runs accept only their explicit candidate profile."
+            "Subject-shape runs accept only their explicit access-aware profiles."
         )
     roles = _schema_array_roles(run_group, phase=phase)
     row_count = _row_count(run_group)
@@ -376,24 +416,27 @@ def persist_subject_shape_storage_receipt(
     *,
     phase: str,
 ) -> dict[str, object]:
-    if receipt.profile != SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_V1:
+    if receipt.profile not in _ACCESS_AWARE_PROFILES.values():
         raise ValueError("Cannot persist an unrecognized subject-shape profile.")
     manifest = receipt.as_manifest()
     run_group.attrs[SUBJECT_SHAPE_STORAGE_PLAN_ATTR] = manifest
     run_group.attrs[SUBJECT_SHAPE_STORAGE_PLAN_DIGEST_ATTR] = manifest["payload_digest"]
     run_group.attrs[SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR] = receipt.profile.profile_id
-    run_group.attrs[SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR] = (
-        SUBJECT_SHAPE_STORAGE_PROFILE_ROLE
+    run_group.attrs[SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR] = _profile_role(
+        receipt.profile.profile_id
     )
-    run_group.attrs[SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR] = {
-        "schema_id": "palette.subject_shape_storage_candidate",
-        "schema_version": 1,
-        "profile_id": receipt.profile.profile_id,
-        "logical_profile_id": _logical_profile_id(run_group),
-        "phase": phase,
-        "selector_eligible": False,
-        "promotion_status": "unpromoted_candidate",
-    }
+    if is_subject_shape_storage_candidate(receipt.profile.profile_id):
+        run_group.attrs[SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR] = {
+            "schema_id": "palette.subject_shape_storage_candidate",
+            "schema_version": 1,
+            "profile_id": receipt.profile.profile_id,
+            "logical_profile_id": _logical_profile_id(run_group),
+            "phase": phase,
+            "selector_eligible": False,
+            "promotion_status": "unpromoted_candidate",
+        }
+    elif SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR in run_group.attrs:
+        del run_group.attrs[SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR]
     return manifest
 
 
@@ -664,23 +707,33 @@ def validate_subject_shape_storage_source_manifest_link(
     return tuple(errors)
 
 
-def materialize_subject_shape_storage_candidate(
+def materialize_subject_shape_access_aware_storage(
     source_run: Any,
     destination_path: str | Path,
     *,
+    profile: StorageProfile,
     phase: str = "unbound",
     copy_block_rows: int = 1_024,
 ) -> dict[str, object]:
-    """Write one complete node-local candidate through the shared factory."""
+    """Write one complete node-local access-aware run through the shared factory."""
 
     destination = Path(destination_path).expanduser().resolve()
     if destination.exists():
-        raise FileExistsError(f"Refusing existing subject-shape candidate: {destination}")
+        raise FileExistsError(f"Refusing existing subject-shape output: {destination}")
     sealed_manifest = load_sealed_unbound_subject_shape_manifest(source_run)
     sealed_arrays = sealed_manifest.record["arrays"]
-    receipt = build_subject_shape_storage_receipt(source_run, phase=phase)
+    receipt = build_subject_shape_storage_receipt(
+        source_run,
+        phase=phase,
+        profile=profile,
+    )
     entry_by_path = {entry.declaration.path: entry for entry in receipt.entries}
-    destination_run = zarr.open_group(str(destination), mode="w", zarr_format=3)
+    destination_run = zarr.open_group(
+        str(destination),
+        mode="w",
+        zarr_format=3,
+        use_consolidated=False,
+    )
     _copy_group_attributes(source_run, destination_run)
     hashes: dict[str, str] = {}
     for path, source_array in _iter_arrays(source_run):
@@ -726,12 +779,15 @@ def materialize_subject_shape_storage_candidate(
         receipt,
         phase=phase,
     )
-    errors = validate_subject_shape_candidate_storage(
+    errors = validate_subject_shape_access_aware_storage(
         destination_run,
         phase=phase,
+        expected_profile_id=profile.profile_id,
     )
     if errors:
-        raise RuntimeError("Subject-shape candidate validation failed: " + "; ".join(errors))
+        raise RuntimeError(
+            "Subject-shape access-aware validation failed: " + "; ".join(errors)
+        )
     return {
         "schema_id": "palette.subject_shape_storage_materialization",
         "schema_version": 1,
@@ -744,14 +800,32 @@ def materialize_subject_shape_storage_candidate(
     }
 
 
-def create_bound_subject_shape_candidate_array(
+def materialize_subject_shape_storage_candidate(
+    source_run: Any,
+    destination_path: str | Path,
+    *,
+    phase: str = "unbound",
+    copy_block_rows: int = 1_024,
+) -> dict[str, object]:
+    """Preserve the explicit unpromoted-candidate materialization API."""
+
+    return materialize_subject_shape_access_aware_storage(
+        source_run,
+        destination_path,
+        profile=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_V1,
+        phase=phase,
+        copy_block_rows=copy_block_rows,
+    )
+
+
+def create_bound_subject_shape_access_aware_array(
     run_group: Any,
     group: Any,
     *,
     name: str,
     values: np.ndarray,
 ) -> Any:
-    """Create one final-binding array with the candidate profile."""
+    """Create one final-binding array with the declared access-aware profile."""
 
     path_prefix = str(getattr(group, "path", "")).strip("/")
     run_path = str(getattr(run_group, "path", "")).strip("/")
@@ -786,10 +860,12 @@ def create_bound_subject_shape_candidate_array(
             "one complete subject-shape row with all fixed trailing semantic axes indivisible"
         ),
     )
+    profile_id = run_group.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR)
+    profile = subject_shape_access_aware_storage_profile(str(profile_id))
     receipt = plan_analysis_storage(
         (declaration,),
         {relative_path: facts},
-        profile=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_V1,
+        profile=profile,
         dimensions={"n_rows": row_count},
     )
     entry = receipt.entries[0]
@@ -805,10 +881,41 @@ def create_bound_subject_shape_candidate_array(
     return array
 
 
+def create_bound_subject_shape_candidate_array(
+    run_group: Any,
+    group: Any,
+    *,
+    name: str,
+    values: np.ndarray,
+) -> Any:
+    """Create a binding array for the explicit unpromoted candidate profile."""
+
+    profile_id = str(
+        run_group.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR)
+    )
+    if profile_id != SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID:
+        raise ValueError(
+            "Candidate array creation requires the candidate storage profile."
+        )
+    return create_bound_subject_shape_access_aware_array(
+        run_group,
+        group,
+        name=name,
+        values=values,
+    )
+
+
 def finalize_bound_subject_shape_storage_receipt(run_group: Any) -> dict[str, object]:
     """Replace the unbound receipt with the exact final bound inventory."""
 
-    receipt = build_subject_shape_storage_receipt(run_group, phase="bound")
+    profile = subject_shape_access_aware_storage_profile(
+        str(run_group.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR))
+    )
+    receipt = build_subject_shape_storage_receipt(
+        run_group,
+        phase="bound",
+        profile=profile,
+    )
     return persist_subject_shape_storage_receipt(run_group, receipt, phase="bound")
 
 
@@ -824,14 +931,21 @@ def _normalized_metadata(value: Any) -> Any:
     return value
 
 
-def validate_subject_shape_candidate_storage(
+def validate_subject_shape_access_aware_storage(
     run_group: Any,
     *,
     phase: str,
+    expected_profile_id: str,
 ) -> tuple[str, ...]:
-    """Replan and validate every candidate array declaration fail closed."""
+    """Replan and validate every access-aware array declaration fail closed."""
 
     errors: list[str] = []
+    try:
+        expected_profile = subject_shape_access_aware_storage_profile(
+            expected_profile_id
+        )
+    except ValueError as exc:
+        return (str(exc),)
     errors.extend(
         validate_subject_shape_storage_source_manifest_link(
             run_group,
@@ -845,12 +959,13 @@ def validate_subject_shape_candidate_storage(
         parsed = analysis_storage_plan_receipt_from_manifest(persisted)
     except Exception as exc:
         return (f"subject-shape storage-plan receipt is invalid: {exc}",)
-    if parsed.profile != SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_V1:
-        errors.append("subject-shape storage profile is not the frozen candidate")
+    if parsed.profile != expected_profile:
+        errors.append("subject-shape storage profile differs from the expected profile")
     try:
         expected = build_subject_shape_storage_receipt(
             run_group,
             phase=phase,
+            profile=expected_profile,
         )
     except Exception as exc:
         return (*errors, f"subject-shape storage plan cannot be recomputed: {exc}")
@@ -862,27 +977,30 @@ def validate_subject_shape_candidate_storage(
         errors.append("subject-shape redundant storage-plan digest mismatch")
     if (
         run_group.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR)
-        != SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
+        != expected_profile.profile_id
         or run_group.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR)
-        != SUBJECT_SHAPE_STORAGE_PROFILE_ROLE
+        != _profile_role(expected_profile.profile_id)
     ):
-        errors.append("subject-shape candidate profile identity/role mismatch")
+        errors.append("subject-shape access-aware profile identity/role mismatch")
     candidate = run_group.attrs.get(SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR)
-    expected_candidate = {
-        "schema_id": "palette.subject_shape_storage_candidate",
-        "schema_version": 1,
-        "profile_id": SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
-        "logical_profile_id": _logical_profile_id(run_group),
-        "phase": phase,
-        "selector_eligible": False,
-        "promotion_status": "unpromoted_candidate",
-    }
-    if candidate != expected_candidate:
-        errors.append("subject-shape candidate envelope is not exact")
+    if is_subject_shape_storage_candidate(expected_profile.profile_id):
+        expected_candidate = {
+            "schema_id": "palette.subject_shape_storage_candidate",
+            "schema_version": 1,
+            "profile_id": SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+            "logical_profile_id": _logical_profile_id(run_group),
+            "phase": phase,
+            "selector_eligible": False,
+            "promotion_status": "unpromoted_candidate",
+        }
+        if candidate != expected_candidate:
+            errors.append("subject-shape candidate envelope is not exact")
+    elif candidate is not None:
+        errors.append("supported subject-shape storage carries a candidate envelope")
     entry_by_path = {entry.declaration.path: entry for entry in expected.entries}
     arrays = dict(_iter_arrays(run_group))
     if set(arrays) != set(entry_by_path):
-        errors.append("subject-shape candidate array inventory differs from receipt")
+        errors.append("subject-shape access-aware array inventory differs from receipt")
         return tuple(errors)
     for path in sorted(arrays):
         array = arrays[path]
@@ -920,11 +1038,26 @@ def validate_subject_shape_candidate_storage(
     return tuple(errors)
 
 
+def validate_subject_shape_candidate_storage(
+    run_group: Any,
+    *,
+    phase: str,
+) -> tuple[str, ...]:
+    """Validate the explicit unpromoted-candidate profile."""
+
+    return validate_subject_shape_access_aware_storage(
+        run_group,
+        phase=phase,
+        expected_profile_id=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+    )
+
+
 def validate_subject_shape_direct_consolidated_storage(
     archive_path: str | Path,
     *,
     run_path: str,
     phase: str = "bound",
+    expected_profile_id: str | None = None,
 ) -> tuple[str, ...]:
     errors: list[str] = []
     archive = Path(archive_path).expanduser().resolve()
@@ -939,9 +1072,24 @@ def validate_subject_shape_direct_consolidated_storage(
         consolidated_run = _array_at_path(consolidated_root, run_path)
     except Exception as exc:
         return (f"subject-shape metadata views cannot be opened: {exc}",)
-    errors.extend(validate_subject_shape_candidate_storage(direct_run, phase=phase))
+    profile_id = (
+        str(expected_profile_id)
+        if expected_profile_id is not None
+        else str(direct_run.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR))
+    )
     errors.extend(
-        validate_subject_shape_candidate_storage(consolidated_run, phase=phase)
+        validate_subject_shape_access_aware_storage(
+            direct_run,
+            phase=phase,
+            expected_profile_id=profile_id,
+        )
+    )
+    errors.extend(
+        validate_subject_shape_access_aware_storage(
+            consolidated_run,
+            phase=phase,
+            expected_profile_id=profile_id,
+        )
     )
     try:
         receipt = validate_direct_consolidated_subtree(
@@ -954,6 +1102,24 @@ def validate_subject_shape_direct_consolidated_storage(
         visibility = direct_run.attrs.get(
             SUBJECT_SHAPE_STORAGE_METADATA_POLICY_ATTR
         )
+        if not isinstance(visibility, Mapping):
+            errors.append("subject-shape metadata visibility policy is missing")
+            visibility = {}
+        if visibility.get("profile_id") != profile_id:
+            errors.append(
+                "subject-shape metadata visibility profile differs from storage profile"
+            )
+        for field in (
+            "direct_consolidated_run_attrs_required",
+            "direct_consolidated_group_declarations_required",
+            "direct_consolidated_array_declarations_required",
+            "direct_consolidated_exact_node_inventory_required",
+            "root_consolidation_is_final_visibility_step",
+        ):
+            if visibility.get(field) is not True:
+                errors.append(
+                    f"subject-shape metadata visibility policy requires {field!r}"
+                )
         expected_array_count = (
             visibility.get("expected_array_count")
             if isinstance(visibility, Mapping)
@@ -975,10 +1141,14 @@ def set_subject_shape_metadata_visibility_policy(
     *,
     expected_array_count: int,
 ) -> None:
+    profile_id = str(
+        run_group.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR)
+    )
+    subject_shape_access_aware_storage_profile(profile_id)
     run_group.attrs[SUBJECT_SHAPE_STORAGE_METADATA_POLICY_ATTR] = {
         "schema_id": "palette.subject_shape_metadata_visibility_policy",
         "schema_version": 1,
-        "profile_id": SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+        "profile_id": profile_id,
         "expected_array_count": int(expected_array_count),
         "direct_consolidated_run_attrs_required": True,
         "direct_consolidated_group_declarations_required": True,
@@ -991,17 +1161,24 @@ def set_subject_shape_metadata_visibility_policy(
 __all__ = [
     "SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID",
     "SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_V1",
+    "SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID",
+    "SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_V1",
     "SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE",
     "SUBJECT_SHAPE_STORAGE_PROFILE_CHOICES",
     "build_subject_shape_storage_receipt",
+    "create_bound_subject_shape_access_aware_array",
     "create_bound_subject_shape_candidate_array",
     "finalize_bound_subject_shape_storage_receipt",
+    "is_subject_shape_access_aware_storage",
     "is_subject_shape_storage_candidate",
+    "materialize_subject_shape_access_aware_storage",
     "materialize_subject_shape_storage_candidate",
     "persist_subject_shape_storage_receipt",
     "persist_subject_shape_storage_source_manifest_link",
     "set_subject_shape_metadata_visibility_policy",
     "subject_shape_fill_value",
+    "subject_shape_access_aware_storage_profile",
+    "validate_subject_shape_access_aware_storage",
     "validate_subject_shape_candidate_storage",
     "validate_subject_shape_direct_consolidated_storage",
     "validate_subject_shape_storage_source_manifest_link",

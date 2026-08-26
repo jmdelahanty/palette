@@ -112,6 +112,7 @@ from ..shared.subject_shape_coordinate_publication import (
 )
 from ..shared.zarr.subject_shape_bundle_source import (
     BoundSubjectShapeBundleSource,
+    assignment_rebinding_run_id_from_source_record,
     load_subject_shape_bundle_source,
 )
 from ..shared.zarr_io import open_zarr_root
@@ -2906,6 +2907,11 @@ def _validate_unbound_subject_shape_payload(
             Path(str(archive.key[0])),
             bundle_id=expected_subject_mask_bundle_id,
             allow_inactive=True,
+            assignment_keypoint_rebinding_run_id=(
+                assignment_rebinding_run_id_from_source_record(
+                    run_group.attrs.get(SUBJECT_SHAPE_SOURCE_BINDING_ATTR)
+                )
+            ),
         )
         if (
             run_group.attrs.get(SUBJECT_SHAPE_SOURCE_BINDING_ATTR)
@@ -3331,6 +3337,7 @@ def write_subject_shape_run_group(
     stage_command: Optional[str] = None,
     subject_mask_bundle_id: str | None = None,
     allow_inactive_subject_mask_bundle: bool = False,
+    assignment_keypoint_rebinding_run_id: str | None = None,
     _unbound_coordinate_stage: bool = False,
 ) -> dict[str, object]:
     """Write one row-aligned subject-shape analysis run."""
@@ -3370,6 +3377,9 @@ def write_subject_shape_run_group(
             Path(str(archive.key[0])),
             bundle_id=str(subject_mask_bundle_id),
             allow_inactive=allow_inactive_subject_mask_bundle,
+            assignment_keypoint_rebinding_run_id=(
+                assignment_keypoint_rebinding_run_id
+            ),
         )
         refined_run_path = bundle_source.authority.refined_run_path
         prefix = "refined_subject_masks_runs/"
@@ -3455,6 +3465,11 @@ def write_subject_shape_run_group(
         ),
         "subject_mask_bundle_active": (
             bundle_source.active if bundle_source is not None else None
+        ),
+        "assignment_keypoint_rebinding_run_id": (
+            bundle_source.assignment_keypoint_rebinding_run_id
+            if bundle_source is not None
+            else None
         ),
         "point_coordinate_space": (
             "roi_local_px_unbound_numeric"

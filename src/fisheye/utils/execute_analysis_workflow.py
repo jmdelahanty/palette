@@ -25,10 +25,12 @@ from fisheye.analysis_workflows import (
     WorkflowExecutionPlan,
     build_workflow_execution_plan,
     default_core_behavior_profile_path,
-    discover_stage_availability,
     load_analysis_workflow,
     plan_analysis_workflow,
     stage_run_relative_path,
+)
+from fisheye.analysis_workflows.runtime_verification import (
+    verify_persisted_stage_output,
 )
 from fisheye.analytics_exports.publication import export_manifest_path
 from fisheye.analytics_exports.validation import (
@@ -300,7 +302,7 @@ def execute_workflow_plan(
                 raise WorkflowExecutionError(
                     f"Zarr-stage command {command.node_id!r} has no canonical stage ID"
                 )
-            availability = discover_stage_availability(
+            availability = verify_persisted_stage_output(
                 zarr_path,
                 command.stage_id,
                 requested_run=command.output_run,

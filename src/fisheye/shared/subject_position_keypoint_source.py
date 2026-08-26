@@ -113,6 +113,7 @@ _SELECTOR_ALIAS_NAMES = frozenset(
 )
 
 _BOUND_SOURCE_SEAL = object()
+_BOUND_COORDINATE_SUCCESSOR_SEAL = object()
 _REQUIRED_SOURCE_CROP_ARRAYS = (
     "instance_key",
     "frame_indices",
@@ -200,6 +201,38 @@ class BoundKeypointPositionSource:
         """Exact anatomy source-binding identity used by this adapter."""
 
         return self._binding_id
+
+
+@dataclass(frozen=True, init=False)
+class BoundKeypointCoordinateSuccessorSource:
+    """Full-strength, selector-ineligible coordinate-successor profile."""
+
+    analysis_zarr: Path
+    run_path: str
+    run_id: str
+    run_group: Any = field(repr=False, compare=False)
+    manifest: Mapping[str, Any] = field(repr=False)
+    manifest_digest: str
+    surfaces: BoundKeypointCoordinateSurfaces = field(repr=False, compare=False)
+    successor_authority: Mapping[str, Any] = field(repr=False)
+    successor_authority_digest: str
+    active_keypoint_bundle_authority: Mapping[str, Any] = field(repr=False)
+    active_keypoint_bundle_authority_digest: str
+    _seal: object = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        *,
+        _verification_seal: object | None = None,
+        **values: Any,
+    ) -> None:
+        if _verification_seal is not _BOUND_COORDINATE_SUCCESSOR_SEAL:
+            raise KeypointPositionSourceError(
+                "Coordinate-successor sources must be produced by the shared resolver."
+            )
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "_seal", _verification_seal)
 
 
 def _read_array(node: Any, *, name: str) -> np.ndarray:
@@ -758,6 +791,63 @@ def _require_coordinate_successor_authority(
     return _readonly_mapping(authority), canonical_json_sha256(authority)
 
 
+def load_keypoint_coordinate_successor_source(
+    analysis_zarr: str | Path,
+    *,
+    run_path: str,
+) -> BoundKeypointCoordinateSuccessorSource:
+    """Resolve the maintained coordinate-successor profile without anatomy.
+
+    This is the shared evidence branch used by planners and downstream
+    assignment consumers.  It performs the same full-strength authority,
+    lifecycle, metadata, and coordinate validation as the anatomy adapter.
+    """
+
+    archive = Path(analysis_zarr).expanduser().resolve()
+    normalized_path, run_id = _canonical_run_path(run_path)
+    root = _open_root(archive)
+    parent = _require_group(root, "keypoints_runs", label="keypoint parent")
+    run = _require_group(root, normalized_path, label="keypoint run")
+    manifest, payload = _manifest_and_payload(run, run_id=run_id)
+    authority, authority_digest = _require_coordinate_successor_authority(
+        root,
+        archive,
+        run=run,
+        parent=parent,
+        run_path=normalized_path,
+        run_id=run_id,
+        manifest=manifest,
+        payload=payload,
+    )
+    _validate_published_metadata(
+        archive,
+        run_path=normalized_path,
+        run_id=run_id,
+        payload=payload,
+    )
+    surfaces = require_bound_ineligible_keypoint_coordinate_surfaces(
+        load_persisted_ineligible_keypoint_coordinate_surfaces(
+            root,
+            normalized_path,
+        )
+    )
+    active = authority["payload"]["source_authority"]["record"]
+    return BoundKeypointCoordinateSuccessorSource(
+        analysis_zarr=archive,
+        run_path=normalized_path,
+        run_id=run_id,
+        run_group=run,
+        manifest=_readonly_mapping(manifest),
+        manifest_digest=canonical_json_sha256(manifest),
+        surfaces=surfaces,
+        successor_authority=authority,
+        successor_authority_digest=authority_digest,
+        active_keypoint_bundle_authority=_readonly_mapping(active),
+        active_keypoint_bundle_authority_digest=canonical_json_sha256(active),
+        _verification_seal=_BOUND_COORDINATE_SUCCESSOR_SEAL,
+    )
+
+
 def _bind_source_schema(
     binding: Mapping[str, Any],
     pose_binding: Mapping[str, Any],
@@ -1150,6 +1240,7 @@ def require_bound_keypoint_position_source(
 
 
 __all__ = [
+    "BoundKeypointCoordinateSuccessorSource",
     "BoundKeypointPositionSource",
     "KeypointPositionSourceError",
     "KeypointPositionSourcePolicy",
@@ -1162,6 +1253,7 @@ __all__ = [
     "SOURCE_KIND",
     "SOURCE_MODALITY",
     "load_bound_keypoint_position_source",
+    "load_keypoint_coordinate_successor_source",
     "revalidate_bound_keypoint_position_source",
     "require_bound_keypoint_position_source",
 ]
