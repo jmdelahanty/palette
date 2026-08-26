@@ -15,6 +15,10 @@ from types import MappingProxyType
 from typing import Callable, Mapping
 
 from fisheye.registry.stage_catalog import canonical_stage_id
+from fisheye.shared.subject_shape_storage import (
+    SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID,
+    SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE,
+)
 
 from .contracts import AnalysisWorkflow
 from .dag import NodePlan, WorkflowPlan
@@ -346,9 +350,23 @@ def _subject_shape_command(context: StageCommandContext) -> tuple[str, ...]:
             raise WorkflowExecutionError(
                 f"unsafe subject-mask bundle selection: {mask_authority!r}"
             )
-        command.extend(("--subject-mask-bundle-id", bundle_id))
+        command.extend(
+            (
+                "--subject-mask-bundle-id",
+                bundle_id,
+                "--storage-profile",
+                SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID,
+            )
+        )
     else:
-        command.extend(("--refined-run", mask_authority))
+        command.extend(
+            (
+                "--refined-run",
+                mask_authority,
+                "--storage-profile",
+                SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE,
+            )
+        )
     command.extend(
         (
             "--run-name",

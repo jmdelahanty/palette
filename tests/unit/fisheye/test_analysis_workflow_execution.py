@@ -277,6 +277,7 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
         str(tmp_path / "recording_analysis.zarr"),
     )
     assert shape[shape.index("--refined-run") + 1] == "refined_masks_a"
+    assert shape[shape.index("--storage-profile") + 1] == "legacy_explicit_chunks"
     assert shape[shape.index("--execution-backend") + 1] == "dask_worker_chunks"
     assert shape[shape.index("--num-workers") + 1] == "8"
     assert shape[shape.index("--block-rows") + 1] == "1024"
@@ -705,7 +706,7 @@ def test_apply_validates_manifest_selected_eye_trace_export(
         validate,
     )
     monkeypatch.setattr(
-        "fisheye.utils.execute_analysis_workflow.discover_stage_availability",
+        "fisheye.utils.execute_analysis_workflow.verify_persisted_stage_output",
         lambda *_args, **_kwargs: pytest.fail(
             "Parquet exports must not enter Zarr stage discovery"
         ),
@@ -886,6 +887,9 @@ def test_execution_composes_clipped_tracking_and_active_mask_bundle(
 
     shape = commands["subject_shape"].argv
     assert shape[shape.index("--subject-mask-bundle-id") + 1] == "masks_bundle_a"
+    assert shape[shape.index("--storage-profile") + 1] == (
+        "subject_shape_access_aware_v1"
+    )
     assert "--refined-run" not in shape
 
 
@@ -1001,17 +1005,23 @@ def test_cli_renders_sleepyfish_style_swim_bout_command(
 ) -> None:
     zarr_path = tmp_path / "sleepyfish_analysis.zarr"
     _write_group(zarr_path)
-    refined_parent = zarr_path / "refined_keypoints_runs"
+    refined_parent = zarr_path / "keypoints_runs"
     _write_group(
         refined_parent,
-        {"latest": "refined_kp_a", "latest_complete": "refined_kp_a"},
+        {"latest": "keypoints_a", "latest_complete": "keypoints_a"},
     )
     _write_group(
-        refined_parent / "refined_kp_a",
+        refined_parent / "keypoints_a",
         {
             "palette_run_completion_status": "complete",
             "stage_selector_eligible": True,
+            "source_crop_run": "crop_a",
+            "keypoints_processed": 10,
         },
+    )
+    _write_group(
+        zarr_path / "crop_runs" / "crop_a",
+        {"source_refined_run": "detect_a"},
     )
     tracks_parent = zarr_path / "tracking_runs"
     _write_group(
@@ -1023,6 +1033,9 @@ def test_cli_renders_sleepyfish_style_swim_bout_command(
         {
             "palette_run_completion_status": "complete",
             "stage_selector_eligible": True,
+            "source_rowset_path": "crop_runs/crop_a",
+            "source_refined_run": "detect_a",
+            "source_rowset_row_count": 10,
         },
     )
     track_parent = zarr_path / "analysis" / "track_kinematics_runs" / "offline"

@@ -64,6 +64,12 @@ from fisheye.shared.keypoint_coordinate_publication import (
     KEYPOINT_LABEL_AUTHORITY_SCHEMA_VERSION,
     load_persisted_keypoint_coordinate_surfaces,
 )
+from fisheye.shared.subject_position_keypoint_source import (
+    load_keypoint_coordinate_successor_source,
+)
+from fisheye.shared.zarr.assignment_keypoint_rebinding import (
+    ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE,
+)
 from fisheye.pose.body_frame import (
     BODY_FRAME_COORDINATE_SPACE_ROI,
     BODY_FRAME_SCHEMA_ID,
@@ -200,7 +206,8 @@ EYE_ANGLE_REFINED_DIAGNOSTIC_COORDINATE_CONTRACT = (
 EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_ID = (
     "palette.eye_angle_staged_canonical_keypoint_authority"
 )
-EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_VERSION = 1
+EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_VERSION = 2
+_EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_LEGACY_VERSIONS = frozenset({1})
 EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCOPE = (
     "materializer_private_subject_shape_assignment_keypoints_subset_v1"
 )
@@ -2729,23 +2736,36 @@ def _build_staged_canonical_keypoint_authority(
     surfaces: Any,
     assignment_authority: Any,
     alignment: Mapping[str, Any],
+    success_dataset: str = "detection_success",
 ) -> dict[str, Any]:
     context = surfaces.context
     run_path = str(context.run_path)
     run_name = run_path.split("/", 1)[1]
     group = context._run_group
-    arrays = {
-        name: _array_authority_entry(
-            group[name],
-            array_ref=f"/{run_path}/{name}",
+    arrays: dict[str, dict[str, Any]] = {}
+    for name in (
+        "keypoints_roi",
+        "detection_success",
+        "instance_key",
+        "source_acquisition_frame_index",
+    ):
+        source_dataset = success_dataset if name == "detection_success" else name
+        entry = _array_authority_entry(
+            group[source_dataset],
+            array_ref=f"/{run_path}/{source_dataset}",
         )
-        for name in (
-            "keypoints_roi",
-            "detection_success",
-            "instance_key",
-            "source_acquisition_frame_index",
-        )
-    }
+        entry["source_dataset"] = source_dataset
+        arrays[name] = entry
+    if isinstance(assignment_authority, Mapping):
+        assignment_pointer = {
+            "record_ref": assignment_authority.get("record_ref"),
+            "record_sha256": assignment_authority.get("record_sha256"),
+        }
+    else:
+        assignment_pointer = {
+            "record_ref": assignment_authority.record_ref,
+            "record_sha256": assignment_authority.record_sha256,
+        }
     body = {
         "schema_id": EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_ID,
         "schema_version": EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_VERSION,
@@ -2771,10 +2791,7 @@ def _build_staged_canonical_keypoint_authority(
                 context.keypoint_label_authority.record_sha256
             ),
         },
-        "assignment_authority": {
-            "record_ref": assignment_authority.record_ref,
-            "record_sha256": assignment_authority.record_sha256,
-        },
+        "assignment_authority": assignment_pointer,
         "subject_shape_run_path": str(
             eye_geometry.subject_shape_coordinate_publication.run_path
         ),
@@ -2811,10 +2828,14 @@ def _canonical_staged_keypoint_authority(value: Any) -> dict[str, Any]:
     }
     if set(canonical) != expected:
         raise ValueError("Staged canonical keypoint authority fields are not exact.")
+    schema_version = canonical.get("schema_version")
     if (
         canonical.get("schema_id") != EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_ID
-        or canonical.get("schema_version")
-        != EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_VERSION
+        or schema_version
+        not in {
+            EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_VERSION,
+            *_EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_LEGACY_VERSIONS,
+        }
         or canonical.get("authority_scope")
         != EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCOPE
         or canonical.get("closed_array_inventory") is not True
@@ -2896,11 +2917,26 @@ def _canonical_staged_keypoint_authority(value: Any) -> dict[str, Any]:
             "content_sha256",
             "canonicalization",
         }
+        if schema_version == EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_VERSION:
+            expected_fields.add("source_dataset")
+        source_dataset = (
+            entry.get("source_dataset")
+            if isinstance(entry, Mapping)
+            else None
+        )
+        expected_dataset = (
+            source_dataset
+            if schema_version == EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_VERSION
+            else array_name
+        )
         if (
             not isinstance(entry, Mapping)
             or set(entry) != expected_fields
+            or not isinstance(expected_dataset, str)
+            or not expected_dataset
+            or "/" in expected_dataset
             or entry.get("array_ref")
-            != f"/{canonical['keypoint_run_path']}/{array_name}"
+            != f"/{canonical['keypoint_run_path']}/{expected_dataset}"
             or not isinstance(entry.get("shape"), list)
             or not entry["shape"]
             or any(type(item) is not int or item < 0 for item in entry["shape"])
@@ -3186,7 +3222,8 @@ def _validate_staged_canonical_keypoint_source(
             "publication or ordered labels."
         )
     for name, entry in canonical["arrays"].items():
-        node = group.get(name)
+        source_dataset = str(entry.get("source_dataset", name))
+        node = group.get(source_dataset)
         if (
             node is None
             or np.dtype(node.dtype).str != entry["dtype"]
@@ -3245,7 +3282,134 @@ def _resolve_canonical_eye_keypoints(
             "Refined-subject geometry is available only with an explicit refined-keypoint "
             "diagnostic source."
         )
-    refined_context = publication.source.context
+    publication_source = publication.source
+    rebinding = getattr(
+        publication_source,
+        "assignment_keypoint_rebinding_manifest",
+        None,
+    )
+    rebinding_run_id = getattr(
+        publication_source,
+        "assignment_keypoint_rebinding_run_id",
+        None,
+    )
+    if isinstance(rebinding, Mapping) and isinstance(rebinding_run_id, str):
+        payload = rebinding.get("payload")
+        keypoint_source = (
+            payload.get("canonical_keypoint_source")
+            if isinstance(payload, Mapping)
+            else None
+        )
+        equivalence = payload.get("equivalence") if isinstance(payload, Mapping) else None
+        if (
+            not isinstance(keypoint_source, Mapping)
+            or not isinstance(equivalence, Mapping)
+            or payload.get("assignment_state") != "used"
+            or keypoint_source.get("authority_profile")
+            != ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE
+        ):
+            raise ValueError(
+                "Subject-shape assignment rebinding profile is missing or invalid."
+            )
+        path = str(keypoint_source.get("run_path") or "")
+        if not path.startswith("keypoints_runs/") or path.count("/") != 1:
+            raise ValueError(
+                "Subject-shape assignment rebinding names a noncanonical keypoint path."
+            )
+        run_name = path.split("/", 1)[1]
+        if expected_keypoint_run is not None and expected_keypoint_run != run_name:
+            raise ValueError(
+                "--keypoint-run differs from the exact rebinding sealed by "
+                "the selected subject-shape publication."
+            )
+        resolved = load_keypoint_coordinate_successor_source(
+            publication_source.archive_path,
+            run_path=path,
+        )
+        if (
+            resolved.manifest_digest
+            != keypoint_source.get("run_manifest_document_digest")
+            or resolved.manifest.get("payload_digest")
+            != keypoint_source.get("run_manifest_payload_digest")
+            or resolved.successor_authority_digest
+            != keypoint_source.get("coordinate_successor_authority_digest")
+            or resolved.active_keypoint_bundle_authority_digest
+            != keypoint_source.get("keypoint_bundle_authority_digest")
+        ):
+            raise ValueError(
+                "Live keypoint coordinate successor differs from the assignment rebinding."
+            )
+        surfaces = resolved.surfaces
+        group = resolved.run_group
+        success = group.get("pose_success")
+        keypoint_equivalence = equivalence.get("keypoints_roi_to_keypoints_roi")
+        success_equivalence = equivalence.get(
+            "detection_success_to_pose_success"
+        )
+        if (
+            success is None
+            or not isinstance(keypoint_equivalence, Mapping)
+            or not isinstance(success_equivalence, Mapping)
+            or array_values_sha256(group["keypoints_roi"])
+            != keypoint_equivalence.get("normalized_sha256")
+            or array_values_sha256(success)
+            != success_equivalence.get("normalized_sha256")
+        ):
+            raise ValueError(
+                "Canonical eye keypoint values differ from the assignment rebinding."
+            )
+        assignment_pointer = {
+            "record_ref": (
+                "/subject_mask_assignment_keypoint_rebinding_runs/"
+                f"{rebinding_run_id}@run_manifest"
+            ),
+            "record_sha256": _canonical_json_sha256(rebinding),
+        }
+        alignment = _require_ordered_eye_row_alignment(
+            publication.row_identity,
+            surfaces.context.row_identity,
+            publication.temporal_authority,
+            surfaces.context.temporal_authority,
+        )
+        authority = _build_staged_canonical_keypoint_authority(
+            eye_geometry=eye_geometry,
+            surfaces=surfaces,
+            assignment_authority=assignment_pointer,
+            alignment=alignment,
+            success_dataset="pose_success",
+        )
+        authority_arrays = authority["arrays"]
+        if (
+            authority_arrays["keypoints_roi"]["content_sha256"]
+            != keypoint_equivalence.get("normalized_sha256")
+            or authority_arrays["detection_success"]["content_sha256"]
+            != success_equivalence.get("normalized_sha256")
+            or authority_arrays["instance_key"]["content_sha256"]
+            != alignment["shared_instance_key_content_sha256"]
+            or authority_arrays["source_acquisition_frame_index"]["content_sha256"]
+            != alignment["shared_frame_index_content_sha256"]
+        ):
+            raise ValueError(
+                "Canonical rebinding payload changed while its detached authority "
+                "was being sealed."
+            )
+        return (
+            group,
+            path,
+            run_name,
+            tuple(surfaces.context.keypoint_labels),
+            surfaces,
+            authority,
+            int(surfaces.context.temporal_authority.record.source_total_frames),
+        )
+
+    refined_context = getattr(publication_source, "context", None)
+    if refined_context is None:
+        raise ValueError(
+            "The selected subject-shape publication does not seal a supported "
+            "assignment-keypoint authority. Publish or select an admitted "
+            "assignment rebinding before planning eye-angle analysis."
+        )
     nested = refined_context.assignment_keypoint_surfaces
     assignment_authority = refined_context.assignment_keypoint_authority
     if (
@@ -3438,7 +3602,11 @@ def _resolve_eye_angle_inputs(
         source_kp_group = None
         source_kp_run_name = None
         source_kp_group_path = None
-        detection_success_key = "detection_success"
+        detection_success_key = (
+            "detection_success"
+            if "detection_success" in kp_group
+            else "pose_success"
+        )
         frame_indices_key = "source_acquisition_frame_index"
         instance_key_source: Optional[zarr.Group] = kp_group
         instance_key_key: Optional[str] = "instance_key"

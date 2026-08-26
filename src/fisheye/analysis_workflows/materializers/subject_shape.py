@@ -39,14 +39,15 @@ from ...analysis.subject_shape_runs import (
     write_subject_shape_run_group,
 )
 from ...analysis.subject_shape_storage import (
-    SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
     SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE,
     SUBJECT_SHAPE_STORAGE_PROFILE_CHOICES,
     finalize_bound_subject_shape_storage_receipt,
+    is_subject_shape_access_aware_storage,
     is_subject_shape_storage_candidate,
-    materialize_subject_shape_storage_candidate,
+    materialize_subject_shape_access_aware_storage,
     set_subject_shape_metadata_visibility_policy,
-    validate_subject_shape_candidate_storage,
+    subject_shape_access_aware_storage_profile,
+    validate_subject_shape_access_aware_storage,
     validate_subject_shape_direct_consolidated_storage,
     validate_subject_shape_storage_source_manifest_link,
 )
@@ -148,6 +149,7 @@ class SubjectShapeMaterializationPlan:
     source_contract: dict[str, Any]
     subject_mask_bundle_id: str | None = None
     allow_inactive_subject_mask_bundle: bool = False
+    assignment_keypoint_rebinding_run_id: str | None = None
 
     @property
     def compute_run_path(self) -> Path:
@@ -191,6 +193,9 @@ class SubjectShapeMaterializationPlan:
                 "subject_mask_bundle_id": self.subject_mask_bundle_id,
                 "allow_inactive_subject_mask_bundle": (
                     self.allow_inactive_subject_mask_bundle
+                ),
+                "assignment_keypoint_rebinding_run_id": (
+                    self.assignment_keypoint_rebinding_run_id
                 ),
             }
         )
@@ -240,6 +245,7 @@ def build_subject_shape_materialization_plan(
     native_threads: int = DEFAULT_NATIVE_THREADS,
     subject_mask_bundle_id: str | None = None,
     allow_inactive_subject_mask_bundle: bool = False,
+    assignment_keypoint_rebinding_run_id: str | None = None,
 ) -> SubjectShapeMaterializationPlan:
     """Resolve a read-only plan without creating scratch or mutating the archive."""
 
@@ -292,15 +298,18 @@ def build_subject_shape_materialization_plan(
     root = open_zarr_root(source, mode="r")
     bundle_source = None
     if subject_mask_bundle_id is not None:
-        if storage_profile_id != SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID:
+        if not is_subject_shape_access_aware_storage(storage_profile_id):
             raise ValueError(
-                "Recording-bundle subject shape is initially authorized only as the "
-                "selector-ineligible access-aware storage candidate."
+                "Recording-bundle subject shape requires one explicit access-aware "
+                "storage profile."
             )
         bundle_source = load_subject_shape_bundle_source(
             source,
             bundle_id=str(subject_mask_bundle_id),
             allow_inactive=allow_inactive_subject_mask_bundle,
+            assignment_keypoint_rebinding_run_id=(
+                assignment_keypoint_rebinding_run_id
+            ),
         )
         refined_path = bundle_source.authority.refined_run_path
         prefix = "refined_subject_masks_runs/"
@@ -326,11 +335,26 @@ def build_subject_shape_materialization_plan(
             "refined_manifest_payload_digest": (
                 bundle_source.authority.refined_manifest["payload_digest"]
             ),
+            "assignment_keypoint_rebinding_run_id": (
+                bundle_source.assignment_keypoint_rebinding_run_id
+            ),
+            "assignment_keypoint_rebinding_manifest_payload_digest": (
+                bundle_source.assignment_keypoint_rebinding_manifest[
+                    "payload_digest"
+                ]
+                if bundle_source.assignment_keypoint_rebinding_manifest is not None
+                else None
+            ),
         }
     else:
         if allow_inactive_subject_mask_bundle:
             raise ValueError(
                 "allow_inactive_subject_mask_bundle requires subject_mask_bundle_id."
+            )
+        if assignment_keypoint_rebinding_run_id is not None:
+            raise ValueError(
+                "assignment_keypoint_rebinding_run_id requires "
+                "subject_mask_bundle_id."
             )
         refined_group, resolved_refined_run, _path = resolve_refined_subject_masks_run(
             root, refined_run
@@ -435,6 +459,11 @@ def build_subject_shape_materialization_plan(
         allow_inactive_subject_mask_bundle=(
             allow_inactive_subject_mask_bundle if bundle_source is not None else False
         ),
+        assignment_keypoint_rebinding_run_id=(
+            bundle_source.assignment_keypoint_rebinding_run_id
+            if bundle_source is not None
+            else None
+        ),
     )
 
 
@@ -511,14 +540,21 @@ def _validate_subject_shape_run(
                 errors.append(f"unbound run contains canonical attr {name}")
         if "coordinate_records" in group:
             errors.append("unbound run contains coordinate_records")
+    storage_access_aware = is_subject_shape_access_aware_storage(storage_profile_id)
     storage_candidate = is_subject_shape_storage_candidate(storage_profile_id)
-    if storage_candidate:
+    if storage_access_aware:
         phase = (
             "bound"
             if expected_binding_status == SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
             else "unbound"
         )
-        errors.extend(validate_subject_shape_candidate_storage(group, phase=phase))
+        errors.extend(
+            validate_subject_shape_access_aware_storage(
+                group,
+                phase=phase,
+                expected_profile_id=storage_profile_id,
+            )
+        )
     return {
         "valid": not errors,
         "errors": errors,
@@ -527,6 +563,7 @@ def _validate_subject_shape_run(
         "binding_status": expected_binding_status,
         "physical_storage_layout": layout,
         "storage_profile_id": storage_profile_id,
+        "storage_access_aware": storage_access_aware,
         "storage_candidate": storage_candidate,
     }
 
@@ -547,6 +584,7 @@ def publish_subject_shape_run(
         "publication_run_path",
         plan.sharded_run,
     )
+    storage_access_aware = is_subject_shape_access_aware_storage(storage_profile_id)
     storage_candidate = is_subject_shape_storage_candidate(storage_profile_id)
     transaction = {
         "binding_complete": False,
@@ -560,7 +598,7 @@ def publish_subject_shape_run(
         structural = _validate_subject_shape_run(
             path,
             row_count=plan.row_count,
-            require_sharded=not storage_candidate,
+            require_sharded=not storage_access_aware,
             expected_binding_status=(
                 SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
                 if transaction["binding_complete"]
@@ -632,7 +670,7 @@ def publish_subject_shape_run(
             raise RuntimeError("Subject-shape publication owner is missing.")
         transaction["publication_owner_uuid"] = owner
         write_best_effort_run_lineage_attrs(run_group, run_family="subject_shape_run")
-        if storage_candidate:
+        if storage_access_aware:
             source_link_issues = validate_subject_shape_storage_source_manifest_link(
                 run_group,
                 phase="unbound",
@@ -641,7 +679,7 @@ def publish_subject_shape_run(
             )
             if source_link_issues:
                 raise RuntimeError(
-                    "Subject-shape candidate differs from its original producer "
+                    "Subject-shape access-aware run differs from its original producer "
                     "seal before binding: " + "; ".join(source_link_issues)
                 )
             refresh_unbound_subject_shape_manifest_after_storage_materialization(
@@ -660,7 +698,7 @@ def publish_subject_shape_run(
         )
         if binding.get("valid") is not True:
             raise RuntimeError(f"Final-path subject-shape binding failed: {binding!r}")
-        if storage_candidate:
+        if storage_access_aware:
             receipt = finalize_bound_subject_shape_storage_receipt(run_group)
             array_count = int(
                 receipt["payload"]["object_estimate"]["array_metadata_objects"]
@@ -753,6 +791,7 @@ def publish_subject_shape_run(
                 plan.source_zarr,
                 run_path=f"analysis/subject_shape_runs/{plan.run_name}",
                 phase="bound",
+                expected_profile_id=storage_profile_id,
             )
             if issues:
                 raise RuntimeError(
@@ -786,6 +825,39 @@ def publish_subject_shape_run(
             run=run_group,
             expected_run_attrs=expected_run_attrs,
         )
+        if storage_access_aware:
+            # Selector-visible immutable publications expose their committed
+            # lifecycle only after the root consolidated generation is
+            # refreshed and independently reopened.
+            consolidate_metadata_capture_expected_warnings(plan.source_zarr)
+            issues = validate_subject_shape_direct_consolidated_storage(
+                plan.source_zarr,
+                run_path=f"analysis/subject_shape_runs/{plan.run_name}",
+                phase="bound",
+                expected_profile_id=storage_profile_id,
+            )
+            if issues:
+                raise RuntimeError(
+                    "Supported subject-shape publication differs between direct "
+                    "and consolidated metadata: " + "; ".join(issues)
+                )
+            consolidated_root = zarr.open_group(
+                str(plan.source_zarr),
+                mode="r",
+                use_consolidated=True,
+            )
+            proof = load_persisted_subject_shape_coordinate_publication(
+                consolidated_root,
+                f"analysis/subject_shape_runs/{plan.run_name}",
+                expected_publication_owner=str(
+                    transaction["publication_owner_uuid"]
+                ),
+            )
+            if proof.manifest.record_sha256 != deferred_activation[0].manifest_sha256:
+                raise RuntimeError(
+                    "Consolidated supported subject-shape authority changed during "
+                    "selector activation."
+                )
 
     def rollback_activation() -> None:
         if not storage_candidate and deferred_activation:
@@ -863,7 +935,7 @@ def publish_subject_shape_run(
             publish_schema_id=PUBLISH_SCHEMA_ID,
             policy=(
                 "read_only_compute_unbound_stage_byte_plan_final_path_bind_then_publish"
-                if storage_candidate
+                if storage_access_aware
                 else "read_only_compute_unbound_stage_shard_final_path_bind_then_publish"
             ),
             rollback_policy=(
@@ -896,6 +968,7 @@ def publish_subject_shape_run(
             ),
             "materialization": json_attr_safe(materialization_payload),
         },
+        accept_persisted_activation_on_callback_error=not storage_access_aware,
     )
 
 
@@ -921,6 +994,7 @@ def materialize_subject_shape(
     stage_command: str | None = None,
     subject_mask_bundle_id: str | None = None,
     allow_inactive_subject_mask_bundle: bool = False,
+    assignment_keypoint_rebinding_run_id: str | None = None,
 ) -> dict[str, Any]:
     plan = build_subject_shape_materialization_plan(
         source_zarr,
@@ -938,6 +1012,9 @@ def materialize_subject_shape(
         native_threads=native_threads,
         subject_mask_bundle_id=subject_mask_bundle_id,
         allow_inactive_subject_mask_bundle=allow_inactive_subject_mask_bundle,
+        assignment_keypoint_rebinding_run_id=(
+            assignment_keypoint_rebinding_run_id
+        ),
     )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
@@ -984,6 +1061,11 @@ def materialize_subject_shape(
             allow_inactive_subject_mask_bundle=(
                 getattr(plan, "allow_inactive_subject_mask_bundle", False)
             ),
+            assignment_keypoint_rebinding_run_id=getattr(
+                plan,
+                "assignment_keypoint_rebinding_run_id",
+                None,
+            ),
             _unbound_coordinate_stage=True,
         )
         compute_validation = _validate_subject_shape_run(
@@ -998,12 +1080,17 @@ def materialize_subject_shape(
             raise RuntimeError(
                 f"Node-local compute validation failed: {compute_validation}"
             )
-        storage_candidate = is_subject_shape_storage_candidate(plan.storage_profile_id)
-        if storage_candidate:
+        storage_access_aware = is_subject_shape_access_aware_storage(
+            plan.storage_profile_id
+        )
+        if storage_access_aware:
             compute_run = compute_root[f"analysis/subject_shape_runs/{plan.run_name}"]
-            sharding_summary = materialize_subject_shape_storage_candidate(
+            sharding_summary = materialize_subject_shape_access_aware_storage(
                 compute_run,
                 plan.sharded_run,
+                profile=subject_shape_access_aware_storage_profile(
+                    plan.storage_profile_id
+                ),
                 phase="unbound",
                 copy_block_rows=plan.block_rows,
             )
@@ -1039,7 +1126,7 @@ def materialize_subject_shape(
         publishing_validation = _validate_subject_shape_run(
             plan.sharded_run,
             row_count=plan.row_count,
-            require_sharded=not storage_candidate,
+            require_sharded=not storage_access_aware,
             expected_binding_status=SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
             require_complete=False,
             expected_selector_eligible=False,
@@ -1668,6 +1755,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Authorize exactly the named inactive bundle for a selector-ineligible canary.",
     )
+    parser.add_argument("--assignment-keypoint-rebinding-run")
     parser.add_argument("--run-name", required=True)
     parser.add_argument(
         "--storage-profile",
@@ -1728,6 +1816,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         subject_mask_bundle_id=args.subject_mask_bundle_id,
         allow_inactive_subject_mask_bundle=(
             args.allow_inactive_subject_mask_bundle
+        ),
+        assignment_keypoint_rebinding_run_id=(
+            args.assignment_keypoint_rebinding_run
         ),
     )
     if args.report is not None:

@@ -16,6 +16,9 @@ from fisheye.analysis.subject_shape_storage import (
     validate_subject_shape_direct_consolidated_storage,
 )
 from fisheye.analysis_workflows.materializers import subject_shape as materializer
+from fisheye.analysis_workflows.runtime_verification import (
+    verify_persisted_stage_output,
+)
 from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
 )
@@ -551,6 +554,13 @@ def test_subject_shape_materializer_computes_shards_and_publishes(
     assert run.attrs["unbound_numeric_stage_manifest_sha256_consumed"] == (
         consumed.attrs[f"{SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR}_sha256"]
     )
+    workflow_verification = verify_persisted_stage_output(
+        source_path,
+        "subject_shape",
+        requested_run="shape_materialized",
+        dependency_runs={"refined_subject_masks": "r1"},
+    )
+    assert workflow_verification.available is True
     derivation = run.attrs[SUBJECT_SHAPE_DERIVATION_ATTR]
     assert derivation["unbound_numeric_stage"]["record_ref"].endswith(
         "coordinate_records/consumed_unbound_stage@"
