@@ -832,6 +832,7 @@ def load_keypoint_coordinate_successor_source(
         )
     )
     active = authority["payload"]["source_authority"]["record"]
+    active_digest = authority["payload"]["source_authority"]["record_sha256"]
     return BoundKeypointCoordinateSuccessorSource(
         analysis_zarr=archive,
         run_path=normalized_path,
@@ -843,7 +844,7 @@ def load_keypoint_coordinate_successor_source(
         successor_authority=authority,
         successor_authority_digest=authority_digest,
         active_keypoint_bundle_authority=_readonly_mapping(active),
-        active_keypoint_bundle_authority_digest=canonical_json_sha256(active),
+        active_keypoint_bundle_authority_digest=active_digest,
         _verification_seal=_BOUND_COORDINATE_SUCCESSOR_SEAL,
     )
 
