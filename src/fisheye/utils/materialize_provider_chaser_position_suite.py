@@ -34,12 +34,22 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--geometry-selection-run", required=True)
     parser.add_argument("--expected-selection-record-sha256", required=True)
     parser.add_argument("--expected-physical-authority-sha256", required=True)
-    parser.add_argument(
+    epoch_source = parser.add_mutually_exclusive_group(required=True)
+    epoch_source.add_argument(
         "--epoch-role",
         type=_parse_epoch_role,
         action="append",
-        required=True,
-        help="Explicit analysis-role binding in ROLE=WINDOW_ID form; repeat as needed.",
+        help=(
+            "Legacy explicit analysis-role binding in ROLE=WINDOW_ID form; "
+            "repeat as needed."
+        ),
+    )
+    epoch_source.add_argument(
+        "--protocol-semantic-selection-run",
+        help=(
+            "Exact immutable semantic selection run; supplies chaser_pre, "
+            "chaser_training, and chaser_post without caller role aliases."
+        ),
     )
     parser.add_argument("--treatment-role", default="aggressive")
     parser.add_argument("--baseline-role", default="inert")
@@ -69,7 +79,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         geometry_selection_run=args.geometry_selection_run,
         expected_selection_record_sha256=args.expected_selection_record_sha256,
         expected_physical_authority_sha256=args.expected_physical_authority_sha256,
-        epoch_role_bindings=args.epoch_role,
+        epoch_role_bindings=args.epoch_role or (),
+        protocol_semantic_selection_run=args.protocol_semantic_selection_run,
         treatment_role=args.treatment_role,
         baseline_role=args.baseline_role,
         radial_bin_width_mm=args.radial_bin_width_mm,

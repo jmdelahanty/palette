@@ -15,6 +15,15 @@ These registry tables are discovery indexes over authoritative recording
 analysis Zarr metadata. They enable protocol-independent cohort queries such as
 `stimulus_mode = 'CHASER'`.
 
+Registry migration 72 also projects the exact producer protocol-semantic
+status/hash, a bounded ordered recipe, versioned trial-index integrity, and
+per-step semantic family/display context. Snapshot-v1 rows retain Palette's
+explicitly local trial-index byte digest. Snapshot-v2 rows instead expose the
+producer trial-index hash, exact execution hash/status and stimulus-frame
+intervals, plus the sealed correspondence-proxy status/manifest digest. The
+existing `protocol_hash` remains the distinct Palette-derived authored-protocol
+hash.
+
 ## Safety model
 
 `fisheye.registry.stimulus_metadata_backfill` is census-only by default. It:
@@ -23,6 +32,11 @@ analysis Zarr metadata. They enable protocol-independent cohort queries such as
   connection;
 - opens recording Zarrs read-only with unconsolidated metadata;
 - reports normalized protocols, runs, steps, and modes;
+- reloads and validates exact semantic snapshot arrays and every stored step
+  binding before reporting a run as `verified`;
+- for snapshot v2, reloads the exact execution document, revalidates every
+  half-open step/chaser-phase interval, and recomputes the correspondence-proxy
+  arrays and manifest before indexing its seal;
 - flags unreadable archives, missing/multiple latest run pointers, and
   `UNKNOWN` modes;
 - does not run unrelated registry extractors.
@@ -54,6 +68,9 @@ Inspect the resulting JSON, especially:
 dataset_count
 datasets_with_stimulus_count
 latest_mode_dataset_counts
+latest_protocol_semantic_status_run_counts
+latest_protocol_semantic_hash_dataset_counts
+latest_protocol_recipe_run_counts
 issue_count and issues
 ```
 
@@ -87,3 +104,24 @@ scripts/py -m fisheye.utils.build_virtual_collection_manifest \
 
 Protocol names remain metadata for confound checks; they are not cohort
 membership predicates.
+
+To distinguish the currently known GoodBatBadBat recipes, query the full
+producer hash or bounded recipe instead of names:
+
+```sql
+SELECT protocol_semantic_hash, protocol_recipe_label, COUNT(*) AS recordings
+FROM recording_stimulus_runs
+WHERE is_latest = 1 AND protocol_semantic_status = 'verified'
+GROUP BY protocol_semantic_hash, protocol_recipe_label;
+```
+
+Rows with `NULL` semantic status have not yet been inspected through this
+contract. `legacy_missing` is written only after complete absence was observed
+in the authoritative source; corrupt or partial modern state is an extraction
+issue and never falls back to legacy.
+
+The registry's proxy fields are discovery evidence, not an acquisition join.
+`protocol_acquisition_containment_status` remains
+`unavailable_without_sealed_stimulus_to_acquisition_mapping` until the live
+frame-bound `recording_frame_id` identity chain is available. Camera frame IDs
+and timestamps must not be promoted to acquisition-row authority by a query.

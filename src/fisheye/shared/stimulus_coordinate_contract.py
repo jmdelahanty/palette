@@ -195,6 +195,15 @@ STIMULUS_COORDINATE_V6_SOURCE_RECORD_PATH = (
 STIMULUS_COORDINATE_V6_NORMALIZED_RECORD_PATH = (
     "/stimulus_coordinate_v6/normalized_semantic_record_json"
 )
+STIMULUS_COORDINATE_V6_RAW_H5_BINDING_PATH = (
+    "/stimulus_coordinate_v6/raw_citrus_h5_binding_json"
+)
+STIMULUS_COORDINATE_V6_ACQUISITION_CAMERA_BINDING_PATH = (
+    "/stimulus_coordinate_v6/acquisition_camera_binding_json"
+)
+STIMULUS_COORDINATE_V6_ORANGE_RECORDING_IDENTITY_PATH = (
+    "/stimulus_coordinate_v6/orange_recording_identity_json"
+)
 STIMULUS_COORDINATE_V6_FRAME_METADATA_PATH = "/video_metadata/frame_metadata"
 STIMULUS_COORDINATE_V6_TARGET_VALID_ARRAY = (
     "target_source_acquisition_frame_valid"
@@ -354,6 +363,13 @@ class V6StimulusCoordinateArtifact:
     source_semantic_record_sha256: str
     normalized_semantic_record: Mapping[str, Any]
     normalized_semantic_record_sha256: str
+    raw_citrus_h5_binding: Mapping[str, Any]
+    raw_citrus_h5_binding_sha256: str
+    acquisition_camera_binding: Mapping[str, Any]
+    acquisition_camera_binding_sha256: str
+    orange_recording_identity: Mapping[str, Any]
+    orange_recording_identity_sha256: str
+    recording_identity_token: str
     stimulus_state_key: np.ndarray = dataclass_field(repr=False, compare=False)
     source_acquisition_frame_index: np.ndarray = dataclass_field(repr=False, compare=False)
     target_source_acquisition_frame_index: np.ndarray = dataclass_field(repr=False, compare=False)
@@ -1777,6 +1793,170 @@ def _v6_require_sha256(value: Any, *, label: str) -> str:
     return value
 
 
+def _v6_read_closed_canonical_record(
+    h5: h5py.File,
+    *,
+    path: str,
+) -> tuple[dict[str, Any], str]:
+    """Read one producer-authored scalar JSON record with a closed envelope."""
+
+    payload, record = _v6_read_scalar_utf8(
+        h5,
+        path=path,
+        attr_name="canonicalization",
+        expected_attr_value="canonical_json_utf8_sort_keys_compact_v1",
+    )
+    digest = _v6_sha256(payload)
+    attrs = {
+        str(key): _normalize_attr(value) for key, value in h5[path].attrs.items()
+    }
+    if attrs != {
+        "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+        "checksum_sha256": digest,
+    }:
+        raise StimulusCoordinateContractError(
+            f"v6 record dataset {path} attributes are not closed."
+        )
+    if payload != _v6_canonical_json(record).encode("utf-8"):
+        raise StimulusCoordinateContractError(
+            f"v6 record dataset {path} is not canonical JSON bytes."
+        )
+    return record, digest
+
+
+def _v6_is_normalized_bundle_relative_path(value: Any) -> bool:
+    return bool(
+        isinstance(value, str)
+        and value
+        and value == value.strip()
+        and "\\" not in value
+        and "//" not in value
+        and not value.startswith("/")
+        and all(part not in {"", ".", ".."} for part in value.split("/"))
+    )
+
+
+def _v6_validate_raw_citrus_h5_binding(
+    record: Mapping[str, Any],
+    *,
+    recording_id: str,
+) -> None:
+    expected_root = {
+        "canonicalization",
+        "citrus_experiment_id",
+        "citrus_session_uuid",
+        "finalized_observation_receipt",
+        "h5_artifact",
+        "observation_context_id",
+        "recording_id",
+        "schema_id",
+        "schema_version",
+    }
+    if (
+        set(record) != expected_root
+        or record.get("schema_id")
+        != "citrus.stimulus_coordinate_v6.raw_citrus_h5_binding"
+        or record.get("schema_version") != 1
+        or record.get("canonicalization")
+        != "canonical_json_utf8_sort_keys_compact_v1"
+        or record.get("recording_id") != recording_id
+    ):
+        raise StimulusCoordinateContractError(
+            "v6 raw Citrus H5 binding is not closed or recording-scoped."
+        )
+    for name in (
+        "citrus_experiment_id",
+        "citrus_session_uuid",
+        "observation_context_id",
+    ):
+        _required_text(record.get(name), label=f"v6 raw H5 binding {name}")
+    receipt = record.get("finalized_observation_receipt")
+    artifact = record.get("h5_artifact")
+    if (
+        not isinstance(receipt, Mapping)
+        or set(receipt) != {"contract_sha256", "receipt_id"}
+        or not isinstance(artifact, Mapping)
+        or set(artifact) != {"relative_path", "sha256", "size_bytes"}
+    ):
+        raise StimulusCoordinateContractError(
+            "v6 raw Citrus H5 binding nested records are not closed."
+        )
+    _required_text(receipt.get("receipt_id"), label="v6 finalized receipt_id")
+    _v6_require_sha256(
+        receipt.get("contract_sha256"),
+        label="v6 finalized receipt contract_sha256",
+    )
+    if not _v6_is_normalized_bundle_relative_path(artifact.get("relative_path")):
+        raise StimulusCoordinateContractError(
+            "v6 raw Citrus H5 path must be recording-bundle-relative."
+        )
+    _v6_require_sha256(artifact.get("sha256"), label="v6 raw Citrus H5 sha256")
+    size_bytes = artifact.get("size_bytes")
+    if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes <= 0:
+        raise StimulusCoordinateContractError(
+            "v6 raw Citrus H5 size_bytes must be a positive integer."
+        )
+
+
+def _v6_validate_acquisition_camera_binding(
+    record: Mapping[str, Any],
+    *,
+    camera_serial: str,
+) -> None:
+    expected = {
+        "acquisition_camera_id",
+        "camera_serial",
+        "canonicalization",
+        "schema_id",
+        "schema_version",
+        "shaman_numeric_camera_id",
+    }
+    numeric_id = record.get("shaman_numeric_camera_id")
+    if (
+        set(record) != expected
+        or record.get("schema_id")
+        != "citrus.stimulus_coordinate_v6.acquisition_camera_binding"
+        or record.get("schema_version") != 1
+        or record.get("canonicalization")
+        != "canonical_json_utf8_sort_keys_compact_v1"
+        or record.get("camera_serial") != camera_serial
+        or isinstance(numeric_id, bool)
+        or not isinstance(numeric_id, int)
+        or numeric_id < 0
+        or numeric_id > (2**32 - 1)
+    ):
+        raise StimulusCoordinateContractError(
+            "v6 acquisition-camera binding is not closed or internally consistent."
+        )
+    _required_text(
+        record.get("acquisition_camera_id"),
+        label="v6 acquisition_camera_id",
+    )
+
+
+def _v6_validate_orange_recording_identity(
+    record: Mapping[str, Any],
+    *,
+    recording_id: str,
+) -> str:
+    subject = {
+        "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+        "recording_id": recording_id,
+        "schema_id": "orange.shaman_v2.recording_identity",
+        "schema_version": 1,
+        "scope": "recording_session",
+    }
+    expected = dict(subject)
+    expected["recording_identity_token"] = _v6_sha256(
+        _v6_canonical_json(subject).encode("utf-8")
+    )
+    if record != expected:
+        raise StimulusCoordinateContractError(
+            "v6 Orange recording identity token is stale or recording-substituted."
+        )
+    return expected["recording_identity_token"]
+
+
 def _v6_validate_orange_source_record(
     record: Mapping[str, Any],
     *,
@@ -2029,6 +2209,29 @@ def validate_citrus_stimulus_coordinate_v6_artifact(
         raise StimulusCoordinateContractError(
             "v6 normalized semantic record is not the exact lossless adapter record."
         )
+
+    raw_h5_binding, raw_h5_binding_digest = _v6_read_closed_canonical_record(
+        h5, path=STIMULUS_COORDINATE_V6_RAW_H5_BINDING_PATH
+    )
+    _v6_validate_raw_citrus_h5_binding(
+        raw_h5_binding, recording_id=recording_id
+    )
+    acquisition_camera_binding, acquisition_camera_binding_digest = (
+        _v6_read_closed_canonical_record(
+            h5, path=STIMULUS_COORDINATE_V6_ACQUISITION_CAMERA_BINDING_PATH
+        )
+    )
+    _v6_validate_acquisition_camera_binding(
+        acquisition_camera_binding, camera_serial=camera_serial
+    )
+    orange_recording_identity, orange_recording_identity_digest = (
+        _v6_read_closed_canonical_record(
+            h5, path=STIMULUS_COORDINATE_V6_ORANGE_RECORDING_IDENTITY_PATH
+        )
+    )
+    recording_identity_token = _v6_validate_orange_recording_identity(
+        orange_recording_identity, recording_id=recording_id
+    )
 
     renderer_snapshot, renderer_path, renderer_digest = _classify_renderer_snapshot(h5)
     if renderer_path != STIMULUS_RENDERER_SNAPSHOT_PATH:
@@ -2341,6 +2544,9 @@ def validate_citrus_stimulus_coordinate_v6_artifact(
         "source_file_identity": dict(file_identity), "source_schema_version": 6,
         "v6_source_semantic_record_sha256": source_digest,
         "v6_normalized_semantic_record_sha256": normalized_digest,
+        "v6_raw_citrus_h5_binding_sha256": raw_h5_binding_digest,
+        "v6_acquisition_camera_binding_sha256": acquisition_camera_binding_digest,
+        "v6_orange_recording_identity_sha256": orange_recording_identity_digest,
         "v6_chaser_states_sha256": source_dataset_digest,
         "v6_stimulus_state_key_sha256": key_digest,
         "v6_renderer_snapshot_sha256": renderer_digest,
@@ -2350,10 +2556,17 @@ def validate_citrus_stimulus_coordinate_v6_artifact(
     return V6StimulusCoordinateArtifact(
         source_h5=source_h5.expanduser().resolve(), source_file_identity=file_identity,
         source_contract_sha256=canonical_mapping_digest(evidence),
-        status="pre_materialization_only",
+        status="sealed_producer_contract_v6",
         source_semantic_record=source_record, source_semantic_record_sha256=source_digest,
         normalized_semantic_record=normalized_record,
         normalized_semantic_record_sha256=normalized_digest,
+        raw_citrus_h5_binding=raw_h5_binding,
+        raw_citrus_h5_binding_sha256=raw_h5_binding_digest,
+        acquisition_camera_binding=acquisition_camera_binding,
+        acquisition_camera_binding_sha256=acquisition_camera_binding_digest,
+        orange_recording_identity=orange_recording_identity,
+        orange_recording_identity_sha256=orange_recording_identity_digest,
+        recording_identity_token=recording_identity_token,
         stimulus_state_key=key_values,
         source_acquisition_frame_index=source_values,
         target_source_acquisition_frame_index=target_values,

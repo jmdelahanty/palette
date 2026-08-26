@@ -1,10 +1,13 @@
 """Export explicit selector-ineligible provider epoch summaries as a cohort.
 
-This exporter is intentionally a separate, talk-support surface.  It accepts
+This exporter is intentionally a separate, talk-support surface. It accepts
 only an operator-authored manifest which names one exact summary run per
-recording and track.  It never resolves a selector, changes a Zarr archive, or
-infers subject identity from a track number.  The resulting Parquet generation
-is an immutable derived analysis product and is itself selector-ineligible.
+recording and track. Legacy input v1 consumes only summary v1. Semantic input
+v2 additionally freezes the exact protocol-semantic selection run, manifest,
+and producer hash for every recording and consumes only semantic summary v2.
+It never resolves a selector, changes a Zarr archive, or infers subject
+identity from a track number. The resulting Parquet generation is an immutable
+derived analysis product and is itself selector-ineligible.
 """
 
 from __future__ import annotations
@@ -40,11 +43,20 @@ from fisheye.shared.zarr_io import open_zarr_root
 
 
 INPUT_SCHEMA_ID = "palette.provider_epoch_behavior_cohort_input"
-INPUT_SCHEMA_VERSION = 1
+LEGACY_INPUT_SCHEMA_VERSION = 1
+SEMANTIC_INPUT_SCHEMA_VERSION = 2
+INPUT_SCHEMA_VERSION = LEGACY_INPUT_SCHEMA_VERSION
 EXPORT_SCHEMA_ID = "palette.provider_epoch_behavior_cohort"
-EXPORT_SCHEMA_VERSION = 1
+LEGACY_EXPORT_SCHEMA_VERSION = 1
+SEMANTIC_EXPORT_SCHEMA_VERSION = 2
+EXPORT_SCHEMA_VERSION = LEGACY_EXPORT_SCHEMA_VERSION
 ARROW_ENVELOPE_SCHEMA_ID = "palette.provider_epoch_behavior_cohort.arrow_contracts"
-ARROW_ENVELOPE_SCHEMA_VERSION = 1
+LEGACY_ARROW_ENVELOPE_SCHEMA_VERSION = 1
+SEMANTIC_ARROW_ENVELOPE_SCHEMA_VERSION = 2
+ARROW_ENVELOPE_SCHEMA_VERSION = LEGACY_ARROW_ENVELOPE_SCHEMA_VERSION
+LEGACY_EPOCH_BINDING_MODE = "exact_epoch_selection_v1"
+SEMANTIC_EPOCH_BINDING_MODE = "protocol_semantic_selection_v2"
+SEMANTIC_ROLES = ("chaser_pre", "chaser_training", "chaser_post")
 SUMMARY_PARENT_PATH = "analysis/stimulus_epoch_behavior_summary_runs"
 TABLE_BOUTS = "provider_epoch_bout_events"
 TABLE_FISH = "provider_epoch_behavior_summary"
@@ -91,6 +103,19 @@ def _sha256(value: object, *, label: str) -> str:
     digest = _string(value, label=label)
     if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
         raise ProviderEpochBehaviorCohortError(f"{label} must be a lowercase SHA-256.")
+    return digest
+
+
+def _prefixed_sha256(value: object, *, label: str) -> str:
+    digest = _string(value, label=label)
+    if (
+        len(digest) != 71
+        or not digest.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in digest[7:])
+    ):
+        raise ProviderEpochBehaviorCohortError(
+            f"{label} must be 'sha256:' plus 64 lowercase hexadecimal digits."
+        )
     return digest
 
 
@@ -189,6 +214,26 @@ _BOUT_SOURCE_FIELDS = (
     ("abs_bout_net_heading_change_deg", "float64"),
     ("bout_heading_path_deg", "float64"),
 )
+_SEMANTIC_SOURCE_FIELDS = (
+    ("analysis_role", "|S32"),
+    ("protocol_semantic_hash", "|S72"),
+    ("protocol_semantic_step_index", "int32"),
+    ("protocol_semantic_step_ref", "|S112"),
+)
+
+
+def _source_fields(
+    base: Sequence[tuple[str, str]],
+    *,
+    schema_version: int,
+) -> tuple[tuple[str, str], ...]:
+    if schema_version == LEGACY_EXPORT_SCHEMA_VERSION:
+        return tuple(base)
+    if schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION:
+        return tuple(base) + _SEMANTIC_SOURCE_FIELDS
+    raise ProviderEpochBehaviorCohortError(
+        f"Unsupported provider epoch cohort schema version: {schema_version!r}."
+    )
 
 
 def _source_dtype(spec: Sequence[tuple[str, str]]) -> np.dtype[Any]:
@@ -201,6 +246,8 @@ def _source_schema_digest(spec: Sequence[tuple[str, str]]) -> str:
 
 def _contract_fields(
     disposition: str = "full",
+    *,
+    schema_version: int = EXPORT_SCHEMA_VERSION,
 ) -> tuple[dict[str, str], dict[str, str]]:
     if disposition not in METRIC_DISPOSITIONS:
         raise ProviderEpochBehaviorCohortError(f"Unknown metric disposition: {disposition}")
@@ -219,6 +266,18 @@ def _contract_fields(
         "swim_bout_lineage_sha256": "string",
         "swim_bout_frame_axis_sha256": "string",
     }
+    if schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION:
+        common.update(
+            {
+                "epoch_binding_mode": "string",
+                "protocol_semantic_selection_run": "string",
+                "protocol_semantic_selection_manifest_sha256": "string",
+            }
+        )
+    elif schema_version != LEGACY_EXPORT_SCHEMA_VERSION:
+        raise ProviderEpochBehaviorCohortError(
+            f"Unsupported provider epoch cohort schema version: {schema_version!r}."
+        )
     bout = {
         **common,
         "epoch_id": "int32",
@@ -249,7 +308,10 @@ def _contract_fields(
         "epoch_index": "int32",
         "epoch_label": "string",
     }
-    for name, arrow_type in _FISH_SOURCE_FIELDS:
+    for name, arrow_type in _source_fields(
+        _FISH_SOURCE_FIELDS,
+        schema_version=schema_version,
+    ):
         if name in {"track_id", "window_id", "window_index", "window_label"}:
             continue
         if disposition == "linear_only" and name in _FISH_ANGULAR_FIELDS:
@@ -260,9 +322,21 @@ def _contract_fields(
             "window_label": "epoch_label",
         }.get(name, name)
         fish[output_name] = {
+            "|S32": "string",
             "|S64": "string",
+            "|S72": "string",
             "|S96": "string",
+            "|S112": "string",
         }.get(arrow_type, arrow_type)
+    if schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION:
+        bout.update(
+            {
+                "analysis_role": "string",
+                "protocol_semantic_hash": "string",
+                "protocol_semantic_step_index": "int32",
+                "protocol_semantic_step_ref": "string",
+            }
+        )
     if disposition == "linear_only":
         for name in _BOUT_ANGULAR_FIELDS:
             bout.pop(name, None)
@@ -288,8 +362,13 @@ def _contract(
 
 def table_contracts_for_disposition(
     disposition: str,
+    *,
+    schema_version: int = EXPORT_SCHEMA_VERSION,
 ) -> dict[str, ArrowTableContract]:
-    bout_fields, fish_fields = _contract_fields(disposition)
+    bout_fields, fish_fields = _contract_fields(
+        disposition,
+        schema_version=schema_version,
+    )
     return {
         TABLE_BOUTS: _contract(
             TABLE_BOUTS,
@@ -314,6 +393,9 @@ class CohortEntry:
     summary_run: str
     track_id: int
     subject_id: str | None
+    protocol_semantic_selection_run: str | None = None
+    protocol_semantic_selection_manifest_sha256: str | None = None
+    protocol_semantic_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -338,12 +420,14 @@ class LoadedSummary:
     per_epoch_fish: np.ndarray
     source_table_receipts: Mapping[str, Any]
     summary_attrs: Mapping[str, Any]
+    schema_version: int
+    epoch_binding_mode: str
 
 
 def _validate_manifest(payload: object) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         raise ProviderEpochBehaviorCohortError("Cohort manifest must be a JSON object.")
-    required = {
+    common_required = {
         "schema_id",
         "schema_version",
         "cohort_id",
@@ -352,10 +436,26 @@ def _validate_manifest(payload: object) -> dict[str, Any]:
         "entries",
         "manifest_payload_sha256",
     }
+    schema_version = payload.get("schema_version")
+    required = set(common_required)
+    if schema_version == SEMANTIC_INPUT_SCHEMA_VERSION:
+        required.add("epoch_binding_mode")
     if set(payload) != required:
         raise ProviderEpochBehaviorCohortError("Cohort manifest has an unexpected field set.")
-    if payload["schema_id"] != INPUT_SCHEMA_ID or payload["schema_version"] != INPUT_SCHEMA_VERSION:
+    if (
+        payload["schema_id"] != INPUT_SCHEMA_ID
+        or type(schema_version) is not int
+        or schema_version
+        not in {LEGACY_INPUT_SCHEMA_VERSION, SEMANTIC_INPUT_SCHEMA_VERSION}
+    ):
         raise ProviderEpochBehaviorCohortError("Cohort manifest schema identity is invalid.")
+    if (
+        schema_version == SEMANTIC_INPUT_SCHEMA_VERSION
+        and payload.get("epoch_binding_mode") != SEMANTIC_EPOCH_BINDING_MODE
+    ):
+        raise ProviderEpochBehaviorCohortError(
+            "Cohort manifest v2 must bind protocol_semantic_selection_v2."
+        )
     disposition = payload["metric_disposition"]
     if disposition not in METRIC_DISPOSITIONS:
         raise ProviderEpochBehaviorCohortError(
@@ -377,7 +477,22 @@ def _validate_manifest(payload: object) -> dict[str, Any]:
     for raw in entries:
         if not isinstance(raw, Mapping):
             raise ProviderEpochBehaviorCohortError("Each cohort entry must be an object.")
-        if set(raw) != {"recording_id", "analysis_zarr", "summary_run", "track_id", "subject_id"}:
+        entry_fields = {
+            "recording_id",
+            "analysis_zarr",
+            "summary_run",
+            "track_id",
+            "subject_id",
+        }
+        if schema_version == SEMANTIC_INPUT_SCHEMA_VERSION:
+            entry_fields.update(
+                {
+                    "protocol_semantic_selection_run",
+                    "protocol_semantic_selection_manifest_sha256",
+                    "protocol_semantic_hash",
+                }
+            )
+        if set(raw) != entry_fields:
             raise ProviderEpochBehaviorCohortError("Cohort entry fields are incomplete or unknown.")
         recording_id = _string(raw["recording_id"], label="recording_id")
         analysis_zarr = str(Path(_string(raw["analysis_zarr"], label="analysis_zarr")).expanduser().resolve())
@@ -388,6 +503,16 @@ def _validate_manifest(payload: object) -> dict[str, Any]:
         subject_id = raw["subject_id"]
         if subject_id is not None:
             _string(subject_id, label="subject_id")
+        if schema_version == SEMANTIC_INPUT_SCHEMA_VERSION:
+            _safe_run_name(raw["protocol_semantic_selection_run"])
+            _sha256(
+                raw["protocol_semantic_selection_manifest_sha256"],
+                label="protocol_semantic_selection_manifest_sha256",
+            )
+            _prefixed_sha256(
+                raw["protocol_semantic_hash"],
+                label="protocol_semantic_hash",
+            )
         mapping_key = (recording_id, analysis_zarr, summary_run, track_id)
         if mapping_key in seen_mappings:
             raise ProviderEpochBehaviorCohortError(
@@ -417,6 +542,21 @@ def load_cohort_manifest(path: str | Path) -> tuple[dict[str, Any], tuple[Cohort
             summary_run=str(raw["summary_run"]),
             track_id=int(raw["track_id"]),
             subject_id=str(raw["subject_id"]) if raw["subject_id"] is not None else None,
+            protocol_semantic_selection_run=(
+                str(raw["protocol_semantic_selection_run"])
+                if checked["schema_version"] == SEMANTIC_INPUT_SCHEMA_VERSION
+                else None
+            ),
+            protocol_semantic_selection_manifest_sha256=(
+                str(raw["protocol_semantic_selection_manifest_sha256"])
+                if checked["schema_version"] == SEMANTIC_INPUT_SCHEMA_VERSION
+                else None
+            ),
+            protocol_semantic_hash=(
+                str(raw["protocol_semantic_hash"])
+                if checked["schema_version"] == SEMANTIC_INPUT_SCHEMA_VERSION
+                else None
+            ),
         )
         for raw in checked["entries"]
     )
@@ -466,15 +606,198 @@ def _validate_columnar_source(
     }
 
 
-def _validate_summary(entry: CohortEntry) -> LoadedSummary:
+def _semantic_role_records(
+    binding: Mapping[str, Any],
+) -> tuple[dict[str, Any], ...]:
+    records = binding.get("semantic_role_bindings")
+    if not isinstance(records, list) or tuple(
+        record.get("analysis_role") if isinstance(record, Mapping) else None
+        for record in records
+    ) != SEMANTIC_ROLES:
+        raise ProviderEpochBehaviorCohortError(
+            "Protocol-semantic source binding does not contain the exact ordered roles."
+        )
+    if canonical_json_sha256(records) != binding.get(
+        "semantic_role_bindings_sha256"
+    ):
+        raise ProviderEpochBehaviorCohortError(
+            "Protocol-semantic source role-binding digest is stale."
+        )
+    semantic_hash = _prefixed_sha256(
+        binding.get("protocol_semantic_hash"),
+        label="source protocol_semantic_hash",
+    )
+    seen_windows: set[int] = set()
+    checked: list[dict[str, Any]] = []
+    for role_index, raw in enumerate(records):
+        assert isinstance(raw, Mapping)
+        record = dict(raw)
+        window_id = record.get("source_window_id")
+        start = record.get("selected_start_frame")
+        end = record.get("selected_end_frame_exclusive")
+        step_index = record.get("protocol_semantic_step_index")
+        step_ref = record.get("protocol_semantic_step_ref")
+        if (
+            type(window_id) is not int
+            or window_id < 0
+            or window_id in seen_windows
+            or type(start) is not int
+            or type(end) is not int
+            or end <= start
+            or type(step_index) is not int
+            or step_index < 0
+            or step_ref
+            != f"protocol_semantic_snapshot@recipe.steps[{step_index}]"
+            or record.get("protocol_semantic_hash") != semantic_hash
+        ):
+            raise ProviderEpochBehaviorCohortError(
+                "Protocol-semantic source role identity is malformed."
+            )
+        seen_windows.add(window_id)
+        record["role_index"] = role_index
+        checked.append(record)
+    return tuple(checked)
+
+
+def _validate_semantic_source_binding(
+    entry: CohortEntry,
+    *,
+    source_refs: Mapping[str, Any],
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+    binding = source_refs.get("protocol_semantic_selection")
+    if not isinstance(binding, Mapping):
+        raise ProviderEpochBehaviorCohortError(
+            f"{entry.recording_id}: protocol-semantic source binding is missing."
+        )
+    checked = json_attr_safe(dict(binding))
+    if (
+        source_refs.get("epoch_binding_mode") != SEMANTIC_EPOCH_BINDING_MODE
+        or checked.get("roles") != list(SEMANTIC_ROLES)
+        or checked.get("selector_eligible") is not False
+        or checked.get("production_authority") is not False
+        or checked.get("source_epoch_selection")
+        != source_refs["epoch_selection"].get("record")
+        or checked.get("run_name") != entry.protocol_semantic_selection_run
+        or checked.get("run_path")
+        != (
+            "analysis/protocol_semantic_chaser_selection_runs/"
+            f"{entry.protocol_semantic_selection_run}"
+        )
+        or checked.get("manifest_sha256")
+        != entry.protocol_semantic_selection_manifest_sha256
+        or checked.get("protocol_semantic_hash") != entry.protocol_semantic_hash
+    ):
+        raise ProviderEpochBehaviorCohortError(
+            f"{entry.recording_id}: protocol-semantic source differs from the frozen cohort entry."
+        )
+    _sha256(
+        checked.get("manifest_sha256"),
+        label="source semantic selection manifest_sha256",
+    )
+    position_epochs = checked.get("position_suite_epochs")
+    if (
+        not isinstance(position_epochs, list)
+        or tuple(
+            record.get("analysis_role") if isinstance(record, Mapping) else None
+            for record in position_epochs
+        )
+        != SEMANTIC_ROLES
+        or canonical_json_sha256(position_epochs)
+        != checked.get("position_suite_epochs_sha256")
+    ):
+        raise ProviderEpochBehaviorCohortError(
+            f"{entry.recording_id}: protocol-semantic epoch projection is stale."
+        )
+    roles = _semantic_role_records(checked)
+    for epoch, role in zip(position_epochs, roles):
+        assert isinstance(epoch, Mapping)
+        if (
+            epoch.get("window_id") != role["source_window_id"]
+            or epoch.get("start_frame") != role["selected_start_frame"]
+            or epoch.get("end_frame_exclusive")
+            != role["selected_end_frame_exclusive"]
+            or epoch.get("source_interval_sha256")
+            != role.get("source_interval_sha256")
+        ):
+            raise ProviderEpochBehaviorCohortError(
+                f"{entry.recording_id}: protocol-semantic epoch and role identities differ."
+            )
+    return checked, roles
+
+
+def _validate_semantic_source_rows(
+    rows: np.ndarray,
+    *,
+    role_records: Sequence[Mapping[str, Any]],
+    table_name: str,
+    require_all_roles: bool,
+) -> None:
+    by_window = {int(record["source_window_id"]): record for record in role_records}
+    observed_roles: list[str] = []
+    for raw in rows:
+        row = _record(raw)
+        window_id = row.get("window_id")
+        if type(window_id) is not int or window_id not in by_window:
+            raise ProviderEpochBehaviorCohortError(
+                f"{table_name}: row does not bind one selected semantic window."
+            )
+        role = by_window[window_id]
+        expected_role = str(role["analysis_role"])
+        expected_index = int(role["role_index"])
+        if (
+            row.get("window_index") != expected_index
+            or row.get("window_label") != expected_role
+            or row.get("start_frame") != role["selected_start_frame"]
+            or row.get("end_frame")
+            != int(role["selected_end_frame_exclusive"]) - 1
+            or row.get("analysis_role") != expected_role
+            or row.get("protocol_semantic_hash")
+            != role["protocol_semantic_hash"]
+            or row.get("protocol_semantic_step_index")
+            != role["protocol_semantic_step_index"]
+            or row.get("protocol_semantic_step_ref")
+            != role["protocol_semantic_step_ref"]
+        ):
+            raise ProviderEpochBehaviorCohortError(
+                f"{table_name}: row protocol-semantic identity is stale."
+            )
+        observed_roles.append(expected_role)
+    if require_all_roles and tuple(observed_roles) != SEMANTIC_ROLES:
+        raise ProviderEpochBehaviorCohortError(
+            f"{table_name}: expected exactly one ordered row for every semantic role."
+        )
+
+
+def _validate_summary(
+    entry: CohortEntry,
+    *,
+    expected_schema_version: int,
+) -> LoadedSummary:
     if not entry.analysis_zarr.is_dir():
         raise ProviderEpochBehaviorCohortError(f"Analysis Zarr is not a directory: {entry.analysis_zarr}")
     root = open_zarr_root(entry.analysis_zarr, mode="r", use_consolidated=True)
     run_path = f"{SUMMARY_PARENT_PATH}/{entry.summary_run}"
     run = _group_at(root, run_path)
     attrs = dict(run.attrs)
-    if attrs.get("schema_id") != "palette.stimulus_epoch_behavior_summary" or attrs.get("schema_version") != 1:
+    schema_version = attrs.get("schema_version")
+    if (
+        attrs.get("schema_id") != "palette.stimulus_epoch_behavior_summary"
+        or type(schema_version) is not int
+        or schema_version != expected_schema_version
+    ):
         raise ProviderEpochBehaviorCohortError(f"{entry.recording_id}: summary schema identity is invalid.")
+    epoch_binding_mode = (
+        SEMANTIC_EPOCH_BINDING_MODE
+        if schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION
+        else LEGACY_EPOCH_BINDING_MODE
+    )
+    if schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION and (
+        attrs.get("method_version") != 2
+        or attrs.get("epoch_binding_mode") != epoch_binding_mode
+    ):
+        raise ProviderEpochBehaviorCohortError(
+            f"{entry.recording_id}: semantic summary binding identity is invalid."
+        )
     if attrs.get(RUN_COMPLETION_CONTRACT_ATTR) != RUN_COMPLETION_CONTRACT or attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE:
         raise ProviderEpochBehaviorCohortError(f"{entry.recording_id}: summary is incomplete.")
     if attrs.get(RUN_NAME_ATTR) != entry.summary_run or attrs.get("stage_selector_eligible") is not False:
@@ -530,12 +853,56 @@ def _validate_summary(entry: CohortEntry) -> LoadedSummary:
         raise ProviderEpochBehaviorCohortError(
             f"{entry.recording_id}: provider or swim-bout track identity is stale."
         )
+    semantic_roles: tuple[dict[str, Any], ...] = ()
+    if schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION:
+        _semantic_binding, semantic_roles = _validate_semantic_source_binding(
+            entry,
+            source_refs=source_refs,
+        )
     bouts, bout_attrs = load_structured_dataset(run, "per_epoch_bouts")
     fish, fish_attrs = load_structured_dataset(run, "per_epoch_fish")
+    bout_spec = _source_fields(
+        _BOUT_SOURCE_FIELDS,
+        schema_version=schema_version,
+    )
+    fish_spec = _source_fields(
+        _FISH_SOURCE_FIELDS,
+        schema_version=schema_version,
+    )
     receipts = {
-        "per_epoch_bouts": _validate_columnar_source(bouts, bout_attrs, name="per_epoch_bouts", spec=_BOUT_SOURCE_FIELDS),
-        "per_epoch_fish": _validate_columnar_source(fish, fish_attrs, name="per_epoch_fish", spec=_FISH_SOURCE_FIELDS),
+        "per_epoch_bouts": _validate_columnar_source(
+            bouts,
+            bout_attrs,
+            name="per_epoch_bouts",
+            spec=bout_spec,
+        ),
+        "per_epoch_fish": _validate_columnar_source(
+            fish,
+            fish_attrs,
+            name="per_epoch_fish",
+            spec=fish_spec,
+        ),
     }
+    if schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION:
+        if (
+            bout_attrs.get("epoch_binding_mode") != epoch_binding_mode
+            or fish_attrs.get("epoch_binding_mode") != epoch_binding_mode
+        ):
+            raise ProviderEpochBehaviorCohortError(
+                f"{entry.recording_id}: semantic source table binding mode is stale."
+            )
+        _validate_semantic_source_rows(
+            fish,
+            role_records=semantic_roles,
+            table_name="per_epoch_fish",
+            require_all_roles=True,
+        )
+        _validate_semantic_source_rows(
+            bouts,
+            role_records=semantic_roles,
+            table_name="per_epoch_bouts",
+            require_all_roles=False,
+        )
     source_record = {
         "run_path": run_path,
         "recording_id": entry.recording_id,
@@ -553,6 +920,8 @@ def _validate_summary(entry: CohortEntry) -> LoadedSummary:
         per_epoch_fish=fish,
         source_table_receipts=receipts,
         summary_attrs=json_attr_safe(attrs),
+        schema_version=schema_version,
+        epoch_binding_mode=epoch_binding_mode,
     )
 
 
@@ -560,7 +929,7 @@ def _lineage_columns(summary: LoadedSummary, cohort_id: str) -> dict[str, object
     refs = summary.source_refs
     motion = refs["provider_motion"]
     swim = refs["swim_bouts"]
-    return {
+    lineage: dict[str, object] = {
         "cohort_id": cohort_id,
         "recording_id": summary.entry.recording_id,
         "analysis_zarr": str(summary.entry.analysis_zarr),
@@ -575,6 +944,18 @@ def _lineage_columns(summary: LoadedSummary, cohort_id: str) -> dict[str, object
         "swim_bout_lineage_sha256": swim["lineage_hash"],
         "swim_bout_frame_axis_sha256": swim["frame_axis_sha256"],
     }
+    if summary.schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION:
+        semantic = refs["protocol_semantic_selection"]
+        lineage.update(
+            {
+                "epoch_binding_mode": summary.epoch_binding_mode,
+                "protocol_semantic_selection_run": semantic["run_name"],
+                "protocol_semantic_selection_manifest_sha256": semantic[
+                    "manifest_sha256"
+                ],
+            }
+        )
+    return lineage
 
 
 def _build_rows(
@@ -593,7 +974,10 @@ def _build_rows(
             raise ProviderEpochBehaviorCohortError(f"{summary.entry.recording_id}: duplicate or mismatched fish epoch row.")
         seen_fish.add(key)
         row = dict(lineage)
-        for name, _ in _FISH_SOURCE_FIELDS:
+        for name, _ in _source_fields(
+            _FISH_SOURCE_FIELDS,
+            schema_version=summary.schema_version,
+        ):
             if name == "track_id":
                 continue
             if disposition.name == "linear_only" and name in _FISH_ANGULAR_FIELDS:
@@ -610,7 +994,10 @@ def _build_rows(
             raise ProviderEpochBehaviorCohortError(f"{summary.entry.recording_id}: duplicate or mismatched bout row.")
         seen_bouts.add(key)
         row = dict(lineage)
-        for name, _ in _BOUT_SOURCE_FIELDS:
+        for name, _ in _source_fields(
+            _BOUT_SOURCE_FIELDS,
+            schema_version=summary.schema_version,
+        ):
             if name == "track_id":
                 continue
             if disposition.name == "linear_only" and name in _BOUT_ANGULAR_FIELDS:
@@ -631,7 +1018,7 @@ def _build_rows(
 
 
 def _lineage_manifest_record(summary: LoadedSummary) -> dict[str, Any]:
-    return {
+    record = {
         "recording_id": summary.entry.recording_id,
         "analysis_zarr": str(summary.entry.analysis_zarr),
         "subject_id": summary.entry.subject_id,
@@ -644,6 +1031,14 @@ def _lineage_manifest_record(summary: LoadedSummary) -> dict[str, Any]:
         "source_tables": summary.source_table_receipts,
         "summary_attrs": summary.summary_attrs,
     }
+    if summary.schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION:
+        record.update(
+            {
+                "summary_schema_version": summary.schema_version,
+                "epoch_binding_mode": summary.epoch_binding_mode,
+            }
+        )
+    return record
 
 
 def build_provider_epoch_behavior_cohort_plan(
@@ -654,7 +1049,14 @@ def build_provider_epoch_behavior_cohort_plan(
 ) -> dict[str, Any]:
     manifest, entries, manifest_sha256, disposition = load_cohort_manifest(manifest_path)
     run_id = _string(analysis_run_id, label="analysis_run_id")
-    loaded = tuple(_validate_summary(entry) for entry in entries)
+    export_schema_version = int(manifest["schema_version"])
+    loaded = tuple(
+        _validate_summary(
+            entry,
+            expected_schema_version=export_schema_version,
+        )
+        for entry in entries
+    )
     loaded = tuple(sorted(loaded, key=lambda item: item.entry.recording_id))
     bout_rows: list[dict[str, object]] = []
     fish_rows: list[dict[str, object]] = []
@@ -666,11 +1068,16 @@ def build_provider_epoch_behavior_cohort_plan(
         )
         bout_rows.extend(bouts)
         fish_rows.extend(fish)
-    bout_rows.sort(key=lambda row: (row["recording_id"], row["track_id"], row["epoch_id"], row["bout_source_row"]))
-    fish_rows.sort(key=lambda row: (row["recording_id"], row["track_id"], row["epoch_id"]))
-    return {
+    order_field = (
+        "epoch_index"
+        if export_schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION
+        else "epoch_id"
+    )
+    bout_rows.sort(key=lambda row: (row["recording_id"], row["track_id"], row[order_field], row["bout_source_row"]))
+    fish_rows.sort(key=lambda row: (row["recording_id"], row["track_id"], row[order_field]))
+    plan = {
         "schema_id": EXPORT_SCHEMA_ID,
-        "schema_version": EXPORT_SCHEMA_VERSION,
+        "schema_version": export_schema_version,
         "cohort_id": manifest["cohort_id"],
         "analysis_run_id": run_id,
         "input_manifest_path": str(Path(manifest_path).expanduser().resolve()),
@@ -685,6 +1092,19 @@ def build_provider_epoch_behavior_cohort_plan(
         "source_lineage": [_lineage_manifest_record(item) for item in loaded],
         "rows_by_table": {TABLE_BOUTS: bout_rows, TABLE_FISH: fish_rows},
     }
+    if export_schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION:
+        plan.update(
+            {
+                "arrow_envelope_schema_version": (
+                    SEMANTIC_ARROW_ENVELOPE_SCHEMA_VERSION
+                ),
+                "epoch_binding_mode": SEMANTIC_EPOCH_BINDING_MODE,
+                "protocol_to_acquisition_alignment": (
+                    "sealed_epoch_selection_proxy_not_physical_presentation"
+                ),
+            }
+        )
+    return plan
 
 
 def export_provider_epoch_behavior_cohort(
@@ -702,9 +1122,16 @@ def export_provider_epoch_behavior_cohort(
     )
     if not apply:
         return {key: value for key, value in plan.items() if key != "rows_by_table"}
+    export_schema_version = int(plan["schema_version"])
+    arrow_schema_version = int(
+        plan.get(
+            "arrow_envelope_schema_version",
+            LEGACY_ARROW_ENVELOPE_SCHEMA_VERSION,
+        )
+    )
     manifest_fields = {
         "export_schema_id": EXPORT_SCHEMA_ID,
-        "export_schema_version": EXPORT_SCHEMA_VERSION,
+        "export_schema_version": export_schema_version,
         "cohort_id": plan["cohort_id"],
         "input_manifest_path": plan["input_manifest_path"],
         "input_manifest_sha256": plan["input_manifest_sha256"],
@@ -715,13 +1142,25 @@ def export_provider_epoch_behavior_cohort(
         "selector_eligible": False,
         "source_lineage": plan["source_lineage"],
     }
-    contracts = table_contracts_for_disposition(str(plan["metric_disposition"]))
+    if export_schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION:
+        manifest_fields.update(
+            {
+                "epoch_binding_mode": plan["epoch_binding_mode"],
+                "protocol_to_acquisition_alignment": plan[
+                    "protocol_to_acquisition_alignment"
+                ],
+            }
+        )
+    contracts = table_contracts_for_disposition(
+        str(plan["metric_disposition"]),
+        schema_version=export_schema_version,
+    )
     envelope = contract_envelope(
         TABLE_NAMES,
         known_table_names=TABLE_NAMES,
         contracts=contracts,
         schema_id=ARROW_ENVELOPE_SCHEMA_ID,
-        schema_version=ARROW_ENVELOPE_SCHEMA_VERSION,
+        schema_version=arrow_schema_version,
     )
     published = publish_derived_table_generation(
         output_root=Path(output_root),
@@ -731,12 +1170,23 @@ def export_provider_epoch_behavior_cohort(
         contracts=contracts,
         arrow_contract_envelope=envelope,
         arrow_envelope_schema_id=ARROW_ENVELOPE_SCHEMA_ID,
-        arrow_envelope_schema_version=ARROW_ENVELOPE_SCHEMA_VERSION,
+        arrow_envelope_schema_version=arrow_schema_version,
         manifest_fields=manifest_fields,
         footer_metadata={
             b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode("utf-8"),
-            b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode("ascii"),
+            b"palette.export_schema_version": str(export_schema_version).encode(
+                "ascii"
+            ),
             b"palette.selector_eligible": b"false",
+            **(
+                {
+                    b"palette.epoch_binding_mode": str(
+                        plan["epoch_binding_mode"]
+                    ).encode("utf-8")
+                }
+                if export_schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION
+                else {}
+            ),
         },
         selector_eligible=False,
         generation_id=generation_id,
@@ -781,8 +1231,19 @@ __all__ = [
     "CohortEntry",
     "EXPORT_SCHEMA_ID",
     "EXPORT_SCHEMA_VERSION",
-    "ProviderEpochBehaviorCohortError",
+    "INPUT_SCHEMA_ID",
+    "INPUT_SCHEMA_VERSION",
+    "LEGACY_ARROW_ENVELOPE_SCHEMA_VERSION",
+    "LEGACY_EPOCH_BINDING_MODE",
+    "LEGACY_EXPORT_SCHEMA_VERSION",
+    "LEGACY_INPUT_SCHEMA_VERSION",
     "MetricDisposition",
+    "ProviderEpochBehaviorCohortError",
+    "SEMANTIC_ARROW_ENVELOPE_SCHEMA_VERSION",
+    "SEMANTIC_EPOCH_BINDING_MODE",
+    "SEMANTIC_EXPORT_SCHEMA_VERSION",
+    "SEMANTIC_INPUT_SCHEMA_VERSION",
+    "SEMANTIC_ROLES",
     "TABLE_BOUTS",
     "TABLE_CONTRACTS",
     "TABLE_FISH",

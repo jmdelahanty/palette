@@ -27,10 +27,13 @@ RELATIVE_REASON_CODES = (
     "valid",
     "selection_excluded",
     "occurrence_excluded",
-    "chaser_inactive",
     "fish_invalid",
     "chaser_invalid",
     "nonfinite_coordinate",
+)
+
+ACTIVE_ORTHOGONAL_POSITION_VALIDITY_POLICY = (
+    "controller_active_is_orthogonal_position_evidence_v1"
 )
 
 NEAREST_REASON_CODES = RELATIVE_REASON_CODES + (
@@ -472,6 +475,7 @@ class ChaserRelativeFrameResult:
     occurrence_membership: np.ndarray
     chaser_trial_ids: Optional[np.ndarray]
     chaser_active: Optional[np.ndarray]
+    active_position_validity_policy: str
     fish_xy: np.ndarray
     fish_valid: np.ndarray
     fish_source_row_index: np.ndarray
@@ -604,6 +608,15 @@ class ChaserRelativeFrameResult:
                 else:
                     _require_int64(array, label=name)
                 object.__setattr__(self, name, array)
+        policy = _text(
+            self.active_position_validity_policy,
+            label="active_position_validity_policy",
+        )
+        if policy != ACTIVE_ORTHOGONAL_POSITION_VALIDITY_POLICY:
+            _error(
+                "Controller activity cannot gate relative-position validity."
+            )
+        object.__setattr__(self, "active_position_validity_policy", policy)
 
 
 def _require_exact_frame_keys(
@@ -766,11 +779,6 @@ def compute_chaser_relative_frame(
     occurrence = inputs.occurrence_membership
     fish_finite = np.isfinite(fish_xy).all(axis=1)
     chaser_finite = np.isfinite(chaser_xy).all(axis=2)
-    active = (
-        np.ones((n, m), dtype=bool)
-        if chasers.active is None
-        else np.asarray(chasers.active, dtype=bool)
-    )
     relative_xy = np.full((n, m, 2), np.nan, dtype=np.float64)
     distance_px = np.full((n, m), np.nan, dtype=np.float64)
     reason = _reason_array((n, m), "valid")
@@ -780,12 +788,13 @@ def compute_chaser_relative_frame(
 
     apply_reason(~selection[:, None], "selection_excluded")
     apply_reason(selection[:, None] & ~occurrence, "occurrence_excluded")
-    apply_reason(selection[:, None] & occurrence & ~active, "chaser_inactive")
-    apply_reason(selection[:, None] & occurrence & active & ~inputs.fish_valid[:, None], "fish_invalid")
+    apply_reason(
+        selection[:, None] & occurrence & ~inputs.fish_valid[:, None],
+        "fish_invalid",
+    )
     apply_reason(
         selection[:, None]
         & occurrence
-        & active
         & inputs.fish_valid[:, None]
         & ~chasers.valid,
         "chaser_invalid",
@@ -793,7 +802,6 @@ def compute_chaser_relative_frame(
     candidate = (
         selection[:, None]
         & occurrence
-        & active
         & inputs.fish_valid[:, None]
         & chasers.valid
     )
@@ -944,7 +952,6 @@ def compute_chaser_relative_frame(
         body_pair = (
             selection[:, None]
             & occurrence
-            & active
             & chasers.valid
             & chaser_finite
             & body_valid[:, None]
@@ -970,7 +977,6 @@ def compute_chaser_relative_frame(
         ego_candidate = (
             selection[:, None]
             & occurrence
-            & active
             & chasers.valid
             & chaser_finite
         )
@@ -1000,6 +1006,7 @@ def compute_chaser_relative_frame(
         occurrence_membership=occurrence,
         chaser_trial_ids=chasers.trial_ids,
         chaser_active=chasers.active,
+        active_position_validity_policy=ACTIVE_ORTHOGONAL_POSITION_VALIDITY_POLICY,
         fish_xy=inputs.fish_xy,
         fish_valid=inputs.fish_valid,
         fish_source_row_index=inputs.fish_source_row_index,
@@ -1059,6 +1066,7 @@ ProviderAuthority = ProviderSourceAuthority
 
 
 __all__ = [
+    "ACTIVE_ORTHOGONAL_POSITION_VALIDITY_POLICY",
     "AcquisitionFrameKeys",
     "BodyFrameInput",
     "ChaserObservations",

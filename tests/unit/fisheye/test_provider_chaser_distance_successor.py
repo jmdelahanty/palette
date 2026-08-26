@@ -119,14 +119,29 @@ def test_prepare_preserves_flat_axis_and_binds_proxy_and_denominators(monkeypatc
     assert prepared.array("chaser_identity_code").tolist() == [1, 2, 1, 2, 1, 2]
     np.testing.assert_allclose(
         prepared.array("distance_px"),
-        [3.0, 4.0, 3.0, np.nan, np.nan, np.nan],
+        [3.0, 4.0, 3.0, 4.0, np.nan, np.nan],
         equal_nan=True,
     )
     np.testing.assert_allclose(
         prepared.array("distance_mm"),
-        [0.3, 0.4, 0.3, np.nan, np.nan, np.nan],
+        [0.3, 0.4, 0.3, 0.4, np.nan, np.nan],
         equal_nan=True,
     )
+    # Controller activity is membership evidence for trial/event successors;
+    # it is deliberately orthogonal to otherwise valid position geometry.
+    assert view.pair_array("active_state_code").tolist() == [
+        [1, 1],
+        [1, 0],
+        [1, 1],
+    ]
+    assert prepared.array("distance_px_valid").tolist() == [
+        True,
+        True,
+        True,
+        True,
+        False,
+        False,
+    ]
     assert prepared.array("trial_id").tolist() == [4, 4, 4, 4, 5, 5]
     assert prepared.manifest["selector_eligible"] is False
     assert prepared.manifest["production_authority"] is False
@@ -142,7 +157,7 @@ def test_prepare_preserves_flat_axis_and_binds_proxy_and_denominators(monkeypatc
         "unique_acquisition_frame_count": 3,
         "frame_x_chaser_relation_row_count": 6,
         "valid_source_position_frame_count": 3,
-        "valid_distance_relation_row_count": 3,
+        "valid_distance_relation_row_count": 4,
         "native_stimulus_sample_count": 5,
         "selected_input_acquisition_frame_count": 3,
         "native_sample_multiplicity": {

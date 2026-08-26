@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from pathlib import Path
 import json
 
@@ -691,7 +692,11 @@ def _add_target_source_acquisition_mapping(path: Path) -> None:
         )
 
 
-def _write_stimulus_h5_with_protocol_steps(path: Path) -> None:
+def _write_stimulus_h5_with_protocol_steps(
+    path: Path,
+    *,
+    modern_semantic: bool = False,
+) -> str | None:
     _write_stimulus_h5_with_calibration(path)
     events_dtype = np.dtype(
         [
@@ -752,11 +757,104 @@ def _write_stimulus_h5_with_protocol_steps(path: Path) -> None:
             "protocol_definition_json",
             data=json.dumps(protocol).encode("utf-8"),
         )
+        semantic_hash = None
+        if modern_semantic:
+            semantic = {
+                "identity": {
+                    "iti_stimulus_mode_id": 99,
+                    "steps": [
+                        {
+                            "duration": {
+                                "scale": "1e-3",
+                                "unit": "s",
+                                "value": 1000,
+                            },
+                            "parameters": {},
+                            "post_stimulus_iti": {
+                                "scale": "1e-3",
+                                "unit": "s",
+                                "value": 0,
+                            },
+                            "stimulus_mode_id": 3,
+                        },
+                        {
+                            "duration": {
+                                "scale": "1e-3",
+                                "unit": "s",
+                                "value": 1000,
+                            },
+                            "parameters": {},
+                            "post_stimulus_iti": {
+                                "scale": "1e-3",
+                                "unit": "s",
+                                "value": 0,
+                            },
+                            "stimulus_mode_id": 6,
+                        },
+                    ],
+                },
+                "normalization_policy": "citrus.protocol.semantic.v1",
+                "schema_id": "citrus.protocol.semantic",
+                "schema_version": 1,
+            }
+            semantic_json = json.dumps(
+                semantic,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            semantic_hash = "sha256:" + sha256(
+                semantic_json.encode("utf-8")
+            ).hexdigest()
+            trial_json = json.dumps(
+                {
+                    "normalization_policy": "citrus.protocol.trial_index.v1",
+                    "protocol_semantic_hash": semantic_hash,
+                    "schema_id": "citrus.protocol.trial_index",
+                    "schema_version": 1,
+                    "steps": [
+                        {
+                            "duration_s": 1.0,
+                            "features": {},
+                            "index_status": "detailed",
+                            "post_stimulus_iti_s": 0.0,
+                            "step_index": 0,
+                            "stimulus_family": "moving_grating",
+                            "stimulus_mode": "MOVING_GRATING",
+                            "stimulus_mode_id": 3,
+                        },
+                        {
+                            "duration_s": 1.0,
+                            "features": {},
+                            "index_status": "detailed",
+                            "post_stimulus_iti_s": 0.0,
+                            "step_index": 1,
+                            "stimulus_family": "concentric_grating",
+                            "stimulus_mode": "CONCENTRIC_GRATING",
+                            "stimulus_mode_id": 6,
+                        },
+                    ],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            protocol_group.create_dataset(
+                "protocol_semantic_hash",
+                data=semantic_hash.encode("utf-8"),
+            )
+            protocol_group.create_dataset(
+                "protocol_semantic_json",
+                data=semantic_json.encode("utf-8"),
+            )
+            protocol_group.create_dataset(
+                "protocol_trial_index_json",
+                data=trial_json.encode("utf-8"),
+            )
         coords = h5.create_group("stimulus_coordinates")
         arena = coords.create_group("arena_1")
         custom = arena.create_group("custom_coordinates")
         custom.attrs["texture_center_x"] = 172.0
         custom.attrs["texture_center_y"] = 173.0
+    return semantic_hash
 
 
 def test_import_sets_source_stimulus_video_path_when_rendered_mp4_exists(tmp_path: Path) -> None:
@@ -3389,7 +3487,10 @@ def test_metadata_and_calibration_only_import_omits_uncontracted_coordinate_surf
 ) -> None:
     h5_path = tmp_path / "session.h5"
     zarr_path = tmp_path / "sample_analysis.zarr"
-    _write_stimulus_h5_with_protocol_steps(h5_path)
+    semantic_hash = _write_stimulus_h5_with_protocol_steps(
+        h5_path,
+        modern_semantic=True,
+    )
     with h5py.File(h5_path, "a") as h5:
         tracking = h5.create_group("tracking_data")
         tracking.create_dataset(
@@ -3436,6 +3537,15 @@ def test_metadata_and_calibration_only_import_omits_uncontracted_coordinate_surf
     assert "events" in run
     assert "steps" in run
     assert "calibration" in run
+    assert run.attrs["protocol_semantic_status"] == "verified"
+    assert run.attrs["protocol_semantic_hash"] == semantic_hash
+    assert run["steps/step_0"].attrs["protocol_semantic_step_index"] == 0
+    assert run["steps/step_1"].attrs["stimulus_family"] == "concentric_grating"
+    semantic_group = run["protocol_semantic_snapshot"]
+    with h5py.File(h5_path, "r") as h5:
+        assert np.asarray(
+            semantic_group["protocol_semantic_json_utf8"][:]
+        ).tobytes() == h5["/protocol_snapshot/protocol_semantic_json"][()]
 
 
 def test_metadata_only_import_initializes_empty_source_camera_frame_placeholder(

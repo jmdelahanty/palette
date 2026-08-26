@@ -2,7 +2,7 @@
 
 <!-- contract-meta
 status: accepted-design
-last_updated: 2026-08-20
+last_updated: 2026-08-25
 implementation: partial
 -->
 
@@ -23,6 +23,69 @@ This checklist extends:
 Existing immutable chaser-distance runs, derived components, cohort exports,
 figures, and compatibility readers remain unchanged. New work publishes
 successors or explicit adapters.
+
+## Protocol semantic identity checkpoint (2026-08-24)
+
+- [x] Validate and materialize the exact Citrus semantic hash, semantic JSON,
+      and trial-index JSON as one fail-closed stimulus-run contract.
+- [x] Bind every materialized step to its exact producer recipe index, mode,
+      family, duration, display context, and full semantic hash.
+- [x] Keep completed and selector-visible stimulus runs immutable; require a
+      new successor when semantic metadata is missing.
+- [x] Add nullable registry migration 72 fields and exact array-backed
+      extraction so the `SOLID_BLACK -> CHASER` and `CHASER` cohorts are
+      queryable without reopening every Zarr.
+- [x] Preserve the distinction between the existing authored-protocol
+      `protocol_hash` and producer `protocol_semantic_hash`.
+- [x] Add a producer-authored trial-index checksum in Citrus snapshot v2.
+      Historical snapshot-v1 recordings retain the explicitly local Palette
+      digest and are never upgraded by inference.
+- [x] Replace raw camera-correspondence `STEP_END` authority in snapshot v2
+      with exact half-open `stimulus_frame_num` execution intervals. Historical
+      snapshot-v1 recordings retain the conservative unresolved-end policy.
+- [x] Materialize a sealed per-row stimulus/camera correspondence proxy for
+      v2 imports, including exact content digests, step and chaser-phase
+      membership, and an explicit visualization/exploratory-only use class.
+- [x] Complete the code-level frame-bound acquisition chain for future
+      recordings. Shaman-v2 ABI revision 3 carries a per-slot Orange recording
+      token; the v6 companion seals that token, the acquisition camera
+      ID/serial/numeric-ID tuple, and the exact closed raw H5 plus finalized
+      observation receipt. Palette validates those producer records, verifies
+      the raw H5 size/SHA-256, joins raw `timestamp_ns_session` by exact
+      `(chaser_index, stimulus_frame_num)`, and feeds the existing immutable
+      selector-ineligible `controller_input_provenance_proxy` materializer.
+      Controlled four-camera hardware validation remains a deployment and
+      promotion gate; this contract still does not claim physical display
+      presentation.
+- [x] Implement a pure, selector-ineligible v2 semantic selection candidate
+      with optional `standalone_solid_black` plus `chaser_pre`,
+      `chaser_training`, and `chaser_post` nested inside the exact `CHASER`
+      step. It uses the conservative boundary common to both unresolved
+      `STEP_END` conventions and records any excluded terminal frame.
+- [x] Implement immutable, selector-ineligible semantic selection publication,
+      a strict source handle, and the first exact binding into the provider
+      position suite. The operator path requires an exact epoch manifest digest
+      and never updates selectors or the registry.
+- [x] Add a recording-local provider motion/swim-bout epoch-summary v2 that
+      consumes the exact semantic selection handle, limits output to
+      `chaser_pre`/`chaser_training`/`chaser_post`, and repeats the producer
+      semantic hash and step identity on every output row. Its legacy v1 path
+      remains unchanged and both paths remain selector-ineligible.
+- [x] Add a version-dispatched provider epoch cohort input/export/Arrow/plot
+      successor. Schema v2 freezes each exact semantic selection run, manifest,
+      producer hash, and summary run; carries role/hash/step identity on every
+      fish and bout row; keeps source window ID separate from semantic order;
+      and repeats the proxy-not-physical-presentation boundary in export and
+      plot receipts. Schema v1 remains unchanged.
+- [ ] Activate a maintained profile only after exact acquisition-row mapping,
+      acquisition-produced immutable stimulus successors where source evidence
+      permits them, focused scientific review, and all required CI are
+      complete.
+- [x] Mark standalone-baseline contrasts not applicable for `CHASER`-only
+      recipes; never substitute legacy `black_before`/`black_after` roles.
+
+The durable contract is
+[`protocol_semantic_step_identity_contract.md`](protocol_semantic_step_identity_contract.md).
 
 ## Implementation checkpoint: full-profile planning and relative-frame storage
 
@@ -390,13 +453,19 @@ extension.
       maintained valid-time entry denominator, invalid-gap reset, hysteresis,
       complete-visit dwell, and boundary/gap censoring semantics unchanged.
       Persisted visit-membership arrays remain Phase 5 work.
-- [ ] Migrate epoch behavior summary v2 to explicit selections and provider
-      motion.
+- [x] Migrate epoch behavior summary v2 to the exact protocol-semantic
+      selection, provider motion, and one exact selector-ineligible swim-bout
+      authority. The semantic source and producer step identity are repeated
+      on every output row; this is a sealed proxy-aligned recording-local
+      candidate, not an exact physical-presentation claim.
 - [ ] Migrate response regimes with distinct fish and chaser separation
       contributions, dropout QC, and support thresholds.
-- [ ] Add a sealed distance/motion bout-response surface if Phase 0 approves the
-      split, including onset distance, bout rate, duration, path length, peak
-      speed, displacement, and distance-band summaries.
+- [x] Add a sealed distance/motion bout-response surface under the versioned
+      generalized successor split, including exact onset/end chaser distance,
+      separation gain, bout rate, duration, path length, peak/mean speed,
+      displacement, and valid-time distance-band summaries. One explicit
+      selector-ineligible swim-bout run and default signal are bound; the
+      optional body-frame directed extension does not gate the base product.
 - [ ] Validate static-object pre/post and moving-chaser calculations separately.
 - [x] Validate detection and keypoint position providers against identical
       selections without averaging them. The bounded eight-recording,
@@ -412,9 +481,12 @@ extension.
 - [ ] Migrate turn-toward/away, turn bias, predicted miss, directed escape, and
       angular-motion metrics only after their body-frame dependencies are
       explicit.
-- [ ] Migrate gaze only when eye-orientation and body-frame authorities are
-      independently valid.
-- [ ] Keep speed-only escape classification separate from the heading-based
+- [x] Add a gaze successor that consumes an exact body-frame relative run and
+      exact compact-v7 eye run only after numerical convention validation and
+      a human-reviewed ellipse-direction receipt bind the exact 41-array eye
+      payload and review artifact. Raw versus smoothed gaze is an explicit,
+      digest-bound source-channel policy; smoothed is the loader default.
+- [x] Keep speed-only escape classification separate from the heading-based
       high-turn tier in schema and provenance.
 - [ ] Add a genuinely mask-aware body-frame manifest and reader before
       publishing `mask_component_axis` output.
@@ -427,18 +499,26 @@ extension.
 
 - [ ] Materialize near-field visit membership with exact hysteresis, invalid-gap
       reset, boundary censoring, and complete-dwell policies.
-- [ ] Materialize controller chase trials from exact logged trial IDs while
-      preserving gaps, fallback use, trigger selection, and trial ordinal.
-- [ ] Bind one exact swim-bout run and selected signal level; prevent the known
+- [x] Materialize controller chase trials from exact logged trial IDs while
+      preserving gaps, trigger selection, and per-chaser trial ordinal. The
+      fallback-used field is preserved and required to remain false; inferred
+      fallback segmentation is prohibited in the successor. Exact active-row
+      membership and first-to-last visualization/censoring envelope identity
+      are separate arrays; every envelope gap has a reason code, and an active
+      row with unavailable trial identity remains unresolved nonmember evidence.
+- [x] Bind one exact swim-bout run and selected signal level; prevent the known
       multi-level bout duplication failure.
-- [ ] Publish escape events with separate speed threshold, optional high-turn
+- [x] Publish escape events with separate speed threshold, optional high-turn
       tier, trigger distance, valid-time rates, gain, recapture, latency, and
       threshold sweep.
-- [ ] Preserve per-event, per-trial, and reduced per-recording arrays rather
+- [x] Preserve per-event, per-trial, and reduced per-recording arrays rather
       than embedding row evidence in metadata.
+- [x] Attach bouts and escape events only through exact active trial membership;
+      retain onset envelope identity and gap reason for visualization and
+      censoring without counting a gap as a trial event.
 - [ ] Prove that bouts and escapes attach to exactly one compatible visit/trial
       occurrence and are never double counted.
-- [ ] Keep event counts in rates even when an event-aligned trace is unusable;
+- [x] Keep event counts in rates even when an event-aligned trace is unusable;
       record the trace exclusion reason separately.
 
 ### Phase 6: composable plot recipes and Marimo
@@ -465,6 +545,9 @@ extension.
 
 - [ ] Freeze a cohort input manifest with exact recording, biological subject,
       protocol, chaser role, provider, and scientific-run identities.
+      The schema-v2 provider epoch cohort contract now supports all of these
+      identities, but no real cohort manifest has yet been operator-authored or
+      published from immutable semantic recording successors.
 - [x] Freeze the bounded position-suite cohort task with exact recording,
       provider manifest, epoch-role, geometry-selection, physical-scale, arena,
       and camera identities. Biological-subject and generalized protocol
@@ -570,9 +653,13 @@ extension.
       bind publication followed by a non-mutating readiness receipt. The
       receipt separates scientific-candidate completeness from CI, selector,
       production-authority, and registry-projection readiness.
-- [ ] Response-regime, persisted visit membership, trial, escape, gaze, and
-      immutable visualization recipes have not yet migrated to the new
-      composable provider contracts.
+- [ ] Response-regime, persisted visit membership, and generalized immutable
+      visualization recipes have not yet migrated to the new composable
+      provider contracts. Controller-trial, generalized bout-response,
+      escape/freeze, gaze, their shared selector-ineligible publication, and
+      the digest-bound v4 full-profile envelope are complete locally. The
+      gaze source still requires a recording-specific reviewed convention
+      receipt, and no real recording has exercised the complete graph yet.
 - [ ] Immutable generalized plot recipes, recording-local discovery, explicit
       selector promotion, serialized registry projection, non-position cohort
       products, and full production-profile readiness remain open.
@@ -765,7 +852,9 @@ Focused outside-sandbox validation passed all 15 cohort and adjacent
 position-suite tests. Required CI has not run. Sealed analysis-Zarr
 publication and reduced profile/DAG integration are superseded by the
 checkpoint below. Generalized plot recipes, selector/registry integration, and
-the motion/bout/body-frame/gaze/trial/escape phases remain open.
+at that checkpoint the motion/bout/body-frame/gaze/trial/escape phases remained
+open. The later 2026-08-24 semantic checkpoint completes the recording-local
+motion/bout epoch summary and its versioned cohort export/plot path only.
 
 ### Implementation checkpoint: 2026-08-23 sealed position-suite publication
 
@@ -817,6 +906,429 @@ Focused outside-sandbox validation passed 39 profile, computation,
 publication, workflow, and readiness tests. Ruff, `py_compile`, and
 `git diff --check` passed. Required CI has not run for this branch, so neither
 the commits nor the canary are merge-ready or production-authoritative.
+
+### Implementation checkpoint: 2026-08-25 composable successor operator
+
+The remaining recording-local successors now have one no-write-by-default
+operator:
+
+`scripts/py -m fisheye.utils.materialize_composable_chaser_successors`
+
+It loads exact immutable relative-frame, semantic-selection, provider-motion,
+swim-bout, and reviewed eye/gaze inputs; expands dependency closure; prepares
+controller-trial, generalized bout-response, escape/freeze, and gaze products;
+and preflights or publishes only selector-ineligible immutable runs. It never
+changes a selector, production authority, or registry row.
+
+The first real eligibility trial used the 2026-08-12 arena-1 GoodBatBadBat
+archive. Relative-frame and provider-motion authorities loaded exactly, but no
+protocol-semantic selection publication or reviewed gaze source exists. The
+receipt at `/tmp/composable_chaser_trial_20260825_v1.eligibility.json` therefore
+reports `blocked_no_products` with four explicit module blockers and no archive
+writes. This is useful operational evidence: source absence is now reported as
+a bounded module/dependency result rather than a partial analytic publication.
+
+The companion integration required for future Citrus snapshot-v2 recordings
+is also implemented locally. It reloads the exact raw-H5/companion pair, checks
+materialized execution bytes against that sealed raw H5, projects producer
+half-open stimulus intervals onto acquisition rows, and requires exact mapped
+CHASER phase envelopes. Reused current-input rows use the same deterministic
+latest-stimulus policy as the chaser input-provenance proxy; all candidates,
+reuse counts, and acquisition gaps remain evidence. The observed historical
+ratio (215,987 stimulus frames to 179,885 unique camera frames) confirms this
+many-to-one rule is required.
+
+Focused outside-sandbox validation passes 105 successor/protocol integration
+tests. `py_compile` and Ruff pass. Required CI, a real complete v6 companion,
+the controlled four-camera hardware trial, reviewed gaze evidence, and a real
+successful successor publication remain outstanding; this checkpoint is not
+merge-ready or production-authoritative.
+
+### Implementation checkpoint: 2026-08-25 exact-trial timed publication and plots
+
+The 2026-08-12 arena-1 GoodBatBadBat archive now has a successful
+selector-ineligible recording-local publication chain. Historical controller
+trials are accepted only from exact strictly positive producer-logged
+`chase_trial_id` values on active rows. Trial gaps remain evidence but are not
+members; no contiguous-active or other fallback segmentation is allowed.
+
+The relative-frame successor is:
+
+`analysis/chaser_relative_frame_runs/chaser_relative_frame_keypoint_triad_cohort_20260825_exact_trials_session_time_v2`
+
+Its immutable manifest SHA-256 is
+`2bd71f856d49dfca3f83492d7ce6410017565eef9b15d5a6bbaa3c5e003f929d`.
+It contains 149,887 frames, 299,774 frame-by-chaser rows, and 53 arrays. Session
+time comes from the exact logged `timestamp_ns_session` shared by both chaser
+records and sealed by the input-provenance proxy. The adapter requires exact
+cross-chaser equality, strict increase, and exact equality to the proxy-sealed
+timestamps. It neither derives time from camera start/stop markers nor
+interpolates it. Exact provider-motion projection matched 148,996 relative
+frames; the 891 unmatched relative frames are invalid/NaN evidence, and 32,549
+provider-only frames are not injected into the relative timeline.
+
+Three successors share the run name
+`goodbatbadbat_chaser_successors_20260825_exact_trials_session_time_v2`:
+
+- controller trials: four exact trials, manifest
+  `6b35d78d74b3f3922025bab3a28af674fc02ea6d95a79b9fbf549f74dba7a110`,
+  scientific payload
+  `2d34642953dae4301960532d438b9c2dc247ad9d796d8e989255b8a84f9f208e`;
+- generalized bout response: 1,673 bouts, 3,346 bout-by-chaser rows, and 30
+  summary rows, manifest
+  `1dc77b756a423131aaaec4ce4619c0117738b4edb6562e9d4a68f200ff83468e`,
+  scientific payload
+  `1bc77098b2f9e9d47b4bc525b00a8e568e9fd78002eae1412628b3ef9d8d22ac`;
+  and
+- escape/freeze: nine speed-threshold escape events, four trial rows, and 20
+  threshold-sweep rows, manifest
+  `e2281f7a807968bdbcc4e9a2c9324dba676b1decfe97a390054e7da97302a056`,
+  scientific payload
+  `8e69b7c47ed462a9b72a62b3c403411a9b952688d70e91389aa45838b0e229f8`.
+
+All four exact trials belong to chaser identity 1 and have zero membership
+gaps. Their response classes are freeze, escape, freeze, and other. The escape
+trial contains nine events at the 20 mm/s primary threshold, has 19.16 seconds
+of valid trial time, a first-event latency of 10.50 seconds, and all nine event
+traces are usable. Trial 4 contains two bouts, but neither reaches 20 mm/s; its
+threshold sweep retains two events at 10 mm/s, one at 15 mm/s, and zero at
+20--30 mm/s. Freeze-window speed coverage is 100% for all four trials. These
+are descriptive candidate results, not production conclusions.
+
+The deeply audited dashboard and external receipt are under:
+
+`/groups/johnson/johnsonlab/jeremy/operations/goodbatbadbat_chaser_successors_20260825_exact_trials_session_time_v2/plots`
+
+The PNG SHA-256 is
+`d94fbf63b1777c1377368402447753208694648e275c565240543ffa515c0feb`,
+the PDF SHA-256 is
+`28ea98e590d25397bf2e0a7dc3906864096aac76e6b333793702922e2963abba`,
+and the receipt payload SHA-256 is
+`5f409a29da44cc20b7b6bb20f8bc7bfe3349fb35a78607f6e28086d3bf3e2db8`.
+The plotter resolves no selectors, deep-rehashes all plotted arrays, and
+requires exact dependency payload digests. The earlier
+`...exact_trials_v1` dashboard is timing-incomplete preliminary evidence and
+is superseded for scientific review by this session-time-v2 dashboard.
+
+This result remains deliberately reduced: no reviewed gaze/eye source or
+body-frame extension was supplied, and the historical semantic selection uses
+the conservative pending `STEP_END` policy until producer-authored v2 endpoint
+evidence is available. No selector, registry row, or production authority was
+changed. Required CI is still unrun, so neither the branch nor these candidate
+artifacts are merge-ready or production-authoritative.
+
+### Correction checkpoint: 2026-08-25 controller activity is not position validity
+
+The exact-session-time v2 relative-frame run above has been scientifically
+superseded. Its computation incorrectly required `chase_sequence_active` for
+otherwise valid fish-to-chaser geometry. That erased all pre and post geometry
+and all inert-chaser geometry during training: relative-position coverage was
+0/0 rows per chaser in pre, 7,747/0 in training, and 0/0 in post despite finite
+position coverage.
+
+Current computation no longer contains an activity-gated position mode.
+Controller activity remains a typed evidence surface for trial semantics, but
+cannot invalidate finite selected occurring fish/chaser geometry. Result
+construction fails closed unless the fixed policy is
+`controller_active_is_orthogonal_position_evidence_v1`; the historical
+`chaser_inactive` reason code remains only for reading and auditing already
+sealed runs.
+
+The corrected immutable relative-frame run is:
+
+`analysis/chaser_relative_frame_runs/chaser_relative_frame_keypoint_triad_cohort_20260825_exact_trials_session_time_activity_orthogonal_v3`
+
+Its manifest SHA-256 is
+`c3a2229fe8fbcd24b5a4fbeb2dee1c672b5e2c59a615479e6c4f05ae93a3f556`.
+Measured relative-position coverage per chaser is now exactly the finite fish
+coverage: 59,789 of 59,964 frames in pre, 29,984 of 29,992 in training, and
+58,302 of 59,930 in post.
+
+The corrected radial/near-field successor is:
+
+`analysis/chaser_radial_near_field_runs/goodbatbadbat_chaser_radial_near_field_20260825_exact_session_time_activity_orthogonal_v2`
+
+Its manifest SHA-256 is
+`af699f076df54bf4da2f99abc2f9db05f4ed694bfdb46fea74f82b8cddf1a1e1`
+and scientific payload SHA-256 is
+`620d0a4df457d0249080cdfbba3dbc752fd592f15ddb09c2f3e8f172be372589`.
+All six epoch-by-chaser distance/radial series are present. Exact 5 mm/6 mm
+hysteretic near-field integration finds no entries in pre or training, then
+one post entry per chaser: 1.042 seconds of aggressive-chaser near dwell and
+1.650 seconds of inert-chaser near dwell. The plot and deep-audit receipt use
+the output stem
+`goodbatbadbat_chaser_radial_near_field_exact_session_time_activity_orthogonal_v2`
+under the recording's `operations/.../plots` directory.
+
+The earlier radial v1 and the controller/bout/escape products bound to the
+superseded relative-frame v2 remain immutable audit evidence but must not be
+used as current scientific products. Their dependent successors therefore had
+to be republished from relative-frame v3 before scientific review. No selector
+or production authority was changed, and required CI remains unrun.
+
+That dependent republish is now complete under the shared immutable run name
+`goodbatbadbat_chaser_successors_20260825_exact_trials_session_time_activity_orthogonal_v3`:
+
+- controller trials: manifest
+  `8ae5c7b89f986d9480d045020361315f23c154207dafdaab2317dd093ddf87ca`,
+  scientific payload
+  `cfd52584cf003ef72a513ce351c31588c3d72b65fe14801fa83429eab1037910`;
+- generalized bout response: manifest
+  `d25e712ab3aac3e1cab29819433e4bf4d262d37a250143c07f5f7460b886a2da`,
+  scientific payload
+  `9612b6125a8b6df877090745f06223a2c13a19477f5e2ad9fb188583229165be`;
+  and
+- escape/freeze: manifest
+  `8000476b554e4426abb71a79c10c65166d8b3f9621cc7636c63d8ec96330e276`,
+  scientific payload
+  `54f388f25704792542fe56c6705072a3c4251da5d09e6d91ac1cac6e6f1c7c86`.
+
+The corrected dashboard is under
+`/groups/johnson/johnsonlab/jeremy/operations/goodbatbadbat_chaser_successors_20260825_exact_trials_session_time_activity_orthogonal_v3/plots`.
+Its PNG SHA-256 is
+`b69b254e5c4ff47923d1370ff257db9b4fd8c9364ecd365d1ce5dabb0afb4d1e`,
+its PDF SHA-256 is
+`73cfb1cf86a20173b5703f6627675d6ae529c8cc4497b5a1131335c0f47bf0a1`,
+and its receipt payload SHA-256 is
+`cd9745ad00df59c9952889da3d0f93b5be05c6b3bbea328976e02fa9968d5baa`.
+The plot was visually inspected and includes four exact trials, all six
+epoch-by-chaser bout-response series, response-class counts, and threshold
+sensitivity. The v2 dashboard is now superseded for scientific review.
+
+### Detection-centroid canary and detailed plot bundle: 2026-08-25
+
+Detection bounding-box centroids are now exercised as a first-class fish
+position provider, not a legacy-only fallback. The immutable relative-frame
+canary is:
+
+`analysis/chaser_relative_frame_runs/chaser_relative_frame_detection_bbox_centroid_cohort_20260825_exact_trials_session_time_activity_orthogonal_v3`
+
+Its manifest SHA-256 is
+`f89f45b006b050587a6197933a085917236cce78eb95212debd0e929de2c3895`
+and prepared payload SHA-256 is
+`c7c9fd30efeb44f24083e16e0cc6d62a76c594ace6ab76d36bc95aca6873ee8f`.
+Finite relative-position coverage per chaser is 59,964/59,964 frames in pre,
+29,992/29,992 in training, and 59,905/59,930 in post. This exceeds the
+reviewed-keypoint canary's coverage while retaining its provider identity as
+separate evidence.
+
+The corresponding radial/near-field successor is:
+
+`analysis/chaser_radial_near_field_runs/goodbatbadbat_chaser_radial_near_field_detection_bbox_centroid_20260825_exact_session_time_activity_orthogonal_v2`
+
+Its manifest SHA-256 is
+`25581e49691ff600711aa34953619eca9517341a09330d2c6cc252f0779dca70`
+and scientific payload SHA-256 is
+`050724d60444440ba4ae4bae6ac7c5293b11abd6d9ec4c5ef4503a3ab4407206`.
+The detection and keypoint providers both find no 5 mm near-field entries in
+pre or training and one post entry per chaser. Aggressive-chaser post dwell is
+identical at 1.041733052 seconds. Inert-chaser post dwell is 1.658356983
+seconds from detections and 1.650024296 seconds from keypoints. Across all six
+epoch-by-chaser strata, median fish--chaser distance differs by less than
+approximately 0.8 mm. This is one-recording canary agreement, not a provider
+equivalence claim.
+
+The detailed immutable plotting recipe is implemented by
+`fisheye.utils.plot_chaser_detailed_successors`. It accepts only explicit run
+names and performs no selector resolution or Zarr mutation. Before comparing
+providers it now requires both radial products to bind their corresponding
+relative-frame products; matching semantic-selection and arena-geometry
+authorities; matching coordinate and scale policy; and byte-identical chaser,
+timestamp, occurrence, behavior-role, and semantic-selection arrays. The two
+fish-position provider identities must remain distinct.
+
+The visually inspected v2 bundle is under:
+
+`/groups/johnson/johnsonlab/jeremy/operations/goodbatbadbat_chaser_successors_20260825_exact_trials_session_time_activity_orthogonal_v3/plots/detailed`
+
+It includes PNG and PDF versions of the matched-provider distance CDFs,
+generalized bout-response heatmaps, exact trial and escape/freeze details, and
+exact-session-time trigger-aligned trial distance traces. The receipt payload
+SHA-256 is
+`fa5cce7193998ad3eb9d5ef781012221d1d91324b69475c57558cdf29eeef21a`
+and its exact source-bindings SHA-256 is
+`2de6cb98b4f185184327d3540483639ed2718140e3c41ebddc3cd3146b8e2724`.
+The earlier detailed v1 bundle remains immutable but is superseded by v2
+because v2 proves the complete comparison alignment contract before render.
+
+The receipt also records plots that cannot yet be produced without inventing
+evidence: individual near visits are not persisted by radial successor v1;
+escape-onset-aligned distance traces are not persisted by escape successor v2;
+ring-entry video is deferred to its sealed video successor; and gaze/bearing
+remains blocked on reviewed body-frame and eye-orientation evidence.
+
+Focused outside-sandbox validation passes 14 plotting/radial tests, including
+rejection of mismatched chaser arrays and duplicate provider identities.
+Required CI remains unrun. All runs and plot receipts are selector-ineligible
+candidate evidence and do not change registry or production authority.
+
+### Frozen 84-recording cohort execution plan: 2026-08-25
+
+The recording-local successor chain now has a dedicated cohort planner/runner:
+
+`scripts/py -m fisheye.utils.materialize_composable_chaser_successor_cohort`
+
+The planner consumes a frozen registry JSON export and resolves mutable
+recording-local authorities only during planning. It freezes the exact raw H5
+stat identity, canonical stimulus run, keypoint and detection proxy manifests,
+compatible motion/bout pair, reviewed arena-geometry selection and digest, and
+physical-scale authority for every recording. Each input group's direct
+metadata-file SHA-256 is retained and revalidated by the worker. The task has
+one canonical payload digest and a contiguous one-based recording axis.
+
+The current read-only GoodBatBadBat inventory contains 84 active recordings:
+36 from 2026-08-10, 28 from 2026-08-11, and 20 from 2026-08-12. Thirty-six use
+producer protocol hash
+`9f27b4084f252eb7ce70bda1bd1056aa93c1d295d90ed65de213d0cc46b5c459`
+and 48 use
+`b0f637a8dbbb4fe064bc4c86b636dc78bde8d082c050510b5c833b6119e98081`.
+All 84 have both first-class position proxies, exact reviewed geometry and
+scale authorities, a canonical stimulus source, and a compatible provider
+motion/swim-bout pair. Eighty-two use the talk-v2 motion/bout pair. The two
+earliest recordings retain explicitly frozen compatible v1 pairs: arena 1
+uses the talk-v1 pair and arena 2 uses the canary-v1 pair.
+
+The frozen task generated during this checkpoint is
+`/tmp/goodbatbadbat_composable_chaser_cohort_task_20260825.json`, with task
+SHA-256
+`0cb0a8b77d7f77e851b7f6543da5a760c42ab2743949476504eba7afd7dced8b`.
+It reports 83 recordings ready for the complete chain and the deeply audited
+arena-1 recording ready for plot-only reuse. The `/tmp` location is diagnostic
+evidence, not a durable cluster handle; the submitter copies a revalidated
+task into its durable run directory before submission.
+
+Each worker serially performs, or exactly reuses after validation: historical
+semantic stimulus publication; v1 compatibility and v2 immutable epoch
+publication; protocol-semantic selection; keypoint and detection relative
+frames; controller-trial, generalized bout-response, and escape/freeze
+successors; both radial/near-field providers; paired-provider exact-epoch
+spatial occupancy; and dashboard, detailed, and spatial-occupancy plot bundles.
+Dynamic epoch-manifest identity is read only after the preceding immutable
+publication completes. No `latest`, `latest_complete`, or other scientific
+selector is resolved during execution.
+
+The LSF renderer is:
+
+`scripts/submit_composable_chaser_successors_bsub.sh`
+
+It requires an absolute clean commit-pinned cluster worktree and full 40-character
+Palette commit, copies and revalidates the task, and emits one array worker per
+recording. Every worker refuses execution outside LSF, owns one entire
+analysis Zarr, uses node-local scratch, writes only selector-ineligible
+recording-local products and external plot/worker receipts, and never updates
+SQLite or activates a selector. This path does not invoke the superseded
+monolithic chaser-analysis submitter.
+
+A real no-write resume check against task 81 revalidated and reused all nine
+completed publication stages and planned only the two missing cohort-layout
+plot recipes. A second real no-write check against task 1 rendered the full
+11-stage chain with its exact v1 motion/bout exception. Combined focused
+outside-sandbox validation passes 20 cohort, plot, and radial tests.
+
+The original 11-stage implementation was committed as
+`900c97ce5b90b4c2462c24433bab2afb596299df` and deployed in a clean,
+commit-pinned cluster worktree. LSF array `153742886` completed 80 recordings
+and failed closed on all four cameras from
+`2026-08-12T21-14-36Z`. Those four archives encode legacy step 0 as
+`[468, 30469]` while step 1 begins at `30469`; exact half-open endpoint
+authority cannot be recovered from that equality. They retain the semantic
+products that were safe to publish, but no relative-frame or dependent
+successor was produced. The 80 successful receipts all report
+`complete_selector_ineligible`, exact commit/task/safety bindings, and no
+nonzero return code.
+
+The original cohort publication produced 400 PNGs, 400 PDFs, and 160 external
+plot receipts below:
+
+`/groups/johnson/johnsonlab/jeremy/operations/goodbatbadbat_chaser_successors_20260825_exact_trials_session_time_activity_orthogonal_v3/cohort_plots`
+
+Required CI remains unrun. These executions are experimental, immutable,
+selector-ineligible evidence; they did not update SQLite, activate a selector,
+or change production authority and are not merge-ready.
+
+### Exact protocol-epoch spatial occupancy heatmaps: 2026-08-25
+
+The missing per-epoch two-dimensional occupancy product is now a first-class
+paired-provider successor rather than a reuse of the historical
+detection-only occupancy surface. It is published below:
+
+`analysis/chaser_spatial_occupancy_runs/goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260825_exact_epochs_v1`
+
+The successor binds explicit immutable keypoint and detection relative-frame
+runs, the exact protocol-semantic selection, and both reviewed-geometry-bound
+radial successors. It requires identical acquisition-frame, timestamp,
+semantic-selection, chaser, geometry, coordinate, and physical-scale
+authorities while requiring the two fish-position provider identities to stay
+distinct. It uses one shared 2 mm arena-centered physical grid, excludes
+finite points outside the reviewed circular arena, and stores integer counts,
+conditional valid-in-arena density, candidate-epoch-normalized occupancy,
+coverage, invalid-position counts, and out-of-arena counts for exactly
+`chaser_pre`, `chaser_training`, and `chaser_post`. Missing positions are not
+interpolated. Exact semantic rows must all exist in the relative-frame source;
+additional selected source rows outside the semantic epoch union remain
+explicit evidence but are excluded from the epoch histograms.
+
+The deeply audited plot recipe produces a 3-by-3 figure: keypoint and detection
+occupancy rows plus a detection-minus-keypoint difference row, with pre,
+training, and post columns on byte-identical physical bins. Titles report
+whole-epoch coverage so conditional spatial normalization cannot hide missing
+positions. PNG/PDF receipts bind the exact source manifest and scientific
+payload and remain selector-ineligible.
+
+Implementation commit `5b2bd068186281206b546c8a927b11d2ea83a14a` passed
+Ruff, `py_compile`, `bash -n`, `git diff --check`, and 28 focused
+outside-sandbox tests. A real no-write computation canary on task 81 produced a
+42-by-42 grid with scientific payload
+`5bdd96b8c014a7344263e1834392731ade2407eb5310994c3f5d7b1d0cb90a62`.
+The selector-ineligible write/plot canary was LSF job `153743120`; it completed
+in 53 seconds and its output was visually reviewed.
+
+LSF array `153743122` then ran only the 80 scientifically resolvable indices
+`1-76,81-84` from the frozen task SHA-256
+`0cb0a8b77d7f77e851b7f6543da5a760c42ab2743949476504eba7afd7dced8b`.
+All 80 elements completed `DONE`. Receipt audit found 80 expected and no
+unexpected indices, 80 unique worker payloads, 13 stages per recording, exact
+commit/task/safety bindings, and no nonzero return code. Plot audit found 80
+unique source manifests and scientific payloads, 80 PNGs, 80 PDFs, and 80 plot
+receipts. Independent rehashing matched all 160 output file sizes and SHA-256
+digests. The plot root now contains 480 PNGs, 480 PDFs, and 240 plot receipts
+across the five dashboard/detailed figures plus the new spatial-occupancy
+figure for each successful recording.
+
+The array receipts are under:
+
+`/groups/johnson/johnsonlab/jeremy/operations/goodbatbadbat_spatial_occupancy_followup_20260825/composable_chaser_successors_goodbatbadbat80_occupancy_5b2bd068_20260825`
+
+The four ambiguous indices `77-80` were never submitted to the occupancy
+follow-up. This evidence remains selector-ineligible and required CI remains
+unrun.
+
+### Deferred publication-performance successor
+
+- [ ] Replace repeated whole-archive publication work with independently
+      consolidated immutable run stores (or equivalent subtree metadata
+      generations) plus one small atomic selector manifest.
+- [ ] Emit a content-addressed publication receipt bound to the exact source
+      manifest, candidate physical inventory, schema/tool version, and
+      consolidated metadata generation. Permit later consumers and interrupted
+      retries to reuse it only after revalidating those bindings.
+- [ ] Evaluate reflink or storage-native immutable copies and safe batching of
+      candidate publications before one final visibility update.
+- [ ] Make strict relative-frame source validation expose a targeted,
+      streaming scientific-array audit mode for consumers that require only
+      frame-axis position/selection evidence. Preserve the exact manifest and
+      array-content proofs without materializing all frame-by-chaser arrays in
+      memory. Occupancy task 2 (`2026-08-10T17-20-55Z_arena_2_goodbatbadbat`)
+      completed correctly but took 955 seconds and peaked at 11,477 MB while
+      the other 79 follow-up tasks completed much sooner; this is optimization
+      evidence, not permission to weaken deep validation.
+
+This optimization is deliberately outside the plot-critical path. The
+2026-08-25 epoch-v2 canary spent 1.7 seconds rematerializing the scientific
+payload but about 82 seconds planning/staging and 94 seconds in atomic
+publication, including 66 seconds in archive-root metadata finalization.
+Optimization must preserve fail-closed identity, direct/consolidated metadata
+equivalence, and selector isolation.
 
 ## Explicit non-goals for the first implementation
 

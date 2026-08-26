@@ -466,7 +466,10 @@ def _validate_context_and_authorities(
         "arena_geometry",
         "arena_to_source_camera_transform",
     }
-    if set(context) != required_context:
+    optional_context = {"controller_state"}
+    if not required_context.issubset(context) or not set(context).issubset(
+        required_context | optional_context
+    ):
         raise ChaserRelativeFrameSourceHandleError(
             "Published context has missing or extra authority records."
         )
@@ -475,7 +478,7 @@ def _validate_context_and_authorities(
     )
     records: dict[str, Mapping[str, Any]] = {}
     for name in sorted(
-        required_context
+        set(context)
         - {
             "fish_identity",
             "arena_geometry",
