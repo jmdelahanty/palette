@@ -75001,7 +75001,7 @@
     "parsed_writer_candidate_module_count": 230,
     "reader_required_array_declaration_count": 106,
     "resolved_writer_leaf_name_count": 629,
-    "scanned_python_module_count": 1574,
+    "scanned_python_module_count": 1575,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,

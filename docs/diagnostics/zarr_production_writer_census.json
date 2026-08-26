@@ -49383,7 +49383,7 @@
       "enclosing_symbol": "fisheye.shared.zarr.keypoint_coordinate_successor:_materialize_keypoint_auxiliaries",
       "file": "src/fisheye/shared/zarr/keypoint_coordinate_successor.py",
       "filters_expression": null,
-      "line": 778,
+      "line": 714,
       "parent_path_pattern": "<run>",
       "path_pattern": "<run>/<name>",
       "receiver_expression": null,
@@ -49391,7 +49391,7 @@
       "shape_expression": null,
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-0bdb366aed3e9a99",
+      "site_id": "writer-93ee5c277f93b72e",
       "status": "current",
       "status_basis": "packaged Palette module without a maintenance marker",
       "surface_class": "production",
@@ -69452,7 +69452,7 @@
     "parsed_writer_candidate_module_count": 230,
     "reader_required_array_declaration_count": 106,
     "resolved_writer_leaf_name_count": 629,
-    "scanned_python_module_count": 1574,
+    "scanned_python_module_count": 1575,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
@@ -69488,7 +69488,7 @@
     "writer_wrapper_call_site_count": 984
   },
   "wrapper_analysis": {
-    "function_definition_count": 6030,
+    "function_definition_count": 6029,
     "writer_function_count": 237,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",

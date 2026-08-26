@@ -22,8 +22,8 @@ import zarr
 
 from fisheye.shared.artifact_fingerprint import CONTENT_FINGERPRINT_SCHEME
 from fisheye.shared.json_safety import json_attr_safe
-from fisheye.shared.keypoint_terminal_pixel_evidence import (
-    DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE,
+from fisheye.shared.keypoint_preprocessing_runtime import (
+    resolve_keypoint_preprocessing_runtime,
 )
 from fisheye.shared.keypoint_coordinate_publication import (
     KEYPOINT_COORDINATE_CONTEXT_ATTR,
@@ -34,7 +34,6 @@ from fisheye.shared.keypoint_coordinate_publication import (
     publish_keypoint_coordinate_surfaces,
     require_bound_ineligible_keypoint_coordinate_surfaces,
 )
-from fisheye.shared.model_input_transform import model_input_transform_from_attrs
 from fisheye.shared.pose_model_schema_binding import pose_schema_from_model_binding
 from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
 from fisheye.shared.zarr.coordinate_successor_authority import (
@@ -215,71 +214,6 @@ def _dimensions(payload: Mapping[str, Any]) -> KeypointDimensions:
         source_width=raw["source_width"],
         source_height=raw["source_height"],
     )
-
-
-def _resolve_preprocessing_runtime(preprocessing: Any) -> tuple[Any, str]:
-    """Resolve one profile's exact model transform and submitted input mode.
-
-    The ordinary keypoint profile records these fields directly in its
-    preprocessing document.  Direct-hybrid finalization records the same
-    runtime evidence under ``observed_runtime`` because its outer input mode
-    describes the row-signature-bound hybrid pixel provider.  Keep the profile
-    dispatch here so inspection and publication cannot develop separate
-    evidence grammars.
-    """
-
-    document = preprocessing.document
-    if preprocessing.profile_id == DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE:
-        if preprocessing.profile_version != 1:
-            raise ValueError(
-                "Direct-hybrid keypoint preprocessing profile version is unsupported."
-            )
-        runtime = document.get("observed_runtime")
-        if (
-            not isinstance(runtime, Mapping)
-            or document.get("evidence_semantics")
-            != "observed_completed_inference_runtime_v1"
-            or document.get("coordinate_contract_mode") != "legacy_noncanonical"
-            or preprocessing.input_mode != "numpy_list"
-            or document.get("observed_input_mode_effective") != "numpy-list"
-            or runtime.get("input_mode_effective") != "numpy-list"
-        ):
-            raise ValueError(
-                "Direct-hybrid keypoint preprocessing runtime evidence is inconsistent."
-            )
-        transform_value = runtime.get("model_input_transform")
-        submitted_input_mode = "numpy-list"
-    else:
-        transform_value = document.get("model_input_transform")
-        submitted_input_mode = document.get("model_input_mode")
-        if submitted_input_mode is None and preprocessing.input_mode in {
-            "numpy-list",
-            "tensor",
-        }:
-            submitted_input_mode = preprocessing.input_mode
-
-    if not isinstance(transform_value, Mapping):
-        raise ValueError("Keypoint preprocessing lacks model_input_transform.")
-    if submitted_input_mode not in {"numpy-list", "tensor"}:
-        raise ValueError(
-            "Keypoint preprocessing lacks an exact submitted model input mode."
-        )
-    transform = model_input_transform_from_attrs(dict(transform_value))
-
-    if preprocessing.profile_id == DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE:
-        expected_shapes = {
-            "model_input_shape_hw": list(transform.model_shape),
-            "model_network_input_shape_hw": list(transform.model_shape),
-            "native_roi_shape_hw": list(transform.native_shape),
-        }
-        if any(
-            runtime.get(name) != expected for name, expected in expected_shapes.items()
-        ):
-            raise ValueError(
-                "Direct-hybrid runtime extents differ from model_input_transform."
-            )
-
-    return transform, str(submitted_input_mode)
 
 
 def _keypoint_semantic_attrs(
@@ -656,7 +590,9 @@ def inspect_keypoint_coordinate_successor_source(
             "Raw keypoint source publication is invalid: " + "; ".join(source_errors)
         )
     preprocessing = keypoint_preprocessing_from_manifest(payload["preprocessing"])
-    transform, preprocessing_input_mode = _resolve_preprocessing_runtime(preprocessing)
+    transform, preprocessing_input_mode = resolve_keypoint_preprocessing_runtime(
+        preprocessing
+    )
     sealed_crop = bind_sealed_geometry_crop_successor_source(
         analysis_zarr=archive,
         root=root,
@@ -864,7 +800,7 @@ def publish_keypoint_coordinate_successor(
         )
         payload = source_manifest["payload"]
         preprocessing = keypoint_preprocessing_from_manifest(payload["preprocessing"])
-        transform, preprocessing_input_mode = _resolve_preprocessing_runtime(
+        transform, preprocessing_input_mode = resolve_keypoint_preprocessing_runtime(
             preprocessing
         )
         if (
@@ -985,7 +921,7 @@ def publish_keypoint_coordinate_successor(
             preprocessing = keypoint_preprocessing_from_manifest(
                 payload["preprocessing"]
             )
-            transform, preprocessing_input_mode = _resolve_preprocessing_runtime(
+            transform, preprocessing_input_mode = resolve_keypoint_preprocessing_runtime(
                 preprocessing
             )
             prepare_keypoint_coordinate_context(

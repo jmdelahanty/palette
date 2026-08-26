@@ -14,6 +14,12 @@ from fisheye.shared.coordinate_record import (
     stamp_and_bind_persisted_coordinate_record,
 )
 from fisheye.shared import keypoint_coordinate_publication
+from fisheye.shared.keypoint_preprocessing_runtime import (
+    resolve_keypoint_preprocessing_runtime,
+)
+from fisheye.shared.keypoint_terminal_pixel_evidence import (
+    DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE,
+)
 from fisheye.shared import subject_mask_coordinate_publication
 from fisheye.shared.zarr.coordinate_successor_authority import (
     COORDINATE_SUCCESSOR_AUTHORITY_ATTR,
@@ -131,7 +137,7 @@ def _direct_hybrid_preprocessing() -> SimpleNamespace:
         model_width=384,
     )
     return SimpleNamespace(
-        profile_id=keypoint_successor.DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE,
+        profile_id=DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE,
         profile_version=1,
         input_mode="numpy_list",
         document={
@@ -150,7 +156,7 @@ def _direct_hybrid_preprocessing() -> SimpleNamespace:
 
 
 def test_keypoint_successor_resolves_direct_hybrid_observed_runtime() -> None:
-    transform, submitted_input_mode = keypoint_successor._resolve_preprocessing_runtime(
+    transform, submitted_input_mode = resolve_keypoint_preprocessing_runtime(
         _direct_hybrid_preprocessing()
     )
 
@@ -182,7 +188,7 @@ def test_keypoint_successor_rejects_inconsistent_direct_hybrid_profile(
     preprocessing.document[field] = value
 
     with pytest.raises(ValueError, match="runtime evidence is inconsistent"):
-        keypoint_successor._resolve_preprocessing_runtime(preprocessing)
+        resolve_keypoint_preprocessing_runtime(preprocessing)
 
 
 def test_keypoint_successor_rejects_direct_hybrid_runtime_extent_mismatch() -> None:
@@ -190,7 +196,7 @@ def test_keypoint_successor_rejects_direct_hybrid_runtime_extent_mismatch() -> N
     preprocessing.document["observed_runtime"]["native_roi_shape_hw"] = [512, 512]
 
     with pytest.raises(ValueError, match="runtime extents differ"):
-        keypoint_successor._resolve_preprocessing_runtime(preprocessing)
+        resolve_keypoint_preprocessing_runtime(preprocessing)
 
 
 @pytest.mark.parametrize(
