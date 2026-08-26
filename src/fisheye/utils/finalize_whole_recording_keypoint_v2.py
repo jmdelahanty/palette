@@ -169,6 +169,34 @@ def _load_terminal(
     return receipt, run, model
 
 
+def _terminal_input_evidence_digest(receipt: Mapping[str, Any]) -> str:
+    """Return the sealed input identity used by clipped finalization.
+
+    The downstream clipped-finalization field retains its historical
+    ``input_package_manifest_digest`` name. Cache-backed terminals bind the
+    cache manifest bytes, while direct-hybrid terminals bind their complete
+    typed pixel/geometry/shard evidence object instead of inventing a cache.
+    """
+
+    payload = receipt.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("Terminal receipt lacks its payload.")
+    if receipt.get("schema_version") == DIRECT_HYBRID_TERMINAL_RECEIPT_SCHEMA_VERSION:
+        evidence = validate_direct_hybrid_terminal_pixel_evidence(
+            payload.get("pixel_evidence")
+        )
+        return canonical_json_sha256(evidence)
+    cache = payload.get("cache")
+    if not isinstance(cache, Mapping):
+        raise ValueError("Terminal receipt lacks cache evidence.")
+    digest = str(cache.get("manifest_sha256") or "").strip()
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ValueError("Terminal cache manifest digest is invalid.")
+    return digest
+
+
 def _dispositions(
     *,
     analysis_zarr: Path,
@@ -371,6 +399,7 @@ def finalize_whole_recording_keypoint_v2(
         expected_crop_run=resolved_terminal_crop_run,
     )
     payload = receipt["payload"]
+    input_evidence_digest = _terminal_input_evidence_digest(receipt)
     binding = model.get("pose_model_schema_binding")
     if not isinstance(binding, Mapping):
         raise ValueError("Terminal receipt lacks an exact pose-model binding.")
@@ -418,7 +447,7 @@ def finalize_whole_recording_keypoint_v2(
         clip_index=0,
         pose_model_schema_binding=binding,
         preprocessing=preprocessing,
-        input_package_manifest_digest=payload["cache"]["manifest_sha256"],
+        input_package_manifest_digest=input_evidence_digest,
     )
     identity = initial_refined_keypoint_snapshot_identity(
         recording_identity=recording_identity,
