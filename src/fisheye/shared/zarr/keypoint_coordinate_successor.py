@@ -22,6 +22,9 @@ import zarr
 
 from fisheye.shared.artifact_fingerprint import CONTENT_FINGERPRINT_SCHEME
 from fisheye.shared.json_safety import json_attr_safe
+from fisheye.shared.keypoint_terminal_pixel_evidence import (
+    DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE,
+)
 from fisheye.shared.keypoint_coordinate_publication import (
     KEYPOINT_COORDINATE_CONTEXT_ATTR,
     KEYPOINT_COORDINATE_DERIVATION_ATTR,
@@ -214,17 +217,69 @@ def _dimensions(payload: Mapping[str, Any]) -> KeypointDimensions:
     )
 
 
-def _submitted_input_mode(preprocessing: Any) -> str:
-    """Resolve the actual model submission mode, not the outer cache reader."""
+def _resolve_preprocessing_runtime(preprocessing: Any) -> tuple[Any, str]:
+    """Resolve one profile's exact model transform and submitted input mode.
 
-    value = preprocessing.document.get("model_input_mode")
-    if value is None and preprocessing.input_mode in {"numpy-list", "tensor"}:
-        value = preprocessing.input_mode
-    if value not in {"numpy-list", "tensor"}:
+    The ordinary keypoint profile records these fields directly in its
+    preprocessing document.  Direct-hybrid finalization records the same
+    runtime evidence under ``observed_runtime`` because its outer input mode
+    describes the row-signature-bound hybrid pixel provider.  Keep the profile
+    dispatch here so inspection and publication cannot develop separate
+    evidence grammars.
+    """
+
+    document = preprocessing.document
+    if preprocessing.profile_id == DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE:
+        if preprocessing.profile_version != 1:
+            raise ValueError(
+                "Direct-hybrid keypoint preprocessing profile version is unsupported."
+            )
+        runtime = document.get("observed_runtime")
+        if (
+            not isinstance(runtime, Mapping)
+            or document.get("evidence_semantics")
+            != "observed_completed_inference_runtime_v1"
+            or document.get("coordinate_contract_mode") != "legacy_noncanonical"
+            or preprocessing.input_mode != "numpy_list"
+            or document.get("observed_input_mode_effective") != "numpy-list"
+            or runtime.get("input_mode_effective") != "numpy-list"
+        ):
+            raise ValueError(
+                "Direct-hybrid keypoint preprocessing runtime evidence is inconsistent."
+            )
+        transform_value = runtime.get("model_input_transform")
+        submitted_input_mode = "numpy-list"
+    else:
+        transform_value = document.get("model_input_transform")
+        submitted_input_mode = document.get("model_input_mode")
+        if submitted_input_mode is None and preprocessing.input_mode in {
+            "numpy-list",
+            "tensor",
+        }:
+            submitted_input_mode = preprocessing.input_mode
+
+    if not isinstance(transform_value, Mapping):
+        raise ValueError("Keypoint preprocessing lacks model_input_transform.")
+    if submitted_input_mode not in {"numpy-list", "tensor"}:
         raise ValueError(
             "Keypoint preprocessing lacks an exact submitted model input mode."
         )
-    return str(value)
+    transform = model_input_transform_from_attrs(dict(transform_value))
+
+    if preprocessing.profile_id == DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE:
+        expected_shapes = {
+            "model_input_shape_hw": list(transform.model_shape),
+            "model_network_input_shape_hw": list(transform.model_shape),
+            "native_roi_shape_hw": list(transform.native_shape),
+        }
+        if any(
+            runtime.get(name) != expected for name, expected in expected_shapes.items()
+        ):
+            raise ValueError(
+                "Direct-hybrid runtime extents differ from model_input_transform."
+            )
+
+    return transform, str(submitted_input_mode)
 
 
 def _keypoint_semantic_attrs(
@@ -601,10 +656,7 @@ def inspect_keypoint_coordinate_successor_source(
             "Raw keypoint source publication is invalid: " + "; ".join(source_errors)
         )
     preprocessing = keypoint_preprocessing_from_manifest(payload["preprocessing"])
-    transform_value = preprocessing.document.get("model_input_transform")
-    if not isinstance(transform_value, Mapping):
-        raise ValueError("Raw keypoint preprocessing lacks model_input_transform.")
-    transform = model_input_transform_from_attrs(dict(transform_value))
+    transform, preprocessing_input_mode = _resolve_preprocessing_runtime(preprocessing)
     sealed_crop = bind_sealed_geometry_crop_successor_source(
         analysis_zarr=archive,
         root=root,
@@ -648,7 +700,7 @@ def inspect_keypoint_coordinate_successor_source(
             "source_crop_path": crop["run_path"],
             "historical_crop_adapter": sealed_crop.as_record(),
             "auxiliary_materialization": auxiliary_plan.as_record(),
-            "preprocessing_input_mode": _submitted_input_mode(preprocessing),
+            "preprocessing_input_mode": preprocessing_input_mode,
             "model_input_transform": transform.to_attrs(),
             "model_artifact": artifact,
             "keypoint_semantic_attrs": semantic_attrs,
@@ -926,15 +978,15 @@ def publish_keypoint_coordinate_successor(
             preprocessing = keypoint_preprocessing_from_manifest(
                 payload["preprocessing"]
             )
-            transform = model_input_transform_from_attrs(
-                dict(preprocessing.document["model_input_transform"])
+            transform, preprocessing_input_mode = _resolve_preprocessing_runtime(
+                preprocessing
             )
             prepare_keypoint_coordinate_context(
                 root,
                 f"keypoints_runs/{successor_id}",
                 crop_path=str(payload["source_crop_snapshot"]["run_path"]),
                 model_input_transform=transform,
-                preprocessing_input_mode=_submitted_input_mode(preprocessing),
+                preprocessing_input_mode=preprocessing_input_mode,
                 model_artifact=artifact,
                 _resolved_crop_source=publication_crop.source,
             )
