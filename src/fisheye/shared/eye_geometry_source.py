@@ -309,7 +309,8 @@ def _build_staged_subject_shape_authority(
             "Canonical eye-separation scalar semantics bind another array."
         )
 
-    source_context = getattr(getattr(publication, "source", None), "context", None)
+    publication_source = getattr(publication, "source", None)
+    source_context = getattr(publication_source, "context", None)
     assignment_authority = getattr(
         source_context,
         "assignment_keypoint_authority",
@@ -331,6 +332,25 @@ def _build_staged_subject_shape_authority(
             "record_ref": assignment_ref,
             "record_sha256": assignment_sha256,
         }
+    else:
+        rebinding = getattr(
+            publication_source,
+            "assignment_keypoint_rebinding_manifest",
+            None,
+        )
+        rebinding_run_id = getattr(
+            publication_source,
+            "assignment_keypoint_rebinding_run_id",
+            None,
+        )
+        if isinstance(rebinding, Mapping) and isinstance(rebinding_run_id, str):
+            assignment_pointer = {
+                "record_ref": (
+                    "/subject_mask_assignment_keypoint_rebinding_runs/"
+                    f"{rebinding_run_id}@run_manifest"
+                ),
+                "record_sha256": _canonical_sha256(rebinding),
+            }
 
     record = {
         "schema_id": EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_ID,

@@ -8,6 +8,10 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from fisheye.shared.zarr.assignment_keypoint_rebinding import (
+    ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE,
+    load_assignment_keypoint_rebinding_manifest,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.subject_mask_bundle_coordinate_authority import (
     BoundRecordingSubjectMaskCoordinateAuthority,
@@ -24,12 +28,16 @@ SUBJECT_SHAPE_BUNDLE_SOURCE_SCHEMA_ID = (
     "palette.subject_shape.recording_mask_bundle_source"
 )
 SUBJECT_SHAPE_BUNDLE_SOURCE_SCHEMA_VERSION = 1
+SUBJECT_SHAPE_BUNDLE_REBOUND_SOURCE_SCHEMA_VERSION = 2
 SUBJECT_SHAPE_BUNDLE_SOURCE_KIND = "recording_subject_mask_bundle_v3"
 SUBJECT_SHAPE_REQUIRED_MASK_COMPONENTS = (
     "subject_body",
     "swim_bladder",
     "eye_left",
     "eye_right",
+)
+_ASSIGNMENT_REBINDING_PREFIX = (
+    "subject_mask_assignment_keypoint_rebinding_runs/"
 )
 
 
@@ -38,6 +46,35 @@ class SubjectShapeBundleSourceError(ValueError):
 
 
 _BOUND_SOURCE_SEAL = object()
+
+
+def assignment_rebinding_run_id_from_source_record(
+    value: Mapping[str, Any] | None,
+) -> str | None:
+    """Return the exact optional rebinding ID sealed by a source record."""
+
+    if not isinstance(value, Mapping) or value.get("schema_version") == 1:
+        return None
+    if value.get("schema_version") != 2:
+        raise SubjectShapeBundleSourceError(
+            "Unsupported subject-shape bundle source-record version."
+        )
+    assignment = value.get("assignment_keypoints")
+    path = (
+        assignment.get("rebinding_run_path")
+        if isinstance(assignment, Mapping)
+        else None
+    )
+    if (
+        not isinstance(path, str)
+        or not path.startswith(_ASSIGNMENT_REBINDING_PREFIX)
+        or "/" in path[len(_ASSIGNMENT_REBINDING_PREFIX) :]
+        or not path[len(_ASSIGNMENT_REBINDING_PREFIX) :]
+    ):
+        raise SubjectShapeBundleSourceError(
+            "Bundle source record lacks one exact assignment rebinding path."
+        )
+    return path[len(_ASSIGNMENT_REBINDING_PREFIX) :]
 
 
 def _array_declarations(
@@ -103,6 +140,7 @@ def _source_record(
     acquisition_frame: BoundAcquisitionCameraFrame,
     continuous_frame: BoundPixelFrameAuthority,
     edge_frame: BoundPixelFrameAuthority,
+    assignment_keypoint_rebinding: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     components = authority.refined_manifest["payload"]["logical_schema"][
         "components"
@@ -114,8 +152,8 @@ def _source_record(
         raise SubjectShapeBundleSourceError(
             "Subject-shape bundle source requires each maintained component exactly once."
         )
-    assignment = dict(authority.assignment_keypoint_collection)
-    return {
+    historical_assignment = dict(authority.assignment_keypoint_collection)
+    source_record: dict[str, object] = {
         "schema_id": SUBJECT_SHAPE_BUNDLE_SOURCE_SCHEMA_ID,
         "schema_version": SUBJECT_SHAPE_BUNDLE_SOURCE_SCHEMA_VERSION,
         "source_kind": SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
@@ -177,9 +215,62 @@ def _source_record(
                 "payload_digest"
             ],
         },
-        "assignment_keypoints": assignment,
-        "assignment_keypoints_digest": canonical_json_sha256(assignment),
+        "assignment_keypoints": historical_assignment,
+        "assignment_keypoints_digest": canonical_json_sha256(
+            historical_assignment
+        ),
     }
+    if assignment_keypoint_rebinding is not None:
+        payload = assignment_keypoint_rebinding.get("payload")
+        subject = payload.get("subject_mask_source") if isinstance(payload, Mapping) else None
+        if (
+            not isinstance(payload, Mapping)
+            or not isinstance(subject, Mapping)
+            or payload.get("assignment_state") != "used"
+            or payload.get("recording_identity") != authority.recording_identity
+            or payload.get("camera_identity") != authority.camera_identity
+            or payload.get("row_count") != authority.n_rois
+            or subject.get("bundle_id") != authority.bundle_id
+            or subject.get("bundle_manifest_payload_digest")
+            != authority.bundle_manifest.get("payload_digest")
+            or subject.get("bundle_coordinate_authority_digest")
+            != authority.authority_digest
+            or subject.get("assignment_collection_digest")
+            != canonical_json_sha256(historical_assignment)
+        ):
+            raise SubjectShapeBundleSourceError(
+                "Assignment-keypoint rebinding does not bind this exact mask bundle."
+            )
+        normalized = {
+            "status": "used",
+            "authority_profile": ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE,
+            "rebinding_run_path": (
+                "subject_mask_assignment_keypoint_rebinding_runs/"
+                f"{payload['rebinding_run_id']}"
+            ),
+            "rebinding_manifest_payload_digest": assignment_keypoint_rebinding[
+                "payload_digest"
+            ],
+            "canonical_keypoint_source": dict(
+                payload["canonical_keypoint_source"]
+            ),
+            "equivalence": dict(payload["equivalence"]),
+            "selection_policy": payload["selection_policy"],
+        }
+        source_record.update(
+            {
+                "schema_version": (
+                    SUBJECT_SHAPE_BUNDLE_REBOUND_SOURCE_SCHEMA_VERSION
+                ),
+                "historical_assignment_keypoints": historical_assignment,
+                "historical_assignment_keypoints_digest": canonical_json_sha256(
+                    historical_assignment
+                ),
+                "assignment_keypoints": normalized,
+                "assignment_keypoints_digest": canonical_json_sha256(normalized),
+            }
+        )
+    return source_record
 
 
 @dataclass(frozen=True, init=False)
@@ -189,6 +280,11 @@ class BoundSubjectShapeBundleSource:
     source_record: Mapping[str, Any] = field(repr=False)
     source_digest: str
     active: bool
+    assignment_keypoint_rebinding_run_id: str | None
+    assignment_keypoint_rebinding_manifest: Mapping[str, Any] | None = field(
+        repr=False,
+        compare=False,
+    )
     authority: BoundRecordingSubjectMaskCoordinateAuthority = field(
         repr=False,
         compare=False,
@@ -272,6 +368,9 @@ class BoundSubjectShapeBundleSource:
             self.archive_path,
             bundle_id=self.bundle_id,
             allow_inactive=True,
+            assignment_keypoint_rebinding_run_id=(
+                self.assignment_keypoint_rebinding_run_id
+            ),
         )
         if current.source_digest != self.source_digest:
             raise SubjectShapeBundleSourceError(
@@ -284,6 +383,7 @@ def load_subject_shape_bundle_source(
     *,
     bundle_id: str | None = None,
     allow_inactive: bool = False,
+    assignment_keypoint_rebinding_run_id: str | None = None,
 ) -> BoundSubjectShapeBundleSource:
     authority = load_recording_subject_mask_coordinate_authority(
         analysis_zarr,
@@ -291,11 +391,20 @@ def load_subject_shape_bundle_source(
         allow_inactive=allow_inactive,
     )
     acquisition, continuous, edge = _camera_frame_authorities(authority)
+    rebinding_manifest = (
+        load_assignment_keypoint_rebinding_manifest(
+            analysis_zarr,
+            rebinding_run_id=assignment_keypoint_rebinding_run_id,
+        )
+        if assignment_keypoint_rebinding_run_id is not None
+        else None
+    )
     record = _source_record(
         authority,
         acquisition_frame=acquisition,
         continuous_frame=continuous,
         edge_frame=edge,
+        assignment_keypoint_rebinding=rebinding_manifest,
     )
     authority.require_translation_only_offsets()
     return BoundSubjectShapeBundleSource(
@@ -304,6 +413,12 @@ def load_subject_shape_bundle_source(
         source_record=record,
         source_digest=canonical_json_sha256(record),
         active=authority.active,
+        assignment_keypoint_rebinding_run_id=(
+            str(assignment_keypoint_rebinding_run_id)
+            if assignment_keypoint_rebinding_run_id is not None
+            else None
+        ),
+        assignment_keypoint_rebinding_manifest=rebinding_manifest,
         authority=authority,
         acquisition_frame=acquisition,
         continuous_source_camera_frame=continuous,
@@ -329,9 +444,11 @@ __all__ = [
     "BoundSubjectShapeBundleSource",
     "SUBJECT_SHAPE_BUNDLE_SOURCE_SCHEMA_ID",
     "SUBJECT_SHAPE_BUNDLE_SOURCE_SCHEMA_VERSION",
+    "SUBJECT_SHAPE_BUNDLE_REBOUND_SOURCE_SCHEMA_VERSION",
     "SUBJECT_SHAPE_BUNDLE_SOURCE_KIND",
     "SUBJECT_SHAPE_REQUIRED_MASK_COMPONENTS",
     "SubjectShapeBundleSourceError",
+    "assignment_rebinding_run_id_from_source_record",
     "load_subject_shape_bundle_source",
     "require_bound_subject_shape_bundle_source",
 ]

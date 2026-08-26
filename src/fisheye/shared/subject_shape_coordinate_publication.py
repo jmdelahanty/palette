@@ -110,6 +110,7 @@ from fisheye.shared.zarr_run_completion import (
 from fisheye.shared.zarr.subject_shape_bundle_source import (
     SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
     BoundSubjectShapeBundleSource,
+    assignment_rebinding_run_id_from_source_record,
     load_subject_shape_bundle_source,
     require_bound_subject_shape_bundle_source,
 )
@@ -494,6 +495,11 @@ def load_exact_subject_shape_source(
         Path(_local_archive_path(root)),
         bundle_id=bundle_id,
         allow_inactive=True,
+        assignment_keypoint_rebinding_run_id=(
+            assignment_rebinding_run_id_from_source_record(
+                run.attrs.get(SUBJECT_SHAPE_SOURCE_BINDING_ATTR)
+            )
+        ),
     )
     if archive_identity(source.authority.refined_run) != archive_identity(run):
         _fail("Subject-shape and recording-bundle source span archives/stores.")

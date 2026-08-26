@@ -149,6 +149,7 @@ class SubjectShapeMaterializationPlan:
     source_contract: dict[str, Any]
     subject_mask_bundle_id: str | None = None
     allow_inactive_subject_mask_bundle: bool = False
+    assignment_keypoint_rebinding_run_id: str | None = None
 
     @property
     def compute_run_path(self) -> Path:
@@ -192,6 +193,9 @@ class SubjectShapeMaterializationPlan:
                 "subject_mask_bundle_id": self.subject_mask_bundle_id,
                 "allow_inactive_subject_mask_bundle": (
                     self.allow_inactive_subject_mask_bundle
+                ),
+                "assignment_keypoint_rebinding_run_id": (
+                    self.assignment_keypoint_rebinding_run_id
                 ),
             }
         )
@@ -241,6 +245,7 @@ def build_subject_shape_materialization_plan(
     native_threads: int = DEFAULT_NATIVE_THREADS,
     subject_mask_bundle_id: str | None = None,
     allow_inactive_subject_mask_bundle: bool = False,
+    assignment_keypoint_rebinding_run_id: str | None = None,
 ) -> SubjectShapeMaterializationPlan:
     """Resolve a read-only plan without creating scratch or mutating the archive."""
 
@@ -302,6 +307,9 @@ def build_subject_shape_materialization_plan(
             source,
             bundle_id=str(subject_mask_bundle_id),
             allow_inactive=allow_inactive_subject_mask_bundle,
+            assignment_keypoint_rebinding_run_id=(
+                assignment_keypoint_rebinding_run_id
+            ),
         )
         refined_path = bundle_source.authority.refined_run_path
         prefix = "refined_subject_masks_runs/"
@@ -327,11 +335,26 @@ def build_subject_shape_materialization_plan(
             "refined_manifest_payload_digest": (
                 bundle_source.authority.refined_manifest["payload_digest"]
             ),
+            "assignment_keypoint_rebinding_run_id": (
+                bundle_source.assignment_keypoint_rebinding_run_id
+            ),
+            "assignment_keypoint_rebinding_manifest_payload_digest": (
+                bundle_source.assignment_keypoint_rebinding_manifest[
+                    "payload_digest"
+                ]
+                if bundle_source.assignment_keypoint_rebinding_manifest is not None
+                else None
+            ),
         }
     else:
         if allow_inactive_subject_mask_bundle:
             raise ValueError(
                 "allow_inactive_subject_mask_bundle requires subject_mask_bundle_id."
+            )
+        if assignment_keypoint_rebinding_run_id is not None:
+            raise ValueError(
+                "assignment_keypoint_rebinding_run_id requires "
+                "subject_mask_bundle_id."
             )
         refined_group, resolved_refined_run, _path = resolve_refined_subject_masks_run(
             root, refined_run
@@ -435,6 +458,11 @@ def build_subject_shape_materialization_plan(
         ),
         allow_inactive_subject_mask_bundle=(
             allow_inactive_subject_mask_bundle if bundle_source is not None else False
+        ),
+        assignment_keypoint_rebinding_run_id=(
+            bundle_source.assignment_keypoint_rebinding_run_id
+            if bundle_source is not None
+            else None
         ),
     )
 
@@ -966,6 +994,7 @@ def materialize_subject_shape(
     stage_command: str | None = None,
     subject_mask_bundle_id: str | None = None,
     allow_inactive_subject_mask_bundle: bool = False,
+    assignment_keypoint_rebinding_run_id: str | None = None,
 ) -> dict[str, Any]:
     plan = build_subject_shape_materialization_plan(
         source_zarr,
@@ -983,6 +1012,9 @@ def materialize_subject_shape(
         native_threads=native_threads,
         subject_mask_bundle_id=subject_mask_bundle_id,
         allow_inactive_subject_mask_bundle=allow_inactive_subject_mask_bundle,
+        assignment_keypoint_rebinding_run_id=(
+            assignment_keypoint_rebinding_run_id
+        ),
     )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
@@ -1028,6 +1060,11 @@ def materialize_subject_shape(
             subject_mask_bundle_id=getattr(plan, "subject_mask_bundle_id", None),
             allow_inactive_subject_mask_bundle=(
                 getattr(plan, "allow_inactive_subject_mask_bundle", False)
+            ),
+            assignment_keypoint_rebinding_run_id=getattr(
+                plan,
+                "assignment_keypoint_rebinding_run_id",
+                None,
             ),
             _unbound_coordinate_stage=True,
         )
@@ -1718,6 +1755,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Authorize exactly the named inactive bundle for a selector-ineligible canary.",
     )
+    parser.add_argument("--assignment-keypoint-rebinding-run")
     parser.add_argument("--run-name", required=True)
     parser.add_argument(
         "--storage-profile",
@@ -1778,6 +1816,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         subject_mask_bundle_id=args.subject_mask_bundle_id,
         allow_inactive_subject_mask_bundle=(
             args.allow_inactive_subject_mask_bundle
+        ),
+        assignment_keypoint_rebinding_run_id=(
+            args.assignment_keypoint_rebinding_run
         ),
     )
     if args.report is not None:
