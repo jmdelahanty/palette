@@ -136,7 +136,10 @@ class _Proxy:
                 "candidate_native_sample_row_index",
                 "selected",
                 "selected_native_sample_row_index",
+                "selected_stimulus_frame_num",
                 "selected_source_stimulus_run_row_index",
+                "selected_source_stimulus_source_row_index",
+                "selected_timestamp_ns_session",
                 "selected_chaser_index",
                 "selected_chaser_position_xy",
                 "selected_chaser_valid",
@@ -225,10 +228,36 @@ class _Root:
                 }
             }
         )
+        chaser_index = np.zeros(106, dtype=np.uint8)
+        chaser_index[[103, 105]] = 1
+        stimulus_frame = np.zeros(106, dtype=np.uint64)
+        stimulus_frame[[102, 103]] = 11
+        stimulus_frame[[104, 105]] = 12
+        source_rows = np.arange(106, dtype=np.int64)
+        source_rows[[102, 103, 104, 105]] = [202, 203, 204, 205]
+        trial_id = np.zeros(106, dtype=np.uint64)
+        trial_id[[102, 104]] = [1, 2]
+        active = np.zeros(106, dtype=np.uint8)
+        active[[102, 104]] = 1
+        timestamp = np.zeros(106, dtype=np.int64)
+        timestamp[[102, 103, 104, 105]] = [110, 110, 120, 120]
+        self.chaser_states = {
+            "chaser_index": chaser_index,
+            "stimulus_frame_num": stimulus_frame,
+            "source_row_indices": source_rows,
+            "chase_trial_id": trial_id,
+            "chase_sequence_active": active,
+            "timestamp_ns_session": timestamp,
+        }
 
-    def __getitem__(self, path: str) -> _Group:
-        assert path == "analysis/stimulus_runs/stimulus-v1"
-        return self.stimulus
+    def __getitem__(self, path: str) -> object:
+        if path == "analysis/stimulus_runs/stimulus-v1":
+            return self.stimulus
+        if path == (
+            "analysis/stimulus_runs/stimulus-v1/tracking_data/chaser_states"
+        ):
+            return self.chaser_states
+        raise KeyError(path)
 
 
 class _Coordinate:
@@ -278,7 +307,7 @@ class _Coordinate:
         return np.asarray(values, dtype=np.float64) + np.asarray([10.0, 20.0])
 
 
-def test_adapter_applies_typed_arena_to_camera_chain_without_timestamp_claim(
+def test_adapter_applies_typed_arena_to_camera_chain_with_exact_session_time(
     monkeypatch,
 ) -> None:
     native = _Native()
@@ -368,8 +397,33 @@ def test_adapter_applies_typed_arena_to_camera_chain_without_timestamp_claim(
         base["fish_position_xy_px"][:2],
         np.asarray([[20.0, 30.0], [20.0, 30.0]], dtype=np.float32),
     )
-    assert not np.any(base["timestamp_valid"])
-    assert bound.prepared.manifest["timing_policy"]["timestamp_field"] is None
+    assert np.all(base["timestamp_valid"])
+    assert base["timestamp_ns"].tolist() == [110, 110, 120, 120]
+    assert base["trial_id"].tolist() == [1, -1, 2, -1]
+    assert base["trial_valid"].tolist() == [True, False, True, False]
+    assert base["active_state_code"].tolist() == [1, 0, 1, 0]
+    assert base["relative_physical_valid"].tolist() == [True, True, True, True]
+    controller = bound.prepared.manifest["context"]["controller_state"]["record"]
+    assert controller["policy_id"] == (
+        "exact_logged_chase_trial_id_and_active_state_v1"
+    )
+    assert controller["fallback"] == "prohibited_fail_closed"
+    assert controller["position_validity_policy"] == (
+        "controller_active_is_orthogonal_position_evidence_v1"
+    )
+    assert bound.prepared.manifest["active_position_validity_policy"] == {
+        "policy_id": "controller_active_is_orthogonal_position_evidence_v1",
+        "active_state_present": True,
+        "active_state_surface": "base/active_state_code",
+        "position_validity_semantics": (
+            "controller activity is preserved as evidence and does not invalidate "
+            "otherwise finite selected occurring fish/chaser geometry"
+        ),
+    }
+    assert (
+        bound.prepared.manifest["timing_policy"]["timestamp_field"]
+        == "timestamp_ns_session"
+    )
     transform = bound.prepared.manifest["context"][
         "arena_to_source_camera_transform"
     ]["record"]
@@ -377,6 +431,32 @@ def test_adapter_applies_typed_arena_to_camera_chain_without_timestamp_claim(
     assert transform["to_coordinate_space"] == "source_camera_image_px"
     assert transform["no_reflection_or_heuristic_flip"] is True
     assert bound.prepared.manifest["selector_eligible"] is False
+
+
+def test_exact_controller_projection_rejects_active_row_without_logged_id() -> None:
+    native = _Native()
+    proxy = _Proxy(native)
+    root = _Root()
+    root.chaser_states["chase_trial_id"][102] = 0
+
+    with pytest.raises(
+        adapter.ChaserProxyRelativeFrameAdapterError,
+        match="legacy contiguous-interval trial reconstruction is prohibited",
+    ):
+        adapter._exact_logged_controller_state(root, proxy=proxy, native=native)
+
+
+def test_exact_controller_projection_rejects_missing_logged_field() -> None:
+    native = _Native()
+    proxy = _Proxy(native)
+    root = _Root()
+    del root.chaser_states["chase_trial_id"]
+
+    with pytest.raises(
+        adapter.ChaserProxyRelativeFrameAdapterError,
+        match="legacy trial reconstruction is prohibited",
+    ):
+        adapter._exact_logged_controller_state(root, proxy=proxy, native=native)
 
 
 def test_adapter_rejects_proxy_bound_to_another_native_authority(monkeypatch) -> None:

@@ -1,11 +1,12 @@
 """Publish selector-ineligible provider-bound stimulus-epoch behavior summaries.
 
-This is the first Phase-4 metric product over the provider architecture.  It
-binds one exact stimulus-epoch v2 candidate, one exact provider-motion run,
-and one exact selector-ineligible swim-bout run.  It never resolves or mutates
-a selector and it deliberately omits spatial/chaser metrics: those require a
-separately selected position provider and must not be inferred from the motion
-source.
+The legacy mode binds one exact stimulus-epoch v2 candidate. The semantic-v2
+successor additionally requires the strict protocol-semantic selection handle,
+computes only ``chaser_pre``, ``chaser_training``, and ``chaser_post``, and
+repeats the producer step identity on every scientific row. Both modes bind one
+exact provider-motion run and one exact selector-ineligible swim-bout run.
+Neither resolves or mutates a selector, claims physical stimulus-presentation
+alignment, or infers spatial/chaser metrics from the motion source.
 """
 
 from __future__ import annotations
@@ -52,6 +53,13 @@ from fisheye.analysis_workflows.provider_track_motion_source_handle import (
     ProviderTrackMotionSourceHandle,
     load_provider_track_motion_source_handle,
 )
+from fisheye.analysis_workflows.protocol_semantic_chaser_selection_publication import (
+    ProtocolSemanticChaserSelectionSourceHandle,
+    load_protocol_semantic_chaser_selection_source_handle,
+)
+from fisheye.analysis_workflows.protocol_semantic_chaser_selection import (
+    CHASER_WINDOW_ROLES,
+)
 from fisheye.analysis_workflows.resolved_epoch_selection import (
     ResolvedEpochSelection,
     resolve_exact_stimulus_epoch_selection,
@@ -88,13 +96,27 @@ from fisheye.shared.zarr_run_completion import (
 
 PARENT_PATH = "analysis/stimulus_epoch_behavior_summary_runs"
 SCHEMA_ID = "palette.stimulus_epoch_behavior_summary"
-SCHEMA_VERSION = 1
+LEGACY_SCHEMA_VERSION = 1
+SEMANTIC_SCHEMA_VERSION = 2
 METHOD_ID = "provider_epoch_motion_bouts"
-METHOD_VERSION = 1
+LEGACY_METHOD_VERSION = 1
+SEMANTIC_METHOD_VERSION = 2
 ANALYSIS_CLASS_ID = "stimulus_epoch_motion_bout_summary"
 ANALYSIS_CLASS_VERSION = 1
-MATERIALIZATION_SCHEMA_ID = "palette.provider_epoch_behavior_summary_materialization.v1"
-PUBLISH_SCHEMA_ID = "palette.provider_epoch_behavior_summary_publish.v1"
+LEGACY_MATERIALIZATION_SCHEMA_ID = (
+    "palette.provider_epoch_behavior_summary_materialization.v1"
+)
+SEMANTIC_MATERIALIZATION_SCHEMA_ID = (
+    "palette.provider_epoch_behavior_summary_materialization.v2"
+)
+LEGACY_PUBLISH_SCHEMA_ID = "palette.provider_epoch_behavior_summary_publish.v1"
+SEMANTIC_PUBLISH_SCHEMA_ID = "palette.provider_epoch_behavior_summary_publish.v2"
+# Preserve the original public constants for legacy callers. Semantic-v2 plans
+# select their successor identifiers from the result binding mode.
+MATERIALIZATION_SCHEMA_ID = LEGACY_MATERIALIZATION_SCHEMA_ID
+PUBLISH_SCHEMA_ID = LEGACY_PUBLISH_SCHEMA_ID
+LEGACY_EPOCH_BINDING_MODE = "exact_epoch_selection_v1"
+SEMANTIC_EPOCH_BINDING_MODE = "protocol_semantic_selection_v2"
 DEFAULT_SPEED_LEVEL = "filtered"
 SUPPORTED_SPEED_LEVELS = ("raw", "filtered", "smoothed", "averaged")
 _SELECTOR_ATTRS = (
@@ -116,7 +138,13 @@ class ProviderEpochBehaviorSummaryResult:
     track_id: int
     speed_level: str
     fps: float
+    schema_version: int
+    method_version: int
+    epoch_binding_mode: str
     epoch_selection: ResolvedEpochSelection
+    protocol_semantic_selection_run_name: str | None
+    protocol_semantic_selection_run_path: str | None
+    protocol_semantic_selection_manifest_sha256: str | None
     motion_run_path: str
     motion_manifest_sha256: str
     motion_verification_digest: str
@@ -140,6 +168,7 @@ class ProviderEpochBehaviorSummaryPlan:
     local_zarr: Path
     run_name: str
     epoch_run_name: str
+    protocol_semantic_selection_run_name: str | None
     motion_run_path: str
     swim_bout_run_name: str
     track_id: int
@@ -161,13 +190,23 @@ class ProviderEpochBehaviorSummaryPlan:
 
     def to_json(self) -> dict[str, Any]:
         return {
-            "schema_id": MATERIALIZATION_SCHEMA_ID,
+            "schema_id": (
+                SEMANTIC_MATERIALIZATION_SCHEMA_ID
+                if self.result.epoch_binding_mode == SEMANTIC_EPOCH_BINDING_MODE
+                else LEGACY_MATERIALIZATION_SCHEMA_ID
+            ),
             "source_zarr": str(self.source_zarr),
             "scratch_root": str(self.scratch_root),
             "local_zarr": str(self.local_zarr),
             "run_name": self.run_name,
             "run_path": self.run_path,
             "epoch_run_name": self.epoch_run_name,
+            "protocol_semantic_selection_run_name": (
+                self.protocol_semantic_selection_run_name
+            ),
+            "epoch_binding_mode": self.result.epoch_binding_mode,
+            "schema_version": self.result.schema_version,
+            "method_version": self.result.method_version,
             "motion_run_path": self.motion_run_path,
             "swim_bout_run_name": self.swim_bout_run_name,
             "track_id": self.track_id,
@@ -310,6 +349,104 @@ def _windows(selection: ResolvedEpochSelection) -> tuple[ChaserDistanceWindow, .
         )
         for interval in selection.intervals
     )
+
+
+def _windows_from_protocol_semantic_binding(
+    selection: ResolvedEpochSelection,
+    binding: Mapping[str, Any],
+) -> tuple[ChaserDistanceWindow, ...]:
+    """Project the three strict semantic roles into motion/bout windows."""
+
+    if binding.get("source_epoch_selection") != selection.selection_record:
+        raise ProviderEpochBehaviorSummaryError(
+            "Protocol-semantic selection and epoch authority identify different "
+            "exact sources."
+        )
+    if (
+        binding.get("selector_eligible") is not False
+        or binding.get("production_authority") is not False
+        or binding.get("roles") != list(CHASER_WINDOW_ROLES)
+    ):
+        raise ProviderEpochBehaviorSummaryError(
+            "Protocol-semantic epoch authority is not the exact selector-ineligible "
+            "chaser role set."
+        )
+    epoch_records = binding.get("position_suite_epochs")
+    role_records = binding.get("semantic_role_bindings")
+    if not isinstance(epoch_records, list) or not isinstance(role_records, list):
+        raise ProviderEpochBehaviorSummaryError(
+            "Protocol-semantic source binding lacks its exact role records."
+        )
+    if canonical_json_sha256(epoch_records) != binding.get(
+        "position_suite_epochs_sha256"
+    ) or canonical_json_sha256(role_records) != binding.get(
+        "semantic_role_bindings_sha256"
+    ):
+        raise ProviderEpochBehaviorSummaryError(
+            "Protocol-semantic role-record digest is stale."
+        )
+    observed_roles = tuple(record.get("analysis_role") for record in epoch_records)
+    if observed_roles != CHASER_WINDOW_ROLES or tuple(
+        record.get("analysis_role") for record in role_records
+    ) != CHASER_WINDOW_ROLES:
+        raise ProviderEpochBehaviorSummaryError(
+            "Protocol-semantic epoch roles must be exact chaser pre/training/post."
+        )
+    source_by_id = {int(interval.window_id): interval for interval in selection.intervals}
+    semantic_by_role = {
+        str(record["analysis_role"]): record for record in role_records
+    }
+    windows: list[ChaserDistanceWindow] = []
+    for record in epoch_records:
+        role = str(record["analysis_role"])
+        source_id = record.get("window_id")
+        start = record.get("start_frame")
+        end = record.get("end_frame_exclusive")
+        if (
+            type(source_id) is not int
+            or type(start) is not int
+            or type(end) is not int
+            or end <= start
+            or source_id not in source_by_id
+        ):
+            raise ProviderEpochBehaviorSummaryError(
+                f"Protocol-semantic epoch {role!r} has invalid selected bounds."
+            )
+        source = source_by_id[source_id]
+        semantic = semantic_by_role[role]
+        if (
+            record.get("source_label") != source.label
+            or record.get("source_interval_sha256")
+            != source.source_interval_digest
+            or semantic.get("source_window_id") != source_id
+            or semantic.get("source_interval_sha256")
+            != source.source_interval_digest
+            or semantic.get("selected_start_frame") != start
+            or semantic.get("selected_end_frame_exclusive") != end
+            or start < source.start_frame
+            or end > source.end_frame
+        ):
+            raise ProviderEpochBehaviorSummaryError(
+                f"Protocol-semantic epoch {role!r} differs from its exact source interval."
+            )
+        duration = (end - start) / selection.fps
+        windows.append(
+            ChaserDistanceWindow(
+                window_id=source_id,
+                label=role,
+                start_frame=start,
+                end_frame=end - 1,
+                start_time_s=start / selection.fps,
+                end_time_s=end / selection.fps,
+                duration_s=duration,
+            )
+        )
+    for previous, current in zip(windows, windows[1:]):
+        if current.start_frame <= previous.end_frame:
+            raise ProviderEpochBehaviorSummaryError(
+                "Protocol-semantic motion/bout windows overlap or are unordered."
+            )
+    return tuple(windows)
 
 
 def _swim_bout_binding(
@@ -672,11 +809,109 @@ def _bind_track_id(records: np.ndarray, *, track_id: int) -> np.ndarray:
     return result
 
 
+def _bind_protocol_semantic_row_identity(
+    records: np.ndarray,
+    *,
+    binding: Mapping[str, Any],
+) -> np.ndarray:
+    """Add producer step identity to every semantic epoch summary row."""
+
+    source = np.asarray(records)
+    if (
+        source.ndim != 1
+        or source.dtype.names is None
+        or "window_id" not in source.dtype.names
+    ):
+        raise ProviderEpochBehaviorSummaryError(
+            "Protocol-semantic summary rows require one structured window_id axis."
+        )
+    added_names = (
+        "analysis_role",
+        "protocol_semantic_hash",
+        "protocol_semantic_step_index",
+        "protocol_semantic_step_ref",
+    )
+    if any(name in source.dtype.names for name in added_names):
+        raise ProviderEpochBehaviorSummaryError(
+            "Protocol-semantic row identity fields already exist."
+        )
+    role_records = binding.get("semantic_role_bindings")
+    if not isinstance(role_records, list):
+        raise ProviderEpochBehaviorSummaryError(
+            "Protocol-semantic source binding lacks role identities."
+        )
+    by_window: dict[int, Mapping[str, Any]] = {}
+    for record in role_records:
+        if not isinstance(record, Mapping):
+            raise ProviderEpochBehaviorSummaryError(
+                "Protocol-semantic role identity is malformed."
+            )
+        window_id = record.get("source_window_id")
+        if type(window_id) is not int or window_id in by_window:
+            raise ProviderEpochBehaviorSummaryError(
+                "Protocol-semantic role identities do not bind unique windows."
+            )
+        by_window[window_id] = record
+    dtype = np.dtype(
+        [(name, source.dtype.fields[name][0]) for name in source.dtype.names]
+        + [
+            ("analysis_role", "S32"),
+            ("protocol_semantic_hash", "S72"),
+            ("protocol_semantic_step_index", np.int32),
+            ("protocol_semantic_step_ref", "S112"),
+        ]
+    )
+    result = np.empty(source.shape, dtype=dtype)
+    for name in source.dtype.names:
+        result[name] = source[name]
+    for row_index, window_value in enumerate(source["window_id"]):
+        window_id = int(window_value)
+        record = by_window.get(window_id)
+        if record is None:
+            raise ProviderEpochBehaviorSummaryError(
+                f"Summary row references non-semantic window_id={window_id}."
+            )
+        role = record.get("analysis_role")
+        semantic_hash = record.get("protocol_semantic_hash")
+        step_index = record.get("protocol_semantic_step_index")
+        step_ref = record.get("protocol_semantic_step_ref")
+        expected_step_ref = (
+            "protocol_semantic_snapshot@recipe.steps"
+            f"[{step_index}]"
+            if type(step_index) is int
+            else None
+        )
+        if (
+            type(role) is not str
+            or role not in CHASER_WINDOW_ROLES
+            or type(semantic_hash) is not str
+            or len(semantic_hash) != 71
+            or not semantic_hash.startswith("sha256:")
+            or any(character not in "0123456789abcdef" for character in semantic_hash[7:])
+            or semantic_hash != binding.get("protocol_semantic_hash")
+            or type(step_index) is not int
+            or step_index < 0
+            or type(step_ref) is not str
+            or step_ref != expected_step_ref
+            or len(role.encode("utf-8")) > 32
+            or len(step_ref.encode("utf-8")) > 112
+        ):
+            raise ProviderEpochBehaviorSummaryError(
+                "Protocol-semantic row identity is incomplete."
+            )
+        result["analysis_role"][row_index] = role.encode("utf-8")
+        result["protocol_semantic_hash"][row_index] = semantic_hash.encode("utf-8")
+        result["protocol_semantic_step_index"][row_index] = step_index
+        result["protocol_semantic_step_ref"][row_index] = step_ref.encode("utf-8")
+    return result
+
+
 def _compute_result(
     source_zarr: Path,
     *,
     run_name: str,
     epoch_run_name: str,
+    protocol_semantic_selection_run_name: str | None,
     motion_run_path: str,
     swim_bout_run_name: str,
     track_id: int,
@@ -718,11 +953,34 @@ def _compute_result(
         )
     motion_identity = provider_motion_identity(provider)
     temporal_identity = temporal_selection_identity(selection)
+    semantic_handle: ProtocolSemanticChaserSelectionSourceHandle | None = None
+    semantic_binding: dict[str, Any] | None = None
+    if protocol_semantic_selection_run_name is not None:
+        semantic_handle = load_protocol_semantic_chaser_selection_source_handle(
+            source_zarr,
+            run_name=protocol_semantic_selection_run_name,
+            expected_recording_id=str(temporal_identity.recording_id),
+            use_consolidated=True,
+            deep_audit=True,
+        )
+        semantic_binding = semantic_handle.source_binding()
+        windows = _windows_from_protocol_semantic_binding(
+            selection,
+            semantic_binding,
+        )
+        schema_version = SEMANTIC_SCHEMA_VERSION
+        method_version = SEMANTIC_METHOD_VERSION
+        epoch_binding_mode = SEMANTIC_EPOCH_BINDING_MODE
+    else:
+        windows = _windows(selection)
+        schema_version = LEGACY_SCHEMA_VERSION
+        method_version = LEGACY_METHOD_VERSION
+        epoch_binding_mode = LEGACY_EPOCH_BINDING_MODE
     offer = build_provider_analysis_offer(
         analysis_class_id=ANALYSIS_CLASS_ID,
         analysis_class_version=ANALYSIS_CLASS_VERSION,
         computation_id=METHOD_ID,
-        computation_version=METHOD_VERSION,
+        computation_version=method_version,
         temporal_selection=temporal_identity,
         provider_requirements=ProviderRequirements(motion=motion_identity),
     )
@@ -733,7 +991,6 @@ def _compute_result(
         )
     offer_record = offer.record
     offer_sha256 = offer.sha256
-    windows = _windows(selection)
     track = _track_adapter(provider, rows=rows)
     per_epoch_fish = _make_per_epoch_fish(
         windows=windows,
@@ -762,7 +1019,27 @@ def _compute_result(
             swim_tables=swim_tables,
         )
     )
+    if semantic_binding is not None:
+        per_epoch_fish = _bind_protocol_semantic_row_identity(
+            per_epoch_fish,
+            binding=semantic_binding,
+        )
+        per_epoch_bouts = _bind_protocol_semantic_row_identity(
+            per_epoch_bouts,
+            binding=semantic_binding,
+        )
+        per_epoch_bout_histograms = _bind_protocol_semantic_row_identity(
+            per_epoch_bout_histograms,
+            binding=semantic_binding,
+        )
+        per_epoch_inter_bout_interval_histograms = (
+            _bind_protocol_semantic_row_identity(
+                per_epoch_inter_bout_interval_histograms,
+                binding=semantic_binding,
+            )
+        )
     source_bindings = {
+        "epoch_binding_mode": epoch_binding_mode,
         "epoch_selection": {
             "record": selection.selection_record,
             "sha256": selection.selection_digest,
@@ -776,6 +1053,11 @@ def _compute_result(
             "track_row_stop": int(rows.stop or 0),
         },
         "swim_bouts": swim_binding,
+        **(
+            {"protocol_semantic_selection": semantic_binding}
+            if semantic_binding is not None
+            else {}
+        ),
     }
     return ProviderEpochBehaviorSummaryResult(
         recording_id=str(temporal_identity.recording_id),
@@ -783,7 +1065,19 @@ def _compute_result(
         track_id=int(track_id),
         speed_level=speed_level,
         fps=fps,
+        schema_version=schema_version,
+        method_version=method_version,
+        epoch_binding_mode=epoch_binding_mode,
         epoch_selection=selection,
+        protocol_semantic_selection_run_name=(
+            semantic_handle.run_name if semantic_handle is not None else None
+        ),
+        protocol_semantic_selection_run_path=(
+            semantic_handle.run_path if semantic_handle is not None else None
+        ),
+        protocol_semantic_selection_manifest_sha256=(
+            semantic_handle.manifest_sha256 if semantic_handle is not None else None
+        ),
         motion_run_path=provider.run_path,
         motion_manifest_sha256=provider.provider_manifest_sha256,
         motion_verification_digest=provider.verification_digest,
@@ -809,6 +1103,7 @@ def build_provider_epoch_behavior_summary_plan(
     scratch_root: str | Path,
     run_name: str,
     epoch_run_name: str,
+    protocol_semantic_selection_run_name: str | None = None,
     motion_run: str,
     swim_bout_run_name: str,
     track_id: int = 0,
@@ -824,6 +1119,14 @@ def build_provider_epoch_behavior_summary_plan(
         )
     run = _safe_name(run_name, label="summary run")
     epoch = _safe_name(epoch_run_name, label="epoch run")
+    semantic = (
+        _safe_name(
+            protocol_semantic_selection_run_name,
+            label="protocol-semantic selection run",
+        )
+        if protocol_semantic_selection_run_name is not None
+        else None
+    )
     bout = _safe_name(swim_bout_run_name, label="swim-bout run")
     motion_path = _motion_run_path(motion_run)
     if type(track_id) is not int or track_id < 0:
@@ -845,6 +1148,7 @@ def build_provider_epoch_behavior_summary_plan(
         source,
         run_name=run,
         epoch_run_name=epoch,
+        protocol_semantic_selection_run_name=semantic,
         motion_run_path=motion_path,
         swim_bout_run_name=bout,
         track_id=track_id,
@@ -856,6 +1160,7 @@ def build_provider_epoch_behavior_summary_plan(
         local_zarr=local,
         run_name=run,
         epoch_run_name=epoch,
+        protocol_semantic_selection_run_name=semantic,
         motion_run_path=motion_path,
         swim_bout_run_name=bout,
         track_id=track_id,
@@ -880,6 +1185,7 @@ def _write_local(plan: ProviderEpochBehaviorSummaryPlan) -> None:
         {
             "row_axis": "track_x_stimulus_epoch",
             "unit_of_analysis": "track_epoch",
+            "epoch_binding_mode": plan.result.epoch_binding_mode,
             "rate_denominator": "valid_tracked_duration_s",
             "motion_validity_rule": "linear_sample_valid_and_transition_valid",
         },
@@ -891,6 +1197,7 @@ def _write_local(plan: ProviderEpochBehaviorSummaryPlan) -> None:
         {
             "row_axis": "stimulus_epoch_x_swim_bout",
             "unit_of_analysis": "swim_bout",
+            "epoch_binding_mode": plan.result.epoch_binding_mode,
             "epoch_assignment_rule": "first nonnegative peak/core_start/start frame within inclusive epoch",
         },
     )
@@ -900,6 +1207,7 @@ def _write_local(plan: ProviderEpochBehaviorSummaryPlan) -> None:
         plan.result.per_epoch_bout_histograms,
         {
             "row_axis": "stimulus_epoch_x_bout_metric_x_bin",
+            "epoch_binding_mode": plan.result.epoch_binding_mode,
             "source_table": "per_epoch_bouts",
         },
     )
@@ -909,6 +1217,7 @@ def _write_local(plan: ProviderEpochBehaviorSummaryPlan) -> None:
         plan.result.per_epoch_inter_bout_interval_histograms,
         {
             "row_axis": "stimulus_epoch_x_inter_bout_interval_bin",
+            "epoch_binding_mode": plan.result.epoch_binding_mode,
             "source_table": "source_swim_bout_run/inter_bout_intervals",
         },
     )
@@ -916,6 +1225,7 @@ def _write_local(plan: ProviderEpochBehaviorSummaryPlan) -> None:
     source_refs_sha256 = _source_bindings_sha256(plan.result.source_bindings)
     parameters = {
         "track_id": plan.track_id,
+        "epoch_binding_mode": plan.result.epoch_binding_mode,
         "physical_speed_level": plan.speed_level,
         "bout_signal_selection": "source_swim_bout_default_signal",
         "bout_assignment_rule": "first_nonnegative_peak_core_start_start_frame_inclusive_epoch",
@@ -923,14 +1233,20 @@ def _write_local(plan: ProviderEpochBehaviorSummaryPlan) -> None:
         "valid_tracked_duration_source": "linear_sample_valid_count_over_exact_fps",
         "motion_validity_rule": "linear_sample_valid_and_transition_valid",
         "spatial_metrics": "omitted_requires_separately_selected_position_provider",
+        "protocol_to_acquisition_alignment": (
+            "sealed_epoch_selection_proxy_not_physical_presentation"
+            if plan.result.epoch_binding_mode == SEMANTIC_EPOCH_BINDING_MODE
+            else "legacy_exact_epoch_selection_without_protocol_role_authority"
+        ),
     }
     run.attrs.update(
         json_attr_safe(
             {
                 "schema_id": SCHEMA_ID,
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": plan.result.schema_version,
                 "method": METHOD_ID,
-                "method_version": METHOD_VERSION,
+                "method_version": plan.result.method_version,
+                "epoch_binding_mode": plan.result.epoch_binding_mode,
                 "run_name": plan.run_name,
                 "recording_id": plan.result.recording_id,
                 "row_axis": "track_x_stimulus_epoch",
@@ -959,6 +1275,15 @@ def _write_local(plan: ProviderEpochBehaviorSummaryPlan) -> None:
                         "epoch": plan.epoch_run_name,
                         "motion": plan.motion_run_path,
                         "swim_bouts": plan.swim_bout_run_name,
+                        **(
+                            {
+                                "protocol_semantic_selection": (
+                                    plan.protocol_semantic_selection_run_name
+                                )
+                            }
+                            if plan.protocol_semantic_selection_run_name is not None
+                            else {}
+                        ),
                     },
                     cwd=plan.source_zarr,
                     include_system_context=False,
@@ -997,7 +1322,12 @@ def _validate_group(
 ) -> dict[str, Any]:
     attrs = run.attrs
     errors: list[str] = []
-    if attrs.get("schema_id") != SCHEMA_ID or attrs.get("schema_version") != SCHEMA_VERSION:
+    if (
+        attrs.get("schema_id") != SCHEMA_ID
+        or attrs.get("schema_version") != result.schema_version
+        or attrs.get("method_version") != result.method_version
+        or attrs.get("epoch_binding_mode") != result.epoch_binding_mode
+    ):
         errors.append("schema identity mismatch")
     if attrs.get(RUN_COMPLETION_CONTRACT_ATTR) != RUN_COMPLETION_CONTRACT:
         errors.append("completion contract mismatch")
@@ -1030,12 +1360,14 @@ def _validate_group(
     }
     for name, expected in expected_tables.items():
         try:
-            observed, _table_attrs = load_structured_dataset(run, name)
+            observed, table_attrs = load_structured_dataset(run, name)
         except Exception as exc:
             errors.append(f"{name} is unreadable: {exc}")
             continue
         if not _arrays_equal(expected, observed):
             errors.append(f"{name} decoded values differ")
+        if table_attrs.get("epoch_binding_mode") != result.epoch_binding_mode:
+            errors.append(f"{name} epoch binding mode differs")
     if errors:
         raise ProviderEpochBehaviorSummaryError("Invalid provider epoch summary: " + "; ".join(errors))
     return {
@@ -1068,6 +1400,7 @@ def materialize_provider_epoch_behavior_summary(
     scratch_root: str | Path,
     run_name: str,
     epoch_run_name: str,
+    protocol_semantic_selection_run_name: str | None = None,
     motion_run: str,
     swim_bout_run_name: str,
     track_id: int = 0,
@@ -1081,6 +1414,9 @@ def materialize_provider_epoch_behavior_summary(
         scratch_root=scratch_root,
         run_name=run_name,
         epoch_run_name=epoch_run_name,
+        protocol_semantic_selection_run_name=(
+            protocol_semantic_selection_run_name
+        ),
         motion_run=motion_run,
         swim_bout_run_name=swim_bout_run_name,
         track_id=track_id,
@@ -1108,6 +1444,9 @@ def materialize_provider_epoch_behavior_summary(
             plan.source_zarr,
             run_name=plan.run_name,
             epoch_run_name=plan.epoch_run_name,
+            protocol_semantic_selection_run_name=(
+                plan.protocol_semantic_selection_run_name
+            ),
             motion_run_path=plan.motion_run_path,
             swim_bout_run_name=plan.swim_bout_run_name,
             track_id=plan.track_id,
@@ -1115,8 +1454,18 @@ def materialize_provider_epoch_behavior_summary(
         )
         if (
             refreshed.analysis_offer_sha256 != plan.result.analysis_offer_sha256
+            or _source_bindings_sha256(refreshed.source_bindings)
+            != _source_bindings_sha256(plan.result.source_bindings)
             or not _arrays_equal(refreshed.per_epoch_fish, plan.result.per_epoch_fish)
             or not _arrays_equal(refreshed.per_epoch_bouts, plan.result.per_epoch_bouts)
+            or not _arrays_equal(
+                refreshed.per_epoch_bout_histograms,
+                plan.result.per_epoch_bout_histograms,
+            )
+            or not _arrays_equal(
+                refreshed.per_epoch_inter_bout_interval_histograms,
+                plan.result.per_epoch_inter_bout_interval_histograms,
+            )
         ):
             raise ProviderEpochBehaviorSummaryError(
                 "Provider epoch summary sources changed during materialization."
@@ -1193,8 +1542,16 @@ def materialize_provider_epoch_behavior_summary(
                 target_run_path=plan.target_run_path,
                 run_name=plan.run_name,
                 lock_suffix="provider-epoch-behavior-summary",
-                publish_schema_id=PUBLISH_SCHEMA_ID,
-                policy="provider_epoch_behavior_summary_atomic_nonpromoting_v1",
+                publish_schema_id=(
+                    SEMANTIC_PUBLISH_SCHEMA_ID
+                    if plan.result.epoch_binding_mode
+                    == SEMANTIC_EPOCH_BINDING_MODE
+                    else LEGACY_PUBLISH_SCHEMA_ID
+                ),
+                policy=(
+                    "provider_epoch_behavior_summary_atomic_nonpromoting_"
+                    f"v{plan.result.schema_version}"
+                ),
                 rollback_policy="retain_failed_public_tombstone_leave_selectors_untouched",
                 content_checksum=True,
             ),
@@ -1259,6 +1616,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("zarr_path", type=Path)
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--epoch-run", required=True)
+    parser.add_argument("--protocol-semantic-selection-run")
     parser.add_argument("--motion-run", required=True)
     parser.add_argument("--swim-bout-run", required=True)
     parser.add_argument("--track-id", type=int, default=0)
@@ -1282,6 +1640,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         scratch_root=args.scratch_root or _default_scratch(args.run_name),
         run_name=args.run_name,
         epoch_run_name=args.epoch_run,
+        protocol_semantic_selection_run_name=(
+            args.protocol_semantic_selection_run
+        ),
         motion_run=args.motion_run,
         swim_bout_run_name=args.swim_bout_run,
         track_id=args.track_id,

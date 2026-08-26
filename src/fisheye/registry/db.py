@@ -66,6 +66,13 @@ from .acquisition_batches import (
 from .migration_bodies import RegistryMigrationMixin
 from .migrations import bind_migrations
 from . import identity as registry_identity
+from .stimulus_protocol_storage import (
+    RECORDING_STIMULUS_RUN_INSERT_SQL,
+    RECORDING_STIMULUS_RUN_SEMANTIC_COLUMNS,
+    RECORDING_STIMULUS_STEP_INSERT_SQL,
+    RECORDING_STIMULUS_STEP_SEMANTIC_COLUMNS,
+    recording_stimulus_payload,
+)
 from .temp_store_guard import assert_temp_store_registration_allowed
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 EYE_MASK_REGISTRY_WRITES_RETIRED_MESSAGE = (
@@ -5884,6 +5891,7 @@ class Registry(
 
         if not self._sqlite_object_exists("stimulus_protocols", object_types=("table",)):
             self._migration_061_stimulus_protocol_registry()
+        self._ensure_stimulus_protocol_semantic_columns()
         protocols = tuple(protocols)
         protocol_steps = tuple(protocol_steps)
         recording_runs = tuple(recording_runs)
@@ -5934,35 +5942,23 @@ class Registry(
                 (str(dataset_id),),
             )
             for record in recording_runs:
-                payload = {**dict(record), "dataset_id": str(dataset_id)}
+                payload = recording_stimulus_payload(
+                    record,
+                    dataset_id=str(dataset_id),
+                    semantic_columns=RECORDING_STIMULUS_RUN_SEMANTIC_COLUMNS,
+                )
                 self.conn.execute(
-                    """
-                    INSERT INTO recording_stimulus_runs (
-                        dataset_id, recording_id, stimulus_run_id, protocol_hash,
-                        protocol_name, is_latest, step_count, source_path,
-                        source_metadata_sha256, source_zarr_path, extracted_utc
-                    ) VALUES (
-                        :dataset_id, :recording_id, :stimulus_run_id, :protocol_hash,
-                        :protocol_name, :is_latest, :step_count, :source_path,
-                        :source_metadata_sha256, :source_zarr_path, :extracted_utc
-                    );
-                    """,
+                    RECORDING_STIMULUS_RUN_INSERT_SQL,
                     payload,
                 )
             for record in recording_steps:
-                payload = {**dict(record), "dataset_id": str(dataset_id)}
+                payload = recording_stimulus_payload(
+                    record,
+                    dataset_id=str(dataset_id),
+                    semantic_columns=RECORDING_STIMULUS_STEP_SEMANTIC_COLUMNS,
+                )
                 self.conn.execute(
-                    """
-                    INSERT INTO recording_stimulus_steps (
-                        dataset_id, stimulus_run_id, step_index, step_name,
-                        stimulus_mode, start_camera_frame, end_camera_frame,
-                        duration_s, step_attrs_json
-                    ) VALUES (
-                        :dataset_id, :stimulus_run_id, :step_index, :step_name,
-                        :stimulus_mode, :start_camera_frame, :end_camera_frame,
-                        :duration_s, :step_attrs_json
-                    );
-                    """,
+                    RECORDING_STIMULUS_STEP_INSERT_SQL,
                     payload,
                 )
             for record in recording_modes:

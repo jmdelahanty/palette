@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import zarr
 
+from fisheye.analysis.provider_chaser_position_suite import PositionSuiteEpoch
 from fisheye.analysis_workflows import (
     provider_chaser_position_suite_publication as publication_module,
 )
@@ -17,6 +18,7 @@ from fisheye.analysis_workflows.provider_chaser_position_suite_publication impor
     publish_provider_chaser_position_suite_run,
 )
 from fisheye.shared.json_safety import json_attr_safe
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_io import open_zarr_root
 from tests.unit.fisheye.test_provider_chaser_position_suite import _result
 
@@ -42,6 +44,101 @@ def _source_bindings() -> dict[str, object]:
         "recording_physical_frame": {"record_sha256": "2" * 64},
         "physical_frame_equivalence": {"policy_id": "equivalent-v1"},
         "source_camera_to_arena_mm_transform": {"record_sha256": "3" * 64},
+    }
+
+
+def _protocol_semantic_suite() -> dict[str, object]:
+    return _result(
+        epochs=(
+            PositionSuiteEpoch(
+                analysis_role="chaser_pre",
+                window_id=0,
+                source_label="pre_event",
+                start_frame=0,
+                end_frame=2,
+                source_interval_sha256="4" * 64,
+            ),
+            PositionSuiteEpoch(
+                analysis_role="chaser_training",
+                window_id=1,
+                source_label="training_event",
+                start_frame=2,
+                end_frame=4,
+                source_interval_sha256="5" * 64,
+            ),
+            PositionSuiteEpoch(
+                analysis_role="chaser_post",
+                window_id=2,
+                source_label="post_event",
+                start_frame=4,
+                end_frame=6,
+                source_interval_sha256="6" * 64,
+            ),
+        )
+    )
+
+
+def _protocol_semantic_source_binding(
+    epoch_records: object,
+) -> dict[str, object]:
+    semantic_roles = [
+        {
+            "analysis_role": row["analysis_role"],
+            "source_window_id": row["window_id"],
+            "source_interval_sha256": row["source_interval_sha256"],
+            "selected_start_frame": row["start_frame"],
+            "selected_end_frame_exclusive": row["end_frame_exclusive"],
+            "protocol_semantic_hash": f"sha256:{'6' * 64}",
+            "protocol_semantic_step_index": 0,
+            "protocol_semantic_step_ref": (
+                "protocol_semantic_snapshot@recipe.steps[0]"
+            ),
+            "terminal_frame_excluded_pending_step_end_contract": False,
+        }
+        for row in epoch_records
+    ]
+    return {
+        "run_name": "semantic-selection-v1",
+        "run_path": (
+            "analysis/protocol_semantic_chaser_selection_runs/"
+            "semantic-selection-v1"
+        ),
+        "manifest_sha256": "4" * 64,
+        "selection_identity_sha256": "5" * 64,
+        "protocol_semantic_hash": f"sha256:{'6' * 64}",
+        "palette_computed_trial_index_sha256": "f" * 64,
+        "trial_index_integrity_status": "palette_computed_not_producer_asserted",
+        "standalone_solid_black_status": (
+            "not_applicable_protocol_has_no_standalone_solid_black"
+        ),
+        "step_end_interval_semantics": "producer_contract_pending",
+        "source_epoch_selection": {
+            "source_epoch_run_path": "analysis/stimulus_epoch_runs/epochs-v1",
+            "source_epoch_run_manifest_sha256": "7" * 64,
+            "source_epoch_run_manifest_payload_sha256": "8" * 64,
+            "source_epoch_logical_content_sha256": "9" * 64,
+            "source_epoch_lineage_hash": "a" * 64,
+            "source_epoch_lineage_payload_sha256": "b" * 64,
+            "source_timeline_digest": "c" * 64,
+            "selection_sha256": "e" * 64,
+        },
+        "roles": ["chaser_pre", "chaser_training", "chaser_post"],
+        "position_suite_epochs": epoch_records,
+        "position_suite_epochs_sha256": canonical_json_sha256(epoch_records),
+        "semantic_role_bindings": semantic_roles,
+        "semantic_role_bindings_sha256": canonical_json_sha256(semantic_roles),
+        "position_suite_scope": {
+            "analysis_epoch_scope": "chaser_internal_windows",
+            "behavior_role_contrast_scope": (
+                "within_epoch_treatment_minus_baseline"
+            ),
+            "standalone_protocol_baseline_included": False,
+            "standalone_protocol_baseline_status": (
+                "not_applicable_protocol_has_no_standalone_solid_black"
+            ),
+        },
+        "selector_eligible": False,
+        "production_authority": False,
     }
 
 
@@ -95,6 +192,9 @@ def test_dry_run_reveals_typed_tables_without_creating_target(tmp_path: Path) ->
     assert result["target_exists"] is False
     assert result["manifest_bytes"] < MAX_MANIFEST_BYTES
     assert not (archive / plan.run_path).exists()
+    assert plan.manifest["source_bindings"]["epoch_binding_mode"] == (
+        "caller_bound_legacy_v1"
+    )
 
 
 def test_manifest_keeps_row_evidence_out_of_attributes(tmp_path: Path) -> None:
@@ -235,4 +335,61 @@ def test_plan_fails_closed_for_missing_authority_or_selector_name(
     with pytest.raises(ValueError, match="concrete bare run name"):
         build_provider_chaser_position_suite_publication_plan(
             archive, report=_report(archive), run_name="latest"
+        )
+
+
+def test_plan_preserves_optional_protocol_semantic_selection_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "analysis.zarr"
+    zarr.open_group(str(archive), mode="w", zarr_format=3, use_consolidated=False)
+    report = _report(archive)
+    report["suite"] = json_attr_safe(_protocol_semantic_suite())
+    semantic = _protocol_semantic_source_binding(report["suite"]["epoch_roles"])
+    report["source_bindings"]["protocol_semantic_selection"] = semantic
+
+    class _SemanticHandle:
+        def source_binding(self) -> dict[str, object]:
+            return semantic
+
+    monkeypatch.setattr(
+        publication_module,
+        "load_protocol_semantic_chaser_selection_source_handle",
+        lambda *_args, **_kwargs: _SemanticHandle(),
+    )
+
+    plan = build_provider_chaser_position_suite_publication_plan(
+        archive,
+        report=report,
+        run_name="position-suite-semantic-v1",
+    )
+
+    assert plan.manifest["source_bindings"][
+        "protocol_semantic_selection"
+    ] == semantic
+    assert plan.run_provenance["input_run_ids"][
+        "protocol_semantic_selection"
+    ] == semantic["run_path"]
+    assert plan.manifest["source_bindings"]["epoch_binding_mode"] == (
+        "protocol_semantic_selection_v2"
+    )
+
+
+def test_plan_rejects_malformed_protocol_semantic_role_hierarchy(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "analysis.zarr"
+    zarr.open_group(str(archive), mode="w", zarr_format=3, use_consolidated=False)
+    report = _report(archive)
+    report["suite"] = json_attr_safe(_protocol_semantic_suite())
+    semantic = _protocol_semantic_source_binding(report["suite"]["epoch_roles"])
+    semantic["roles"] = ["black_before", "chaser", "black_after"]
+    report["source_bindings"]["protocol_semantic_selection"] = semantic
+
+    with pytest.raises(ValueError, match="role hierarchy is invalid"):
+        build_provider_chaser_position_suite_publication_plan(
+            archive,
+            report=report,
+            run_name="position-suite-semantic-v1",
         )

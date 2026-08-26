@@ -30,6 +30,9 @@ from fisheye.analysis.provider_chaser_position_suite import (
     SCHEMA_ID as SUITE_SCHEMA_ID,
     SCHEMA_VERSION as SUITE_SCHEMA_VERSION,
 )
+from fisheye.analysis_workflows.protocol_semantic_chaser_selection_publication import (
+    load_protocol_semantic_chaser_selection_source_handle,
+)
 from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
     atomic_publish_run_group,
@@ -359,7 +362,189 @@ def _validate_source_bindings(value: object) -> dict[str, Any]:
     ):
         if not isinstance(bindings.get(field_name), Mapping):
             _fail(f"Position-suite source binding {field_name!r} is malformed.")
+    semantic = bindings.get("protocol_semantic_selection")
+    if semantic is not None:
+        if not isinstance(semantic, Mapping):
+            _fail("Protocol-semantic selection source binding is malformed.")
+        run_name = semantic.get("run_name")
+        run_path = semantic.get("run_path")
+        semantic_run_name = _run_name(run_name)
+        if (
+            run_path
+            != (
+                "analysis/protocol_semantic_chaser_selection_runs/"
+                f"{semantic_run_name}"
+            )
+        ):
+            _fail("Protocol-semantic selection exact run identity is invalid.")
+        _digest(
+            semantic.get("manifest_sha256"),
+            field_name="protocol_semantic_selection.manifest_sha256",
+        )
+        _digest(
+            semantic.get("selection_identity_sha256"),
+            field_name="protocol_semantic_selection.selection_identity_sha256",
+        )
+        semantic_hash = semantic.get("protocol_semantic_hash")
+        if (
+            type(semantic_hash) is not str
+            or not semantic_hash.startswith("sha256:")
+            or len(semantic_hash) != 71
+        ):
+            _fail("Protocol-semantic selection hash is malformed.")
+        _digest(
+            semantic_hash.removeprefix("sha256:"),
+            field_name="protocol_semantic_selection.protocol_semantic_hash",
+        )
+        _digest(
+            semantic.get("palette_computed_trial_index_sha256"),
+            field_name=(
+                "protocol_semantic_selection."
+                "palette_computed_trial_index_sha256"
+            ),
+        )
+        if (
+            semantic.get("trial_index_integrity_status")
+            != "palette_computed_not_producer_asserted"
+        ):
+            _fail("Protocol-semantic trial-index integrity status is invalid.")
+        if semantic.get("roles") != [
+            "chaser_pre",
+            "chaser_training",
+            "chaser_post",
+        ]:
+            _fail("Protocol-semantic selection role hierarchy is invalid.")
+        if semantic.get("step_end_interval_semantics") not in {
+            "producer_contract_pending",
+            "producer_declared_step_end_inclusive",
+            "producer_declared_step_end_exclusive",
+        }:
+            _fail("Protocol-semantic step-end policy is invalid.")
+        standalone_status = semantic.get("standalone_solid_black_status")
+        if standalone_status not in {
+            "not_applicable_protocol_has_no_standalone_solid_black",
+            "present_not_selected",
+            "selected",
+        }:
+            _fail("Protocol-semantic standalone-baseline status is invalid.")
+        if (
+            semantic.get("selector_eligible") is not False
+            or semantic.get("production_authority") is not False
+        ):
+            _fail("Protocol-semantic selection must remain selector-ineligible.")
+        source_epoch_selection = semantic.get("source_epoch_selection")
+        if not isinstance(source_epoch_selection, Mapping):
+            _fail("Protocol-semantic source epoch identity is missing.")
+        for field_name in (
+            "source_epoch_run_manifest_sha256",
+            "source_epoch_run_manifest_payload_sha256",
+            "source_epoch_logical_content_sha256",
+            "source_epoch_lineage_hash",
+            "source_epoch_lineage_payload_sha256",
+            "source_timeline_digest",
+            "selection_sha256",
+        ):
+            _digest(
+                source_epoch_selection.get(field_name),
+                field_name=f"protocol_semantic_selection.{field_name}",
+            )
+        source_epoch_path = source_epoch_selection.get("source_epoch_run_path")
+        epoch_prefix = "analysis/stimulus_epoch_runs/"
+        if (
+            type(source_epoch_path) is not str
+            or not source_epoch_path.startswith(epoch_prefix)
+        ):
+            _fail("Protocol-semantic source epoch run path is invalid.")
+        _run_name(source_epoch_path[len(epoch_prefix) :])
+        epoch_selection = bindings["epoch_selection"]
+        if source_epoch_selection.get("selection_sha256") != epoch_selection.get(
+            "selection_sha256"
+        ):
+            _fail(
+                "Protocol-semantic and position-suite epoch selections differ."
+            )
+        epoch_candidate = bindings["epoch_candidate"]
+        candidate_epoch_path = epoch_candidate.get("epoch_run_path")
+        if (
+            candidate_epoch_path is not None
+            and source_epoch_selection.get("source_epoch_run_path")
+            != candidate_epoch_path
+        ):
+            _fail(
+                "Protocol-semantic and provider candidate epoch paths differ."
+            )
+        semantic_epochs = semantic.get("position_suite_epochs")
+        if not isinstance(semantic_epochs, list) or len(semantic_epochs) != 3:
+            _fail("Protocol-semantic position-suite epoch binding is malformed.")
+        semantic_epochs_sha256 = _digest(
+            semantic.get("position_suite_epochs_sha256"),
+            field_name="protocol_semantic_selection.position_suite_epochs_sha256",
+        )
+        if canonical_json_sha256(semantic_epochs) != semantic_epochs_sha256:
+            _fail("Protocol-semantic position-suite epoch digest is stale.")
+        semantic_roles = semantic.get("semantic_role_bindings")
+        if (
+            not isinstance(semantic_roles, list)
+            or any(not isinstance(row, Mapping) for row in semantic_roles)
+            or [row.get("analysis_role") for row in semantic_roles]
+            != ["chaser_pre", "chaser_training", "chaser_post"]
+        ):
+            _fail("Protocol-semantic per-role bindings are malformed.")
+        semantic_roles_sha256 = _digest(
+            semantic.get("semantic_role_bindings_sha256"),
+            field_name="protocol_semantic_selection.semantic_role_bindings_sha256",
+        )
+        if canonical_json_sha256(semantic_roles) != semantic_roles_sha256:
+            _fail("Protocol-semantic per-role binding digest is stale.")
+        if semantic.get("position_suite_scope") != {
+            "analysis_epoch_scope": "chaser_internal_windows",
+            "behavior_role_contrast_scope": (
+                "within_epoch_treatment_minus_baseline"
+            ),
+            "standalone_protocol_baseline_included": False,
+            "standalone_protocol_baseline_status": standalone_status,
+        }:
+            _fail("Protocol-semantic position-suite scientific scope is invalid.")
+    mode = bindings.get("epoch_binding_mode")
+    expected_mode = (
+        "protocol_semantic_selection_v2"
+        if semantic is not None
+        else "caller_bound_legacy_v1"
+    )
+    if mode not in (None, expected_mode):
+        _fail("Position-suite epoch binding mode contradicts its source authority.")
+    bindings["epoch_binding_mode"] = expected_mode
     return bindings
+
+
+def _validate_protocol_semantic_source(
+    archive: Path,
+    bindings: Mapping[str, Any],
+    *,
+    expected_recording_id: str,
+) -> None:
+    semantic = bindings.get("protocol_semantic_selection")
+    if semantic is None:
+        return
+    if not isinstance(semantic, Mapping):  # pragma: no cover - prevalidated
+        _fail("Protocol-semantic selection source binding is malformed.")
+    try:
+        handle = load_protocol_semantic_chaser_selection_source_handle(
+            archive,
+            run_name=str(semantic["run_name"]),
+            expected_recording_id=expected_recording_id,
+            use_consolidated=True,
+            deep_audit=True,
+        )
+    except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
+        raise ProviderChaserPositionSuitePublicationError(
+            f"Unable to reload exact protocol-semantic selection source: {exc}"
+        ) from exc
+    if handle.source_binding() != dict(semantic):
+        _fail(
+            "Position-suite protocol-semantic binding differs from its exact "
+            "immutable source."
+        )
 
 
 def _readonly_array(value: Any) -> np.ndarray:
@@ -602,6 +787,14 @@ def prepare_provider_chaser_position_suite(
         key: value for key, value in suite.items() if key not in _ROW_TABLE_FIELDS
     }
     source_bindings = _validate_source_bindings(report.get("source_bindings"))
+    semantic_selection = source_bindings.get("protocol_semantic_selection")
+    if isinstance(semantic_selection, Mapping) and suite.get(
+        "epoch_roles"
+    ) != semantic_selection.get("position_suite_epochs"):
+        _fail(
+            "Computed position-suite epochs differ from the exact protocol-"
+            "semantic selection."
+        )
     temporal_alignment = _strict_json_object(
         report.get("temporal_alignment"), field_name="report.temporal_alignment"
     )
@@ -751,10 +944,33 @@ def build_provider_chaser_position_suite_publication_plan(
         and prepared.recording_id != expected_recording_id
     ):
         _fail("Position-suite recording_id differs from the requested recording.")
+    _validate_protocol_semantic_source(
+        archive,
+        prepared.source_bindings,
+        expected_recording_id=prepared.recording_id,
+    )
     manifest = _publication_manifest(prepared, run_name=name, run_path=run_path)
     source_provider = prepared.source_bindings.get("provider_chaser_distance")
     if not isinstance(source_provider, Mapping):
         _fail("Exact provider chaser-distance source binding is missing.")
+    input_run_ids = {
+        "provider_chaser_distance": str(source_provider.get("run_path")),
+        "source_manifest_sha256": str(source_provider.get("manifest_sha256")),
+    }
+    semantic_selection = prepared.source_bindings.get(
+        "protocol_semantic_selection"
+    )
+    if isinstance(semantic_selection, Mapping):
+        input_run_ids.update(
+            {
+                "protocol_semantic_selection": str(
+                    semantic_selection.get("run_path")
+                ),
+                "protocol_semantic_selection_manifest_sha256": str(
+                    semantic_selection.get("manifest_sha256")
+                ),
+            }
+        )
     run_provenance = build_writer_run_provenance(
         command="fisheye.analysis_workflows.provider_chaser_position_suite_publication",
         params={
@@ -764,10 +980,7 @@ def build_provider_chaser_position_suite_publication_plan(
             "scientific_method_id": METHOD_ID,
             "computed_suite_sha256": prepared.suite_sha256,
         },
-        input_run_ids={
-            "provider_chaser_distance": str(source_provider.get("run_path")),
-            "source_manifest_sha256": str(source_provider.get("manifest_sha256")),
-        },
+        input_run_ids=input_run_ids,
     )
     return ProviderChaserPositionSuitePublicationPlan(
         analysis_zarr=archive,
@@ -1096,6 +1309,11 @@ def publish_provider_chaser_position_suite_run(
             parent = root[RUNS_PARENT_PATH]
             if parent_snapshot is None or dict(parent.attrs) != parent_snapshot:
                 _fail("Selector-ineligible publication changed parent metadata.")
+            _validate_protocol_semantic_source(
+                plan.analysis_zarr,
+                plan.prepared.source_bindings,
+                expected_recording_id=plan.prepared.recording_id,
+            )
             _validate_persistent_run(
                 plan.analysis_zarr / plan.run_path,
                 expected_manifest=plan.manifest,
@@ -1272,6 +1490,11 @@ def load_provider_chaser_position_suite_source_handle(
         expected_run_path=run_path,
         verify_content_hashes=deep_audit,
         run=run,
+    )
+    _validate_protocol_semantic_source(
+        archive,
+        manifest["source_bindings"],
+        expected_recording_id=str(manifest["recording_id"]),
     )
     return ProviderChaserPositionSuiteSourceHandle(
         analysis_zarr=archive,

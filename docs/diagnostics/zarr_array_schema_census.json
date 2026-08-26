@@ -1298,7 +1298,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-79dfc8db057f147e"
+            "schema-writer-30ccad678959a661"
           ],
           "shape": "shape(camera_frame_ids)"
         },
@@ -1625,7 +1625,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-ec9412c12b6e997c"
+            "schema-writer-54f3ddde8fe25326"
           ],
           "shape": "<unresolved>"
         },
@@ -3858,7 +3858,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-85556aef57633e86"
+            "schema-writer-e8aed57469fc47aa"
           ],
           "shape": "shape(h5['/video_metadata/frame_metadata'][:])"
         },
@@ -4581,7 +4581,7 @@
         {
           "dtype": "bool",
           "occurrence_ids": [
-            "schema-writer-6617a75a3da09b94"
+            "schema-writer-3e2039f5a74de4ab"
           ],
           "shape": "frame_metadata.shape[0]"
         },
@@ -5727,7 +5727,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-5aa0329d35b20d8a"
+            "schema-writer-630bd5bd09905edc"
           ],
           "shape": "shape(name_values)"
         }
@@ -5973,7 +5973,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-bff9dbbd127fdf36"
+            "schema-writer-022604626552f657"
           ],
           "shape": "shape(plan.result.per_epoch_bout_histograms)"
         },
@@ -5995,7 +5995,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-d0a6483ec97ad81c"
+            "schema-writer-19679c4c09ffe06a"
           ],
           "shape": "shape(plan.result.per_epoch_bouts)"
         },
@@ -6017,7 +6017,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-33d9140889419e0b"
+            "schema-writer-f9d2a05473d5a215"
           ],
           "shape": "shape(plan.result.per_epoch_fish)"
         },
@@ -6039,7 +6039,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-122f1b9079b36ad1"
+            "schema-writer-0a250676076a47fa"
           ],
           "shape": "shape(plan.result.per_epoch_inter_bout_interval_histograms)"
         },
@@ -8232,7 +8232,7 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-8585e2640056b51f"
+            "schema-writer-ee2ea524649e87ba"
           ],
           "shape": "shape(np.arange(row_count, dtype=np.int64))"
         },
@@ -11113,7 +11113,7 @@
       "window_start_frame"
     ],
     "note": "Leaf-name coverage is orientation evidence only; dynamic paths and semantic reuse require manual review.",
-    "writer_leaf_name_count": 629,
+    "writer_leaf_name_count": 630,
     "writer_without_array_spec_leaf_names": [
       "acceleration",
       "acceleration_mm",
@@ -11254,6 +11254,7 @@
       "epoch_label_bytes",
       "escape_count",
       "event_count",
+      "execution_index_json_utf8",
       "eye",
       "eye_gaze_metrics",
       "eye_range_deg",
@@ -27179,8 +27180,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 800,
-      "occurrence_id": "schema-writer-d61a9e96f0ed7cf1",
+      "line": 819,
+      "occurrence_id": "schema-writer-632fa959702a293c",
       "path_pattern": "<analysis_group>/enums/<name>/id",
       "required": null,
       "shape_expression": "shape(data['id'])",
@@ -27192,7 +27193,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-125a08b986da4e27"
+      "writer_site_id": "writer-39562ff730c76990"
     },
     {
       "access_pattern": "unclassified",
@@ -27213,8 +27214,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 801,
-      "occurrence_id": "schema-writer-5aa0329d35b20d8a",
+      "line": 820,
+      "occurrence_id": "schema-writer-630bd5bd09905edc",
       "path_pattern": "<analysis_group>/enums/<name>/name",
       "required": null,
       "shape_expression": "shape(name_values)",
@@ -27226,7 +27227,41 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-ca5d26c73828132c"
+      "writer_site_id": "writer-8702c683cd27a900"
+    },
+    {
+      "access_pattern": "unclassified",
+      "access_pattern_basis": "no high-confidence static access rule",
+      "array_name": "execution_index_json_utf8",
+      "array_name_expression": "'execution_index_json_utf8'",
+      "canonical_contract_id": null,
+      "canonical_contract_version": null,
+      "consumer": "unclassified",
+      "consumer_basis": "consumer is not provable from static creation/declaration",
+      "contract_mapping_basis": "no initial catalog candidate for this leaf name",
+      "contract_mapping_status": "unmapped",
+      "declaration_symbol": "fisheye.analysis.import_stimulus_to_zarr:_materialize_protocol_execution_index",
+      "declaring_stage": null,
+      "declaring_stage_basis": "stage is not statically bound at this writer call",
+      "description": "Schema evidence recovered from a physical writer call site.",
+      "dtype": null,
+      "dtype_expression": null,
+      "dynamic_name": false,
+      "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
+      "line": 977,
+      "occurrence_id": "schema-writer-a07a369e48dc7882",
+      "path_pattern": "<run_group>/<child_name>/execution_index_json_utf8",
+      "required": null,
+      "shape_expression": "shape(np.frombuffer(execution.execution_json.encode('utf-8'), dtype=np.uint8).copy())",
+      "shape_template": null,
+      "source_kind": "writer_observed_schema",
+      "stage_spec_symbol": null,
+      "status": "current",
+      "status_basis": "packaged Palette module without a maintenance marker",
+      "subgroup": null,
+      "write_lifecycle": "append_or_build_then_publish",
+      "write_lifecycle_basis": "production output; exact write mode unverified",
+      "writer_site_id": "writer-7242d430d3fc27c2"
     },
     {
       "access_pattern": "windowed",
@@ -27247,8 +27282,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 2186,
-      "occurrence_id": "schema-writer-85556aef57633e86",
+      "line": 3271,
+      "occurrence_id": "schema-writer-e8aed57469fc47aa",
       "path_pattern": "<run_group>/video_metadata/frame_metadata",
       "required": null,
       "shape_expression": "shape(h5['/video_metadata/frame_metadata'][:])",
@@ -27260,7 +27295,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-05ac97983d188168"
+      "writer_site_id": "writer-0d001578d6dac2a9"
     },
     {
       "access_pattern": "windowed",
@@ -27281,8 +27316,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 2212,
-      "occurrence_id": "schema-writer-b45329fae8249973",
+      "line": 3297,
+      "occurrence_id": "schema-writer-70a9051e17f21187",
       "path_pattern": "<run_group>/video_metadata/camera_aligned_frame_metadata",
       "required": null,
       "shape_expression": "shape(camera_aligned_metadata)",
@@ -27294,7 +27329,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-77b2d5211a9b5013"
+      "writer_site_id": "writer-47bc4c81467765cf"
     },
     {
       "access_pattern": "unclassified",
@@ -27315,8 +27350,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 2220,
-      "occurrence_id": "schema-writer-6617a75a3da09b94",
+      "line": 3305,
+      "occurrence_id": "schema-writer-3e2039f5a74de4ab",
       "path_pattern": "<run_group>/interpolation_mask",
       "required": null,
       "shape_expression": "frame_metadata.shape[0]",
@@ -27328,7 +27363,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-a697de0234f79b47"
+      "writer_site_id": "writer-4634445f365be57f"
     },
     {
       "access_pattern": "unclassified",
@@ -27349,8 +27384,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 2228,
-      "occurrence_id": "schema-writer-ba302980d1c000eb",
+      "line": 3313,
+      "occurrence_id": "schema-writer-d481e0ccd70e5263",
       "path_pattern": "<run_group>/camera_aligned_interpolation_mask",
       "required": null,
       "shape_expression": "shape(interpolation_mask[camera_aligned_indices])",
@@ -27362,7 +27397,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-617ab69b5d13c98c"
+      "writer_site_id": "writer-6936442917585c77"
     },
     {
       "access_pattern": "unclassified",
@@ -27383,8 +27418,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 2253,
-      "occurrence_id": "schema-writer-ec9412c12b6e997c",
+      "line": 3338,
+      "occurrence_id": "schema-writer-54f3ddde8fe25326",
       "path_pattern": "<unresolved-parent>/chaser_states",
       "required": null,
       "shape_expression": null,
@@ -27396,7 +27431,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-bf116d52954f2fd4"
+      "writer_site_id": "writer-729cbcc20068c425"
     },
     {
       "access_pattern": "unclassified",
@@ -27417,8 +27452,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 2254,
-      "occurrence_id": "schema-writer-05d962949358fea8",
+      "line": 3339,
+      "occurrence_id": "schema-writer-27cc9c12fb139964",
       "path_pattern": "<unresolved-parent>/bounding_boxes",
       "required": null,
       "shape_expression": null,
@@ -27430,7 +27465,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-30c95b3ea1c5e2d2"
+      "writer_site_id": "writer-72513160449583d0"
     },
     {
       "access_pattern": "indexed",
@@ -27451,8 +27486,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 2281,
-      "occurrence_id": "schema-writer-5229454ffeb90865",
+      "line": 3366,
+      "occurrence_id": "schema-writer-caff20b42836f250",
       "path_pattern": "<run_group>/events/values",
       "required": null,
       "shape_expression": "shape(_ensure_utf8_column(values))",
@@ -27464,7 +27499,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-3ac35f0b968e74f1"
+      "writer_site_id": "writer-9a348b23ea3802bd"
     },
     {
       "access_pattern": "unclassified",
@@ -34068,8 +34103,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis_workflows/materializers/provider_epoch_behavior_summary.py",
-      "line": 876,
-      "occurrence_id": "schema-writer-33d9140889419e0b",
+      "line": 1181,
+      "occurrence_id": "schema-writer-f9d2a05473d5a215",
       "path_pattern": "<require_runs_parent(analysis, PARENT_PATH.split('/', 1)[1])>/<plan.run_name>/per_epoch_fish",
       "required": null,
       "shape_expression": "shape(plan.result.per_epoch_fish)",
@@ -34081,7 +34116,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-8da29f7056a483e7"
+      "writer_site_id": "writer-cec08e13e28863b3"
     },
     {
       "access_pattern": "unclassified",
@@ -34102,8 +34137,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis_workflows/materializers/provider_epoch_behavior_summary.py",
-      "line": 887,
-      "occurrence_id": "schema-writer-d0a6483ec97ad81c",
+      "line": 1193,
+      "occurrence_id": "schema-writer-19679c4c09ffe06a",
       "path_pattern": "<require_runs_parent(analysis, PARENT_PATH.split('/', 1)[1])>/<plan.run_name>/per_epoch_bouts",
       "required": null,
       "shape_expression": "shape(plan.result.per_epoch_bouts)",
@@ -34115,7 +34150,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-727f8cb9826e2d2a"
+      "writer_site_id": "writer-cdbdef554b049ddc"
     },
     {
       "access_pattern": "unclassified",
@@ -34136,8 +34171,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis_workflows/materializers/provider_epoch_behavior_summary.py",
-      "line": 897,
-      "occurrence_id": "schema-writer-bff9dbbd127fdf36",
+      "line": 1204,
+      "occurrence_id": "schema-writer-022604626552f657",
       "path_pattern": "<require_runs_parent(analysis, PARENT_PATH.split('/', 1)[1])>/<plan.run_name>/per_epoch_bout_histograms",
       "required": null,
       "shape_expression": "shape(plan.result.per_epoch_bout_histograms)",
@@ -34149,7 +34184,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-92d94876eda9194a"
+      "writer_site_id": "writer-79ab262f42a9d670"
     },
     {
       "access_pattern": "unclassified",
@@ -34170,8 +34205,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis_workflows/materializers/provider_epoch_behavior_summary.py",
-      "line": 906,
-      "occurrence_id": "schema-writer-122f1b9079b36ad1",
+      "line": 1214,
+      "occurrence_id": "schema-writer-0a250676076a47fa",
       "path_pattern": "<require_runs_parent(analysis, PARENT_PATH.split('/', 1)[1])>/<plan.run_name>/per_epoch_inter_bout_interval_histograms",
       "required": null,
       "shape_expression": "shape(plan.result.per_epoch_inter_bout_interval_histograms)",
@@ -34183,7 +34218,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-f0dd8525ffb7a486"
+      "writer_site_id": "writer-dfaa9291dcbb5f2e"
     },
     {
       "access_pattern": "unclassified",
@@ -44205,8 +44240,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/stimulus_coordinate_contract.py",
-      "line": 3275,
-      "occurrence_id": "schema-writer-a5dbf3ef40fe2e8b",
+      "line": 3488,
+      "occurrence_id": "schema-writer-95eeec44ff45bff4",
       "path_pattern": "<chaser>/target_source_acquisition_frame_index",
       "required": null,
       "shape_expression": "shape(target_source_values)",
@@ -44218,7 +44253,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-1afd2119f6a199d3"
+      "writer_site_id": "writer-29073b2bcff9626b"
     },
     {
       "access_pattern": "windowed",
@@ -44239,8 +44274,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/stimulus_coordinate_contract.py",
-      "line": 3281,
-      "occurrence_id": "schema-writer-12634f33045a7f5b",
+      "line": 3494,
+      "occurrence_id": "schema-writer-ddf65569b95627be",
       "path_pattern": "<chaser>/target_source_acquisition_frame_valid",
       "required": null,
       "shape_expression": "shape(target_source_valid)",
@@ -44252,7 +44287,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-5a155c92b82e5ab1"
+      "writer_site_id": "writer-e0f4788f1ca435f6"
     },
     {
       "access_pattern": "windowed",
@@ -44273,8 +44308,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/stimulus_coordinate_contract.py",
-      "line": 3367,
-      "occurrence_id": "schema-writer-79dfc8db057f147e",
+      "line": 3580,
+      "occurrence_id": "schema-writer-30ccad678959a661",
       "path_pattern": "<chaser>/camera_frame_ids",
       "required": null,
       "shape_expression": "shape(camera_frame_ids)",
@@ -44286,7 +44321,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-b0e09c7d7096d372"
+      "writer_site_id": "writer-f84544383bec76e1"
     },
     {
       "access_pattern": "windowed",
@@ -44307,8 +44342,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/stimulus_coordinate_contract.py",
-      "line": 3368,
-      "occurrence_id": "schema-writer-8585e2640056b51f",
+      "line": 3581,
+      "occurrence_id": "schema-writer-ee2ea524649e87ba",
       "path_pattern": "<chaser>/source_row_indices",
       "required": null,
       "shape_expression": "shape(np.arange(row_count, dtype=np.int64))",
@@ -44320,7 +44355,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-cf622e6d752f17ad"
+      "writer_site_id": "writer-baefb715c6fb43c8"
     },
     {
       "access_pattern": "unclassified",
@@ -74995,33 +75030,33 @@
     "array_spec_declaration_count": 450,
     "array_spec_unique_leaf_name_count": 270,
     "array_spec_unique_signature_count": 343,
-    "direct_zarr_api_site_count": 652,
-    "dynamic_or_unresolved_writer_site_count": 345,
+    "direct_zarr_api_site_count": 657,
+    "dynamic_or_unresolved_writer_site_count": 349,
     "manual_zarr_metadata_site_count": 1,
-    "parsed_writer_candidate_module_count": 230,
+    "parsed_writer_candidate_module_count": 232,
     "reader_required_array_declaration_count": 106,
-    "resolved_writer_leaf_name_count": 629,
-    "scanned_python_module_count": 1575,
+    "resolved_writer_leaf_name_count": 630,
+    "scanned_python_module_count": 1613,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
-      "unmapped": 1772
+      "unmapped": 1773
     },
     "schema_occurrences_by_source_kind": {
       "array_spec_stage_binding": 306,
       "array_spec_unbound_declaration": 144,
       "reader_required_array_declaration": 106,
-      "writer_observed_schema": 1292
+      "writer_observed_schema": 1293
     },
-    "writer_site_count": 1637,
-    "writer_site_with_chunks_expression_count": 722,
+    "writer_site_count": 1642,
+    "writer_site_with_chunks_expression_count": 727,
     "writer_site_with_codec_expression_count": 15,
     "writer_site_with_shards_expression_count": 17,
     "writer_site_with_stage_classification_count": 489,
-    "writer_site_without_dtype_evidence_count": 999,
+    "writer_site_without_dtype_evidence_count": 1004,
     "writer_site_without_shape_evidence_count": 162,
     "writer_sites_by_status": {
-      "current": 1502,
+      "current": 1507,
       "unclear": 135
     },
     "writer_sites_by_surface": {
@@ -75030,8 +75065,8 @@
       "diagnostic": 14,
       "legacy": 49,
       "migration_or_maintenance": 47,
-      "production": 1228,
-      "publication": 70,
+      "production": 1231,
+      "publication": 72,
       "training": 180
     },
     "writer_wrapper_call_site_count": 984

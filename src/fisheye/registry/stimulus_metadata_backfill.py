@@ -106,6 +106,10 @@ def build_stimulus_metadata_census(datasets: Sequence[dict[str, Any]]) -> dict[s
     latest_mode_counts: Counter[str] = Counter()
     latest_mode_datasets: defaultdict[str, set[str]] = defaultdict(set)
     protocol_counts: Counter[str] = Counter()
+    latest_semantic_status_counts: Counter[str] = Counter()
+    latest_semantic_hash_counts: Counter[str] = Counter()
+    latest_semantic_hash_datasets: defaultdict[str, set[str]] = defaultdict(set)
+    latest_recipe_counts: Counter[str] = Counter()
     issues: list[dict[str, Any]] = []
     dataset_rows: list[dict[str, Any]] = []
     stimulus_run_count = 0
@@ -150,6 +154,19 @@ def build_stimulus_metadata_census(datasets: Sequence[dict[str, Any]]) -> dict[s
         latest_rows = [row for row in recording_runs if int(row.get("is_latest", 0)) == 1]
         latest_run_ids = {str(row["stimulus_run_id"]) for row in latest_rows}
         latest_run_count += len(latest_rows)
+        for row in latest_rows:
+            status = str(row.get("protocol_semantic_status") or "<unknown>")
+            latest_semantic_status_counts[status] += 1
+            semantic_hash = row.get("protocol_semantic_hash")
+            if semantic_hash:
+                semantic_hash = str(semantic_hash)
+                latest_semantic_hash_counts[semantic_hash] += 1
+                latest_semantic_hash_datasets[semantic_hash].add(
+                    str(dataset["dataset_id"])
+                )
+            recipe = row.get("protocol_recipe_label")
+            if recipe:
+                latest_recipe_counts[str(recipe)] += 1
         if recording_runs:
             datasets_with_stimulus += 1
             if len(latest_rows) != 1:
@@ -205,6 +222,21 @@ def build_stimulus_metadata_census(datasets: Sequence[dict[str, Any]]) -> dict[s
             for mode, dataset_ids in sorted(latest_mode_datasets.items())
         },
         "protocol_dataset_counts": dict(sorted(protocol_counts.items())),
+        "latest_protocol_semantic_status_run_counts": dict(
+            sorted(latest_semantic_status_counts.items())
+        ),
+        "latest_protocol_semantic_hash_run_counts": dict(
+            sorted(latest_semantic_hash_counts.items())
+        ),
+        "latest_protocol_semantic_hash_dataset_counts": {
+            semantic_hash: len(dataset_ids)
+            for semantic_hash, dataset_ids in sorted(
+                latest_semantic_hash_datasets.items()
+            )
+        },
+        "latest_protocol_recipe_run_counts": dict(
+            sorted(latest_recipe_counts.items())
+        ),
         "issue_count": len(issues),
         "issues": issues,
         "datasets": dataset_rows,

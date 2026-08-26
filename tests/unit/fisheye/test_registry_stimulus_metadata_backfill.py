@@ -10,6 +10,9 @@ from fisheye.registry.extractors.stimulus_metadata import StimulusMetadataExtrac
 from fisheye.registry import stimulus_metadata_backfill as backfill
 
 
+SEMANTIC_HASH = "sha256:" + "a" * 64
+
+
 def _extraction(*, mode: str = "CHASER", latest: int = 1) -> StimulusMetadataExtraction:
     return StimulusMetadataExtraction(
         protocols=(
@@ -45,6 +48,17 @@ def _extraction(*, mode: str = "CHASER", latest: int = 1) -> StimulusMetadataExt
                 "source_metadata_sha256": "metadata_hash",
                 "source_zarr_path": "/groups/recording_1_analysis.zarr",
                 "extracted_utc": "2026-07-13T00:00:00Z",
+                "protocol_semantic_status": "verified",
+                "protocol_semantic_hash": SEMANTIC_HASH,
+                "palette_computed_trial_index_sha256": "sha256:" + "b" * 64,
+                "protocol_trial_index_integrity_status": (
+                    "palette_computed_not_producer_asserted"
+                ),
+                "protocol_recipe_schema_id": "palette.stimulus.protocol_recipe.v1",
+                "protocol_recipe_schema_version": 1,
+                "protocol_recipe_step_count": 1,
+                "protocol_recipe_mode_sequence_json": '["CHASER"]',
+                "protocol_recipe_label": "CHASER",
             },
         ),
         recording_steps=(
@@ -57,6 +71,18 @@ def _extraction(*, mode: str = "CHASER", latest: int = 1) -> StimulusMetadataExt
                 "end_camera_frame": 99,
                 "duration_s": 30.0,
                 "step_attrs_json": "{}",
+                "protocol_semantic_status": "verified",
+                "protocol_semantic_hash": SEMANTIC_HASH,
+                "protocol_semantic_step_index": 0,
+                "protocol_semantic_step_ref": (
+                    "protocol_semantic_snapshot@recipe.steps[0]"
+                ),
+                "protocol_semantic_stimulus_mode_id": 12,
+                "protocol_semantic_duration_s": 30.0,
+                "stimulus_family": "chaser",
+                "display_context": "chaser",
+                "protocol_trial_index_status": "detailed",
+                "resolved_color_rgba8_json": None,
             },
         ),
         recording_modes=(
@@ -123,6 +149,13 @@ def test_build_census_reports_latest_normalized_modes(monkeypatch: pytest.Monkey
     assert census["datasets_with_stimulus_count"] == 1
     assert census["latest_mode_run_counts"] == {"CHASER": 1}
     assert census["latest_mode_dataset_counts"] == {"CHASER": 1}
+    assert census["latest_protocol_semantic_status_run_counts"] == {
+        "verified": 1
+    }
+    assert census["latest_protocol_semantic_hash_run_counts"] == {
+        SEMANTIC_HASH: 1
+    }
+    assert census["latest_protocol_recipe_run_counts"] == {"CHASER": 1}
 
 
 def test_build_census_flags_missing_latest_and_unknown_mode(

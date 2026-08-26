@@ -1,10 +1,11 @@
 """Materialize a selector-ineligible provider-aware chaser position canary.
 
-The command accepts only explicit immutable run names and caller-declared
-epoch-role bindings.  Without ``--apply`` it performs all read-only source
-validation and computation, then prints the exact output plan.  With
-``--apply`` it atomically writes compact evidence below an operator-supplied
-operations directory; it never writes the analysis Zarr or registry.
+The command accepts only explicit immutable run names and either a strict
+protocol-semantic selection run or legacy caller-declared epoch-role bindings.
+Without ``--apply`` it performs all read-only source validation and computation,
+then prints the exact output plan. With ``--apply`` it atomically writes compact
+evidence below an operator-supplied operations directory; it never writes the
+analysis Zarr or registry.
 """
 
 from __future__ import annotations
@@ -42,6 +43,13 @@ from fisheye.analysis.provider_chaser_position_suite import (  # noqa: E402
 from fisheye.analysis_workflows.provider_chaser_distance_publication import (  # noqa: E402
     ProviderChaserDistanceSourceHandle,
     load_provider_chaser_distance_source_handle,
+)
+from fisheye.analysis_workflows.composable_epoch_selection_adapter import (  # noqa: E402
+    _selection_identity,
+)
+from fisheye.analysis_workflows.protocol_semantic_chaser_selection_publication import (  # noqa: E402
+    ProtocolSemanticChaserSelectionSourceHandle,
+    load_protocol_semantic_chaser_selection_source_handle,
 )
 from fisheye.analysis_workflows.resolved_epoch_selection import (  # noqa: E402
     resolve_exact_stimulus_epoch_selection,
@@ -299,8 +307,27 @@ def _parse_float_list(value: str) -> tuple[float, ...]:
 
 
 def _epoch_specs(
-    selection: Any, bindings: Sequence[tuple[str, int]]
+    selection: Any,
+    bindings: Sequence[tuple[str, int]],
+    *,
+    semantic_selection: ProtocolSemanticChaserSelectionSourceHandle | None = None,
 ) -> list[PositionSuiteEpoch]:
+    if semantic_selection is not None:
+        if type(semantic_selection) is not ProtocolSemanticChaserSelectionSourceHandle:
+            _fail("Semantic epoch selection must be one strict loader-minted handle.")
+        if bindings:
+            _fail(
+                "Caller epoch-role bindings cannot be combined with a semantic "
+                "selection authority."
+            )
+        if semantic_selection.manifest.get(
+            "source_epoch_selection"
+        ) != _selection_identity(selection):
+            _fail(
+                "Semantic selection and provider epoch authority do not identify "
+                "the same exact source."
+            )
+        return list(semantic_selection.position_suite_epochs())
     if not bindings:
         _fail("At least one explicit --epoch-role binding is required.")
     roles = [role for role, _ in bindings]
@@ -332,6 +359,7 @@ def build_canary(
     expected_selection_record_sha256: str,
     expected_physical_authority_sha256: str,
     epoch_role_bindings: Sequence[tuple[str, int]],
+    protocol_semantic_selection_run: str | None = None,
     treatment_role: str = "aggressive",
     baseline_role: str = "inert",
     radial_bin_width_mm: float = 2.0,
@@ -380,7 +408,24 @@ def build_canary(
         != epoch_binding["epoch_manifest_payload_sha256"]
     ):
         _fail("Exact epoch manifest payload differs from the sealed provider source.")
-    epochs = _epoch_specs(selection, epoch_role_bindings)
+    semantic_selection: ProtocolSemanticChaserSelectionSourceHandle | None = None
+    if protocol_semantic_selection_run is not None:
+        semantic_run = _strict_name(
+            protocol_semantic_selection_run,
+            field="protocol_semantic_selection_run",
+        )
+        semantic_selection = load_protocol_semantic_chaser_selection_source_handle(
+            path,
+            run_name=semantic_run,
+            expected_recording_id=handle.recording_id,
+            use_consolidated=True,
+            deep_audit=True,
+        )
+    epochs = _epoch_specs(
+        selection,
+        epoch_role_bindings,
+        semantic_selection=semantic_selection,
+    )
 
     geometry_task = {
         "analysis_zarr": str(path),
@@ -509,6 +554,11 @@ def build_canary(
             "production_authority": False,
             "registry_update": False,
             "source_bindings": {
+                "epoch_binding_mode": (
+                    "protocol_semantic_selection_v2"
+                    if semantic_selection is not None
+                    else "caller_bound_legacy_v1"
+                ),
                 "provider_chaser_distance": {
                     "run_name": handle.run_name,
                     "run_path": handle.run_path,
@@ -525,6 +575,15 @@ def build_canary(
                 "recording_physical_frame": recording_physical_frame,
                 "physical_frame_equivalence": physical_frame_equivalence,
                 "source_camera_to_arena_mm_transform": transform.as_record(),
+                **(
+                    {
+                        "protocol_semantic_selection": (
+                            semantic_selection.source_binding()
+                        )
+                    }
+                    if semantic_selection is not None
+                    else {}
+                ),
             },
             "temporal_alignment": temporal,
             "temporal_caveat": (
@@ -748,12 +807,22 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--geometry-selection-run", required=True)
     parser.add_argument("--expected-selection-record-sha256", required=True)
     parser.add_argument("--expected-physical-authority-sha256", required=True)
-    parser.add_argument(
+    epoch_source = parser.add_mutually_exclusive_group(required=True)
+    epoch_source.add_argument(
         "--epoch-role",
         type=_parse_epoch_role,
         action="append",
-        required=True,
-        help="Explicit analysis-role binding in ROLE=WINDOW_ID form; repeat as needed.",
+        help=(
+            "Legacy explicit analysis-role binding in ROLE=WINDOW_ID form; "
+            "repeat as needed."
+        ),
+    )
+    epoch_source.add_argument(
+        "--protocol-semantic-selection-run",
+        help=(
+            "Exact immutable semantic selection run; supplies chaser_pre, "
+            "chaser_training, and chaser_post without caller role aliases."
+        ),
     )
     parser.add_argument("--treatment-role", default="aggressive")
     parser.add_argument("--baseline-role", default="inert")
@@ -786,7 +855,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         geometry_selection_run=args.geometry_selection_run,
         expected_selection_record_sha256=args.expected_selection_record_sha256,
         expected_physical_authority_sha256=args.expected_physical_authority_sha256,
-        epoch_role_bindings=args.epoch_role,
+        epoch_role_bindings=args.epoch_role or (),
+        protocol_semantic_selection_run=args.protocol_semantic_selection_run,
         treatment_role=args.treatment_role,
         baseline_role=args.baseline_role,
         radial_bin_width_mm=args.radial_bin_width_mm,

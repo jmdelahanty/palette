@@ -15,6 +15,9 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.utils.export_provider_epoch_behavior_cohort import (
     ARROW_ENVELOPE_SCHEMA_ID,
     ARROW_ENVELOPE_SCHEMA_VERSION,
+    SEMANTIC_EPOCH_BINDING_MODE,
+    SEMANTIC_EXPORT_SCHEMA_VERSION,
+    SEMANTIC_ROLES,
     TABLE_BOUTS,
     TABLE_FISH,
     TABLE_NAMES,
@@ -24,6 +27,8 @@ from fisheye.utils.plot_provider_epoch_behavior_cohort import (
     EXPECTED_EPOCH_LABELS,
     HISTOGRAM_BIN_COUNT,
     NEUTRAL_EPOCH_COLORS,
+    SEMANTIC_EXPECTED_EPOCH_LABELS,
+    SEMANTIC_NEUTRAL_EPOCH_COLORS,
     ProviderEpochBehaviorPlotError,
     _shared_log_histogram_summary,
     _distribution_data,
@@ -45,8 +50,16 @@ def _default_value(arrow_type: str, nullable: bool) -> object:
     raise AssertionError(arrow_type)
 
 
-def _make_table(table_name: str, rows: list[dict[str, object]]) -> pa.Table:
-    contract = table_contracts_for_disposition("linear_only")[table_name]
+def _make_table(
+    table_name: str,
+    rows: list[dict[str, object]],
+    *,
+    schema_version: int = 1,
+) -> pa.Table:
+    contract = table_contracts_for_disposition(
+        "linear_only",
+        schema_version=schema_version,
+    )[table_name]
     normalized = [
         {
             field.name: row.get(field.name, _default_value(field.arrow_type, field.nullable))
@@ -58,21 +71,76 @@ def _make_table(table_name: str, rows: list[dict[str, object]]) -> pa.Table:
         normalized,
         schema=exact_schema(contract, metadata={
             b"palette.export_schema_id": b"palette.provider_epoch_behavior_cohort",
-            b"palette.export_schema_version": b"1",
+            b"palette.export_schema_version": str(schema_version).encode("ascii"),
             b"palette.selector_eligible": b"false",
             b"palette.table_name": table_name.encode("utf-8"),
         }),
     )
 
 
-def _manifest(*, recording_count: int = 3, bout_count: int | None = None) -> dict[str, object]:
-    contracts = table_contracts_for_disposition("linear_only")
+def _semantic_lineage(recording_id: str) -> dict[str, object]:
+    semantic_hash = f"sha256:{'9' * 64}"
+    records = [
+        {
+            "analysis_role": role,
+            "source_window_id": window_id,
+            "protocol_semantic_hash": semantic_hash,
+            "protocol_semantic_step_index": 1,
+            "protocol_semantic_step_ref": (
+                "protocol_semantic_snapshot@recipe.steps[1]"
+            ),
+            "selected_start_frame": index * 10,
+            "selected_end_frame_exclusive": (index + 1) * 10,
+        }
+        for index, (role, window_id) in enumerate(
+            zip(SEMANTIC_ROLES, (4, 8, 12))
+        )
+    ]
+    refs = {
+        "epoch_binding_mode": SEMANTIC_EPOCH_BINDING_MODE,
+        "protocol_semantic_selection": {
+            "run_name": "semantic-selection-v2",
+            "manifest_sha256": "f" * 64,
+            "protocol_semantic_hash": semantic_hash,
+            "roles": list(SEMANTIC_ROLES),
+            "semantic_role_bindings": records,
+            "semantic_role_bindings_sha256": canonical_json_sha256(records),
+            "selector_eligible": False,
+            "production_authority": False,
+        },
+    }
+    return {
+        "recording_id": recording_id,
+        "track_id": 0,
+        "summary_run": "summary-semantic-v2",
+        "source_summary_sha256": "a" * 64,
+        "source_refs_sha256": canonical_json_sha256(refs),
+        "summary_schema_version": 2,
+        "epoch_binding_mode": SEMANTIC_EPOCH_BINDING_MODE,
+        "source_refs": refs,
+    }
+
+
+def _manifest(
+    *,
+    recording_count: int = 3,
+    bout_count: int | None = None,
+    schema_version: int = 1,
+) -> dict[str, object]:
+    contracts = table_contracts_for_disposition(
+        "linear_only",
+        schema_version=schema_version,
+    )
     envelope = contract_envelope(
         TABLE_NAMES,
         known_table_names=TABLE_NAMES,
         contracts=contracts,
         schema_id=ARROW_ENVELOPE_SCHEMA_ID,
-        schema_version=ARROW_ENVELOPE_SCHEMA_VERSION,
+        schema_version=(
+            schema_version
+            if schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION
+            else ARROW_ENVELOPE_SCHEMA_VERSION
+        ),
     )
     analysis_run_id = "talk-run"
     generation_id = "generation-a"
@@ -104,7 +172,7 @@ def _manifest(*, recording_count: int = 3, bout_count: int | None = None) -> dic
     }
     payload: dict[str, object] = {
         "export_schema_id": "palette.provider_epoch_behavior_cohort",
-        "export_schema_version": 1,
+        "export_schema_version": schema_version,
         "cohort_id": "goodbatbadbat-talk",
         "analysis_run_id": analysis_run_id,
         "metric_disposition": "linear_only",
@@ -112,7 +180,14 @@ def _manifest(*, recording_count: int = 3, bout_count: int | None = None) -> dic
         "excluded_metrics": ["bout_net_heading_change_deg"],
         "recording_count": recording_count,
         "selector_eligible": False,
-        "source_lineage": [],
+        "source_lineage": (
+            [
+                _semantic_lineage(f"recording-{chr(ord('a') + index)}")
+                for index in range(recording_count)
+            ]
+            if schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION
+            else []
+        ),
         "output_tables": list(TABLE_NAMES),
         "row_counts_by_table": row_counts,
         "part_files_by_table": {
@@ -124,6 +199,15 @@ def _manifest(*, recording_count: int = 3, bout_count: int | None = None) -> dic
         "arrow_schema_contracts": envelope,
         "publication": publication,
     }
+    if schema_version == SEMANTIC_EXPORT_SCHEMA_VERSION:
+        payload.update(
+            {
+                "epoch_binding_mode": SEMANTIC_EPOCH_BINDING_MODE,
+                "protocol_to_acquisition_alignment": (
+                    "sealed_epoch_selection_proxy_not_physical_presentation"
+                ),
+            }
+        )
     payload["manifest_payload_sha256"] = canonical_json_sha256(payload)
     return payload
 
@@ -162,6 +246,72 @@ def _tables() -> tuple[pa.Table, pa.Table]:
                     }
                 )
     return _make_table(TABLE_BOUTS, bout_rows), _make_table(TABLE_FISH, fish_rows)
+
+
+def _semantic_tables() -> tuple[pa.Table, pa.Table]:
+    fish_rows: list[dict[str, object]] = []
+    bout_rows: list[dict[str, object]] = []
+    semantic_hash = f"sha256:{'9' * 64}"
+    for recording_index, recording_id in enumerate(
+        ("recording-a", "recording-b", "recording-c")
+    ):
+        lineage = _semantic_lineage(recording_id)
+        for epoch_index, (role, epoch_id) in enumerate(
+            zip(SEMANTIC_ROLES, (4, 8, 12))
+        ):
+            common = {
+                "recording_id": recording_id,
+                "subject_id": f"fish-{recording_index}",
+                "track_id": 0,
+                "summary_run": "summary-semantic-v2",
+                "source_summary_sha256": "a" * 64,
+                "source_refs_sha256": lineage["source_refs_sha256"],
+                "epoch_id": epoch_id,
+                "epoch_index": epoch_index,
+                "epoch_label": role,
+                "epoch_binding_mode": SEMANTIC_EPOCH_BINDING_MODE,
+                "protocol_semantic_selection_run": "semantic-selection-v2",
+                "protocol_semantic_selection_manifest_sha256": "f" * 64,
+                "analysis_role": role,
+                "protocol_semantic_hash": semantic_hash,
+                "protocol_semantic_step_index": 1,
+                "protocol_semantic_step_ref": (
+                    "protocol_semantic_snapshot@recipe.steps[1]"
+                ),
+            }
+            fish_rows.append(
+                {
+                    **common,
+                    "start_frame": epoch_index * 10,
+                    "end_frame": (epoch_index + 1) * 10 - 1,
+                    "mean_speed_mm_s": float(recording_index + epoch_index + 1),
+                    "mean_bout_duration_s": 0.1,
+                    "bout_rate_per_min": 60.0,
+                }
+            )
+            if epoch_index == 0:
+                bout_rows.append(
+                    {
+                        **common,
+                        "epoch_start_frame": epoch_index * 10,
+                        "epoch_end_frame": (epoch_index + 1) * 10 - 1,
+                        "bout_source_row": recording_index,
+                        "bout_duration_s": 0.1,
+                        "bout_path_length_mm": 0.25,
+                    }
+                )
+    return (
+        _make_table(
+            TABLE_BOUTS,
+            bout_rows,
+            schema_version=SEMANTIC_EXPORT_SCHEMA_VERSION,
+        ),
+        _make_table(
+            TABLE_FISH,
+            fish_rows,
+            schema_version=SEMANTIC_EXPORT_SCHEMA_VERSION,
+        ),
+    )
 
 
 def _distribution_tables() -> tuple[pa.Table, pa.Table, int]:
@@ -346,6 +496,80 @@ def test_validation_preserves_repeated_recordings_as_distinct_units() -> None:
     assert validated.units[2].subject_id == "fish-2"
     assert validated.units[0].unit_id != validated.units[1].unit_id
     assert validated.units[0].values_by_metric["bout_rate_per_min"] == (1.0, 2.0, 3.0)
+
+
+def test_semantic_v2_validation_uses_role_order_not_source_window_id() -> None:
+    bouts, fish = _semantic_tables()
+
+    validated = validate_cohort_tables(
+        bouts_table=bouts,
+        fish_table=fish,
+        manifest=_manifest(schema_version=SEMANTIC_EXPORT_SCHEMA_VERSION),
+    )
+
+    assert validated.export_schema_version == 2
+    assert validated.epoch_labels == SEMANTIC_EXPECTED_EPOCH_LABELS
+    assert validated.units[0].values_by_metric["mean_speed_mm_s"] == (
+        1.0,
+        2.0,
+        3.0,
+    )
+
+
+def test_semantic_v2_plot_receipt_preserves_proxy_boundary_and_roles(
+    tmp_path: Path,
+) -> None:
+    bouts, fish = _semantic_tables()
+
+    result = plot_provider_epoch_behavior_cohort_tables(
+        bouts_table=bouts,
+        fish_table=fish,
+        manifest=_manifest(schema_version=SEMANTIC_EXPORT_SCHEMA_VERSION),
+        output_dir=tmp_path / "semantic",
+        prefix="semantic",
+    )
+
+    receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+    assert receipt["schema_version"] == 4
+    assert receipt["source_export_schema_version"] == 2
+    assert receipt["expected_epoch_labels"] == list(SEMANTIC_ROLES)
+    assert receipt["epoch_colors"] == SEMANTIC_NEUTRAL_EPOCH_COLORS
+    assert receipt["epoch_binding_mode"] == SEMANTIC_EPOCH_BINDING_MODE
+    assert receipt["protocol_to_acquisition_alignment"] == (
+        "sealed_epoch_selection_proxy_not_physical_presentation"
+    )
+
+
+def test_semantic_v2_plot_rejects_row_step_identity_tampering() -> None:
+    bouts, fish = _semantic_tables()
+    fish_rows = fish.to_pylist()
+    fish_rows[1]["protocol_semantic_step_index"] = 2
+    tampered = _make_table(
+        TABLE_FISH,
+        fish_rows,
+        schema_version=SEMANTIC_EXPORT_SCHEMA_VERSION,
+    )
+
+    with pytest.raises(
+        ProviderEpochBehaviorPlotError,
+        match="row protocol-semantic identity",
+    ):
+        validate_cohort_tables(
+            bouts_table=bouts,
+            fish_table=tampered,
+            manifest=_manifest(schema_version=SEMANTIC_EXPORT_SCHEMA_VERSION),
+        )
+
+
+def test_semantic_v2_manifest_rejects_legacy_arrow_tables() -> None:
+    bouts, fish = _tables()
+
+    with pytest.raises(ProviderEpochBehaviorPlotError, match="Parquet schema"):
+        validate_cohort_tables(
+            bouts_table=bouts,
+            fish_table=fish,
+            manifest=_manifest(schema_version=SEMANTIC_EXPORT_SCHEMA_VERSION),
+        )
 
 
 def test_plot_outputs_are_deterministic_and_semantically_neutral(tmp_path: Path) -> None:
