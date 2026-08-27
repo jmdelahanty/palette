@@ -474,10 +474,26 @@ extension.
 
 ### Phase 4: body-frame and heading integration
 
-- [ ] Consume one explicit body-frame provider independently from position.
-- [ ] Validate exact row/time/coordinate compatibility or a sealed projection
-      before composing position and body frame.
-- [ ] Migrate egocentric chaser bearing to the common body-frame extension.
+- [x] Consume one explicit keypoint body-frame provider independently from
+      position while requiring its exact precomposed position authority to
+      equal the keypoint position provider already bound by the proxy.
+- [x] Project body-frame observations onto the common relative-frame axis only
+      by exact `acquisition_frame_id` identity. Distinguish a missing exact
+      body-frame source row from a present source row whose anatomical axis is
+      invalid; retain both as explicit invalid evidence, without interpolation
+      or a motion-heading fallback. Position-only measurements remain usable
+      wherever their own validity contract passes.
+- [x] Validate exact row/time/coordinate compatibility or a sealed projection
+      before composing position and body frame. Persist the source-row identity,
+      coverage state, anatomical-axis validity, and reason code on every
+      frame-by-chaser row.
+- [ ] Bind an existing applicable anatomical-orientation review receipt or
+      produce a chaser-specific one before treating body-relative output as
+      reviewed scientific evidence. Structural body-frame completeness alone
+      is not a review claim.
+- [x] Migrate egocentric chaser bearing to the common body-frame extension for
+      the exact keypoint-position composition. Detection-centroid position
+      remains position-only pending a separate mixed-provider contract.
 - [ ] Migrate turn-toward/away, turn bias, predicted miss, directed escape, and
       angular-motion metrics only after their body-frame dependencies are
       explicit.
@@ -494,6 +510,17 @@ extension.
       anterior/posterior polarity, validity, and canary policy are frozen.
 - [ ] Add provider-specific coverage and disagreement evidence; do not silently
       promote keypoint or mask heading.
+
+The 2026-08-27 audit of the first deeply audited recording found that its
+body-frame source is present and already has an exact ordered-instance-key
+compatibility proof with the keypoint-position provider. The successor adapter
+now consumes that proof, projects only by exact acquisition-frame identity,
+and seals absent source rows separately from present invalid axes. The
+versioned cohort runner freezes the body run named by each provider-motion
+authority and enables the generalized bout body extension. The precise
+projection terminology, recording-specific coverage counts, and bout/trial
+impact are recorded in
+`docs/diagnostics/chaser_body_frame_projection_gap_2026-08-27.md`.
 
 ### Phase 5: visits, trials, bouts, and escape events
 

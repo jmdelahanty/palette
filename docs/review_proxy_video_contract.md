@@ -3,7 +3,7 @@
 version: 1
 status: active
 implementation: implemented
-last_verified: 2026-05-28
+last_verified: 2026-08-27
 purpose: Define derived browser-review proxy videos for Palette video-backed detection review.
 -->
 
@@ -207,3 +207,9 @@ frontend. The proxy MP4 is only the media source for display.
 - Proxy dimensions match manifest `proxy_width` and `proxy_height`.
 - The reviewer renders boxes by scaling source/normalized coordinates to proxy
   media dimensions.
+
+The 2026-08-27 verification passed the focused proxy builder, deferred-manifest
+shard/finalizer, clipped collection, and video-review backend suites (36
+tests). It covered H.264 faststart commands, CUDA/bilinear options, exact proxy
+manifest fields, deferred and manifest-only modes, skip-existing behavior,
+proxy-entry completeness, and source-to-media box scaling.

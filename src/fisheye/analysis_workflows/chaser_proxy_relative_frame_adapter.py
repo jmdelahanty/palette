@@ -35,6 +35,7 @@ from fisheye.analysis_workflows.chaser_input_provenance_proxy_source_handle impo
 from fisheye.analysis_workflows.chaser_relative_frame import (
     ACTIVE_ORTHOGONAL_POSITION_VALIDITY_POLICY,
     AcquisitionFrameKeys,
+    BodyFrameInput,
     ChaserObservations,
     ChaserRelativeFrameInput,
     CoordinatePolicy,
@@ -42,6 +43,10 @@ from fisheye.analysis_workflows.chaser_relative_frame import (
     ScalePolicy,
     TimingPolicy,
     compute_chaser_relative_frame,
+)
+from fisheye.analysis_workflows.body_frame_source_handle import (
+    BodyFrameSourceHandle,
+    load_body_frame_source_handle,
 )
 from fisheye.analysis_workflows.chaser_relative_frame_storage import (
     ChaserRelativeFramePublicationContext,
@@ -54,6 +59,14 @@ from fisheye.analysis_workflows.provider_chaser_stimulus_source_handle import (
 )
 from fisheye.analysis_workflows.provider_recording_timing_authority import (
     load_provider_recording_timing_authority,
+)
+from fisheye.analysis_workflows.position_body_frame_motion import (
+    PositionBodyFrameMotionAuthority,
+    compose_position_body_frame_motion_authority,
+)
+from fisheye.analysis_workflows.subject_position_source_handle import (
+    SubjectPositionSourceHandle,
+    load_subject_position_source_handle,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.pixel_frame_authority import (
@@ -80,6 +93,9 @@ TEMPORAL_SELECTION_ID = "all_proxy_represented_input_acquisition_frames_v1"
 COORDINATE_POLICY_ID = "typed_arena_to_source_camera_y_down_v1"
 TIMING_POLICY_ID = "acquisition_frame_domain_without_camera_timestamps_v1"
 CONTROLLER_STATE_POLICY_ID = "exact_logged_chase_trial_id_and_active_state_v1"
+BODY_FRAME_PROJECTION_POLICY_ID = (
+    "exact_keypoint_body_frame_acquisition_projection_v1"
+)
 
 
 class ChaserProxyRelativeFrameAdapterError(ValueError):
@@ -513,6 +529,165 @@ def _coordinate_records(
     )
 
 
+def _require_native_position_binding(
+    position: SubjectPositionSourceHandle,
+    *,
+    native_position: Mapping[str, Any],
+) -> None:
+    """Require the reopened position source to be the proxy's exact provider."""
+
+    expected = {
+        "run_path": position.run_path,
+        "manifest_sha256": position.manifest_sha256,
+        "decoded_content_sha256": position.decoded_content_sha256,
+        "estimator_id": position.estimator_record.get("estimator_id"),
+        "estimator_sha256": position.estimator_sha256,
+        "policy_sha256": position.policy_sha256,
+        "source_sha256": position.source_sha256,
+        "anatomy_sha256": position.anatomy_sha256,
+        "coordinate_sha256": position.coordinate_sha256,
+    }
+    observed = {name: native_position.get(name) for name in expected}
+    if observed != expected:
+        _fail(
+            "Explicit body-frame composition does not use the exact position "
+            "provider bound by the chaser proxy."
+        )
+    if position.estimator_record.get("source_modality") != "keypoint":
+        _fail(
+            "The first body-frame projection supports only an exact keypoint "
+            "position provider; mixed detection/body composition is unavailable."
+        )
+
+
+def _project_body_frame_to_relative_axis(
+    *,
+    frames: np.ndarray,
+    frame_keys: AcquisitionFrameKeys,
+    body_frame: BodyFrameSourceHandle,
+    composition: PositionBodyFrameMotionAuthority,
+    coordinate_authority_id: str,
+    scale_authority_id: str,
+    timing_authority_id: str,
+) -> tuple[BodyFrameInput, dict[str, Any]]:
+    """Project one exact sparse body-frame source without filling absent rows."""
+
+    relative_frames = np.asarray(frames, dtype=np.int64)
+    source_frames = np.asarray(
+        composition.source_acquisition_frame_index, dtype=np.int64
+    )
+    body_rows_by_position = np.asarray(
+        composition.body_frame_row_index, dtype=np.int64
+    )
+    if source_frames.ndim != 1 or body_rows_by_position.shape != source_frames.shape:
+        _fail("Position/body-frame composition has inconsistent row axes.")
+    if np.unique(source_frames).size != source_frames.size:
+        _fail(
+            "Keypoint position/body-frame composition has multiple observations "
+            "for one acquisition frame; implicit subject selection is prohibited."
+        )
+    if np.any(body_rows_by_position < 0) or np.any(
+        body_rows_by_position >= body_frame.dimensions.n_instances
+    ):
+        _fail("Position/body-frame composition leaves the exact body-frame source.")
+    if not np.array_equal(
+        np.asarray(body_frame.frame_indices, dtype=np.int64)[body_rows_by_position],
+        source_frames,
+    ):
+        _fail("Composed body-frame rows do not preserve acquisition-frame identity.")
+
+    order = np.argsort(source_frames, kind="stable")
+    ordered_frames = source_frames[order]
+    insertion = np.searchsorted(ordered_frames, relative_frames)
+    present = insertion < ordered_frames.size
+    present[present] &= (
+        ordered_frames[insertion[present]] == relative_frames[present]
+    )
+    position_rows = np.full(relative_frames.size, -1, dtype=np.int64)
+    position_rows[present] = order[insertion[present]]
+    body_source_rows = np.full(relative_frames.size, -1, dtype=np.int64)
+    body_source_rows[present] = body_rows_by_position[position_rows[present]]
+
+    origin = np.full((relative_frames.size, 2), np.nan, dtype=np.float64)
+    forward = np.full((relative_frames.size, 2), np.nan, dtype=np.float64)
+    left = np.full((relative_frames.size, 2), np.nan, dtype=np.float64)
+    axis_valid = np.zeros(relative_frames.size, dtype=bool)
+    if np.any(present):
+        rows = body_source_rows[present]
+        origin[present] = np.asarray(body_frame.origin_xy, dtype=np.float64)[rows]
+        forward[present] = np.asarray(
+            body_frame.forward_axis_xy, dtype=np.float64
+        )[rows]
+        left[present] = np.asarray(body_frame.left_axis_xy, dtype=np.float64)[rows]
+        axis_valid[present] = np.asarray(body_frame.axis_valid, dtype=bool)[rows]
+    origin[~axis_valid] = np.nan
+    forward[~axis_valid] = np.nan
+    left[~axis_valid] = np.nan
+
+    authority = ProviderSourceAuthority(
+        recording_id=frame_keys.recording_id,
+        source_authority_id=body_frame.run_path,
+        source_digest=str(body_frame.run_manifest["payload_digest"]),
+        provider_id=BODY_FRAME_PROJECTION_POLICY_ID,
+        provider_digest=composition.authority_sha256,
+        coordinate_authority_id=coordinate_authority_id,
+        scale_authority_id=scale_authority_id,
+        timing_authority_id=timing_authority_id,
+        row_axis_authority_id=frame_keys.row_axis_authority_id,
+        row_axis_authority_digest=frame_keys.row_axis_authority_digest,
+    )
+    projected = BodyFrameInput(
+        frame_keys=frame_keys,
+        origin_xy=origin,
+        forward_axis_xy=forward,
+        left_axis_xy=left,
+        axis_valid=axis_valid,
+        source_row_index=body_source_rows,
+        authority=authority,
+    )
+    missing = ~present
+    present_invalid = present & ~axis_valid
+    projection_record = _record(
+        "palette.chaser_relative_frame.body_frame_projection_binding",
+        frame_keys.recording_id,
+        policy_id=BODY_FRAME_PROJECTION_POLICY_ID,
+        source_position_body_frame_authority=_plain(
+            composition.authority_record
+        ),
+        source_position_body_frame_authority_sha256=(
+            composition.authority_sha256
+        ),
+        source_body_frame_run_path=body_frame.run_path,
+        source_body_frame_manifest_sha256=str(
+            body_frame.run_manifest["payload_digest"]
+        ),
+        source_body_frame_verification_sha256=body_frame.verification_digest,
+        source_body_frame_recipe_id=body_frame.recipe_id,
+        source_body_frame_recipe_sha256=body_frame.recipe_digest,
+        relative_row_axis_authority_id=frame_keys.row_axis_authority_id,
+        relative_row_axis_authority_sha256=frame_keys.row_axis_authority_digest,
+        relative_acquisition_frame_id_sha256=array_values_sha256(relative_frames),
+        source_acquisition_frame_id_sha256=array_values_sha256(source_frames),
+        projected_body_source_row_index_sha256=array_values_sha256(
+            body_source_rows
+        ),
+        relative_frame_count=int(relative_frames.size),
+        exact_source_row_count=int(np.count_nonzero(present)),
+        missing_source_row_count=int(np.count_nonzero(missing)),
+        present_invalid_axis_count=int(np.count_nonzero(present_invalid)),
+        valid_axis_count=int(np.count_nonzero(axis_valid)),
+        missing_source_row_semantics="explicit_minus_one_no_interpolation",
+        present_invalid_axis_semantics="source_identity_retained_geometry_nan",
+        projection_key="exact_acquisition_frame_id",
+        duplicate_source_frame_policy="prohibited_fail_closed",
+        interpolation="prohibited",
+        motion_heading_fallback="prohibited",
+        neighboring_body_frame_fallback="prohibited",
+        scientific_review_disposition="unreviewed_structural_candidate",
+    )
+    return projected, projection_record
+
+
 @dataclass(frozen=True)
 class PreparedProxyRelativeFrame:
     """Prepared candidate plus compact diagnostic bindings for the caller."""
@@ -525,6 +700,10 @@ class PreparedProxyRelativeFrame:
     coordinate_lineage_sha256: str
     timing_authority_sha256: str
     subject_metadata_sha256: str
+    body_frame_run_path: str | None
+    body_frame_manifest_sha256: str | None
+    body_frame_projection_sha256: str | None
+    body_frame_projection_record: Mapping[str, Any] | None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -538,6 +717,14 @@ class PreparedProxyRelativeFrame:
             "coordinate_lineage_sha256": self.coordinate_lineage_sha256,
             "timing_authority_sha256": self.timing_authority_sha256,
             "subject_metadata_sha256": self.subject_metadata_sha256,
+            "body_frame_run_path": self.body_frame_run_path,
+            "body_frame_manifest_sha256": self.body_frame_manifest_sha256,
+            "body_frame_projection_sha256": self.body_frame_projection_sha256,
+            "body_frame_projection": (
+                None
+                if self.body_frame_projection_record is None
+                else _plain(self.body_frame_projection_record)
+            ),
             "prepared_manifest_sha256": self.prepared.payload_digest,
             "selector_eligible": False,
             "selection": "none",
@@ -553,6 +740,7 @@ def prepare_proxy_relative_frame(
     expected_proxy_manifest_sha256: str | None = None,
     expected_subject_metadata_sha256: str | None = None,
     expected_timing_authority_sha256: str | None = None,
+    body_frame_run_name: str | None = None,
 ) -> PreparedProxyRelativeFrame:
     """Load, rebind, compute, and prepare one exact exploratory candidate."""
 
@@ -790,6 +978,69 @@ def prepare_proxy_relative_frame(
         row_axis_authority_id=row_axis_id,
         row_axis_authority_digest=row_axis_digest,
     )
+    body_frame_input: BodyFrameInput | None = None
+    body_frame_projection_record: dict[str, Any] | None = None
+    body_frame_run_path: str | None = None
+    body_frame_manifest_sha256: str | None = None
+    if body_frame_run_name is not None:
+        if body_frame_run_name in {
+            "latest",
+            "latest_complete",
+            "selected",
+            "current",
+            ".",
+            "..",
+        }:
+            _fail("body_frame_run_name must name one exact immutable run.")
+        body_frame_run_path = (
+            "analysis/body_frame_runs/"
+            + _exact_run_name(
+                f"analysis/body_frame_runs/{body_frame_run_name}",
+                parent="analysis/body_frame_runs",
+                field="body_frame_run_name",
+            )
+        )
+        native_position = native.source_authority["position"]
+        try:
+            position = load_subject_position_source_handle(
+                archive,
+                str(native_position["run_path"]),
+                expected_selector_eligible=False,
+                expected_manifest_sha256=str(
+                    native_position["manifest_sha256"]
+                ),
+                use_consolidated=True,
+            )
+            body_frame = load_body_frame_source_handle(
+                archive,
+                run_path=body_frame_run_path,
+                expected_selector_eligible=False,
+                use_consolidated=True,
+            )
+            composition = compose_position_body_frame_motion_authority(
+                position,
+                body_frame,
+            )
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            _fail(f"Exact keypoint body-frame composition failed: {exc}")
+        _require_native_position_binding(
+            position,
+            native_position=native_position,
+        )
+        body_frame_input, body_frame_projection_record = (
+            _project_body_frame_to_relative_axis(
+                frames=frames,
+                frame_keys=frame_keys,
+                body_frame=body_frame,
+                composition=composition,
+                coordinate_authority_id=coordinate_id,
+                scale_authority_id=scale_id,
+                timing_authority_id=timing_id,
+            )
+        )
+        body_frame_manifest_sha256 = str(
+            body_frame.run_manifest["payload_digest"]
+        )
     inputs = ChaserRelativeFrameInput(
         frame_keys=frame_keys,
         fish_xy=fish_xy,
@@ -814,7 +1065,7 @@ def prepare_proxy_relative_frame(
         coordinate_policy=coordinate_policy,
         scale_policy=scale_policy,
         timing_policy=timing_policy,
-        body_frame=None,
+        body_frame=body_frame_input,
     )
     result = compute_chaser_relative_frame(inputs)
 
@@ -870,6 +1121,7 @@ def prepare_proxy_relative_frame(
         acquisition_projection_record=_plain(proxy.acquisition_projection_record),
         acquisition_projection_publication_record=publication_binding,
         controller_state_record=controller_state_record,
+        body_frame_projection_record=body_frame_projection_record,
         analysis_profile_record=profile_record,
         arena_geometry_record=arena_record,
         arena_to_source_camera_transform_record=transform_record,
@@ -885,6 +1137,14 @@ def prepare_proxy_relative_frame(
         coordinate_lineage_sha256=coordinate_sha256,
         timing_authority_sha256=timing.sha256,
         subject_metadata_sha256=subject.record_sha256,
+        body_frame_run_path=body_frame_run_path,
+        body_frame_manifest_sha256=body_frame_manifest_sha256,
+        body_frame_projection_sha256=(
+            None
+            if body_frame_projection_record is None
+            else canonical_json_sha256(body_frame_projection_record)
+        ),
+        body_frame_projection_record=body_frame_projection_record,
     )
 
 
@@ -893,6 +1153,7 @@ __all__ = [
     "ADAPTER_SCHEMA_VERSION",
     "CHASER_IDENTITY_POLICY_ID",
     "CHASER_OCCURRENCE_POLICY_ID",
+    "BODY_FRAME_PROJECTION_POLICY_ID",
     "COORDINATE_POLICY_ID",
     "ROW_AXIS_POLICY_ID",
     "TEMPORAL_SELECTION_ID",

@@ -112,9 +112,57 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
         )
 
     motion_run, bout_run = cohort.MOTION_BOUT_PAIRS[0]
+    body_run = "body-frame-v1"
+    body_run_path = f"analysis/body_frame_runs/{body_run}"
+    body_payload = {
+        "run_id": body_run,
+        "stage": "body_frame",
+        "publication": {
+            "completion_status": "complete",
+            "stage_selector_eligible": False,
+        },
+    }
+    body_manifest_sha = canonical_json_sha256(body_payload)
+    _write_group(
+        archive / body_run_path,
+        {
+            "run_manifest": {
+                "schema_id": "palette.body_frame.run_manifest",
+                "schema_version": 1,
+                "payload": body_payload,
+                "payload_digest": body_manifest_sha,
+            }
+        },
+    )
+    motion_authority = {
+        "schema_id": "palette.position_body_frame_motion_source_authority",
+        "schema_version": 1,
+        "recording_id": recording_id,
+        "body_frame_source": {
+            "run_path": body_run_path,
+            "manifest_sha256": body_manifest_sha,
+        },
+    }
+    motion_payload = {
+        "source_authority": {
+            "record": motion_authority,
+            "sha256": canonical_json_sha256(motion_authority),
+        }
+    }
+    motion_manifest_sha = canonical_json_sha256(motion_payload)
+    motion_attrs: dict[str, object] = {
+        "recording_id": recording_id,
+        "provider_track_motion_manifest": {
+            "schema_id": "palette.provider_track_motion_run_manifest",
+            "schema_version": 1,
+            "payload": motion_payload,
+            "payload_digest": motion_manifest_sha,
+        },
+        "provider_track_motion_manifest_sha256": motion_manifest_sha,
+    }
     _write_group(
         archive / "analysis/track_kinematics_runs/provider" / motion_run,
-        {"recording_id": recording_id},
+        motion_attrs,
     )
     _write_group(
         archive / "analysis/swim_bout_runs" / bout_run,
@@ -193,7 +241,11 @@ def test_plan_freezes_exact_recording_inputs(tmp_path: Path) -> None:
     assert entry["motion_and_bouts"]["motion_run_path"].endswith(
         cohort.MOTION_BOUT_PAIRS[0][0]
     )
-    assert len(entry["input_group_bindings"]) == 7
+    assert entry["motion_and_bouts"]["body_frame_run_name"] == "body-frame-v1"
+    assert entry["motion_and_bouts"]["body_frame_resolution"] == (
+        "exact_provider_motion_authority_v1"
+    )
+    assert len(entry["input_group_bindings"]) == 8
     assert entry["existing_output_group_paths"] == []
     assert task["safety"] == cohort.EXPECTED_SAFETY
 
@@ -207,6 +259,37 @@ def test_task_digest_rejects_mutation(tmp_path: Path) -> None:
         cohort.load_cohort_task(task)
 
 
+def test_replan_freezes_versioned_body_successor_from_prior_recording_set(
+    tmp_path: Path,
+) -> None:
+    _archive, _raw_h5, snapshot = _fixture(tmp_path)
+    original = cohort.plan_cohort_task(
+        snapshot, operations_root=tmp_path / "old-operations"
+    )
+
+    replanned = cohort.replan_cohort_task(
+        original,
+        operations_root=tmp_path / "body-operations",
+    )
+
+    assert replanned["recording_count"] == original["recording_count"]
+    assert replanned["selection_policy"]["successor_of_task_sha256"] == original[
+        "task_sha256"
+    ]
+    assert replanned["selection_policy"]["body_frame_resolution"] == (
+        "exact_provider_motion_authority_v1"
+    )
+    entry = replanned["entries"][0]
+    assert entry["output_run_names"]["keypoint_relative"] == (
+        cohort.KEYPOINT_RELATIVE_RUN
+    )
+    assert entry["motion_and_bouts"]["body_frame_run_name"] == "body-frame-v1"
+    assert len(entry["input_group_bindings"]) == 8
+    assert cohort.load_cohort_task(replanned)["task_sha256"] == replanned[
+        "task_sha256"
+    ]
+
+
 def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> None:
     _archive, _raw_h5, snapshot = _fixture(tmp_path)
     original = cohort.plan_cohort_task(
@@ -214,7 +297,7 @@ def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> No
     )
     successor = cohort.successor_cohort_task(original)
 
-    assert successor["schema_version"] == 2
+    assert successor["schema_version"] == cohort.TASK_SCHEMA_VERSION
     assert successor["selection_policy"]["successor_of_task_sha256"] == original[
         "task_sha256"
     ]
@@ -237,7 +320,7 @@ def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> No
     assert entry["output_run_names"]["detailed_bundle"] == (
         cohort.DETAILED_RECIPE_BUNDLE_NAME
     )
-    assert entry["output_run_names"]["detailed_bundle"].endswith("recipe_v4")
+    assert entry["output_run_names"]["detailed_bundle"].endswith("recipe_v5")
     assert successor["selection_policy"]["plot_recipe_provenance"] == (
         "self_contained_exact_parameters_v3"
     )
@@ -332,6 +415,26 @@ def test_run_one_dry_run_renders_complete_serial_chain(tmp_path: Path) -> None:
         "detailed_plots",
     ]
     assert all(stage["mode"] == "planned_no_write" for stage in result["stages"])
+    keypoint_relative = next(
+        stage
+        for stage in result["stages"]
+        if stage["stage"] == "keypoint_relative_frame"
+    )
+    detection_relative = next(
+        stage
+        for stage in result["stages"]
+        if stage["stage"] == "detection_relative_frame"
+    )
+    successors = next(
+        stage
+        for stage in result["stages"]
+        if stage["stage"] == "composable_successors"
+    )
+    assert keypoint_relative["command"][
+        keypoint_relative["command"].index("--body-frame-run") + 1
+    ] == "body-frame-v1"
+    assert "--body-frame-run" not in detection_relative["command"]
+    assert "--no-body-extension" not in successors["command"]
     assert result["safety"] == cohort.EXPECTED_SAFETY
     assert not (tmp_path / "scratch").exists()
     assert not (tmp_path / "receipts").exists()

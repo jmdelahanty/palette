@@ -26,7 +26,7 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 TASK_SCHEMA_ID = "palette.composable_chaser_successor_cohort_task"
-TASK_SCHEMA_VERSION = 2
+TASK_SCHEMA_VERSION = 3
 RECEIPT_SCHEMA_ID = "palette.composable_chaser_successor_cohort_receipt"
 RECEIPT_SCHEMA_VERSION = 1
 
@@ -49,43 +49,42 @@ DETECTION_PROXY_RUN = (
     "chaser_input_provenance_proxy_detection_bbox_centroid_cohort_20260821_v2"
 )
 KEYPOINT_RELATIVE_RUN = (
-    "chaser_relative_frame_keypoint_triad_cohort_20260825_"
-    "exact_trials_session_time_activity_orthogonal_v3"
+    "chaser_relative_frame_keypoint_triad_cohort_20260827_"
+    "exact_body_frame_projection_v4"
 )
 DETECTION_RELATIVE_RUN = (
     "chaser_relative_frame_detection_bbox_centroid_cohort_20260825_"
     "exact_trials_session_time_activity_orthogonal_v3"
 )
 SUCCESSOR_RUN = (
-    "goodbatbadbat_chaser_successors_20260825_"
-    "exact_trials_session_time_activity_orthogonal_v3"
+    "goodbatbadbat_chaser_successors_20260827_body_frame_projection_v4"
 )
 KEYPOINT_RADIAL_RUN = (
-    "goodbatbadbat_chaser_radial_near_field_20260825_"
-    "exact_session_time_activity_orthogonal_v2"
+    "goodbatbadbat_chaser_radial_near_field_20260827_"
+    "body_frame_projection_v3"
 )
 DETECTION_RADIAL_RUN = (
     "goodbatbadbat_chaser_radial_near_field_detection_bbox_centroid_20260825_"
     "exact_session_time_activity_orthogonal_v2"
 )
 SPATIAL_OCCUPANCY_RUN = (
-    "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260825_"
-    "exact_epochs_v1"
+    "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260827_"
+    "body_frame_projection_v3"
 )
-DETAILED_BUNDLE_NAME = "goodbatbadbat_chaser_detailed_activity_orthogonal_v2"
+DETAILED_BUNDLE_NAME = "goodbatbadbat_chaser_detailed_body_frame_v3"
 SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN = (
-    "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260825_"
-    "exact_epochs_receipt_bound_v2"
+    "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260827_"
+    "body_frame_projection_receipt_bound_v4"
 )
 SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260825_"
-    "exact_epochs_recipe_v2"
+    "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260827_"
+    "body_frame_projection_recipe_v3"
 )
 DASHBOARD_RECIPE_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_dashboard_activity_orthogonal_recipe_v2"
+    "goodbatbadbat_chaser_dashboard_body_frame_recipe_v3"
 )
 DETAILED_RECIPE_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_detailed_activity_orthogonal_recipe_v4"
+    "goodbatbadbat_chaser_detailed_body_frame_recipe_v5"
 )
 DETAILED_PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v3"
 RELATIVE_FRAME_VALIDATION_MODE = "reusable_direct_subtree_receipt_v1"
@@ -310,7 +309,7 @@ def _resolve_geometry(archive: Path, *, recording_id: str) -> dict[str, Any]:
     }
 
 
-def _resolve_motion_bouts(archive: Path, *, recording_id: str) -> dict[str, str]:
+def _resolve_motion_bouts(archive: Path, *, recording_id: str) -> dict[str, Any]:
     motion_parent = archive / "analysis" / "track_kinematics_runs" / "provider"
     bout_parent = archive / "analysis" / "swim_bout_runs"
     motion_names = set(_run_children(motion_parent))
@@ -323,10 +322,104 @@ def _resolve_motion_bouts(archive: Path, *, recording_id: str) -> dict[str, str]
     if not matches:
         _fail(f"No supported exact motion/bout pair exists for {recording_id!r}.")
     motion, bouts = matches[0]
+    motion_run_path = f"analysis/track_kinematics_runs/provider/{motion}"
+    motion_attrs, motion_metadata_sha = _zarr_attrs(
+        archive / motion_run_path,
+        field="provider motion input",
+    )
+    motion_manifest = _mapping(
+        motion_attrs.get("provider_track_motion_manifest"),
+        field="provider motion manifest",
+    )
+    if set(motion_manifest) != {
+        "schema_id",
+        "schema_version",
+        "payload",
+        "payload_digest",
+    }:
+        _fail(f"Provider motion manifest envelope is not exact for {recording_id!r}.")
+    payload = _mapping(
+        motion_manifest.get("payload"), field="provider motion manifest payload"
+    )
+    motion_manifest_sha = _digest(
+        motion_manifest.get("payload_digest"),
+        field="provider motion manifest payload digest",
+    )
+    persisted_motion_manifest_sha = _digest(
+        motion_attrs.get("provider_track_motion_manifest_sha256"),
+        field="persisted provider motion manifest digest",
+    )
+    if (
+        canonical_json_sha256(payload) != motion_manifest_sha
+        or persisted_motion_manifest_sha != motion_manifest_sha
+    ):
+        _fail(f"Provider motion manifest persisted digest is stale for {recording_id!r}.")
+    authority_envelope = _mapping(
+        payload.get("source_authority"), field="provider motion source authority"
+    )
+    authority_record = _mapping(
+        authority_envelope.get("record"), field="provider motion authority record"
+    )
+    authority_sha = _digest(
+        authority_envelope.get("sha256"), field="provider motion authority digest"
+    )
+    if canonical_json_sha256(authority_record) != authority_sha:
+        _fail(f"Provider motion authority digest is stale for {recording_id!r}.")
+    body_source = _mapping(
+        authority_record.get("body_frame_source"),
+        field="provider motion body-frame source",
+    )
+    body_run_path = _text(
+        body_source.get("run_path"), field="body-frame source run path"
+    )
+    body_run_name = _exact_name(
+        body_run_path.removeprefix("analysis/body_frame_runs/"),
+        field="body-frame source run name",
+    )
+    if body_run_path != f"analysis/body_frame_runs/{body_run_name}":
+        _fail(f"Body-frame source path is not an exact run for {recording_id!r}.")
+    body_manifest_sha = _digest(
+        body_source.get("manifest_sha256"), field="body-frame source manifest digest"
+    )
+    body_attrs, body_metadata_sha = _zarr_attrs(
+        archive / body_run_path,
+        field="body-frame source input",
+    )
+    body_manifest = _mapping(
+        body_attrs.get("run_manifest"), field="body-frame run manifest"
+    )
+    observed_body_manifest_sha = _digest(
+        body_manifest.get("payload_digest"),
+        field="body-frame run manifest payload digest",
+    )
+    body_payload = _mapping(
+        body_manifest.get("payload"), field="body-frame run manifest payload"
+    )
+    if canonical_json_sha256(body_payload) != observed_body_manifest_sha:
+        _fail(f"Body-frame run manifest digest is stale for {recording_id!r}.")
+    if observed_body_manifest_sha != body_manifest_sha:
+        _fail(
+            f"Provider motion and body-frame run disagree for {recording_id!r}."
+        )
+    publication = _mapping(
+        body_payload.get("publication"), field="body-frame publication disposition"
+    )
+    if (
+        publication.get("completion_status") != "complete"
+        or publication.get("stage_selector_eligible") is not False
+    ):
+        _fail(f"Body-frame source is not exact complete evidence for {recording_id!r}.")
     return {
         "selection_policy": "ordered_exact_compatible_pair_v1",
-        "motion_run_path": f"analysis/track_kinematics_runs/provider/{motion}",
+        "motion_run_path": motion_run_path,
+        "motion_manifest_sha256": motion_manifest_sha,
+        "motion_metadata_sha256": motion_metadata_sha,
         "swim_bout_run": bouts,
+        "body_frame_run_path": body_run_path,
+        "body_frame_run_name": body_run_name,
+        "body_frame_manifest_sha256": body_manifest_sha,
+        "body_frame_metadata_sha256": body_metadata_sha,
+        "body_frame_resolution": "exact_provider_motion_authority_v1",
     }
 
 
@@ -411,16 +504,19 @@ def _plan_entry(
             ),
             "metadata_sha256": detection_proxy_metadata_sha,
         },
-        _input_group_binding(
-            archive,
-            motion_bouts["motion_run_path"],
-            field="provider motion input",
-        ),
+        {
+            "group_path": motion_bouts["motion_run_path"],
+            "metadata_sha256": motion_bouts["motion_metadata_sha256"],
+        },
         _input_group_binding(
             archive,
             f"analysis/swim_bout_runs/{motion_bouts['swim_bout_run']}",
             field="swim-bout input",
         ),
+        {
+            "group_path": motion_bouts["body_frame_run_path"],
+            "metadata_sha256": motion_bouts["body_frame_metadata_sha256"],
+        },
         {
             "group_path": (
                 f"analysis/arena_geometry_selection/{geometry['selection_run']}"
@@ -506,23 +602,16 @@ def _plan_entry(
     )
 
 
-def plan_cohort_task(
-    registry_snapshot: str | Path,
+def _build_cohort_task(
+    normalized_rows: Sequence[Mapping[str, Any]],
     *,
     operations_root: str | Path,
+    source_registry_snapshot: Mapping[str, Any],
+    successor_of_task_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """Build one frozen task from a read-only registry JSON export."""
-
-    snapshot = Path(registry_snapshot).expanduser().resolve()
-    if not snapshot.is_file():
-        raise FileNotFoundError(f"Registry snapshot does not exist: {snapshot}")
-    source_bytes = snapshot.read_bytes()
-    rows = json.loads(source_bytes)
-    if not isinstance(rows, list) or not rows:
-        _fail("Registry snapshot must be a non-empty JSON row list.")
-    normalized_rows = [
-        _mapping(row, field="registry snapshot row") for row in rows
-    ]
+    if not normalized_rows:
+        _fail("Cohort planning requires at least one recording row.")
+    normalized_rows = list(normalized_rows)
     normalized_rows.sort(key=lambda row: str(row.get("zarr_path") or ""))
     operations = Path(operations_root).expanduser().resolve()
     entries = [
@@ -541,23 +630,25 @@ def plan_cohort_task(
         for entry in entries
         if entry["status"] != "complete"
     ]
+    selection_policy: dict[str, Any] = {
+        "protocol_name": "goodbatbadbat",
+        "recording_order": "lexicographic_absolute_analysis_zarr_path_v1",
+        "motion_bout_resolution": "ordered_exact_compatible_pair_v1",
+        "body_frame_resolution": "exact_provider_motion_authority_v1",
+        "selector_resolution_time": "planning_only",
+        "execution_selector_resolution": False,
+    }
+    if successor_of_task_sha256 is not None:
+        selection_policy["successor_of_task_sha256"] = _digest(
+            successor_of_task_sha256, field="predecessor cohort task digest"
+        )
     task = json_attr_safe(
         {
             "schema_id": TASK_SCHEMA_ID,
             "schema_version": TASK_SCHEMA_VERSION,
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
-            "source_registry_snapshot": {
-                "path": str(snapshot),
-                "sha256": hashlib.sha256(source_bytes).hexdigest(),
-                "row_count": len(normalized_rows),
-            },
-            "selection_policy": {
-                "protocol_name": "goodbatbadbat",
-                "recording_order": "lexicographic_absolute_analysis_zarr_path_v1",
-                "motion_bout_resolution": "ordered_exact_compatible_pair_v1",
-                "selector_resolution_time": "planning_only",
-                "execution_selector_resolution": False,
-            },
+            "source_registry_snapshot": dict(source_registry_snapshot),
+            "selection_policy": selection_policy,
             "recording_count": len(entries),
             "status_counts": status_counts,
             "runnable_task_indices": runnable_indices,
@@ -568,6 +659,72 @@ def plan_cohort_task(
     )
     task["task_sha256"] = _task_digest(task)
     return task
+
+
+def plan_cohort_task(
+    registry_snapshot: str | Path,
+    *,
+    operations_root: str | Path,
+) -> dict[str, Any]:
+    """Build one frozen task from a read-only registry JSON export."""
+
+    snapshot = Path(registry_snapshot).expanduser().resolve()
+    if not snapshot.is_file():
+        raise FileNotFoundError(f"Registry snapshot does not exist: {snapshot}")
+    source_bytes = snapshot.read_bytes()
+    rows = json.loads(source_bytes)
+    if not isinstance(rows, list) or not rows:
+        _fail("Registry snapshot must be a non-empty JSON row list.")
+    normalized_rows = [
+        _mapping(row, field="registry snapshot row") for row in rows
+    ]
+    return _build_cohort_task(
+        normalized_rows,
+        operations_root=operations_root,
+        source_registry_snapshot={
+            "path": str(snapshot),
+            "sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "row_count": len(normalized_rows),
+        },
+    )
+
+
+def replan_cohort_task(
+    source: str | Path | Mapping[str, Any],
+    *,
+    operations_root: str | Path,
+) -> dict[str, Any]:
+    """Freeze a new versioned cohort from one prior task's exact recording set."""
+
+    previous = load_cohort_task(source)
+    rows = []
+    for raw_entry in previous["entries"]:
+        entry = _mapping(raw_entry, field="predecessor cohort entry")
+        rows.append(
+            {
+                "dataset_id": entry.get("dataset_id"),
+                "recording_id": entry.get("recording_id"),
+                "zarr_path": entry.get("analysis_zarr"),
+                "protocol_name": entry.get("protocol_name"),
+                "protocol_hash": entry.get("protocol_hash"),
+                "arena_id": entry.get("arena_id"),
+                "camera_id": entry.get("camera_id"),
+            }
+        )
+    source_snapshot = dict(
+        _mapping(
+            previous.get("source_registry_snapshot"),
+            field="predecessor registry snapshot binding",
+        )
+    )
+    if int(source_snapshot.get("row_count", -1)) != len(rows):
+        _fail("Predecessor registry snapshot row count is stale.")
+    return _build_cohort_task(
+        rows,
+        operations_root=operations_root,
+        source_registry_snapshot=source_snapshot,
+        successor_of_task_sha256=str(previous["task_sha256"]),
+    )
 
 
 def load_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
@@ -582,6 +739,7 @@ def load_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
         task = dict(_mapping(json.loads(path.read_bytes()), field="cohort task"))
     if task.get("schema_id") != TASK_SCHEMA_ID or task.get("schema_version") not in {
         1,
+        2,
         TASK_SCHEMA_VERSION,
     }:
         _fail("Cohort task schema is unsupported.")
@@ -1150,6 +1308,12 @@ def run_one(
         ("detection", detection_proxy, "detection_relative"),
     ):
         relative_name = outputs[relative_key]
+        body_frame_flags: tuple[object, ...] = ()
+        if provider == "keypoint":
+            body_frame_flags = (
+                "--body-frame-run",
+                motion_bouts["body_frame_run_name"],
+            )
         execute_if_missing(
             f"{provider}_relative_frame",
             f"analysis/chaser_relative_frame_runs/{relative_name}",
@@ -1169,6 +1333,7 @@ def run_one(
                 recording_id,
                 "--expected-proxy-manifest-sha256",
                 proxy["manifest_sha256"],
+                *body_frame_flags,
                 "--copy-backend",
                 copy_backend,
                 "--apply",
@@ -1254,7 +1419,6 @@ def run_one(
                     "generalized_chaser_bout_response",
                     "--module",
                     "chaser_escape_freeze_v2",
-                    "--no-body-extension",
                     "--speed-level",
                     "filtered",
                     "--scratch-root",
@@ -1636,6 +1800,13 @@ def _parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--registry-snapshot", type=Path, required=True)
     plan_parser.add_argument("--operations-root", type=Path, required=True)
     plan_parser.add_argument("--output", type=Path, required=True)
+    replan_parser = subparsers.add_parser(
+        "replan",
+        help="freeze versioned successors from a prior task's exact recording set",
+    )
+    replan_parser.add_argument("task", type=Path)
+    replan_parser.add_argument("--operations-root", type=Path, required=True)
+    replan_parser.add_argument("--output", type=Path, required=True)
     successor_parser = subparsers.add_parser(
         "successor",
         help="derive the receipt-bound self-contained-plot task successor",
@@ -1661,6 +1832,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "plan":
         result = plan_cohort_task(
             args.registry_snapshot,
+            operations_root=args.operations_root,
+        )
+        write_json_atomic(args.output.expanduser().resolve(), result)
+    elif args.command == "replan":
+        result = replan_cohort_task(
+            args.task,
             operations_root=args.operations_root,
         )
         write_json_atomic(args.output.expanduser().resolve(), result)
@@ -1700,6 +1877,7 @@ __all__ = [
     "load_cohort_task",
     "main",
     "plan_cohort_task",
+    "replan_cohort_task",
     "run_one",
     "successor_cohort_task",
 ]

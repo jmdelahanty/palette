@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from fisheye.shared.zarr.body_frame_schema import (
+    BODY_FRAME_HEADING_VALIDATION_ATOL_DEG,
     BODY_FRAME_SCHEMA_V1,
     BodyFrameDimensions,
     BodyFrameSchemaError,
@@ -73,6 +74,34 @@ def test_body_frame_v1_accepts_exact_source_bound_geometry() -> None:
 def test_body_frame_v1_rejects_heading_that_does_not_match_forward_axis() -> None:
     dimensions, arrays, source_keypoints = _fixture()
     arrays["heading_deg"][0] = np.float32(45.0)
+
+    issues = BODY_FRAME_SCHEMA_V1.validate(
+        arrays,
+        dimensions=dimensions,
+        source_keypoint_arrays=source_keypoints,
+    )
+
+    assert "heading_derivation_mismatch" in {issue.code for issue in issues}
+
+
+def test_body_frame_v1_accepts_float32_heading_reproduction_noise() -> None:
+    dimensions, arrays, source_keypoints = _fixture()
+    arrays["heading_deg"][3] += np.float32(
+        BODY_FRAME_HEADING_VALIDATION_ATOL_DEG / 2
+    )
+
+    BODY_FRAME_SCHEMA_V1.require(
+        arrays,
+        dimensions=dimensions,
+        source_keypoint_arrays=source_keypoints,
+    )
+
+
+def test_body_frame_v1_rejects_heading_outside_reproduction_tolerance() -> None:
+    dimensions, arrays, source_keypoints = _fixture()
+    arrays["heading_deg"][3] += np.float32(
+        BODY_FRAME_HEADING_VALIDATION_ATOL_DEG * 2
+    )
 
     issues = BODY_FRAME_SCHEMA_V1.validate(
         arrays,

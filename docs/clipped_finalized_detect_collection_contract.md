@@ -2,8 +2,8 @@
 <!-- contract-meta
 version: 1
 status: active
-implementation: implemented
-last_verified: 2026-05-28
+implementation: partial
+last_verified: 2026-08-27
 purpose: Define how consumers resolve finalized clipped refined-detect collections to parent frames, clip-local video frames, and refined detection rows.
 -->
 
@@ -20,6 +20,19 @@ include:
 - `fisheye.utils.resolve_clipped_refined_detect_collection`;
 - analysis-to-training promotion tools;
 - Crimson or other non-Python viewers.
+
+## Implementation Status
+
+The video-backed reviewer implements the complete video-review discovery and
+required-column path described below, including the root
+`recording_frame_index_path` authority and required `video_path`. The
+standalone `resolve_clipped_refined_detect_collection` utility currently
+implements explicit-path and collection-plan discovery only, treats
+`video_path` as optional in its generic frame/run mapping, and does not itself
+materialize the `recording_frame_id - 1` compatibility projection. Callers
+that require the full video-review contract must use the reviewer boundary or
+provide the exact frame-index path. These gaps keep the overall contract at
+`implementation: partial`.
 
 ## Authoritative Surfaces
 
@@ -233,3 +246,6 @@ Before treating a clipped finalized collection as reviewable:
   inspection, editing, issue navigation, and optional training promotion.
 - Crimson should use this resolver contract rather than directory scans or
   top-level detect-run assumptions.
+
+The 2026-08-27 verification passed the focused finalized-collection, resolver,
+proxy-video, sharded-submission, and video-review backend suites (36 tests).
