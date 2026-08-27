@@ -586,6 +586,19 @@ def publish_subject_shape_run(
     )
     storage_access_aware = is_subject_shape_access_aware_storage(storage_profile_id)
     storage_candidate = is_subject_shape_storage_candidate(storage_profile_id)
+    unbound_array_content_sha256: Mapping[str, str] | None = None
+    if storage_access_aware:
+        raw_digests = materialization_payload.get("node_local_sharding", {}).get(
+            "array_content_sha256"
+        )
+        if not isinstance(raw_digests, Mapping) or not raw_digests:
+            raise ValueError(
+                "Access-aware subject-shape publication requires the writer's "
+                "closed decoded digest receipt."
+            )
+        unbound_array_content_sha256 = {
+            str(path): str(digest) for path, digest in raw_digests.items()
+        }
     transaction = {
         "binding_complete": False,
         "completion_published": False,
@@ -674,8 +687,7 @@ def publish_subject_shape_run(
             source_link_issues = validate_subject_shape_storage_source_manifest_link(
                 run_group,
                 phase="unbound",
-                verify_content=True,
-                block_rows=int(getattr(plan, "block_rows", 1_024)),
+                verify_content=False,
             )
             if source_link_issues:
                 raise RuntimeError(
@@ -683,7 +695,8 @@ def publish_subject_shape_run(
                     "seal before binding: " + "; ".join(source_link_issues)
                 )
             refresh_unbound_subject_shape_manifest_after_storage_materialization(
-                run_group
+                run_group,
+                array_content_sha256=unbound_array_content_sha256,
             )
         binding = bind_staged_subject_shape_run(
             root,
@@ -695,6 +708,9 @@ def publish_subject_shape_run(
                 "subject_mask_bundle_id",
                 None,
             ),
+            payload_run_path=plan.target_run_path,
+            payload_hash_workers=max(1, int(getattr(plan, "shard_copy_workers", 4))),
+            unbound_array_content_sha256=unbound_array_content_sha256,
         )
         if binding.get("valid") is not True:
             raise RuntimeError(f"Final-path subject-shape binding failed: {binding!r}")

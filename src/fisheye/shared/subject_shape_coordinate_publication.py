@@ -17,13 +17,15 @@ not relabelling or a resolution ratio.
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import hashlib
 import json
 import math
 from pathlib import Path
 import re
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 
@@ -107,6 +109,13 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
     RUN_STATUS_COMPLETE,
 )
+from fisheye.shared.zarr_payload_receipt import (
+    build_payload_integrity_receipt,
+    build_payload_validation_receipt,
+    canonical_payload_integrity_receipt,
+    verify_payload_integrity_receipt,
+    verify_payload_validation_receipt,
+)
 from fisheye.shared.zarr.subject_shape_bundle_source import (
     SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
     BoundSubjectShapeBundleSource,
@@ -173,6 +182,22 @@ SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_SCHEMA_ID = (
 SUBJECT_SHAPE_STORAGE_METADATA_POLICY_ATTR = (
     "subject_shape_storage_metadata_visibility_policy"
 )
+SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR = (
+    "subject_shape_payload_integrity_receipt"
+)
+SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR = (
+    "subject_shape_payload_validation_receipt"
+)
+SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR = (
+    "subject_shape_payload_receipt_profile"
+)
+SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE = (
+    "single_locked_bound_payload_receipt_v1"
+)
+SUBJECT_SHAPE_PAYLOAD_VALIDATOR_SCHEMA_ID = (
+    "palette.subject_shape_bound_payload_validator"
+)
+SUBJECT_SHAPE_PAYLOAD_VALIDATOR_SCHEMA_VERSION = 1
 SUBJECT_SHAPE_STORAGE_ARRAY_ATTRS = frozenset(
     {
         "logical_schema_id",
@@ -184,6 +209,22 @@ SUBJECT_SHAPE_STORAGE_ARRAY_ATTRS = frozenset(
         "write_mode",
     }
 )
+
+
+_ACTIVE_SUBJECT_SHAPE_ARRAY_DIGESTS: ContextVar[Mapping[str, str] | None] = (
+    ContextVar("palette_subject_shape_array_digests", default=None)
+)
+
+
+@contextmanager
+def _subject_shape_array_digest_scope(
+    values: Mapping[str, str],
+) -> Iterator[None]:
+    token = _ACTIVE_SUBJECT_SHAPE_ARRAY_DIGESTS.set(dict(values))
+    try:
+        yield
+    finally:
+        _ACTIVE_SUBJECT_SHAPE_ARRAY_DIGESTS.reset(token)
 
 
 def _uses_access_aware_subject_shape_storage(run: Any) -> bool:
@@ -587,50 +628,131 @@ def require_translation_only_subject_shape_placement(
     return require_translation_only_refined_placement(source)
 
 
-def _translate_points_node(node: Any, offsets: np.ndarray) -> None:
-    values = np.asarray(node[:])
-    if values.dtype.kind != "f" or values.ndim < 2 or values.shape[0] != offsets.shape[0] or values.shape[-1] != 2:
-        _fail(f"/{canonical_node_path(node)} is not a floating row-aligned XY surface.")
-    shape = (offsets.shape[0],) + (1,) * (values.ndim - 2) + (2,)
-    transformed = values.astype(np.float64) + offsets.reshape(shape)
-    transformed[np.isnan(values)] = np.nan
-    node[...] = transformed.astype(values.dtype)
+def _outer_row_block_size(node: Any, row_count: int) -> int:
+    """Return one physical outer chunk/shard extent along the row axis."""
+
+    try:
+        metadata = node.metadata.to_dict()
+        outer = metadata["chunk_grid"]["configuration"]["chunk_shape"]
+        value = int(outer[0])
+    except (AttributeError, KeyError, TypeError, ValueError, IndexError):
+        chunks = getattr(node, "chunks", None)
+        try:
+            value = int(chunks[0]) if chunks else 0
+        except (TypeError, ValueError, IndexError):
+            value = 0
+    if value <= 0:
+        value = max(1, min(int(row_count), 65_536))
+    return value
+
+
+def _row_blocks(node: Any, row_count: int) -> Iterable[tuple[int, int]]:
+    step = _outer_row_block_size(node, row_count)
+    for start in range(0, int(row_count), step):
+        yield start, min(int(row_count), start + step)
+
+
+def _require_row_array_metadata(
+    node: Any,
+    *,
+    row_count: int,
+    trailing_shape: tuple[int, ...] | None = None,
+) -> tuple[np.dtype[Any], tuple[int, ...]]:
+    try:
+        dtype = np.dtype(node.dtype)
+        shape = tuple(int(value) for value in node.shape)
+    except (AttributeError, TypeError, ValueError) as exc:
+        _fail(f"/{canonical_node_path(node)} has invalid array metadata: {exc}")
+    if (
+        dtype.kind != "f"
+        or not shape
+        or shape[0] != int(row_count)
+        or (trailing_shape is not None and shape[1:] != trailing_shape)
+    ):
+        _fail(f"/{canonical_node_path(node)} has an invalid row-aligned shape.")
+    return dtype, shape
+
+
+def _mask_invalid_and_translate_points_node(
+    node: Any,
+    offsets: np.ndarray,
+    valid_node: Any,
+) -> None:
+    """Mask and translate one positional surface in one whole-shard pass."""
+
+    row_count = int(offsets.shape[0])
+    dtype, shape = _require_row_array_metadata(node, row_count=row_count)
+    if len(shape) < 2 or shape[-1] != 2:
+        _fail(f"/{canonical_node_path(node)} is not a row-aligned XY surface.")
+    if tuple(int(value) for value in valid_node.shape) != (row_count,):
+        _fail(f"/{canonical_node_path(valid_node)} validity alignment is invalid.")
+    trailing = (slice(None),) * (len(shape) - 1)
+    for start, stop in _row_blocks(node, row_count):
+        selection = (slice(start, stop), *trailing)
+        values = np.asarray(node[selection])
+        valid = np.asarray(valid_node[start:stop], dtype=bool)
+        offset_shape = (stop - start,) + (1,) * (len(shape) - 2) + (2,)
+        transformed = values.astype(np.float64) + offsets[start:stop].reshape(
+            offset_shape
+        )
+        transformed[np.isnan(values)] = np.nan
+        transformed[~valid] = np.nan
+        node[selection] = transformed.astype(dtype)
 
 
 def _translate_bbox_node(node: Any, offsets: np.ndarray, valid_node: Any) -> None:
-    values = np.asarray(node[:])
-    valid = np.asarray(valid_node[:], dtype=bool)
-    if values.dtype.kind != "f" or values.shape != (offsets.shape[0], 4) or valid.shape != (offsets.shape[0],):
-        _fail(f"/{canonical_node_path(node)} is not a row-aligned bbox_xyxy surface.")
-    # The shared mask-geometry primitive emits canonical half-open pixel-edge
-    # bounds.  Transform both corners as edges; do not add one here or infer a
-    # convention from the array name.
-    half_open = values.astype(np.float64)
-    half_open[~valid] = np.nan
-    corners = half_open.reshape(offsets.shape[0], 2, 2)
-    transformed = corners + offsets[:, None, :]
-    node[...] = transformed.reshape(values.shape).astype(values.dtype)
+    row_count = int(offsets.shape[0])
+    dtype, _shape = _require_row_array_metadata(
+        node,
+        row_count=row_count,
+        trailing_shape=(4,),
+    )
+    if tuple(int(value) for value in valid_node.shape) != (row_count,):
+        _fail(f"/{canonical_node_path(node)} bbox validity is misaligned.")
+    for start, stop in _row_blocks(node, row_count):
+        values = np.asarray(node[start:stop])
+        valid = np.asarray(valid_node[start:stop], dtype=bool)
+        # The shared primitive emits half-open pixel-edge bounds. Transform
+        # both corners as edges without adding or inferring a pixel.
+        output = values.astype(np.float64)
+        output[~valid] = np.nan
+        output = (
+            output.reshape(stop - start, 2, 2)
+            + offsets[start:stop, None, :]
+        ).reshape(values.shape)
+        node[start:stop] = output.astype(dtype)
 
 
 def _translate_ellipse_node(node: Any, offsets: np.ndarray, valid_node: Any) -> None:
-    values = np.asarray(node[:])
-    valid = np.asarray(valid_node[:], dtype=bool)
-    if values.dtype.kind != "f" or values.shape != (offsets.shape[0], 5) or valid.shape != (offsets.shape[0],):
-        _fail(f"/{canonical_node_path(node)} is not a row-aligned ellipse surface.")
-    output = values.astype(np.float64)
-    output[:, :2] += offsets
-    output[~valid] = np.nan
-    node[...] = output.astype(values.dtype)
+    row_count = int(offsets.shape[0])
+    dtype, _shape = _require_row_array_metadata(
+        node,
+        row_count=row_count,
+        trailing_shape=(5,),
+    )
+    if tuple(int(value) for value in valid_node.shape) != (row_count,):
+        _fail(f"/{canonical_node_path(node)} ellipse validity is misaligned.")
+    for start, stop in _row_blocks(node, row_count):
+        values = np.asarray(node[start:stop])
+        valid = np.asarray(valid_node[start:stop], dtype=bool)
+        output = values.astype(np.float64)
+        output[:, :2] += offsets[start:stop]
+        output[~valid] = np.nan
+        node[start:stop] = output.astype(dtype)
 
 
 def _mask_invalid(node: Any, valid_node: Any) -> None:
-    values = np.asarray(node[:])
-    valid = np.asarray(valid_node[:], dtype=bool)
-    if values.dtype.kind != "f" or values.shape[0] != valid.shape[0]:
+    row_count = int(node.shape[0])
+    dtype, shape = _require_row_array_metadata(node, row_count=row_count)
+    if tuple(int(value) for value in valid_node.shape) != (row_count,):
         _fail(f"/{canonical_node_path(node)} validity alignment is invalid.")
-    output = values.copy()
-    output[~valid] = np.nan
-    node[...] = output
+    trailing = (slice(None),) * (len(shape) - 1)
+    for start, stop in _row_blocks(node, row_count):
+        selection = (slice(start, stop), *trailing)
+        output = np.asarray(node[selection]).copy()
+        valid = np.asarray(valid_node[start:stop], dtype=bool)
+        output[~valid] = np.nan
+        node[selection] = output.astype(dtype)
 
 
 def transform_subject_shape_geometry_to_source_camera(
@@ -647,8 +769,11 @@ def transform_subject_shape_geometry_to_source_camera(
     components = run["components"]
     for name in component_names:
         group = components[str(name)]
-        _mask_invalid(group["centroid_xy"], group["centroid_valid"])
-        _translate_points_node(group["centroid_xy"], continuous_offsets)
+        _mask_invalid_and_translate_points_node(
+            group["centroid_xy"],
+            continuous_offsets,
+            group["centroid_valid"],
+        )
         _translate_bbox_node(group["bbox_xyxy"], edge_offsets, group["bbox_valid"])
         if "ellipse_params" in group:
             _translate_ellipse_node(group["ellipse_params"], continuous_offsets, group["ellipse_success"])
@@ -669,8 +794,11 @@ def transform_subject_shape_geometry_to_source_camera(
             ("tail_base_xy", "tail_base_valid"),
         ):
             if point_name in body:
-                _mask_invalid(body[point_name], body[valid_name])
-                _translate_points_node(body[point_name], continuous_offsets)
+                _mask_invalid_and_translate_points_node(
+                    body[point_name],
+                    continuous_offsets,
+                    body[valid_name],
+                )
         for vector_name, valid_name in (
             ("principal_axis_xy", "principal_axis_valid"),
             ("tail_tangent_xy", "tail_sample_valid"),
@@ -686,14 +814,20 @@ def transform_subject_shape_geometry_to_source_camera(
 
     swim = components.get("swim_bladder")
     if swim is not None and "caudal_contour_point_xy" in swim:
-        _mask_invalid(swim["caudal_contour_point_xy"], swim["caudal_contour_valid"])
-        _translate_points_node(swim["caudal_contour_point_xy"], continuous_offsets)
+        _mask_invalid_and_translate_points_node(
+            swim["caudal_contour_point_xy"],
+            continuous_offsets,
+            swim["caudal_contour_valid"],
+        )
 
     relations = run.get("relations")
     if relations is not None and "eye_pair" in relations:
         eye_pair = relations["eye_pair"]
-        _mask_invalid(eye_pair["midpoint_xy"], eye_pair["midpoint_valid"])
-        _translate_points_node(eye_pair["midpoint_xy"], continuous_offsets)
+        _mask_invalid_and_translate_points_node(
+            eye_pair["midpoint_xy"],
+            continuous_offsets,
+            eye_pair["midpoint_valid"],
+        )
     if relations is not None and "eyes_to_body" in relations:
         eyes = relations["eyes_to_body"]
         for prefix in ("left", "right"):
@@ -1257,6 +1391,8 @@ _RUN_OPERATIONAL_ATTRS = frozenset(
         SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR,
         f"{SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR}_sha256",
         SUBJECT_SHAPE_STORAGE_METADATA_POLICY_ATTR,
+        SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR,
+        SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR,
     }
 )
 _RUN_AUTHORITATIVE_ATTRS = frozenset(
@@ -1284,6 +1420,7 @@ _RUN_AUTHORITATIVE_ATTRS = frozenset(
         SUBJECT_SHAPE_BUNDLE_ACTIVE_AT_DERIVATION_ATTR,
         SUBJECT_SHAPE_SOURCE_BINDING_ATTR,
         SUBJECT_SHAPE_SOURCE_BINDING_DIGEST_ATTR,
+        SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR,
     }
 )
 _RUN_FINAL_AUTHORITATIVE_ATTRS = frozenset(
@@ -1850,6 +1987,8 @@ def build_subject_shape_schema_inventory_record(
 
 def build_subject_shape_unbound_numeric_manifest_record(
     run: Any,
+    *,
+    array_content_sha256: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Build the producer seal for one unbound subject-shape numeric payload."""
 
@@ -1857,17 +1996,26 @@ def build_subject_shape_unbound_numeric_manifest_record(
         run,
         phase="unbound",
     )
-    arrays = {
-        path: {
+    expected_paths = set(schema_inventory["arrays"])
+    if array_content_sha256 is not None and set(array_content_sha256) != expected_paths:
+        _fail("Subject-shape unbound digest receipt inventory is not exact.")
+    arrays: dict[str, dict[str, Any]] = {}
+    for path in schema_inventory["arrays"]:
+        node = run[path]
+        digest = (
+            array_payload_sha256(node)
+            if array_content_sha256 is None
+            else array_content_sha256[path]
+        )
+        if type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            _fail(f"Subject-shape unbound digest receipt is invalid for {path!r}.")
+        arrays[path] = {
             "relative_ref": path,
             "dtype": np.dtype(node.dtype).str,
             "shape": [int(value) for value in node.shape],
-            "content_sha256": array_payload_sha256(node),
+            "content_sha256": digest,
             "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
         }
-        for path in schema_inventory["arrays"]
-        for node in (run[path],)
-    }
     result = {
         "schema_id": SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID,
         "schema_version": 1,
@@ -1904,24 +2052,38 @@ def build_subject_shape_unbound_numeric_manifest_record(
     return result
 
 
-def stamp_unbound_subject_shape_manifest(run: Any) -> BoundCoordinateRecord:
+def stamp_unbound_subject_shape_manifest(
+    run: Any,
+    *,
+    array_content_sha256: Mapping[str, str] | None = None,
+) -> BoundCoordinateRecord:
     """Persist and digest-bind the exact unbound producer seal."""
 
     return stamp_and_bind_persisted_coordinate_record(
         run,
-        build_subject_shape_unbound_numeric_manifest_record(run),
+        build_subject_shape_unbound_numeric_manifest_record(
+            run,
+            array_content_sha256=array_content_sha256,
+        ),
         attr_name=SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
     )
 
 
-def load_unbound_subject_shape_manifest(run: Any) -> BoundCoordinateRecord:
+def load_unbound_subject_shape_manifest(
+    run: Any,
+    *,
+    array_content_sha256: Mapping[str, str] | None = None,
+) -> BoundCoordinateRecord:
     """Load an unbound producer seal only when it matches the live payload."""
 
     result = bind_persisted_coordinate_record(
         run,
         attr_name=SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
     )
-    if result.record != build_subject_shape_unbound_numeric_manifest_record(run):
+    if result.record != build_subject_shape_unbound_numeric_manifest_record(
+        run,
+        array_content_sha256=array_content_sha256,
+    ):
         _fail("Subject-shape unbound numeric manifest differs from live arrays.")
     return result
 
@@ -2072,7 +2234,11 @@ def _validate_retained_unbound_schema(run: Any, record: Mapping[str, Any]) -> No
             _fail(f"Retained unbound-stage array record for {path!r} is invalid.")
 
     stable_run_names = sorted(
-        {str(value) for value in run.attrs.keys()} & set(_RUN_AUTHORITATIVE_ATTRS)
+        (
+            {str(value) for value in run.attrs.keys()}
+            & set(_RUN_AUTHORITATIVE_ATTRS)
+        )
+        - {SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR}
     )
     expected_root_entry = _attribute_inventory_entry(run, stable_run_names)
     if inventory_attrs["."] != expected_root_entry:
@@ -2953,13 +3119,272 @@ def _iter_arrays(group: Any, prefix: str = "") -> Iterable[tuple[str, Any]]:
         yield from _iter_arrays(group[name], path)
 
 
+def _subject_shape_payload_numerical_policy(
+    array_content_sha256: Mapping[str, str],
+) -> dict[str, Any]:
+    return {
+        "array_digest_source": "single_locked_post_binding_decoded_scan_v1",
+        "array_payload_canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        "array_content_sha256": {
+            path: array_content_sha256[path]
+            for path in sorted(array_content_sha256)
+        },
+        "closed_array_inventory": True,
+        "mutation_exclusion_contract": (
+            "exclusive_archive_publication_lock_then_immutable_run_lifecycle_v1"
+        ),
+        "normal_load_physical_rehash": False,
+        "deep_audit_physical_rehash_available": True,
+    }
+
+
+def _scan_subject_shape_bound_payload(
+    run: Any,
+) -> tuple[dict[str, str], Mapping[str, Any]]:
+    """Read the final arrays once before metadata-only authority stamping."""
+
+    from fisheye.shared.subject_shape_storage import (
+        build_subject_shape_bound_payload_scan_receipt,
+    )
+
+    if (
+        SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR in run.attrs
+        or SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR in run.attrs
+    ):
+        _fail("Subject-shape payload receipt attributes are already occupied.")
+    scan = build_subject_shape_bound_payload_scan_receipt(run)
+    raw_digests = scan.get("array_content_sha256")
+    copy_report = scan.get("decoded_copy_report")
+    if not isinstance(raw_digests, Mapping) or not isinstance(copy_report, Mapping):
+        _fail("Subject-shape payload scan did not return closed digest evidence.")
+    return (
+        {str(path): str(value) for path, value in raw_digests.items()},
+        copy_report,
+    )
+
+
+def _build_subject_shape_payload_integrity(
+    run: Any,
+    *,
+    decoded_copy_report: Mapping[str, Any],
+    payload_run_path: str | Path | None,
+    hash_workers: int,
+) -> dict[str, Any]:
+    """Seal final physical and immutable metadata after authority stamping."""
+
+    if (
+        SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR in run.attrs
+        or SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR in run.attrs
+    ):
+        _fail("Subject-shape payload receipt attributes are already occupied.")
+    payload_path = _subject_shape_payload_path(run, payload_run_path)
+    integrity = build_payload_integrity_receipt(
+        payload_path,
+        run_ref=f"/{canonical_node_path(run)}",
+        decoded_copy_report=decoded_copy_report,
+        hash_workers=max(1, int(hash_workers)),
+    )
+    run.attrs[SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR] = _json_copy(
+        integrity
+    )
+    if run.attrs.get(SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR) != integrity:
+        _fail("Subject-shape payload integrity receipt did not persist exactly.")
+    return integrity
+
+
+def _subject_shape_payload_path(
+    run: Any,
+    payload_run_path: str | Path | None,
+) -> Path:
+    if payload_run_path is not None:
+        return Path(payload_run_path).expanduser().resolve()
+    identity = archive_identity(run)
+    if identity.kind != "local_store_root":
+        _fail("Subject-shape payload receipts require an explicit local run path.")
+    return Path(str(identity.key[0])).joinpath(
+        *str(run.path).strip("/").split("/")
+    )
+
+
+def _stamp_subject_shape_payload_validation(
+    run: Any,
+    *,
+    integrity_receipt: Mapping[str, Any],
+    manifest_sha256: str,
+    array_content_sha256: Mapping[str, str],
+) -> dict[str, Any]:
+    validation = build_payload_validation_receipt(
+        integrity_receipt,
+        scientific_manifest_schema_id=SUBJECT_SHAPE_MANIFEST_SCHEMA_ID,
+        scientific_manifest_schema_version=SUBJECT_SHAPE_SCHEMA_VERSION,
+        scientific_manifest_sha256=manifest_sha256,
+        validator_schema_id=SUBJECT_SHAPE_PAYLOAD_VALIDATOR_SCHEMA_ID,
+        validator_schema_version=SUBJECT_SHAPE_PAYLOAD_VALIDATOR_SCHEMA_VERSION,
+        numerical_policy=_subject_shape_payload_numerical_policy(
+            array_content_sha256
+        ),
+    )
+    run.attrs[SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR] = _json_copy(
+        validation
+    )
+    if run.attrs.get(SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR) != validation:
+        _fail("Subject-shape payload validation receipt did not persist exactly.")
+    return validation
+
+
+def _load_subject_shape_payload_digest_evidence(
+    run: Any,
+    *,
+    manifest_sha256: str,
+) -> Mapping[str, str] | None:
+    """Load receipt-backed digests, falling back only for historical artifacts."""
+
+    raw_integrity = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR)
+    raw_validation = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR)
+    receipt_profile = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
+    if raw_integrity is None and raw_validation is None:
+        if receipt_profile is not None:
+            _fail("Subject-shape receipt-profile publication lacks its receipts.")
+        return None
+    if receipt_profile != SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE:
+        _fail("Subject-shape payload receipts lack their exact profile marker.")
+    if not isinstance(raw_integrity, Mapping) or not isinstance(
+        raw_validation,
+        Mapping,
+    ):
+        _fail("Subject-shape payload receipt pair is incomplete or malformed.")
+    try:
+        integrity = canonical_payload_integrity_receipt(raw_integrity)
+        if integrity.get("run_ref") != f"/{canonical_node_path(run)}":
+            raise ValueError("payload integrity receipt names another run")
+        validation = verify_payload_validation_receipt(
+            raw_validation,
+            integrity_receipt=integrity,
+            expected_scientific_manifest_sha256=manifest_sha256,
+            expected_validator_schema_id=SUBJECT_SHAPE_PAYLOAD_VALIDATOR_SCHEMA_ID,
+            expected_validator_schema_version=(
+                SUBJECT_SHAPE_PAYLOAD_VALIDATOR_SCHEMA_VERSION
+            ),
+        )
+    except Exception as exc:
+        _fail(f"Subject-shape payload receipt validation failed: {exc}")
+    policy = validation.get("numerical_policy")
+    if not isinstance(policy, Mapping):
+        _fail("Subject-shape payload validation lacks its numerical policy.")
+    digests = policy.get("array_content_sha256")
+    if (
+        set(policy)
+        != {
+            "array_digest_source",
+            "array_payload_canonicalization",
+            "array_content_sha256",
+            "closed_array_inventory",
+            "mutation_exclusion_contract",
+            "normal_load_physical_rehash",
+            "deep_audit_physical_rehash_available",
+        }
+        or policy.get("array_digest_source")
+        != "single_locked_post_binding_decoded_scan_v1"
+        or policy.get("array_payload_canonicalization")
+        != "numpy_dtype_shape_c_order_bytes_v1"
+        or policy.get("closed_array_inventory") is not True
+        or policy.get("mutation_exclusion_contract")
+        != "exclusive_archive_publication_lock_then_immutable_run_lifecycle_v1"
+        or policy.get("normal_load_physical_rehash") is not False
+        or policy.get("deep_audit_physical_rehash_available") is not True
+        or not isinstance(digests, Mapping)
+    ):
+        _fail("Subject-shape payload validation policy is not exact.")
+    live_arrays = dict(_iter_arrays(run))
+    decoded_arrays = integrity["decoded_payload"]["arrays"]
+    decoded_by_path = {str(value["path"]): value for value in decoded_arrays}
+    if set(digests) != set(live_arrays) or set(decoded_by_path) != set(live_arrays):
+        _fail("Subject-shape payload receipt array inventory differs from the run.")
+    normalized: dict[str, str] = {}
+    for path in sorted(live_arrays):
+        node = live_arrays[path]
+        digest = digests[path]
+        decoded = decoded_by_path[path]
+        if (
+            type(digest) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or decoded.get("dtype") != str(np.dtype(node.dtype))
+            or decoded.get("shape") != [int(value) for value in node.shape]
+        ):
+            _fail(f"Subject-shape payload receipt declaration differs for {path!r}.")
+        normalized[path] = digest
+    return normalized
+
+
+def deep_audit_subject_shape_payload_receipt(
+    run: Any,
+    *,
+    payload_run_path: str | Path | None = None,
+    hash_workers: int = 4,
+) -> dict[str, Any]:
+    """Rehash one immutable publication against its sealed payload receipt.
+
+    Normal scientific loads validate the digest-bound receipt and metadata
+    declarations without rereading immutable payload files.  This explicit
+    maintenance/audit path performs the expensive physical rehash when archive
+    custody, transfer, or out-of-band mutation is in question.
+    """
+
+    manifest = bind_persisted_coordinate_record(
+        run,
+        attr_name=SUBJECT_SHAPE_MANIFEST_ATTR,
+    )
+    digests = _load_subject_shape_payload_digest_evidence(
+        run,
+        manifest_sha256=manifest.record_sha256,
+    )
+    if digests is None:
+        _fail("Historical subject-shape publication lacks a payload receipt.")
+    raw_integrity = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR)
+    try:
+        integrity = verify_payload_integrity_receipt(
+            _subject_shape_payload_path(run, payload_run_path),
+            raw_integrity,
+            expected_run_ref=f"/{canonical_node_path(run)}",
+            hash_workers=max(1, int(hash_workers)),
+            verify_physical_payload=True,
+        )
+    except Exception as exc:
+        _fail(f"Subject-shape deep payload audit failed: {exc}")
+    return {
+        "valid": True,
+        "run_ref": integrity["run_ref"],
+        "manifest_sha256": manifest.record_sha256,
+        "integrity_receipt_sha256": integrity["record_sha256"],
+        "decoded_payload_root_sha256": integrity["decoded_payload"]["root_sha256"],
+        "physical_payload_root_sha256": integrity["physical_payload"]["root_sha256"],
+        "immutable_metadata_root_sha256": integrity["immutable_metadata"][
+            "root_sha256"
+        ],
+        "array_count": len(digests),
+        "physical_rehash_performed": True,
+    }
+
+
 def _array_record(path: str, node: Any) -> dict[str, Any]:
+    digests = _ACTIVE_SUBJECT_SHAPE_ARRAY_DIGESTS.get()
+    if digests is None:
+        content_sha256 = array_payload_sha256(node)
+    else:
+        content_sha256 = digests.get(path)
+        if (
+            type(content_sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", content_sha256) is None
+        ):
+            _fail(
+                f"Subject-shape payload receipt omits exact array digest {path!r}."
+            )
     return {
         "array_ref": f"/{canonical_node_path(node)}",
         "relative_ref": path,
         "dtype": np.dtype(node.dtype).str,
         "shape": [int(value) for value in node.shape],
-        "content_sha256": array_payload_sha256(node),
+        "content_sha256": content_sha256,
         "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
     }
 
@@ -3703,6 +4128,22 @@ def _load_subject_shape_publication(
     ):
         _fail("Subject-shape run lacks exact bound canonical coordinate status.")
     _require_subject_shape_maintained_profile(run)
+    manifest = bind_persisted_coordinate_record(
+        run,
+        attr_name=SUBJECT_SHAPE_MANIFEST_ATTR,
+    )
+    payload_digests = _load_subject_shape_payload_digest_evidence(
+        run,
+        manifest_sha256=manifest.record_sha256,
+    )
+
+    def digest_scope():
+        return (
+            nullcontext()
+            if payload_digests is None
+            else _subject_shape_array_digest_scope(payload_digests)
+        )
+
     component_names = tuple(str(value) for value in (run.attrs.get("component_names") or ()))
     source = load_exact_subject_shape_source(root, run)
     source_binding = _load_source_binding(run, source)
@@ -3736,14 +4177,15 @@ def _load_subject_shape_publication(
     if component_schema.record != _component_schema_record(component_names):
         _fail("Subject-shape component schema differs from run inventory.")
     scientific_configuration = _load_scientific_configuration(run)
-    tail_sample_axis = _load_tail_sample_axis(run)
-    scalar_surfaces, scalar_surface_inventory = _scalar_surface_bindings(
-        run,
-        identity=identity,
-        scientific_configuration=scientific_configuration,
-        tail_sample_axis=tail_sample_axis,
-        load=True,
-    )
+    with digest_scope():
+        tail_sample_axis = _load_tail_sample_axis(run)
+        scalar_surfaces, scalar_surface_inventory = _scalar_surface_bindings(
+            run,
+            identity=identity,
+            scientific_configuration=scientific_configuration,
+            tail_sample_axis=tail_sample_axis,
+            load=True,
+        )
     derivation = bind_persisted_coordinate_record(
         run,
         attr_name=SUBJECT_SHAPE_DERIVATION_ATTR,
@@ -3782,29 +4224,29 @@ def _load_subject_shape_publication(
         tail_sample_axis=tail_sample_axis,
         derivation=derivation,
     )
-    heading_semantics = _load_heading_semantics(
-        run,
-        identity=identity,
-        forward_descriptor=descriptors["body_frame/forward_axis_xy"],
-        body_frame=body_frame,
-    )
-    manifest = bind_persisted_coordinate_record(run, attr_name=SUBJECT_SHAPE_MANIFEST_ATTR)
-    expected_manifest = _manifest_record(
-        run,
-        source=source,
-        source_binding=source_binding,
-        identity=identity,
-        temporal=temporal,
-        component_schema=component_schema,
-        scientific_configuration=scientific_configuration,
-        tail_sample_axis=tail_sample_axis,
-        scalar_surfaces=scalar_surfaces,
-        scalar_surface_inventory=scalar_surface_inventory,
-        derivation=derivation,
-        descriptors=descriptors,
-        body_frame=body_frame,
-        heading_semantics=heading_semantics,
-    )
+    with digest_scope():
+        heading_semantics = _load_heading_semantics(
+            run,
+            identity=identity,
+            forward_descriptor=descriptors["body_frame/forward_axis_xy"],
+            body_frame=body_frame,
+        )
+        expected_manifest = _manifest_record(
+            run,
+            source=source,
+            source_binding=source_binding,
+            identity=identity,
+            temporal=temporal,
+            component_schema=component_schema,
+            scientific_configuration=scientific_configuration,
+            tail_sample_axis=tail_sample_axis,
+            scalar_surfaces=scalar_surfaces,
+            scalar_surface_inventory=scalar_surface_inventory,
+            derivation=derivation,
+            descriptors=descriptors,
+            body_frame=body_frame,
+            heading_semantics=heading_semantics,
+        )
     if manifest.record != expected_manifest:
         _fail("Subject-shape publication manifest differs from live arrays or authorities.")
     if run.attrs.get("publication_manifest_sha256") != manifest.record_sha256:
@@ -3889,6 +4331,8 @@ def publish_subject_shape_coordinate_surfaces(
     component_names: Sequence[str],
     identity: BoundRowIdentityContract,
     component_schema: BoundCoordinateRecord,
+    payload_run_path: str | Path | None = None,
+    payload_hash_workers: int = 4,
 ) -> BoundSubjectShapeCoordinatePublication:
     """Transform and seal one running/ineligible child without selecting it."""
 
@@ -3907,79 +4351,96 @@ def publish_subject_shape_coordinate_surfaces(
     )
     _write_component_aggregate(run, component_names)
     _rewrite_body_frame_from_camera_components(run, component_names)
-    temporal = stamp_subject_shape_temporal_authority(run, source, identity)
-    scientific_configuration = _stamp_scientific_configuration(run)
-    tail_sample_axis = _stamp_tail_sample_axis(run)
-    scalar_surfaces, scalar_surface_inventory = _scalar_surface_bindings(
-        run,
-        identity=identity,
-        scientific_configuration=scientific_configuration,
-        tail_sample_axis=tail_sample_axis,
-        load=False,
+    run.attrs[SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR] = (
+        SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE
     )
-    derivation = stamp_subject_shape_derivation(
-        run,
-        source,
-        source_binding,
-        identity,
-        component_schema,
-        temporal,
-        scientific_configuration,
-        tail_sample_axis,
-        scalar_surface_inventory,
-    )
-    descriptors = _descriptor_bindings(
-        run,
-        source=source,
-        source_binding=source_binding,
-        identity=identity,
-        component_schema=component_schema,
-        scientific_configuration=scientific_configuration,
-        tail_sample_axis=tail_sample_axis,
-        derivation=derivation,
-        component_names=component_names,
-        load=False,
-    )
-    stamp_bound_canonical_coordinate_descriptors(descriptors.values())
-    body_frame = _stamp_body_frame(
-        run,
-        source=source,
-        source_binding=source_binding,
-        identity=identity,
-        component_schema=component_schema,
-        scientific_configuration=scientific_configuration,
-        tail_sample_axis=tail_sample_axis,
-        derivation=derivation,
-    )
-    heading_semantics = _stamp_heading_semantics(
-        run,
-        identity=identity,
-        forward_descriptor=descriptors["body_frame/forward_axis_xy"],
-        body_frame=body_frame,
-    )
-    manifest_record = _manifest_record(
-        run,
-        source=source,
-        source_binding=source_binding,
-        identity=identity,
-        temporal=temporal,
-        component_schema=component_schema,
-        scientific_configuration=scientific_configuration,
-        tail_sample_axis=tail_sample_axis,
-        scalar_surfaces=scalar_surfaces,
-        scalar_surface_inventory=scalar_surface_inventory,
-        derivation=derivation,
-        descriptors=descriptors,
-        body_frame=body_frame,
-        heading_semantics=heading_semantics,
-    )
-    manifest = stamp_and_bind_persisted_coordinate_record(
-        run,
-        manifest_record,
-        attr_name=SUBJECT_SHAPE_MANIFEST_ATTR,
-    )
+    array_digests, decoded_copy_report = _scan_subject_shape_bound_payload(run)
+    with _subject_shape_array_digest_scope(array_digests):
+        temporal = stamp_subject_shape_temporal_authority(run, source, identity)
+        scientific_configuration = _stamp_scientific_configuration(run)
+        tail_sample_axis = _stamp_tail_sample_axis(run)
+        scalar_surfaces, scalar_surface_inventory = _scalar_surface_bindings(
+            run,
+            identity=identity,
+            scientific_configuration=scientific_configuration,
+            tail_sample_axis=tail_sample_axis,
+            load=False,
+        )
+        derivation = stamp_subject_shape_derivation(
+            run,
+            source,
+            source_binding,
+            identity,
+            component_schema,
+            temporal,
+            scientific_configuration,
+            tail_sample_axis,
+            scalar_surface_inventory,
+        )
+        descriptors = _descriptor_bindings(
+            run,
+            source=source,
+            source_binding=source_binding,
+            identity=identity,
+            component_schema=component_schema,
+            scientific_configuration=scientific_configuration,
+            tail_sample_axis=tail_sample_axis,
+            derivation=derivation,
+            component_names=component_names,
+            load=False,
+        )
+        stamp_bound_canonical_coordinate_descriptors(descriptors.values())
+        body_frame = _stamp_body_frame(
+            run,
+            source=source,
+            source_binding=source_binding,
+            identity=identity,
+            component_schema=component_schema,
+            scientific_configuration=scientific_configuration,
+            tail_sample_axis=tail_sample_axis,
+            derivation=derivation,
+        )
+        heading_semantics = _stamp_heading_semantics(
+            run,
+            identity=identity,
+            forward_descriptor=descriptors["body_frame/forward_axis_xy"],
+            body_frame=body_frame,
+        )
+        manifest_record = _manifest_record(
+            run,
+            source=source,
+            source_binding=source_binding,
+            identity=identity,
+            temporal=temporal,
+            component_schema=component_schema,
+            scientific_configuration=scientific_configuration,
+            tail_sample_axis=tail_sample_axis,
+            scalar_surfaces=scalar_surfaces,
+            scalar_surface_inventory=scalar_surface_inventory,
+            derivation=derivation,
+            descriptors=descriptors,
+            body_frame=body_frame,
+            heading_semantics=heading_semantics,
+        )
+        manifest = stamp_and_bind_persisted_coordinate_record(
+            run,
+            manifest_record,
+            attr_name=SUBJECT_SHAPE_MANIFEST_ATTR,
+        )
     run.attrs["publication_manifest_sha256"] = manifest.record_sha256
     run.attrs["coordinate_contract"] = SUBJECT_SHAPE_COORDINATE_CONTRACT
+    integrity_receipt = _build_subject_shape_payload_integrity(
+        run,
+        decoded_copy_report=decoded_copy_report,
+        payload_run_path=payload_run_path,
+        hash_workers=payload_hash_workers,
+    )
+    _stamp_subject_shape_payload_validation(
+        run,
+        integrity_receipt=integrity_receipt,
+        manifest_sha256=manifest.record_sha256,
+        array_content_sha256=array_digests,
+    )
     if (
         run.attrs.get("publication_manifest_sha256") != manifest.record_sha256
         or run.attrs.get("coordinate_contract") != SUBJECT_SHAPE_COORDINATE_CONTRACT
@@ -4781,6 +5242,12 @@ __all__ = [
     "SUBJECT_SHAPE_HEADING_SEMANTICS_ATTR",
     "SUBJECT_SHAPE_MANIFEST_ATTR",
     "SUBJECT_SHAPE_PARENT_PUBLICATION_LEASE_ATTR",
+    "SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR",
+    "SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE",
+    "SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR",
+    "SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR",
+    "SUBJECT_SHAPE_PAYLOAD_VALIDATOR_SCHEMA_ID",
+    "SUBJECT_SHAPE_PAYLOAD_VALIDATOR_SCHEMA_VERSION",
     "SUBJECT_SHAPE_PUBLICATION_GENERATION_ATTR",
     "SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR",
     "SUBJECT_SHAPE_PUBLICATION_POLICY_ATTR",
@@ -4819,6 +5286,7 @@ __all__ = [
     "build_subject_shape_unbound_numeric_manifest_record",
     "build_subject_shape_pending_receipt",
     "commit_deferred_subject_shape_coordinate_activation",
+    "deep_audit_subject_shape_payload_receipt",
     "load_completed_ineligible_subject_shape_coordinate_publication",
     "load_exact_subject_shape_source",
     "load_exact_subject_shape_refined_source",
@@ -4826,6 +5294,7 @@ __all__ = [
     "load_subject_shape_temporal_authority",
     "load_persisted_subject_shape_coordinate_publication",
     "load_sealed_unbound_subject_shape_manifest",
+    "load_unbound_subject_shape_manifest",
     "prepare_subject_shape_identity_and_schema",
     "publish_subject_shape_coordinate_surfaces",
     "require_translation_only_refined_placement",

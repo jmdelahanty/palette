@@ -33,6 +33,8 @@ from fisheye.shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
     SUBJECT_SHAPE_DERIVATION_ATTR,
     SUBJECT_SHAPE_PARENT_PUBLICATION_LEASE_ATTR,
+    SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR,
+    SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR,
     SUBJECT_SHAPE_PUBLICATION_GENERATION_ATTR,
     SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
     SUBJECT_SHAPE_PUBLICATION_POLICY,
@@ -516,7 +518,8 @@ def test_subject_shape_materializer_computes_shards_and_publishes(
     )
 
     assert result["status"] == "complete"
-    assert result["local_materialization"]["node_local_sharding"]["exact_decoded_validation"] is True
+    node_local_sharding = result["local_materialization"]["node_local_sharding"]
+    assert node_local_sharding["exact_decoded_validation"] is True
     root = zarr.open_group(str(source_path), mode="r", use_consolidated=False)
     np.testing.assert_array_equal(
         np.asarray(root["refined_subject_masks_runs"]["r1"]["masks_roi"][:]),
@@ -528,6 +531,18 @@ def test_subject_shape_materializer_computes_shards_and_publishes(
     assert run.attrs["palette_run_completion_status"] == "complete"
     assert run.attrs["coordinate_binding_status"] == "bound_canonical_v2"
     assert run.attrs["stage_selector_eligible"] is True
+    integrity = run.attrs[SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR]
+    validation = run.attrs[SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR]
+    assert integrity["run_ref"] == (
+        "/analysis/subject_shape_runs/shape_materialized"
+    )
+    assert validation["integrity_receipt_sha256"] == integrity["record_sha256"]
+    assert validation["scientific_manifest"]["sha256"] == run.attrs[
+        "publication_manifest_sha256"
+    ]
+    assert set(validation["numerical_policy"]["array_content_sha256"]) == {
+        path for path, _node in mod._iter_subject_shape_arrays(run)
+    }
     assert run.attrs["centerline_crop_to_foreground"] is True
     assert run.attrs["physical_storage_layout"]["layout"] == "zarr_v3_indexed_sharding"
     assert tuple(run["components"]["subject_body"]["centerline_xy"].shards[1:]) == (
@@ -607,6 +622,13 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
     )
 
     assert result["status"] == "complete"
+    node_local_sharding = result["local_materialization"]["node_local_sharding"]
+    assert node_local_sharding["physical_write_policy"] == (
+        "one_complete_nonoverlapping_outer_chunk_or_shard_per_assignment_v1"
+    )
+    assert set(node_local_sharding["array_content_sha256"]) == set(
+        node_local_sharding["outer_write_rows"]
+    )
     direct_root = zarr.open_group(
         str(source_path), mode="r", use_consolidated=False
     )
@@ -750,7 +772,7 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
     degree = compute["components/subject_body/bspline_degree_used"]
     original_degree = int(degree[0])
     degree[0] = original_degree + 1
-    with pytest.raises(ValueError, match="manifest differs from live arrays"):
+    with pytest.raises(RuntimeError, match="differs from the producer seal"):
         materialize_subject_shape_storage_candidate(
             compute,
             tmp_path / "candidate-from-tampered-source",
@@ -877,7 +899,11 @@ def test_subject_shape_candidate_repairs_failed_visibility_after_consolidation(
     ):
         materializer.publish_subject_shape_run(
             plan,
-            materialization_payload={},
+            materialization_payload={
+                "node_local_sharding": {
+                    "array_content_sha256": {"synthetic": "a" * 64}
+                }
+            },
             copy_backend="python",
         )
 

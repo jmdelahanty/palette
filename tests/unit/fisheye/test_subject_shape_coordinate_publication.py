@@ -45,6 +45,7 @@ from fisheye.shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
     SubjectShapeCoordinatePublicationError,
     activate_subject_shape_coordinate_publication,
+    deep_audit_subject_shape_payload_receipt,
     load_persisted_subject_shape_coordinate_publication,
     require_translation_only_refined_placement,
     selector_snapshot,
@@ -451,7 +452,10 @@ def _restamp_tampered_subject_shape_manifest(
         ("relation_reduction", "relation order"),
         ("optional_lineage", "row_index bundle"),
         ("row_index_dtype", "rank-1 uint64"),
-        ("row_index_value", "canonical direct row-identity array"),
+        (
+            "row_index_value",
+            "payload receipt validation|canonical direct row-identity array",
+        ),
         ("schema_version", "run identity"),
     ),
 )
@@ -565,6 +569,64 @@ def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authori
         root,
         "analysis/subject_shape_runs/shape_001",
     )
+    payload_run_path = (
+        tmp_path / "canonical.zarr/analysis/subject_shape_runs/shape_001"
+    )
+    deep_audit = deep_audit_subject_shape_payload_receipt(
+        run,
+        payload_run_path=payload_run_path,
+        hash_workers=1,
+    )
+    assert deep_audit["valid"] is True
+    assert deep_audit["physical_rehash_performed"] is True
+
+    def reject_live_array_hash(_node: Any) -> str:
+        raise AssertionError("receipt-backed load performed a live array hash")
+
+    with monkeypatch.context() as receipt_loader_patch:
+        receipt_loader_patch.setattr(
+            module,
+            "array_payload_sha256",
+            reject_live_array_hash,
+        )
+        load_persisted_subject_shape_coordinate_publication(
+            root,
+            "analysis/subject_shape_runs/shape_001",
+        )
+
+    validation_attr = module.SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR
+    original_validation = copy.deepcopy(run.attrs[validation_attr])
+    tampered_validation = copy.deepcopy(original_validation)
+    tampered_validation["numerical_policy"]["normal_load_physical_rehash"] = True
+    tampered_validation["numerical_policy_sha256"] = module._canonical_sha256(
+        tampered_validation["numerical_policy"]
+    )
+    tampered_validation["record_sha256"] = module._canonical_sha256(
+        {
+            key: value
+            for key, value in tampered_validation.items()
+            if key != "record_sha256"
+        }
+    )
+    run.attrs[validation_attr] = tampered_validation
+    with pytest.raises(SubjectShapeCoordinatePublicationError, match="policy"):
+        load_persisted_subject_shape_coordinate_publication(
+            root,
+            "analysis/subject_shape_runs/shape_001",
+        )
+    run.attrs[validation_attr] = original_validation
+
+    integrity_attr = module.SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR
+    original_integrity = copy.deepcopy(run.attrs[integrity_attr])
+    del run.attrs[integrity_attr]
+    del run.attrs[validation_attr]
+    with pytest.raises(SubjectShapeCoordinatePublicationError, match="lacks its receipts"):
+        load_persisted_subject_shape_coordinate_publication(
+            root,
+            "analysis/subject_shape_runs/shape_001",
+        )
+    run.attrs[integrity_attr] = original_integrity
+    run.attrs[validation_attr] = original_validation
     np.testing.assert_array_equal(run["instance_key"][:], refined["instance_key"][:])
     np.testing.assert_array_equal(
         run["source_crop_row_ids"][:],
@@ -681,14 +743,16 @@ def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authori
         "degrees(atan2(-forward_y, forward_x))"
     )
 
-    # Output payloads, their array-specific descriptors, the exact refined
-    # authority, and the direct copied identity all remain live load gates.
+    # Immutable output payloads are guarded by the explicit deep-audit path;
+    # normal loads use the sealed receipt.  Array descriptors, exact refined
+    # authority, and directly copied identity remain ordinary live load gates.
     original = float(body["centroid_xy"][0, 0])
     body["centroid_xy"][0, 0] = original + 1.0
     with pytest.raises(SubjectShapeCoordinatePublicationError):
-        load_persisted_subject_shape_coordinate_publication(
-            root,
-            "analysis/subject_shape_runs/shape_001",
+        deep_audit_subject_shape_payload_receipt(
+            run,
+            payload_run_path=payload_run_path,
+            hash_workers=1,
         )
     body["centroid_xy"][0, 0] = original
 
@@ -721,9 +785,10 @@ def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authori
     tail_s = np.asarray(body["tail_sample_s"][:]).copy()
     body["tail_sample_s"][1] = np.float32(0.123)
     with pytest.raises(SubjectShapeCoordinatePublicationError):
-        load_persisted_subject_shape_coordinate_publication(
-            root,
-            "analysis/subject_shape_runs/shape_001",
+        deep_audit_subject_shape_payload_receipt(
+            run,
+            payload_run_path=payload_run_path,
+            hash_workers=1,
         )
     body["tail_sample_s"][:] = tail_s
 
@@ -776,18 +841,20 @@ def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authori
         curvature_values[curvature_row, curvature_sample] + 0.25
     )
     with pytest.raises(SubjectShapeCoordinatePublicationError):
-        load_persisted_subject_shape_coordinate_publication(
-            root,
-            "analysis/subject_shape_runs/shape_001",
+        deep_audit_subject_shape_payload_receipt(
+            run,
+            payload_run_path=payload_run_path,
+            hash_workers=1,
         )
     curvature_node[:] = curvature_values
 
     tail_valid = np.asarray(body["tail_sample_valid"][:], dtype=bool).copy()
     body["tail_sample_valid"][0] = ~tail_valid[0]
     with pytest.raises(SubjectShapeCoordinatePublicationError):
-        load_persisted_subject_shape_coordinate_publication(
-            root,
-            "analysis/subject_shape_runs/shape_001",
+        deep_audit_subject_shape_payload_receipt(
+            run,
+            payload_run_path=payload_run_path,
+            hash_workers=1,
         )
     body["tail_sample_valid"][:] = tail_valid
 
