@@ -118,6 +118,11 @@
   the root `subject_mask_authority` envelope. Do not create a parallel generic
   `segmentation_authority` when that subject-mask contract applies. A trained
   network or model artifact is not itself per-recording mask authority.
+- Follow
+  `docs/diagnostics/authority_acceptance_implementation_checklist_2026-08-27.md`
+  when changing review, acceptance, approval, authority resolution, registry
+  projection, or cohort-release behavior. Do not introduce another
+  modality-specific acceptance schema without reconciling it there.
 
 ## Sandbox Zarr Fallback Rule
 
