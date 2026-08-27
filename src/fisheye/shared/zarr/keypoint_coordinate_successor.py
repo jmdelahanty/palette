@@ -22,6 +22,9 @@ import zarr
 
 from fisheye.shared.artifact_fingerprint import CONTENT_FINGERPRINT_SCHEME
 from fisheye.shared.json_safety import json_attr_safe
+from fisheye.shared.keypoint_preprocessing_runtime import (
+    resolve_keypoint_preprocessing_runtime,
+)
 from fisheye.shared.keypoint_coordinate_publication import (
     KEYPOINT_COORDINATE_CONTEXT_ATTR,
     KEYPOINT_COORDINATE_DERIVATION_ATTR,
@@ -31,7 +34,6 @@ from fisheye.shared.keypoint_coordinate_publication import (
     publish_keypoint_coordinate_surfaces,
     require_bound_ineligible_keypoint_coordinate_surfaces,
 )
-from fisheye.shared.model_input_transform import model_input_transform_from_attrs
 from fisheye.shared.pose_model_schema_binding import pose_schema_from_model_binding
 from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
 from fisheye.shared.zarr.coordinate_successor_authority import (
@@ -212,19 +214,6 @@ def _dimensions(payload: Mapping[str, Any]) -> KeypointDimensions:
         source_width=raw["source_width"],
         source_height=raw["source_height"],
     )
-
-
-def _submitted_input_mode(preprocessing: Any) -> str:
-    """Resolve the actual model submission mode, not the outer cache reader."""
-
-    value = preprocessing.document.get("model_input_mode")
-    if value is None and preprocessing.input_mode in {"numpy-list", "tensor"}:
-        value = preprocessing.input_mode
-    if value not in {"numpy-list", "tensor"}:
-        raise ValueError(
-            "Keypoint preprocessing lacks an exact submitted model input mode."
-        )
-    return str(value)
 
 
 def _keypoint_semantic_attrs(
@@ -601,10 +590,9 @@ def inspect_keypoint_coordinate_successor_source(
             "Raw keypoint source publication is invalid: " + "; ".join(source_errors)
         )
     preprocessing = keypoint_preprocessing_from_manifest(payload["preprocessing"])
-    transform_value = preprocessing.document.get("model_input_transform")
-    if not isinstance(transform_value, Mapping):
-        raise ValueError("Raw keypoint preprocessing lacks model_input_transform.")
-    transform = model_input_transform_from_attrs(dict(transform_value))
+    transform, preprocessing_input_mode = resolve_keypoint_preprocessing_runtime(
+        preprocessing
+    )
     sealed_crop = bind_sealed_geometry_crop_successor_source(
         analysis_zarr=archive,
         root=root,
@@ -648,7 +636,7 @@ def inspect_keypoint_coordinate_successor_source(
             "source_crop_path": crop["run_path"],
             "historical_crop_adapter": sealed_crop.as_record(),
             "auxiliary_materialization": auxiliary_plan.as_record(),
-            "preprocessing_input_mode": _submitted_input_mode(preprocessing),
+            "preprocessing_input_mode": preprocessing_input_mode,
             "model_input_transform": transform.to_attrs(),
             "model_artifact": artifact,
             "keypoint_semantic_attrs": semantic_attrs,
@@ -812,9 +800,16 @@ def publish_keypoint_coordinate_successor(
         )
         payload = source_manifest["payload"]
         preprocessing = keypoint_preprocessing_from_manifest(payload["preprocessing"])
-        transform = model_input_transform_from_attrs(
-            dict(preprocessing.document["model_input_transform"])
+        transform, preprocessing_input_mode = resolve_keypoint_preprocessing_runtime(
+            preprocessing
         )
+        if (
+            transform.to_attrs() != checked["model_input_transform"]
+            or preprocessing_input_mode != checked["preprocessing_input_mode"]
+        ):
+            raise RuntimeError(
+                "Keypoint preprocessing runtime changed between dry-run and apply."
+            )
         artifact = _model_artifact(
             keypoint_model_path,
             pose_binding=payload["pose_model_schema_binding"],
@@ -926,15 +921,15 @@ def publish_keypoint_coordinate_successor(
             preprocessing = keypoint_preprocessing_from_manifest(
                 payload["preprocessing"]
             )
-            transform = model_input_transform_from_attrs(
-                dict(preprocessing.document["model_input_transform"])
+            transform, preprocessing_input_mode = resolve_keypoint_preprocessing_runtime(
+                preprocessing
             )
             prepare_keypoint_coordinate_context(
                 root,
                 f"keypoints_runs/{successor_id}",
                 crop_path=str(payload["source_crop_snapshot"]["run_path"]),
                 model_input_transform=transform,
-                preprocessing_input_mode=_submitted_input_mode(preprocessing),
+                preprocessing_input_mode=preprocessing_input_mode,
                 model_artifact=artifact,
                 _resolved_crop_source=publication_crop.source,
             )

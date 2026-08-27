@@ -14,6 +14,12 @@ from fisheye.shared.coordinate_record import (
     stamp_and_bind_persisted_coordinate_record,
 )
 from fisheye.shared import keypoint_coordinate_publication
+from fisheye.shared.keypoint_preprocessing_runtime import (
+    resolve_keypoint_preprocessing_runtime,
+)
+from fisheye.shared.keypoint_terminal_pixel_evidence import (
+    DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE,
+)
 from fisheye.shared import subject_mask_coordinate_publication
 from fisheye.shared.zarr.coordinate_successor_authority import (
     COORDINATE_SUCCESSOR_AUTHORITY_ATTR,
@@ -120,6 +126,77 @@ class _Root:
 
     def __getitem__(self, key: str) -> object:
         return self.nodes[key]
+
+
+def _direct_hybrid_preprocessing() -> SimpleNamespace:
+    transform = ModelInputTransform(
+        name="identity",
+        native_height=384,
+        native_width=384,
+        model_height=384,
+        model_width=384,
+    )
+    return SimpleNamespace(
+        profile_id=DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE,
+        profile_version=1,
+        input_mode="numpy_list",
+        document={
+            "evidence_semantics": "observed_completed_inference_runtime_v1",
+            "coordinate_contract_mode": "legacy_noncanonical",
+            "observed_input_mode_effective": "numpy-list",
+            "observed_runtime": {
+                "input_mode_effective": "numpy-list",
+                "model_input_transform": transform.to_attrs(),
+                "model_input_shape_hw": [384, 384],
+                "model_network_input_shape_hw": [384, 384],
+                "native_roi_shape_hw": [384, 384],
+            },
+        },
+    )
+
+
+def test_keypoint_successor_resolves_direct_hybrid_observed_runtime() -> None:
+    transform, submitted_input_mode = resolve_keypoint_preprocessing_runtime(
+        _direct_hybrid_preprocessing()
+    )
+
+    assert (
+        transform.to_attrs()
+        == ModelInputTransform(
+            name="identity",
+            native_height=384,
+            native_width=384,
+            model_height=384,
+            model_width=384,
+        ).to_attrs()
+    )
+    assert submitted_input_mode == "numpy-list"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("observed_input_mode_effective", "tensor"),
+        ("coordinate_contract_mode", "canonical_v2"),
+    ],
+)
+def test_keypoint_successor_rejects_inconsistent_direct_hybrid_profile(
+    field: str,
+    value: str,
+) -> None:
+    preprocessing = _direct_hybrid_preprocessing()
+    preprocessing.document[field] = value
+
+    with pytest.raises(ValueError, match="runtime evidence is inconsistent"):
+        resolve_keypoint_preprocessing_runtime(preprocessing)
+
+
+def test_keypoint_successor_rejects_direct_hybrid_runtime_extent_mismatch() -> None:
+    preprocessing = _direct_hybrid_preprocessing()
+    preprocessing.document["observed_runtime"]["native_roi_shape_hw"] = [512, 512]
+
+    with pytest.raises(ValueError, match="runtime extents differ"):
+        resolve_keypoint_preprocessing_runtime(preprocessing)
 
 
 @pytest.mark.parametrize(
@@ -1558,9 +1635,7 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
         padded_lineage=padded_lineage,
         as_record=lambda: {"adapter_kind": "test_historical_adapter"},
     )
-    preprocessing = SimpleNamespace(
-        document={"model_input_transform": transform.to_attrs()}
-    )
+    preprocessing = _direct_hybrid_preprocessing()
     surfaces = SimpleNamespace(
         context=SimpleNamespace(
             context_record=SimpleNamespace(
@@ -1641,6 +1716,8 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
             "selectors_before": selectors,
             "historical_crop_adapter": binding.as_record(),
             "auxiliary_materialization": auxiliary_plan.as_record(),
+            "preprocessing_input_mode": "numpy-list",
+            "model_input_transform": transform.to_attrs(),
             "keypoint_semantic_attrs": keypoint_successor._keypoint_semantic_attrs(
                 source_manifest["payload"], model_artifact=model_artifact
             ),
@@ -1655,9 +1732,6 @@ def test_keypoint_successor_apply_reaches_preparation_with_padded_auxiliaries(
         keypoint_successor,
         "keypoint_preprocessing_from_manifest",
         lambda _value: preprocessing,
-    )
-    monkeypatch.setattr(
-        keypoint_successor, "_submitted_input_mode", lambda _value: "tensor"
     )
     monkeypatch.setattr(
         keypoint_successor,

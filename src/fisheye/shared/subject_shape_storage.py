@@ -26,6 +26,7 @@ from fisheye.shared.subject_shape_coordinate_publication import (
     CANONICAL_SUBJECT_SHAPE_BUNDLE_PROFILE_ID,
     CANONICAL_SUBJECT_SHAPE_PROFILE_ID,
     SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
+    SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR,
     SUBJECT_SHAPE_HISTORICAL_SOURCE_KIND,
     SUBJECT_SHAPE_SOURCE_KIND_ATTR,
     SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR,
@@ -42,8 +43,9 @@ from fisheye.shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_MANIFEST_ATTR,
     SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
     SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID,
+    SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
     build_subject_shape_schema_inventory_record,
-    load_sealed_unbound_subject_shape_manifest,
+    load_unbound_subject_shape_manifest,
 )
 from fisheye.shared.zarr.analysis_array_contracts import (
     AnalysisArrayDeclaration,
@@ -474,6 +476,124 @@ def _array_digest(array: Any, *, block_rows: int) -> str:
     return digest.hexdigest()
 
 
+def _array_digest_header(*, dtype: np.dtype[Any], shape: tuple[int, ...]) -> Any:
+    """Return the canonical subject-shape payload digest before decoded bytes.
+
+    The grammar is intentionally byte-identical to
+    ``coordinate_frame_record.array_payload_sha256``.  Keeping the incremental
+    form here lets the immutable writer hash the exact values it writes and
+    reads back without reopening the complete destination array later.
+    """
+
+    digest = hashlib.sha256()
+    digest.update(
+        canonical_json_bytes(
+            {
+                "canonicalization": ARRAY_PAYLOAD_CANONICALIZATION,
+                "dtype": np.lib.format.dtype_to_descr(dtype),
+                "shape": list(shape),
+            }
+        )
+    )
+    digest.update(b"\x00")
+    return digest
+
+
+def _outer_write_rows(plan: Any, *, shape: tuple[int, ...]) -> int:
+    """Choose one complete physical outer chunk/shard along the growth axis."""
+
+    if not shape:
+        return 1
+    grid = plan.shard_shape if plan.shard_shape is not None else plan.chunk_shape
+    if not isinstance(grid, (tuple, list)) or not grid:
+        raise ValueError("Subject-shape storage plan lacks an outer write grid.")
+    rows = int(grid[0])
+    if rows <= 0:
+        raise ValueError("Subject-shape outer write rows must be positive.")
+    return rows
+
+
+def _decoded_equal(left: np.ndarray, right: np.ndarray) -> bool:
+    equal_nan = left.dtype.kind in {"f", "c"}
+    return bool(np.array_equal(left, right, equal_nan=equal_nan))
+
+
+def _copy_array_by_outer_units(
+    source_array: Any,
+    destination_array: Any,
+    *,
+    plan: Any,
+    path: str,
+) -> tuple[str, list[dict[str, object]]]:
+    """Write and read back each complete physical unit exactly once.
+
+    Zarr v3 indexed shards are single physical objects.  Writing inner logical
+    chunks separately causes a read-modify-write of the same shard.  This
+    routine instead owns one full outer shard per assignment.  The immediate
+    decoded readback both validates the write and produces the leaf receipt
+    that later publication gates can reuse.
+    """
+
+    dtype = np.dtype(source_array.dtype)
+    shape = tuple(int(value) for value in source_array.shape)
+    if dtype.hasobject:
+        raise TypeError(f"{path}: object arrays have no immutable byte contract.")
+    if np.dtype(destination_array.dtype) != dtype or tuple(
+        int(value) for value in destination_array.shape
+    ) != shape:
+        raise RuntimeError(f"{path}: destination dtype/shape differs before copy.")
+
+    digest = _array_digest_header(dtype=dtype, shape=shape)
+    leaves: list[dict[str, object]] = []
+    if not shape:
+        values = np.ascontiguousarray(source_array[...])
+        destination_array[...] = values
+        observed = np.ascontiguousarray(destination_array[...])
+        if observed.dtype != dtype or observed.shape != shape:
+            raise RuntimeError(f"{path}: scalar readback metadata differs.")
+        payload = observed.tobytes(order="C")
+        if not _decoded_equal(values, observed):
+            raise RuntimeError(f"{path}: scalar decoded readback differs.")
+        digest.update(payload)
+        leaves.append(
+            {
+                "path": path,
+                "decoded_bytes": len(payload),
+                "decoded_sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+        return digest.hexdigest(), leaves
+
+    step = _outer_write_rows(plan, shape=shape)
+    trailing = (slice(None),) * (len(shape) - 1)
+    for start in range(0, shape[0], step):
+        stop = min(shape[0], start + step)
+        selection = (slice(start, stop), *trailing)
+        values = np.ascontiguousarray(source_array[selection])
+        destination_array[selection] = values
+        observed = np.ascontiguousarray(destination_array[selection])
+        if (
+            observed.dtype != dtype
+            or observed.shape != values.shape
+            or not _decoded_equal(values, observed)
+        ):
+            raise RuntimeError(
+                f"{path}[{start}:{stop}]: decoded outer-unit readback differs."
+            )
+        payload = observed.tobytes(order="C")
+        digest.update(payload)
+        leaves.append(
+            {
+                "path": path,
+                "start_row": start,
+                "stop_row": stop,
+                "decoded_bytes": len(payload),
+                "decoded_sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+    return digest.hexdigest(), leaves
+
+
 def _source_manifest_link_record(sealed_manifest: Any) -> dict[str, object]:
     sealed_manifest.assert_verified()
     source_record = sealed_manifest.record
@@ -720,7 +840,29 @@ def materialize_subject_shape_access_aware_storage(
     destination = Path(destination_path).expanduser().resolve()
     if destination.exists():
         raise FileExistsError(f"Refusing existing subject-shape output: {destination}")
-    sealed_manifest = load_sealed_unbound_subject_shape_manifest(source_run)
+    if (
+        source_run.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
+        != SUBJECT_SHAPE_UNBOUND_STAGE_STATUS
+        or source_run.attrs.get("palette_run_completion_status") != "complete"
+        or source_run.attrs.get("stage_selector_eligible") is not False
+    ):
+        raise ValueError(
+            "Subject-shape storage conversion requires one producer-sealed, "
+            "complete, unbound, selector-ineligible stage."
+        )
+    raw_manifest = source_run.attrs.get(SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR)
+    raw_arrays = raw_manifest.get("arrays") if isinstance(raw_manifest, Mapping) else None
+    if not isinstance(raw_arrays, Mapping) or not raw_arrays:
+        raise ValueError("Subject-shape producer seal lacks its array inventory.")
+    persisted_digests = {
+        str(path): str(record.get("content_sha256"))
+        for path, record in raw_arrays.items()
+        if isinstance(record, Mapping)
+    }
+    sealed_manifest = load_unbound_subject_shape_manifest(
+        source_run,
+        array_content_sha256=persisted_digests,
+    )
     sealed_arrays = sealed_manifest.record["arrays"]
     receipt = build_subject_shape_storage_receipt(
         source_run,
@@ -736,6 +878,8 @@ def materialize_subject_shape_access_aware_storage(
     )
     _copy_group_attributes(source_run, destination_run)
     hashes: dict[str, str] = {}
+    write_leaves: dict[str, list[dict[str, object]]] = {}
+    outer_write_rows: dict[str, int] = {}
     for path, source_array in _iter_arrays(source_run):
         entry = entry_by_path[path]
         parent, leaf = _parent_and_leaf(destination_run, path)
@@ -747,22 +891,11 @@ def materialize_subject_shape_access_aware_storage(
             fill_value=subject_shape_fill_value(path, source_array.dtype),
             attributes=dict(source_array.attrs),
         )
-        if source_array.shape:
-            for start in range(
-                0,
-                int(source_array.shape[0]),
-                max(1, int(copy_block_rows)),
-            ):
-                stop = min(
-                    int(source_array.shape[0]),
-                    start + max(1, int(copy_block_rows)),
-                )
-                destination_array[start:stop] = source_array[start:stop]
-        else:
-            destination_array[...] = source_array[...]
-        destination_hash = _array_digest(
+        destination_hash, leaves = _copy_array_by_outer_units(
+            source_array,
             destination_array,
-            block_rows=copy_block_rows,
+            plan=entry.plan,
+            path=path,
         )
         expected_hash = sealed_arrays[path]["content_sha256"]
         if destination_hash != expected_hash:
@@ -770,6 +903,11 @@ def materialize_subject_shape_access_aware_storage(
                 f"Decoded candidate differs from the producer seal for {path!r}."
             )
         hashes[path] = destination_hash
+        write_leaves[path] = leaves
+        outer_write_rows[path] = _outer_write_rows(
+            entry.plan,
+            shape=tuple(int(value) for value in source_array.shape),
+        )
     source_manifest_link = persist_subject_shape_storage_source_manifest_link(
         destination_run,
         sealed_manifest,
@@ -794,6 +932,14 @@ def materialize_subject_shape_access_aware_storage(
         "phase": phase,
         "array_count": len(hashes),
         "decoded_equality": True,
+        "exact_decoded_validation": True,
+        "physical_write_policy": (
+            "one_complete_nonoverlapping_outer_chunk_or_shard_per_assignment_v1"
+        ),
+        "requested_copy_block_rows": int(copy_block_rows),
+        "effective_write_grid_policy": "physical_outer_grid_overrides_logical_block_rows_v1",
+        "outer_write_rows": outer_write_rows,
+        "decoded_write_leaves": write_leaves,
         "array_content_sha256": hashes,
         "source_manifest_link": source_manifest_link,
         "storage_plan": receipt.as_manifest(),
@@ -816,6 +962,108 @@ def materialize_subject_shape_storage_candidate(
         phase=phase,
         copy_block_rows=copy_block_rows,
     )
+
+
+def build_subject_shape_bound_payload_scan_receipt(
+    run_group: Any,
+) -> dict[str, object]:
+    """Scan one final bound payload once into reusable decoded digest evidence.
+
+    The caller owns the archive publication lock and must have completed every
+    array mutation.  Blocks follow the live physical outer grid, bounding
+    memory while ensuring that the receipt describes exactly one immutable
+    publication generation.
+    """
+
+    if (
+        run_group.attrs.get("palette_run_completion_status") != "running"
+        or run_group.attrs.get("stage_selector_eligible") is not False
+    ):
+        raise ValueError(
+            "Subject-shape payload scan requires one running, ineligible child."
+        )
+    row_count = _row_count(run_group)
+    plans: list[dict[str, object]] = []
+    shard_leaves: list[dict[str, object]] = []
+    static_leaves: list[dict[str, object]] = []
+    content_sha256: dict[str, str] = {}
+    decoded_bytes = 0
+    for path, array in _iter_arrays(run_group):
+        dtype = np.dtype(array.dtype)
+        shape = tuple(int(value) for value in array.shape)
+        if dtype.hasobject:
+            raise TypeError(f"{path}: object arrays have no payload receipt grammar.")
+        plans.append({"path": path, "shape": list(shape), "dtype": str(dtype)})
+        digest = _array_digest_header(dtype=dtype, shape=shape)
+        if shape and shape[0] == row_count:
+            try:
+                metadata = array.metadata.to_dict()
+                outer_shape = metadata["chunk_grid"]["configuration"]["chunk_shape"]
+                step = int(outer_shape[0])
+            except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
+                raise ValueError(
+                    f"{path}: physical outer grid is unavailable: {exc}."
+                ) from exc
+            if step <= 0:
+                raise ValueError(f"{path}: physical outer row extent is invalid.")
+            trailing = (slice(None),) * (len(shape) - 1)
+            for start in range(0, shape[0], step):
+                stop = min(shape[0], start + step)
+                values = np.ascontiguousarray(
+                    array[(slice(start, stop), *trailing)]
+                )
+                if values.dtype != dtype:
+                    raise RuntimeError(f"{path}: decoded scan dtype changed.")
+                payload = values.tobytes(order="C")
+                digest.update(payload)
+                decoded_bytes += len(payload)
+                shard_leaves.append(
+                    {
+                        "path": path,
+                        "start_row": start,
+                        "stop_row": stop,
+                        "decoded_bytes": len(payload),
+                        "decoded_sha256": hashlib.sha256(payload).hexdigest(),
+                    }
+                )
+        else:
+            values = np.ascontiguousarray(array[...])
+            if values.dtype != dtype or values.shape != shape:
+                raise RuntimeError(f"{path}: decoded static scan metadata changed.")
+            payload = values.tobytes(order="C")
+            digest.update(payload)
+            decoded_bytes += len(payload)
+            static_leaves.append(
+                {
+                    "path": path,
+                    "decoded_bytes": len(payload),
+                    "decoded_sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            )
+        content_sha256[path] = digest.hexdigest()
+
+    copy_report = {
+        "schema_id": "palette.zarr_sharded_run_copy.v1",
+        "status": "complete",
+        "source_run": f"/{str(run_group.path).strip('/')}",
+        "destination_run": f"/{str(run_group.path).strip('/')}",
+        "array_count": len(plans),
+        "arrays": plans,
+        "shards": shard_leaves,
+        "static_arrays": static_leaves,
+        "decoded_bytes_copied": decoded_bytes,
+        "exact_decoded_validation": True,
+        "receipt_origin": "single_locked_post_binding_decoded_scan_v1",
+    }
+    return {
+        "schema_id": "palette.subject_shape_bound_payload_scan_receipt",
+        "schema_version": 1,
+        "run_ref": f"/{str(run_group.path).strip('/')}",
+        "array_payload_canonicalization": ARRAY_PAYLOAD_CANONICALIZATION,
+        "closed_array_inventory": True,
+        "array_content_sha256": content_sha256,
+        "decoded_copy_report": copy_report,
+    }
 
 
 def create_bound_subject_shape_access_aware_array(
@@ -1165,6 +1413,7 @@ __all__ = [
     "SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_V1",
     "SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE",
     "SUBJECT_SHAPE_STORAGE_PROFILE_CHOICES",
+    "build_subject_shape_bound_payload_scan_receipt",
     "build_subject_shape_storage_receipt",
     "create_bound_subject_shape_access_aware_array",
     "create_bound_subject_shape_candidate_array",

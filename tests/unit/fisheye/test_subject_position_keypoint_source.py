@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import copy
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -16,6 +16,7 @@ from fisheye.shared.subject_position_keypoint_source import (
     KeypointPositionSourceError,
     KeypointPositionSourcePolicy,
     load_bound_keypoint_position_source,
+    load_keypoint_coordinate_successor_source,
     revalidate_bound_keypoint_position_source,
 )
 
@@ -500,6 +501,55 @@ def test_coordinate_successor_canary_does_not_fallback_when_authority_fails(
                 ),
             ),
         )
+
+
+def test_coordinate_successor_resolver_reuses_sealed_active_authority_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _profile_value, arrays, _pose_binding = _fixture(monkeypatch)
+    surfaces = _fake_surfaces(arrays)
+    active = MappingProxyType({"generation": 7, "members": MappingProxyType({})})
+    active_digest = source_mod.canonical_json_sha256(
+        {"generation": 7, "members": {}}
+    )
+    authority = MappingProxyType(
+        {
+            "payload": MappingProxyType(
+                {
+                    "source_authority": MappingProxyType(
+                        {
+                            "record": active,
+                            "record_sha256": active_digest,
+                        }
+                    )
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(source_mod, "_open_root", lambda _archive: root)
+    monkeypatch.setattr(
+        source_mod,
+        "_require_coordinate_successor_authority",
+        lambda *args, **kwargs: (authority, "7" * 64),
+    )
+    monkeypatch.setattr(
+        source_mod,
+        "load_persisted_ineligible_keypoint_coordinate_surfaces",
+        lambda _root, _path: surfaces,
+    )
+    monkeypatch.setattr(
+        source_mod,
+        "require_bound_ineligible_keypoint_coordinate_surfaces",
+        lambda value: value,
+    )
+
+    source = load_keypoint_coordinate_successor_source(
+        "/tmp/fake-analysis.zarr",
+        run_path=_RUN_PATH,
+    )
+
+    assert source.active_keypoint_bundle_authority == active
+    assert source.active_keypoint_bundle_authority_digest == active_digest
 
 
 def test_root_bundle_authority_compares_two_open_metadata_views(

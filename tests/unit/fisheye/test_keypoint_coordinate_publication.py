@@ -4,6 +4,7 @@ import ast
 import hashlib
 import inspect
 import textwrap
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -12,6 +13,11 @@ import zarr
 
 from fisheye.detection import detect_keypoints_yolo as keypoint_writer_module
 import fisheye.shared.keypoint_coordinate_publication as publication_module
+import fisheye.shared.zarr.coordinate_successor_authority as successor_authority_module
+import fisheye.shared.zarr.sealed_geometry_crop_profile as sealed_crop_module
+from fisheye.shared.keypoint_terminal_pixel_evidence import (
+    DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE,
+)
 from fisheye.shared.proof_verification import proof_verification_scope
 from fisheye.detection.detect_yolo import (
     _publish_detection_acquisition_mapping,
@@ -37,7 +43,10 @@ from fisheye.shared.keypoint_coordinate_publication import (
     revalidate_keypoint_coordinate_batch_context,
     rollback_keypoint_coordinate_publication,
 )
-from fisheye.shared.model_input_transform import resolve_model_input_transform
+from fisheye.shared.model_input_transform import (
+    ModelInputTransform,
+    resolve_model_input_transform,
+)
 from fisheye.shared.pose_model_schema_binding import (
     build_explicit_pose_model_schema_binding,
 )
@@ -83,6 +92,8 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_failed,
     mark_run_started,
 )
+from fisheye.shared.zarr.keypoint_manifest import KeypointPreprocessingReference
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from tests.unit.fisheye.test_directed_transform_chain import FakeArray, FakeGroup
 from tests.unit.fisheye.test_observation_coordinate_publication import (
     _crop_copy,
@@ -185,6 +196,149 @@ def test_complete_coordinate_successor_validates_evidence_then_uses_resolved_cro
             resolved_source,
         ),
     ]
+
+
+def test_persisted_successor_reader_resolves_direct_hybrid_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The persisted reader must consume the same profile grammar as its writer."""
+
+    token = object()
+    root = _RootRegistry(token)
+    successor = root.register(
+        FakeGroup(path="keypoints_runs/successor", archive_token=token)
+    )
+    source = root.register(FakeGroup(path="keypoints_runs/source", archive_token=token))
+    for name, values in {
+        "source_crop_row_ids": np.asarray([0], dtype="<i8"),
+        "instance_key": np.asarray([10], dtype="<u8"),
+        "source_acquisition_frame_index": np.asarray([0], dtype="<i8"),
+        "source_crop_row_signature": np.zeros((1, 32), dtype="uint8"),
+    }.items():
+        source.children[name] = FakeArray(
+            values,
+            path=f"keypoints_runs/source/{name}",
+            archive_token=token,
+        )
+
+    transform_attrs = ModelInputTransform(
+        name="identity",
+        native_height=384,
+        native_width=384,
+        model_height=384,
+        model_width=384,
+    ).to_attrs()
+    preprocessing = KeypointPreprocessingReference(
+        profile_id=DIRECT_HYBRID_TERMINAL_EVIDENCE_PROFILE,
+        profile_version=1,
+        input_mode="numpy_list",
+        document={
+            "evidence_semantics": "observed_completed_inference_runtime_v1",
+            "coordinate_contract_mode": "legacy_noncanonical",
+            "observed_input_mode_effective": "numpy-list",
+            "observed_runtime": {
+                "input_mode_effective": "numpy-list",
+                "model_input_transform": transform_attrs,
+                "model_input_shape_hw": [384, 384],
+                "model_network_input_shape_hw": [384, 384],
+                "native_roi_shape_hw": [384, 384],
+            },
+        },
+    )
+    source_manifest = {
+        "payload_digest": "1" * 64,
+        "payload": {
+            "logical_content": {"digest": "2" * 64},
+            "preprocessing": preprocessing.as_manifest(),
+            "source_crop_snapshot": {"run_path": "crop_runs/crop"},
+        },
+    }
+    source.attrs["run_manifest"] = source_manifest
+
+    crop_evidence = {"source_run_path": "keypoints_runs/source"}
+    padded = SimpleNamespace(
+        record_ref="/successor@padded",
+        record_sha256="3" * 64,
+        record={"source_crop_adapter": crop_evidence},
+    )
+    crop = SimpleNamespace(record=crop_evidence)
+    bbox = SimpleNamespace(
+        record_ref="/successor@bbox",
+        record_sha256="4" * 64,
+    )
+    records = {
+        "coordinate_successor_padded_crop_lineage": padded,
+        "coordinate_successor_historical_crop_adapter": crop,
+        sealed_crop_module.SEALED_GEOMETRY_BBOX_NORMALIZATION_ATTR: bbox,
+    }
+    authority = {
+        "payload": {
+            "coordinate_records": {
+                "padded_crop_lineage": {
+                    "record_ref": padded.record_ref,
+                    "record_sha256": padded.record_sha256,
+                },
+                "historical_bbox_normalization": {
+                    "record_ref": bbox.record_ref,
+                    "record_sha256": bbox.record_sha256,
+                },
+            },
+            "source": {
+                "family": "keypoints_runs",
+                "run_path": "keypoints_runs/source",
+                "manifest_payload_digest": source_manifest["payload_digest"],
+                "manifest_document_digest": canonical_json_sha256(source_manifest),
+                "logical_content_digest": "2" * 64,
+            },
+        }
+    }
+    bound = SimpleNamespace(as_record=lambda: crop_evidence)
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        successor_authority_module,
+        "load_coordinate_successor_authority",
+        lambda *_args, **_kwargs: authority,
+    )
+    monkeypatch.setattr(
+        publication_module,
+        "bind_persisted_coordinate_record",
+        lambda _run, *, attr_name: records[attr_name],
+    )
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.keypoint_manifest.validate_keypoint_run_manifest",
+        lambda _manifest: (),
+    )
+    monkeypatch.setattr(
+        publication_module,
+        "archive_identity",
+        lambda _root: SimpleNamespace(kind="local_store_root", key=("/archive",)),
+    )
+
+    def bind_source(**kwargs: object) -> object:
+        observed["transform"] = kwargs["model_input_transform"]
+        return bound
+
+    monkeypatch.setattr(
+        sealed_crop_module,
+        "bind_sealed_geometry_crop_successor_source",
+        bind_source,
+    )
+    monkeypatch.setattr(
+        sealed_crop_module,
+        "load_sealed_geometry_bbox_normalization_from_successor",
+        lambda binding, **_kwargs: binding,
+    )
+
+    assert (
+        publication_module._load_persisted_sealed_crop_successor_binding(
+            root,
+            successor,
+            run_path="keypoints_runs/successor",
+        )
+        is bound
+    )
+    assert observed["transform"].to_attrs() == transform_attrs
 
 
 def test_keypoint_crop_loader_reuses_only_within_one_proof_scope(

@@ -87,6 +87,9 @@ from fisheye.shared.directed_transform_v2 import (
     stamp_directed_transform_v2,
 )
 from fisheye.shared.model_input_transform import ModelInputTransform
+from fisheye.shared.keypoint_preprocessing_runtime import (
+    resolve_keypoint_preprocessing_runtime,
+)
 from fisheye.shared.observation_coordinate_publication import (
     BoundCropObservationGeometry,
     CROP_ROI_BBOX_EDGE_FRAME_RELATIVE_PATH,
@@ -2988,9 +2991,6 @@ def _load_persisted_sealed_crop_successor_binding(
 
     from pathlib import Path
 
-    from fisheye.shared.model_input_transform import (
-        model_input_transform_from_attrs,
-    )
     from fisheye.shared.zarr.coordinate_successor_authority import (
         KEYPOINT_COORDINATE_SUCCESSOR_KIND,
         load_coordinate_successor_authority,
@@ -3094,8 +3094,8 @@ def _load_persisted_sealed_crop_successor_binding(
         preprocessing = keypoint_preprocessing_from_manifest(
             source_payload["preprocessing"]
         )
-        transform = model_input_transform_from_attrs(
-            dict(preprocessing.document["model_input_transform"])
+        transform, _submitted_input_mode = resolve_keypoint_preprocessing_runtime(
+            preprocessing
         )
         identity = archive_identity(root_node)
         if identity.kind != "local_store_root":

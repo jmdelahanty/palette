@@ -2757,6 +2757,8 @@ def _stamp_unbound_numeric_manifest(run_group: zarr.Group):
 
 def refresh_unbound_subject_shape_manifest_after_storage_materialization(
     run_group: zarr.Group,
+    *,
+    array_content_sha256: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Restamp the exact unbound receipt after a physical-only rewrite.
 
@@ -2808,7 +2810,10 @@ def refresh_unbound_subject_shape_manifest_after_storage_materialization(
     ):
         if name in run_group.attrs:
             del run_group.attrs[name]
-    manifest = _stamp_unbound_numeric_manifest(run_group)
+    manifest = stamp_unbound_subject_shape_manifest(
+        run_group,
+        array_content_sha256=array_content_sha256,
+    )
     return {
         "valid": True,
         "status": SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
@@ -2816,8 +2821,15 @@ def refresh_unbound_subject_shape_manifest_after_storage_materialization(
     }
 
 
-def _load_unbound_numeric_manifest(run_group: zarr.Group):
-    return _load_shared_unbound_manifest(run_group)
+def _load_unbound_numeric_manifest(
+    run_group: zarr.Group,
+    *,
+    array_content_sha256: Mapping[str, str] | None = None,
+):
+    return _load_shared_unbound_manifest(
+        run_group,
+        array_content_sha256=array_content_sha256,
+    )
 
 
 def load_sealed_unbound_subject_shape_manifest(run_group: zarr.Group):
@@ -2841,6 +2853,7 @@ def _validate_unbound_subject_shape_payload(
     expected_binding_status: str,
     require_complete: bool,
     expected_subject_mask_bundle_id: str | None = None,
+    array_content_sha256: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     expected_path = f"analysis/subject_shape_runs/{expected_run_name}"
     if str(run_group.path) != expected_path:
@@ -3005,7 +3018,10 @@ def _validate_unbound_subject_shape_payload(
         node = run_group.get(path)
         if node is None or tuple(int(value) for value in node.shape) != shape:
             raise ValueError(f"Unbound subject-shape array {path!r} has wrong shape.")
-    manifest = _load_unbound_numeric_manifest(run_group)
+    manifest = _load_unbound_numeric_manifest(
+        run_group,
+        array_content_sha256=array_content_sha256,
+    )
     return {
         "valid": True,
         "status": expected_binding_status,
@@ -3024,6 +3040,7 @@ def validate_unbound_subject_shape_run(
     expected_binding_status: str = SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
     require_complete: bool = True,
     expected_subject_mask_bundle_id: str | None = None,
+    array_content_sha256: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Validate one numeric-only ROI-local stage against its exact source."""
 
@@ -3035,6 +3052,7 @@ def validate_unbound_subject_shape_run(
         expected_binding_status=expected_binding_status,
         require_complete=require_complete,
         expected_subject_mask_bundle_id=expected_subject_mask_bundle_id,
+        array_content_sha256=array_content_sha256,
     )
 
 
@@ -3046,6 +3064,9 @@ def bind_staged_subject_shape_run(
     expected_refined_run: str,
     expected_run_name: str,
     expected_subject_mask_bundle_id: str | None = None,
+    payload_run_path: str | Path | None = None,
+    payload_hash_workers: int = 4,
+    unbound_array_content_sha256: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Bind and transform an unbound stage only at its authoritative path."""
 
@@ -3061,6 +3082,7 @@ def bind_staged_subject_shape_run(
         expected_binding_status=SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
         require_complete=False,
         expected_subject_mask_bundle_id=expected_subject_mask_bundle_id,
+        array_content_sha256=unbound_array_content_sha256,
     )
     source_revision_audit = audit_subject_shape_source_revisions_group(
         authoritative_root,
@@ -3073,7 +3095,10 @@ def bind_staged_subject_shape_run(
             f"{source_revision_audit!r}."
         )
     source = load_exact_subject_shape_source(authoritative_root, final_run_group)
-    unbound_manifest = _load_unbound_numeric_manifest(final_run_group)
+    unbound_manifest = _load_unbound_numeric_manifest(
+        final_run_group,
+        array_content_sha256=unbound_array_content_sha256,
+    )
     manifest_sha256 = str(validation["unbound_manifest_sha256"])
     if unbound_manifest.record_sha256 != manifest_sha256:
         raise ValueError(
@@ -3119,6 +3144,8 @@ def bind_staged_subject_shape_run(
         component_names=component_names,
         identity=identity,
         component_schema=component_schema,
+        payload_run_path=payload_run_path,
+        payload_hash_workers=payload_hash_workers,
     )
     final_run_group.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
         SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
