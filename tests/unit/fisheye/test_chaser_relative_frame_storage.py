@@ -290,6 +290,41 @@ def test_prepare_flattens_frame_major_and_validates_body_extension() -> None:
     )
 
 
+def test_body_projection_context_is_digest_bound_and_readable() -> None:
+    projection = _record(
+        "palette.chaser_relative_frame.body_frame_projection_binding",
+        recording_id="recording-1",
+        policy_id="exact_keypoint_body_frame_acquisition_projection_v1",
+        missing_source_row_semantics="explicit_minus_one_no_interpolation",
+    )
+    prepared = prepare_chaser_relative_frame(
+        _result(),
+        context=_context(body_frame_projection_record=projection),
+    )
+
+    envelope = prepared.manifest["context"]["body_frame_projection"]
+    assert envelope["record"] == projection
+    assert envelope["sha256"] == canonical_json_sha256(projection)
+    validated = validate_prepared_chaser_relative_frame(prepared)
+    assert validated["body_extension_present"] is True
+
+
+def test_position_only_result_rejects_body_projection_context() -> None:
+    projection = _record(
+        "palette.chaser_relative_frame.body_frame_projection_binding",
+        recording_id="recording-1",
+        policy_id="exact_keypoint_body_frame_acquisition_projection_v1",
+    )
+    with pytest.raises(
+        ChaserRelativeFrameStorageError,
+        match="unexpected body-frame projection",
+    ):
+        prepare_chaser_relative_frame(
+            _result(body=False),
+            context=_context(body_frame_projection_record=projection),
+        )
+
+
 def test_proxy_projection_context_preserves_explicit_caveats_and_source_binding() -> (
     None
 ):

@@ -84,6 +84,17 @@ These counts describe this one immutable recording and must not be generalized
 to the cohort. Every successor publication must recompute and seal its own
 coverage evidence.
 
+The first strict read also exposed a portability defect in validation of the
+derived `heading_deg` cache. Recomputing the cache from its authoritative
+`float32` forward axes on this workstation differed from the stored cache on
+52,084 valid rows, but every difference was at most
+`0.000030517578125` degrees and none exceeded `0.0001` degrees. The body axes,
+sign convention, and invalid-row behavior still validated. Body-frame v1 now
+accepts only an absolute `0.00005` degree reproduction tolerance for this
+derived cache, matching the existing downstream relative-frame validator;
+relative calculations continue to derive from the digest-bound axes rather
+than treating the scalar cache as authority.
+
 ## Safe implementation boundary
 
 The first implementation should bind the explicit keypoint body-frame source,
@@ -102,6 +113,47 @@ Detection-centroid position plus a keypoint-derived body frame is a separate
 mixed-provider composition. It must remain unavailable until an explicit
 coordinate, frame, row-identity, review, and provider-disagreement contract is
 bound; it must not silently inherit the keypoint-position proof.
+
+## Structural implementation checkpoint (2026-08-27)
+
+The exact keypoint composition is implemented as a new selector-ineligible
+successor path. The adapter reopens the keypoint position source named by the
+proxy, requires every digest-bound position field to match, composes it with
+the explicitly named body-frame run, and projects onto the relative axis only
+by exact acquisition-frame identity. The dry-run operator exposes the sealed
+coverage record alongside its digest.
+
+The full-recording no-write canary reproduced the audited counts above and
+prepared manifest
+`9506ab2e3920c393f047156a0848dff3afe02d20b748f07bea722002ad596254`.
+Its body projection record is
+`f6eec26ac739a30967db081208e968dcf28e242b67038fdb8ff84641483ae73f`
+and retains `scientific_review_disposition=unreviewed_structural_candidate`.
+
+The versioned cohort planner now resolves each body frame from the exact
+provider-motion authority, freezes the body metadata and manifest digests as
+worker inputs, passes the body source only to the keypoint relative-frame
+operator, and runs the generalized bout successor without
+`--no-body-extension`. A no-write replan of all 84 frozen GoodBatBadBat
+recordings succeeded with task digest
+`6cc1c46ec7372627794a66c06e0eab6c31faf6d8b3c3bd0499fae6eeb0ad0d02`.
+Eighty-three recordings bind
+`body_frame_goodbatbadbat_pose_384_20260816_v1`; the exact canary motion source
+for one recording binds
+`body_frame_goodbatbadbat_pose_384_heading_successor_20260818_v2`. No job was
+submitted and no recording was modified during this replan.
+
+The derived receipt-bound execution task is
+`/tmp/goodbatbadbat_chaser_body_frame_receipt_bound_task_20260827.json`, with
+task digest
+`bbbcc9710d38c6bd5c0a611bc68b40c24ef908f1faaf93913b26b914a0256509`.
+That `/tmp` file is diagnostic planning evidence, not yet a durable submission
+handle.
+
+This checkpoint establishes structural computation and immutable planning,
+not reviewed scientific authority. The anatomical-orientation review receipt,
+required CI, a commit-pinned deployment, and a controlled publication canary
+remain gates before broader execution.
 
 This diagnostic changes no selector, registry row, production authority, or
 historical analysis publication.

@@ -556,3 +556,59 @@ def test_invalid_body_axes_are_explicitly_censored_without_velocity_fallback() -
     assert result.egocentric_valid[1].tolist() == [False, False]
     assert result.egocentric_reason_code[1, 0] == "body_frame_invalid"
     assert np.isnan(result.egocentric_bearing_deg[1]).all()
+
+
+def test_absent_body_source_row_is_distinct_from_present_invalid_axis() -> None:
+    keys = _keys()
+    valid = np.asarray([True, False, False, True], dtype=bool)
+    origin = np.zeros((4, 2), dtype=np.float64)
+    forward = np.repeat(np.asarray([[1.0, 0.0]]), 4, axis=0)
+    left = np.repeat(np.asarray([[0.0, -1.0]]), 4, axis=0)
+    origin[~valid] = np.nan
+    forward[~valid] = np.nan
+    left[~valid] = np.nan
+    body = BodyFrameInput(
+        frame_keys=keys,
+        origin_xy=origin,
+        forward_axis_xy=forward,
+        left_axis_xy=left,
+        axis_valid=valid,
+        source_row_index=np.asarray([20, 21, -1, 23], dtype=np.int64),
+        authority=_authority(
+            provider_id="body-frame-provider",
+            provider_digest="body-provider-digest",
+            source_authority_id="body-frame-source",
+            source_digest="body-frame-source-digest",
+        ),
+    )
+
+    result = compute_chaser_relative_frame(_base_input(body_frame=body))
+
+    assert result.body_frame_reason_code.tolist() == [
+        "valid",
+        "body_frame_invalid",
+        "source_row_unavailable",
+        "valid",
+    ]
+    assert result.egocentric_reason_code[1, 0] == "body_frame_invalid"
+    assert result.egocentric_reason_code[2, 0] == "source_row_unavailable"
+    assert result.relative_valid.all()
+
+
+def test_valid_body_geometry_requires_nonnegative_source_identity() -> None:
+    keys = _keys()
+    with pytest.raises(ChaserRelativeFrameError, match="nonnegative source row"):
+        BodyFrameInput(
+            frame_keys=keys,
+            origin_xy=np.zeros((4, 2), dtype=np.float64),
+            forward_axis_xy=np.repeat([[1.0, 0.0]], 4, axis=0),
+            left_axis_xy=np.repeat([[0.0, -1.0]], 4, axis=0),
+            axis_valid=np.ones(4, dtype=bool),
+            source_row_index=np.asarray([0, 1, -1, 3], dtype=np.int64),
+            authority=_authority(
+                provider_id="body-frame-provider",
+                provider_digest="body-provider-digest",
+                source_authority_id="body-frame-source",
+                source_digest="body-frame-source-digest",
+            ),
+        )

@@ -533,3 +533,124 @@ def test_native_acquisition_frame_loader_requires_exact_bound_pointer(
                 "record_sha256": "b" * 64,
             },
         )
+
+
+def test_exact_body_projection_retains_absent_and_invalid_rows_without_fill() -> None:
+    keys = adapter.AcquisitionFrameKeys(
+        recording_id="recording-1",
+        acquisition_frame_id=np.asarray([10, 11, 12, 13], dtype=np.int64),
+        track_sample_id=np.asarray([10, 11, 12, 13], dtype=np.int64),
+        row_axis_authority_id="relative-rows-v1",
+        row_axis_authority_digest="relative-rows-digest",
+        timestamp_ns=np.asarray([100, 200, 300, 400], dtype=np.int64),
+    )
+    body = SimpleNamespace(
+        dimensions=SimpleNamespace(n_instances=3),
+        frame_indices=np.asarray([10, 12, 13], dtype=np.int64),
+        origin_xy=np.asarray([[1.0, 1.0], [np.nan, np.nan], [4.0, 4.0]]),
+        forward_axis_xy=np.asarray([[1.0, 0.0], [np.nan, np.nan], [0.0, -1.0]]),
+        left_axis_xy=np.asarray([[0.0, -1.0], [np.nan, np.nan], [-1.0, 0.0]]),
+        axis_valid=np.asarray([True, False, True], dtype=bool),
+        run_path="analysis/body_frame_runs/body-v1",
+        run_manifest={"payload_digest": "a" * 64},
+        verification_digest="b" * 64,
+        recipe_id="keypoint-eye-axis-v1",
+        recipe_digest="c" * 64,
+    )
+    authority_record = {
+        "schema_id": "palette.position_body_frame_motion_source_authority",
+        "schema_version": 1,
+        "recording_id": "recording-1",
+    }
+    composition = SimpleNamespace(
+        source_acquisition_frame_index=np.asarray([10, 12, 13], dtype=np.int64),
+        body_frame_row_index=np.asarray([0, 1, 2], dtype=np.int64),
+        authority_record=authority_record,
+        authority_sha256=adapter.canonical_json_sha256(authority_record),
+    )
+
+    projected, record = adapter._project_body_frame_to_relative_axis(
+        frames=keys.acquisition_frame_id,
+        frame_keys=keys,
+        body_frame=body,
+        composition=composition,
+        coordinate_authority_id="camera-v1",
+        scale_authority_id="scale-v1",
+        timing_authority_id="time-v1",
+    )
+
+    assert projected.source_row_index.tolist() == [0, -1, 1, 2]
+    assert projected.axis_valid.tolist() == [True, False, False, True]
+    assert np.isnan(projected.origin_xy[1:3]).all()
+    assert record["missing_source_row_count"] == 1
+    assert record["present_invalid_axis_count"] == 1
+    assert record["valid_axis_count"] == 2
+    assert record["interpolation"] == "prohibited"
+    assert record["motion_heading_fallback"] == "prohibited"
+
+
+def test_body_projection_rejects_duplicate_source_acquisition_frames() -> None:
+    keys = adapter.AcquisitionFrameKeys(
+        recording_id="recording-1",
+        acquisition_frame_id=np.asarray([10], dtype=np.int64),
+        track_sample_id=np.asarray([10], dtype=np.int64),
+        row_axis_authority_id="relative-rows-v1",
+        row_axis_authority_digest="relative-rows-digest",
+        timestamp_ns=np.asarray([100], dtype=np.int64),
+    )
+    body = SimpleNamespace(
+        dimensions=SimpleNamespace(n_instances=2),
+        frame_indices=np.asarray([10, 10], dtype=np.int64),
+    )
+    composition = SimpleNamespace(
+        source_acquisition_frame_index=np.asarray([10, 10], dtype=np.int64),
+        body_frame_row_index=np.asarray([0, 1], dtype=np.int64),
+    )
+
+    with pytest.raises(
+        adapter.ChaserProxyRelativeFrameAdapterError,
+        match="multiple observations",
+    ):
+        adapter._project_body_frame_to_relative_axis(
+            frames=keys.acquisition_frame_id,
+            frame_keys=keys,
+            body_frame=body,
+            composition=composition,
+            coordinate_authority_id="camera-v1",
+            scale_authority_id="scale-v1",
+            timing_authority_id="time-v1",
+        )
+
+
+def test_prepared_proxy_json_exposes_body_projection_coverage_record() -> None:
+    record = {
+        "schema_id": "palette.chaser_relative_frame.body_frame_projection_binding",
+        "schema_version": 1,
+        "recording_id": "recording-1",
+        "relative_frame_count": 4,
+        "exact_source_row_count": 3,
+        "missing_source_row_count": 1,
+        "present_invalid_axis_count": 1,
+        "valid_axis_count": 2,
+    }
+    prepared = adapter.PreparedProxyRelativeFrame(
+        prepared=SimpleNamespace(payload_digest="prepared-digest"),
+        proxy_run_path="analysis/chaser_input_provenance_proxy_runs/proxy-v1",
+        proxy_manifest_sha256="a" * 64,
+        native_run_path="analysis/provider_chaser_distance_candidate_runs/native-v1",
+        native_manifest_sha256="b" * 64,
+        coordinate_lineage_sha256="c" * 64,
+        timing_authority_sha256="d" * 64,
+        subject_metadata_sha256="e" * 64,
+        body_frame_run_path="analysis/body_frame_runs/body-v1",
+        body_frame_manifest_sha256="f" * 64,
+        body_frame_projection_sha256=adapter.canonical_json_sha256(record),
+        body_frame_projection_record=record,
+    )
+
+    payload = prepared.to_json()
+
+    assert payload["body_frame_projection"] == record
+    assert payload["body_frame_projection_sha256"] == adapter.canonical_json_sha256(
+        payload["body_frame_projection"]
+    )

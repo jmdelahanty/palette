@@ -44,12 +44,14 @@ NEAREST_REASON_CODES = RELATIVE_REASON_CODES + (
 BODY_REASON_CODES = (
     "valid",
     "body_frame_unavailable",
+    "source_row_unavailable",
     "body_frame_invalid",
     "body_frame_nonfinite",
 )
 
 EGOCENTRIC_REASON_CODES = RELATIVE_REASON_CODES + (
     "body_frame_unavailable",
+    "source_row_unavailable",
     "body_frame_invalid",
     "body_frame_nonfinite",
     "zero_relative_vector",
@@ -66,6 +68,17 @@ TRANSITION_REASON_CODES = (
     "trial_boundary",
     "invalid_current_or_previous_position",
     "invalid_current_or_previous_body_frame",
+)
+
+_REASON_TEXT_WIDTH = max(
+    len(value)
+    for value in (
+        RELATIVE_REASON_CODES
+        + NEAREST_REASON_CODES
+        + BODY_REASON_CODES
+        + EGOCENTRIC_REASON_CODES
+        + TRANSITION_REASON_CODES
+    )
 )
 
 
@@ -378,6 +391,10 @@ class BodyFrameInput:
         _require_shape(source_rows, (n,), label="body frame source_row_index")
         _require_bool(valid, label="axis_valid")
         _require_int64(source_rows, label="body frame source_row_index")
+        if np.any(source_rows < -1):
+            _error("body-frame source rows may use only -1 as the absent sentinel.")
+        if np.any(valid & (source_rows < 0)):
+            _error("a valid body frame must have an exact nonnegative source row.")
         finite = (
             np.isfinite(origin).all(axis=1)
             & np.isfinite(forward).all(axis=1)
@@ -691,7 +708,10 @@ def _validate_provider_digest_consistency(
 
 
 def _reason_array(shape: tuple[int, ...], value: str) -> np.ndarray:
-    return np.full(shape, value, dtype=np.dtypes.StringDType())
+    # Reason codes come from the closed tuples above. A bounded Unicode dtype
+    # avoids NumPy 2.x StringDType corruption during masked reassignment of a
+    # longer reason while still prohibiting object arrays.
+    return np.full(shape, value, dtype=f"<U{_REASON_TEXT_WIDTH}")
 
 
 def _base_transition_reasons(
@@ -927,10 +947,13 @@ def compute_chaser_relative_frame(
             & np.isfinite(body_forward).all(axis=1)
             & np.isfinite(body_left).all(axis=1)
         )
-        body_valid = body.axis_valid & axis_finite
+        body_source_present = body_source_rows >= 0
+        body_valid = body_source_present & body.axis_valid & axis_finite
         body_reason[:] = "body_frame_invalid"
-        body_reason[~body.axis_valid & axis_finite] = "body_frame_invalid"
-        body_reason[body.axis_valid & ~axis_finite] = "body_frame_nonfinite"
+        body_reason[~body_source_present] = "source_row_unavailable"
+        body_reason[
+            body_source_present & body.axis_valid & ~axis_finite
+        ] = "body_frame_nonfinite"
         body_reason[body_valid] = "valid"
         body_heading[body_valid] = np.rad2deg(
             np.arctan2(
@@ -980,14 +1003,12 @@ def compute_chaser_relative_frame(
             & chasers.valid
             & chaser_finite
         )
-        ego_reason[ego_candidate & ~body_valid[:, None]] = np.broadcast_to(
-            body_reason[:, None],
-            (n, m),
-        )[ego_candidate & ~body_valid[:, None]]
         for frame_index in range(n):
             if body_valid[frame_index]:
                 continue
-            ego_reason[frame_index, ego_candidate[frame_index]] = body_reason[frame_index]
+            ego_reason[frame_index, ego_candidate[frame_index]] = str(
+                body_reason[frame_index]
+            )
     else:
         ego_reason[:] = np.where(relative_valid, "body_frame_unavailable", reason)
         heading_transition_reason[base_transition_reason == "valid"] = (

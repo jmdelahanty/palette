@@ -47,6 +47,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-subject-metadata-sha256")
     parser.add_argument("--expected-timing-authority-sha256")
     parser.add_argument(
+        "--body-frame-run",
+        help=(
+            "Exact selector-ineligible analysis/body_frame_runs child to "
+            "project by acquisition-frame identity. Omit for a position-only run."
+        ),
+    )
+    parser.add_argument(
         "--copy-backend",
         choices=("python", "rsync"),
         default="python",
@@ -70,6 +77,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         expected_proxy_manifest_sha256=args.expected_proxy_manifest_sha256,
         expected_subject_metadata_sha256=args.expected_subject_metadata_sha256,
         expected_timing_authority_sha256=args.expected_timing_authority_sha256,
+        body_frame_run_name=args.body_frame_run,
     )
     if args.apply:
         publication = materialize_chaser_relative_frame(

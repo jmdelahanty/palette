@@ -29,6 +29,11 @@ BODY_FRAME_RUN_SCHEMA_ID = "palette.analysis.body_frame"
 BODY_FRAME_RUN_SCHEMA_VERSION = 1
 BODY_FRAME_RUN_LAYOUT = "sparse_observation_body_frames_v1"
 BODY_FRAME_ANGLE_CONVENTION = "atan2_negative_y_x_degrees"
+# NumPy/libm implementations can differ by a few float32 ULPs when the cached
+# angle is reproduced from the authoritative axes on another machine.  This
+# bound matches the downstream relative-frame schema while remaining far below
+# any scientifically meaningful orientation change.
+BODY_FRAME_HEADING_VALIDATION_ATOL_DEG = 5e-5
 
 _CONTRACTS: tuple[tuple[str, ArrayContract], ...] = (
     ("instance_key", KEYPOINT_INSTANCE_KEY_V1),
@@ -385,12 +390,21 @@ class BodyFrameSchema:
                     np.arctan2(-forward[:, 1], forward[:, 0])
                 ).astype(np.float32)
                 expected_heading[invalid] = np.nan
-                if not np.array_equal(heading, expected_heading, equal_nan=True):
+                if np.any(
+                    valid
+                    & ~np.isclose(
+                        heading,
+                        expected_heading,
+                        atol=BODY_FRAME_HEADING_VALIDATION_ATOL_DEG,
+                        rtol=0.0,
+                    )
+                ):
                     issues.append(
                         _issue(
                             "heading_derivation_mismatch",
                             "heading_deg",
-                            "heading_deg must exactly equal atan2(-forward_y, forward_x).",
+                            "heading_deg must equal atan2(-forward_y, forward_x) "
+                            f"within {BODY_FRAME_HEADING_VALIDATION_ATOL_DEG:g} degrees.",
                         )
                     )
         return tuple(issues)
@@ -504,6 +518,7 @@ BODY_FRAME_SCHEMA_V1 = BodyFrameSchema(
 __all__ = [
     "BODY_FRAME_ANGLE_CONVENTION",
     "BODY_FRAME_BINDINGS",
+    "BODY_FRAME_HEADING_VALIDATION_ATOL_DEG",
     "BODY_FRAME_RUN_LAYOUT",
     "BODY_FRAME_RUN_SCHEMA_ID",
     "BODY_FRAME_RUN_SCHEMA_VERSION",

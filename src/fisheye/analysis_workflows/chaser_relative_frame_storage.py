@@ -296,6 +296,7 @@ class ChaserRelativeFramePublicationContext:
     analysis_profile_record: Mapping[str, Any]
     acquisition_projection_publication_record: Mapping[str, Any] | None = None
     controller_state_record: Mapping[str, Any] | None = None
+    body_frame_projection_record: Mapping[str, Any] | None = None
     arena_geometry_record: Mapping[str, Any] | None = None
     arena_to_source_camera_transform_record: Mapping[str, Any] | None = None
 
@@ -350,6 +351,17 @@ class ChaserRelativeFramePublicationContext:
                 "controller_state_record",
                 MappingProxyType(controller_record),
             )
+        body_projection = self.body_frame_projection_record
+        if body_projection is not None:
+            body_projection_record = _strict_json_record(
+                body_projection,
+                field="body_frame_projection_record",
+            )
+            object.__setattr__(
+                self,
+                "body_frame_projection_record",
+                MappingProxyType(body_projection_record),
+            )
 
         subject = self.subject_identity_record
         if subject.get("subject_id") != self.fish_identity:
@@ -392,6 +404,7 @@ class ChaserRelativeFramePublicationContext:
             "acquisition_projection_record",
             "acquisition_projection_publication_record",
             "controller_state_record",
+            "body_frame_projection_record",
             "arena_geometry_record",
             "arena_to_source_camera_transform_record",
         ):
@@ -435,6 +448,10 @@ class ChaserRelativeFramePublicationContext:
         if self.controller_state_record is not None:
             manifest["controller_state"] = self._envelope(
                 self.controller_state_record
+            )
+        if self.body_frame_projection_record is not None:
+            manifest["body_frame_projection"] = self._envelope(
+                self.body_frame_projection_record
             )
         return manifest
 
@@ -533,6 +550,16 @@ def validate_prepared_chaser_relative_frame(
     if context.get("controller_state") is not None:
         records["controller_state"] = _require_binding_envelope(
             context.get("controller_state"), field="context.controller_state"
+        )
+    if context.get("body_frame_projection") is not None:
+        if prepared.body_arrays is None:
+            _fail(
+                "Position-only prepared output has an unexpected body-frame "
+                "projection binding."
+            )
+        records["body_frame_projection"] = _require_binding_envelope(
+            context.get("body_frame_projection"),
+            field="context.body_frame_projection",
         )
     publication = context.get("acquisition_projection_publication")
     if records["acquisition_projection"].get("policy_id") == (

@@ -466,12 +466,16 @@ def _validate_context_and_authorities(
         "arena_geometry",
         "arena_to_source_camera_transform",
     }
-    optional_context = {"controller_state"}
+    optional_context = {"controller_state", "body_frame_projection"}
     if not required_context.issubset(context) or not set(context).issubset(
         required_context | optional_context
     ):
         raise ChaserRelativeFrameSourceHandleError(
             "Published context has missing or extra authority records."
+        )
+    if "body_frame_projection" in context and not body_present:
+        raise ChaserRelativeFrameSourceHandleError(
+            "Position-only publication has an unexpected body-frame projection."
         )
     fish_identity = _require_nonempty_text(
         context.get("fish_identity"), field="manifest.context.fish_identity"
