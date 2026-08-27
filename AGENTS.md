@@ -88,6 +88,25 @@
   when an applicable contract defines the reviewed claim, receipt schema, and
   runtime validator. A representative visual inspection may instead be a
   distinct promotion or publication-quality check.
+- Keep `canonical` and `authoritative` claims separate. `canonical` identifies
+  the validated standard schema, coordinate system, lineage, and normal
+  production representation. `authoritative` identifies the exact accepted
+  selection for a declared use. A canonical candidate need not be
+  authoritative, and an authority activation must first validate the applicable
+  canonical contract.
+- Do not treat the mere presence of `authoritative_run` as proof of scientific
+  review. The generic authority primitive proves that a named run exists, is
+  complete, is selector-eligible, and has approval provenance; it does not by
+  itself validate a stage-specific review payload. Claim reviewed authority
+  only when the stage activation path also validates the required review state
+  or receipt.
+- `authoritative_run` is not the universal authority mechanism. Canonical raw
+  detections use matching `latest`/`latest_complete` selectors plus the bound
+  canonical-detection contract and digest; refined detections may use
+  `refined_detect_runs.authoritative_run`; manually accepted refined subject
+  masks may use `refined_subject_masks_runs.authoritative_run`; and modern
+  atomic subject-mask publication selects a cross-family bundle through the
+  root `subject_mask_authority` envelope.
 - Detection authority is explicit and stage-specific: `detect_runs/<run>` may
   be the selected canonical raw/model detection authority, while the finalized
   `refined_detect_runs/<run>` (or its clipped finalized collection) is the
