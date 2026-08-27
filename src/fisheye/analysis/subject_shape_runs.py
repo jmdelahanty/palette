@@ -7,7 +7,9 @@ from contextlib import contextmanager
 import heapq
 import json
 import math
+import os
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -110,6 +112,9 @@ from ..shared.subject_shape_coordinate_publication import (
     selector_snapshot,
     stamp_unbound_subject_shape_manifest,
 )
+from ..shared.subject_shape_storage import (
+    build_subject_shape_unbound_payload_scan_receipt,
+)
 from ..shared.zarr.subject_shape_bundle_source import (
     BoundSubjectShapeBundleSource,
     assignment_rebinding_run_id_from_source_record,
@@ -165,6 +170,83 @@ SUPPORTED_SCHEDULERS = ("single-threaded", "threads", "processes", "distributed"
 EXECUTION_BACKENDS = ("serial_driver", "dask_worker_chunks")
 SERIAL_EXECUTION_BACKEND = "serial_driver"
 DASK_WORKER_EXECUTION_BACKEND = "dask_worker_chunks"
+_SUBJECT_SHAPE_WORKER_CONTEXT_CACHE_MAX_ENTRIES = 8
+_SUBJECT_SHAPE_WORKER_CONTEXT_CACHE: dict[
+    tuple[object, ...],
+    tuple[zarr.Group, zarr.Group, MaskStore],
+] = {}
+_SUBJECT_SHAPE_WORKER_CONTEXT_CACHE_LOCK = threading.Lock()
+
+
+def _zarr_store_identity(path: str | Path) -> tuple[object, ...]:
+    root = Path(path).expanduser().resolve()
+    metadata = root / "zarr.json"
+    if not metadata.is_file():
+        metadata = root / ".zgroup"
+    stat = metadata.stat()
+    return (
+        str(root),
+        str(metadata.name),
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+    )
+
+
+def _clear_subject_shape_worker_context_cache() -> None:
+    """Clear process-local handles; intended for bounded worker/test teardown."""
+
+    with _SUBJECT_SHAPE_WORKER_CONTEXT_CACHE_LOCK:
+        _SUBJECT_SHAPE_WORKER_CONTEXT_CACHE.clear()
+
+
+def _subject_shape_worker_context(
+    source_zarr_path: str,
+    *,
+    output_zarr_path: str,
+    refined_run: str,
+    shape_run: str,
+) -> tuple[tuple[zarr.Group, zarr.Group, MaskStore], bool]:
+    """Reuse exact subgroup handles inside one worker process.
+
+    Source publications are immutable and the output path is one exclusively
+    owned node-local stage.  Device/inode/size/mtime identity prevents a
+    deleted-and-recreated path from inheriting a prior process-local handle.
+    """
+
+    key = (
+        int(os.getpid()),
+        *_zarr_store_identity(source_zarr_path),
+        *_zarr_store_identity(output_zarr_path),
+        str(refined_run),
+        str(shape_run),
+    )
+    with _SUBJECT_SHAPE_WORKER_CONTEXT_CACHE_LOCK:
+        cached = _SUBJECT_SHAPE_WORKER_CONTEXT_CACHE.get(key)
+        if cached is not None:
+            return cached, True
+        source_root = open_zarr_root(source_zarr_path, mode="r")
+        output_root = open_zarr_root(output_zarr_path, mode="a")
+        refined_group = source_root["refined_subject_masks_runs"][refined_run]
+        mask_store = open_mask_store(
+            refined_group,
+            source_path=f"refined_subject_masks_runs/{refined_run}",
+            prefer="dense",
+        )
+        context = (
+            refined_group,
+            output_root["analysis"]["subject_shape_runs"][shape_run],
+            mask_store,
+        )
+        if (
+            len(_SUBJECT_SHAPE_WORKER_CONTEXT_CACHE)
+            >= _SUBJECT_SHAPE_WORKER_CONTEXT_CACHE_MAX_ENTRIES
+        ):
+            oldest_key = next(iter(_SUBJECT_SHAPE_WORKER_CONTEXT_CACHE))
+            del _SUBJECT_SHAPE_WORKER_CONTEXT_CACHE[oldest_key]
+        _SUBJECT_SHAPE_WORKER_CONTEXT_CACHE[key] = context
+        return context, False
 
 
 @contextmanager
@@ -2654,18 +2736,20 @@ def _process_and_write_subject_shape_chunk(
     centerline_crop_to_foreground: bool = False,
     native_threads: Optional[int] = None,
 ) -> dict[str, object]:
-    source_root = open_zarr_root(source_zarr_path, mode="r")
-    output_root = open_zarr_root(output_zarr_path, mode="a")
-    refined_group = source_root["refined_subject_masks_runs"][refined_run]
-    mask_store = open_mask_store(
-        refined_group,
-        source_path=f"refined_subject_masks_runs/{refined_run}",
-        prefer="dense",
+    context_start = time.perf_counter()
+    (refined_group, run_group, mask_store), cache_hit = (
+        _subject_shape_worker_context(
+            source_zarr_path,
+            output_zarr_path=output_zarr_path,
+            refined_run=refined_run,
+            shape_run=shape_run,
+        )
     )
+    context_seconds = float(time.perf_counter() - context_start)
     with _native_thread_limit(native_threads):
-        return _process_and_write_subject_shape_chunk_groups(
+        result = _process_and_write_subject_shape_chunk_groups(
             refined_group,
-            output_root["analysis"]["subject_shape_runs"][shape_run],
+            run_group,
             mask_store=mask_store,
             component_indices=component_indices,
             start_row=start_row,
@@ -2674,6 +2758,16 @@ def _process_and_write_subject_shape_chunk(
             execution_backend=DASK_WORKER_EXECUTION_BACKEND,
             centerline_crop_to_foreground=bool(centerline_crop_to_foreground),
         )
+    chunk_timing = dict(result["chunk_timing"])
+    chunk_timing["worker_context_lookup_seconds"] = context_seconds
+    chunk_timing["worker_context_cache_hit"] = cache_hit
+    chunk_timing["total_seconds"] = (
+        float(chunk_timing.get("total_seconds") or 0.0) + context_seconds
+    )
+    return {
+        **result,
+        "chunk_timing": chunk_timing,
+    }
 
 
 def _compute_dask_tasks(
@@ -2725,6 +2819,12 @@ def _summarize_subject_shape_chunk_timings(
     )
     return {
         "chunk_count": len(chunk_timings),
+        "worker_context_cache_hits": sum(
+            item.get("worker_context_cache_hit") is True for item in chunk_timings
+        ),
+        "worker_context_cache_misses": sum(
+            item.get("worker_context_cache_hit") is False for item in chunk_timings
+        ),
         "mean_chunk_seconds": float(np.mean(totals)) if totals else 0.0,
         "median_chunk_seconds": float(np.median(totals)) if totals else 0.0,
         "p95_chunk_seconds": float(np.percentile(totals, 95.0)) if totals else 0.0,
@@ -2751,8 +2851,15 @@ def _unbound_numeric_manifest_record(run_group: zarr.Group) -> dict[str, object]
     return build_subject_shape_unbound_numeric_manifest_record(run_group)
 
 
-def _stamp_unbound_numeric_manifest(run_group: zarr.Group):
-    return stamp_unbound_subject_shape_manifest(run_group)
+def _stamp_unbound_numeric_manifest(
+    run_group: zarr.Group,
+    *,
+    array_content_sha256: Mapping[str, str] | None = None,
+):
+    return stamp_unbound_subject_shape_manifest(
+        run_group,
+        array_content_sha256=array_content_sha256,
+    )
 
 
 def refresh_unbound_subject_shape_manifest_after_storage_materialization(
@@ -3365,6 +3472,8 @@ def write_subject_shape_run_group(
     subject_mask_bundle_id: str | None = None,
     allow_inactive_subject_mask_bundle: bool = False,
     assignment_keypoint_rebinding_run_id: str | None = None,
+    payload_scan_workers: int = 1,
+    payload_scan_block_rows: int | None = None,
     _unbound_coordinate_stage: bool = False,
 ) -> dict[str, object]:
     """Write one row-aligned subject-shape analysis run."""
@@ -3388,6 +3497,12 @@ def write_subject_shape_run_group(
         )
     if type(allow_inactive_subject_mask_bundle) is not bool:
         raise TypeError("allow_inactive_subject_mask_bundle must be an exact bool.")
+    if type(payload_scan_workers) is not int or payload_scan_workers <= 0:
+        raise ValueError("payload_scan_workers must be a positive integer.")
+    if payload_scan_block_rows is not None and (
+        type(payload_scan_block_rows) is not int or payload_scan_block_rows <= 0
+    ):
+        raise ValueError("payload_scan_block_rows must be a positive integer.")
     if subject_mask_bundle_id is not None and not _unbound_coordinate_stage:
         raise ValueError(
             "Recording-bundle subject-shape v5 must be finalized through the "
@@ -3476,9 +3591,20 @@ def write_subject_shape_run_group(
             if backend == DASK_WORKER_EXECUTION_BACKEND
             else "requested_chunk_size"
         ),
+        "worker_context_cache_policy": (
+            "exact_store_metadata_identity_process_local_v1"
+            if backend == DASK_WORKER_EXECUTION_BACKEND
+            else "not_used_serial_driver"
+        ),
         "centerline_crop_to_foreground": bool(centerline_crop_to_foreground),
         "native_threads_per_worker": (
             max(1, int(native_threads)) if native_threads is not None else None
+        ),
+        "payload_scan_workers": int(payload_scan_workers),
+        "payload_scan_block_rows": (
+            int(payload_scan_block_rows)
+            if payload_scan_block_rows is not None
+            else int(worker_chunk_size)
         ),
         "separate_output_root": destination_root is not root,
         "mutates_archive": not bool(dry_run),
@@ -3587,6 +3713,11 @@ def write_subject_shape_run_group(
         "dask_scheduler": scheduler_key,
         "dask_num_workers": int(num_workers) if num_workers is not None else None,
         "dask_chunk_size": max(1, int(chunk_size)),
+        "worker_context_cache_policy": (
+            "exact_store_metadata_identity_process_local_v1"
+            if backend == DASK_WORKER_EXECUTION_BACKEND
+            else "not_used_serial_driver"
+        ),
         "centerline_crop_to_foreground": bool(centerline_crop_to_foreground),
         "native_threads_per_worker": (
             max(1, int(native_threads)) if native_threads is not None else None
@@ -3617,7 +3748,20 @@ def write_subject_shape_run_group(
                 fallback_command="subject_shape_runs_unbound_stage",
             ),
         )
-        _stamp_unbound_numeric_manifest(run_group)
+        payload_scan = build_subject_shape_unbound_payload_scan_receipt(
+            run_group,
+            workers=payload_scan_workers,
+            block_rows=(
+                payload_scan_block_rows
+                if payload_scan_block_rows is not None
+                else worker_chunk_size
+            ),
+        )
+        payload_hashes = dict(payload_scan["array_content_sha256"])
+        _stamp_unbound_numeric_manifest(
+            run_group,
+            array_content_sha256=payload_hashes,
+        )
         validation = _validate_unbound_subject_shape_payload(
             root,
             run_group,
@@ -3628,7 +3772,9 @@ def write_subject_shape_run_group(
             expected_subject_mask_bundle_id=(
                 bundle_source.bundle_id if bundle_source is not None else None
             ),
+            array_content_sha256=payload_hashes,
         )
+        decoded_payload = dict(payload_scan["decoded_payload"])
         summary.update(
             {
                 "status": SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
@@ -3638,6 +3784,25 @@ def write_subject_shape_run_group(
                 "rows_per_second": rows_per_second,
                 "rows_with_component": rows_with_component,
                 "chunk_timing_count": len(chunk_timings),
+                "producer_payload_scan_receipt": {
+                    "schema_id": payload_scan["schema_id"],
+                    "schema_version": payload_scan["schema_version"],
+                    "run_ref": payload_scan["run_ref"],
+                    "array_payload_canonicalization": payload_scan[
+                        "array_payload_canonicalization"
+                    ],
+                    "closed_array_inventory": payload_scan[
+                        "closed_array_inventory"
+                    ],
+                    "mutation_exclusion": payload_scan["mutation_exclusion"],
+                    "requested_workers": payload_scan["requested_workers"],
+                    "effective_workers": payload_scan["effective_workers"],
+                    "block_rows": payload_scan["block_rows"],
+                    "duration_seconds": payload_scan["duration_seconds"],
+                    "array_count": decoded_payload["array_count"],
+                    "decoded_bytes": decoded_payload["decoded_bytes"],
+                    "decoded_payload_root_sha256": decoded_payload["root_sha256"],
+                },
             }
         )
         if include_chunk_timings:

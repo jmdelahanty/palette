@@ -118,6 +118,16 @@ SUBJECT_SHAPE_EXECUTION_PHASE_ORDER = (
     "physical_inventory",
     "publication_acceptance_validation",
 )
+SUBJECT_SHAPE_MATERIALIZATION_PHASE_ORDER = (
+    "plan",
+    "scratch_setup",
+    "scientific_compute",
+    "compute_validation",
+    "storage_conversion",
+    "publishing_validation",
+    "atomic_publication",
+    "cleanup",
+)
 SUBJECT_SHAPE_EXECUTION_BINDING_ATTR = "analysis_candidate_execution_binding"
 SUBJECT_SHAPE_EXECUTION_FAILURE_TOMBSTONE_ATTR = (
     "analysis_candidate_execution_tombstone"
@@ -1012,26 +1022,39 @@ def materialize_subject_shape(
     allow_inactive_subject_mask_bundle: bool = False,
     assignment_keypoint_rebinding_run_id: str | None = None,
 ) -> dict[str, Any]:
-    plan = build_subject_shape_materialization_plan(
-        source_zarr,
-        scratch_root=scratch_root,
-        refined_run=refined_run,
-        run_name=run_name,
-        storage_profile=storage_profile,
-        components=components,
-        block_rows=block_rows,
-        output_shard_rows=output_shard_rows,
-        execution_backend=execution_backend,
-        scheduler=scheduler,
-        num_workers=num_workers,
-        shard_copy_workers=shard_copy_workers,
-        native_threads=native_threads,
-        subject_mask_bundle_id=subject_mask_bundle_id,
-        allow_inactive_subject_mask_bundle=allow_inactive_subject_mask_bundle,
-        assignment_keypoint_rebinding_run_id=(
-            assignment_keypoint_rebinding_run_id
-        ),
+    telemetry = PhaseTelemetry(
+        materializer="subject_shape",
+        context={
+            "source_zarr": str(Path(source_zarr).expanduser().resolve()),
+            "run_name": str(run_name),
+            "storage_profile_id": str(storage_profile),
+            "execution_backend": str(execution_backend),
+            "scheduler": str(scheduler),
+            "num_workers": int(num_workers),
+            "shard_copy_workers": int(shard_copy_workers),
+        },
     )
+    with telemetry.phase("plan"):
+        plan = build_subject_shape_materialization_plan(
+            source_zarr,
+            scratch_root=scratch_root,
+            refined_run=refined_run,
+            run_name=run_name,
+            storage_profile=storage_profile,
+            components=components,
+            block_rows=block_rows,
+            output_shard_rows=output_shard_rows,
+            execution_backend=execution_backend,
+            scheduler=scheduler,
+            num_workers=num_workers,
+            shard_copy_workers=shard_copy_workers,
+            native_threads=native_threads,
+            subject_mask_bundle_id=subject_mask_bundle_id,
+            allow_inactive_subject_mask_bundle=allow_inactive_subject_mask_bundle,
+            assignment_keypoint_rebinding_run_id=(
+                assignment_keypoint_rebinding_run_id
+            ),
+        )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
         "status": "planned" if not apply else "running",
@@ -1039,120 +1062,137 @@ def materialize_subject_shape(
         "plan": plan.to_json(),
     }
     if not apply:
+        result["runtime_telemetry"] = _ordered_materialization_telemetry(telemetry)
         return result
 
     succeeded = False
-    if plan.scratch_root.exists():
-        raise FileExistsError(f"Refusing existing scratch root: {plan.scratch_root}")
-    plan.scratch_root.mkdir(parents=True)
-    free_bytes = int(shutil.disk_usage(plan.scratch_root).free)
-    if check_capacity and free_bytes < plan.estimated_scratch_bytes:
-        raise OSError(
-            f"Insufficient scratch capacity: need approximately {plan.estimated_scratch_bytes} bytes, "
-            f"found {free_bytes} bytes at {plan.scratch_root}."
-        )
-    native_environment = _configure_native_threads(plan.native_threads)
+    with telemetry.phase("scratch_setup"):
+        if plan.scratch_root.exists():
+            raise FileExistsError(f"Refusing existing scratch root: {plan.scratch_root}")
+        plan.scratch_root.mkdir(parents=True)
+        free_bytes = int(shutil.disk_usage(plan.scratch_root).free)
+        if check_capacity and free_bytes < plan.estimated_scratch_bytes:
+            raise OSError(
+                "Insufficient scratch capacity: need approximately "
+                f"{plan.estimated_scratch_bytes} bytes, found {free_bytes} bytes "
+                f"at {plan.scratch_root}."
+            )
+        native_environment = _configure_native_threads(plan.native_threads)
     try:
-        source_root = open_zarr_root(plan.source_zarr, mode="r")
-        compute_root = zarr.open_group(str(plan.compute_zarr), mode="w", zarr_format=3)
-        compute_summary = write_subject_shape_run_group(
-            source_root,
-            zarr_path=plan.source_zarr,
-            output_root=compute_root,
-            output_zarr_path=plan.compute_zarr,
-            refined_run=plan.refined_run,
-            run_name=plan.run_name,
-            components=plan.component_names,
-            chunk_size=plan.block_rows,
-            execution_backend=plan.execution_backend,
-            scheduler=plan.scheduler,
-            num_workers=plan.num_workers,
-            overwrite=False,
-            dry_run=False,
-            centerline_crop_to_foreground=True,
-            native_threads=plan.native_threads,
-            stage_command=stage_command
-            or (" ".join(sys.argv) if sys.argv else "unknown"),
-            subject_mask_bundle_id=getattr(plan, "subject_mask_bundle_id", None),
-            allow_inactive_subject_mask_bundle=(
-                getattr(plan, "allow_inactive_subject_mask_bundle", False)
-            ),
-            assignment_keypoint_rebinding_run_id=getattr(
-                plan,
-                "assignment_keypoint_rebinding_run_id",
-                None,
-            ),
-            _unbound_coordinate_stage=True,
-        )
-        compute_validation = _validate_subject_shape_run(
-            plan.compute_run_path,
-            row_count=plan.row_count,
-            require_sharded=False,
-            expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
-            require_complete=True,
-            expected_selector_eligible=False,
-        )
-        if not compute_validation["valid"]:
-            raise RuntimeError(
-                f"Node-local compute validation failed: {compute_validation}"
+        with telemetry.phase("scientific_compute"):
+            source_root = open_zarr_root(plan.source_zarr, mode="r")
+            compute_root = zarr.open_group(
+                str(plan.compute_zarr), mode="w", zarr_format=3
             )
-        storage_access_aware = is_subject_shape_access_aware_storage(
-            plan.storage_profile_id
-        )
-        if storage_access_aware:
-            compute_run = compute_root[f"analysis/subject_shape_runs/{plan.run_name}"]
-            sharding_summary = materialize_subject_shape_access_aware_storage(
-                compute_run,
-                plan.sharded_run,
-                profile=subject_shape_access_aware_storage_profile(
-                    plan.storage_profile_id
+            compute_summary = write_subject_shape_run_group(
+                source_root,
+                zarr_path=plan.source_zarr,
+                output_root=compute_root,
+                output_zarr_path=plan.compute_zarr,
+                refined_run=plan.refined_run,
+                run_name=plan.run_name,
+                components=plan.component_names,
+                chunk_size=plan.block_rows,
+                execution_backend=plan.execution_backend,
+                scheduler=plan.scheduler,
+                num_workers=plan.num_workers,
+                overwrite=False,
+                dry_run=False,
+                centerline_crop_to_foreground=True,
+                native_threads=plan.native_threads,
+                stage_command=stage_command
+                or (" ".join(sys.argv) if sys.argv else "unknown"),
+                subject_mask_bundle_id=getattr(
+                    plan, "subject_mask_bundle_id", None
                 ),
-                phase="unbound",
-                copy_block_rows=plan.block_rows,
+                allow_inactive_subject_mask_bundle=(
+                    getattr(plan, "allow_inactive_subject_mask_bundle", False)
+                ),
+                assignment_keypoint_rebinding_run_id=getattr(
+                    plan,
+                    "assignment_keypoint_rebinding_run_id",
+                    None,
+                ),
+                payload_scan_workers=plan.shard_copy_workers,
+                payload_scan_block_rows=plan.block_rows,
+                _unbound_coordinate_stage=True,
             )
-            sharding_summary["exact_decoded_validation"] = True
-        else:
-            sharding = copy_completed_run_to_sharded(
+        with telemetry.phase("compute_validation"):
+            compute_validation = _validate_subject_shape_run(
                 plan.compute_run_path,
+                row_count=plan.row_count,
+                require_sharded=False,
+                expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+                require_complete=True,
+                expected_selector_eligible=False,
+            )
+            if not compute_validation["valid"]:
+                raise RuntimeError(
+                    f"Node-local compute validation failed: {compute_validation}"
+                )
+        with telemetry.phase("storage_conversion"):
+            storage_access_aware = is_subject_shape_access_aware_storage(
+                plan.storage_profile_id
+            )
+            if storage_access_aware:
+                compute_run = compute_root[
+                    f"analysis/subject_shape_runs/{plan.run_name}"
+                ]
+                sharding_summary = materialize_subject_shape_access_aware_storage(
+                    compute_run,
+                    plan.sharded_run,
+                    profile=subject_shape_access_aware_storage_profile(
+                        plan.storage_profile_id
+                    ),
+                    phase="unbound",
+                    copy_block_rows=plan.block_rows,
+                    workers=plan.shard_copy_workers,
+                )
+                sharding_summary["exact_decoded_validation"] = True
+            else:
+                sharding = copy_completed_run_to_sharded(
+                    plan.compute_run_path,
+                    plan.sharded_run,
+                    row_count_array="row_index/instance_key",
+                    shard_rows=plan.output_shard_rows,
+                    workers=plan.shard_copy_workers,
+                )
+                sharding_summary = {
+                    key: value
+                    for key, value in sharding.items()
+                    if key not in {"arrays", "shards", "static_arrays"}
+                }
+            sharded = open_zarr_root(plan.sharded_run, mode="a")
+            if (
+                sharded.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
+                != SUBJECT_SHAPE_UNBOUND_STAGE_STATUS
+                or sharded.attrs.get("palette_run_completion_status") != "complete"
+            ):
+                raise RuntimeError(
+                    "Sharded subject-shape copy did not preserve the exact "
+                    "unbound stage."
+                )
+            sharded.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
+                SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS
+            )
+            sharded.attrs["palette_run_completion_status"] = "running"
+            if "palette_run_completed_at_utc" in sharded.attrs:
+                del sharded.attrs["palette_run_completed_at_utc"]
+        with telemetry.phase("publishing_validation"):
+            publishing_validation = _validate_subject_shape_run(
                 plan.sharded_run,
-                row_count_array="row_index/instance_key",
-                shard_rows=plan.output_shard_rows,
-                workers=plan.shard_copy_workers,
+                row_count=plan.row_count,
+                require_sharded=not storage_access_aware,
+                expected_binding_status=SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
+                require_complete=False,
+                expected_selector_eligible=False,
+                storage_profile_id=plan.storage_profile_id,
             )
-            sharding_summary = {
-                key: value
-                for key, value in sharding.items()
-                if key not in {"arrays", "shards", "static_arrays"}
-            }
-        sharded = open_zarr_root(plan.sharded_run, mode="a")
-        if (
-            sharded.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
-            != SUBJECT_SHAPE_UNBOUND_STAGE_STATUS
-            or sharded.attrs.get("palette_run_completion_status") != "complete"
-        ):
-            raise RuntimeError(
-                "Sharded subject-shape copy did not preserve the exact unbound stage."
-            )
-        sharded.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
-            SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS
-        )
-        sharded.attrs["palette_run_completion_status"] = "running"
-        if "palette_run_completed_at_utc" in sharded.attrs:
-            del sharded.attrs["palette_run_completed_at_utc"]
-        publishing_validation = _validate_subject_shape_run(
-            plan.sharded_run,
-            row_count=plan.row_count,
-            require_sharded=not storage_access_aware,
-            expected_binding_status=SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
-            require_complete=False,
-            expected_selector_eligible=False,
-            storage_profile_id=plan.storage_profile_id,
-        )
-        if not publishing_validation["valid"]:
-            raise RuntimeError(
-                "Sharded subject-shape publishing stage is invalid: "
-                f"{publishing_validation!r}"
-            )
+            if not publishing_validation["valid"]:
+                raise RuntimeError(
+                    "Sharded subject-shape publishing stage is invalid: "
+                    f"{publishing_validation!r}"
+                )
         materialization_payload = {
             "schema_id": MATERIALIZATION_SCHEMA_ID,
             "status": "complete",
@@ -1169,11 +1209,12 @@ def materialize_subject_shape(
                 "required_bytes_estimate": plan.estimated_scratch_bytes,
             },
         }
-        publish = publish_subject_shape_run(
-            plan,
-            materialization_payload=materialization_payload,
-            copy_backend=copy_backend,
-        )
+        with telemetry.phase("atomic_publication"):
+            publish = publish_subject_shape_run(
+                plan,
+                materialization_payload=materialization_payload,
+                copy_backend=copy_backend,
+            )
         result.update(
             {
                 "status": "complete",
@@ -1182,10 +1223,12 @@ def materialize_subject_shape(
             }
         )
         succeeded = True
-        return result
     finally:
-        if succeeded and not keep_scratch and plan.scratch_root.is_dir():
-            shutil.rmtree(plan.scratch_root)
+        with telemetry.phase("cleanup"):
+            if succeeded and not keep_scratch and plan.scratch_root.is_dir():
+                shutil.rmtree(plan.scratch_root)
+    result["runtime_telemetry"] = _ordered_materialization_telemetry(telemetry)
+    return result
 
 
 def _ordered_execution_telemetry(telemetry: PhaseTelemetry) -> dict[str, Any]:
@@ -1196,6 +1239,22 @@ def _ordered_execution_telemetry(telemetry: PhaseTelemetry) -> dict[str, Any]:
     phases = list(result["phases"])
     if any(phase["name"] not in order for phase in phases):
         raise RuntimeError("Subject-shape execution telemetry has an unknown phase.")
+    phases.sort(key=lambda phase: order[phase["name"]])
+    result["phases"] = phases
+    return result
+
+
+def _ordered_materialization_telemetry(
+    telemetry: PhaseTelemetry,
+) -> dict[str, Any]:
+    result = telemetry.to_json()
+    order = {
+        name: index
+        for index, name in enumerate(SUBJECT_SHAPE_MATERIALIZATION_PHASE_ORDER)
+    }
+    phases = list(result["phases"])
+    if any(phase["name"] not in order for phase in phases):
+        raise RuntimeError("Subject-shape materialization telemetry has an unknown phase.")
     phases.sort(key=lambda phase: order[phase["name"]])
     result["phases"] = phases
     return result

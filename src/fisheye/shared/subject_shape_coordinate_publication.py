@@ -3140,6 +3140,8 @@ def _subject_shape_payload_numerical_policy(
 
 def _scan_subject_shape_bound_payload(
     run: Any,
+    *,
+    workers: int,
 ) -> tuple[dict[str, str], Mapping[str, Any]]:
     """Read the final arrays once before metadata-only authority stamping."""
 
@@ -3152,7 +3154,10 @@ def _scan_subject_shape_bound_payload(
         or SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR in run.attrs
     ):
         _fail("Subject-shape payload receipt attributes are already occupied.")
-    scan = build_subject_shape_bound_payload_scan_receipt(run)
+    scan = build_subject_shape_bound_payload_scan_receipt(
+        run,
+        workers=workers,
+    )
     raw_digests = scan.get("array_content_sha256")
     copy_report = scan.get("decoded_copy_report")
     if not isinstance(raw_digests, Mapping) or not isinstance(copy_report, Mapping):
@@ -4354,7 +4359,10 @@ def publish_subject_shape_coordinate_surfaces(
     run.attrs[SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR] = (
         SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE
     )
-    array_digests, decoded_copy_report = _scan_subject_shape_bound_payload(run)
+    array_digests, decoded_copy_report = _scan_subject_shape_bound_payload(
+        run,
+        workers=max(1, int(payload_hash_workers)),
+    )
     with _subject_shape_array_digest_scope(array_digests):
         temporal = stamp_subject_shape_temporal_authority(run, source, identity)
         scientific_configuration = _stamp_scientific_configuration(run)

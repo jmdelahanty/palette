@@ -9,10 +9,12 @@ retaining distinct selector lifecycles.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import math
 from pathlib import Path
 import re
+import time
 from typing import Any, Mapping
 
 import numpy as np
@@ -71,6 +73,9 @@ from fisheye.shared.zarr.metadata_equivalence import (
 )
 from fisheye.shared.zarr.storage_intent import AccessPattern, WriteMode
 from fisheye.shared.zarr.storage_profiles import KIB, MIB, StorageProfile
+from fisheye.shared.zarr_payload_receipt import (
+    decoded_payload_receipt_from_copy_report,
+)
 
 
 SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE = "legacy_explicit_chunks"
@@ -834,12 +839,21 @@ def materialize_subject_shape_access_aware_storage(
     profile: StorageProfile,
     phase: str = "unbound",
     copy_block_rows: int = 1_024,
+    workers: int = 1,
 ) -> dict[str, object]:
-    """Write one complete node-local access-aware run through the shared factory."""
+    """Write one complete node-local access-aware run through the shared factory.
+
+    Destination arrays and their metadata are created serially.  Payload copies
+    may then run concurrently across arrays; each worker owns every physical
+    chunk/shard of exactly one destination array, so no physical Zarr object is
+    shared between workers.
+    """
 
     destination = Path(destination_path).expanduser().resolve()
     if destination.exists():
         raise FileExistsError(f"Refusing existing subject-shape output: {destination}")
+    if type(workers) is not int or workers <= 0:
+        raise ValueError("Subject-shape storage copy workers must be positive.")
     if (
         source_run.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
         != SUBJECT_SHAPE_UNBOUND_STAGE_STATUS
@@ -877,9 +891,7 @@ def materialize_subject_shape_access_aware_storage(
         use_consolidated=False,
     )
     _copy_group_attributes(source_run, destination_run)
-    hashes: dict[str, str] = {}
-    write_leaves: dict[str, list[dict[str, object]]] = {}
-    outer_write_rows: dict[str, int] = {}
+    copy_assignments: list[tuple[str, Any, Any, Any]] = []
     for path, source_array in _iter_arrays(source_run):
         entry = entry_by_path[path]
         parent, leaf = _parent_and_leaf(destination_run, path)
@@ -891,10 +903,18 @@ def materialize_subject_shape_access_aware_storage(
             fill_value=subject_shape_fill_value(path, source_array.dtype),
             attributes=dict(source_array.attrs),
         )
+        copy_assignments.append(
+            (path, source_array, destination_array, entry.plan)
+        )
+
+    effective_workers = min(workers, max(1, len(copy_assignments)))
+
+    def copy_assignment(assignment: tuple[str, Any, Any, Any]):
+        path, source_array, destination_array, plan = assignment
         destination_hash, leaves = _copy_array_by_outer_units(
             source_array,
             destination_array,
-            plan=entry.plan,
+            plan=plan,
             path=path,
         )
         expected_hash = sealed_arrays[path]["content_sha256"]
@@ -902,12 +922,33 @@ def materialize_subject_shape_access_aware_storage(
             raise RuntimeError(
                 f"Decoded candidate differs from the producer seal for {path!r}."
             )
-        hashes[path] = destination_hash
-        write_leaves[path] = leaves
-        outer_write_rows[path] = _outer_write_rows(
-            entry.plan,
-            shape=tuple(int(value) for value in source_array.shape),
+        return {
+            "path": path,
+            "content_sha256": destination_hash,
+            "leaves": leaves,
+            "outer_write_rows": _outer_write_rows(
+                plan,
+                shape=tuple(int(value) for value in source_array.shape),
+            ),
+        }
+
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        copy_results = sorted(
+            executor.map(copy_assignment, copy_assignments),
+            key=lambda value: str(value["path"]),
         )
+    hashes = {
+        str(result["path"]): str(result["content_sha256"])
+        for result in copy_results
+    }
+    write_leaves = {
+        str(result["path"]): list(result["leaves"])
+        for result in copy_results
+    }
+    outer_write_rows = {
+        str(result["path"]): int(result["outer_write_rows"])
+        for result in copy_results
+    }
     source_manifest_link = persist_subject_shape_storage_source_manifest_link(
         destination_run,
         sealed_manifest,
@@ -937,6 +978,11 @@ def materialize_subject_shape_access_aware_storage(
             "one_complete_nonoverlapping_outer_chunk_or_shard_per_assignment_v1"
         ),
         "requested_copy_block_rows": int(copy_block_rows),
+        "requested_copy_workers": workers,
+        "effective_copy_workers": effective_workers,
+        "parallel_write_ownership": (
+            "one_complete_destination_array_and_all_its_physical_objects_per_worker_v1"
+        ),
         "effective_write_grid_policy": "physical_outer_grid_overrides_logical_block_rows_v1",
         "outer_write_rows": outer_write_rows,
         "decoded_write_leaves": write_leaves,
@@ -952,6 +998,7 @@ def materialize_subject_shape_storage_candidate(
     *,
     phase: str = "unbound",
     copy_block_rows: int = 1_024,
+    workers: int = 1,
 ) -> dict[str, object]:
     """Preserve the explicit unpromoted-candidate materialization API."""
 
@@ -961,11 +1008,197 @@ def materialize_subject_shape_storage_candidate(
         profile=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_V1,
         phase=phase,
         copy_block_rows=copy_block_rows,
+        workers=workers,
     )
+
+
+def _scan_subject_shape_array_once(
+    path: str,
+    array: Any,
+    *,
+    row_count: int,
+    block_rows: int | None,
+) -> dict[str, object]:
+    """Read one array once into canonical digest and decoded leaf evidence."""
+
+    dtype = np.dtype(array.dtype)
+    shape = tuple(int(value) for value in array.shape)
+    if dtype.hasobject:
+        raise TypeError(f"{path}: object arrays have no payload receipt grammar.")
+    digest = _array_digest_header(dtype=dtype, shape=shape)
+    leaves: list[dict[str, object]] = []
+    decoded_bytes = 0
+    row_aligned = bool(shape and shape[0] == row_count)
+    if row_aligned:
+        if block_rows is None:
+            try:
+                metadata = array.metadata.to_dict()
+                outer_shape = metadata["chunk_grid"]["configuration"][
+                    "chunk_shape"
+                ]
+                step = int(outer_shape[0])
+            except (
+                AttributeError,
+                KeyError,
+                TypeError,
+                ValueError,
+                IndexError,
+            ) as exc:
+                raise ValueError(
+                    f"{path}: physical outer grid is unavailable: {exc}."
+                ) from exc
+        else:
+            step = block_rows
+        if step <= 0:
+            raise ValueError(f"{path}: decoded scan row step is invalid.")
+        trailing = (slice(None),) * (len(shape) - 1)
+        for start in range(0, shape[0], step):
+            stop = min(shape[0], start + step)
+            values = np.ascontiguousarray(
+                array[(slice(start, stop), *trailing)]
+            )
+            if values.dtype != dtype or values.shape != (stop - start, *shape[1:]):
+                raise RuntimeError(f"{path}: decoded scan metadata changed.")
+            payload = values.tobytes(order="C")
+            digest.update(payload)
+            decoded_bytes += len(payload)
+            leaves.append(
+                {
+                    "path": path,
+                    "start_row": start,
+                    "stop_row": stop,
+                    "decoded_bytes": len(payload),
+                    "decoded_sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            )
+    else:
+        values = np.ascontiguousarray(array[...])
+        if values.dtype != dtype or values.shape != shape:
+            raise RuntimeError(f"{path}: decoded static scan metadata changed.")
+        payload = values.tobytes(order="C")
+        digest.update(payload)
+        decoded_bytes = len(payload)
+        leaves.append(
+            {
+                "path": path,
+                "decoded_bytes": len(payload),
+                "decoded_sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+    if np.dtype(array.dtype) != dtype or tuple(int(value) for value in array.shape) != shape:
+        raise RuntimeError(f"{path}: array metadata changed during payload scan.")
+    return {
+        "path": path,
+        "plan": {"path": path, "shape": list(shape), "dtype": str(dtype)},
+        "row_aligned": row_aligned,
+        "leaves": leaves,
+        "decoded_bytes": decoded_bytes,
+        "content_sha256": digest.hexdigest(),
+    }
+
+
+def build_subject_shape_unbound_payload_scan_receipt(
+    run_group: Any,
+    *,
+    workers: int = 1,
+    block_rows: int = 1_024,
+) -> dict[str, object]:
+    """Scan an exclusive local unbound payload once into reusable evidence.
+
+    The caller owns the node-local scratch artifact exclusively and has closed
+    every scientific write.  Array reads are parallelized across the closed
+    inventory, while each individual array is traversed in canonical row-major
+    order so its digest is byte-identical to ``array_payload_sha256``.  The
+    later storage materialization re-reads every value and checks these direct
+    digests, closing the boundary before authoritative publication.
+    """
+
+    if type(workers) is not int or workers <= 0:
+        raise ValueError("Subject-shape payload scan workers must be positive.")
+    if type(block_rows) is not int or block_rows <= 0:
+        raise ValueError("Subject-shape payload scan block_rows must be positive.")
+    if (
+        run_group.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
+        != SUBJECT_SHAPE_UNBOUND_STAGE_STATUS
+        or run_group.attrs.get("palette_run_completion_status") != "complete"
+        or run_group.attrs.get("stage_selector_eligible") is not False
+    ):
+        raise ValueError(
+            "Subject-shape unbound payload scan requires one complete, "
+            "selector-ineligible unbound stage."
+        )
+    arrays = list(_iter_arrays(run_group))
+    row_count = _row_count(run_group)
+    effective_workers = min(workers, max(1, len(arrays)))
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        futures = [
+            executor.submit(
+                _scan_subject_shape_array_once,
+                path,
+                array,
+                row_count=row_count,
+                block_rows=block_rows,
+            )
+            for path, array in arrays
+        ]
+        results = sorted(
+            (future.result() for future in futures),
+            key=lambda value: str(value["path"]),
+        )
+    plans = [dict(result["plan"]) for result in results]
+    shard_leaves = [
+        dict(leaf)
+        for result in results
+        if result["row_aligned"] is True
+        for leaf in result["leaves"]
+    ]
+    static_leaves = [
+        dict(leaf)
+        for result in results
+        if result["row_aligned"] is False
+        for leaf in result["leaves"]
+    ]
+    content_sha256 = {
+        str(result["path"]): str(result["content_sha256"])
+        for result in results
+    }
+    decoded_bytes = sum(int(result["decoded_bytes"]) for result in results)
+    copy_report = {
+        "schema_id": "palette.zarr_sharded_run_copy.v1",
+        "status": "complete",
+        "source_run": f"/{str(run_group.path).strip('/')}",
+        "destination_run": f"/{str(run_group.path).strip('/')}",
+        "array_count": len(plans),
+        "arrays": plans,
+        "shards": shard_leaves,
+        "static_arrays": static_leaves,
+        "decoded_bytes_copied": decoded_bytes,
+        "exact_decoded_validation": True,
+        "receipt_origin": "single_exclusive_post_compute_decoded_scan_v1",
+    }
+    decoded_payload = decoded_payload_receipt_from_copy_report(copy_report)
+    return {
+        "schema_id": "palette.subject_shape_unbound_payload_scan_receipt",
+        "schema_version": 1,
+        "run_ref": f"/{str(run_group.path).strip('/')}",
+        "array_payload_canonicalization": ARRAY_PAYLOAD_CANONICALIZATION,
+        "closed_array_inventory": True,
+        "mutation_exclusion": "exclusive_node_local_writer_v1",
+        "requested_workers": workers,
+        "effective_workers": effective_workers,
+        "block_rows": block_rows,
+        "duration_seconds": float(time.perf_counter() - started),
+        "array_content_sha256": content_sha256,
+        "decoded_payload": decoded_payload,
+        "decoded_copy_report": copy_report,
+    }
 
 
 def build_subject_shape_bound_payload_scan_receipt(
     run_group: Any,
+    *,
+    workers: int = 1,
 ) -> dict[str, object]:
     """Scan one final bound payload once into reusable decoded digest evidence.
 
@@ -982,65 +1215,44 @@ def build_subject_shape_bound_payload_scan_receipt(
         raise ValueError(
             "Subject-shape payload scan requires one running, ineligible child."
         )
+    if type(workers) is not int or workers <= 0:
+        raise ValueError("Subject-shape bound payload scan workers must be positive.")
     row_count = _row_count(run_group)
-    plans: list[dict[str, object]] = []
-    shard_leaves: list[dict[str, object]] = []
-    static_leaves: list[dict[str, object]] = []
-    content_sha256: dict[str, str] = {}
-    decoded_bytes = 0
-    for path, array in _iter_arrays(run_group):
-        dtype = np.dtype(array.dtype)
-        shape = tuple(int(value) for value in array.shape)
-        if dtype.hasobject:
-            raise TypeError(f"{path}: object arrays have no payload receipt grammar.")
-        plans.append({"path": path, "shape": list(shape), "dtype": str(dtype)})
-        digest = _array_digest_header(dtype=dtype, shape=shape)
-        if shape and shape[0] == row_count:
-            try:
-                metadata = array.metadata.to_dict()
-                outer_shape = metadata["chunk_grid"]["configuration"]["chunk_shape"]
-                step = int(outer_shape[0])
-            except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
-                raise ValueError(
-                    f"{path}: physical outer grid is unavailable: {exc}."
-                ) from exc
-            if step <= 0:
-                raise ValueError(f"{path}: physical outer row extent is invalid.")
-            trailing = (slice(None),) * (len(shape) - 1)
-            for start in range(0, shape[0], step):
-                stop = min(shape[0], start + step)
-                values = np.ascontiguousarray(
-                    array[(slice(start, stop), *trailing)]
-                )
-                if values.dtype != dtype:
-                    raise RuntimeError(f"{path}: decoded scan dtype changed.")
-                payload = values.tobytes(order="C")
-                digest.update(payload)
-                decoded_bytes += len(payload)
-                shard_leaves.append(
-                    {
-                        "path": path,
-                        "start_row": start,
-                        "stop_row": stop,
-                        "decoded_bytes": len(payload),
-                        "decoded_sha256": hashlib.sha256(payload).hexdigest(),
-                    }
-                )
-        else:
-            values = np.ascontiguousarray(array[...])
-            if values.dtype != dtype or values.shape != shape:
-                raise RuntimeError(f"{path}: decoded static scan metadata changed.")
-            payload = values.tobytes(order="C")
-            digest.update(payload)
-            decoded_bytes += len(payload)
-            static_leaves.append(
-                {
-                    "path": path,
-                    "decoded_bytes": len(payload),
-                    "decoded_sha256": hashlib.sha256(payload).hexdigest(),
-                }
+    arrays = list(_iter_arrays(run_group))
+    effective_workers = min(workers, max(1, len(arrays)))
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        futures = [
+            executor.submit(
+                _scan_subject_shape_array_once,
+                path,
+                array,
+                row_count=row_count,
+                block_rows=None,
             )
-        content_sha256[path] = digest.hexdigest()
+            for path, array in arrays
+        ]
+        results = sorted(
+            (future.result() for future in futures),
+            key=lambda value: str(value["path"]),
+        )
+    plans = [dict(result["plan"]) for result in results]
+    shard_leaves = [
+        dict(leaf)
+        for result in results
+        if result["row_aligned"] is True
+        for leaf in result["leaves"]
+    ]
+    static_leaves = [
+        dict(leaf)
+        for result in results
+        if result["row_aligned"] is False
+        for leaf in result["leaves"]
+    ]
+    content_sha256 = {
+        str(result["path"]): str(result["content_sha256"])
+        for result in results
+    }
+    decoded_bytes = sum(int(result["decoded_bytes"]) for result in results)
 
     copy_report = {
         "schema_id": "palette.zarr_sharded_run_copy.v1",
@@ -1061,6 +1273,8 @@ def build_subject_shape_bound_payload_scan_receipt(
         "run_ref": f"/{str(run_group.path).strip('/')}",
         "array_payload_canonicalization": ARRAY_PAYLOAD_CANONICALIZATION,
         "closed_array_inventory": True,
+        "requested_workers": workers,
+        "effective_workers": effective_workers,
         "array_content_sha256": content_sha256,
         "decoded_copy_report": copy_report,
     }
@@ -1414,6 +1628,7 @@ __all__ = [
     "SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE",
     "SUBJECT_SHAPE_STORAGE_PROFILE_CHOICES",
     "build_subject_shape_bound_payload_scan_receipt",
+    "build_subject_shape_unbound_payload_scan_receipt",
     "build_subject_shape_storage_receipt",
     "create_bound_subject_shape_access_aware_array",
     "create_bound_subject_shape_candidate_array",
