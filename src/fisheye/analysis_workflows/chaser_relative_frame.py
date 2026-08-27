@@ -70,18 +70,6 @@ TRANSITION_REASON_CODES = (
     "invalid_current_or_previous_body_frame",
 )
 
-_REASON_TEXT_WIDTH = max(
-    len(value)
-    for value in (
-        RELATIVE_REASON_CODES
-        + NEAREST_REASON_CODES
-        + BODY_REASON_CODES
-        + EGOCENTRIC_REASON_CODES
-        + TRANSITION_REASON_CODES
-    )
-)
-
-
 def _error(message: str) -> None:
     raise ChaserRelativeFrameError(message)
 
@@ -708,10 +696,11 @@ def _validate_provider_digest_consistency(
 
 
 def _reason_array(shape: tuple[int, ...], value: str) -> np.ndarray:
-    # Reason codes come from the closed tuples above. A bounded Unicode dtype
-    # avoids NumPy 2.x StringDType corruption during masked reassignment of a
-    # longer reason while still prohibiting object arrays.
-    return np.full(shape, value, dtype=f"<U{_REASON_TEXT_WIDTH}")
+    # These are transient labels over the closed reason-code tuples above;
+    # publication encodes them immediately as numeric reason codes.  Object
+    # storage keeps masked assignments exact under NumPy 2.x without creating
+    # a fixed-width Unicode array that could leak into a Zarr write boundary.
+    return np.full(shape, value, dtype=object)
 
 
 def _base_transition_reasons(
