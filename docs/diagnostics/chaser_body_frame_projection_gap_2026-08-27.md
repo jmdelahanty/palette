@@ -103,16 +103,22 @@ onto relative acquisition frames without interpolation, and publish a new
 immutable body-extended relative-frame run. The generalized bout successor can
 then run without `--no-body-extension`.
 
-Before those body-relative results are treated as reviewed scientific
-evidence, the chain must bind an existing applicable anatomical-orientation
-review receipt or produce a chaser-specific one. A complete body-frame
-manifest and exact row compatibility do not by themselves establish that
-review claim.
+The validated body-frame supplier is sufficient authority for these
+body-relative results. It binds the exact keypoint snapshot, labeled skeleton,
+controlled anatomical-axis recipe, row identity, coordinates, validity, and
+content digests. The source keypoints remain sealed lineage; the chaser
+consumer does not need to resolve a separate keypoint authority or bind a human
+keypoint-review receipt when it consumes only the body-frame arrays.
+
+Representative axis visualization may still be part of a later promotion or
+publication-quality protocol. Such a check is not a selector-ineligible
+execution gate unless that protocol defines the reviewed claim, receipt, and
+runtime validator explicitly.
 
 Detection-centroid position plus a keypoint-derived body frame is a separate
 mixed-provider composition. It must remain unavailable until an explicit
-coordinate, frame, row-identity, review, and provider-disagreement contract is
-bound; it must not silently inherit the keypoint-position proof.
+coordinate, frame, row-identity, and provider-disagreement contract is bound;
+it must not silently inherit the keypoint-position proof.
 
 ## Structural implementation checkpoint (2026-08-27)
 
@@ -129,6 +135,9 @@ prepared manifest
 Its body projection record is
 `f6eec26ac739a30967db081208e968dcf28e242b67038fdb8ff84641483ae73f`
 and retains `scientific_review_disposition=unreviewed_structural_candidate`.
+That v4 field is descriptive metadata frozen into the immutable candidate
+identity. It does not create a runtime review gate or require separate
+keypoint-authority resolution.
 
 The versioned cohort planner now resolves each body frame from the exact
 provider-motion authority, freezes the body metadata and manifest digests as
@@ -150,10 +159,33 @@ task digest
 That `/tmp` file is diagnostic planning evidence, not yet a durable submission
 handle.
 
-This checkpoint establishes structural computation and immutable planning,
-not reviewed scientific authority. The anatomical-orientation review receipt,
-required CI, a commit-pinned deployment, and a controlled publication canary
-remain gates before broader execution.
+This checkpoint establishes structural computation and immutable planning.
+Required CI, a commit-pinned deployment, and a controlled publication canary
+remain gates before broader execution; a separate keypoint-authority or human
+anatomical-review receipt does not.
 
 This diagnostic changes no selector, registry row, production authority, or
 historical analysis publication.
+
+## Controlled publication canary (2026-08-27)
+
+After required CI passed and PR 66 merged, commit
+`65b06a2f6ab4c4c30a92a8248a7ffb1742d70b0c` was deployed in the locked,
+commit-pinned worktree
+`/groups/johnson/johnsonlab/jeremy/gitrepos/palette-worktrees/chaser-body-frame-canary-20260827-65b06a2f`.
+The shared `/groups` checkout remained unchanged.
+
+LSF job `153755761` ran only frozen task index 1 from task digest
+`bbbcc9710d38c6bd5c0a611bc68b40c24ef908f1faaf93913b26b914a0256509`.
+It completed in 316 seconds with worker status
+`complete_selector_ineligible`, 22 successful or exactly reused stages, and
+worker receipt payload digest
+`2fbf45cfe9e9efd0e606cb4e53679e5ffb68d6b6d0e350010d9ba3ad1cba1d17`.
+Independent rehashing reproduced that receipt, the three plot-receipt payloads,
+and all 18 plot files (9 PNG and 9 PDF). Representative dashboard, occupancy,
+bout-response, and trajectory figures rendered coherently.
+
+The canary clears the structural execution gate for the selector-ineligible
+cohort. It does not activate a selector, registry row, or production authority.
+No separate keypoint-authority resolution or human anatomical-review receipt is
+required for the body-frame-only chaser consumers.

@@ -683,6 +683,8 @@ def _project_body_frame_to_relative_axis(
         interpolation="prohibited",
         motion_heading_fallback="prohibited",
         neighboring_body_frame_fallback="prohibited",
+        # Descriptive v4 metadata, not a keypoint-authority or human-review
+        # execution gate. Keep the value stable for immutable v4 identity.
         scientific_review_disposition="unreviewed_structural_candidate",
     )
     return projected, projection_record
