@@ -30,6 +30,11 @@ from fisheye.analysis_workflows.composable_chaser_successor_publication import (
     STORAGE_SCHEMA_ID as COMPOSABLE_CHASER_STORAGE_SCHEMA_ID,
     STORAGE_SCHEMA_VERSION as COMPOSABLE_CHASER_STORAGE_SCHEMA_VERSION,
 )
+from fisheye.analysis_workflows.exact_relative_frame_binding import (
+    ExactRelativeFrameBindingError,
+    require_same_exact_relative_frame_child,
+    validate_exact_relative_frame_binding,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
@@ -694,14 +699,23 @@ def discover_exact_chaser_successor_options(
         if roles != ("keypoint", "detection"):
             continue
         provider_ids: list[str] = []
+        relative_binding_proofs: list[dict[str, Any]] = []
         valid = True
         for record in providers:
             if not isinstance(record, Mapping):
                 valid = False
                 break
+            try:
+                spatial_relative_binding = validate_exact_relative_frame_binding(
+                    record.get("relative_frame"),
+                    label="spatial relative-frame binding",
+                )
+            except ExactRelativeFrameBindingError:
+                valid = False
+                break
             relative = _exact_bound_child(
                 root,
-                record.get("relative_frame"),
+                spatial_relative_binding.normalized_identity,
                 parent="analysis/chaser_relative_frame_runs",
                 kind=None,
                 recording_id=recording_id,
@@ -738,22 +752,45 @@ def discover_exact_chaser_successor_options(
                 if isinstance(radial_sources, Mapping)
                 else None
             )
+            try:
+                relative_proof = require_same_exact_relative_frame_child(
+                    record.get("relative_frame"),
+                    radial_relative,
+                    expected_label="spatial relative-frame binding",
+                    observed_label="radial relative-frame binding",
+                )
+            except ExactRelativeFrameBindingError:
+                valid = False
+                break
             provider_id = str(record.get("provider_id") or "")
             provider_digest = str(record.get("provider_digest") or "")
             if (
                 not isinstance(relative_fish, Mapping)
                 or not isinstance(radial_provider, Mapping)
-                or not isinstance(radial_relative, Mapping)
                 or relative_fish.get("provider_id") != provider_id
                 or relative_fish.get("provider_digest") != provider_digest
                 or radial_provider.get("provider_id") != provider_id
                 or radial_provider.get("provider_digest") != provider_digest
                 or radial_provider.get("status") != "first_class_explicit_authority"
-                or dict(radial_relative) != dict(record.get("relative_frame") or {})
             ):
                 valid = False
                 break
             provider_ids.append(provider_id)
+            relative_binding_proofs.append(
+                {
+                    "normalized_identity": dict(relative_proof.normalized_identity),
+                    "spatial_binding_profile": relative_proof.expected.profile_id,
+                    "radial_binding_profile": relative_proof.observed.profile_id,
+                    "validation_receipt_sha256": (
+                        relative_proof.expected.validation_receipt_sha256
+                    ),
+                    "verification_mode": relative_proof.expected.verification_mode,
+                    "validation_behavior": (
+                        "binding_schema_and_identity_validated_"
+                        "receipt_digest_not_reopened"
+                    ),
+                }
+            )
         if not valid or len(set(provider_ids)) != 2:
             continue
         artifact_path = join_path(run_path, "interactive")
@@ -767,7 +804,7 @@ def discover_exact_chaser_successor_options(
         title = f"Exact paired-provider chaser successors: {run_name}"
         spec = {
             "schema_id": "palette.chaser_exact_successor_explorer_spec",
-            "schema_version": 1,
+            "schema_version": 2,
             "renderer": CHASER_EXACT_SUCCESSOR_RENDERER,
             "title": title,
             "run_name": run_name,
@@ -778,6 +815,7 @@ def discover_exact_chaser_successor_options(
                 "spatial_occupancy": run_path,
                 "position_providers": providers,
             },
+            "relative_frame_binding_proofs": relative_binding_proofs,
             "adapter_semantics": (
                 "read_only_exact_children_no_selector_no_interpolation"
             ),

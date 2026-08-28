@@ -24,6 +24,10 @@ from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
 from fisheye.analysis_workflows.composable_chaser_successor_publication import (
     load_composable_chaser_successor_source_handle,
 )
+from fisheye.analysis_workflows.exact_relative_frame_binding import (
+    ExactRelativeFrameBindingProof,
+    require_same_exact_relative_frame_child,
+)
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.metadata_equivalence import (
@@ -279,7 +283,7 @@ def _verify_bundle_children(
     spatial: Any,
     radials: Sequence[Any],
     relative_bindings: Sequence[Mapping[str, Any]],
-) -> tuple[str, str]:
+) -> tuple[tuple[str, str], tuple[ExactRelativeFrameBindingProof, ...]]:
     records = _source_records(spatial)
     if len(radials) != 2 or len(relative_bindings) != 2:
         raise ValueError("Exact chaser bundle is incomplete.")
@@ -288,6 +292,7 @@ def _verify_bundle_children(
     geometry_binding: Mapping[str, Any] | None = None
     epoch_records: Any = None
     arena: Any = None
+    relative_binding_proofs: list[ExactRelativeFrameBindingProof] = []
     for record, radial, relative_binding in zip(
         records, radials, relative_bindings, strict=True
     ):
@@ -297,11 +302,15 @@ def _verify_bundle_children(
         expected_relative = _mapping(
             record.get("relative_frame"), label="relative binding"
         )
-        if (
-            radial.run_path != radial_binding.get("run_path")
-            or radial.manifest_sha256 != radial_binding.get("manifest_sha256")
-            or dict(relative_binding) != dict(expected_relative)
-        ):
+        require_same_exact_relative_frame_child(
+            expected_relative,
+            relative_binding,
+            expected_label="spatial relative-frame binding",
+            observed_label="projection relative-frame binding",
+        )
+        if radial.run_path != radial_binding.get(
+            "run_path"
+        ) or radial.manifest_sha256 != radial_binding.get("manifest_sha256"):
             raise ValueError("Spatial bundle child digest binding is stale.")
         scientific = radial.scientific_manifest
         provider = _mapping(
@@ -316,12 +325,14 @@ def _verify_bundle_children(
                 "Radial successor position authority differs from the bundle."
             )
         radial_sources = _mapping(scientific.get("sources"), label="radial sources")
-        if dict(
+        relative_binding_proof = require_same_exact_relative_frame_child(
+            expected_relative,
             _mapping(
                 radial_sources.get("relative_frame"), label="radial relative source"
-            )
-        ) != dict(expected_relative):
-            raise ValueError("Radial successor is bound to another relative-frame run.")
+            ),
+            expected_label="spatial relative-frame binding",
+            observed_label="radial relative-frame binding",
+        )
         local_semantic = _mapping(
             radial_sources.get("protocol_semantic_selection"),
             label="radial semantic selection",
@@ -345,6 +356,7 @@ def _verify_bundle_children(
                 "Paired radial successors do not share exact epochs and arena."
             )
         provider_ids.append(str(provider["provider_id"]))
+        relative_binding_proofs.append(relative_binding_proof)
     if len(set(provider_ids)) != 2:
         raise ValueError("Exact chaser bundle providers are not distinct.")
     spatial_sources = _mapping(
@@ -366,7 +378,10 @@ def _verify_bundle_children(
         raise ValueError(
             "Spatial and radial successors use different semantic epochs or geometry."
         )
-    return provider_ids[0], provider_ids[1]
+    return (
+        (provider_ids[0], provider_ids[1]),
+        tuple(relative_binding_proofs),
+    )
 
 
 def available_exact_chaser_successor_analysis_ids(
@@ -424,7 +439,9 @@ def load_exact_chaser_successor_projection(
         )
         for binding in radial_bindings
     )
-    provider_ids = _verify_bundle_children(spatial, radials, relative_bindings)
+    provider_ids, relative_binding_proofs = _verify_bundle_children(
+        spatial, radials, relative_bindings
+    )
     relatives = None
     if analysis_id in {"distance_traces", "trajectory_overlays"}:
         relatives = tuple(
@@ -487,6 +504,10 @@ def load_exact_chaser_successor_projection(
                     radial.manifest_sha256 for radial in radials
                 ],
                 "relative_bindings": [_plain(value) for value in relative_bindings],
+                "relative_binding_proofs": [
+                    _plain(proof.provenance_record())
+                    for proof in relative_binding_proofs
+                ],
                 "adapter_semantics": (
                     "read_only_exact_children_no_selector_no_interpolation"
                 ),
