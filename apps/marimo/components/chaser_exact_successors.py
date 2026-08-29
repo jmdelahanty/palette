@@ -23,6 +23,7 @@ from .chaser_exact.provider import (
     load_exact_chaser_successor_projection,
 )
 from .chaser_exact.radial_near_field import build_exact_radial_near_field_output
+from .chaser_exact.spatial_occupancy import build_exact_spatial_occupancy_output
 from .chaser_exact.trajectory_overlays import (
     _trajectory_display_indices,
     build_exact_trajectory_overlays_output,
@@ -38,6 +39,7 @@ __all__ = [
     "available_exact_chaser_successor_analysis_ids",
     "build_exact_distance_traces_output",
     "build_exact_radial_near_field_output",
+    "build_exact_spatial_occupancy_output",
     "build_exact_trajectory_overlays_output",
     "load_exact_chaser_successor_projection",
 ]

@@ -36,7 +36,7 @@ def _option(
     run_path = f"analysis/chaser_spatial_occupancy_runs/{run_name}"
     spec = {
         "schema_id": "palette.chaser_exact_successor_explorer_spec",
-        "schema_version": 2,
+        "schema_version": 3,
         "renderer": CHASER_EXACT_SUCCESSOR_RENDERER,
         "bundle_status": "exact_selector_ineligible",
         "bundle_manifest_sha256": manifest_sha256,
@@ -89,6 +89,7 @@ def test_provider_routes_are_closed_and_controls_are_explicit() -> None:
         "radial_near_field",
         "distance_traces",
         "trajectory_overlays",
+        "spatial_occupancy",
         "provenance",
     )
     assert EXACT_CHASER_PROVIDER_ADAPTER.requires_projection("distance_traces")
@@ -124,14 +125,19 @@ def test_only_selected_analysis_requests_relative_arrays(
     radial = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
         option.zarr_path, option, analysis_id="radial_near_field"
     )
+    spatial = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
+        option.zarr_path, option, analysis_id="spatial_occupancy"
+    )
     distance = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
         option.zarr_path, option, analysis_id="distance_traces"
     )
 
     assert radial.analysis_id == "radial_near_field"
+    assert spatial.analysis_id == "spatial_occupancy"
     assert distance.analysis_id == "distance_traces"
     assert observed == [
         ("radial_near_field", False),
+        ("spatial_occupancy", False),
         ("distance_traces", True),
     ]
 

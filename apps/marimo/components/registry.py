@@ -804,7 +804,7 @@ def discover_exact_chaser_successor_options(
         title = f"Exact paired-provider chaser successors: {run_name}"
         spec = {
             "schema_id": "palette.chaser_exact_successor_explorer_spec",
-            "schema_version": 2,
+            "schema_version": 3,
             "renderer": CHASER_EXACT_SUCCESSOR_RENDERER,
             "title": title,
             "run_name": run_name,
@@ -820,6 +820,26 @@ def discover_exact_chaser_successor_options(
                 "read_only_exact_children_no_selector_no_interpolation"
             ),
             "display_parameters": {
+                "spatial_occupancy": {
+                    "recipe_id": (
+                        "paired_provider_exact_epoch_spatial_occupancy_heatmap_v2"
+                    ),
+                    "source_array": "occupancy_density_valid_in_arena",
+                    "density_multiplier_to_percent": 100.0,
+                    "density_color_normalization": (
+                        "shared_max_across_persisted_provider_epoch_arrays"
+                    ),
+                    "provider_difference": (
+                        "detection_minus_keypoint_percentage_points_per_bin"
+                    ),
+                    "difference_color_normalization": "symmetric_persisted_max_abs",
+                    "coverage_annotation_array": (
+                        "in_arena_coverage_fraction_candidate"
+                    ),
+                    "arena_bin_center_mask_role": (
+                        "hover_evidence_only_bins_not_discarded_boundary_bins_may_straddle_circle"
+                    ),
+                },
                 "distance_traces": {
                     "algorithm": (
                         "source_order_bucket_first_last_min_max_missing_break_v1"

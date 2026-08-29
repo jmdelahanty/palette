@@ -17,6 +17,7 @@ from .projection import (
     load_exact_chaser_projection,
 )
 from .radial_near_field import build_exact_radial_near_field_output
+from .spatial_occupancy import build_exact_spatial_occupancy_output
 from .trajectory_overlays import build_exact_trajectory_overlays_output
 
 EXACT_CHASER_PROVIDER_ID = "stimulus_chaser_exact_successors"
@@ -68,6 +69,12 @@ _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
             display_parameter_version="exact-trajectory-overlay-display-v1",
             load_relative=True,
             renderer=build_exact_trajectory_overlays_output,
+        ),
+        "spatial_occupancy": ExactChaserAnalysisRoute(
+            analysis_id="spatial_occupancy",
+            display_parameter_version="exact-spatial-occupancy-display-v1",
+            load_relative=False,
+            renderer=build_exact_spatial_occupancy_output,
         ),
         "provenance": ExactChaserAnalysisRoute(
             analysis_id="provenance",
