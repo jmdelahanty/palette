@@ -37,6 +37,7 @@ from ..common import normalize_path
 from ..registry import CHASER_EXACT_SUCCESSOR_RENDERER, InteractiveSpecOption
 from .bout_response_projection import load_exact_bout_response
 from .controller_trial_projection import load_exact_controller_trials
+from .escape_freeze_projection import load_exact_escape_freeze
 from .provenance import build_projection_provenance, freeze, plain
 
 PROVIDER_ROLES = ("keypoint", "detection")
@@ -213,6 +214,7 @@ class ExactChaserSuccessorProjection:
     relatives: tuple[RelativeFrameProjection, RelativeFrameProjection] | None
     controller_trials: Any | None
     generalized_bout_response: Any | None
+    escape_freeze: Any | None
     provider_ids: tuple[str, str]
     epoch_records: tuple[Mapping[str, Any], ...]
     provenance: Mapping[str, Any]
@@ -446,6 +448,7 @@ def load_exact_chaser_projection(
     load_relative: bool,
     load_controller_trials: bool = False,
     load_generalized_bout_response: bool = False,
+    load_escape_freeze: bool = False,
 ) -> ExactChaserSuccessorProjection:
     """Load one exact, selector-free visualization projection."""
 
@@ -568,6 +571,20 @@ def load_exact_chaser_projection(
             relative=relatives[0],
             controller_trials=controller_trials,
         )
+    escape_freeze = None
+    if load_escape_freeze:
+        if controller_trials is None or generalized_bout_response is None:
+            raise ExactChaserProjectionError(
+                "Escape/freeze views require exact controller-trial and "
+                "generalized bout-response sources."
+            )
+        escape_freeze = load_exact_escape_freeze(
+            archive,
+            option,
+            spatial=spatial,
+            controller_trials=controller_trials,
+            generalized_bout_response=generalized_bout_response,
+        )
     epoch_records = spatial.scientific_manifest.get("epoch_records")
     if not isinstance(epoch_records, (list, tuple)) or not epoch_records:
         raise ExactChaserProjectionError("Exact chaser bundle lacks epoch records.")
@@ -580,6 +597,7 @@ def load_exact_chaser_projection(
         relatives=relatives,  # type: ignore[arg-type]
         controller_trials=controller_trials,
         generalized_bout_response=generalized_bout_response,
+        escape_freeze=escape_freeze,
         provider_ids=provider_ids,
         epoch_records=tuple(freeze(record) for record in epoch_records),
         provenance=build_projection_provenance(
@@ -589,6 +607,7 @@ def load_exact_chaser_projection(
             relative_binding_proofs=relative_binding_proofs,
             controller_trials=controller_trials,
             generalized_bout_response=generalized_bout_response,
+            escape_freeze=escape_freeze,
         ),
     )
 

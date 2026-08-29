@@ -232,6 +232,15 @@ CHASER_EXACT_SUCCESSOR_PROVIDER = ProviderDefinition(
             ),
         ),
         AnalysisDefinition(
+            "escape_freeze",
+            "Exact escape/freeze outcomes",
+            (
+                "Persisted speed-defined escape events, separately annotated "
+                "high turns, exact-trial freeze candidates, recapture outcomes, "
+                "validity reasons, and threshold sensitivity."
+            ),
+        ),
+        AnalysisDefinition(
             "provenance",
             "Provenance",
             "Exact bundle, child-run identities, display projection, and authorities.",

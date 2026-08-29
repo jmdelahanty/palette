@@ -2,7 +2,7 @@
 
 <!-- contract-meta
 status: implementation-in-progress
-implementation: reader-spatial-controller-trial-merged-generalized-bout-response-locally-validated-ci-pending
+implementation: reader-through-generalized-merged-escape-freeze-locally-validated-ci-pending
 last_verified: 2026-08-29
 -->
 
@@ -64,8 +64,16 @@ current zero-option defect.
       a read-only live v4 smoke: 1,445 selected bouts, 2,890 bout-by-chaser
       rows, 30 persisted distance-band summaries, and 2,466 directed-valid
       body-frame rows.
-- [ ] Required CI for the generalized bout-response branch has not run. Local
-      and real-artifact validation do not make that branch merge-ready.
+- [x] The generalized bout-response view passed all 23 required checks and
+      merged through PR 74 as merge commit
+      `267553f548d0590958938d1d2227e5c87f19ec8a`.
+- [x] The escape/freeze implementation passes 59 focused tests, the 163-test
+      Marimo suite (148 passed and 15 expected xfails), Marimo check, and a
+      read-only live v4 smoke: four trials, five events, twenty persisted
+      threshold-sweep rows, one escape trial, three freeze candidates, and five
+      trace-usable events.
+- [ ] Required CI for the escape/freeze branch has not run. Local and
+      real-artifact validation do not make that branch merge-ready.
 
 ## Safety invariants
 
@@ -241,9 +249,10 @@ in [`marimo_explorer_architecture.md`](../marimo_explorer_architecture.md).
 - [x] Keep `apps/marimo/components/chaser_exact_successors.py` as a temporary
       compatibility facade that re-exports the supported public functions.
 - [x] Put spatial occupancy in its own focused module.
-- [ ] Put later escape/freeze and full-profile views in their own focused
-      modules. Controller-trial and generalized bout-response now each have
-      focused renderer and audited binding/loader modules.
+- [x] Put escape/freeze in its own focused renderer plus audited discovery,
+      contract, and loader modules. Controller-trial and generalized
+      bout-response retain their separate focused modules.
+- [ ] Put the later full-profile view in its own focused module.
 - [x] Keep legacy GoodCopBadCop code isolated. Do not add new exact-successor
       logic, fallback behavior, or scientific interpretation to that surface.
 - [x] Keep discovery metadata-only. Importing a provider or listing analysis
@@ -303,11 +312,17 @@ not derive a new scientific product in the UI.
 
 ### 5D — Escape/freeze
 
-- [ ] Mount persisted trial/event summaries and reason/validity codes.
-- [ ] Preserve the exact escape/freeze classifier/version and source window
+- [x] Mount persisted trial/event summaries and reason/validity codes.
+- [x] Preserve the exact escape/freeze classifier/version and source window
       definitions.
-- [ ] Render trial outcomes and event traces without recomputing response
-      classes from displayed/downsampled data.
+- [x] Render trial outcomes, event outcome facts, recapture facts, and
+      trace-validity reasons without recomputing response classes from
+      displayed/downsampled data.
+- [ ] Add event-aligned distance-trace trajectories only after a new immutable
+      successor version persists the aligned samples and their window identity.
+      Version 2 persists recapture outcomes and trace-validity reasons but no
+      aligned distance samples, so the current viewer explicitly does not
+      reconstruct a trace.
 
 ### 5E — Full profile and optional gaze
 

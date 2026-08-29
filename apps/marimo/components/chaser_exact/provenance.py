@@ -43,6 +43,7 @@ def build_projection_provenance(
     relative_binding_proofs: Sequence[Any],
     controller_trials: Any | None = None,
     generalized_bout_response: Any | None = None,
+    escape_freeze: Any | None = None,
 ) -> Mapping[str, Any]:
     """Build the readable, immutable identity record shared by exact views."""
 
@@ -95,6 +96,25 @@ def build_projection_provenance(
                     "deep_audited": generalized_bout_response.deep_audited,
                 }
                 if generalized_bout_response is not None
+                else None
+            ),
+            "escape_freeze_binding": (
+                {
+                    "run_path": escape_freeze.run_path,
+                    "manifest_sha256": escape_freeze.manifest_sha256,
+                    "scientific_payload_sha256": (
+                        escape_freeze.scientific_payload_sha256
+                    ),
+                    "sources": plain(escape_freeze.scientific_manifest.get("sources")),
+                    "parameters": plain(
+                        escape_freeze.scientific_manifest.get("parameters")
+                    ),
+                    "method_id": escape_freeze.scientific_manifest.get(
+                        "scientific_schema", {}
+                    ).get("method_id"),
+                    "deep_audited": escape_freeze.deep_audited,
+                }
+                if escape_freeze is not None
                 else None
             ),
             "adapter_semantics": (
