@@ -845,6 +845,25 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
     # retain pre-binding digests under the receipt-backed fast path.
     for path, digest in numerical_policy["array_content_sha256"].items():
         assert digest == array_values_sha256(np.asarray(direct[path][:]))
+    binding_telemetry = result["publish"]["canonical_binding"][
+        "runtime_telemetry"
+    ]
+    phase_names = {phase["name"] for phase in binding_telemetry["phases"]}
+    assert {
+        "admission_revalidation",
+        "identity_array_append",
+        "coordinate_publication",
+        "binding_array_append",
+        "staged_receipt_composition",
+        "authority_stamping",
+        "physical_payload_hash",
+        "validation_receipt_stamping",
+        "binding_status_finalize",
+    } <= phase_names
+    assert "legacy_post_binding_decoded_scan" not in phase_names
+    assert binding_telemetry["phase_parent_by_name"][
+        "physical_payload_hash"
+    ] == "coordinate_publication"
     assert not validate_subject_shape_candidate_storage(direct, phase="bound")
     assert not validate_subject_shape_direct_consolidated_storage(
         source_path,

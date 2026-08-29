@@ -51,6 +51,7 @@ from ..shared.proof_verification import (
 )
 from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
+from ..shared.runtime_telemetry import PhaseTelemetry
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr_run_completion import (
     mark_run_complete,
@@ -3513,98 +3514,119 @@ def bind_staged_subject_shape_run(
 ) -> dict[str, object]:
     """Bind and transform an unbound stage only at its authoritative path."""
 
-    if archive_identity(authoritative_root) != archive_identity(final_run_group):
-        raise ValueError(
-            "Final subject-shape run is not inside the authoritative archive."
-        )
-    validation = _validate_unbound_subject_shape_payload(
-        authoritative_root,
-        final_run_group,
-        expected_refined_run=expected_refined_run,
-        expected_run_name=expected_run_name,
-        expected_binding_status=SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
-        require_complete=False,
-        expected_subject_mask_bundle_id=expected_subject_mask_bundle_id,
-        array_content_sha256=unbound_array_content_sha256,
+    binding_telemetry = PhaseTelemetry(
+        materializer="subject_shape_final_path_binding",
+        context={
+            "run_name": expected_run_name,
+            "refined_run": expected_refined_run,
+            "receipt_mode": (
+                "staged_transfer_receipt_v2"
+                if staged_decoded_copy_report is not None
+                else "legacy_post_binding_scan_v1"
+            ),
+        },
     )
-    source_revision_audit = audit_subject_shape_source_revisions_group(
-        authoritative_root,
-        shape_run=expected_run_name,
-        refined_run=expected_refined_run,
-    )
-    if source_revision_audit.get("status") != "current":
-        raise ValueError(
-            "Refined subject-mask revisions changed before final-path binding: "
-            f"{source_revision_audit!r}."
+    with binding_telemetry.phase("admission_revalidation"):
+        if archive_identity(authoritative_root) != archive_identity(final_run_group):
+            raise ValueError(
+                "Final subject-shape run is not inside the authoritative archive."
+            )
+        validation = _validate_unbound_subject_shape_payload(
+            authoritative_root,
+            final_run_group,
+            expected_refined_run=expected_refined_run,
+            expected_run_name=expected_run_name,
+            expected_binding_status=SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
+            require_complete=False,
+            expected_subject_mask_bundle_id=expected_subject_mask_bundle_id,
+            array_content_sha256=unbound_array_content_sha256,
         )
-    source = load_exact_subject_shape_source(authoritative_root, final_run_group)
-    unbound_manifest = _load_unbound_numeric_manifest(
-        final_run_group,
-        array_content_sha256=unbound_array_content_sha256,
-    )
-    manifest_sha256 = str(validation["unbound_manifest_sha256"])
-    if unbound_manifest.record_sha256 != manifest_sha256:
-        raise ValueError(
-            "Subject-shape unbound receipt changed between validation and consumption."
+        source_revision_audit = audit_subject_shape_source_revisions_group(
+            authoritative_root,
+            shape_run=expected_run_name,
+            refined_run=expected_refined_run,
         )
+        if source_revision_audit.get("status") != "current":
+            raise ValueError(
+                "Refined subject-mask revisions changed before final-path binding: "
+                f"{source_revision_audit!r}."
+            )
+        source = load_exact_subject_shape_source(authoritative_root, final_run_group)
+        unbound_manifest = _load_unbound_numeric_manifest(
+            final_run_group,
+            array_content_sha256=unbound_array_content_sha256,
+        )
+        manifest_sha256 = str(validation["unbound_manifest_sha256"])
+        if unbound_manifest.record_sha256 != manifest_sha256:
+            raise ValueError(
+                "Subject-shape unbound receipt changed between validation and "
+                "consumption."
+            )
 
     # Close the producer-sealed numeric proof before final-path authority
     # stamping. Legacy v1 stages are transformed after this boundary; projected
     # v2 stages have already written source-camera numerics and are admitted by
     # their freshly revalidated private projection receipt. In both cases, the
     # bound publication starts a distinct proof phase.
-    finish_proof_verification()
-    restart_proof_verification()
+    with binding_telemetry.phase("proof_phase_transition"):
+        finish_proof_verification()
+        restart_proof_verification()
 
-    records = final_run_group.require_group("coordinate_records")
-    consumed_node = records.require_group("consumed_unbound_stage")
-    consumed = stamp_and_bind_persisted_coordinate_record(
-        consumed_node,
-        unbound_manifest.record,
-        attr_name=SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
-    )
-    if consumed.record_sha256 != manifest_sha256:
-        raise ValueError(
-            "Retained subject-shape unbound receipt differs from its validated digest."
+    with binding_telemetry.phase("unbound_receipt_consumption"):
+        records = final_run_group.require_group("coordinate_records")
+        consumed_node = records.require_group("consumed_unbound_stage")
+        consumed = stamp_and_bind_persisted_coordinate_record(
+            consumed_node,
+            unbound_manifest.record,
+            attr_name=SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
         )
-    del final_run_group.attrs[SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR]
-    del final_run_group.attrs[f"{SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR}_sha256"]
-    final_run_group.attrs["unbound_numeric_stage_manifest_sha256_consumed"] = (
-        manifest_sha256
-    )
-    component_names = tuple(
-        str(value) for value in final_run_group.attrs["component_names"]
-    )
-    identity, component_schema = prepare_subject_shape_identity_and_schema(
-        final_run_group,
-        source,
-        component_names=component_names,
-    )
-    publication = publish_subject_shape_coordinate_surfaces(
-        authoritative_root,
-        final_run_group,
-        source,
-        component_names=component_names,
-        identity=identity,
-        component_schema=component_schema,
-        payload_run_path=payload_run_path,
-        payload_hash_workers=payload_hash_workers,
-        staged_decoded_copy_report=staged_decoded_copy_report,
-        staged_array_content_sha256=unbound_array_content_sha256,
-        verified_physical_copy=verified_physical_copy,
-    )
-    final_run_group.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
-        SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
-    )
-    if (
-        publication.run_path
-        != f"analysis/subject_shape_runs/{expected_run_name}"
-        or publication.publication_owner
-        != final_run_group.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
-        or final_run_group.attrs.get("coordinate_contract")
-        != SUBJECT_SHAPE_COORDINATE_CONTRACT
-    ):
-        raise ValueError("Final-path subject-shape binding did not persist exactly.")
+        if consumed.record_sha256 != manifest_sha256:
+            raise ValueError(
+                "Retained subject-shape unbound receipt differs from its validated "
+                "digest."
+            )
+        del final_run_group.attrs[SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR]
+        del final_run_group.attrs[f"{SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR}_sha256"]
+        final_run_group.attrs["unbound_numeric_stage_manifest_sha256_consumed"] = (
+            manifest_sha256
+        )
+        component_names = tuple(
+            str(value) for value in final_run_group.attrs["component_names"]
+        )
+    with binding_telemetry.phase("identity_array_append"):
+        identity, component_schema = prepare_subject_shape_identity_and_schema(
+            final_run_group,
+            source,
+            component_names=component_names,
+        )
+    with binding_telemetry.phase("coordinate_publication"):
+        publication = publish_subject_shape_coordinate_surfaces(
+            authoritative_root,
+            final_run_group,
+            source,
+            component_names=component_names,
+            identity=identity,
+            component_schema=component_schema,
+            payload_run_path=payload_run_path,
+            payload_hash_workers=payload_hash_workers,
+            staged_decoded_copy_report=staged_decoded_copy_report,
+            staged_array_content_sha256=unbound_array_content_sha256,
+            verified_physical_copy=verified_physical_copy,
+            runtime_telemetry=binding_telemetry,
+        )
+    with binding_telemetry.phase("binding_status_finalize"):
+        final_run_group.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
+            SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
+        )
+        if (
+            publication.run_path
+            != f"analysis/subject_shape_runs/{expected_run_name}"
+            or publication.publication_owner
+            != final_run_group.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
+            or final_run_group.attrs.get("coordinate_contract")
+            != SUBJECT_SHAPE_COORDINATE_CONTRACT
+        ):
+            raise ValueError("Final-path subject-shape binding did not persist exactly.")
     return {
         "valid": True,
         "status": SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
@@ -3613,6 +3635,7 @@ def bind_staged_subject_shape_run(
         "publication_manifest_sha256": publication.manifest.record_sha256,
         "unbound_manifest_sha256": manifest_sha256,
         "source_revision_audit": source_revision_audit,
+        "runtime_telemetry": binding_telemetry.to_json(),
     }
 
 

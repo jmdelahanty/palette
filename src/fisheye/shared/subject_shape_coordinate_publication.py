@@ -5022,37 +5022,48 @@ def publish_subject_shape_coordinate_surfaces(
     staged_decoded_copy_report: Mapping[str, Any] | None = None,
     staged_array_content_sha256: Mapping[str, str] | None = None,
     verified_physical_copy: Mapping[str, Any] | None = None,
+    runtime_telemetry: Any | None = None,
 ) -> BoundSubjectShapeCoordinatePublication:
     """Transform and seal one running/ineligible child without selecting it."""
 
-    owner = _require_state(run, complete=False, eligible=False)
-    # The computation preflight supplied this sealed source.  Requiring the
-    # directed chain below freshly rechecks placement/identity metadata.  The
-    # owning writer performs one complete source+output reload immediately
-    # before activation, avoiding another full refined-raster hash pass here.
-    if archive_identity(_source_run_group(source)) != archive_identity(run):
-        _fail("Subject-shape and refined-mask source span archives/stores.")
-    source_binding = _stamp_source_binding(run, source)
-    numeric_projection = require_subject_shape_source_camera_numeric_projection(
-        run,
-        source,
-    )
-    if numeric_projection is None:
-        transform_subject_shape_geometry_to_source_camera(
+    def phase(name: str):
+        if runtime_telemetry is None:
+            return nullcontext()
+        phase_factory = getattr(runtime_telemetry, "phase", None)
+        if not callable(phase_factory):
+            _fail("Subject-shape binding runtime telemetry has no phase interface.")
+        return phase_factory(name)
+
+    with phase("coordinate_source_binding_and_projection"):
+        owner = _require_state(run, complete=False, eligible=False)
+        # The computation preflight supplied this sealed source.  Requiring the
+        # directed chain below freshly rechecks placement/identity metadata.  The
+        # owning writer performs one complete source+output reload immediately
+        # before activation, avoiding another full refined-raster hash pass here.
+        if archive_identity(_source_run_group(source)) != archive_identity(run):
+            _fail("Subject-shape and refined-mask source span archives/stores.")
+        source_binding = _stamp_source_binding(run, source)
+        numeric_projection = require_subject_shape_source_camera_numeric_projection(
             run,
             source,
-            component_names=component_names,
         )
-    else:
-        _stamp_subject_shape_source_camera_coordinate_labels(
-            run,
-            component_names=component_names,
-        )
-    _write_component_aggregate(run, component_names)
-    if numeric_projection is None:
-        _rewrite_body_frame_from_camera_components(run, component_names)
-    else:
-        _finalize_preprojected_body_frame(run)
+        if numeric_projection is None:
+            transform_subject_shape_geometry_to_source_camera(
+                run,
+                source,
+                component_names=component_names,
+            )
+        else:
+            _stamp_subject_shape_source_camera_coordinate_labels(
+                run,
+                component_names=component_names,
+            )
+    with phase("binding_array_append"):
+        _write_component_aggregate(run, component_names)
+        if numeric_projection is None:
+            _rewrite_body_frame_from_camera_components(run, component_names)
+        else:
+            _finalize_preprojected_body_frame(run)
     staged_evidence = (
         staged_decoded_copy_report,
         staged_array_content_sha256,
@@ -5060,153 +5071,159 @@ def publish_subject_shape_coordinate_surfaces(
     )
     receipt_composition: Mapping[str, Any] | None = None
     if any(value is not None for value in staged_evidence):
-        if any(value is None for value in staged_evidence):
-            _fail("Subject-shape staged receipt evidence is incomplete.")
-        if numeric_projection is None:
-            _fail(
-                "Subject-shape staged receipts cannot cover a final-path numeric "
-                "rewrite."
+        with phase("staged_receipt_composition"):
+            if any(value is None for value in staged_evidence):
+                _fail("Subject-shape staged receipt evidence is incomplete.")
+            if numeric_projection is None:
+                _fail(
+                    "Subject-shape staged receipts cannot cover a final-path numeric "
+                    "rewrite."
+                )
+            from fisheye.shared.subject_shape_storage import (
+                compose_subject_shape_bound_payload_receipt,
             )
-        from fisheye.shared.subject_shape_storage import (
-            compose_subject_shape_bound_payload_receipt,
-        )
 
-        composed = compose_subject_shape_bound_payload_receipt(
-            run,
-            staged_decoded_copy_report=staged_decoded_copy_report,
-            staged_array_content_sha256=staged_array_content_sha256,
-            appended_paths=SUBJECT_SHAPE_BINDING_APPENDED_ARRAY_PATHS,
-            workers=max(1, int(payload_hash_workers)),
-        )
-        raw_digests = composed.get("array_content_sha256")
-        raw_copy_report = composed.get("decoded_copy_report")
-        if not isinstance(raw_digests, Mapping) or not isinstance(
-            raw_copy_report,
-            Mapping,
-        ):
-            _fail("Subject-shape bound receipt composition is incomplete.")
-        array_digests = {
-            str(path): str(value) for path, value in raw_digests.items()
-        }
-        decoded_copy_report = raw_copy_report
-        receipt_profile = SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V2
-        receipt_composition = {
-            key: composed[key]
-            for key in (
-                "schema_id",
-                "schema_version",
-                "receipt_origin",
-                "staged_decoded_payload_root_sha256",
-                "appended_paths",
-                "appended_decoded_bytes",
+            composed = compose_subject_shape_bound_payload_receipt(
+                run,
+                staged_decoded_copy_report=staged_decoded_copy_report,
+                staged_array_content_sha256=staged_array_content_sha256,
+                appended_paths=SUBJECT_SHAPE_BINDING_APPENDED_ARRAY_PATHS,
+                workers=max(1, int(payload_hash_workers)),
             )
-        }
+            raw_digests = composed.get("array_content_sha256")
+            raw_copy_report = composed.get("decoded_copy_report")
+            if not isinstance(raw_digests, Mapping) or not isinstance(
+                raw_copy_report,
+                Mapping,
+            ):
+                _fail("Subject-shape bound receipt composition is incomplete.")
+            array_digests = {
+                str(path): str(value) for path, value in raw_digests.items()
+            }
+            decoded_copy_report = raw_copy_report
+            receipt_profile = SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V2
+            receipt_composition = {
+                key: composed[key]
+                for key in (
+                    "schema_id",
+                    "schema_version",
+                    "receipt_origin",
+                    "staged_decoded_payload_root_sha256",
+                    "appended_paths",
+                    "appended_decoded_bytes",
+                )
+            }
     else:
-        array_digests, decoded_copy_report = _scan_subject_shape_bound_payload(
+        with phase("legacy_post_binding_decoded_scan"):
+            array_digests, decoded_copy_report = _scan_subject_shape_bound_payload(
+                run,
+                workers=max(1, int(payload_hash_workers)),
+            )
+            receipt_profile = SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V1
+    with phase("authority_stamping"):
+        run.attrs[SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR] = receipt_profile
+        with _subject_shape_array_digest_scope(array_digests):
+            temporal = stamp_subject_shape_temporal_authority(run, source, identity)
+            scientific_configuration = _stamp_scientific_configuration(run)
+            tail_sample_axis = _stamp_tail_sample_axis(run)
+            scalar_surfaces, scalar_surface_inventory = _scalar_surface_bindings(
+                run,
+                identity=identity,
+                scientific_configuration=scientific_configuration,
+                tail_sample_axis=tail_sample_axis,
+                load=False,
+            )
+            derivation = stamp_subject_shape_derivation(
+                run,
+                source,
+                source_binding,
+                identity,
+                component_schema,
+                temporal,
+                scientific_configuration,
+                tail_sample_axis,
+                scalar_surface_inventory,
+            )
+            descriptors = _descriptor_bindings(
+                run,
+                source=source,
+                source_binding=source_binding,
+                identity=identity,
+                component_schema=component_schema,
+                scientific_configuration=scientific_configuration,
+                tail_sample_axis=tail_sample_axis,
+                derivation=derivation,
+                component_names=component_names,
+                load=False,
+            )
+            stamp_bound_canonical_coordinate_descriptors(descriptors.values())
+            body_frame = _stamp_body_frame(
+                run,
+                source=source,
+                source_binding=source_binding,
+                identity=identity,
+                component_schema=component_schema,
+                scientific_configuration=scientific_configuration,
+                tail_sample_axis=tail_sample_axis,
+                derivation=derivation,
+            )
+            heading_semantics = _stamp_heading_semantics(
+                run,
+                identity=identity,
+                forward_descriptor=descriptors["body_frame/forward_axis_xy"],
+                body_frame=body_frame,
+            )
+            manifest_record = _manifest_record(
+                run,
+                source=source,
+                source_binding=source_binding,
+                identity=identity,
+                temporal=temporal,
+                component_schema=component_schema,
+                scientific_configuration=scientific_configuration,
+                tail_sample_axis=tail_sample_axis,
+                scalar_surfaces=scalar_surfaces,
+                scalar_surface_inventory=scalar_surface_inventory,
+                derivation=derivation,
+                descriptors=descriptors,
+                body_frame=body_frame,
+                heading_semantics=heading_semantics,
+            )
+            manifest = stamp_and_bind_persisted_coordinate_record(
+                run,
+                manifest_record,
+                attr_name=SUBJECT_SHAPE_MANIFEST_ATTR,
+            )
+        run.attrs["publication_manifest_sha256"] = manifest.record_sha256
+        run.attrs["coordinate_contract"] = SUBJECT_SHAPE_COORDINATE_CONTRACT
+    with phase("physical_payload_hash"):
+        integrity_receipt = _build_subject_shape_payload_integrity(
             run,
-            workers=max(1, int(payload_hash_workers)),
+            decoded_copy_report=decoded_copy_report,
+            payload_run_path=payload_run_path,
+            hash_workers=payload_hash_workers,
         )
-        receipt_profile = SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V1
-    run.attrs[SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR] = receipt_profile
-    with _subject_shape_array_digest_scope(array_digests):
-        temporal = stamp_subject_shape_temporal_authority(run, source, identity)
-        scientific_configuration = _stamp_scientific_configuration(run)
-        tail_sample_axis = _stamp_tail_sample_axis(run)
-        scalar_surfaces, scalar_surface_inventory = _scalar_surface_bindings(
+    with phase("validation_receipt_stamping"):
+        _stamp_subject_shape_payload_validation(
             run,
-            identity=identity,
-            scientific_configuration=scientific_configuration,
-            tail_sample_axis=tail_sample_axis,
-            load=False,
+            integrity_receipt=integrity_receipt,
+            manifest_sha256=manifest.record_sha256,
+            array_content_sha256=array_digests,
+            receipt_profile=receipt_profile,
+            verified_physical_copy=(
+                verified_physical_copy
+                if receipt_profile == SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V2
+                else None
+            ),
+            receipt_composition=receipt_composition,
         )
-        derivation = stamp_subject_shape_derivation(
-            run,
-            source,
-            source_binding,
-            identity,
-            component_schema,
-            temporal,
-            scientific_configuration,
-            tail_sample_axis,
-            scalar_surface_inventory,
-        )
-        descriptors = _descriptor_bindings(
-            run,
-            source=source,
-            source_binding=source_binding,
-            identity=identity,
-            component_schema=component_schema,
-            scientific_configuration=scientific_configuration,
-            tail_sample_axis=tail_sample_axis,
-            derivation=derivation,
-            component_names=component_names,
-            load=False,
-        )
-        stamp_bound_canonical_coordinate_descriptors(descriptors.values())
-        body_frame = _stamp_body_frame(
-            run,
-            source=source,
-            source_binding=source_binding,
-            identity=identity,
-            component_schema=component_schema,
-            scientific_configuration=scientific_configuration,
-            tail_sample_axis=tail_sample_axis,
-            derivation=derivation,
-        )
-        heading_semantics = _stamp_heading_semantics(
-            run,
-            identity=identity,
-            forward_descriptor=descriptors["body_frame/forward_axis_xy"],
-            body_frame=body_frame,
-        )
-        manifest_record = _manifest_record(
-            run,
-            source=source,
-            source_binding=source_binding,
-            identity=identity,
-            temporal=temporal,
-            component_schema=component_schema,
-            scientific_configuration=scientific_configuration,
-            tail_sample_axis=tail_sample_axis,
-            scalar_surfaces=scalar_surfaces,
-            scalar_surface_inventory=scalar_surface_inventory,
-            derivation=derivation,
-            descriptors=descriptors,
-            body_frame=body_frame,
-            heading_semantics=heading_semantics,
-        )
-        manifest = stamp_and_bind_persisted_coordinate_record(
-            run,
-            manifest_record,
-            attr_name=SUBJECT_SHAPE_MANIFEST_ATTR,
-        )
-    run.attrs["publication_manifest_sha256"] = manifest.record_sha256
-    run.attrs["coordinate_contract"] = SUBJECT_SHAPE_COORDINATE_CONTRACT
-    integrity_receipt = _build_subject_shape_payload_integrity(
-        run,
-        decoded_copy_report=decoded_copy_report,
-        payload_run_path=payload_run_path,
-        hash_workers=payload_hash_workers,
-    )
-    _stamp_subject_shape_payload_validation(
-        run,
-        integrity_receipt=integrity_receipt,
-        manifest_sha256=manifest.record_sha256,
-        array_content_sha256=array_digests,
-        receipt_profile=receipt_profile,
-        verified_physical_copy=(
-            verified_physical_copy
-            if receipt_profile == SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V2
-            else None
-        ),
-        receipt_composition=receipt_composition,
-    )
-    if (
-        run.attrs.get("publication_manifest_sha256") != manifest.record_sha256
-        or run.attrs.get("coordinate_contract") != SUBJECT_SHAPE_COORDINATE_CONTRACT
-        or _owner(run, expected=owner) != owner
-    ):
-        _fail("Subject-shape coordinate publication attrs did not persist exactly.")
+        if (
+            run.attrs.get("publication_manifest_sha256") != manifest.record_sha256
+            or run.attrs.get("coordinate_contract")
+            != SUBJECT_SHAPE_COORDINATE_CONTRACT
+            or _owner(run, expected=owner) != owner
+        ):
+            _fail("Subject-shape coordinate publication attrs did not persist exactly.")
     # Completion is performed by the owning writer.  Return the sealed pieces
     # now only for diagnostics; activation requires a fresh complete reload.
     return BoundSubjectShapeCoordinatePublication(
