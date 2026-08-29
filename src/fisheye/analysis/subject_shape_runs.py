@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
@@ -92,6 +92,8 @@ from ..shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR,
     SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
     SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
+    SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR,
+    SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR,
     SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
     SUBJECT_SHAPE_SOURCE_BINDING_ATTR,
     SUBJECT_SHAPE_SOURCE_BINDING_DIGEST_ATTR,
@@ -103,7 +105,13 @@ from ..shared.subject_shape_coordinate_publication import (
     DeferredSubjectShapeCoordinateActivation,
     activate_subject_shape_coordinate_publication,
     build_subject_shape_unbound_numeric_manifest_record,
-    load_completed_ineligible_subject_shape_coordinate_publication,
+    derive_canonical_subject_shape_body_frame,
+    mask_invalid_subject_shape_vectors,
+    project_subject_shape_bboxes,
+    project_subject_shape_ellipses,
+    project_subject_shape_points,
+    require_subject_shape_source_camera_numeric_projection,
+    stamp_subject_shape_source_camera_numeric_projection,
     load_exact_subject_shape_source,
     load_sealed_unbound_subject_shape_manifest as _load_shared_sealed_unbound_manifest,
     load_unbound_subject_shape_manifest as _load_shared_unbound_manifest,
@@ -111,6 +119,7 @@ from ..shared.subject_shape_coordinate_publication import (
     publish_subject_shape_coordinate_surfaces,
     selector_snapshot,
     stamp_unbound_subject_shape_manifest,
+    validate_sealed_subject_shape_publication_metadata,
 )
 from ..shared.subject_shape_storage import (
     build_subject_shape_unbound_payload_scan_receipt,
@@ -1536,6 +1545,55 @@ def _compute_component_batch(masks: np.ndarray, component_name: str) -> Componen
     )
 
 
+def _projection_offsets(
+    offsets_xy: np.ndarray | None,
+    *,
+    row_count: int,
+) -> np.ndarray | None:
+    if offsets_xy is None:
+        return None
+    offsets = np.asarray(offsets_xy, dtype=np.float64)
+    if offsets.shape != (int(row_count), 2) or not np.isfinite(offsets).all():
+        raise ValueError(
+            "Subject-shape source-camera projection offsets must be finite [row,xy]."
+        )
+    return offsets
+
+
+def _project_component_batch_for_write(
+    batch: ComponentBatch,
+    offsets_xy: np.ndarray | None,
+) -> ComponentBatch:
+    offsets = _projection_offsets(
+        offsets_xy,
+        row_count=int(batch.mask_present.shape[0]),
+    )
+    if offsets is None:
+        return batch
+    return replace(
+        batch,
+        centroid_xy=project_subject_shape_points(
+            batch.centroid_xy,
+            offsets,
+            batch.centroid_valid,
+        ),
+        bbox_xyxy=project_subject_shape_bboxes(
+            batch.bbox_xyxy,
+            offsets,
+            batch.bbox_valid,
+        ),
+        principal_axis_xy=mask_invalid_subject_shape_vectors(
+            batch.principal_axis_xy,
+            batch.principal_axis_valid,
+        ),
+        ellipse_params=project_subject_shape_ellipses(
+            batch.ellipse_params,
+            offsets,
+            batch.ellipse_success,
+        ),
+    )
+
+
 def _write_component_batch(
     run_group: zarr.Group,
     component_name: str,
@@ -1687,6 +1745,33 @@ def _compute_body_frame_batch(batches: Mapping[str, ComponentBatch]) -> BodyFram
     )
 
 
+def _compute_canonical_camera_body_frame_batch(
+    batches: Mapping[str, ComponentBatch],
+) -> BodyFrameBatch:
+    labels = tuple(str(value) for value in batches)
+    centroids = np.stack(
+        [np.asarray(batches[name].centroid_xy, dtype=np.float32) for name in labels],
+        axis=1,
+    )
+    validity = np.stack(
+        [np.asarray(batches[name].centroid_valid, dtype=bool) for name in labels],
+        axis=1,
+    )
+    derived = derive_canonical_subject_shape_body_frame(
+        labels,
+        centroids,
+        validity,
+    )
+    return BodyFrameBatch(
+        origin_xy=derived["origin_xy"],
+        forward_axis_xy=derived["forward_axis_xy"],
+        left_axis_xy=derived["left_axis_xy"],
+        heading_deg=derived["heading_deg"],
+        valid=derived["valid"],
+        failure_reason_bytes=derived["failure_reason_bytes"],
+    )
+
+
 def _write_body_frame_batch(run_group: zarr.Group, row_slice: slice, batch: BodyFrameBatch) -> None:
     if "body_frame" not in run_group:
         return
@@ -1763,14 +1848,29 @@ def _compute_caudal_anchor_batch(
     )
 
 
-def _write_caudal_anchor_batch(run_group: zarr.Group, row_slice: slice, batch: CaudalAnchorBatch) -> None:
+def _write_caudal_anchor_batch(
+    run_group: zarr.Group,
+    row_slice: slice,
+    batch: CaudalAnchorBatch,
+    *,
+    source_camera_offsets_xy: np.ndarray | None = None,
+) -> None:
     components = run_group.get("components")
     if components is None or "swim_bladder" not in components:
         return
     group = components["swim_bladder"]
     if "caudal_contour_point_xy" not in group:
         return
-    group["caudal_contour_point_xy"][row_slice, :] = batch.point_xy
+    point_xy = (
+        project_subject_shape_points(
+            batch.point_xy,
+            source_camera_offsets_xy,
+            batch.valid,
+        )
+        if source_camera_offsets_xy is not None
+        else batch.point_xy
+    )
+    group["caudal_contour_point_xy"][row_slice, :] = point_xy
     group["caudal_contour_projection_px"][row_slice] = batch.projection_px
     group["caudal_contour_valid"][row_slice] = batch.valid
     group["caudal_contour_failure_reason_bytes"][row_slice, :] = batch.failure_reason_bytes
@@ -1834,14 +1934,29 @@ def _compute_snout_tip_batch(
     )
 
 
-def _write_snout_tip_batch(run_group: zarr.Group, row_slice: slice, batch: SnoutTipBatch) -> None:
+def _write_snout_tip_batch(
+    run_group: zarr.Group,
+    row_slice: slice,
+    batch: SnoutTipBatch,
+    *,
+    source_camera_offsets_xy: np.ndarray | None = None,
+) -> None:
     components = run_group.get("components")
     if components is None or "subject_body" not in components:
         return
     group = components["subject_body"]
     if "snout_tip_xy" not in group:
         return
-    group["snout_tip_xy"][row_slice, :] = batch.point_xy
+    point_xy = (
+        project_subject_shape_points(
+            batch.point_xy,
+            source_camera_offsets_xy,
+            batch.valid,
+        )
+        if source_camera_offsets_xy is not None
+        else batch.point_xy
+    )
+    group["snout_tip_xy"][row_slice, :] = point_xy
     group["snout_tip_valid"][row_slice] = batch.valid
     group["snout_tip_failure_reason_bytes"][row_slice, :] = batch.failure_reason_bytes
 
@@ -2331,19 +2446,62 @@ def _compute_centerline_batch(
     )
 
 
-def _write_centerline_batch(run_group: zarr.Group, row_slice: slice, batch: CenterlineBatch) -> None:
+def _write_centerline_batch(
+    run_group: zarr.Group,
+    row_slice: slice,
+    batch: CenterlineBatch,
+    *,
+    source_camera_offsets_xy: np.ndarray | None = None,
+) -> None:
     components = run_group.get("components")
     if components is None or "subject_body" not in components:
         return
     group = components["subject_body"]
     if "centerline_xy" not in group:
         return
-    group["centerline_xy"][row_slice, :, :] = batch.centerline_xy
+    offsets = source_camera_offsets_xy
+    centerline_xy = (
+        project_subject_shape_points(
+            batch.centerline_xy,
+            offsets,
+            batch.centerline_valid,
+        )
+        if offsets is not None
+        else batch.centerline_xy
+    )
+    head_endpoint_xy = (
+        project_subject_shape_points(
+            batch.head_endpoint_xy,
+            offsets,
+            batch.centerline_valid,
+        )
+        if offsets is not None
+        else batch.head_endpoint_xy
+    )
+    tail_tip_xy = (
+        project_subject_shape_points(
+            batch.tail_tip_xy,
+            offsets,
+            batch.centerline_valid,
+        )
+        if offsets is not None
+        else batch.tail_tip_xy
+    )
+    tail_base_xy = (
+        project_subject_shape_points(
+            batch.tail_base_xy,
+            offsets,
+            batch.tail_base_valid,
+        )
+        if offsets is not None
+        else batch.tail_base_xy
+    )
+    group["centerline_xy"][row_slice, :, :] = centerline_xy
     group["centerline_valid"][row_slice] = batch.centerline_valid
     group["centerline_failure_reason_bytes"][row_slice, :] = batch.centerline_failure_reason_bytes
-    group["head_endpoint_xy"][row_slice, :] = batch.head_endpoint_xy
-    group["tail_tip_xy"][row_slice, :] = batch.tail_tip_xy
-    group["tail_base_xy"][row_slice, :] = batch.tail_base_xy
+    group["head_endpoint_xy"][row_slice, :] = head_endpoint_xy
+    group["tail_tip_xy"][row_slice, :] = tail_tip_xy
+    group["tail_base_xy"][row_slice, :] = tail_base_xy
     group["tail_base_valid"][row_slice] = batch.tail_base_valid
     group["tail_base_arclength_px"][row_slice] = batch.tail_base_arclength_px
     group["tail_base_failure_reason_bytes"][row_slice, :] = batch.tail_base_failure_reason_bytes
@@ -2407,6 +2565,8 @@ def _write_subject_body_spline_batch(
     run_group: zarr.Group,
     row_slice: slice,
     batch: SubjectBodySplineBatch,
+    *,
+    source_camera_offsets_xy: np.ndarray | None = None,
 ) -> None:
     components = run_group.get("components")
     if components is None or "subject_body" not in components:
@@ -2414,17 +2574,63 @@ def _write_subject_body_spline_batch(
     group = components["subject_body"]
     if "bspline_sample_xy" not in group:
         return
-    group["bspline_control_points_xy"][row_slice, :, :] = batch.bspline_control_points_xy
+    offsets = source_camera_offsets_xy
+    bspline_control_points_xy = (
+        project_subject_shape_points(
+            batch.bspline_control_points_xy,
+            offsets,
+            batch.bspline_valid,
+        )
+        if offsets is not None
+        else batch.bspline_control_points_xy
+    )
+    bspline_sample_xy = (
+        project_subject_shape_points(
+            batch.bspline_sample_xy,
+            offsets,
+            batch.bspline_valid,
+        )
+        if offsets is not None
+        else batch.bspline_sample_xy
+    )
+    tail_sample_xy = (
+        project_subject_shape_points(
+            batch.tail_sample_xy,
+            offsets,
+            batch.tail_sample_valid,
+        )
+        if offsets is not None
+        else batch.tail_sample_xy
+    )
+    tail_tangent_xy = (
+        mask_invalid_subject_shape_vectors(
+            batch.tail_tangent_xy,
+            batch.tail_sample_valid,
+        )
+        if offsets is not None
+        else batch.tail_tangent_xy
+    )
+    tail_normal_xy = (
+        mask_invalid_subject_shape_vectors(
+            batch.tail_normal_xy,
+            batch.tail_sample_valid,
+        )
+        if offsets is not None
+        else batch.tail_normal_xy
+    )
+    group["bspline_control_points_xy"][row_slice, :, :] = (
+        bspline_control_points_xy
+    )
     group["bspline_knots"][row_slice, :] = batch.bspline_knots
     group["bspline_degree_used"][row_slice] = batch.bspline_degree_used
-    group["bspline_sample_xy"][row_slice, :, :] = batch.bspline_sample_xy
+    group["bspline_sample_xy"][row_slice, :, :] = bspline_sample_xy
     group["bspline_valid"][row_slice] = batch.bspline_valid
     group["bspline_failure_reason_bytes"][row_slice, :] = _encode_reasons(batch.bspline_failure_reasons)
     group["bspline_arc_length_px"][row_slice] = batch.bspline_arc_length_px
     group["centerline_curvature_px_inv"][row_slice, :] = batch.centerline_curvature_px_inv
-    group["tail_sample_xy"][row_slice, :, :] = batch.tail_sample_xy
-    group["tail_tangent_xy"][row_slice, :, :] = batch.tail_tangent_xy
-    group["tail_normal_xy"][row_slice, :, :] = batch.tail_normal_xy
+    group["tail_sample_xy"][row_slice, :, :] = tail_sample_xy
+    group["tail_tangent_xy"][row_slice, :, :] = tail_tangent_xy
+    group["tail_normal_xy"][row_slice, :, :] = tail_normal_xy
     group["tail_curvature_px_inv"][row_slice, :] = batch.tail_curvature_px_inv
     group["tail_sample_valid"][row_slice] = batch.tail_sample_valid
     group["tail_sample_failure_reason_bytes"][row_slice, :] = _encode_reasons(batch.tail_sample_failure_reasons)
@@ -2446,7 +2652,13 @@ def _eye_axis_from_ellipse_params(params: np.ndarray) -> np.ndarray:
     return np.asarray([math.cos(theta), math.sin(theta)], dtype=np.float32)
 
 
-def _write_relations(run_group: zarr.Group, row_slice: slice, batches: Mapping[str, ComponentBatch]) -> None:
+def _write_relations(
+    run_group: zarr.Group,
+    row_slice: slice,
+    batches: Mapping[str, ComponentBatch],
+    *,
+    source_camera_offsets_xy: np.ndarray | None = None,
+) -> None:
     relations = run_group.get("relations")
     if relations is None:
         return
@@ -2460,10 +2672,19 @@ def _write_relations(run_group: zarr.Group, row_slice: slice, batches: Mapping[s
             delta = left.centroid_xy[valid] - right.centroid_xy[valid]
             separation[valid] = np.linalg.norm(delta, axis=1).astype(np.float32, copy=False)
             midpoint[valid] = ((left.centroid_xy[valid] + right.centroid_xy[valid]) * 0.5).astype(np.float32)
+        persisted_midpoint = (
+            project_subject_shape_points(
+                midpoint,
+                source_camera_offsets_xy,
+                valid,
+            )
+            if source_camera_offsets_xy is not None
+            else midpoint
+        )
         group = relations["eye_pair"]
         group["separation_px"][row_slice] = separation
         group["separation_valid"][row_slice] = valid
-        group["midpoint_xy"][row_slice, :] = midpoint
+        group["midpoint_xy"][row_slice, :] = persisted_midpoint
         group["midpoint_valid"][row_slice] = valid
 
     if "swim_bladder_to_body" in relations and {"subject_body", "swim_bladder"}.issubset(batches):
@@ -2504,8 +2725,13 @@ def _write_relations(run_group: zarr.Group, row_slice: slice, batches: Mapping[s
                 body_axis = body.principal_axis_xy[int(row_idx)]
                 eye_axis = _eye_axis_from_ellipse_params(eye_batch.ellipse_params[int(row_idx)])
                 angle[int(row_idx)] = np.float32(_angle_between_unoriented_axes(body_axis, eye_axis))
+            persisted_offset = (
+                mask_invalid_subject_shape_vectors(offset, valid)
+                if source_camera_offsets_xy is not None
+                else offset
+            )
             group[f"{prefix}_eye_relation_valid"][row_slice] = valid
-            group[f"{prefix}_eye_offset_xy"][row_slice, :] = offset
+            group[f"{prefix}_eye_offset_xy"][row_slice, :] = persisted_offset
             group[f"{prefix}_eye_distance_to_body_centroid_px"][row_slice] = distance
             group[f"{prefix}_eye_axis_angle_to_body_rad"][row_slice] = angle
 
@@ -2522,6 +2748,7 @@ def _process_and_write_subject_shape_chunk_groups(
     execution_backend: str,
     output_start_row: Optional[int] = None,
     centerline_crop_to_foreground: bool = False,
+    source_camera_offsets_xy: np.ndarray | None = None,
 ) -> dict[str, object]:
     source_row_slice = slice(int(start_row), int(stop_row))
     output_start = int(start_row) if output_start_row is None else int(output_start_row)
@@ -2546,6 +2773,11 @@ def _process_and_write_subject_shape_chunk_groups(
     component_masks_by_name: dict[str, np.ndarray] = {}
     rows_with_component: dict[str, int] = {}
     source_body_qc: SourceBodyMaskQcBatch | None = None
+    chunk_offsets = _projection_offsets(
+        source_camera_offsets_xy,
+        row_count=int(stop_row) - int(start_row),
+    )
+    persisted_batches: dict[str, ComponentBatch] = {}
     for component_name, component_idx in component_indices:
         phase_start = time.perf_counter()
         read_start = time.perf_counter()
@@ -2560,10 +2792,17 @@ def _process_and_write_subject_shape_chunk_groups(
         compute_elapsed = float(time.perf_counter() - compute_start)
         compute_seconds += compute_elapsed
         write_start = time.perf_counter()
-        _write_component_batch(run_group, str(component_name), output_row_slice, batch)
+        persisted_batch = _project_component_batch_for_write(batch, chunk_offsets)
+        _write_component_batch(
+            run_group,
+            str(component_name),
+            output_row_slice,
+            persisted_batch,
+        )
         write_elapsed = float(time.perf_counter() - write_start)
         write_seconds += write_elapsed
         batches[str(component_name)] = batch
+        persisted_batches[str(component_name)] = persisted_batch
         if str(component_name) in {"subject_body", "swim_bladder"}:
             component_masks_by_name[str(component_name)] = component_masks
         if str(component_name) == "subject_body":
@@ -2594,7 +2833,12 @@ def _process_and_write_subject_shape_chunk_groups(
         compute_elapsed = float(time.perf_counter() - compute_start)
         compute_seconds += compute_elapsed
         write_start = time.perf_counter()
-        _write_body_frame_batch(run_group, output_row_slice, body_frame)
+        persisted_body_frame = (
+            _compute_canonical_camera_body_frame_batch(persisted_batches)
+            if chunk_offsets is not None
+            else body_frame
+        )
+        _write_body_frame_batch(run_group, output_row_slice, persisted_body_frame)
         write_elapsed = float(time.perf_counter() - write_start)
         write_seconds += write_elapsed
         chunk_timing["write_body_frame_seconds"] = float(time.perf_counter() - phase_start)
@@ -2614,7 +2858,12 @@ def _process_and_write_subject_shape_chunk_groups(
         compute_elapsed = float(time.perf_counter() - compute_start)
         compute_seconds += compute_elapsed
         write_start = time.perf_counter()
-        _write_snout_tip_batch(run_group, output_row_slice, snout_tip)
+        _write_snout_tip_batch(
+            run_group,
+            output_row_slice,
+            snout_tip,
+            source_camera_offsets_xy=chunk_offsets,
+        )
         write_elapsed = float(time.perf_counter() - write_start)
         write_seconds += write_elapsed
         chunk_timing["write_snout_tip_seconds"] = float(time.perf_counter() - phase_start)
@@ -2630,7 +2879,12 @@ def _process_and_write_subject_shape_chunk_groups(
         compute_elapsed = float(time.perf_counter() - compute_start)
         compute_seconds += compute_elapsed
         write_start = time.perf_counter()
-        _write_caudal_anchor_batch(run_group, output_row_slice, caudal_anchor)
+        _write_caudal_anchor_batch(
+            run_group,
+            output_row_slice,
+            caudal_anchor,
+            source_camera_offsets_xy=chunk_offsets,
+        )
         write_elapsed = float(time.perf_counter() - write_start)
         write_seconds += write_elapsed
         chunk_timing["write_caudal_anchor_seconds"] = float(time.perf_counter() - phase_start)
@@ -2653,7 +2907,12 @@ def _process_and_write_subject_shape_chunk_groups(
         compute_elapsed = float(time.perf_counter() - compute_start)
         compute_seconds += compute_elapsed
         write_start = time.perf_counter()
-        _write_centerline_batch(run_group, output_row_slice, centerline)
+        _write_centerline_batch(
+            run_group,
+            output_row_slice,
+            centerline,
+            source_camera_offsets_xy=chunk_offsets,
+        )
         write_elapsed = float(time.perf_counter() - write_start)
         write_seconds += write_elapsed
         chunk_timing["write_centerline_seconds"] = float(time.perf_counter() - phase_start)
@@ -2696,7 +2955,12 @@ def _process_and_write_subject_shape_chunk_groups(
         compute_elapsed = float(time.perf_counter() - compute_start)
         compute_seconds += compute_elapsed
         write_start = time.perf_counter()
-        _write_subject_body_spline_batch(run_group, output_row_slice, spline)
+        _write_subject_body_spline_batch(
+            run_group,
+            output_row_slice,
+            spline,
+            source_camera_offsets_xy=chunk_offsets,
+        )
         write_elapsed = float(time.perf_counter() - write_start)
         write_seconds += write_elapsed
         chunk_timing["write_subject_body_spline_seconds"] = float(time.perf_counter() - phase_start)
@@ -2706,7 +2970,12 @@ def _process_and_write_subject_shape_chunk_groups(
         rows_with_component["tail_sample_valid"] = int(np.count_nonzero(spline.tail_sample_valid))
 
     phase_start = time.perf_counter()
-    _write_relations(run_group, output_row_slice, batches)
+    _write_relations(
+        run_group,
+        output_row_slice,
+        batches,
+        source_camera_offsets_xy=chunk_offsets,
+    )
     relations_elapsed = float(time.perf_counter() - phase_start)
     chunk_timing["write_relations_seconds"] = relations_elapsed
     chunk_timing["relations_compute_write_seconds"] = relations_elapsed
@@ -2735,6 +3004,7 @@ def _process_and_write_subject_shape_chunk(
     chunk_index: int,
     centerline_crop_to_foreground: bool = False,
     native_threads: Optional[int] = None,
+    source_camera_offsets_xy: np.ndarray | None = None,
 ) -> dict[str, object]:
     context_start = time.perf_counter()
     (refined_group, run_group, mask_store), cache_hit = (
@@ -2757,6 +3027,7 @@ def _process_and_write_subject_shape_chunk(
             chunk_index=chunk_index,
             execution_backend=DASK_WORKER_EXECUTION_BACKEND,
             centerline_crop_to_foreground=bool(centerline_crop_to_foreground),
+            source_camera_offsets_xy=source_camera_offsets_xy,
         )
     chunk_timing = dict(result["chunk_timing"])
     chunk_timing["worker_context_lookup_seconds"] = context_seconds
@@ -3049,6 +3320,15 @@ def _validate_unbound_subject_shape_payload(
             authoritative_root,
             f"refined_subject_masks_runs/{expected_refined_run}",
         )
+    projection_present = (
+        SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR in run_group.attrs
+        or SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR in run_group.attrs
+    )
+    if projection_present:
+        require_subject_shape_source_camera_numeric_projection(
+            run_group,
+            source,
+        )
     component_names = tuple(run_group.attrs.get("component_names") or ())
     if (
         len(component_names) != len(COMPONENT_ORDER)
@@ -3212,11 +3492,11 @@ def bind_staged_subject_shape_run(
             "Subject-shape unbound receipt changed between validation and consumption."
         )
 
-    # The unbound receipt hashes ROI-local numeric arrays that binding is about
-    # to transform in place. Close that immutable-input proof phase before the
-    # first final-path mutation, then start a fresh phase for the canonical
-    # source-camera payload. Otherwise the proof cache correctly reports the
-    # intentional transform as input drift at completion time.
+    # Close the producer-sealed numeric proof before final-path authority
+    # stamping. Legacy v1 stages are transformed after this boundary; projected
+    # v2 stages have already written source-camera numerics and are admitted by
+    # their freshly revalidated private projection receipt. In both cases, the
+    # bound publication starts a distinct proof phase.
     finish_proof_verification()
     restart_proof_verification()
 
@@ -3360,16 +3640,17 @@ def complete_bound_subject_shape_candidate_run(
         ),
     )
     restart_proof_verification()
-    proof = load_completed_ineligible_subject_shape_coordinate_publication(
+    proof = validate_sealed_subject_shape_publication_metadata(
         authoritative_root,
         f"analysis/subject_shape_runs/{expected_run_name}",
+        expected_selector_eligible=False,
         expected_publication_owner=publication_owner,
     )
     return {
         "valid": True,
         "status": SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
         "run_name": expected_run_name,
-        "row_count": int(proof.row_identity.leading_dimension),
+        "row_count": proof.row_count,
         "publication_manifest_sha256": proof.manifest.record_sha256,
         "selector_state": "unchanged_candidate_ineligible",
     }
@@ -3422,9 +3703,10 @@ def _complete_bound_subject_shape_run(
         ),
     )
     restart_proof_verification()
-    proof = load_completed_ineligible_subject_shape_coordinate_publication(
+    proof = validate_sealed_subject_shape_publication_metadata(
         authoritative_root,
         f"analysis/subject_shape_runs/{expected_run_name}",
+        expected_selector_eligible=False,
         expected_publication_owner=publication_owner,
     )
     activation_snapshot = selector_snapshot(parent)
@@ -3442,7 +3724,7 @@ def _complete_bound_subject_shape_run(
             "valid": True,
             "status": SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
             "run_name": expected_run_name,
-            "row_count": int(proof.row_identity.leading_dimension),
+            "row_count": proof.row_count,
             "publication_manifest_sha256": proof.manifest.record_sha256,
         },
         activation,
@@ -3533,6 +3815,7 @@ def write_subject_shape_run_group(
                 "Explicit refined_run differs from the selected subject-mask bundle member."
             )
         refined_group = bundle_source.authority.refined_run
+        coordinate_source = bundle_source
     else:
         if allow_inactive_subject_mask_bundle:
             raise ValueError(
@@ -3549,6 +3832,7 @@ def write_subject_shape_run_group(
             raise ValueError(
                 "Logical refined-mask selection differs from canonical coordinate authority."
             )
+        coordinate_source = refined_coordinate_source
     refined_tables = load_refined_subject_masks_run_tables(
         root,
         run_name=refined_run_name,
@@ -3625,7 +3909,7 @@ def write_subject_shape_run_group(
             else None
         ),
         "point_coordinate_space": (
-            "roi_local_px_unbound_numeric"
+            "source_camera_image_px_precanonical_numeric"
             if _unbound_coordinate_stage
             else "source_camera_image_px"
         ),
@@ -3657,6 +3941,15 @@ def write_subject_shape_run_group(
         overwrite=overwrite,
         bundle_source=bundle_source,
     )
+    source_camera_offsets_xy: np.ndarray | None = None
+    if _unbound_coordinate_stage:
+        source_camera_offsets_xy = (
+            stamp_subject_shape_source_camera_numeric_projection(
+                run_group,
+                coordinate_source,
+                component_names=selected_component_names,
+            )
+        )
     chunk_timings: list[dict[str, object]] = []
     rows_with_component: dict[str, int] = {name: 0 for name, _idx in component_indices}
     if backend == DASK_WORKER_EXECUTION_BACKEND:
@@ -3673,6 +3966,11 @@ def write_subject_shape_run_group(
                 chunk_index=chunk_index,
                 centerline_crop_to_foreground=bool(centerline_crop_to_foreground),
                 native_threads=native_threads,
+                source_camera_offsets_xy=(
+                    source_camera_offsets_xy[start_row:stop_row]
+                    if source_camera_offsets_xy is not None
+                    else None
+                ),
             )
             for chunk_index, (start_row, stop_row) in enumerate(chunks)
         ]
@@ -3694,6 +3992,11 @@ def write_subject_shape_run_group(
                     chunk_index=chunk_index,
                     execution_backend=SERIAL_EXECUTION_BACKEND,
                     centerline_crop_to_foreground=bool(centerline_crop_to_foreground),
+                    source_camera_offsets_xy=(
+                        source_camera_offsets_xy[start_row:stop_row]
+                        if source_camera_offsets_xy is not None
+                        else None
+                    ),
                 )
             chunk_timing = dict(result["chunk_timing"])
             chunk_timings.append(chunk_timing)

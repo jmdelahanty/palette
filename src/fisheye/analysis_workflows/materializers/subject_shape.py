@@ -53,11 +53,14 @@ from ...analysis.subject_shape_storage import (
 )
 from ...shared.json_safety import json_attr_safe
 from ...shared.subject_shape_coordinate_publication import (
+    SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE,
+    SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR,
     SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
     commit_deferred_subject_shape_coordinate_activation,
     load_completed_ineligible_subject_shape_coordinate_publication,
     load_persisted_subject_shape_coordinate_publication,
     rollback_deferred_subject_shape_coordinate_activation,
+    validate_sealed_subject_shape_publication_metadata,
 )
 from ...shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from ...shared.zarr_helpers import archive_metadata_publication_lock
@@ -641,18 +644,41 @@ def publish_subject_shape_run(
             return structural
         if transaction["completion_published"]:
             try:
-                root = open_zarr_root(plan.source_zarr, mode="r")
-                proof = load_completed_ineligible_subject_shape_coordinate_publication(
-                    root,
-                    f"analysis/subject_shape_runs/{plan.run_name}",
-                    expected_publication_owner=str(
-                        transaction["publication_owner_uuid"]
-                    ),
+                root = open_zarr_root(
+                    plan.source_zarr,
+                    mode="r",
+                    use_consolidated=False,
                 )
+                run_path = f"analysis/subject_shape_runs/{plan.run_name}"
+                run = root[run_path]
+                if (
+                    run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
+                    == SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE
+                ):
+                    proof = validate_sealed_subject_shape_publication_metadata(
+                        root,
+                        run_path,
+                        expected_selector_eligible=False,
+                        expected_publication_owner=str(
+                            transaction["publication_owner_uuid"]
+                        ),
+                    )
+                    row_count = proof.row_count
+                else:
+                    proof = (
+                        load_completed_ineligible_subject_shape_coordinate_publication(
+                            root,
+                            run_path,
+                            expected_publication_owner=str(
+                                transaction["publication_owner_uuid"]
+                            ),
+                        )
+                    )
+                    row_count = int(proof.row_identity.leading_dimension)
                 structural["canonical_validation"] = {
                     "valid": True,
                     "run_name": plan.run_name,
-                    "row_count": int(proof.row_identity.leading_dimension),
+                    "row_count": row_count,
                     "manifest_sha256": proof.manifest.record_sha256,
                 }
             except Exception as exc:

@@ -50,6 +50,7 @@ from fisheye.shared.coordinate_frame_record import (
     FISH_ANATOMICAL_BODY_FRAME_ATTR,
     BoundFishAnatomicalBodyFrame,
     array_payload_sha256,
+    array_values_sha256,
     bind_body_frame_geometry,
     bind_body_source_coordinate_descriptor,
     bind_mask_component_axis_source,
@@ -159,6 +160,10 @@ SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR = "subject_shape_unbound_numeric_manifest"
 SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID = (
     "palette.subject_shape_unbound_numeric_manifest"
 )
+SUBJECT_SHAPE_PROJECTED_UNBOUND_MANIFEST_SCHEMA_VERSION = 2
+SUBJECT_SHAPE_PROJECTED_UNBOUND_BINDING_STATUS = (
+    "unbound_source_camera_projected_numeric_payload"
+)
 SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR = (
     "subject_shape_consumed_unbound_stage"
 )
@@ -190,6 +195,15 @@ SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR = (
 )
 SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR = (
     "subject_shape_payload_receipt_profile"
+)
+SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR = (
+    "subject_shape_source_camera_numeric_projection"
+)
+SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR = (
+    f"{SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR}_sha256"
+)
+SUBJECT_SHAPE_NUMERIC_PROJECTION_SCHEMA_ID = (
+    "palette.subject_shape_source_camera_numeric_projection"
 )
 SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE = (
     "single_locked_bound_payload_receipt_v1"
@@ -290,6 +304,7 @@ BODY_FRAME_IMPLEMENTATION_VERSION = "subject_shape_from_refined_masks_v11"
 
 _OWNER_RE = re.compile(r"^[0-9a-f]{32}$")
 _BOUND_PUBLICATION_SEAL = object()
+_METADATA_PUBLICATION_SEAL = object()
 _DEFERRED_ACTIVATION_SEAL = object()
 _GUARDED_SELECTORS = (
     "latest",
@@ -628,6 +643,136 @@ def require_translation_only_subject_shape_placement(
     return require_translation_only_refined_placement(source)
 
 
+def build_subject_shape_source_camera_numeric_projection_record(
+    source: SubjectShapeCoordinateSource,
+) -> tuple[dict[str, Any], np.ndarray]:
+    """Seal the exact translation used by the node-local numeric writer.
+
+    This is projection evidence, not canonical coordinate authority.  The
+    final-path binder freshly resolves the same source authority and requires
+    this record byte-for-byte before it may skip the historical in-place
+    translation pass.
+    """
+
+    continuous, edge = require_translation_only_subject_shape_placement(source)
+    continuous = np.ascontiguousarray(continuous, dtype=np.float64)
+    edge = np.ascontiguousarray(edge, dtype=np.float64)
+    if continuous.shape != edge.shape or not np.array_equal(continuous, edge):
+        _fail(
+            "Source-camera numeric projection requires identical continuous "
+            "and half-open-edge translation offsets."
+        )
+    if _is_bundle_source(source):
+        bundle = require_bound_subject_shape_bundle_source(source)
+        source_evidence: dict[str, Any] = {
+            "source_kind": SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
+            "source_binding_sha256": bundle.source_digest,
+            "bundle_id": bundle.bundle_id,
+            "bundle_manifest_payload_digest": bundle.authority.bundle_manifest[
+                "payload_digest"
+            ],
+            "refined_manifest_payload_digest": bundle.authority.refined_manifest[
+                "payload_digest"
+            ],
+        }
+    else:
+        source_evidence = {
+            "source_kind": SUBJECT_SHAPE_HISTORICAL_SOURCE_KIND,
+            "run_path": source.context.run_path,
+            "context_sha256": source.context.context_record.record_sha256,
+            "surface_inventory_sha256": source.inventory.record_sha256,
+            "component_qc_inventory_sha256": (
+                source.component_qc_inventory.record_sha256
+            ),
+        }
+    record = {
+        "schema_id": SUBJECT_SHAPE_NUMERIC_PROJECTION_SCHEMA_ID,
+        "schema_version": 1,
+        "projection_role": (
+            "private_precanonical_numeric_evidence_not_coordinate_authority"
+        ),
+        "source_evidence": source_evidence,
+        "row_count": int(continuous.shape[0]),
+        "offset_dtype": np.dtype(continuous.dtype).str,
+        "offset_shape": [int(value) for value in continuous.shape],
+        "offset_content_sha256": array_values_sha256(continuous),
+        "continuous_edge_offsets_equal": True,
+        "transform_policy": "translation_only_roi_to_source_camera_v1",
+        "application_policy": (
+            "roi_science_then_source_camera_projection_at_chunk_write_v1"
+        ),
+        "point_policy": "add_row_xy_then_preserve_nan_and_mask_invalid",
+        "bbox_policy": "add_row_xy_to_both_half_open_corners",
+        "ellipse_policy": "add_row_xy_to_center_only",
+        "vector_scalar_policy": "mask_invalid_vectors_and_do_not_translate_scalars",
+    }
+    return record, continuous
+
+
+def stamp_subject_shape_source_camera_numeric_projection(
+    run: Any,
+    source: SubjectShapeCoordinateSource,
+    *,
+    component_names: Sequence[str],
+) -> np.ndarray:
+    if (
+        SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR in run.attrs
+        or SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR in run.attrs
+    ):
+        _fail("Subject-shape numeric projection evidence is already occupied.")
+    record, offsets = build_subject_shape_source_camera_numeric_projection_record(
+        source
+    )
+    digest = _canonical_sha256(record)
+    run.attrs[SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR] = _json_copy(record)
+    run.attrs[SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR] = digest
+    components = run["components"]
+    for name in component_names:
+        group = components[str(name)]
+        group.attrs["point_coordinate_space"] = (
+            "source_camera_image_px_precanonical_numeric"
+        )
+        group.attrs["bbox_coordinate_space"] = (
+            "source_camera_image_px_precanonical_numeric"
+        )
+    body = components.get("subject_body")
+    if body is not None:
+        body.attrs["principal_axis_semantics"] = (
+            "unoriented_principal_axis_in_source_camera_xy_precanonical_numeric"
+        )
+    if (
+        run.attrs.get(SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR) != record
+        or run.attrs.get(SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR) != digest
+    ):
+        _fail("Subject-shape numeric projection evidence did not persist exactly.")
+    return offsets
+
+
+def require_subject_shape_source_camera_numeric_projection(
+    run: Any,
+    source: SubjectShapeCoordinateSource,
+) -> Mapping[str, Any] | None:
+    raw = run.attrs.get(SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR)
+    raw_digest = run.attrs.get(SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR)
+    if raw is None and raw_digest is None:
+        return None
+    if not isinstance(raw, Mapping) or not isinstance(raw_digest, str):
+        _fail("Subject-shape numeric projection evidence is incomplete.")
+    expected, _offsets = build_subject_shape_source_camera_numeric_projection_record(
+        source
+    )
+    if (
+        dict(raw) != expected
+        or raw_digest != _canonical_sha256(expected)
+        or int(expected["row_count"]) != int(_source_row_node(source, "instance_key").shape[0])
+    ):
+        _fail(
+            "Subject-shape numeric projection differs from the freshly resolved "
+            "source authority."
+        )
+    return raw
+
+
 def _outer_row_block_size(node: Any, row_count: int) -> int:
     """Return one physical outer chunk/shard extent along the row axis."""
 
@@ -673,6 +818,92 @@ def _require_row_array_metadata(
     return dtype, shape
 
 
+def project_subject_shape_points(
+    values: Any,
+    offsets_xy: Any,
+    valid: Any,
+) -> np.ndarray:
+    """Apply the maintained point projection to one in-memory row block."""
+
+    source = np.asarray(values)
+    offsets = np.asarray(offsets_xy, dtype=np.float64)
+    validity = np.asarray(valid, dtype=bool)
+    if (
+        source.dtype.kind != "f"
+        or source.ndim < 2
+        or source.shape[-1] != 2
+        or offsets.shape != (source.shape[0], 2)
+        or validity.shape != (source.shape[0],)
+        or not np.isfinite(offsets).all()
+    ):
+        _fail("Subject-shape point projection inputs are not exact row-aligned XY.")
+    output = source.astype(np.float64) + offsets.reshape(
+        (source.shape[0],) + (1,) * (source.ndim - 2) + (2,)
+    )
+    output[np.isnan(source)] = np.nan
+    output[~validity] = np.nan
+    return output.astype(source.dtype)
+
+
+def project_subject_shape_bboxes(
+    values: Any,
+    offsets_xy: Any,
+    valid: Any,
+) -> np.ndarray:
+    source = np.asarray(values)
+    offsets = np.asarray(offsets_xy, dtype=np.float64)
+    validity = np.asarray(valid, dtype=bool)
+    if (
+        source.dtype.kind != "f"
+        or source.shape != (offsets.shape[0], 4)
+        or offsets.shape != (source.shape[0], 2)
+        or validity.shape != (source.shape[0],)
+        or not np.isfinite(offsets).all()
+    ):
+        _fail("Subject-shape bbox projection inputs are not exact row-aligned xyxy.")
+    output = source.astype(np.float64)
+    output[~validity] = np.nan
+    return (
+        output.reshape(source.shape[0], 2, 2) + offsets[:, None, :]
+    ).reshape(source.shape).astype(source.dtype)
+
+
+def project_subject_shape_ellipses(
+    values: Any,
+    offsets_xy: Any,
+    valid: Any,
+) -> np.ndarray:
+    source = np.asarray(values)
+    offsets = np.asarray(offsets_xy, dtype=np.float64)
+    validity = np.asarray(valid, dtype=bool)
+    if (
+        source.dtype.kind != "f"
+        or source.shape != (offsets.shape[0], 5)
+        or offsets.shape != (source.shape[0], 2)
+        or validity.shape != (source.shape[0],)
+        or not np.isfinite(offsets).all()
+    ):
+        _fail("Subject-shape ellipse projection inputs are not exact row-aligned.")
+    output = source.astype(np.float64)
+    output[:, :2] += offsets
+    output[~validity] = np.nan
+    return output.astype(source.dtype)
+
+
+def mask_invalid_subject_shape_vectors(values: Any, valid: Any) -> np.ndarray:
+    source = np.asarray(values)
+    validity = np.asarray(valid, dtype=bool)
+    if (
+        source.dtype.kind != "f"
+        or not source.shape
+        or validity.shape != (source.shape[0],)
+    ):
+        _fail("Subject-shape vector masking inputs are not row aligned.")
+    output = source.copy()
+    output[~validity] = np.nan
+    return output
+
+
 def _mask_invalid_and_translate_points_node(
     node: Any,
     offsets: np.ndarray,
@@ -691,13 +922,11 @@ def _mask_invalid_and_translate_points_node(
         selection = (slice(start, stop), *trailing)
         values = np.asarray(node[selection])
         valid = np.asarray(valid_node[start:stop], dtype=bool)
-        offset_shape = (stop - start,) + (1,) * (len(shape) - 2) + (2,)
-        transformed = values.astype(np.float64) + offsets[start:stop].reshape(
-            offset_shape
-        )
-        transformed[np.isnan(values)] = np.nan
-        transformed[~valid] = np.nan
-        node[selection] = transformed.astype(dtype)
+        node[selection] = project_subject_shape_points(
+            values,
+            offsets[start:stop],
+            valid,
+        ).astype(dtype, copy=False)
 
 
 def _translate_bbox_node(node: Any, offsets: np.ndarray, valid_node: Any) -> None:
@@ -712,15 +941,11 @@ def _translate_bbox_node(node: Any, offsets: np.ndarray, valid_node: Any) -> Non
     for start, stop in _row_blocks(node, row_count):
         values = np.asarray(node[start:stop])
         valid = np.asarray(valid_node[start:stop], dtype=bool)
-        # The shared primitive emits half-open pixel-edge bounds. Transform
-        # both corners as edges without adding or inferring a pixel.
-        output = values.astype(np.float64)
-        output[~valid] = np.nan
-        output = (
-            output.reshape(stop - start, 2, 2)
-            + offsets[start:stop, None, :]
-        ).reshape(values.shape)
-        node[start:stop] = output.astype(dtype)
+        node[start:stop] = project_subject_shape_bboxes(
+            values,
+            offsets[start:stop],
+            valid,
+        ).astype(dtype, copy=False)
 
 
 def _translate_ellipse_node(node: Any, offsets: np.ndarray, valid_node: Any) -> None:
@@ -735,10 +960,11 @@ def _translate_ellipse_node(node: Any, offsets: np.ndarray, valid_node: Any) -> 
     for start, stop in _row_blocks(node, row_count):
         values = np.asarray(node[start:stop])
         valid = np.asarray(valid_node[start:stop], dtype=bool)
-        output = values.astype(np.float64)
-        output[:, :2] += offsets[start:stop]
-        output[~valid] = np.nan
-        node[start:stop] = output.astype(dtype)
+        node[start:stop] = project_subject_shape_ellipses(
+            values,
+            offsets[start:stop],
+            valid,
+        ).astype(dtype, copy=False)
 
 
 def _mask_invalid(node: Any, valid_node: Any) -> None:
@@ -749,10 +975,42 @@ def _mask_invalid(node: Any, valid_node: Any) -> None:
     trailing = (slice(None),) * (len(shape) - 1)
     for start, stop in _row_blocks(node, row_count):
         selection = (slice(start, stop), *trailing)
-        output = np.asarray(node[selection]).copy()
-        valid = np.asarray(valid_node[start:stop], dtype=bool)
-        output[~valid] = np.nan
-        node[selection] = output.astype(dtype)
+        output = mask_invalid_subject_shape_vectors(
+            np.asarray(node[selection]),
+            np.asarray(valid_node[start:stop], dtype=bool),
+        )
+        node[selection] = output.astype(dtype, copy=False)
+
+
+def _stamp_subject_shape_source_camera_coordinate_labels(
+    run: Any,
+    *,
+    component_names: Sequence[str],
+) -> None:
+    components = run["components"]
+    for name in component_names:
+        group = components[str(name)]
+        group.attrs["point_coordinate_space"] = "source_camera_image_px"
+        group.attrs["bbox_coordinate_space"] = "source_camera_image_px"
+        group.attrs["bbox_convention"] = "xyxy_pixel_edge_half_open"
+    body = components.get("subject_body")
+    if body is not None:
+        body.attrs["principal_axis_semantics"] = (
+            "unoriented_principal_axis_in_source_camera_xy"
+        )
+        body.attrs["tail_vector_coordinate_space"] = "source_camera_image_px"
+        body.attrs["tail_vector_sampling_axis"] = "tail_sample_s"
+    relations = run.get("relations")
+    if relations is not None and "eyes_to_body" in relations:
+        eyes = relations["eyes_to_body"]
+        eyes.attrs["offset_coordinate_space"] = "source_camera_image_px"
+        eyes.attrs["offset_semantics"] = "displacement_vector_not_overlay_position"
+    run.attrs["point_coordinate_space"] = "source_camera_image_px"
+    run.attrs["point_coordinate_transform"] = (
+        "exact_rowwise_roi_to_source_camera_translation"
+    )
+    run.attrs["bbox_convention"] = "xyxy_pixel_edge_half_open"
+    run.attrs["roi_local_point_arrays_retained"] = False
 
 
 def transform_subject_shape_geometry_to_source_camera(
@@ -777,10 +1035,6 @@ def transform_subject_shape_geometry_to_source_camera(
         _translate_bbox_node(group["bbox_xyxy"], edge_offsets, group["bbox_valid"])
         if "ellipse_params" in group:
             _translate_ellipse_node(group["ellipse_params"], continuous_offsets, group["ellipse_success"])
-        group.attrs["point_coordinate_space"] = "source_camera_image_px"
-        group.attrs["bbox_coordinate_space"] = "source_camera_image_px"
-        group.attrs["bbox_convention"] = "xyxy_pixel_edge_half_open"
-
     body = components.get("subject_body")
     if body is not None:
         for point_name, valid_name in (
@@ -806,11 +1060,6 @@ def transform_subject_shape_geometry_to_source_camera(
         ):
             if vector_name in body:
                 _mask_invalid(body[vector_name], body[valid_name])
-        body.attrs["principal_axis_semantics"] = (
-            "unoriented_principal_axis_in_source_camera_xy"
-        )
-        body.attrs["tail_vector_coordinate_space"] = "source_camera_image_px"
-        body.attrs["tail_vector_sampling_axis"] = "tail_sample_s"
 
     swim = components.get("swim_bladder")
     if swim is not None and "caudal_contour_point_xy" in swim:
@@ -835,13 +1084,10 @@ def transform_subject_shape_geometry_to_source_camera(
                 eyes[f"{prefix}_eye_offset_xy"],
                 eyes[f"{prefix}_eye_relation_valid"],
             )
-        eyes.attrs["offset_coordinate_space"] = "source_camera_image_px"
-        eyes.attrs["offset_semantics"] = "displacement_vector_not_overlay_position"
-
-    run.attrs["point_coordinate_space"] = "source_camera_image_px"
-    run.attrs["point_coordinate_transform"] = "exact_rowwise_roi_to_source_camera_translation"
-    run.attrs["bbox_convention"] = "xyxy_pixel_edge_half_open"
-    run.attrs["roi_local_point_arrays_retained"] = False
+    _stamp_subject_shape_source_camera_coordinate_labels(
+        run,
+        component_names=component_names,
+    )
 
 
 def _create_array(group: Any, name: str, values: np.ndarray) -> Any:
@@ -1421,6 +1667,8 @@ _RUN_AUTHORITATIVE_ATTRS = frozenset(
         SUBJECT_SHAPE_SOURCE_BINDING_ATTR,
         SUBJECT_SHAPE_SOURCE_BINDING_DIGEST_ATTR,
         SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR,
+        SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR,
+        SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR,
     }
 )
 _RUN_FINAL_AUTHORITATIVE_ATTRS = frozenset(
@@ -2016,11 +2264,28 @@ def build_subject_shape_unbound_numeric_manifest_record(
             "content_sha256": digest,
             "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
         }
+    projection = run.attrs.get(SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR)
+    projection_digest = run.attrs.get(SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR)
+    projected = projection is not None or projection_digest is not None
+    if projected and (
+        not isinstance(projection, Mapping)
+        or not isinstance(projection_digest, str)
+        or projection_digest != _canonical_sha256(projection)
+    ):
+        _fail("Subject-shape numeric projection evidence is incomplete or stale.")
     result = {
         "schema_id": SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID,
-        "schema_version": 1,
+        "schema_version": (
+            SUBJECT_SHAPE_PROJECTED_UNBOUND_MANIFEST_SCHEMA_VERSION
+            if projected
+            else 1
+        ),
         "run_name": run.attrs.get("palette_run_name"),
-        "binding_status": "unbound_roi_local_numeric_payload",
+        "binding_status": (
+            SUBJECT_SHAPE_PROJECTED_UNBOUND_BINDING_STATUS
+            if projected
+            else "unbound_roi_local_numeric_payload"
+        ),
         "source_refined_subject_masks_run": run.attrs.get(
             "source_refined_subject_masks_run"
         ),
@@ -2258,9 +2523,19 @@ def load_subject_shape_consumed_unbound_stage(run: Any) -> BoundCoordinateRecord
     record = result.record
     scientific = record.get("scientific_configuration")
     schema_inventory = record.get("schema_inventory")
+    projected = (
+        record.get("schema_version")
+        == SUBJECT_SHAPE_PROJECTED_UNBOUND_MANIFEST_SCHEMA_VERSION
+        and record.get("binding_status")
+        == SUBJECT_SHAPE_PROJECTED_UNBOUND_BINDING_STATUS
+    )
+    legacy = (
+        record.get("schema_version") == 1
+        and record.get("binding_status") == "unbound_roi_local_numeric_payload"
+    )
     if (
         record.get("schema_id") != SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID
-        or record.get("schema_version") != SUBJECT_SHAPE_SCHEMA_VERSION
+        or not (legacy or projected)
         or record.get("run_name") != run.attrs.get("palette_run_name")
         or record.get("source_refined_subject_masks_run")
         != run.attrs.get("source_refined_subject_masks_run")
@@ -2268,7 +2543,6 @@ def load_subject_shape_consumed_unbound_stage(run: Any) -> BoundCoordinateRecord
         or record.get("method_version") != run.attrs.get("method_version")
         or scientific != _scientific_configuration_record(run)
         or not isinstance(schema_inventory, Mapping)
-        or record.get("binding_status") != "unbound_roi_local_numeric_payload"
         or record.get("component_names")
         != list(run.attrs.get("component_names") or ())
         or record.get("closed_group_inventory") is not True
@@ -2279,6 +2553,15 @@ def load_subject_shape_consumed_unbound_stage(run: Any) -> BoundCoordinateRecord
         _fail(
             "Retained subject-shape unbound-stage record differs from the exact "
             "bound run identity or scientific configuration."
+        )
+    projection_present = (
+        SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR in run.attrs
+        and SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR in run.attrs
+    )
+    if projected is not projection_present:
+        _fail(
+            "Retained subject-shape unbound-stage projection profile differs "
+            "from its bound run evidence."
         )
     _validate_retained_unbound_schema(run, record)
     consumed_digest = run.attrs.get(
@@ -2535,20 +2818,40 @@ def _derivation_record(
             },
         }
         schema_version = SUBJECT_SHAPE_SCHEMA_VERSION
+    unbound_record = consumed_unbound_stage.record
+    projected = (
+        unbound_record.get("schema_version")
+        == SUBJECT_SHAPE_PROJECTED_UNBOUND_MANIFEST_SCHEMA_VERSION
+        and unbound_record.get("binding_status")
+        == SUBJECT_SHAPE_PROJECTED_UNBOUND_BINDING_STATUS
+    )
+    unbound_section: dict[str, Any] = {
+        "schema_id": SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID,
+        "manifest_sha256": unbound_manifest_sha256,
+        "record_ref": consumed_unbound_stage.record_ref,
+        "record_sha256": consumed_unbound_stage.record_sha256,
+        "coordinate_status": (
+            "source_camera_numeric_precanonical"
+            if projected
+            else "roi_local_numeric_unbound"
+        ),
+        "consumption_policy": (
+            "validate_projection_receipt_then_stamp_final_authority_v1"
+            if projected
+            else "validate_then_final_path_bind_and_transform_v1"
+        ),
+    }
+    if projected:
+        unbound_section["numeric_projection_sha256"] = run.attrs.get(
+            SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR
+        )
     return {
         "schema_id": SUBJECT_SHAPE_DERIVATION_SCHEMA_ID,
         "schema_version": schema_version,
         "run_ref": f"/{canonical_node_path(run)}",
         "method": run.attrs.get("method"),
         "method_version": run.attrs.get("method_version"),
-        "unbound_numeric_stage": {
-            "schema_id": SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID,
-            "manifest_sha256": unbound_manifest_sha256,
-            "record_ref": consumed_unbound_stage.record_ref,
-            "record_sha256": consumed_unbound_stage.record_sha256,
-            "coordinate_status": "roi_local_numeric_unbound",
-            "consumption_policy": "validate_then_final_path_bind_and_transform_v1",
-        },
+        "unbound_numeric_stage": unbound_section,
         "source_refined_subject_masks": source_section,
         "output_row_identity": {
             "record_ref": identity.record_ref,
@@ -2846,16 +3149,25 @@ def _write_component_aggregate(
     )
 
 
-def _rewrite_body_frame_from_camera_components(
-    run: Any,
+def derive_canonical_subject_shape_body_frame(
     component_names: Sequence[str],
-) -> None:
+    component_centroid_xy: Any,
+    component_centroid_valid: Any,
+) -> dict[str, np.ndarray]:
+    """Derive the maintained camera-space anatomical frame in memory."""
+
     labels = tuple(str(value) for value in component_names)
     required = ("eye_left", "eye_right", "swim_bladder")
     if any(name not in labels for name in required):
         _fail("Canonical subject-shape publication requires both eyes and swim_bladder.")
-    anchors = np.asarray(run["component_centroid_xy"][:], dtype=np.float32)
-    validity = np.asarray(run["component_centroid_valid"][:], dtype=bool)
+    anchors = np.asarray(component_centroid_xy, dtype=np.float32)
+    validity = np.asarray(component_centroid_valid, dtype=bool)
+    if (
+        anchors.ndim != 3
+        or anchors.shape[1:] != (len(labels), 2)
+        or validity.shape != anchors.shape[:2]
+    ):
+        _fail("Canonical subject-shape body-frame inputs are not exact.")
     row_count = anchors.shape[0]
     origin = np.full((row_count, 2), np.nan, dtype=np.float32)
     forward = np.full((row_count, 2), np.nan, dtype=np.float32)
@@ -2887,12 +3199,7 @@ def _rewrite_body_frame_from_camera_components(
         left[row] = row_left.astype(np.float32)
         valid[row] = True
         reasons[row] = "ok"
-    body = run["body_frame"]
-    body["origin_xy"][:] = origin
-    body["forward_axis_xy"][:] = forward
-    body["left_axis_xy"][:] = left
-    body["valid"][:] = valid
-    body["heading_deg"][:] = np.asarray(
+    heading = np.asarray(
         [
             math.degrees(math.atan2(-float(value[1]), float(value[0])))
             if is_valid
@@ -2901,25 +3208,68 @@ def _rewrite_body_frame_from_camera_components(
         ],
         dtype=np.float32,
     )
+    return {
+        "origin_xy": origin,
+        "forward_axis_xy": forward,
+        "left_axis_xy": left,
+        "valid": valid,
+        "heading_deg": heading,
+        "failure_reason_bytes": np.asarray(
+            [
+                np.pad(
+                    np.frombuffer(reason.encode("utf-8")[:63], dtype=np.uint8),
+                    (0, 64 - min(len(reason.encode("utf-8")), 63)),
+                )
+                for reason in reasons
+            ],
+            dtype=np.uint8,
+        ),
+    }
+
+
+def _rewrite_body_frame_from_camera_components(
+    run: Any,
+    component_names: Sequence[str],
+) -> None:
+    derived = derive_canonical_subject_shape_body_frame(
+        component_names,
+        np.asarray(run["component_centroid_xy"][:], dtype=np.float32),
+        np.asarray(run["component_centroid_valid"][:], dtype=bool),
+    )
+    body = run["body_frame"]
+    body["origin_xy"][:] = derived["origin_xy"]
+    body["forward_axis_xy"][:] = derived["forward_axis_xy"]
+    body["left_axis_xy"][:] = derived["left_axis_xy"]
+    body["valid"][:] = derived["valid"]
+    body["heading_deg"][:] = derived["heading_deg"]
     if "axis_valid" in body:
         _fail("Immutable body_frame/axis_valid already exists.")
-    axis_valid = _create_array(body, "axis_valid", valid)
-    body["failure_reason_bytes"][:] = np.asarray(
-        [
-            np.pad(
-                np.frombuffer(reason.encode("utf-8")[:63], dtype=np.uint8),
-                (0, 64 - min(len(reason.encode("utf-8")), 63)),
-            )
-            for reason in reasons
-        ],
-        dtype=np.uint8,
-    )
+    axis_valid = _create_array(body, "axis_valid", derived["valid"])
+    body["failure_reason_bytes"][:] = derived["failure_reason_bytes"]
     body.attrs["body_frame_coordinate_space"] = "source_camera_image_px"
     body.attrs["axis_valid_array"] = "axis_valid"
     # Keep the historical `valid` sibling solely as an explicit compatibility
     # alias; the sealed body record authorizes axis_valid.
     body.attrs["valid_compatibility_alias_of"] = "axis_valid"
     if not np.array_equal(np.asarray(axis_valid[:], dtype=bool), np.asarray(body["valid"][:], dtype=bool)):
+        _fail("Body-frame validity compatibility alias differs from axis_valid.")
+
+
+def _finalize_preprojected_body_frame(run: Any) -> None:
+    """Add the canonical validity alias without rewriting sealed geometry."""
+
+    body = run["body_frame"]
+    if "axis_valid" in body:
+        _fail("Immutable body_frame/axis_valid already exists.")
+    valid = np.asarray(body["valid"][:], dtype=bool)
+    axis_valid = _create_array(body, "axis_valid", valid)
+    body.attrs["body_frame_coordinate_space"] = "source_camera_image_px"
+    body.attrs["axis_valid_array"] = "axis_valid"
+    body.attrs["valid_compatibility_alias_of"] = "axis_valid"
+    if not np.array_equal(
+        np.asarray(axis_valid[:], dtype=bool),
+        valid,
+    ):
         _fail("Body-frame validity compatibility alias differs from axis_valid.")
 
 
@@ -4021,6 +4371,173 @@ class BoundSubjectShapeCoordinatePublication:
         return binding
 
 
+@dataclass(frozen=True, init=False)
+class SealedSubjectShapePublicationMetadataProof:
+    """Process-local lifecycle proof that never decodes scientific arrays."""
+
+    run_path: str
+    manifest: BoundCoordinateRecord = field(repr=False)
+    row_count: int
+    selector_eligible: bool
+    publication_owner: str
+    _seal: object = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        *,
+        _verification_seal: object | None = None,
+        **values: Any,
+    ) -> None:
+        if _verification_seal is not _METADATA_PUBLICATION_SEAL:
+            _fail("Subject-shape metadata proofs cannot be constructed directly.")
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "_seal", _verification_seal)
+
+
+@proof_verification_operation
+def validate_sealed_subject_shape_publication_metadata(
+    root: Any,
+    run_path: str,
+    *,
+    expected_selector_eligible: bool,
+    expected_publication_owner: str,
+    payload_run_path: str | Path | None = None,
+) -> SealedSubjectShapePublicationMetadataProof:
+    """Validate one publication lifecycle epoch without decoding its arrays.
+
+    This validator is intentionally limited to atomic publication internals.
+    Ordinary scientific consumers still use the full authority resolver.  The
+    proof checks the closed schema, manifest, receipt chain, live array
+    metadata, and installed immutable Zarr metadata.  Explicit deep audit is
+    the only path that rehashes physical payload bytes.
+    """
+
+    path = _canonical_run_path(run_path)
+    run = _node(root, path, label="subject-shape metadata-only publication")
+    owner = _require_state(
+        run,
+        complete=True,
+        eligible=expected_selector_eligible,
+        expected_owner=expected_publication_owner,
+    )
+    if (
+        run.attrs.get("coordinate_contract")
+        != SUBJECT_SHAPE_COORDINATE_CONTRACT
+        or run.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
+        != SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
+    ):
+        _fail("Subject-shape metadata proof requires a bound canonical child.")
+    _require_subject_shape_maintained_profile(run)
+    manifest = bind_persisted_coordinate_record(
+        run,
+        attr_name=SUBJECT_SHAPE_MANIFEST_ATTR,
+    )
+    payload_digests = _load_subject_shape_payload_digest_evidence(
+        run,
+        manifest_sha256=manifest.record_sha256,
+    )
+    if payload_digests is None:
+        _fail("Metadata-only validation requires sealed payload receipts.")
+    raw_integrity = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR)
+    try:
+        verify_payload_integrity_receipt(
+            _subject_shape_payload_path(run, payload_run_path),
+            raw_integrity,
+            expected_run_ref=f"/{path}",
+            verify_physical_payload=False,
+        )
+    except Exception as exc:
+        _fail(f"Subject-shape immutable metadata validation failed: {exc}")
+
+    record = manifest.record
+    schema_inventory = build_subject_shape_schema_inventory_record(
+        run,
+        phase="bound",
+    )
+    arrays = record.get("arrays")
+    live_arrays = dict(_iter_arrays(run))
+    expected_manifest_fields = {
+        "schema_id",
+        "schema_version",
+        "run_ref",
+        "row_identity",
+        "temporal_authority",
+        "source_refined_subject_masks",
+        "component_schema",
+        "scientific_configuration",
+        "consumed_unbound_stage",
+        "tail_sample_axis",
+        "scalar_surface_inventory",
+        "scalar_surfaces",
+        "derivation",
+        "body_frame",
+        "heading_semantics",
+        "coordinate_descriptors",
+        "arrays",
+        "schema_inventory",
+        "closed_array_inventory",
+        "closed_group_inventory",
+        "closed_attr_inventory",
+    }
+    expected_manifest_version = (
+        SUBJECT_SHAPE_BUNDLE_MANIFEST_SCHEMA_VERSION
+        if run.attrs.get(SUBJECT_SHAPE_SOURCE_KIND_ATTR)
+        == SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
+        else SUBJECT_SHAPE_SCHEMA_VERSION
+    )
+    if (
+        set(record) != expected_manifest_fields
+        or record.get("schema_id") != SUBJECT_SHAPE_MANIFEST_SCHEMA_ID
+        or record.get("schema_version") != expected_manifest_version
+        or record.get("run_ref") != f"/{path}"
+        or record.get("schema_inventory") != schema_inventory
+        or record.get("closed_array_inventory") is not True
+        or record.get("closed_group_inventory") is not True
+        or record.get("closed_attr_inventory") is not True
+        or not isinstance(arrays, Mapping)
+        or set(arrays) != set(live_arrays)
+        or set(payload_digests) != set(live_arrays)
+    ):
+        _fail("Subject-shape metadata proof differs from its closed manifest.")
+    for relative_ref, node in live_arrays.items():
+        entry = arrays[relative_ref]
+        if (
+            not isinstance(entry, Mapping)
+            or set(entry)
+            != {
+                "array_ref",
+                "relative_ref",
+                "dtype",
+                "shape",
+                "content_sha256",
+                "canonicalization",
+            }
+            or entry.get("array_ref") != f"/{canonical_node_path(node)}"
+            or entry.get("relative_ref") != relative_ref
+            or entry.get("dtype") != np.dtype(node.dtype).str
+            or entry.get("shape") != [int(value) for value in node.shape]
+            or entry.get("content_sha256") != payload_digests[relative_ref]
+            or entry.get("canonicalization")
+            != "numpy_dtype_shape_c_order_bytes_v1"
+        ):
+            _fail(
+                "Subject-shape metadata proof array declaration differs for "
+                f"{relative_ref!r}."
+            )
+    instance_key = live_arrays.get("instance_key")
+    if instance_key is None or not instance_key.shape:
+        _fail("Subject-shape metadata proof lacks its row-identity array.")
+    return SealedSubjectShapePublicationMetadataProof(
+        run_path=path,
+        manifest=manifest,
+        row_count=int(instance_key.shape[0]),
+        selector_eligible=expected_selector_eligible,
+        publication_owner=owner,
+        _verification_seal=_METADATA_PUBLICATION_SEAL,
+    )
+
+
 @dataclass(frozen=True)
 class DeferredSubjectShapeCoordinateActivation:
     """Process-local receipt for one selected but still-ineligible child."""
@@ -4349,13 +4866,26 @@ def publish_subject_shape_coordinate_surfaces(
     if archive_identity(_source_run_group(source)) != archive_identity(run):
         _fail("Subject-shape and refined-mask source span archives/stores.")
     source_binding = _stamp_source_binding(run, source)
-    transform_subject_shape_geometry_to_source_camera(
+    numeric_projection = require_subject_shape_source_camera_numeric_projection(
         run,
         source,
-        component_names=component_names,
     )
+    if numeric_projection is None:
+        transform_subject_shape_geometry_to_source_camera(
+            run,
+            source,
+            component_names=component_names,
+        )
+    else:
+        _stamp_subject_shape_source_camera_coordinate_labels(
+            run,
+            component_names=component_names,
+        )
     _write_component_aggregate(run, component_names)
-    _rewrite_body_frame_from_camera_components(run, component_names)
+    if numeric_projection is None:
+        _rewrite_body_frame_from_camera_components(run, component_names)
+    else:
+        _finalize_preprojected_body_frame(run)
     run.attrs[SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR] = (
         SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE
     )
@@ -4591,7 +5121,10 @@ def _deferred_activation_receipt_payload(
 def _install_subject_shape_pending_receipt(
     root: Any,
     parent: Any,
-    proof: BoundSubjectShapeCoordinatePublication,
+    proof: (
+        BoundSubjectShapeCoordinatePublication
+        | SealedSubjectShapePublicationMetadataProof
+    ),
     *,
     run_name: str,
     owner: str,
@@ -4787,7 +5320,10 @@ def rollback_subject_shape_activation(
 def activate_subject_shape_coordinate_publication(
     root: Any,
     parent: Any,
-    proof: BoundSubjectShapeCoordinatePublication,
+    proof: (
+        BoundSubjectShapeCoordinatePublication
+        | SealedSubjectShapePublicationMetadataProof
+    ),
     *,
     run_name: str,
     owner: str,
@@ -4796,7 +5332,15 @@ def activate_subject_shape_coordinate_publication(
 ) -> DeferredSubjectShapeCoordinateActivation | None:
     """Publish selectors, then flip child eligibility as the final mutation."""
 
-    if type(proof) is not BoundSubjectShapeCoordinatePublication or proof._seal is not _BOUND_PUBLICATION_SEAL:
+    full_proof = (
+        type(proof) is BoundSubjectShapeCoordinatePublication
+        and proof._seal is _BOUND_PUBLICATION_SEAL
+    )
+    metadata_proof = (
+        type(proof) is SealedSubjectShapePublicationMetadataProof
+        and proof._seal is _METADATA_PUBLICATION_SEAL
+    )
+    if not (full_proof or metadata_proof):
         _fail("Subject-shape activation requires a sealed proof.")
     expected_path = f"analysis/subject_shape_runs/{run_name}"
     run = _node(root, expected_path, label="subject-shape activation child")
@@ -4855,12 +5399,23 @@ def activate_subject_shape_coordinate_publication(
         # Reconstruct the complete child while no parent selector has changed.
         # The supplied proof is an ownership/intent receipt; this live reload
         # establishes the exact child and source graph for this activation.
-        fresh_proof = _load_subject_shape_publication(
-            root,
-            expected_path,
-            eligible=False,
-            expected_owner=owner,
-        )
+        if (
+            run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
+            == SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE
+        ):
+            fresh_proof = validate_sealed_subject_shape_publication_metadata(
+                root,
+                expected_path,
+                expected_selector_eligible=False,
+                expected_publication_owner=owner,
+            )
+        else:
+            fresh_proof = _load_subject_shape_publication(
+                root,
+                expected_path,
+                eligible=False,
+                expected_owner=owner,
+            )
         if fresh_proof.manifest.record_sha256 != proof.manifest.record_sha256:
             _fail("Subject-shape publication changed before activation.")
 
@@ -4957,12 +5512,24 @@ def activate_subject_shape_coordinate_publication(
         # before commit.  The parent itself was freshly reloaded between every
         # individual write above.
         restart_proof_verification()
-        final_proof = _load_subject_shape_publication(
-            root,
-            expected_path,
-            eligible=False,
-            expected_owner=owner,
-        )
+        run = _node(root, expected_path, label="subject-shape activation child")
+        if (
+            run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
+            == SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE
+        ):
+            final_proof = validate_sealed_subject_shape_publication_metadata(
+                root,
+                expected_path,
+                expected_selector_eligible=False,
+                expected_publication_owner=owner,
+            )
+        else:
+            final_proof = _load_subject_shape_publication(
+                root,
+                expected_path,
+                eligible=False,
+                expected_owner=owner,
+            )
         if final_proof.manifest.record_sha256 != proof.manifest.record_sha256:
             _fail("Subject-shape publication changed during activation.")
         # Close the post-selector proof phase while the child remains
@@ -5134,12 +5701,23 @@ def commit_deferred_subject_shape_coordinate_activation(
         activation.snapshot,
         overrides=expected_overrides,
     )
-    proof = _load_subject_shape_publication(
-        root,
-        expected_path,
-        eligible=False,
-        expected_owner=activation.owner,
-    )
+    if (
+        run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
+        == SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE
+    ):
+        proof = validate_sealed_subject_shape_publication_metadata(
+            root,
+            expected_path,
+            expected_selector_eligible=False,
+            expected_publication_owner=activation.owner,
+        )
+    else:
+        proof = _load_subject_shape_publication(
+            root,
+            expected_path,
+            eligible=False,
+            expected_owner=activation.owner,
+        )
     if proof.manifest.record_sha256 != activation.manifest_sha256:
         _fail("Deferred subject-shape publication changed before commit.")
     parent = _node(
@@ -5256,6 +5834,11 @@ __all__ = [
     "SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR",
     "SUBJECT_SHAPE_PAYLOAD_VALIDATOR_SCHEMA_ID",
     "SUBJECT_SHAPE_PAYLOAD_VALIDATOR_SCHEMA_VERSION",
+    "SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR",
+    "SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR",
+    "SUBJECT_SHAPE_NUMERIC_PROJECTION_SCHEMA_ID",
+    "SUBJECT_SHAPE_PROJECTED_UNBOUND_BINDING_STATUS",
+    "SUBJECT_SHAPE_PROJECTED_UNBOUND_MANIFEST_SCHEMA_VERSION",
     "SUBJECT_SHAPE_PUBLICATION_GENERATION_ATTR",
     "SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR",
     "SUBJECT_SHAPE_PUBLICATION_POLICY_ATTR",
@@ -5286,15 +5869,18 @@ __all__ = [
     "BoundSubjectShapeScalarSurface",
     "BoundSubjectShapeCoordinatePublication",
     "DeferredSubjectShapeCoordinateActivation",
+    "SealedSubjectShapePublicationMetadataProof",
     "SubjectShapeCoordinateSource",
     "SubjectShapeCoordinatePublicationError",
     "activate_subject_shape_coordinate_publication",
     "build_subject_shape_schema_inventory_record",
     "build_subject_shape_scientific_configuration_record",
+    "build_subject_shape_source_camera_numeric_projection_record",
     "build_subject_shape_unbound_numeric_manifest_record",
     "build_subject_shape_pending_receipt",
     "commit_deferred_subject_shape_coordinate_activation",
     "deep_audit_subject_shape_payload_receipt",
+    "derive_canonical_subject_shape_body_frame",
     "load_completed_ineligible_subject_shape_coordinate_publication",
     "load_exact_subject_shape_source",
     "load_exact_subject_shape_refined_source",
@@ -5304,16 +5890,23 @@ __all__ = [
     "load_sealed_unbound_subject_shape_manifest",
     "load_unbound_subject_shape_manifest",
     "prepare_subject_shape_identity_and_schema",
+    "project_subject_shape_bboxes",
+    "project_subject_shape_ellipses",
+    "project_subject_shape_points",
     "publish_subject_shape_coordinate_surfaces",
     "require_translation_only_refined_placement",
     "require_translation_only_subject_shape_placement",
+    "require_subject_shape_source_camera_numeric_projection",
     "rollback_subject_shape_activation",
     "rollback_deferred_subject_shape_coordinate_activation",
     "selector_snapshot",
     "subject_shape_maintained_profile_record",
     "subject_shape_bundle_maintained_profile_record",
     "stamp_subject_shape_derivation",
+    "stamp_subject_shape_source_camera_numeric_projection",
     "stamp_subject_shape_temporal_authority",
     "stamp_unbound_subject_shape_manifest",
     "transform_subject_shape_geometry_to_source_camera",
+    "validate_sealed_subject_shape_publication_metadata",
+    "mask_invalid_subject_shape_vectors",
 ]

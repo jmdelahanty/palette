@@ -43,6 +43,8 @@ from fisheye.shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR,
     SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_SCHEMA_ID,
     SUBJECT_SHAPE_MANIFEST_ATTR,
+    SUBJECT_SHAPE_PROJECTED_UNBOUND_BINDING_STATUS,
+    SUBJECT_SHAPE_PROJECTED_UNBOUND_MANIFEST_SCHEMA_VERSION,
     SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
     SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID,
     SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
@@ -774,10 +776,20 @@ def validate_subject_shape_storage_source_manifest_link(
         )
     else:
         bundle_binding_valid = bundle_source_binding is None
+    source_schema_version = source_manifest.get("schema_version")
+    source_binding_status = source_manifest.get("binding_status")
+    supported_unbound_profile = (
+        source_schema_version == 1
+        and source_binding_status == "unbound_roi_local_numeric_payload"
+    ) or (
+        source_schema_version
+        == SUBJECT_SHAPE_PROJECTED_UNBOUND_MANIFEST_SCHEMA_VERSION
+        and source_binding_status == SUBJECT_SHAPE_PROJECTED_UNBOUND_BINDING_STATUS
+    )
     if (
         source_manifest.get("schema_id")
         != SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID
-        or source_manifest.get("schema_version") != 1
+        or not supported_unbound_profile
         or set(source_manifest) != expected_manifest_fields
         or logical_profile_id
         not in {

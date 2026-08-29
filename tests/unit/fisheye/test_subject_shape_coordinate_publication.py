@@ -594,6 +594,45 @@ def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authori
             "analysis/subject_shape_runs/shape_001",
         )
 
+    array_type = type(run["instance_key"])
+
+    def reject_array_decode(_self: Any, _selection: Any) -> Any:
+        raise AssertionError("metadata-only validation decoded an array")
+
+    with monkeypatch.context() as metadata_only_patch:
+        metadata_only_patch.setattr(array_type, "__getitem__", reject_array_decode)
+        metadata_proof = module.validate_sealed_subject_shape_publication_metadata(
+            root,
+            "analysis/subject_shape_runs/shape_001",
+            expected_selector_eligible=True,
+            expected_publication_owner=run.attrs[
+                SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR
+            ],
+            payload_run_path=payload_run_path,
+        )
+    assert metadata_proof.row_count == 2
+    assert metadata_proof.manifest.record_sha256 == run.attrs[
+        "publication_manifest_sha256"
+    ]
+
+    body = run["components/subject_body"]
+    original_point_space = body.attrs["point_coordinate_space"]
+    body.attrs["point_coordinate_space"] = "tampered"
+    with pytest.raises(
+        SubjectShapeCoordinatePublicationError,
+        match="closed manifest",
+    ):
+        module.validate_sealed_subject_shape_publication_metadata(
+            root,
+            "analysis/subject_shape_runs/shape_001",
+            expected_selector_eligible=True,
+            expected_publication_owner=run.attrs[
+                SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR
+            ],
+            payload_run_path=payload_run_path,
+        )
+    body.attrs["point_coordinate_space"] = original_point_space
+
     validation_attr = module.SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR
     original_validation = copy.deepcopy(run.attrs[validation_attr])
     tampered_validation = copy.deepcopy(original_validation)
@@ -922,14 +961,24 @@ def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authori
         )
     del body["centroid_xy"].attrs["coordinate_space"]
 
-    # The cluster path computes and shards only an explicitly unbound ROI-local
-    # numeric stage.  Canonical identity, transforms, descriptors, completion,
+    # The cluster path computes and shards an explicitly unbound numeric stage.
+    # Positional values are projected during chunk writing, but the projection
+    # receipt is not canonical authority. Identity, descriptors, completion,
     # and selection are created only after the run is atomically renamed into
     # this authoritative archive.
     monkeypatch.setattr(
         shape_materializer,
         "write_best_effort_run_lineage_attrs",
         lambda *args, **kwargs: None,
+    )
+
+    def reject_legacy_post_write_transform(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("projected writer invoked legacy in-place transform")
+
+    monkeypatch.setattr(
+        module,
+        "transform_subject_shape_geometry_to_source_camera",
+        reject_legacy_post_write_transform,
     )
     scratch = tmp_path / "subject-shape-materializer"
     result = shape_materializer.materialize_subject_shape(
@@ -953,7 +1002,7 @@ def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authori
     assert result["status"] == "complete"
     scratch_compute = shape_materializer.open_zarr_root(
         scratch / "compute.zarr",
-        mode="r",
+        mode="r+",
     )["analysis/subject_shape_runs/shape_materialized"]
     assert scratch_compute.attrs["coordinate_binding_status"] == (
         "unbound_numeric_stage_complete_v1"
@@ -964,7 +1013,45 @@ def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authori
     assert "instance_key" not in scratch_compute
     assert scratch_compute["components/subject_body"].attrs[
         "point_coordinate_space"
-    ] == "roi_local_px"
+    ] == "source_camera_image_px_precanonical_numeric"
+    scratch_manifest = scratch_compute.attrs[module.SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR]
+    assert scratch_manifest["schema_version"] == 2
+    assert scratch_manifest["binding_status"] == (
+        module.SUBJECT_SHAPE_PROJECTED_UNBOUND_BINDING_STATUS
+    )
+    assert scratch_compute.attrs[module.SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR][
+        "projection_role"
+    ] == "private_precanonical_numeric_evidence_not_coordinate_authority"
+    original_projection = copy.deepcopy(
+        scratch_compute.attrs[module.SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR]
+    )
+    original_projection_digest = scratch_compute.attrs[
+        module.SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR
+    ]
+    tampered_projection = copy.deepcopy(original_projection)
+    tampered_projection["row_count"] = int(tampered_projection["row_count"]) + 1
+    scratch_compute.attrs[module.SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR] = (
+        tampered_projection
+    )
+    scratch_compute.attrs[module.SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR] = (
+        module._canonical_sha256(tampered_projection)
+    )
+    with pytest.raises(
+        SubjectShapeCoordinatePublicationError,
+        match="differs from the freshly resolved source authority",
+    ):
+        subject_shape_writer.validate_unbound_subject_shape_run(
+            root,
+            scratch_compute,
+            expected_refined_run="r1",
+            expected_run_name="shape_materialized",
+        )
+    scratch_compute.attrs[module.SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR] = (
+        original_projection
+    )
+    scratch_compute.attrs[module.SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR] = (
+        original_projection_digest
+    )
     assert COORDINATE_DESCRIPTOR_ATTR not in scratch_compute[
         "components/subject_body/centroid_xy"
     ].attrs
@@ -993,6 +1080,16 @@ def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authori
         final["components/subject_body/centroid_xy"][:],
         expected_centroid,
     )
+    legacy = root["analysis/subject_shape_runs/shape_001"]
+    legacy_arrays = dict(module._iter_arrays(legacy))
+    materialized_arrays = dict(module._iter_arrays(final))
+    assert set(legacy_arrays) == set(materialized_arrays)
+    for path in sorted(legacy_arrays):
+        np.testing.assert_array_equal(
+            np.asarray(materialized_arrays[path][:]),
+            np.asarray(legacy_arrays[path][:]),
+            err_msg=f"fused projection changed {path}",
+        )
 
 
 def test_subject_shape_translation_gate_rejects_scale_or_axis_mix(

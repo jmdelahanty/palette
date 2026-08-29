@@ -261,28 +261,43 @@ arrays.
   axes, temporal authority, scientific configuration, heading semantics, row
   identity, and body-frame record.
 
-Cluster materialization follows a deferred-binding transaction. Scratch
-contains only a completed, explicitly unbound ROI-local numeric stage and a
-closed decoded-payload manifest: no canonical descriptor, direct output
-identity, selector, or coordinate-completion claim is permitted there. After
-deterministic sharding and atomic rename into the authoritative archive,
-Palette freshly resolves the exact refined source, consumes the unbound
-manifest, creates direct identity/temporal authorities, performs the exact
-ROI-to-camera transform, seals descriptors and manifests, marks the child
-complete but ineligible, and performs a fresh strict reload. Parent selectors
-advance only after that reload; child eligibility is the final scientific and
+Cluster materialization follows a deferred-binding transaction. Science is
+computed in ROI-local coordinates. The maintained projected-unbound v2 writer
+applies the exact row-wise translation only as each numeric chunk is persisted,
+so positional arrays in scratch already contain source-camera numerical values.
+Scratch still has no canonical descriptor, direct output identity, selector,
+or coordinate-completion claim. Instead it carries a private, digest-bound
+numeric-projection record that names the exact source evidence, ordered offset
+digest, transform policy, row count, and application policy. This record is
+producer evidence only; it cannot be used as coordinate authority by a normal
+consumer.
+
+After deterministic sharding and atomic rename into the authoritative archive,
+Palette freshly resolves the exact refined source, re-derives and compares the
+private projection record, consumes the closed unbound manifest, and creates
+the direct identity and temporal authorities. A valid projected-unbound v2
+stage is not rewritten. Palette stamps the canonical descriptors and manifests
+over the already-projected values, performs one locked decoded payload scan,
+and seals the resulting content and physical-integrity receipts. Historical
+unbound v1 ROI-local stages remain supported and use the original final-path
+in-place transform.
+
+Completion and selector activation validate the receipt chain, closed schema,
+array dtype/shape declarations, immutable Zarr metadata, owner, and lifecycle
+state without decoding the scientific payload again. Normal scientific readers
+continue to use the full authority resolver. An explicit deep-audit operation
+remains available to rehash physical payload bytes. Parent selectors advance
+only after validation; child eligibility is the final scientific and
 selection-state mutation. The generic publisher may subsequently update only
 the explicitly non-scientific `cluster_output_staging` operational receipt,
 which is outside the immutable scientific manifest. Any post-rename failure,
 including an operational-receipt failure, removes only the UUID-owned target
 and restores the UUID-owned selector epoch.
 
-The unbound ROI-local payload and the bound source-camera payload are separate
-proof phases. Palette closes and freshly reverifies every unbound input proof
-before the first intentional in-place coordinate transformation, then starts a
-new proof phase for the bound arrays. A verifier must not retain an ROI-local
-payload snapshot across that transform and later misclassify the intentional
-binding operation as source drift.
+The producer-sealed numeric payload and the bound canonical publication remain
+separate proof phases for both unbound profiles. No proof state may cross the
+final binding boundary. The projected profile removes redundant transformation
+I/O; it does not merge producer evidence with canonical authority.
 
 Subject-shape activation owns an exact structured `latest_pending` receipt and
 compares the complete selector/lifecycle epoch: selectors, publication
