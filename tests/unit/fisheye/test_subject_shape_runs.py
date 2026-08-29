@@ -839,6 +839,12 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
     assert numerical_policy["receipt_composition"]["appended_paths"] == sorted(
         coordinate_publication.SUBJECT_SHAPE_BINDING_APPENDED_ARRAY_PATHS
     )
+    # The v2 receipt may reuse staged digests only because projected final
+    # binding appends authority arrays without rewriting any staged payload.
+    # Deep-audit the small fixture so a future binding rewrite cannot silently
+    # retain pre-binding digests under the receipt-backed fast path.
+    for path, digest in numerical_policy["array_content_sha256"].items():
+        assert digest == array_values_sha256(np.asarray(direct[path][:]))
     assert not validate_subject_shape_candidate_storage(direct, phase="bound")
     assert not validate_subject_shape_direct_consolidated_storage(
         source_path,
