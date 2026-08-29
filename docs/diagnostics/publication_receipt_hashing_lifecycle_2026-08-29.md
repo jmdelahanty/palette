@@ -4,8 +4,9 @@ Status: **design decision and optimization contract**. This governs new work;
 existing publication families may require a compatibility migration before
 their redundant payload scans can be removed.
 
-Observed against Palette commit:
-`bf058521` (`subject-shape-unbound-receipt-20260827-bf058521`).
+Legacy behavior was observed against Palette commit `bf058521`
+(`subject-shape-unbound-receipt-20260827-bf058521`). The receipt-v2
+implementation checkpoint is `e35714b0`.
 
 ## Decision
 
@@ -118,9 +119,11 @@ composable identity.
 ## Subject-shape v2 implementation checkpoint
 
 Status: **implemented and locally validated in
-`agent/palette/subject-shape-plan-receipts-20260829`; this document is part of
-the implementation checkpoint, which is not yet pushed, CI-green, merged, or
-production-active**.
+`agent/palette/subject-shape-plan-receipts-20260829` at `e35714b0`; pushed to
+draft PR #73. Required CI passed at that runtime commit and the
+selector-ineligible performance canary completed successfully. The canary also
+exposed a separate pre-existing nondeterministic ellipse-fit edge case, so the
+canary remains ineligible and the branch is not merged or production-active**.
 
 The projected access-aware subject-shape path now implements the first durable
 receipt profile:
@@ -175,23 +178,134 @@ Local evidence so far:
 
 - 62 complete affected atomic-publisher and subject-shape tests passed in
   425.92 seconds;
-- the final access-aware regression passed in 181.34 seconds; and
+- the final instrumented access-aware regression passed in 189.94 seconds;
+- that regression compares every v2 declared final array digest with the live
+  final array, guarding against reuse of a staged digest after a binding write;
+  and
 - that regression makes both
   `build_subject_shape_unbound_payload_scan_receipt` and
   `_scan_subject_shape_bound_payload` raise if the v2 path attempts either
   complete decoded rescan.
 
-The commit-`bf058521` canary cannot benefit from code written after submission.
-Its resource trace changed character at approximately 19:27:23 UTC, after
-8,176.78 seconds and 626.40 GB of cumulative delivered reads: thread count and
-writes began rising, which is consistent with leaving the serial unbound scan
-and entering parallel storage conversion. By 19:33:23 UTC conversion had added
-only about 2.73 GB of reads and 1.35 GB of writes. At 19:33:53 UTC a short
-multi-process copy/physical phase began, followed by another read-heavy,
-write-flat phase consistent with the old post-binding decoded scan. These phase
-labels are inferences from resource transitions because the old process buffers
-its stage log. The job remains diagnostic baseline evidence, not a benchmark of
-this v2 implementation.
+### Completed legacy baseline
+
+LSF job `153770521` ran the immutable commit-`bf058521` implementation against
+Cam2010094 and completed successfully on 2026-08-29 at 22:17:31 UTC. The run
+`subject_shape_fused_projection_canary_20260829_bf058521_cam2010094` is
+complete, selector-ineligible, bound under `bound_canonical_v2`, and sealed
+with the historical `single_locked_bound_payload_receipt_v1` profile. Registry
+writes were disabled.
+
+| Phase | Wall time | Delivered read characters |
+|---|---:|---:|
+| plan | 1,403.552 s (23m24s) | 37.31 GB |
+| scientific compute, including the old post-compute receipt scan | 6,764.819 s (1h52m45s) | 396.67 GB |
+| access-aware storage conversion | 361.063 s (6m01s) | 2.78 GB |
+| atomic publication | 9,826.970 s (2h43m47s) | 826.43 GB |
+| cleanup | 22.871 s | negligible |
+
+Within atomic publication, `post_rename_binding` alone took 9,748.514 seconds
+(2h42m29s) and delivered 818.42 GB of reads. The whole job took 18,390.019
+seconds (5h06m30s), delivered 1,460,813,022,742 read characters, and averaged
+2.507 effective CPU cores across 32 allocated slots: 7.835% slot efficiency.
+The OS reported only 6,487,134,208 physical storage-read bytes, so delivered
+read characters primarily measure repeated decode/cache traversal rather than
+network or physical-disk traffic.
+
+A metadata-file census of the baseline target found 106 arrays totaling 10.266
+GiB of logical values. Its final physical-integrity receipt covers
+1,439,980,758 bytes (about 1.34 GiB). Therefore the 1.461 TB of delivered read
+characters was about 133 times the complete logical payload and about 1,014
+times the final compressed tree. Delivered read characters include page-cache
+traffic and are not physical storage bytes, but the ratios still expose
+repeated sharded decode traversal rather than one sequential verification pass.
+
+### Completed receipt-v2 canary
+
+LSF job `153770860` ran commit `e35714b0` against the same Cam2010094 inputs,
+on the same host and 32-slot resource request. It started immediately after the
+baseline at 22:17:31 UTC, completed with exit code zero at 23:03:58 UTC, and did
+not overlap the baseline. The run
+`subject_shape_receipt_v2_canary_20260829_e35714b0_cam2010094` remains
+selector-ineligible, registry writes were disabled, and the consolidated root
+contains the completed `bound_canonical_v2` publication.
+
+| Phase | Legacy `bf058521` | Receipt v2 `e35714b0` | Speedup |
+|---|---:|---:|---:|
+| plan | 1,403.552 s | 23.080 s | 60.81x |
+| scientific-compute envelope | 6,764.819 s | 995.189 s | 6.80x |
+| access-aware storage conversion | 361.063 s | 348.977 s | 1.03x |
+| atomic publication | 9,826.970 s | 1,299.618 s | 7.56x |
+| post-rename binding | 9,748.514 s | 1,222.107 s | 7.98x |
+| total scheduler-observed job | 18,390.019 s | 2,786.824 s | 6.60x |
+
+Total wall time fell from 5h06m30s to 46m27s, an 84.85% reduction. Delivered
+read characters fell from 1,460,813,022,742 to 475,337,630,238, a 67.46%
+reduction. Average effective CPU use increased from 2.507 to 9.950 cores and
+32-slot efficiency rose from 7.835% to 31.095%, approximately 3.97 times the
+baseline efficiency.
+
+The receipt chain closed as designed:
+
+- the final profile is
+  `verified_staged_transfer_plus_binding_append_receipt_v2`;
+- all 100 storage-transform array digests equal the corresponding 100 carried
+  final digests;
+- the six declared binding arrays are the only appended paths;
+- the final receipt records
+  `verified_staged_transfer_plus_final_binding_readback_v2` as its digest
+  source;
+- the physical-copy receipt covers 1,365,323,664 bytes in 1,168 files and was
+  verified by an `rsync --checksum` dry run; and
+- the published consolidated metadata records completion, selector
+  ineligibility, canonical binding, and the v2 profile.
+
+There is no hidden legacy decoded-payload scan. The remaining 1,222.107-second
+binding interval is dominated by `authority_stamping`: 912.950 seconds and
+43.008 GB of delivered read characters. The final `physical_payload_hash` took
+only 2.912 seconds and delivered 1.441 GB. The authority interval wrote only
+90.876 MB, which points to large-metadata read/modify/write amplification, not a
+second numeric transformation. Admission revalidation (113.308 seconds),
+coordinate-source binding/projection (111.018 seconds), and identity-array
+append (69.914 seconds) are the other material subphases. Reducing repeated
+authority-metadata serialization is the next publication optimization; it is
+not evidence for removing the receipt checks.
+
+### Scientific parity finding
+
+The receipt-v2 canary has the same 106-array topology as the baseline. Ninety-
+eight array digests are byte-identical. Eight differ, all downstream of
+`cv2.fitEllipse`:
+
+| Component/output | Differing rows or elements |
+|---|---:|
+| left-eye ellipse parameters | 31 rows |
+| left-eye ellipse success | 29 elements |
+| left-eye body-axis angle | 30 elements |
+| right-eye ellipse parameters | 87 rows |
+| right-eye ellipse success | 75 elements |
+| right-eye body-axis angle | 85 elements |
+| swim-bladder ellipse parameters | 1,651 rows |
+| swim-bladder ellipse success | 1,249 elements |
+
+The source bindings, worker count, chunk size, native-thread limit, and mask
+publication digests are identical. A bounded replay against the immutable
+source masks found that every affected mask contains only 4--12 foreground
+pixels. More decisively, two consecutive calls to the current ellipse fitter on
+the same in-memory mask agreed for only 19/31 left-eye rows, 53/87 right-eye
+rows, and 754/1,651 swim-bladder rows. Replay variably matched the baseline,
+the optimized run, or neither. This is numerical instability in OpenCV's
+ellipse fit on degenerate tiny contours, not a transfer-receipt or storage-copy
+failure.
+
+Do not choose one canary's unstable values as canonical. The scientific
+hardening follow-up is to define a deterministic degenerate-mask admission
+predicate before `cv2.fitEllipse`, emit an explicit component failure reason,
+and test repeated-run identity. This matches the existing policy that a
+component-level geometry failure is recorded without invalidating an otherwise
+valid publication. Until that policy lands, this canary remains
+selector-ineligible even though the receipt-v2 performance and composition
+checks passed.
 
 ## Compatibility and migration
 
