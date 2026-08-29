@@ -487,10 +487,12 @@ extension.
       before composing position and body frame. Persist the source-row identity,
       coverage state, anatomical-axis validity, and reason code on every
       frame-by-chaser row.
-- [ ] Bind an existing applicable anatomical-orientation review receipt or
-      produce a chaser-specific one before treating body-relative output as
-      reviewed scientific evidence. Structural body-frame completeness alone
-      is not a review claim.
+- [x] Treat the validated body-frame supplier as sufficient authority for
+      body-relative outputs. Its exact keypoint source remains sealed lineage;
+      chaser consumers do not separately resolve keypoint authority or require
+      a human keypoint-review receipt when they consume only body-frame arrays.
+      Representative axis visualization is a distinct promotion-quality check,
+      not a selector-ineligible execution gate.
 - [x] Migrate egocentric chaser bearing to the common body-frame extension for
       the exact keypoint-position composition. Detection-centroid position
       remains position-only pending a separate mixed-provider contract.
@@ -620,7 +622,7 @@ impact are recorded in
 - [ ] Test exact reuse, immutable retry, selector ineligibility, source
       preservation, compact metadata, and direct/consolidated equivalence.
 - [ ] Run the first full canary with detection and keypoint position providers
-      kept separate and one reviewed keypoint body-frame provider.
+      kept separate and one validated keypoint-derived body-frame supplier.
 - [ ] Visually inspect representative static pre/post visits, moving-chaser
       trials, escape events, bearing, and provider disagreement.
 - [ ] Compare provider coverage and bias by camera, stimulus state, distance,
@@ -1182,7 +1184,8 @@ The receipt also records plots that cannot yet be produced without inventing
 evidence: individual near visits are not persisted by radial successor v1;
 escape-onset-aligned distance traces are not persisted by escape successor v2;
 ring-entry video is deferred to its sealed video successor; and gaze/bearing
-remains blocked on reviewed body-frame and eye-orientation evidence.
+remains blocked on a validated body-frame supplier and reviewed eye-orientation
+evidence.
 
 Focused outside-sandbox validation passes 14 plotting/radial tests, including
 rejection of mismatched chaser arrays and duplicate provider identities.

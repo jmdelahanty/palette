@@ -69,6 +69,61 @@
   must not alter production authority, and must be reported as not merge-ready
   until the required CI is green.
 
+## Authority Roles and Supplier Sufficiency
+
+- Require only the authorities declared by the consumer's contract. Do not
+  invent a second upstream-authority or human-review gate when a validated
+  supplier already binds that upstream source, its controlled derivation, row
+  identity, coordinate system, validity, and content digests.
+- A validated body-frame supplier is sufficient for consumers that need only
+  anatomical origin, forward/left axes, heading, and validity. Its source
+  keypoints or masks remain sealed lineage; those upstream authorities need to
+  be resolved separately only by consumers that read their landmarks or pixels.
+- `keypoint_authority=false` on a body-frame run prevents the derived cache from
+  masquerading as canonical keypoints. It does not invalidate the run's own
+  body-frame authority and does not imply that a separate human keypoint review
+  is required.
+- Do not infer a human-review requirement from words such as `candidate`,
+  `unreviewed`, or `selector-ineligible`. Human review is an execution gate only
+  when an applicable contract defines the reviewed claim, receipt schema, and
+  runtime validator. A representative visual inspection may instead be a
+  distinct promotion or publication-quality check.
+- Keep `canonical` and `authoritative` claims separate. `canonical` identifies
+  the validated standard schema, coordinate system, lineage, and normal
+  production representation. `authoritative` identifies the exact accepted
+  selection for a declared use. A canonical candidate need not be
+  authoritative, and an authority activation must first validate the applicable
+  canonical contract.
+- Do not treat the mere presence of `authoritative_run` as proof of scientific
+  review. The generic authority primitive proves that a named run exists, is
+  complete, is selector-eligible, and has approval provenance; it does not by
+  itself validate a stage-specific review payload. Claim reviewed authority
+  only when the stage activation path also validates the required review state
+  or receipt.
+- `authoritative_run` is not the universal authority mechanism. Canonical raw
+  detections use matching `latest`/`latest_complete` selectors plus the bound
+  canonical-detection contract and digest; refined detections may use
+  `refined_detect_runs.authoritative_run`; manually accepted refined subject
+  masks may use `refined_subject_masks_runs.authoritative_run`; and modern
+  atomic subject-mask publication selects a cross-family bundle through the
+  root `subject_mask_authority` envelope.
+- Detection authority is explicit and stage-specific: `detect_runs/<run>` may
+  be the selected canonical raw/model detection authority, while the finalized
+  `refined_detect_runs/<run>` (or its clipped finalized collection) is the
+  downstream curated detection authority. Derived position, crop, or analysis
+  runs must not relabel themselves as detection authorities.
+- For modern segmentation, use the existing subject-mask vocabulary. A model
+  produces a `subject_mask_runs/<run>` candidate; a recording-level bundle binds
+  raw mask, refined dense mask, and quality members; explicit activation creates
+  the root `subject_mask_authority` envelope. Do not create a parallel generic
+  `segmentation_authority` when that subject-mask contract applies. A trained
+  network or model artifact is not itself per-recording mask authority.
+- Follow
+  `docs/diagnostics/authority_acceptance_implementation_checklist_2026-08-27.md`
+  when changing review, acceptance, approval, authority resolution, registry
+  projection, or cohort-release behavior. Do not introduce another
+  modality-specific acceptance schema without reconciling it there.
+
 ## Sandbox Zarr Fallback Rule
 
 - If sync `zarr.open_group(...)` hangs in Codex sandbox, use metadata-file checks from `docs/sandbox_zarr_fallback.md`.

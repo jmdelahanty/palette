@@ -28,14 +28,14 @@ promote a scientific source.
 | --- | --- | --- |
 | Full-session and per-epoch chaser distance traces | Trial-only traces and persisted distance CDFs are present | Render both first-class providers directly from receipt-validated relative-frame distance and session-timestamp arrays, using exact persisted epoch bounds and no interpolation |
 | Epoch behavior summary and distributions | Absent | A new protocol-semantic successor must persist fish activity, bout, and inter-bout summary tables with exact exposure denominators before plotting |
-| Egocentric bearing and polar distance | Absent | Reviewed body-frame authority projected only by exact acquisition-frame identity, with missing source rows and present-but-invalid anatomical axes retained as distinct invalid evidence |
-| Fish heading and alignment | Absent | The same reviewed body-frame authority and exact projection; position-only relative-frame runs cannot support these claims, and motion heading or interpolation is not an anatomical fallback |
+| Egocentric bearing and polar distance | Absent | Validated body-frame supplier projected only by exact acquisition-frame identity, with missing source rows and present-but-invalid anatomical axes retained as distinct invalid evidence; no separate keypoint-authority review is required |
+| Fish heading and alignment | Absent | The same validated body-frame supplier and exact projection; position-only relative-frame runs cannot support these claims, and motion heading or interpolation is not an anatomical fallback |
 | Fish trajectory with chaser overlay | Spatial heatmaps exist, but trajectory/overlay context does not | Render source-camera fish and chaser positions from the two receipt-validated relative-frame providers, restrict epoch panels by exact persisted half-open acquisition-frame bounds, retain missing rows, avoid lines that invent continuity between position samples, and rasterize dense exact-row point artists |
 | Configured-zone and chaser-quadrant occupancy | Absent; the existing similarly named product is a Cartesian occupancy heatmap | A modern semantic successor must persist exact zone definitions, geometry identity, denominators, and per-zone counts/fractions; do not silently reuse the legacy module |
 | Chaser radial/near-field summary | The two successors and paired CDF plot are present, but their distance, ring-selection, near-fraction, dwell, and entry-rate panels are not in the cohort bundle | Render only the persisted paired-provider summary and radial tables after verifying identical semantic, geometry, chaser, occurrence, and timing authorities |
 | Individual near-field visits | Absent | A successor schema must persist visit rows, entry/exit/censor identities, and exact timestamps; radial successor v1 contains aggregate visit evidence only |
 | Escape-onset-aligned distance traces | Absent | Escape successor must persist the exact event-to-relative-row alignment rather than reconstructing it in a plotter |
-| Eye--chaser gaze tracking | Absent | Reviewed body-frame and eye-orientation authorities bound to the same acquisition rows |
+| Eye--chaser gaze tracking | Absent | Validated body-frame supplier and separately reviewed eye-orientation authority bound to the same acquisition rows |
 | Response regimes | Absent | A protocol-semantic successor and reviewed state/threshold contract are required |
 | Ring-entry video | Deferred | A sealed video successor must bind source frames, timing, overlays, codec/rendering parameters, and output digest |
 
