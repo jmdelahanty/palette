@@ -224,6 +224,14 @@ CHASER_EXACT_SUCCESSOR_PROVIDER = ProviderDefinition(
             ),
         ),
         AnalysisDefinition(
+            "generalized_bout_response",
+            "Generalized bout response",
+            (
+                "Persisted bout rate, kinematics, separation response, and "
+                "optional body-frame turning by exact onset distance."
+            ),
+        ),
+        AnalysisDefinition(
             "provenance",
             "Provenance",
             "Exact bundle, child-run identities, display projection, and authorities.",

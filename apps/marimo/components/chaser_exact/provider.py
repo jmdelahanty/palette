@@ -8,6 +8,11 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
 from ..registry import InteractiveSpecOption
+from .bout_response import build_exact_bout_response_output
+from .bout_response_projection import (
+    ExactBoutResponseProjectionError,
+    option_bout_response_binding,
+)
 from .controller_trial_projection import (
     ExactControllerTrialProjectionError,
     option_controller_trial_binding,
@@ -54,6 +59,7 @@ class ExactChaserAnalysisRoute:
     load_relative: bool
     renderer: Renderer | None
     load_controller_trials: bool = False
+    load_generalized_bout_response: bool = False
 
 
 _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
@@ -88,6 +94,14 @@ _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
             load_relative=True,
             renderer=build_exact_controller_trials_output,
             load_controller_trials=True,
+        ),
+        "generalized_bout_response": ExactChaserAnalysisRoute(
+            analysis_id="generalized_bout_response",
+            display_parameter_version="exact-generalized-bout-response-display-v1",
+            load_relative=True,
+            renderer=build_exact_bout_response_output,
+            load_controller_trials=True,
+            load_generalized_bout_response=True,
         ),
         "provenance": ExactChaserAnalysisRoute(
             analysis_id="provenance",
@@ -134,12 +148,21 @@ class ExactChaserProviderAdapter:
         _option_bundle(option)
         if option.spec.get("bundle_status") != "exact_selector_ineligible":
             return ()
-        available = [value for value in ANALYSIS_IDS if value != "controller_trials"]
+        available = [
+            value
+            for value in ANALYSIS_IDS
+            if value not in {"controller_trials", "generalized_bout_response"}
+        ]
         try:
             option_controller_trial_binding(option)
         except ExactControllerTrialProjectionError:
             return tuple(available)
         available.insert(4, "controller_trials")
+        try:
+            option_bout_response_binding(option)
+        except ExactBoutResponseProjectionError:
+            return tuple(available)
+        available.insert(5, "generalized_bout_response")
         return tuple(available)
 
     def requires_projection(self, analysis_id: str) -> bool:
@@ -183,6 +206,7 @@ class ExactChaserProviderAdapter:
             selection_identity=identity,
             load_relative=route.load_relative,
             load_controller_trials=route.load_controller_trials,
+            load_generalized_bout_response=(route.load_generalized_bout_response),
         )
 
     def require_current_projection(

@@ -311,16 +311,48 @@ retains all gap counts, including untimed gaps. Display-only reduction limits,
 missing-line breaks, gap-marker placement, interpolation prohibition, and
 legacy-reconstruction prohibition are recorded in figure metadata.
 
-Focused validation currently passes 48 tests. Required CI for the new
-controller-trial branch remains pending, so this section is local and
-real-artifact evidence rather than a merge-ready or deployed claim.
+Focused validation passed 48 tests, and all 23 required checks passed. The
+controller-trial view merged through PR 72 as merge commit
+`d7b1cde38efce05a106c20882f7cd3b8452cc1d2`.
+
+The next modular package adds `generalized_bout_response`. Discovery joins the
+spatial keypoint relative frame to exactly one immutable generalized successor
+by recording identity, normalized relative-frame child, semantic-selection
+digest, exact controller scientific payload, motion source/projection, swim-
+bout lineage and signal, dimensions, method, and no-fallback policy. Ambiguity
+or any mismatch hides only this capability. The loader deep-audits the chosen
+successor and rechecks every synthesized binding before exposing persisted
+arrays.
+
+The view reads the already persisted semantic-role × chaser × onset-distance
+band rates and medians without re-binning or re-aggregation. Bout-level plots
+show the persisted bout start-to-end separation change and, when declared,
+the persisted body-frame bearing/turn rows. The successor does not define an
+independent post-bout response window; the viewer therefore does not invent
+one. It does not resegment bouts, reconstruct trial membership, substitute
+motion heading, interpolate rows, or turn envelope gaps into events. Raw rows
+may undergo deterministic endpoint-preserving display thinning capped at 6,000
+points per role/chaser series; persisted summaries are not thinned.
+
+The live receipt-bound v4 smoke discovered two explicit spatial bundles and
+selected the v4 bundle by its exact run identity. It uniquely joined
+`analysis/generalized_chaser_bout_response_runs/goodbatbadbat_chaser_successors_20260827_body_frame_projection_v4`,
+whose outer manifest digest is
+`81a01f070e274ab546814e36380b335a84e6116718052678977a6bc85a23dc80`
+and scientific payload digest is
+`bd989380194427405b0a42387defa1e084ce5a738dda8ae109de523aea2cb30f`.
+The deep audit loaded 1,445 bouts, 2,890 bout-by-chaser rows, and 30 persisted
+summary rows in 13.361 seconds. Of 2,466 base-valid rows, all 2,466 carried
+valid body-frame axes. Eight rows began during exact active controller-trial
+membership; the remaining rows retained their explicit non-trial attachment
+state. Focused validation passes 57 tests. Required CI for this new branch is
+pending, so the generalized view is not yet merge-ready or deployed.
 
 ## Persisted but not yet mounted in this capability
 
 These products are safe candidates for later read-only panels, but were kept
 out of the initial component:
 
-- generalized bout-response summaries;
 - escape/freeze trial and event summaries;
 - gaze/controller-trial views where a complete gaze successor is present; and
 - the full-profile readiness and module-binding envelope.
@@ -332,11 +364,12 @@ geometry.
 
 The currently declared exact-successor analyses are
 `radial_near_field`, `distance_traces`, `trajectory_overlays`,
-`spatial_occupancy`, conditionally `controller_trials`, and `provenance`. They
+`spatial_occupancy`, conditionally `controller_trials`, conditionally
+`generalized_bout_response`, and `provenance`. They
 do not provide interactive
 equivalents for all nine static figure families. In particular,
-bout-response detail, escape/freeze detail, and the composed full dashboard
-remain absent from this exact reader. Older GoodCopBadCop components or
+escape/freeze detail and the composed full dashboard remain absent from this
+exact reader. Older GoodCopBadCop components or
 candidate views must not be used as an implicit fallback for these
 receipt-bound successors.
 
@@ -370,4 +403,5 @@ either as scientific authority. When more than one immutable exact bundle is
 visible, the source dropdown starts unselected and no analysis projection loads
 until the operator chooses one. A sole exact bundle remains the unambiguous
 default. The reader and modular spatial implementation are present on `main`;
-the controller-trial addition above remains on its CI-pending branch.
+the controller-trial addition above is merged. The generalized bout-response
+addition remains on its locally validated, CI-pending branch.

@@ -2,7 +2,7 @@
 
 <!-- contract-meta
 status: implementation-in-progress
-implementation: reader-and-modular-spatial-merged-controller-trial-locally-validated-ci-pending
+implementation: reader-spatial-controller-trial-merged-generalized-bout-response-locally-validated-ci-pending
 last_verified: 2026-08-29
 -->
 
@@ -57,8 +57,15 @@ current zero-option defect.
 - [x] The modular/spatial branch plus explicit multi-source choice passed all
       23 required checks and merged through PR 71 as merge commit
       `13318a8b7a16399a70f290ea3bd5ad466f309ae9`.
-- [ ] Required CI for the controller-trial branch has not run. Local and
-      real-artifact validation do not make that branch merge-ready.
+- [x] The exact controller-trial view passed all 23 required checks and merged
+      through PR 72 as merge commit
+      `d7b1cde38efce05a106c20882f7cd3b8452cc1d2`.
+- [x] The generalized bout-response implementation passes 57 focused tests and
+      a read-only live v4 smoke: 1,445 selected bouts, 2,890 bout-by-chaser
+      rows, 30 persisted distance-band summaries, and 2,466 directed-valid
+      body-frame rows.
+- [ ] Required CI for the generalized bout-response branch has not run. Local
+      and real-artifact validation do not make that branch merge-ready.
 
 ## Safety invariants
 
@@ -234,10 +241,9 @@ in [`marimo_explorer_architecture.md`](../marimo_explorer_architecture.md).
 - [x] Keep `apps/marimo/components/chaser_exact_successors.py` as a temporary
       compatibility facade that re-exports the supported public functions.
 - [x] Put spatial occupancy in its own focused module.
-- [ ] Put later generalized bout-response, escape/freeze, and full-profile
-      views in their own focused modules. The controller-trial view now has its
-      own focused renderer and audited binding/loader modules on the current
-      implementation branch.
+- [ ] Put later escape/freeze and full-profile views in their own focused
+      modules. Controller-trial and generalized bout-response now each have
+      focused renderer and audited binding/loader modules.
 - [x] Keep legacy GoodCopBadCop code isolated. Do not add new exact-successor
       logic, fallback behavior, or scientific interpretation to that surface.
 - [x] Keep discovery metadata-only. Importing a provider or listing analysis
@@ -283,13 +289,17 @@ not derive a new scientific product in the UI.
 
 ### 5C — Generalized bout response
 
-- [ ] Mount persisted bout-response rows, response windows, bout identities,
-      kinematics, and source validity.
-- [ ] Preserve the source swim-bout segmentation and controller-trial binding;
+- [x] Mount persisted bout-response rows, exact bout start/end response
+      intervals, bout identities, kinematics, and source validity. The
+      successor has no independent post-bout response window, so the viewer
+      does not synthesize one.
+- [x] Preserve the source swim-bout segmentation and controller-trial binding;
       do not resegment bouts or reassign events in the viewer.
-- [ ] Expose distance-stratified and body-frame response summaries only where
-      the persisted product declares the required source/validity fields.
-- [ ] Keep body-frame missing-source and present-invalid-axis states distinct.
+- [x] Expose persisted distance-stratified summaries and raw body-frame
+      response rows only where the product declares the required source and
+      validity fields; do not re-bin or re-aggregate scientific summaries.
+- [x] Keep body-frame missing-source and present-invalid-axis states distinct
+      in the callout and display provenance, with no motion-heading fallback.
 
 ### 5D — Escape/freeze
 
@@ -401,7 +411,7 @@ This is a design gate, not a prerequisite for the reader compatibility fix.
 ## Definition of done
 
 The immediate reader package is done only when the real smoke target discovers
-exactly one receipt-bound option, all four currently declared analyses load
+exactly one receipt-bound option and every currently declared exact analysis loads
 through consolidated exact-path reads, production-shaped and adversarial tests
 pass, Marimo check passes, and every required CI check is green. This does not
 claim full visualization parity.
