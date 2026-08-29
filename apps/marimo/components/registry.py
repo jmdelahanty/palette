@@ -63,6 +63,9 @@ from fisheye.visualization.bout_kinematics_interactive import (
     effective_bout_renderer,
 )
 from .common import join_path, normalize_path
+from .chaser_exact_bout_response_discovery import (
+    compatible_generalized_bout_response_binding,
+)
 
 TRACK_KINEMATICS_PLOT_RENDERER = "palette-track-kinematics-summary-v1"
 TRACK_KINEMATICS_INTERACTIVE_ARTIFACT = "track_kinematics_summary_track_0_interactive"
@@ -988,15 +991,22 @@ def discover_exact_chaser_successor_options(
             spatial_sources=sources,
             keypoint_relative_manifest=relative_manifests[0],
         )
-        analysis_bindings = (
-            {"controller_trials": dict(controller_trial_binding)}
-            if controller_trial_binding is not None
-            else {}
+        bout_response_binding = compatible_generalized_bout_response_binding(
+            root,
+            recording_id=recording_id,
+            spatial_sources=sources,
+            keypoint_relative_manifest=relative_manifests[0],
+            controller_trial_binding=controller_trial_binding,
         )
+        analysis_bindings = {}
+        if controller_trial_binding is not None:
+            analysis_bindings["controller_trials"] = dict(controller_trial_binding)
+        if bout_response_binding is not None:
+            analysis_bindings["generalized_bout_response"] = dict(bout_response_binding)
         title = f"Exact paired-provider chaser successors: {run_name}"
         spec = {
             "schema_id": "palette.chaser_exact_successor_explorer_spec",
-            "schema_version": 4,
+            "schema_version": 5,
             "renderer": CHASER_EXACT_SUCCESSOR_RENDERER,
             "title": title,
             "run_name": run_name,
@@ -1010,6 +1020,11 @@ def discover_exact_chaser_successor_options(
                 **(
                     {"controller_trials": controller_trial_binding["run_path"]}
                     if controller_trial_binding is not None
+                    else {}
+                ),
+                **(
+                    {"generalized_bout_response": bout_response_binding["run_path"]}
+                    if bout_response_binding is not None
                     else {}
                 ),
             },
@@ -1068,6 +1083,25 @@ def discover_exact_chaser_successor_options(
                     "gap_marker_timestamp_policy": (
                         "valid_source_timestamps_only_all_gaps_retained_in_table"
                     ),
+                },
+                "generalized_bout_response": {
+                    "recipe_id": "persisted_exact_bout_by_chaser_response_view_v1",
+                    "summary_source": (
+                        "persisted_semantic_role_x_chaser_x_distance_band_arrays"
+                    ),
+                    "bout_source": "persisted_selected_swim_bout_x_chaser_rows",
+                    "distance_band_edges": "persisted_no_rebinning",
+                    "rate_denominator": (
+                        "persisted_valid_transition_time_in_distance_band"
+                    ),
+                    "max_points_per_role_chaser_series": 6000,
+                    "display_projection_algorithm": (
+                        "source_order_uniform_endpoint_preserving_v1"
+                    ),
+                    "trial_membership": "exact_onset_row_only",
+                    "trial_envelope_gaps": "retained_nonmembers_not_events",
+                    "bout_resegmentation": "prohibited",
+                    "body_frame_fallback": "prohibited",
                 },
                 "scientific_recomputation": False,
                 "interpolation": "prohibited",

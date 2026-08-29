@@ -42,6 +42,7 @@ def build_projection_provenance(
     relative_bindings: Sequence[Mapping[str, Any]],
     relative_binding_proofs: Sequence[Any],
     controller_trials: Any | None = None,
+    generalized_bout_response: Any | None = None,
 ) -> Mapping[str, Any]:
     """Build the readable, immutable identity record shared by exact views."""
 
@@ -74,6 +75,26 @@ def build_projection_provenance(
                     "deep_audited": controller_trials.deep_audited,
                 }
                 if controller_trials is not None
+                else None
+            ),
+            "generalized_bout_response_binding": (
+                {
+                    "run_path": generalized_bout_response.run_path,
+                    "manifest_sha256": generalized_bout_response.manifest_sha256,
+                    "scientific_payload_sha256": (
+                        generalized_bout_response.scientific_payload_sha256
+                    ),
+                    "sources": plain(
+                        generalized_bout_response.scientific_manifest.get("sources")
+                    ),
+                    "body_extension_present": generalized_bout_response.scientific_manifest.get(
+                        "scientific_schema", {}
+                    ).get(
+                        "body_extension_present"
+                    ),
+                    "deep_audited": generalized_bout_response.deep_audited,
+                }
+                if generalized_bout_response is not None
                 else None
             ),
             "adapter_semantics": (
