@@ -345,6 +345,7 @@ def build_subject_shape_materialization_plan(
             "bundle_manifest_payload_digest": (
                 bundle_source.authority.bundle_manifest["payload_digest"]
             ),
+            "bundle_admission_receipt": dict(bundle_source.authority.admission_receipt),
             "refined_manifest_payload_digest": (
                 bundle_source.authority.refined_manifest["payload_digest"]
             ),

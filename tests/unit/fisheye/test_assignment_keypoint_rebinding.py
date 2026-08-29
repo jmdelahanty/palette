@@ -3,9 +3,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
 import numpy as np
+import pytest
 
 from fisheye.shared.zarr.assignment_keypoint_rebinding import (
     ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE,
@@ -15,6 +17,7 @@ from fisheye.shared.zarr.assignment_keypoint_rebinding import (
     _assignment_collection_source_run,
     _chunked_equivalence,
     inspect_assignment_keypoint_rebinding,
+    load_assignment_keypoint_rebinding_manifest,
     validate_assignment_keypoint_rebinding_manifest,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
@@ -97,10 +100,7 @@ def _manifest() -> dict[str, object]:
             for name in (
                 "source_crop_row_ids_to_source_crop_row_ids",
                 "instance_key_to_instance_key",
-                (
-                    "source_acquisition_frame_index_to_"
-                    "source_acquisition_frame_index"
-                ),
+                ("source_acquisition_frame_index_to_" "source_acquisition_frame_index"),
                 "keypoints_roi_to_keypoints_roi",
                 "detection_success_to_pose_success",
             )
@@ -189,6 +189,86 @@ def test_rebinding_manifest_is_closed_and_digest_sealed() -> None:
         "payload fields are not exact" in error
         for error in validate_assignment_keypoint_rebinding_manifest(expanded)
     )
+
+
+def test_rebinding_loader_reuses_provided_bound_mask_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _manifest()
+    collection = _collection()
+    manifest["payload"]["subject_mask_source"]["assignment_collection_digest"] = (
+        canonical_json_sha256(collection)
+    )
+    manifest["payload_digest"] = canonical_json_sha256(manifest["payload"])
+    run = SimpleNamespace(
+        attrs={
+            "run_manifest": manifest,
+            "palette_run_completion_contract": "palette.zarr_run_completion.v1",
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+            "production_candidate": True,
+        }
+    )
+    root = {"subject_mask_assignment_keypoint_rebinding_runs/rebind_001": run}
+    bundle = SimpleNamespace(
+        archive_path=Path("/archive"),
+        recording_identity="recording",
+        camera_identity="camera",
+        n_rois=5,
+        bundle_id="bundle_001",
+        bundle_manifest={"payload_digest": "1" * 64},
+        authority_digest="2" * 64,
+        refined_run_path="refined_subject_masks_runs/refined_001",
+        assignment_keypoint_collection=collection,
+        admission_receipt={"status": "admitted"},
+    )
+    keypoints = manifest["payload"]["canonical_keypoint_source"]
+    source = SimpleNamespace(
+        active_keypoint_bundle_authority_digest=keypoints[
+            "keypoint_bundle_authority_digest"
+        ],
+        active_keypoint_bundle_authority={
+            "generation": keypoints["keypoint_bundle_authority_generation"]
+        },
+        run_path=keypoints["run_path"],
+        successor_authority_digest=keypoints["coordinate_successor_authority_digest"],
+        manifest={"payload_digest": keypoints["run_manifest_payload_digest"]},
+        manifest_digest=keypoints["run_manifest_document_digest"],
+    )
+
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding.open_zarr_root",
+        lambda *_args, **_kwargs: root,
+    )
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding.zarr.open_group",
+        lambda *_args, **_kwargs: root,
+    )
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding."
+        "require_bound_recording_subject_mask_coordinate_authority",
+        lambda value: value,
+    )
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding."
+        "load_recording_subject_mask_coordinate_authority",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("provided authority must prevent a second bundle load")
+        ),
+    )
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding."
+        "load_keypoint_coordinate_successor_admission",
+        lambda *_args, **_kwargs: source,
+    )
+
+    loaded = load_assignment_keypoint_rebinding_manifest(
+        Path("/archive"),
+        rebinding_run_id="rebind_001",
+        subject_mask_authority=bundle,
+    )
+
+    assert loaded == manifest
 
 
 def test_inspection_uses_resolver_digests_for_immutable_documents(

@@ -4,13 +4,17 @@ import copy
 import hashlib
 import json
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
 import numpy as np
 import pytest
 import zarr
 
+from fisheye.shared.zarr import subject_mask_bundle_publication as bundle_publication
+from fisheye.shared.zarr import subject_mask_cache_publication as cache_publication
+from fisheye.shared.zarr import subject_mask_core_publication as core_publication
+from fisheye.shared.zarr import subject_mask_quality_publication as quality_publication
 from fisheye.analysis.subject_shape_storage import (
     SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
     SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID,
@@ -1147,6 +1151,7 @@ def test_recording_bundle_signed_hybrid_rebase_is_explicit_and_fail_closed(
 
 def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v5(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     draft = _draft(
         tmp_path,
@@ -1241,12 +1246,83 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
             analysis,
             bundle_id="bundle_coordinate_v4",
         )
-    inactive = load_recording_subject_mask_coordinate_authority(
-        analysis,
-        bundle_id="bundle_coordinate_v4",
-        allow_inactive=True,
-    )
+
+    def forbid_quality_payload_hash(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError(
+            "normal bundle admission must not recompute quality payload hashes"
+        )
+
+    root_metadata_reads = {
+        "bundle": 0,
+        "cache": 0,
+        "core": 0,
+        "quality": 0,
+    }
+    root_metadata_path = (analysis / "zarr.json").resolve()
+
+    def count_root_read(
+        name: str,
+        reader: Callable[[Path], dict[str, Any]],
+    ) -> Callable[[Path], dict[str, Any]]:
+        def counted(path: Path) -> dict[str, Any]:
+            if Path(path).resolve() == root_metadata_path:
+                root_metadata_reads[name] += 1
+            return reader(path)
+
+        return counted
+
+    with monkeypatch.context() as admission_guard:
+        admission_guard.setattr(
+            "fisheye.shared.zarr.subject_mask_quality_manifest."
+            "streaming_array_sha256",
+            forbid_quality_payload_hash,
+        )
+        admission_guard.setattr(
+            bundle_publication,
+            "_strict_json",
+            count_root_read("bundle", bundle_publication._strict_json),
+        )
+        admission_guard.setattr(
+            cache_publication,
+            "_strict_json",
+            count_root_read("cache", cache_publication._strict_json),
+        )
+        admission_guard.setattr(
+            core_publication,
+            "_strict_json",
+            count_root_read("core", core_publication._strict_json),
+        )
+        admission_guard.setattr(
+            quality_publication,
+            "_read_strict_json",
+            count_root_read("quality", quality_publication._read_strict_json),
+        )
+        inactive = load_recording_subject_mask_coordinate_authority(
+            analysis,
+            bundle_id="bundle_coordinate_v4",
+            allow_inactive=True,
+        )
+    assert root_metadata_reads == {
+        "bundle": 1,
+        "cache": 0,
+        "core": 0,
+        "quality": 0,
+    }
+    with monkeypatch.context() as admission_guard:
+        admission_guard.setattr(
+            "fisheye.shared.zarr.subject_mask_quality_manifest."
+            "streaming_array_sha256",
+            forbid_quality_payload_hash,
+        )
+        shape_source = load_subject_shape_bundle_source(
+            analysis,
+            bundle_id="bundle_coordinate_v4",
+            allow_inactive=True,
+        )
     assert inactive.active is False
+    assert inactive.admission_receipt["validation_profile"] == (
+        "sealed_member_receipts_v1"
+    )
     assert inactive.crop_run_path == "crop_runs/crop_001"
     assert (
         inactive.refined_run.path == "refined_subject_masks_runs/refined_coordinate_v4"
@@ -1262,11 +1338,6 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
     )
     with pytest.raises(SubjectShapeBundleSourceError, match="cannot be constructed"):
         BoundSubjectShapeBundleSource()
-    shape_source = load_subject_shape_bundle_source(
-        analysis,
-        bundle_id="bundle_coordinate_v4",
-        allow_inactive=True,
-    )
     assert shape_source.active is False
     assert shape_source.source_record["component_labels"] == [
         "subject_body",
@@ -1344,6 +1415,12 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
         check_capacity=False,
     )
     assert shape_result["status"] == "complete"
+    assert (
+        shape_result["plan"]["source_contract"]["bundle_admission_receipt"][
+            "validation_profile"
+        ]
+        == "sealed_member_receipts_v1"
+    )
     mutable = zarr.open_group(str(analysis), mode="r", use_consolidated=False)
     shape_parent = mutable["analysis/subject_shape_runs"]
     assert {
@@ -1423,9 +1500,7 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
         check_capacity=False,
     )
     assert supported_result["status"] == "complete"
-    selected_root = zarr.open_group(
-        str(analysis), mode="r", use_consolidated=True
-    )
+    selected_root = zarr.open_group(str(analysis), mode="r", use_consolidated=True)
     selected_parent = selected_root["analysis/subject_shape_runs"]
     assert selected_parent.attrs["latest"] == "shape_bundle_v5_supported"
     assert selected_parent.attrs["latest_complete"] == "shape_bundle_v5_supported"
@@ -1437,7 +1512,9 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
         "analysis/subject_shape_runs/shape_bundle_v5_supported",
     )
     assert selected_publication.source_binding is not None
-    assert selected_publication.source_binding.record_sha256 == shape_source.source_digest
+    assert (
+        selected_publication.source_binding.record_sha256 == shape_source.source_digest
+    )
     workflow_verification = verify_persisted_stage_output(
         analysis,
         "subject_shape",
@@ -1500,9 +1577,7 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
         "analysis/subject_shape_runs/shape_bundle_v5_supported/coordinate_records/"
         "source_binding"
     ]
-    supported_binding.attrs[SUBJECT_SHAPE_SOURCE_BINDING_ATTR] = {
-        "tampered": True
-    }
+    supported_binding.attrs[SUBJECT_SHAPE_SOURCE_BINDING_ATTR] = {"tampered": True}
     failed_workflow_verification = verify_persisted_stage_output(
         analysis,
         "subject_shape",
