@@ -2,7 +2,7 @@
 
 <!-- contract-meta
 status: active
-implementation: reader-merged-modular-spatial-locally-validated-ci-pending
+implementation: reader-and-modular-spatial-merged-controller-trial-locally-validated-ci-pending
 last_verified: 2026-08-29
 -->
 
@@ -159,11 +159,11 @@ needed for the compatibility fix.
 
 ### Reader correction and acceptance evidence — verified 2026-08-29
 
-The isolated implementation worktree
-`/tmp/palette-chaser-interactive-reader-20260827` contains the reader-only
-correction at commit `559c08fdea42f0e4de3985033f95e99917a67a5f` on PR 70.
-All 23 required CI checks passed and GitHub reports a clean merge state. The PR
-remains open and has not been merged or deployed.
+The reader-only correction at commit
+`559c08fdea42f0e4de3985033f95e99917a67a5f` passed all 23 required CI checks
+and merged through PR 70 as merge commit
+`33bc1c5b7f4d91348fc18ff2a8683e72761ea185`. It was not deployed or used to
+activate a selector.
 
 The correction adds one Marimo-independent exact-relative-child binding
 validator. It accepts only the closed minimal and receipt-bound profiles,
@@ -261,17 +261,65 @@ spatial and 61+61 radial arrays totaling 324,573 decoded bytes. It loaded no
 relative-frame arrays. The renderer exposed nine heatmaps totaling 15,876
 cells. The first behavior smoke rendered in 0.116 seconds.
 
-Local validation passes 35 focused tests, `marimo check`, Python compilation,
-Black formatting, contract freshness, file-size ratchet, and `git diff
---check`. Required CI for this new branch remains pending; neither commit is
-merge-ready, deployed, or present on `main` until that CI and review complete.
+The modular/spatial work and explicit multi-source choice passed all 23
+required checks and merged through PR 71 as merge commit
+`13318a8b7a16399a70f290ea3bd5ad466f309ae9`. It remains undeployed and did not
+change the shared `/groups` checkout or any selector.
+
+## Exact controller-trial implementation and smoke — 2026-08-29
+
+The current controller-trial branch adds a focused renderer in
+`chaser_exact/controller_trials.py`, a focused audited binding/loader in
+`chaser_exact/controller_trial_projection.py`, and one closed provider route. At
+metadata discovery, it joins a spatial bundle to a controller-trial successor
+only when exactly one complete selector-ineligible controller run has the same
+recording ID, keypoint relative-frame run path/digest, semantic-selection run
+path/digest, dimensions, exact logged-membership method, and no-fallback
+policy. It never uses a shared run name, modification time, selector, or sorted
+default. Zero or multiple matches leave only this capability unavailable. The
+chosen controller outer manifest, scientific payload, relative source, and
+semantic source are copied into schema-v4 synthesized analysis bindings and
+their digest participates in the reactive selection identity.
+
+The projection deep-audits all controller arrays and verifies the stored trial
+table against dense source-row membership, envelope membership, gap membership
+and reason codes, trigger timestamp/acquisition identity, per-trial counts,
+chaser identity, and the paired relative-frame dimensions. Any `fallback_used`
+row, unresolved active trial identity, changed digest, incompatible source, or
+membership/gap overlap makes the panel unavailable.
+
+The live read-only smoke selected receipt-bound v4 spatial run
+`goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260827_body_frame_projection_receipt_bound_v4`
+and uniquely joined controller run
+`goodbatbadbat_chaser_successors_20260827_body_frame_projection_v4`. The exact
+controller outer manifest digest was
+`ba886b62cc99ffa8bd2272d06a051ba37779352b5aec6731abbe92333ee31b00`;
+its scientific payload digest was
+`3bd888e3da2e74fbccfde484b4c9474b05466712ad95c2f81a94a15145c9f9da`.
+Discovery returned the two explicit spatial bundles in 0.314 seconds. The v4
+smoke observed one exact controller match for each bundle and selected the
+receipt-bound v4 bundle explicitly; no controller was cross-joined or chosen
+as a default. The v4
+controller projection loaded and deep-audited 299,872 source rows in 11.368
+seconds. It found four trials with 2,024, 2,037, 1,907, and 1,993 exact active
+members, zero gaps in this recording, and `fallback_used=false` throughout.
+Synthetic tests retain and label explicit nonmember gaps so the zero-gap live
+case does not erase that behavior. Real Plotly construction produced eight
+full-session traces, eight trigger-aligned trial traces, and four exact trial
+table rows. Gap markers require a valid source timestamp while the table
+retains all gap counts, including untimed gaps. Display-only reduction limits,
+missing-line breaks, gap-marker placement, interpolation prohibition, and
+legacy-reconstruction prohibition are recorded in figure metadata.
+
+Focused validation currently passes 48 tests. Required CI for the new
+controller-trial branch remains pending, so this section is local and
+real-artifact evidence rather than a merge-ready or deployed claim.
 
 ## Persisted but not yet mounted in this capability
 
 These products are safe candidates for later read-only panels, but were kept
 out of the initial component:
 
-- exact controller-trial summaries and trigger-aligned distance views;
 - generalized bout-response summaries;
 - escape/freeze trial and event summaries;
 - gaze/controller-trial views where a complete gaze successor is present; and
@@ -284,12 +332,13 @@ geometry.
 
 The currently declared exact-successor analyses are
 `radial_near_field`, `distance_traces`, `trajectory_overlays`,
-`spatial_occupancy`, and `provenance`. They do not provide interactive
+`spatial_occupancy`, conditionally `controller_trials`, and `provenance`. They
+do not provide interactive
 equivalents for all nine static figure families. In particular,
-controller-trial/bout-response detail, escape/freeze detail, and the composed
-full dashboard remain absent from this exact reader. Older GoodCopBadCop
-components or candidate views must not be used as an implicit fallback for
-these receipt-bound successors.
+bout-response detail, escape/freeze detail, and the composed full dashboard
+remain absent from this exact reader. Older GoodCopBadCop components or
+candidate views must not be used as an implicit fallback for these
+receipt-bound successors.
 
 ## Still evidence-blocked or deferred
 
@@ -320,5 +369,5 @@ bundle, so current discovery presents two source choices without treating
 either as scientific authority. When more than one immutable exact bundle is
 visible, the source dropdown starts unselected and no analysis projection loads
 until the operator chooses one. A sole exact bundle remains the unambiguous
-default. The reader is present on `main`; the modular spatial implementation
-above remains on its CI-pending branch.
+default. The reader and modular spatial implementation are present on `main`;
+the controller-trial addition above remains on its CI-pending branch.

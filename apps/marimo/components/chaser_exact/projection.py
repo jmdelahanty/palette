@@ -20,6 +20,7 @@ from fisheye.analysis_workflows.composable_chaser_successor_publication import (
 from fisheye.analysis_workflows.exact_relative_frame_binding import (
     ExactRelativeFrameBindingProof,
     require_same_exact_relative_frame_child,
+    validate_exact_relative_frame_binding,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
@@ -34,6 +35,7 @@ from fisheye.shared.zarr_run_completion import (
 
 from ..common import normalize_path
 from ..registry import CHASER_EXACT_SUCCESSOR_RENDERER, InteractiveSpecOption
+from .controller_trial_projection import load_exact_controller_trials
 from .provenance import build_projection_provenance, freeze, plain
 
 PROVIDER_ROLES = ("keypoint", "detection")
@@ -89,7 +91,19 @@ def _exact_child_path(value: Any, *, parent: str, label: str) -> tuple[str, str]
         not value.startswith(prefix)
         or not name
         or "/" in name
-        or name in {".", "..", "latest", "default", "selected"}
+        or name in {".", ".."}
+        or name.casefold()
+        in {
+            "latest",
+            "latest_complete",
+            "latest_pending",
+            "current",
+            "current_run",
+            "selected",
+            "authoritative",
+            "authoritative_run",
+            "default",
+        }
     ):
         raise ExactChaserProjectionError(
             f"{label} must be one exact child below {parent!r}."
@@ -121,6 +135,7 @@ class ExactChaserSelectionIdentity:
     analysis_id: str
     display_parameter_version: str
     display_parameters_sha256: str
+    analysis_bindings_sha256: str
 
 
 def build_exact_chaser_selection_identity(
@@ -140,6 +155,9 @@ def build_exact_chaser_selection_identity(
     display_parameters = _mapping(
         option.spec.get("display_parameters", {}), label="display parameters"
     )
+    analysis_bindings = _mapping(
+        option.spec.get("analysis_bindings", {}), label="analysis bindings"
+    )
     return ExactChaserSelectionIdentity(
         archive_path=str(archive),
         run_path=run_path,
@@ -149,6 +167,7 @@ def build_exact_chaser_selection_identity(
         analysis_id=analysis_id,
         display_parameter_version=display_parameter_version,
         display_parameters_sha256=canonical_json_sha256(plain(display_parameters)),
+        analysis_bindings_sha256=canonical_json_sha256(plain(analysis_bindings)),
     )
 
 
@@ -191,6 +210,7 @@ class ExactChaserSuccessorProjection:
     spatial: Any
     radials: tuple[Any, Any]
     relatives: tuple[RelativeFrameProjection, RelativeFrameProjection] | None
+    controller_trials: Any | None
     provider_ids: tuple[str, str]
     epoch_records: tuple[Mapping[str, Any], ...]
     provenance: Mapping[str, Any]
@@ -422,6 +442,7 @@ def load_exact_chaser_projection(
     *,
     selection_identity: ExactChaserSelectionIdentity,
     load_relative: bool,
+    load_controller_trials: bool = False,
 ) -> ExactChaserSuccessorProjection:
     """Load one exact, selector-free visualization projection."""
 
@@ -516,6 +537,19 @@ def load_exact_chaser_projection(
                 raise ExactChaserProjectionError(
                     f"Paired exact chaser evidence differs for {name!r}."
                 )
+    controller_trials = None
+    if load_controller_trials:
+        if relatives is None:
+            raise ExactChaserProjectionError(
+                "Controller-trial views require exact relative-frame sources."
+            )
+        controller_trials = load_exact_controller_trials(
+            archive,
+            option,
+            spatial=spatial,
+            expected_relative_binding=relative_bindings[0],
+            relative=relatives[0],
+        )
     epoch_records = spatial.scientific_manifest.get("epoch_records")
     if not isinstance(epoch_records, (list, tuple)) or not epoch_records:
         raise ExactChaserProjectionError("Exact chaser bundle lacks epoch records.")
@@ -526,6 +560,7 @@ def load_exact_chaser_projection(
         spatial=spatial,
         radials=radials,  # type: ignore[arg-type]
         relatives=relatives,  # type: ignore[arg-type]
+        controller_trials=controller_trials,
         provider_ids=provider_ids,
         epoch_records=tuple(freeze(record) for record in epoch_records),
         provenance=build_projection_provenance(
@@ -533,6 +568,7 @@ def load_exact_chaser_projection(
             radials=radials,
             relative_bindings=relative_bindings,
             relative_binding_proofs=relative_binding_proofs,
+            controller_trials=controller_trials,
         ),
     )
 

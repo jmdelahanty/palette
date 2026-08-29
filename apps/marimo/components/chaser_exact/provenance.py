@@ -41,11 +41,13 @@ def build_projection_provenance(
     radials: Sequence[Any],
     relative_bindings: Sequence[Mapping[str, Any]],
     relative_binding_proofs: Sequence[Any],
+    controller_trials: Any | None = None,
 ) -> Mapping[str, Any]:
     """Build the readable, immutable identity record shared by exact views."""
 
     return freeze(
         {
+            "recording_id": spatial.recording_id,
             "bundle_run_path": spatial.run_path,
             "bundle_manifest_sha256": spatial.manifest_sha256,
             "radial_run_paths": [radial.run_path for radial in radials],
@@ -54,6 +56,26 @@ def build_projection_provenance(
             "relative_binding_proofs": [
                 plain(proof.provenance_record()) for proof in relative_binding_proofs
             ],
+            "controller_trial_binding": (
+                {
+                    "run_path": controller_trials.run_path,
+                    "manifest_sha256": controller_trials.manifest_sha256,
+                    "scientific_payload_sha256": (
+                        controller_trials.scientific_payload_sha256
+                    ),
+                    "source_relative_frame": plain(
+                        controller_trials.scientific_manifest.get(
+                            "source_relative_frame"
+                        )
+                    ),
+                    "semantic_selection": plain(
+                        controller_trials.scientific_manifest.get("semantic_selection")
+                    ),
+                    "deep_audited": controller_trials.deep_audited,
+                }
+                if controller_trials is not None
+                else None
+            ),
             "adapter_semantics": (
                 "read_only_exact_children_no_selector_no_interpolation"
             ),

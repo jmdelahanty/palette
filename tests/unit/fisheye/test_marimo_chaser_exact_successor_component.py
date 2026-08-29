@@ -40,6 +40,7 @@ def _relative(path: str, provider_id: str, provider_digest: str) -> _Group:
         "recording_id": "recording-1",
         "selector_eligible": False,
         "selection": "none",
+        "dimensions": {"n_frames": 10, "n_chasers": 2, "n_rows": 20},
         "source_authorities": {
             "fish_position": {
                 "provider_id": provider_id,
@@ -66,6 +67,8 @@ def _successor(
     kind: str,
     scientific: dict[str, Any],
 ) -> _Group:
+    scientific = dict(scientific)
+    scientific["payload_digest"] = canonical_json_sha256(scientific)
     manifest = {
         "successor_kind": kind,
         "run_path": path,
@@ -73,6 +76,7 @@ def _successor(
         "selector_eligible": False,
         "selection": "none",
         "scientific_manifest": scientific,
+        "scientific_payload_sha256": scientific["payload_digest"],
     }
     digest = canonical_json_sha256(manifest)
     return _Group(
@@ -94,6 +98,10 @@ def _archive() -> _Group:
         ("detection", "detection.v1", "b" * 64),
     )
     root = _Group()
+    semantic = {
+        "run_path": ("analysis/protocol_semantic_chaser_selection_runs/semantic-v1"),
+        "manifest_sha256": "c" * 64,
+    }
     records = []
     for role, provider_id, provider_digest in providers:
         relative_path = f"analysis/chaser_relative_frame_runs/{role}-relative"
@@ -141,11 +149,47 @@ def _archive() -> _Group:
     spatial = _successor(
         spatial_path,
         "chaser_spatial_occupancy",
-        {"sources": {"position_providers": records}},
+        {
+            "sources": {
+                "position_providers": records,
+                "protocol_semantic_selection": semantic,
+            }
+        },
     )
     parent = _Group({spatial_name: spatial})
     root["analysis/chaser_spatial_occupancy_runs"] = parent
     root[spatial_path] = spatial
+    controller_name = "controller-v1"
+    controller_path = f"analysis/controller_chase_trial_runs/{controller_name}"
+    controller = _successor(
+        controller_path,
+        "controller_chase_trials",
+        {
+            "scientific_schema": {
+                "schema_id": "palette.analysis.controller_chase_trials",
+                "schema_version": 1,
+                "method_id": "exact_logged_trial_id_active_membership_v1",
+            },
+            "source_relative_frame": {
+                key: records[0]["relative_frame"][key]
+                for key in ("run_path", "manifest_sha256")
+            },
+            "semantic_selection": semantic,
+            "dimensions": {
+                "n_frames": 10,
+                "n_chasers": 2,
+                "n_source_rows": 20,
+                "n_trials": 2,
+            },
+            "policy": {
+                "fallback": "prohibited_fail_closed",
+                "legacy_contiguous_interval_reconstruction": "rejected",
+            },
+        },
+    )
+    controller_parent = _Group({controller_name: controller})
+    root["analysis/controller_chase_trial_runs"] = controller_parent
+    root[controller_path] = controller
     return root
 
 
@@ -177,29 +221,115 @@ def test_exact_successor_discovery_uses_spatial_bundle_and_exact_children(
     assert len(options) == 1
     assert options[0].renderer == CHASER_EXACT_SUCCESSOR_RENDERER
     assert options[0].spec["bundle_status"] == "exact_selector_ineligible"
-    assert options[0].spec["schema_version"] == 3
+    assert options[0].spec["schema_version"] == 4
     assert options[0].spec["provider_ids"] == ["keypoint.v1", "detection.v1"]
-    spatial_parameters = options[0].spec["display_parameters"][
-        "spatial_occupancy"
-    ]
-    assert (
-        spatial_parameters["source_array"]
-        == "occupancy_density_valid_in_arena"
-    )
+    spatial_parameters = options[0].spec["display_parameters"]["spatial_occupancy"]
+    assert spatial_parameters["source_array"] == "occupancy_density_valid_in_arena"
     assert spatial_parameters["density_multiplier_to_percent"] == 100.0
     assert (
         spatial_parameters["provider_difference"]
         == "detection_minus_keypoint_percentage_points_per_bin"
     )
+    controller_parameters = options[0].spec["display_parameters"]["controller_trials"]
+    assert controller_parameters["max_points_per_trace"] == 6000
+    assert controller_parameters["max_trial_panels"] == 32
+    assert controller_parameters["max_gap_markers_per_panel"] == 2000
     proofs = options[0].spec["relative_frame_binding_proofs"]
     assert len(proofs) == 2
     assert proofs[0]["spatial_binding_profile"] == RECEIPT_BOUND_PROFILE
     assert proofs[0]["radial_binding_profile"] == MINIMAL_EXACT_CHILD_PROFILE
     assert proofs[0]["validation_receipt_sha256"] == "f" * 64
     assert proofs[0]["verification_mode"] == ("receipt_bound_targeted_array_rehash_v1")
+    controller = options[0].spec["analysis_bindings"]["controller_trials"]
+    assert controller["run_path"] == (
+        "analysis/controller_chase_trial_runs/controller-v1"
+    )
+    assert controller["source_relative_frame"] == {
+        key: _provider_records(root)[0]["relative_frame"][key]
+        for key in ("run_path", "manifest_sha256")
+    }
     assert group_specs_by_provider(options) == {
         "stimulus_chaser_exact_successors": options
     }
+
+
+def test_controller_trial_capability_is_hidden_when_exact_join_is_ambiguous(
+    monkeypatch,
+) -> None:
+    root = _archive()
+    parent = root["analysis/controller_chase_trial_runs"]
+    original = parent["controller-v1"]
+    scientific = dict(
+        original.attrs["composable_chaser_successor_manifest"]["scientific_manifest"]
+    )
+    scientific.pop("payload_digest")
+    duplicate_path = "analysis/controller_chase_trial_runs/controller-v2"
+    duplicate = _successor(
+        duplicate_path,
+        "controller_chase_trials",
+        scientific,
+    )
+    parent["controller-v2"] = duplicate
+    root[duplicate_path] = duplicate
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    assert options[0].spec["analysis_bindings"] == {}
+
+
+def test_controller_trial_capability_is_hidden_for_wrong_relative_source(
+    monkeypatch,
+) -> None:
+    root = _archive()
+    controller = root["analysis/controller_chase_trial_runs/controller-v1"]
+    manifest = controller.attrs["composable_chaser_successor_manifest"]
+    manifest["scientific_manifest"]["source_relative_frame"]["manifest_sha256"] = (
+        "e" * 64
+    )
+    manifest["scientific_payload_sha256"] = manifest["scientific_manifest"][
+        "payload_digest"
+    ]
+    controller.attrs["composable_chaser_successor_manifest_sha256"] = (
+        canonical_json_sha256(manifest)
+    )
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    assert options[0].spec["analysis_bindings"] == {}
+
+
+def test_controller_trial_capability_is_hidden_above_panel_bound(monkeypatch) -> None:
+    root = _archive()
+    controller = root["analysis/controller_chase_trial_runs/controller-v1"]
+    manifest = controller.attrs["composable_chaser_successor_manifest"]
+    scientific = manifest["scientific_manifest"]
+    scientific["dimensions"]["n_trials"] = 33
+    scientific["payload_digest"] = canonical_json_sha256(
+        {key: value for key, value in scientific.items() if key != "payload_digest"}
+    )
+    manifest["scientific_payload_sha256"] = scientific["payload_digest"]
+    controller.attrs["composable_chaser_successor_manifest_sha256"] = (
+        canonical_json_sha256(manifest)
+    )
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    assert options[0].spec["analysis_bindings"] == {}
 
 
 def test_production_binding_shapes_are_not_whole_object_equal() -> None:
@@ -427,15 +557,34 @@ def test_discovery_hides_reversed_provider_roles(monkeypatch) -> None:
     assert discover_exact_chaser_successor_options("recording.zarr") == []
 
 
-def test_discovery_hides_forbidden_parent_selector(monkeypatch) -> None:
+@pytest.mark.parametrize("selector", ["latest", "latest_pending", "current_run"])
+def test_discovery_hides_forbidden_parent_selector(monkeypatch, selector: str) -> None:
     root = _archive()
-    root["analysis/chaser_spatial_occupancy_runs"].attrs["latest"] = "paired-spatial-v1"
+    root["analysis/chaser_spatial_occupancy_runs"].attrs[selector] = "paired-spatial-v1"
     monkeypatch.setattr(
         "apps.marimo.components.registry.open_zarr_root",
         lambda *args, **kwargs: root,
     )
 
     assert discover_exact_chaser_successor_options("recording.zarr") == []
+
+
+def test_discovery_hides_controller_capability_with_parent_selector(
+    monkeypatch,
+) -> None:
+    root = _archive()
+    root["analysis/controller_chase_trial_runs"].attrs[
+        "authoritative_run"
+    ] = "controller-v1"
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    assert options[0].spec["analysis_bindings"] == {}
 
 
 def test_discovery_does_not_retry_unconsolidated_metadata(monkeypatch) -> None:

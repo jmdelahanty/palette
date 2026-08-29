@@ -216,6 +216,14 @@ CHASER_EXACT_SUCCESSOR_PROVIDER = ProviderDefinition(
             ),
         ),
         AnalysisDefinition(
+            "controller_trials",
+            "Exact controller trials",
+            (
+                "Full-session and trigger-aligned distance from producer-logged "
+                "active trial membership, with retained nonmember gaps."
+            ),
+        ),
+        AnalysisDefinition(
             "provenance",
             "Provenance",
             "Exact bundle, child-run identities, display projection, and authorities.",
