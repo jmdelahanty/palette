@@ -2,8 +2,8 @@
 
 <!-- contract-meta
 status: active
-implementation: partial
-last_verified: 2026-08-27
+implementation: reader-fix-ci-green-merge-pending
+last_verified: 2026-08-29
 -->
 
 ## Purpose
@@ -151,13 +151,13 @@ rewriting the scientific Zarr publications, static images, plot receipts, or
 source-validation receipts. No cohort recomputation or Zarr migration is
 needed for the compatibility fix.
 
-### Local reader correction and acceptance evidence — 2026-08-27
+### Reader correction and acceptance evidence — verified 2026-08-29
 
 The isolated implementation worktree
-`/tmp/palette-chaser-interactive-reader-20260827` now contains the reader-only
-correction. It is based on `origin/main` commit
-`b90bb2a5904f382289fb5e6e6f714f2d56505dac`; the implementation itself is not
-yet committed or CI-qualified.
+`/tmp/palette-chaser-interactive-reader-20260827` contains the reader-only
+correction at commit `559c08fdea42f0e4de3985033f95e99917a67a5f` on PR 70.
+All 23 required CI checks passed and GitHub reports a clean merge state. The PR
+remains open and has not been merged or deployed.
 
 The correction adds one Marimo-independent exact-relative-child binding
 validator. It accepts only the closed minimal and receipt-bound profiles,
@@ -197,8 +197,17 @@ passed 80/80 eligible recordings in 31.079 seconds. Task indices `77-80`
 remained explicitly excluded, and the task digest was
 `bbbcc9710d38c6bd5c0a611bc68b40c24ef908f1faaf93913b26b914a0256509`.
 No Zarr, selector, registry, authority, receipt, or static plot was written or
-changed. Required CI and a commit-pinned representative deep-load report still
-gate merge readiness.
+changed. A commit-pinned representative deep-load report remains an acceptance
+follow-up for broader interactive parity; it does not erase the green required
+CI evidence for the reader correction.
+
+The remaining exact views will use the modular provider/package plan in
+[`marimo_explorer_architecture.md`](../marimo_explorer_architecture.md). Palette
+will retain one supported recording-explorer entrypoint while moving shared
+projection, radial, distance, trajectory, spatial, controller-trial,
+bout-response, escape/freeze, full-profile, and provenance behavior into
+focused components behind one closed exact-chaser adapter. New exact behavior
+will not be added to the legacy GoodCopBadCop component.
 
 ## Persisted but not yet mounted in this capability
 
@@ -251,5 +260,5 @@ chaser epochs, their paired radial successors, and their paired relative-frame
 runs. The pre-fix reader returned zero options despite correct direct and
 consolidated metadata. The locally validated correction now discovers exactly
 one option and loads all four declared analyses without a selector, legacy,
-candidate, or unconsolidated fallback. It remains an uncommitted local result
-until the implementation is commit-pinned and required CI is green.
+candidate, or unconsolidated fallback. The implementation is commit-pinned and
+required CI is green on PR 70; it remains absent from `main` until merged.

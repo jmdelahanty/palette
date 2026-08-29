@@ -2,8 +2,8 @@
 
 <!-- contract-meta
 status: implementation-in-progress
-implementation: reader-fix-local-validation-passed-ci-pending
-last_verified: 2026-08-27
+implementation: reader-fix-ci-green-merge-pending-modular-expansion-planned
+last_verified: 2026-08-29
 -->
 
 ## Purpose
@@ -46,8 +46,11 @@ current zero-option defect.
       not exercise the production receipt-bound shape.
 - [x] The local reader correction passes the real-artifact smoke and
       metadata-only discovery for all 80 eligible receipt-bound v4 recordings.
-- [ ] The implementation is not merge-ready until it is commit-pinned and all
-      required CI checks complete successfully.
+- [x] Reader commit `559c08fdea42f0e4de3985033f95e99917a67a5f` is
+      pushed on PR 70; all 23 required checks passed and GitHub reports a clean
+      merge state.
+- [ ] PR 70 is merge-ready but remains unmerged. Do not treat the reader as
+      present on `main` until that merge is verified.
 
 ## Safety invariants
 
@@ -193,6 +196,42 @@ Primary locations:
 - [ ] Write a digest-bound smoke report. It may describe viewer readiness but
       must not activate a selector or alter any recording.
 
+## Phase 4.5 — Establish the modular exact-chaser explorer boundary
+
+The recording explorer remains one supported Marimo entrypoint, but analysis
+implementations must be ordinary focused Python components. Do not grow
+`palette_explorer.py`, `chaser_exact_successors.py`, or the legacy
+`goodcopbadcop_chaser.py` into a new monolith. The durable design is recorded
+in [`marimo_explorer_architecture.md`](../marimo_explorer_architecture.md).
+
+- [ ] Preserve `apps/marimo/palette_explorer.py` as the thin application shell
+      for workspace selection, provider/analysis selection, generic errors,
+      stale-load protection, and final layout.
+- [ ] Define one exact-chaser provider adapter with closed maps for available
+      analysis IDs, projection loaders, optional controls, and renderers.
+- [ ] Replace exact-chaser analysis-specific top-level load/render branches
+      with one provider-adapter invocation; adding a later exact analysis must
+      not require another notebook branch.
+- [ ] Extract the current exact component into focused modules for shared
+      projection, radial/near-field, distance, trajectory, and provenance.
+- [ ] Keep `apps/marimo/components/chaser_exact_successors.py` as a temporary
+      compatibility facade that re-exports the supported public functions.
+- [ ] Put each new view in its own module: spatial occupancy, controller
+      trials, generalized bout response, escape/freeze, and full profile.
+- [ ] Keep legacy GoodCopBadCop code isolated. Do not add new exact-successor
+      logic, fallback behavior, or scientific interpretation to that surface.
+- [ ] Keep discovery metadata-only. Importing a provider or listing analysis
+      IDs must not read scientific arrays.
+- [ ] Load only the selected analysis projection and key any cache by exact
+      archive, run, manifest, renderer, and display-parameter identities.
+- [ ] Prevent late asynchronous results from rendering under a newer recording,
+      provider, source, or analysis selection.
+- [ ] Add focused tests per module plus one facade/provider/top-level routing
+      test proving closed dispatch and typed unavailable behavior.
+- [ ] Land the mechanical extraction as a distinct commit from the first new
+      spatial-occupancy implementation so review can distinguish structural
+      movement from behavior.
+
 ## Phase 5 — Mount the remaining persisted scientific views
 
 Implement these as separate reviewable packages after the reader unblock. Each
@@ -309,8 +348,10 @@ This is a design gate, not a prerequisite for the reader compatibility fix.
       smoke and required CI pass.
 - [ ] Document exactly which static figure families have interactive
       equivalents and which remain static-only.
-- [ ] Add or update the recording-explorer architecture documentation with the
-      exact-successor capability and descriptor decision.
+- [x] Update recording-explorer architecture documentation with the modular
+      exact-successor provider/package plan.
+- [ ] Record the durable interactive-descriptor decision separately when that
+      Phase 6 design gate is resolved.
 - [ ] Add a required boundary test covering producer-shaped receipt-bound Zarr
       metadata -> consolidated discovery -> projection loader -> Marimo output.
 - [ ] Run all required CI checks. Failed, cancelled, skipped-after-failure, or
