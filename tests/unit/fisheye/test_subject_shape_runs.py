@@ -28,6 +28,7 @@ from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.refinement.subject_body_mask_qc import write_subject_body_mask_qc_group
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.shared.proof_verification import proof_verification_scope
+from fisheye.shared import subject_shape_coordinate_publication as coordinate_publication
 from fisheye.shared.runtime_telemetry import require_runtime_telemetry
 from fisheye.shared.refined_subject_mask_mutation import (
     RefinedSubjectMaskMutationError,
@@ -36,8 +37,11 @@ from fisheye.shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
     SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
     SUBJECT_SHAPE_DERIVATION_ATTR,
+    SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR,
     SUBJECT_SHAPE_PARENT_PUBLICATION_LEASE_ATTR,
     SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR,
+    SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR,
+    SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V2,
     SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR,
     SUBJECT_SHAPE_PUBLICATION_GENERATION_ATTR,
     SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
@@ -736,6 +740,20 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
 ) -> None:
     _patch_provenance(monkeypatch)
     monkeypatch.setattr(
+        coordinate_publication,
+        "_scan_subject_shape_bound_payload",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("access-aware publication performed a full decoded scan")
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_subject_shape_unbound_payload_scan_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("access-aware writer performed a post-compute decoded scan")
+        ),
+    )
+    monkeypatch.setattr(
         materializer,
         "write_best_effort_run_lineage_attrs",
         lambda *args, **kwargs: None,
@@ -769,6 +787,14 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
 
     assert result["status"] == "complete"
     node_local_sharding = result["local_materialization"]["node_local_sharding"]
+    compute_summary = result["local_materialization"]["node_local_compute"]
+    assert "producer_payload_scan_receipt" not in compute_summary
+    assert compute_summary["producer_payload_receipt_deferred"]["receipt_role"] == (
+        "closed_scratch_writer_handoff_to_exact_access_aware_storage_transform"
+    )
+    assert node_local_sharding["producer_receipt_mode"] == (
+        "deferred_exact_storage_transform_v2"
+    )
     assert node_local_sharding["requested_copy_workers"] == 4
     assert node_local_sharding["effective_copy_workers"] > 1
     assert node_local_sharding["parallel_write_ownership"] == (
@@ -798,6 +824,21 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
     assert direct.attrs["subject_shape_storage_profile_id"] == (
         SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
     )
+    assert direct.attrs[SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR] == (
+        SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V2
+    )
+    numerical_policy = direct.attrs[
+        SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR
+    ]["numerical_policy"]
+    assert numerical_policy["array_digest_source"] == (
+        "verified_staged_transfer_plus_final_binding_readback_v2"
+    )
+    assert numerical_policy["verified_physical_copy"] == result["publish"][
+        "physical_copy"
+    ]
+    assert numerical_policy["receipt_composition"]["appended_paths"] == sorted(
+        coordinate_publication.SUBJECT_SHAPE_BINDING_APPENDED_ARRAY_PATHS
+    )
     assert not validate_subject_shape_candidate_storage(direct, phase="bound")
     assert not validate_subject_shape_direct_consolidated_storage(
         source_path,
@@ -808,6 +849,8 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
         mode="a",
         use_consolidated=False,
     )["analysis/subject_shape_runs/shape_byte_candidate"]
+    assert SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR not in compute.attrs
+    assert SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR in compute.attrs
     local_candidate = zarr.open_group(
         str(tmp_path / "candidate-scratch/subject-shape-sharded-run"),
         mode="r",
@@ -1052,7 +1095,8 @@ def test_subject_shape_candidate_repairs_failed_visibility_after_consolidation(
             plan,
             materialization_payload={
                 "node_local_sharding": {
-                    "array_content_sha256": {"synthetic": "a" * 64}
+                    "array_content_sha256": {"synthetic": "a" * 64},
+                    "decoded_copy_report": {},
                 }
             },
             copy_backend="python",

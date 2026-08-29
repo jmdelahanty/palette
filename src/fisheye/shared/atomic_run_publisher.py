@@ -87,7 +87,10 @@ CompleteRun = Callable[[zarr.Group, zarr.Group, zarr.Group], None]
 ActivateRun = Callable[[zarr.Group, zarr.Group, zarr.Group], None]
 RollbackActivation = Callable[[], None]
 VerifyPointers = Callable[[zarr.Group], None]
-AfterRename = Callable[[zarr.Group, zarr.Group], Mapping[str, Any] | None]
+AfterRename = Callable[
+    [zarr.Group, zarr.Group, Mapping[str, Any]],
+    Mapping[str, Any] | None,
+]
 RepairFailedPublicationVisibility = Callable[[Path], None]
 
 
@@ -730,6 +733,10 @@ def atomic_publish_run_group(
 ) -> dict[str, Any]:
     """Publish one completed local run as a fail-closed transaction.
 
+    ``after_rename`` receives the exact verified physical-copy receipt before
+    it performs any authoritative binding. Stage publishers can therefore seal
+    transfer evidence without reconstructing or re-running the copy gate.
+
     By default, an activation callback that raises after persisting the exact
     final eligibility write is treated as an interrupted acknowledgement of a
     successful commit. Callers whose activation callback also owns fallible
@@ -968,7 +975,7 @@ def _atomic_publish_locked(
 
         with telemetry.phase("post_rename_binding"):
             post_rename_metadata = (
-                dict(after_rename(root, run_group) or {})
+                dict(after_rename(root, run_group, dict(physical_copy)) or {})
                 if after_rename is not None
                 else {}
             )

@@ -181,6 +181,9 @@ SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR = "subject_shape_storage_candidate"
 SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR = (
     "subject_shape_storage_source_unbound_manifest"
 )
+SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR = (
+    "subject_shape_deferred_storage_transform_receipt"
+)
 SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_SCHEMA_ID = (
     "palette.subject_shape_storage_source_unbound_manifest"
 )
@@ -208,6 +211,24 @@ SUBJECT_SHAPE_NUMERIC_PROJECTION_SCHEMA_ID = (
 SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE = (
     "single_locked_bound_payload_receipt_v1"
 )
+SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V1 = SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE
+SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V2 = (
+    "verified_staged_transfer_plus_binding_append_receipt_v2"
+)
+SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILES = frozenset(
+    {
+        SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V1,
+        SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V2,
+    }
+)
+SUBJECT_SHAPE_BINDING_APPENDED_ARRAY_PATHS = (
+    "instance_key",
+    "source_crop_row_ids",
+    "source_acquisition_frame_index",
+    "component_centroid_xy",
+    "component_centroid_valid",
+    "body_frame/axis_valid",
+)
 SUBJECT_SHAPE_PAYLOAD_VALIDATOR_SCHEMA_ID = (
     "palette.subject_shape_bound_payload_validator"
 )
@@ -228,6 +249,12 @@ SUBJECT_SHAPE_STORAGE_ARRAY_ATTRS = frozenset(
 _ACTIVE_SUBJECT_SHAPE_ARRAY_DIGESTS: ContextVar[Mapping[str, str] | None] = (
     ContextVar("palette_subject_shape_array_digests", default=None)
 )
+
+
+def is_supported_subject_shape_payload_receipt_profile(value: Any) -> bool:
+    """Return whether ``value`` names one maintained receipt grammar."""
+
+    return type(value) is str and value in SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILES
 
 
 @contextmanager
@@ -1634,6 +1661,7 @@ _RUN_OPERATIONAL_ATTRS = frozenset(
         SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR,
         SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR,
         SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR,
+        SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR,
         SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR,
         f"{SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR}_sha256",
         SUBJECT_SHAPE_STORAGE_METADATA_POLICY_ATTR,
@@ -3471,9 +3499,12 @@ def _iter_arrays(group: Any, prefix: str = "") -> Iterable[tuple[str, Any]]:
 
 def _subject_shape_payload_numerical_policy(
     array_content_sha256: Mapping[str, str],
+    *,
+    receipt_profile: str,
+    verified_physical_copy: Mapping[str, Any] | None = None,
+    receipt_composition: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "array_digest_source": "single_locked_post_binding_decoded_scan_v1",
+    common = {
         "array_payload_canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
         "array_content_sha256": {
             path: array_content_sha256[path]
@@ -3486,6 +3517,110 @@ def _subject_shape_payload_numerical_policy(
         "normal_load_physical_rehash": False,
         "deep_audit_physical_rehash_available": True,
     }
+    if receipt_profile == SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V1:
+        if verified_physical_copy is not None or receipt_composition is not None:
+            _fail("Legacy subject-shape scan receipts cannot carry transfer evidence.")
+        return {
+            **common,
+            "array_digest_source": "single_locked_post_binding_decoded_scan_v1",
+        }
+    if receipt_profile != SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V2:
+        _fail("Subject-shape payload receipt profile is unsupported.")
+    physical_copy = _canonical_subject_shape_physical_copy_receipt(
+        verified_physical_copy
+    )
+    composition = _canonical_subject_shape_receipt_composition(
+        receipt_composition
+    )
+    return {
+        **common,
+        "array_digest_source": (
+            "verified_staged_transfer_plus_final_binding_readback_v2"
+        ),
+        "mutation_exclusion_contract": (
+            "exclusive_node_local_storage_then_atomic_verified_copy_then_"
+            "archive_publication_lock_v2"
+        ),
+        "verified_physical_copy": physical_copy,
+        "receipt_composition": composition,
+    }
+
+
+def _canonical_subject_shape_physical_copy_receipt(
+    value: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        _fail("Subject-shape v2 receipt lacks verified physical-copy evidence.")
+    receipt = _json_copy(value)
+    expected = {
+        "backend",
+        "verification",
+        "file_count",
+        "physical_bytes",
+        "inventory_sha256",
+        "content_sha256",
+    }
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != expected
+        or receipt.get("backend") not in {"python", "rsync"}
+        or receipt.get("verification")
+        not in {"sha256_all_physical_files", "rsync_checksum_dry_run"}
+        or type(receipt.get("file_count")) is not int
+        or receipt["file_count"] < 1
+        or type(receipt.get("physical_bytes")) is not int
+        or receipt["physical_bytes"] < 0
+        or re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("inventory_sha256")))
+        is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("content_sha256")))
+        is None
+        or (
+            receipt["backend"] == "python"
+            and receipt["verification"] != "sha256_all_physical_files"
+        )
+        or (
+            receipt["backend"] == "rsync"
+            and receipt["verification"] != "rsync_checksum_dry_run"
+        )
+    ):
+        _fail("Subject-shape verified physical-copy receipt is malformed.")
+    return receipt
+
+
+def _canonical_subject_shape_receipt_composition(
+    value: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        _fail("Subject-shape v2 receipt lacks its composition evidence.")
+    receipt = _json_copy(value)
+    expected = {
+        "schema_id",
+        "schema_version",
+        "receipt_origin",
+        "staged_decoded_payload_root_sha256",
+        "appended_paths",
+        "appended_decoded_bytes",
+    }
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != expected
+        or receipt.get("schema_id")
+        != "palette.subject_shape_bound_payload_receipt_composition"
+        or receipt.get("schema_version") != 1
+        or receipt.get("receipt_origin")
+        != "verified_staged_transfer_plus_final_binding_readback_v2"
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(receipt.get("staged_decoded_payload_root_sha256")),
+        )
+        is None
+        or receipt.get("appended_paths")
+        != list(sorted(SUBJECT_SHAPE_BINDING_APPENDED_ARRAY_PATHS))
+        or type(receipt.get("appended_decoded_bytes")) is not int
+        or receipt["appended_decoded_bytes"] < 0
+    ):
+        _fail("Subject-shape bound receipt composition is malformed.")
+    return receipt
 
 
 def _scan_subject_shape_bound_payload(
@@ -3567,6 +3702,9 @@ def _stamp_subject_shape_payload_validation(
     integrity_receipt: Mapping[str, Any],
     manifest_sha256: str,
     array_content_sha256: Mapping[str, str],
+    receipt_profile: str,
+    verified_physical_copy: Mapping[str, Any] | None = None,
+    receipt_composition: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     validation = build_payload_validation_receipt(
         integrity_receipt,
@@ -3576,7 +3714,10 @@ def _stamp_subject_shape_payload_validation(
         validator_schema_id=SUBJECT_SHAPE_PAYLOAD_VALIDATOR_SCHEMA_ID,
         validator_schema_version=SUBJECT_SHAPE_PAYLOAD_VALIDATOR_SCHEMA_VERSION,
         numerical_policy=_subject_shape_payload_numerical_policy(
-            array_content_sha256
+            array_content_sha256,
+            receipt_profile=receipt_profile,
+            verified_physical_copy=verified_physical_copy,
+            receipt_composition=receipt_composition,
         ),
     )
     run.attrs[SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR] = _json_copy(
@@ -3601,7 +3742,7 @@ def _load_subject_shape_payload_digest_evidence(
         if receipt_profile is not None:
             _fail("Subject-shape receipt-profile publication lacks its receipts.")
         return None
-    if receipt_profile != SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE:
+    if not is_supported_subject_shape_payload_receipt_profile(receipt_profile):
         _fail("Subject-shape payload receipts lack their exact profile marker.")
     if not isinstance(raw_integrity, Mapping) or not isinstance(
         raw_validation,
@@ -3627,24 +3768,47 @@ def _load_subject_shape_payload_digest_evidence(
     if not isinstance(policy, Mapping):
         _fail("Subject-shape payload validation lacks its numerical policy.")
     digests = policy.get("array_content_sha256")
+    common_fields = {
+        "array_digest_source",
+        "array_payload_canonicalization",
+        "array_content_sha256",
+        "closed_array_inventory",
+        "mutation_exclusion_contract",
+        "normal_load_physical_rehash",
+        "deep_audit_physical_rehash_available",
+    }
+    if receipt_profile == SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V1:
+        policy_valid = (
+            set(policy) == common_fields
+            and policy.get("array_digest_source")
+            == "single_locked_post_binding_decoded_scan_v1"
+            and policy.get("mutation_exclusion_contract")
+            == "exclusive_archive_publication_lock_then_immutable_run_lifecycle_v1"
+        )
+    else:
+        policy_valid = (
+            set(policy)
+            == common_fields | {"verified_physical_copy", "receipt_composition"}
+            and policy.get("array_digest_source")
+            == "verified_staged_transfer_plus_final_binding_readback_v2"
+            and policy.get("mutation_exclusion_contract")
+            == (
+                "exclusive_node_local_storage_then_atomic_verified_copy_then_"
+                "archive_publication_lock_v2"
+            )
+        )
+        if policy_valid:
+            _canonical_subject_shape_physical_copy_receipt(
+                policy.get("verified_physical_copy")
+            )
+            _canonical_subject_shape_receipt_composition(
+                policy.get("receipt_composition")
+            )
     if (
-        set(policy)
-        != {
-            "array_digest_source",
-            "array_payload_canonicalization",
-            "array_content_sha256",
-            "closed_array_inventory",
-            "mutation_exclusion_contract",
-            "normal_load_physical_rehash",
-            "deep_audit_physical_rehash_available",
-        }
-        or policy.get("array_digest_source")
-        != "single_locked_post_binding_decoded_scan_v1"
+        not policy_valid
         or policy.get("array_payload_canonicalization")
         != "numpy_dtype_shape_c_order_bytes_v1"
         or policy.get("closed_array_inventory") is not True
-        or policy.get("mutation_exclusion_contract")
-        != "exclusive_archive_publication_lock_then_immutable_run_lifecycle_v1"
         or policy.get("normal_load_physical_rehash") is not False
         or policy.get("deep_audit_physical_rehash_available") is not True
         or not isinstance(digests, Mapping)
@@ -4855,6 +5019,9 @@ def publish_subject_shape_coordinate_surfaces(
     component_schema: BoundCoordinateRecord,
     payload_run_path: str | Path | None = None,
     payload_hash_workers: int = 4,
+    staged_decoded_copy_report: Mapping[str, Any] | None = None,
+    staged_array_content_sha256: Mapping[str, str] | None = None,
+    verified_physical_copy: Mapping[str, Any] | None = None,
 ) -> BoundSubjectShapeCoordinatePublication:
     """Transform and seal one running/ineligible child without selecting it."""
 
@@ -4886,13 +5053,61 @@ def publish_subject_shape_coordinate_surfaces(
         _rewrite_body_frame_from_camera_components(run, component_names)
     else:
         _finalize_preprojected_body_frame(run)
-    run.attrs[SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR] = (
-        SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE
+    staged_evidence = (
+        staged_decoded_copy_report,
+        staged_array_content_sha256,
+        verified_physical_copy,
     )
-    array_digests, decoded_copy_report = _scan_subject_shape_bound_payload(
-        run,
-        workers=max(1, int(payload_hash_workers)),
-    )
+    receipt_composition: Mapping[str, Any] | None = None
+    if any(value is not None for value in staged_evidence):
+        if any(value is None for value in staged_evidence):
+            _fail("Subject-shape staged receipt evidence is incomplete.")
+        if numeric_projection is None:
+            _fail(
+                "Subject-shape staged receipts cannot cover a final-path numeric "
+                "rewrite."
+            )
+        from fisheye.shared.subject_shape_storage import (
+            compose_subject_shape_bound_payload_receipt,
+        )
+
+        composed = compose_subject_shape_bound_payload_receipt(
+            run,
+            staged_decoded_copy_report=staged_decoded_copy_report,
+            staged_array_content_sha256=staged_array_content_sha256,
+            appended_paths=SUBJECT_SHAPE_BINDING_APPENDED_ARRAY_PATHS,
+            workers=max(1, int(payload_hash_workers)),
+        )
+        raw_digests = composed.get("array_content_sha256")
+        raw_copy_report = composed.get("decoded_copy_report")
+        if not isinstance(raw_digests, Mapping) or not isinstance(
+            raw_copy_report,
+            Mapping,
+        ):
+            _fail("Subject-shape bound receipt composition is incomplete.")
+        array_digests = {
+            str(path): str(value) for path, value in raw_digests.items()
+        }
+        decoded_copy_report = raw_copy_report
+        receipt_profile = SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V2
+        receipt_composition = {
+            key: composed[key]
+            for key in (
+                "schema_id",
+                "schema_version",
+                "receipt_origin",
+                "staged_decoded_payload_root_sha256",
+                "appended_paths",
+                "appended_decoded_bytes",
+            )
+        }
+    else:
+        array_digests, decoded_copy_report = _scan_subject_shape_bound_payload(
+            run,
+            workers=max(1, int(payload_hash_workers)),
+        )
+        receipt_profile = SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V1
+    run.attrs[SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR] = receipt_profile
     with _subject_shape_array_digest_scope(array_digests):
         temporal = stamp_subject_shape_temporal_authority(run, source, identity)
         scientific_configuration = _stamp_scientific_configuration(run)
@@ -4978,6 +5193,13 @@ def publish_subject_shape_coordinate_surfaces(
         integrity_receipt=integrity_receipt,
         manifest_sha256=manifest.record_sha256,
         array_content_sha256=array_digests,
+        receipt_profile=receipt_profile,
+        verified_physical_copy=(
+            verified_physical_copy
+            if receipt_profile == SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V2
+            else None
+        ),
+        receipt_composition=receipt_composition,
     )
     if (
         run.attrs.get("publication_manifest_sha256") != manifest.record_sha256
@@ -5399,9 +5621,8 @@ def activate_subject_shape_coordinate_publication(
         # Reconstruct the complete child while no parent selector has changed.
         # The supplied proof is an ownership/intent receipt; this live reload
         # establishes the exact child and source graph for this activation.
-        if (
+        if is_supported_subject_shape_payload_receipt_profile(
             run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
-            == SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE
         ):
             fresh_proof = validate_sealed_subject_shape_publication_metadata(
                 root,
@@ -5513,9 +5734,8 @@ def activate_subject_shape_coordinate_publication(
         # individual write above.
         restart_proof_verification()
         run = _node(root, expected_path, label="subject-shape activation child")
-        if (
+        if is_supported_subject_shape_payload_receipt_profile(
             run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
-            == SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE
         ):
             final_proof = validate_sealed_subject_shape_publication_metadata(
                 root,
@@ -5701,9 +5921,8 @@ def commit_deferred_subject_shape_coordinate_activation(
         activation.snapshot,
         overrides=expected_overrides,
     )
-    if (
+    if is_supported_subject_shape_payload_receipt_profile(
         run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
-        == SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE
     ):
         proof = validate_sealed_subject_shape_publication_metadata(
             root,
@@ -5825,11 +6044,15 @@ __all__ = [
     "SUBJECT_SHAPE_COORDINATE_CONTRACT",
     "SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR",
     "SUBJECT_SHAPE_DERIVATION_ATTR",
+    "SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR",
     "SUBJECT_SHAPE_HEADING_SEMANTICS_ATTR",
     "SUBJECT_SHAPE_MANIFEST_ATTR",
     "SUBJECT_SHAPE_PARENT_PUBLICATION_LEASE_ATTR",
     "SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR",
     "SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE",
+    "SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V1",
+    "SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V2",
+    "SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILES",
     "SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR",
     "SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR",
     "SUBJECT_SHAPE_PAYLOAD_VALIDATOR_SCHEMA_ID",
@@ -5889,6 +6112,7 @@ __all__ = [
     "load_persisted_subject_shape_coordinate_publication",
     "load_sealed_unbound_subject_shape_manifest",
     "load_unbound_subject_shape_manifest",
+    "is_supported_subject_shape_payload_receipt_profile",
     "prepare_subject_shape_identity_and_schema",
     "project_subject_shape_bboxes",
     "project_subject_shape_ellipses",

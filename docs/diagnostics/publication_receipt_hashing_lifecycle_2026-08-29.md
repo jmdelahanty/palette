@@ -98,10 +98,10 @@ available as explicit operations. They are required when:
 These conditions fail closed. They must not trigger an unreported expensive
 fallback during ordinary planning or publication.
 
-## Current defect demonstrated by the subject-shape canary
+## Baseline defect demonstrated by the subject-shape canary
 
-The current subject-shape writer does not emit composable digests for its final
-parallel output. Finalization consequently rereads the completed arrays in
+The commit-`bf058521` subject-shape writer does not emit reusable evidence for
+its final parallel output. Finalization consequently rereads completed arrays in
 `build_subject_shape_unbound_payload_scan_receipt` to manufacture flat payload
 hashes. Other admission paths have also reloaded payloads to reproduce claims
 already sealed by upstream receipts.
@@ -110,11 +110,88 @@ That scan is compatibility work caused by a missing write-time receipt; it is
 not subject-shape computation and is not the intended steady-state publication
 design.
 
-The immediate optimization may eliminate duplicate admission reads while
-retaining one final scan. The durable optimization is to emit write-unit
-receipts during the transformation, seal those receipts without rereading the
-payload, and teach the publication/consumer contracts to accept the versioned
+The durable optimization is to make the already-required storage transform
+issue the write-unit receipt while it has source and destination values in
+memory, then teach publication and consumers to accept that versioned
 composable identity.
+
+## Subject-shape v2 implementation checkpoint
+
+Status: **implemented and locally validated in
+`agent/palette/subject-shape-plan-receipts-20260829`; this document is part of
+the implementation checkpoint, which is not yet pushed, CI-green, merged, or
+production-active**.
+
+The projected access-aware subject-shape path now implements the first durable
+receipt profile:
+
+`verified_staged_transfer_plus_binding_append_receipt_v2`.
+
+The proof chain is:
+
+1. The parallel compute writer closes its scratch tree with a sealed,
+   metadata-only deferred-transform receipt. It does not invent or predict any
+   payload digest. That receipt can be consumed only by the named access-aware
+   storage profile under exclusive scratch ownership.
+2. Access-aware storage conversion writes complete physical outer units,
+   immediately reads each unit back, and emits the closed decoded copy report
+   and flat per-array content digests from that same traversal. Exact decoded
+   source-to-destination equality is checked before the receipt closes.
+3. Only after every copy/readback succeeds does conversion consume the deferred
+   receipt and stamp the ordinary sealed unbound manifest. A missing, changed,
+   leftover, or profile-mismatched deferred receipt fails closed.
+4. The shared atomic publisher passes its already-verified physical-copy
+   receipt into the existing post-rename callback. This is one shared
+   publication interface; no subject-shape-specific transfer adapter was
+   added.
+5. Final-path binding verifies that the numeric projection is already in
+   source-camera coordinates and therefore does not rewrite any staged array.
+6. Binding creates and reads back only the six appended arrays:
+   `instance_key`, `source_crop_row_ids`,
+   `source_acquisition_frame_index`, `component_centroid_xy`,
+   `component_centroid_valid`, and `body_frame/axis_valid`.
+7. The staged and appended decoded receipts must partition the exact live
+   array inventory. Missing, overlapping, or unexpected arrays fail closed.
+8. The final target receives one physical-payload hash and immutable-metadata
+   receipt. The scientific validation receipt binds that final integrity root,
+   the coordinate manifest, the transfer evidence, and the decoded receipt
+   composition.
+
+The old `single_locked_bound_payload_receipt_v1` grammar remains readable and
+continues to be emitted for paths that genuinely transform numeric geometry at
+final binding or do not supply the v2 transfer evidence. Its exported constant
+retains its historical meaning; v2 has a distinct explicit constant and
+profile marker.
+
+This removes both complete decoded rescans from the maintained projected
+access-aware path: the post-compute unbound scan and the post-binding scan. It
+deliberately does **not** remove the final physical-file hash yet: that scan
+covers the low-single-digit-gigabyte compressed tree, not the hundreds of
+gigabytes delivered by decoded array traversal. Reusing physical leaves across
+transport is a smaller follow-up and requires the atomic transport to expose
+compatible per-file leaves, not merely an aggregate copy digest.
+
+Local evidence so far:
+
+- 62 complete affected atomic-publisher and subject-shape tests passed in
+  425.92 seconds;
+- the final access-aware regression passed in 181.34 seconds; and
+- that regression makes both
+  `build_subject_shape_unbound_payload_scan_receipt` and
+  `_scan_subject_shape_bound_payload` raise if the v2 path attempts either
+  complete decoded rescan.
+
+The commit-`bf058521` canary cannot benefit from code written after submission.
+Its resource trace changed character at approximately 19:27:23 UTC, after
+8,176.78 seconds and 626.40 GB of cumulative delivered reads: thread count and
+writes began rising, which is consistent with leaving the serial unbound scan
+and entering parallel storage conversion. By 19:33:23 UTC conversion had added
+only about 2.73 GB of reads and 1.35 GB of writes. At 19:33:53 UTC a short
+multi-process copy/physical phase began, followed by another read-heavy,
+write-flat phase consistent with the old post-binding decoded scan. These phase
+labels are inferences from resource transitions because the old process buffers
+its stage log. The job remains diagnostic baseline evidence, not a benchmark of
+this v2 implementation.
 
 ## Compatibility and migration
 

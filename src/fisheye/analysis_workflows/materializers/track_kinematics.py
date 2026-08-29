@@ -721,6 +721,7 @@ def publish_track_kinematics_run(
     def after_rename(
         root: zarr.Group,
         run: zarr.Group,
+        _physical_copy: Mapping[str, Any],
     ) -> dict[str, Any]:
         if transaction["binding_complete"] or transaction["completion_published"]:
             raise RuntimeError("Track publication transaction state is inconsistent.")

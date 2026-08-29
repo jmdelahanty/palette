@@ -2425,7 +2425,11 @@ def publish_arena_geometry_candidate(
             analysis = root.require_group("analysis")
             return (require_runs_parent(analysis, CANDIDATE_RUNS_PARENT),)
 
-        def after_rename(_root: zarr.Group, _run: zarr.Group) -> dict[str, Any]:
+        def after_rename(
+            _root: zarr.Group,
+            _run: zarr.Group,
+            _physical_copy: Mapping[str, Any],
+        ) -> dict[str, Any]:
             return {"source_revision_audit": _revalidate_candidate_sources(plan)}
 
         def complete(

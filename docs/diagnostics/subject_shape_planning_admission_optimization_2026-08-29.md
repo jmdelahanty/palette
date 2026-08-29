@@ -1,7 +1,7 @@
 # Subject-shape planning admission optimization — 2026-08-29
 
-Status: **implemented and locally validated in the isolated optimization
-worktree; not committed, merged, or production-active**.
+Status: **implemented, locally validated, and committed as `f8f8abfa` in the
+isolated optimization worktree; not merged or production-active**.
 
 Worktree branch: `agent/palette/subject-shape-plan-receipts-20260829`
 
