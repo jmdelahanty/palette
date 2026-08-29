@@ -99,6 +99,14 @@ def test_provider_routes_are_closed_and_controls_are_explicit() -> None:
         EXACT_CHASER_PROVIDER_ADAPTER.requires_projection("distance-ish")
 
 
+def test_exact_source_defaults_only_when_discovery_is_unambiguous() -> None:
+    assert EXACT_CHASER_PROVIDER_ADAPTER.initial_source_label(()) is None
+    assert EXACT_CHASER_PROVIDER_ADAPTER.initial_source_label(("only",)) == "only"
+    assert (
+        EXACT_CHASER_PROVIDER_ADAPTER.initial_source_label(("newer", "older")) is None
+    )
+
+
 def test_only_selected_analysis_requests_relative_arrays(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -230,3 +238,6 @@ def test_palette_explorer_uses_one_exact_provider_load_and_render_boundary() -> 
     assert "build_exact_trajectory_overlays_output" not in source
     assert source.count("EXACT_CHASER_PROVIDER_ADAPTER.load_projection(") == 1
     assert source.count("EXACT_CHASER_PROVIDER_ADAPTER.render(") == 1
+    assert "EXACT_CHASER_PROVIDER_ADAPTER.initial_source_label(source_labels)" in source
+    assert "source_picker.value is not None" in source
+    assert "no analysis arrays will load until" in source

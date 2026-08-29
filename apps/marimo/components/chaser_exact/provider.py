@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from ..registry import InteractiveSpecOption
 from .distance_traces import build_exact_distance_traces_output
@@ -93,6 +93,14 @@ class ExactChaserProviderAdapter:
     """One stable metadata/load/control/render boundary for exact successors."""
 
     provider_id: str = EXACT_CHASER_PROVIDER_ID
+
+    def initial_source_label(self, source_labels: Sequence[str]) -> str | None:
+        """Default only when discovery exposes one unambiguous exact bundle."""
+
+        labels = tuple(source_labels)
+        if len(labels) == 1:
+            return labels[0]
+        return None
 
     def route(self, analysis_id: str) -> ExactChaserAnalysisRoute:
         try:

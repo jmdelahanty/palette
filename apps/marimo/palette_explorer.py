@@ -306,7 +306,7 @@ def _(provider_by_label, provider_picker, specs_by_provider):
 
 
 @app.cell(hide_code=True)
-def _(mo, provider_specs, selected_provider):
+def _(EXACT_CHASER_PROVIDER_ADAPTER, mo, provider_specs, selected_provider):
     if selected_provider is None or not provider_specs:
         source_by_label = {}
         source_picker = None
@@ -316,16 +316,41 @@ def _(mo, provider_specs, selected_provider):
             f"{index + 1}. {getattr(option, 'label', None) or option.run_name or option.run_path}": option
             for index, option in enumerate(provider_specs)
         }
+        source_labels = list(source_by_label)
+        requires_explicit_choice = (
+            selected_provider.provider_id == EXACT_CHASER_PROVIDER_ADAPTER.provider_id
+            and len(source_labels) > 1
+        )
+        initial_source_label = (
+            EXACT_CHASER_PROVIDER_ADAPTER.initial_source_label(source_labels)
+            if selected_provider.provider_id
+            == EXACT_CHASER_PROVIDER_ADAPTER.provider_id
+            else next(iter(source_by_label))
+        )
         source_picker = mo.ui.dropdown(
-            options=list(source_by_label),
-            value=next(iter(source_by_label)),
+            options=source_labels,
+            value=initial_source_label,
+            allow_select_none=requires_explicit_choice,
             label="Analysis run",
+        )
+        selection_guidance = (
+            mo.callout(
+                mo.md(
+                    "Multiple immutable exact-successor bundles are available. "
+                    "Choose one explicitly; no analysis arrays will load until "
+                    "you do."
+                ),
+                kind="warn",
+            )
+            if requires_explicit_choice
+            else mo.md("")
         )
         source_output = mo.vstack(
             [
                 mo.md(
                     f"### {selected_provider.label}\n\n{selected_provider.description}"
                 ),
+                selection_guidance,
                 source_picker,
             ]
         )
@@ -336,7 +361,9 @@ def _(mo, provider_specs, selected_provider):
 @app.cell(hide_code=True)
 def _(source_by_label, source_picker):
     selected_spec = (
-        source_by_label[source_picker.value] if source_picker is not None else None
+        source_by_label[source_picker.value]
+        if source_picker is not None and source_picker.value is not None
+        else None
     )
     return (selected_spec,)
 

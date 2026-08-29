@@ -186,6 +186,9 @@ Primary locations:
       one option matching the exact v4 spatial run. Two explicit immutable
       exact bundles are currently visible in the recording; the other is the
       older `20260825_exact_epochs_v1` candidate and is not silently selected.
+- [x] Require an explicit operator source choice when discovery exposes more
+      than one immutable exact bundle. Keep a sole exact bundle as the
+      unambiguous default, and load no projection while the choice is unset.
 - [x] Load `radial_near_field` and require deep audit of both spatial/radial
       children.
 - [x] Load `distance_traces` and `trajectory_overlays`; require content hashes

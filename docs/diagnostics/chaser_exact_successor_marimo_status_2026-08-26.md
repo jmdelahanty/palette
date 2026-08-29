@@ -317,5 +317,8 @@ consolidated metadata. The merged correction now discovers exactly one option
 matching the receipt-bound v4 identity without a selector, legacy, candidate,
 or unconsolidated fallback. The recording also retains an older explicit exact
 bundle, so current discovery presents two source choices without treating
-either as scientific authority. The reader is present on `main`; the modular
-spatial implementation above remains on its CI-pending branch.
+either as scientific authority. When more than one immutable exact bundle is
+visible, the source dropdown starts unselected and no analysis projection loads
+until the operator chooses one. A sole exact bundle remains the unambiguous
+default. The reader is present on `main`; the modular spatial implementation
+above remains on its CI-pending branch.
