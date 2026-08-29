@@ -1,0 +1,76 @@
+"""Immutable provenance helpers for exact-chaser display projections."""
+
+from __future__ import annotations
+
+from types import MappingProxyType
+from typing import Any, Mapping, Sequence
+
+import numpy as np
+
+TRACE_DISPLAY_ALGORITHM = "source_order_bucket_first_last_min_max_missing_break_v1"
+TRACE_MAX_POINTS = 6_000
+TRAJECTORY_DISPLAY_ALGORITHM = "source_order_uniform_plus_coordinate_extrema_v1"
+TRAJECTORY_MAX_POINTS = 15_000
+
+
+def plain(value: Any) -> Any:
+    """Return JSON-compatible display provenance without mutating the source."""
+
+    if isinstance(value, Mapping):
+        return {str(key): plain(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [plain(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def freeze(value: Any) -> Any:
+    """Recursively freeze projection metadata exposed to renderers."""
+
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): freeze(item) for key, item in value.items()})
+    if isinstance(value, (tuple, list)):
+        return tuple(freeze(item) for item in value)
+    return value
+
+
+def build_projection_provenance(
+    *,
+    spatial: Any,
+    radials: Sequence[Any],
+    relative_bindings: Sequence[Mapping[str, Any]],
+    relative_binding_proofs: Sequence[Any],
+) -> Mapping[str, Any]:
+    """Build the readable, immutable identity record shared by exact views."""
+
+    return freeze(
+        {
+            "bundle_run_path": spatial.run_path,
+            "bundle_manifest_sha256": spatial.manifest_sha256,
+            "radial_run_paths": [radial.run_path for radial in radials],
+            "radial_manifest_sha256": [radial.manifest_sha256 for radial in radials],
+            "relative_bindings": [plain(value) for value in relative_bindings],
+            "relative_binding_proofs": [
+                plain(proof.provenance_record()) for proof in relative_binding_proofs
+            ],
+            "adapter_semantics": (
+                "read_only_exact_children_no_selector_no_interpolation"
+            ),
+            "display_trace_algorithm": TRACE_DISPLAY_ALGORITHM,
+            "display_trace_max_points_per_series": TRACE_MAX_POINTS,
+            "display_trajectory_algorithm": TRAJECTORY_DISPLAY_ALGORITHM,
+            "display_trajectory_max_points_per_panel": TRAJECTORY_MAX_POINTS,
+        }
+    )
+
+
+__all__ = [
+    "TRACE_DISPLAY_ALGORITHM",
+    "TRACE_MAX_POINTS",
+    "TRAJECTORY_DISPLAY_ALGORITHM",
+    "TRAJECTORY_MAX_POINTS",
+    "build_projection_provenance",
+    "freeze",
+    "plain",
+]

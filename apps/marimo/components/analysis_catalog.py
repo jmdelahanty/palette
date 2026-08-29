@@ -208,6 +208,14 @@ CHASER_EXACT_SUCCESSOR_PROVIDER = ProviderDefinition(
             "Fish positions with exact logged chaser positions in the reviewed arena.",
         ),
         AnalysisDefinition(
+            "spatial_occupancy",
+            "Exact-epoch occupancy heatmaps",
+            (
+                "Persisted paired-provider occupancy and detection-minus-keypoint "
+                "display on the sealed reviewed-arena physical grid."
+            ),
+        ),
+        AnalysisDefinition(
             "provenance",
             "Provenance",
             "Exact bundle, child-run identities, display projection, and authorities.",

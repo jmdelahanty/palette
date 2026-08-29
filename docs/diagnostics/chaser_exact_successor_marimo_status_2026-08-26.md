@@ -2,7 +2,7 @@
 
 <!-- contract-meta
 status: active
-implementation: reader-fix-ci-green-merge-pending
+implementation: reader-merged-modular-spatial-locally-validated-ci-pending
 last_verified: 2026-08-29
 -->
 
@@ -24,8 +24,8 @@ intended to discover a recording only when one complete, selector-ineligible
 spatial-occupancy successor seals an ordered keypoint/detection bundle and each
 referenced relative-frame and radial child still has the exact bound manifest
 digest and provider identity. The 2026-08-27 live-artifact audit below found a
-reader compatibility defect that currently prevents receipt-bound v4 bundles
-from reaching this capability.
+reader compatibility defect that prevented receipt-bound v4 bundles from
+reaching this capability. PR 70 corrected and merged that reader on 2026-08-29.
 
 The declared interactive views are:
 
@@ -34,13 +34,19 @@ The declared interactive views are:
 2. full-session and exact protocol-epoch fish–chaser distance traces;
 3. exact protocol-epoch fish positions with logged chaser-position overlays in
    the reviewed circular arena; and
-4. exact manifest, child identity, provider authority, and display-projection
+4. exact protocol-epoch paired-provider spatial occupancy and the sealed-array
+   detection-minus-keypoint display; and
+5. exact manifest, child identity, provider authority, and display-projection
    provenance.
 
 The adapter resolves no `latest`, default, promoted, or fallback selector. It
 deep-audits the small spatial/radial successor arrays. For frame-scale panels it
 reads and content-hashes only the relative-frame arrays required by the selected
 view. This is a bounded replacement for rescanning unrelated archive payloads.
+Its cache/reactive identity binds the exact archive, run path, bundle manifest,
+renderer, analysis, display-version string, and display-parameter digest. A
+completed projection is rejected if any of those identities changes before
+rendering.
 
 Plotly point reduction is display-only and is recorded in figure metadata. The
 distance projection preserves source order, local first/last/minimum/maximum
@@ -177,9 +183,9 @@ Local fail-closed validation passed:
 - `scripts/py -m marimo check apps/marimo/palette_explorer.py` outside the
   sandbox.
 
-Read-only acceptance against the frozen smoke recording now discovers exactly
-one schema-v2 option in 0.359 seconds. Every currently declared analysis loads
-successfully:
+Read-only acceptance against the frozen smoke recording found exactly one
+matching receipt-bound v4 schema-v2 option in 0.359 seconds. Every analysis
+declared by that reader revision loaded successfully:
 
 - `radial_near_field`: 3.265 seconds, deep-auditing the exact spatial and two
   radial children without loading relative arrays;
@@ -209,13 +215,62 @@ bout-response, escape/freeze, full-profile, and provenance behavior into
 focused components behind one closed exact-chaser adapter. New exact behavior
 will not be added to the legacy GoodCopBadCop component.
 
+## Modular spatial-view implementation and smoke — 2026-08-29
+
+PR 70 merged as `33bc1c5b7f4d91348fc18ff2a8683e72761ea185`, and
+the modular architecture documentation merged through PR 68 as
+`b1495ff7664fc80169aab583db3a765da6439660`. The next implementation branch
+keeps two reviewable commits:
+
+- `345083fb922316767a1b58f105f26c85943d2ef7` mechanically extracts the exact
+  provider, projection, provenance, radial, distance, and trajectory modules,
+  retains the old module as a compatibility facade, and replaces three
+  analysis-specific notebook render branches with one closed adapter call; and
+- `d215eb686045b59aacf2a201a99fdfdcf12c88ec` adds the persisted
+  spatial-occupancy route and schema-v3 display parameters.
+
+The spatial renderer reads the deep-audited `occupancy_count`,
+`occupancy_density_valid_in_arena`, `occupancy_fraction_candidate_epoch`, exact
+bin edges, bin-center arena mask, provider/epoch registries, and every persisted
+candidate/validity denominator. It verifies row conservation and the two
+persisted normalizations before displaying the source density as percent per
+bin. Detection-minus-keypoint is display-only. The reviewed circle, `+y_down`
+orientation, coverage counts, shared density scale, symmetric difference
+scale, exact bin edges, mask-display policy, interpolation prohibition, and
+scientific-recomputation prohibition are recorded in Plotly figure metadata.
+
+The commit-pinned read-only smoke used:
+
+- Palette path: `/tmp/palette-authority-supplier-clarity-20260827`;
+- recording: `2026-08-10T17-20-55Z_arena_1_goodbatbadbat`;
+- exact run:
+  `goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260827_body_frame_projection_receipt_bound_v4`;
+- bundle manifest:
+  `7ab19bf9fa888f12cbb4fc06e01c847024584a3cc00f9df2a7be5fd9d57950f0`;
+- display-parameter digest:
+  `be992c84cc076f376c2b31a1237688b5e1a690a555d1625a1686eff8b2872af3`;
+- providers: `keypoint_anatomical_triad_mean.v1` then
+  `detection_bbox_centroid.v1`; and
+- grid shape: two providers by three epochs by 42 by 42 bins.
+
+Metadata discovery took 0.304 seconds and returned two explicit immutable exact
+sources. Exactly one matched the receipt-bound v4 identity above; the other was
+the older `20260825_exact_epochs_v1` bundle. No source was inferred or silently
+selected. The v4 spatial projection loaded in 3.758 seconds, deep-auditing 19
+spatial and 61+61 radial arrays totaling 324,573 decoded bytes. It loaded no
+relative-frame arrays. The renderer exposed nine heatmaps totaling 15,876
+cells. The first behavior smoke rendered in 0.116 seconds.
+
+Local validation passes 35 focused tests, `marimo check`, Python compilation,
+Black formatting, contract freshness, file-size ratchet, and `git diff
+--check`. Required CI for this new branch remains pending; neither commit is
+merge-ready, deployed, or present on `main` until that CI and review complete.
+
 ## Persisted but not yet mounted in this capability
 
 These products are safe candidates for later read-only panels, but were kept
 out of the initial component:
 
-- paired-provider spatial-occupancy heatmaps from
-  `analysis/chaser_spatial_occupancy_runs`;
 - exact controller-trial summaries and trigger-aligned distance views;
 - generalized bout-response summaries;
 - escape/freeze trial and event summaries;
@@ -227,10 +282,10 @@ binding, validate child manifest and payload identities, and render persisted
 arrays without recomputing trial membership, event classification, timing, or
 geometry.
 
-The currently declared exact-successor analyses are limited to
-`radial_near_field`, `distance_traces`, `trajectory_overlays`, and
-`provenance`. They do not provide interactive equivalents for all nine static
-figure families. In particular, paired-provider spatial heatmaps,
+The currently declared exact-successor analyses are
+`radial_near_field`, `distance_traces`, `trajectory_overlays`,
+`spatial_occupancy`, and `provenance`. They do not provide interactive
+equivalents for all nine static figure families. In particular,
 controller-trial/bout-response detail, escape/freeze detail, and the composed
 full dashboard remain absent from this exact reader. Older GoodCopBadCop
 components or candidate views must not be used as an implicit fallback for
@@ -258,7 +313,12 @@ Its spatial bundle binds the first-class providers
 `keypoint_anatomical_triad_mean.v1` and `detection_bbox_centroid.v1`, three exact
 chaser epochs, their paired radial successors, and their paired relative-frame
 runs. The pre-fix reader returned zero options despite correct direct and
-consolidated metadata. The locally validated correction now discovers exactly
-one option and loads all four declared analyses without a selector, legacy,
-candidate, or unconsolidated fallback. The implementation is commit-pinned and
-required CI is green on PR 70; it remains absent from `main` until merged.
+consolidated metadata. The merged correction now discovers exactly one option
+matching the receipt-bound v4 identity without a selector, legacy, candidate,
+or unconsolidated fallback. The recording also retains an older explicit exact
+bundle, so current discovery presents two source choices without treating
+either as scientific authority. When more than one immutable exact bundle is
+visible, the source dropdown starts unselected and no analysis projection loads
+until the operator chooses one. A sole exact bundle remains the unambiguous
+default. The reader is present on `main`; the modular spatial implementation
+above remains on its CI-pending branch.

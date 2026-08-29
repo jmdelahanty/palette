@@ -67,12 +67,8 @@ def _():
         build_provider_chaser_candidate_bout_response_output,
         load_provider_chaser_candidate_projection,
     )
-    from apps.marimo.components.chaser_exact_successors import (
-        available_exact_chaser_successor_analysis_ids,
-        build_exact_distance_traces_output,
-        build_exact_radial_near_field_output,
-        build_exact_trajectory_overlays_output,
-        load_exact_chaser_successor_projection,
+    from apps.marimo.components.chaser_exact import (
+        EXACT_CHASER_PROVIDER_ADAPTER,
     )
     from apps.marimo.components.recording_workspace import (
         RecordingExplorationWorkspace,
@@ -86,6 +82,7 @@ def _():
 
     return (
         CoreBehaviorSource,
+        EXACT_CHASER_PROVIDER_ADAPTER,
         PROVIDERS,
         Path,
         RecordingExplorationWorkspace,
@@ -94,7 +91,6 @@ def _():
         available_bout_analysis_ids,
         available_chaser_analysis_ids,
         available_provider_chaser_candidate_analysis_ids,
-        available_exact_chaser_successor_analysis_ids,
         build_arena_heatmap,
         build_bout_controls,
         build_bout_kinematics_output,
@@ -113,9 +109,6 @@ def _():
         build_fish_heading_output,
         build_provider_chaser_candidate_bearing_output,
         build_provider_chaser_candidate_bout_response_output,
-        build_exact_distance_traces_output,
-        build_exact_radial_near_field_output,
-        build_exact_trajectory_overlays_output,
         build_spatial_occupancy_output,
         build_spec_provenance_panel,
         build_static_artifacts_panel,
@@ -131,7 +124,6 @@ def _():
         load_core_behavior_projection,
         load_goodcopbadcop_view,
         load_provider_chaser_candidate_projection,
-        load_exact_chaser_successor_projection,
         mo,
         px,
         resolve_time_window_from_widgets,
@@ -314,7 +306,7 @@ def _(provider_by_label, provider_picker, specs_by_provider):
 
 
 @app.cell(hide_code=True)
-def _(mo, provider_specs, selected_provider):
+def _(EXACT_CHASER_PROVIDER_ADAPTER, mo, provider_specs, selected_provider):
     if selected_provider is None or not provider_specs:
         source_by_label = {}
         source_picker = None
@@ -324,16 +316,41 @@ def _(mo, provider_specs, selected_provider):
             f"{index + 1}. {getattr(option, 'label', None) or option.run_name or option.run_path}": option
             for index, option in enumerate(provider_specs)
         }
+        source_labels = list(source_by_label)
+        requires_explicit_choice = (
+            selected_provider.provider_id == EXACT_CHASER_PROVIDER_ADAPTER.provider_id
+            and len(source_labels) > 1
+        )
+        initial_source_label = (
+            EXACT_CHASER_PROVIDER_ADAPTER.initial_source_label(source_labels)
+            if selected_provider.provider_id
+            == EXACT_CHASER_PROVIDER_ADAPTER.provider_id
+            else next(iter(source_by_label))
+        )
         source_picker = mo.ui.dropdown(
-            options=list(source_by_label),
-            value=next(iter(source_by_label)),
+            options=source_labels,
+            value=initial_source_label,
+            allow_select_none=requires_explicit_choice,
             label="Analysis run",
+        )
+        selection_guidance = (
+            mo.callout(
+                mo.md(
+                    "Multiple immutable exact-successor bundles are available. "
+                    "Choose one explicitly; no analysis arrays will load until "
+                    "you do."
+                ),
+                kind="warn",
+            )
+            if requires_explicit_choice
+            else mo.md("")
         )
         source_output = mo.vstack(
             [
                 mo.md(
                     f"### {selected_provider.label}\n\n{selected_provider.description}"
                 ),
+                selection_guidance,
                 source_picker,
             ]
         )
@@ -344,7 +361,9 @@ def _(mo, provider_specs, selected_provider):
 @app.cell(hide_code=True)
 def _(source_by_label, source_picker):
     selected_spec = (
-        source_by_label[source_picker.value] if source_picker is not None else None
+        source_by_label[source_picker.value]
+        if source_picker is not None and source_picker.value is not None
+        else None
     )
     return (selected_spec,)
 
@@ -352,8 +371,8 @@ def _(source_by_label, source_picker):
 @app.cell(hide_code=True)
 def _(
     CoreBehaviorSource,
+    EXACT_CHASER_PROVIDER_ADAPTER,
     analyses_for_provider,
-    available_exact_chaser_successor_analysis_ids,
     available_bout_analysis_ids,
     available_chaser_analysis_ids,
     available_provider_chaser_candidate_analysis_ids,
@@ -375,7 +394,7 @@ def _(
             zarr_path, selected_spec
         )
     elif selected_provider.provider_id == "stimulus_chaser_exact_successors":
-        available_ids = available_exact_chaser_successor_analysis_ids(
+        available_ids = EXACT_CHASER_PROVIDER_ADAPTER.available_analysis_ids(
             zarr_path, selected_spec
         )
     else:
@@ -915,7 +934,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
-    load_exact_chaser_successor_projection,
+    EXACT_CHASER_PROVIDER_ADAPTER,
     selected_analysis_id,
     selected_provider,
     selected_spec,
@@ -925,13 +944,13 @@ def _(
     exact_chaser_projection_error = None
     if (
         selected_provider is not None
-        and selected_provider.provider_id == "stimulus_chaser_exact_successors"
+        and selected_provider.provider_id == EXACT_CHASER_PROVIDER_ADAPTER.provider_id
         and selected_spec is not None
-        and selected_analysis_id
-        in {"radial_near_field", "distance_traces", "trajectory_overlays"}
+        and bool(selected_analysis_id)
+        and EXACT_CHASER_PROVIDER_ADAPTER.requires_projection(selected_analysis_id)
     ):
         try:
-            exact_chaser_projection = load_exact_chaser_successor_projection(
+            exact_chaser_projection = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
                 zarr_path,
                 selected_spec,
                 analysis_id=selected_analysis_id,
@@ -1036,6 +1055,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
+    EXACT_CHASER_PROVIDER_ADAPTER,
     build_arena_heatmap,
     build_chaser_gaze_tracking_output,
     build_cra_near_field_output,
@@ -1047,9 +1067,6 @@ def _(
     build_egocentric_polar_heatmap_output,
     build_epoch_summary_output,
     build_escape_freeze_output,
-    build_exact_distance_traces_output,
-    build_exact_radial_near_field_output,
-    build_exact_trajectory_overlays_output,
     build_fish_heading_output,
     build_provider_chaser_candidate_bearing_output,
     build_provider_chaser_candidate_bout_response_output,
@@ -1119,26 +1136,14 @@ def _(
             mo,
             candidate_projection,
         )
-    elif (
-        selected_analysis_id == "radial_near_field"
-        and exact_chaser_projection is not None
-    ):
-        chaser_output = build_exact_radial_near_field_output(
-            mo, go, exact_chaser_projection
-        )
-    elif (
-        selected_analysis_id == "distance_traces"
-        and exact_chaser_projection is not None
-    ):
-        chaser_output = build_exact_distance_traces_output(
-            mo, go, exact_chaser_projection
-        )
-    elif (
-        selected_analysis_id == "trajectory_overlays"
-        and exact_chaser_projection is not None
-    ):
-        chaser_output = build_exact_trajectory_overlays_output(
-            mo, go, exact_chaser_projection
+    elif exact_chaser_projection is not None and selected_spec is not None:
+        chaser_output = EXACT_CHASER_PROVIDER_ADAPTER.render(
+            mo,
+            go,
+            exact_chaser_projection,
+            zarr_path=zarr_path,
+            option=selected_spec,
+            analysis_id=selected_analysis_id,
         )
     elif selected_analysis_id == "gaze_tracking" and chaser_gaze_view is not None:
         chaser_output = build_chaser_gaze_tracking_output(

@@ -2,7 +2,7 @@
 
 <!-- contract-meta
 status: implementation-in-progress
-implementation: reader-fix-ci-green-merge-pending-modular-expansion-planned
+implementation: reader-merged-modular-spatial-locally-validated-ci-pending
 last_verified: 2026-08-29
 -->
 
@@ -46,11 +46,16 @@ current zero-option defect.
       not exercise the production receipt-bound shape.
 - [x] The local reader correction passes the real-artifact smoke and
       metadata-only discovery for all 80 eligible receipt-bound v4 recordings.
-- [x] Reader commit `559c08fdea42f0e4de3985033f95e99917a67a5f` is
-      pushed on PR 70; all 23 required checks passed and GitHub reports a clean
-      merge state.
-- [ ] PR 70 is merge-ready but remains unmerged. Do not treat the reader as
-      present on `main` until that merge is verified.
+- [x] Reader commit `559c08fdea42f0e4de3985033f95e99917a67a5f`
+      passed all 23 required checks and merged through PR 70 as merge commit
+      `33bc1c5b7f4d91348fc18ff2a8683e72761ea185`.
+- [x] The modular architecture plan merged through PR 68 as merge commit
+      `b1495ff7664fc80169aab583db3a765da6439660`.
+- [x] The behavior-preserving package extraction is commit
+      `345083fb922316767a1b58f105f26c85943d2ef7`; the separate spatial view is
+      commit `d215eb686045b59aacf2a201a99fdfdcf12c88ec`.
+- [ ] Required CI for the new modular/spatial branch has not run. Local and
+      real-artifact validation do not make that branch merge-ready.
 
 ## Safety invariants
 
@@ -174,10 +179,16 @@ Primary locations:
 
 ## Phase 4 — Real-artifact acceptance
 
-- [ ] Use the commit-pinned implementation under test; record its full commit
-      and absolute Palette path.
+- [x] Use commit-pinned implementation
+      `d215eb686045b59aacf2a201a99fdfdcf12c88ec` at
+      `/tmp/palette-authority-supplier-clarity-20260827`.
 - [x] Reopen the smoke recording with consolidated metadata and require exactly
-      one option for the exact v4 spatial run.
+      one option matching the exact v4 spatial run. Two explicit immutable
+      exact bundles are currently visible in the recording; the other is the
+      older `20260825_exact_epochs_v1` candidate and is not silently selected.
+- [x] Require an explicit operator source choice when discovery exposes more
+      than one immutable exact bundle. Keep a sole exact bundle as the
+      unambiguous default, and load no projection while the choice is unset.
 - [x] Load `radial_near_field` and require deep audit of both spatial/radial
       children.
 - [x] Load `distance_traces` and `trajectory_overlays`; require content hashes
@@ -185,15 +196,18 @@ Primary locations:
 - [x] Require all declared analyses to retain the exact recording ID, provider
       IDs/digests, run paths, child manifest digests, semantic epoch binding,
       and geometry authority.
-- [ ] Record load time, arrays read, bytes read where measurable, and display
-      point counts. Performance evidence must not weaken validation.
+- [x] Record load time, arrays read, bytes read where measurable, and display
+      point counts. The commit-pinned spatial smoke discovered in 0.304 s,
+      loaded in 3.758 s, deep-audited 19 spatial plus 61+61 radial arrays
+      (324,573 decoded bytes), loaded no relative arrays, and rendered 15,876
+      heatmap cells. Performance evidence did not weaken validation.
 - [x] Run metadata-only discovery over all 80 eligible recordings and require
       one exact option per recording.
 - [ ] Deep-load a deterministic representative sample covering arenas,
       recording dates, body-frame source variants, and the previously long
       task-2 recording.
 - [x] Keep indices `77-80` explicitly excluded from successful-cohort claims.
-- [ ] Write a digest-bound smoke report. It may describe viewer readiness but
+- [x] Write a digest-bound smoke report. It may describe viewer readiness but
       must not activate a selector or alter any recording.
 
 ## Phase 4.5 — Establish the modular exact-chaser explorer boundary
@@ -204,33 +218,34 @@ implementations must be ordinary focused Python components. Do not grow
 `goodcopbadcop_chaser.py` into a new monolith. The durable design is recorded
 in [`marimo_explorer_architecture.md`](../marimo_explorer_architecture.md).
 
-- [ ] Preserve `apps/marimo/palette_explorer.py` as the thin application shell
+- [x] Preserve `apps/marimo/palette_explorer.py` as the thin application shell
       for workspace selection, provider/analysis selection, generic errors,
       stale-load protection, and final layout.
-- [ ] Define one exact-chaser provider adapter with closed maps for available
+- [x] Define one exact-chaser provider adapter with closed maps for available
       analysis IDs, projection loaders, optional controls, and renderers.
-- [ ] Replace exact-chaser analysis-specific top-level load/render branches
+- [x] Replace exact-chaser analysis-specific top-level load/render branches
       with one provider-adapter invocation; adding a later exact analysis must
       not require another notebook branch.
-- [ ] Extract the current exact component into focused modules for shared
+- [x] Extract the current exact component into focused modules for shared
       projection, radial/near-field, distance, trajectory, and provenance.
-- [ ] Keep `apps/marimo/components/chaser_exact_successors.py` as a temporary
+- [x] Keep `apps/marimo/components/chaser_exact_successors.py` as a temporary
       compatibility facade that re-exports the supported public functions.
-- [ ] Put each new view in its own module: spatial occupancy, controller
-      trials, generalized bout response, escape/freeze, and full profile.
-- [ ] Keep legacy GoodCopBadCop code isolated. Do not add new exact-successor
+- [x] Put spatial occupancy in its own focused module.
+- [ ] Put later controller-trial, generalized bout-response, escape/freeze, and
+      full-profile views in their own focused modules.
+- [x] Keep legacy GoodCopBadCop code isolated. Do not add new exact-successor
       logic, fallback behavior, or scientific interpretation to that surface.
-- [ ] Keep discovery metadata-only. Importing a provider or listing analysis
+- [x] Keep discovery metadata-only. Importing a provider or listing analysis
       IDs must not read scientific arrays.
-- [ ] Load only the selected analysis projection and key any cache by exact
+- [x] Load only the selected analysis projection and key any cache by exact
       archive, run, manifest, renderer, and display-parameter identities.
-- [ ] Prevent late asynchronous results from rendering under a newer recording,
+- [x] Prevent late asynchronous results from rendering under a newer recording,
       provider, source, or analysis selection.
-- [ ] Add focused tests per module plus one facade/provider/top-level routing
+- [x] Add focused tests per module plus one facade/provider/top-level routing
       test proving closed dispatch and typed unavailable behavior.
-- [ ] Land the mechanical extraction as a distinct commit from the first new
+- [x] Land the mechanical extraction as a distinct commit from the first new
       spatial-occupancy implementation so review can distinguish structural
-      movement from behavior.
+      movement from behavior: `345083fb` then `d215eb68`.
 
 ## Phase 5 — Mount the remaining persisted scientific views
 
@@ -240,14 +255,14 @@ not derive a new scientific product in the UI.
 
 ### 5A — Spatial-occupancy heatmaps
 
-- [ ] Add an exact `spatial_occupancy` analysis ID.
-- [ ] Read persisted `occupancy_density_valid_in_arena`, bin edges, arena-bin
+- [x] Add an exact `spatial_occupancy` analysis ID.
+- [x] Read persisted `occupancy_density_valid_in_arena`, bin edges, arena-bin
       mask, epoch/provider codes, and candidate/validity denominators.
-- [ ] Reproduce provider/epoch ordering and the detection-minus-keypoint
+- [x] Reproduce provider/epoch ordering and the detection-minus-keypoint
       display from sealed arrays.
-- [ ] Bind the 2 mm grid policy, reviewed circle, coordinate orientation,
+- [x] Bind the 2 mm grid policy, reviewed circle, coordinate orientation,
       missing-row policy, color normalization, and coverage annotations.
-- [ ] Treat color scale and point/texture resolution as display parameters;
+- [x] Treat color scale and point/texture resolution as display parameters;
       never renormalize scientific occupancy in Marimo.
 
 ### 5B — Controller-trial and trigger-aligned views

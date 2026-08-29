@@ -177,8 +177,20 @@ def test_exact_successor_discovery_uses_spatial_bundle_and_exact_children(
     assert len(options) == 1
     assert options[0].renderer == CHASER_EXACT_SUCCESSOR_RENDERER
     assert options[0].spec["bundle_status"] == "exact_selector_ineligible"
-    assert options[0].spec["schema_version"] == 2
+    assert options[0].spec["schema_version"] == 3
     assert options[0].spec["provider_ids"] == ["keypoint.v1", "detection.v1"]
+    spatial_parameters = options[0].spec["display_parameters"][
+        "spatial_occupancy"
+    ]
+    assert (
+        spatial_parameters["source_array"]
+        == "occupancy_density_valid_in_arena"
+    )
+    assert spatial_parameters["density_multiplier_to_percent"] == 100.0
+    assert (
+        spatial_parameters["provider_difference"]
+        == "detection_minus_keypoint_percentage_points_per_bin"
+    )
     proofs = options[0].spec["relative_frame_binding_proofs"]
     assert len(proofs) == 2
     assert proofs[0]["spatial_binding_profile"] == RECEIPT_BOUND_PROFILE
