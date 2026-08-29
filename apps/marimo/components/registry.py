@@ -73,6 +73,21 @@ PROVIDER_CHASER_CANDIDATE_ARTIFACT = "provider_chaser_distance_candidate"
 CHASER_EXACT_SUCCESSOR_RENDERER = "palette-chaser-exact-successor-explorer-v1"
 CHASER_EXACT_SUCCESSOR_ARTIFACT = "chaser_exact_successor_bundle"
 CHASER_EXACT_SUCCESSOR_PARENT_PATH = "analysis/chaser_spatial_occupancy_runs"
+CHASER_EXACT_CONTROLLER_TRIAL_PARENT_PATH = "analysis/controller_chase_trial_runs"
+CHASER_EXACT_SEMANTIC_PARENT_PATH = "analysis/protocol_semantic_chaser_selection_runs"
+_CHASER_EXACT_FORBIDDEN_SELECTORS = frozenset(
+    {
+        "latest",
+        "latest_complete",
+        "latest_pending",
+        "current",
+        "current_run",
+        "selected",
+        "authoritative",
+        "authoritative_run",
+        "default",
+    }
+)
 _PROVIDER_CHASER_CANDIDATE_FORBIDDEN_SELECTORS = frozenset(
     {
         "latest",
@@ -599,7 +614,8 @@ def _exact_bound_child(
         not path.startswith(prefix)
         or not name
         or "/" in name
-        or name in {"latest", "default", "selected", ".", ".."}
+        or name in {".", ".."}
+        or name.casefold() in _CHASER_EXACT_FORBIDDEN_SELECTORS
         or len(digest) != 64
     ):
         return None
@@ -641,6 +657,170 @@ def _exact_bound_child(
     return manifest
 
 
+def _exact_child_identity(
+    binding: Any,
+    *,
+    parent: str,
+) -> Mapping[str, str] | None:
+    """Normalize one exact child identity without accepting a selector alias."""
+
+    if not isinstance(binding, Mapping):
+        return None
+    path = str(binding.get("run_path") or "")
+    digest = str(binding.get("manifest_sha256") or "")
+    prefix = f"{parent}/"
+    name = path.removeprefix(prefix)
+    if (
+        not path.startswith(prefix)
+        or not name
+        or "/" in name
+        or name in {".", ".."}
+        or name.casefold() in _CHASER_EXACT_FORBIDDEN_SELECTORS
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        return None
+    return {"run_path": path, "manifest_sha256": digest}
+
+
+def _compatible_controller_trial_binding(
+    root: Any,
+    *,
+    recording_id: str,
+    spatial_sources: Mapping[str, Any],
+    keypoint_relative_manifest: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    """Resolve exactly one immutable controller trial by sealed source identity."""
+
+    providers = spatial_sources.get("position_providers")
+    if not isinstance(providers, list) or len(providers) != 2:
+        return None
+    keypoint = providers[0]
+    if not isinstance(keypoint, Mapping) or keypoint.get("provider_role") != "keypoint":
+        return None
+    try:
+        expected_relative = validate_exact_relative_frame_binding(
+            keypoint.get("relative_frame"),
+            label="spatial keypoint relative-frame binding",
+        )
+    except ExactRelativeFrameBindingError:
+        return None
+    expected_semantic = _exact_child_identity(
+        spatial_sources.get("protocol_semantic_selection"),
+        parent=CHASER_EXACT_SEMANTIC_PARENT_PATH,
+    )
+    if expected_semantic is None:
+        return None
+    relative_dimensions = keypoint_relative_manifest.get("dimensions")
+    if not isinstance(relative_dimensions, Mapping):
+        return None
+    try:
+        expected_dimensions = (
+            int(relative_dimensions.get("n_frames", 0)),
+            int(relative_dimensions.get("n_chasers", 0)),
+            int(relative_dimensions.get("n_rows", 0)),
+        )
+    except (TypeError, ValueError):
+        return None
+    if (
+        expected_dimensions[0] <= 0
+        or expected_dimensions[1] <= 0
+        or expected_dimensions[2] != expected_dimensions[0] * expected_dimensions[1]
+    ):
+        return None
+    try:
+        parent = root[CHASER_EXACT_CONTROLLER_TRIAL_PARENT_PATH]
+    except Exception:
+        return None
+    if _CHASER_EXACT_FORBIDDEN_SELECTORS.intersection(getattr(parent, "attrs", {})):
+        return None
+
+    matches: list[Mapping[str, Any]] = []
+    for run_name in _group_names(parent):
+        if (
+            run_name in {".", ".."}
+            or run_name.casefold() in _CHASER_EXACT_FORBIDDEN_SELECTORS
+        ):
+            continue
+        run_path = f"{CHASER_EXACT_CONTROLLER_TRIAL_PARENT_PATH}/{run_name}"
+        manifest = _valid_composable_successor_manifest(
+            parent[run_name],
+            expected_kind="controller_chase_trials",
+            expected_run_path=run_path,
+        )
+        if manifest is None or manifest.get("recording_id") != recording_id:
+            continue
+        scientific = manifest.get("scientific_manifest")
+        if not isinstance(scientific, Mapping):
+            continue
+        scientific_schema = scientific.get("scientific_schema")
+        dimensions = scientific.get("dimensions")
+        policy = scientific.get("policy")
+        try:
+            observed_dimensions = (
+                int(dimensions.get("n_frames", 0)),
+                int(dimensions.get("n_chasers", 0)),
+                int(dimensions.get("n_source_rows", 0)),
+            )
+            n_trials = int(dimensions.get("n_trials", 0))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if (
+            not isinstance(scientific_schema, Mapping)
+            or scientific_schema.get("schema_id")
+            != "palette.analysis.controller_chase_trials"
+            or scientific_schema.get("schema_version") != 1
+            or scientific_schema.get("method_id")
+            != "exact_logged_trial_id_active_membership_v1"
+            or not isinstance(dimensions, Mapping)
+            or observed_dimensions != expected_dimensions
+            or not 0 < n_trials <= 32
+            or not isinstance(policy, Mapping)
+            or policy.get("fallback") != "prohibited_fail_closed"
+            or policy.get("legacy_contiguous_interval_reconstruction") != "rejected"
+        ):
+            continue
+        try:
+            controller_relative = validate_exact_relative_frame_binding(
+                scientific.get("source_relative_frame"),
+                label="controller-trial relative-frame binding",
+            )
+            require_same_exact_relative_frame_child(
+                expected_relative.normalized_identity,
+                controller_relative.normalized_identity,
+                expected_label="spatial keypoint relative-frame binding",
+                observed_label="controller-trial relative-frame binding",
+            )
+        except ExactRelativeFrameBindingError:
+            continue
+        controller_semantic = _exact_child_identity(
+            scientific.get("semantic_selection"),
+            parent=CHASER_EXACT_SEMANTIC_PARENT_PATH,
+        )
+        if controller_semantic != expected_semantic:
+            continue
+        manifest_digest = canonical_json_sha256(dict(manifest))
+        scientific_payload = str(manifest.get("scientific_payload_sha256") or "")
+        if (
+            len(scientific_payload) != 64
+            or any(
+                character not in "0123456789abcdef" for character in scientific_payload
+            )
+            or scientific.get("payload_digest") != scientific_payload
+        ):
+            continue
+        matches.append(
+            {
+                "run_path": run_path,
+                "manifest_sha256": manifest_digest,
+                "scientific_payload_sha256": scientific_payload,
+                "source_relative_frame": dict(expected_relative.normalized_identity),
+                "semantic_selection": dict(expected_semantic),
+            }
+        )
+    return matches[0] if len(matches) == 1 else None
+
+
 def discover_exact_chaser_successor_options(
     zarr_path: Path | str,
     *,
@@ -661,18 +841,17 @@ def discover_exact_chaser_successor_options(
         parent = root[CHASER_EXACT_SUCCESSOR_PARENT_PATH]
     except Exception:
         return []
-    if {
-        "latest",
-        "latest_complete",
-        "selected",
-        "authoritative",
-        "default",
-    }.intersection(getattr(parent, "attrs", {})):
+    if _CHASER_EXACT_FORBIDDEN_SELECTORS.intersection(getattr(parent, "attrs", {})):
         return []
     run_wanted = normalize_path(str(run_path_filter)) if run_path_filter else None
     artifact_wanted = normalize_path(str(artifact_filter)) if artifact_filter else None
     options: list[InteractiveSpecOption] = []
     for run_name in _group_names(parent):
+        if (
+            run_name in {".", ".."}
+            or run_name.casefold() in _CHASER_EXACT_FORBIDDEN_SELECTORS
+        ):
+            continue
         run_path = f"{CHASER_EXACT_SUCCESSOR_PARENT_PATH}/{run_name}"
         if run_wanted and run_wanted != run_path:
             continue
@@ -699,6 +878,7 @@ def discover_exact_chaser_successor_options(
         if roles != ("keypoint", "detection"):
             continue
         provider_ids: list[str] = []
+        relative_manifests: list[Mapping[str, Any]] = []
         relative_binding_proofs: list[dict[str, Any]] = []
         valid = True
         for record in providers:
@@ -776,6 +956,7 @@ def discover_exact_chaser_successor_options(
                 valid = False
                 break
             provider_ids.append(provider_id)
+            relative_manifests.append(relative)
             relative_binding_proofs.append(
                 {
                     "normalized_identity": dict(relative_proof.normalized_identity),
@@ -801,19 +982,36 @@ def discover_exact_chaser_successor_options(
             continue
         attrs = dict(getattr(run, "attrs", {}))
         digest = str(attrs[COMPOSABLE_CHASER_MANIFEST_DIGEST_ATTR])
+        controller_trial_binding = _compatible_controller_trial_binding(
+            root,
+            recording_id=recording_id,
+            spatial_sources=sources,
+            keypoint_relative_manifest=relative_manifests[0],
+        )
+        analysis_bindings = (
+            {"controller_trials": dict(controller_trial_binding)}
+            if controller_trial_binding is not None
+            else {}
+        )
         title = f"Exact paired-provider chaser successors: {run_name}"
         spec = {
             "schema_id": "palette.chaser_exact_successor_explorer_spec",
-            "schema_version": 3,
+            "schema_version": 4,
             "renderer": CHASER_EXACT_SUCCESSOR_RENDERER,
             "title": title,
             "run_name": run_name,
             "bundle_status": "exact_selector_ineligible",
             "bundle_manifest_sha256": digest,
             "provider_ids": provider_ids,
+            "analysis_bindings": analysis_bindings,
             "source_paths": {
                 "spatial_occupancy": run_path,
                 "position_providers": providers,
+                **(
+                    {"controller_trials": controller_trial_binding["run_path"]}
+                    if controller_trial_binding is not None
+                    else {}
+                ),
             },
             "relative_frame_binding_proofs": relative_binding_proofs,
             "adapter_semantics": (
@@ -850,6 +1048,26 @@ def discover_exact_chaser_successor_options(
                 "trajectory_overlays": {
                     "algorithm": ("source_order_uniform_plus_coordinate_extrema_v1"),
                     "max_points_per_series_per_epoch": 15000,
+                },
+                "controller_trials": {
+                    "recipe_id": "exact_logged_trial_membership_distance_view_v1",
+                    "source_membership_array": "logged_active_trial_member",
+                    "source_gap_array": "trial_gap_member",
+                    "source_gap_reason_array": ("trial_gap_reason_code_by_source_row"),
+                    "trace_projection_algorithm": (
+                        "source_order_bucket_first_last_min_max_missing_break_v1"
+                    ),
+                    "max_points_per_trace": 6000,
+                    "max_trial_panels": 32,
+                    "max_gap_markers_per_panel": 2000,
+                    "connect_missing_gaps": False,
+                    "legacy_trial_reconstruction": "prohibited",
+                    "gap_marker_height_role": (
+                        "display_only_panel_max_not_scientific_value"
+                    ),
+                    "gap_marker_timestamp_policy": (
+                        "valid_source_timestamps_only_all_gaps_retained_in_table"
+                    ),
                 },
                 "scientific_recomputation": False,
                 "interpolation": "prohibited",

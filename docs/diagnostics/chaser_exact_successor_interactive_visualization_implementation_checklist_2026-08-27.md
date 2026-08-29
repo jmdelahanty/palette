@@ -2,7 +2,7 @@
 
 <!-- contract-meta
 status: implementation-in-progress
-implementation: reader-merged-modular-spatial-locally-validated-ci-pending
+implementation: reader-and-modular-spatial-merged-controller-trial-locally-validated-ci-pending
 last_verified: 2026-08-29
 -->
 
@@ -54,7 +54,10 @@ current zero-option defect.
 - [x] The behavior-preserving package extraction is commit
       `345083fb922316767a1b58f105f26c85943d2ef7`; the separate spatial view is
       commit `d215eb686045b59aacf2a201a99fdfdcf12c88ec`.
-- [ ] Required CI for the new modular/spatial branch has not run. Local and
+- [x] The modular/spatial branch plus explicit multi-source choice passed all
+      23 required checks and merged through PR 71 as merge commit
+      `13318a8b7a16399a70f290ea3bd5ad466f309ae9`.
+- [ ] Required CI for the controller-trial branch has not run. Local and
       real-artifact validation do not make that branch merge-ready.
 
 ## Safety invariants
@@ -231,8 +234,10 @@ in [`marimo_explorer_architecture.md`](../marimo_explorer_architecture.md).
 - [x] Keep `apps/marimo/components/chaser_exact_successors.py` as a temporary
       compatibility facade that re-exports the supported public functions.
 - [x] Put spatial occupancy in its own focused module.
-- [ ] Put later controller-trial, generalized bout-response, escape/freeze, and
-      full-profile views in their own focused modules.
+- [ ] Put later generalized bout-response, escape/freeze, and full-profile
+      views in their own focused modules. The controller-trial view now has its
+      own focused renderer and audited binding/loader modules on the current
+      implementation branch.
 - [x] Keep legacy GoodCopBadCop code isolated. Do not add new exact-successor
       logic, fallback behavior, or scientific interpretation to that surface.
 - [x] Keep discovery metadata-only. Importing a provider or listing analysis
@@ -267,13 +272,13 @@ not derive a new scientific product in the UI.
 
 ### 5B — Controller-trial and trigger-aligned views
 
-- [ ] Anchor the exact controller-trial successor by run path, manifest digest,
+- [x] Anchor the exact controller-trial successor by run path, manifest digest,
       semantic selection, recording identity, and relative-frame source.
-- [ ] Render exact logged active trial members only; retained trial gaps remain
+- [x] Render exact logged active trial members only; retained trial gaps remain
       evidence but do not become trial members.
-- [ ] Display full/trial distance traces from persisted membership and timing
+- [x] Display full/trial distance traces from persisted membership and timing
       arrays without inferring legacy trial boundaries.
-- [ ] Preserve exact session-time and relative-frame semantics in labels and
+- [x] Preserve exact session-time and relative-frame semantics in labels and
       provenance.
 
 ### 5C — Generalized bout response

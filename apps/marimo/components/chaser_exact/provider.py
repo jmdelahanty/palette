@@ -8,6 +8,11 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
 from ..registry import InteractiveSpecOption
+from .controller_trial_projection import (
+    ExactControllerTrialProjectionError,
+    option_controller_trial_binding,
+)
+from .controller_trials import build_exact_controller_trials_output
 from .distance_traces import build_exact_distance_traces_output
 from .projection import (
     ExactChaserSelectionIdentity,
@@ -48,6 +53,7 @@ class ExactChaserAnalysisRoute:
     display_parameter_version: str
     load_relative: bool
     renderer: Renderer | None
+    load_controller_trials: bool = False
 
 
 _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
@@ -75,6 +81,13 @@ _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
             display_parameter_version="exact-spatial-occupancy-display-v1",
             load_relative=False,
             renderer=build_exact_spatial_occupancy_output,
+        ),
+        "controller_trials": ExactChaserAnalysisRoute(
+            analysis_id="controller_trials",
+            display_parameter_version="exact-controller-trial-display-v1",
+            load_relative=True,
+            renderer=build_exact_controller_trials_output,
+            load_controller_trials=True,
         ),
         "provenance": ExactChaserAnalysisRoute(
             analysis_id="provenance",
@@ -121,7 +134,13 @@ class ExactChaserProviderAdapter:
         _option_bundle(option)
         if option.spec.get("bundle_status") != "exact_selector_ineligible":
             return ()
-        return ANALYSIS_IDS
+        available = [value for value in ANALYSIS_IDS if value != "controller_trials"]
+        try:
+            option_controller_trial_binding(option)
+        except ExactControllerTrialProjectionError:
+            return tuple(available)
+        available.insert(4, "controller_trials")
+        return tuple(available)
 
     def requires_projection(self, analysis_id: str) -> bool:
         """Return whether the provider, rather than the shared shell, renders it."""
@@ -163,6 +182,7 @@ class ExactChaserProviderAdapter:
             option,
             selection_identity=identity,
             load_relative=route.load_relative,
+            load_controller_trials=route.load_controller_trials,
         )
 
     def require_current_projection(

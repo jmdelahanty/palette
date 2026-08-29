@@ -9,6 +9,7 @@ from .chaser_exact.distance_traces import (
     _trace_display_projection,
     build_exact_distance_traces_output,
 )
+from .chaser_exact.controller_trials import build_exact_controller_trials_output
 from .chaser_exact.projection import (
     ExactChaserSelectionIdentity,
     ExactChaserSuccessorProjection,
@@ -38,6 +39,7 @@ __all__ = [
     "RelativeFrameProjection",
     "available_exact_chaser_successor_analysis_ids",
     "build_exact_distance_traces_output",
+    "build_exact_controller_trials_output",
     "build_exact_radial_near_field_output",
     "build_exact_spatial_occupancy_output",
     "build_exact_trajectory_overlays_output",
