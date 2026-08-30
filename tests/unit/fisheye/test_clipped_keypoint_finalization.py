@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +45,7 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
     RUN_STATUS_COMPLETE,
 )
+from fisheye.utils import write_keypoint_clip_terminal_receipt as receipt_cli
 from tests.unit.fisheye.test_keypoint_publication import (
     _crop_fixture,
     _pose_binding,
@@ -358,6 +360,153 @@ def test_legacy_clip_adapter_requires_exact_source_crop_geometry(
             preprocessing=_preprocessing(),
             input_package_manifest_digest="a" * 64,
         )
+
+
+def test_clip_adapter_accepts_selected_rows_from_direct_strict_crop_v2(
+    tmp_path: object,
+) -> None:
+    crop = _crop(tmp_path)
+    rows = np.asarray([1, 3], dtype=np.int64)
+    row_count = int(np.asarray(crop.arrays["instance_key"]).shape[0])
+    source_crop = {
+        "instance_key": np.asarray(crop.arrays["instance_key"]),
+        "source_crop_row_ids": np.arange(row_count, dtype=np.int64),
+        "frame_indices": np.asarray(crop.arrays["frame_indices"]),
+        "roi_coordinates_full": np.asarray(crop.arrays["roi_coordinates_full"]),
+        "roi_sizes_full": np.asarray(crop.arrays["roi_sizes_full"]),
+    }
+    yolo = {
+        "instance_key": source_crop["instance_key"][rows].copy(),
+        "source_crop_row_ids": rows.copy(),
+        "frame_indices": source_crop["frame_indices"][rows].copy(),
+        "keypoints_roi": np.zeros((2, 3, 2), dtype=np.float32),
+        "keypoint_confidences": np.ones((2, 3), dtype=np.float32),
+        "confidence": np.ones(2, dtype=np.float32),
+        "pose_bbox_xyxy_roi": np.ones((2, 4), dtype=np.float32),
+        "detection_success": np.ones(2, dtype=bool),
+    }
+
+    result = clip_terminal_result_from_yolo_arrays(
+        crop,
+        yolo,
+        source_crop_arrays=source_crop,
+        clip_id="clip_1",
+        clip_index=1,
+        pose_model_schema_binding=_pose_binding(),
+        preprocessing=_preprocessing(),
+        input_package_manifest_digest="c" * 64,
+    )
+
+    np.testing.assert_array_equal(
+        result.inference.instance_key,
+        np.asarray(crop.arrays["instance_key"])[rows],
+    )
+    np.testing.assert_array_equal(
+        result.source_crop_row_signature,
+        np.asarray(crop.arrays["source_row_signature"])[rows],
+    )
+
+
+def test_terminal_receipt_supports_direct_strict_crop_without_legacy_row_array(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    crop = _crop(tmp_path)
+    rows = np.asarray([1, 3], dtype=np.int64)
+    binding = _pose_binding()
+    transform = {
+        "name": "identity",
+        "native_shape_hw": [20, 20],
+        "model_shape_hw": [20, 20],
+        "pad_top": 0,
+        "pad_bottom": 0,
+        "pad_left": 0,
+        "pad_right": 0,
+        "coordinate_mapping": "native_xy = model_xy - [pad_left, pad_top]",
+    }
+    preprocessing = KeypointPreprocessingReference(
+        profile_id="direct_strict_crop_fixture",
+        profile_version=1,
+        input_mode="crop_pixel_work_package",
+        document={
+            "clip_source_contract": {
+                "coordinate_contract_mode": "legacy_noncanonical",
+                "input_mode_effective": "numpy-list",
+                "model_input_transform": transform,
+            }
+        },
+    )
+
+    class _Group(dict):
+        def __init__(self, *args: object, attrs: dict[str, object], **kwargs: object):
+            super().__init__(*args, **kwargs)
+            self.attrs = attrs
+
+    package_path = tmp_path / "package.json"
+    package_path.write_text("{}\n", encoding="utf-8")
+    preprocessing_path = tmp_path / "preprocessing.json"
+    preprocessing_path.write_text(
+        json.dumps(preprocessing.as_manifest()), encoding="utf-8"
+    )
+    pose_path = tmp_path / "pose.json"
+    pose_path.write_text("{}\n", encoding="utf-8")
+    source = _Group(
+        {
+            "instance_key": np.asarray(crop.arrays["instance_key"])[rows],
+            "source_crop_row_ids": rows.copy(),
+            "frame_indices": np.asarray(crop.arrays["frame_indices"])[rows],
+            "keypoints_roi": np.zeros((2, 3, 2), dtype=np.float32),
+            "keypoint_confidences": np.ones((2, 3), dtype=np.float32),
+            "confidence": np.ones(2, dtype=np.float32),
+            "pose_bbox_xyxy_roi": np.ones((2, 4), dtype=np.float32),
+            "detection_success": np.ones(2, dtype=bool),
+        },
+        attrs={
+            "coordinate_contract_mode": "legacy_noncanonical",
+            "input_mode_effective": "numpy-list",
+            "model_input_transform": transform,
+            "source_crop_pixel_work_package_manifest": str(package_path),
+            "source_crop_run": crop.run_id,
+            "provenance": {
+                "model_resolution": {
+                    "artifacts": {"model_pose_schema_binding": binding}
+                }
+            },
+        },
+    )
+    crop_group = _Group(
+        {name: np.asarray(value) for name, value in crop.arrays.items()},
+        attrs={"run_manifest": crop.manifest},
+    )
+    root = {
+        "keypoint_shard_runs": {"clip_1": source},
+        "crop_runs": {crop.run_id: crop_group},
+    }
+    monkeypatch.setattr(receipt_cli.zarr, "open_group", lambda *_a, **_k: root)
+    monkeypatch.setattr(
+        receipt_cli,
+        "open_persisted_crop_geometry_publication",
+        lambda *_a, **_k: crop,
+    )
+    monkeypatch.setattr(
+        receipt_cli, "load_pose_model_schema_binding", lambda _path: binding
+    )
+    monkeypatch.setattr(receipt_cli, "is_run_complete", lambda _group: True)
+
+    receipt = receipt_cli.build_clip_terminal_receipt(
+        analysis_zarr=tmp_path / "analysis.zarr",
+        crop_run_id=crop.run_id,
+        source_group_path="keypoint_shard_runs/clip_1",
+        clip_id="clip_1",
+        clip_index=1,
+        pose_binding_path=pose_path,
+        preprocessing_path=preprocessing_path,
+        input_package_manifest_path=package_path,
+    )
+
+    assert receipt["payload"]["source_crop_group_path"] == (
+        f"crop_runs/{crop.run_id}"
+    )
+    assert validate_clip_terminal_result_receipt(receipt) == ()
 
 
 def test_complete_chain_uses_shared_plans_and_one_selector_ineligible_receipt(

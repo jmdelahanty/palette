@@ -5,6 +5,19 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.utils import organize_recordings
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+)
+
+
+def _identity(recording_id: str, session_uuid: str, camera_id: str) -> dict[str, str]:
+    return {
+        SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
+        "recording_id": recording_id,
+        "session_uuid": session_uuid,
+        "camera_id": camera_id,
+    }
 
 
 def test_apply_plan_records_keyframe_flags_in_manifest(tmp_path: Path, monkeypatch) -> None:
@@ -19,7 +32,7 @@ def test_apply_plan_records_keyframe_flags_in_manifest(tmp_path: Path, monkeypat
         cam_files=[organize_recordings.PlannedFile(source=src_mp4, dest_name="Cam1.mp4")],
         derived_files=[],
         camera_id="1",
-        meta={"session_uuid": "session_1"},
+        meta=_identity("recording_001", "session_1", "1"),
     )
 
     monkeypatch.setattr(
@@ -73,7 +86,7 @@ def test_apply_plan_warns_when_hevc_keyframe_flags_need_fix(tmp_path: Path, monk
         cam_files=[organize_recordings.PlannedFile(source=src_mp4, dest_name="Cam2.mp4")],
         derived_files=[],
         camera_id="2",
-        meta={"session_uuid": "session_2"},
+        meta=_identity("recording_002", "session_2", "2"),
     )
 
     monkeypatch.setattr(

@@ -8652,3 +8652,469 @@ class RegistryMigrationMixin:
 
         self._migration_061_stimulus_protocol_registry()
         self._ensure_stimulus_protocol_semantic_columns()
+
+    def _migration_073_recording_identity_authority(self) -> None:
+        """Add opt-in, revision-bound recording identity authority.
+
+        Existing rows are deliberately left unbound. Authority is minted only
+        by the guarded projection writer after complete source evidence agrees.
+        """
+
+        cur = self.conn.cursor()
+        authority_tables = (
+            "recording_identity_evidence",
+            "recording_identity_revisions",
+            "recording_identity_current",
+            "dataset_recording_identity_current",
+            "recording_import_receipt_bindings",
+        )
+        placeholders = ", ".join("?" for _ in authority_tables)
+        preexisting = [
+            str(row[0])
+            for row in cur.execute(
+                f"SELECT name FROM sqlite_master "
+                f"WHERE type='table' AND name IN ({placeholders}) ORDER BY name;",
+                authority_tables,
+            ).fetchall()
+        ]
+        if preexisting:
+            raise RuntimeError(
+                "migration 73 refuses pre-existing recording identity authority "
+                "tables: " + ", ".join(preexisting)
+            )
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_recordings_exact_identity
+            ON recordings(recording_id, session_uuid);
+            """
+        )
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_datasets_exact_identity
+            ON datasets(dataset_id, recording_id, session_uuid);
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_identity_evidence (
+                evidence_digest TEXT PRIMARY KEY,
+                schema_id TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                CHECK(schema_id = 'palette.source_recording_identity_claim.v2'),
+                CHECK(json_valid(evidence_json)),
+                CHECK(json_type(evidence_json) = 'object'),
+                CHECK(json_extract(evidence_json, '$.schema_id') IS NOT NULL),
+                CHECK(json_extract(evidence_json, '$.schema_id') = schema_id),
+                CHECK(
+                    json_extract(evidence_json, '$.claim_sha256') IS NOT NULL
+                ),
+                CHECK(
+                    json_extract(evidence_json, '$.claim_sha256') =
+                    evidence_digest
+                ),
+                CHECK(length(evidence_digest) = 64),
+                CHECK(evidence_digest NOT GLOB '*[^0-9a-f]*')
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_identity_revisions (
+                identity_snapshot_id TEXT PRIMARY KEY,
+                identity_scope_id TEXT NOT NULL,
+                recording_id TEXT NOT NULL,
+                session_uuid TEXT NOT NULL,
+                identity_revision INTEGER NOT NULL,
+                supersedes_identity_snapshot_id TEXT UNIQUE,
+                schema_id TEXT NOT NULL,
+                revision_kind TEXT NOT NULL,
+                decided_by TEXT NOT NULL,
+                decided_at_utc TEXT NOT NULL,
+                correction_reason TEXT,
+                evidence_digest TEXT NOT NULL,
+                initiating_dataset_id TEXT NOT NULL,
+                registry_schema_version INTEGER NOT NULL,
+                FOREIGN KEY(identity_scope_id, supersedes_identity_snapshot_id)
+                    REFERENCES recording_identity_revisions(
+                        identity_scope_id, identity_snapshot_id
+                    ) ON DELETE RESTRICT,
+                FOREIGN KEY(evidence_digest)
+                    REFERENCES recording_identity_evidence(evidence_digest)
+                    ON DELETE RESTRICT,
+                UNIQUE(identity_scope_id, identity_revision),
+                UNIQUE(identity_scope_id, identity_snapshot_id),
+                UNIQUE(
+                    identity_scope_id, recording_id, session_uuid,
+                    identity_snapshot_id
+                ),
+                UNIQUE(
+                    identity_scope_id, recording_id, session_uuid,
+                    identity_snapshot_id, identity_revision
+                ),
+                CHECK(identity_revision > 0),
+                CHECK(schema_id = 'palette.registry.recording_identity_revision.v1'),
+                CHECK(revision_kind IN ('initial', 'correction')),
+                CHECK(
+                    (revision_kind = 'initial'
+                     AND identity_revision = 1
+                     AND supersedes_identity_snapshot_id IS NULL
+                     AND correction_reason IS NULL)
+                    OR
+                    (revision_kind = 'correction'
+                     AND identity_revision > 1
+                     AND supersedes_identity_snapshot_id IS NOT NULL
+                     AND correction_reason IS NOT NULL
+                     AND length(trim(correction_reason)) > 0)
+                ),
+                CHECK(length(trim(recording_id)) > 0),
+                CHECK(recording_id = trim(recording_id)),
+                CHECK(length(trim(session_uuid)) > 0),
+                CHECK(session_uuid = trim(session_uuid)),
+                CHECK(length(identity_snapshot_id) = 36),
+                CHECK(length(identity_scope_id) = 36),
+                CHECK(length(evidence_digest) = 64),
+                CHECK(evidence_digest NOT GLOB '*[^0-9a-f]*'),
+                CHECK(registry_schema_version >= 73)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_identity_current (
+                identity_scope_id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL UNIQUE,
+                session_uuid TEXT NOT NULL,
+                identity_snapshot_id TEXT NOT NULL UNIQUE,
+                identity_revision INTEGER NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                FOREIGN KEY(recording_id, session_uuid)
+                    REFERENCES recordings(recording_id, session_uuid)
+                    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(
+                    identity_scope_id, recording_id, session_uuid,
+                    identity_snapshot_id, identity_revision
+                )
+                    REFERENCES recording_identity_revisions(
+                        identity_scope_id, recording_id, session_uuid,
+                        identity_snapshot_id, identity_revision
+                    ) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+                UNIQUE(
+                    identity_scope_id, recording_id, session_uuid,
+                    identity_snapshot_id
+                ),
+                UNIQUE(
+                    identity_scope_id, recording_id, session_uuid,
+                    identity_snapshot_id, identity_revision
+                ),
+                CHECK(identity_revision > 0)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dataset_recording_identity_current (
+                dataset_id TEXT PRIMARY KEY,
+                identity_scope_id TEXT NOT NULL,
+                recording_id TEXT NOT NULL,
+                session_uuid TEXT NOT NULL,
+                identity_snapshot_id TEXT NOT NULL,
+                identity_revision INTEGER NOT NULL,
+                projected_at_utc TEXT NOT NULL,
+                FOREIGN KEY(dataset_id, recording_id, session_uuid)
+                    REFERENCES datasets(dataset_id, recording_id, session_uuid)
+                    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(
+                    identity_scope_id, recording_id, session_uuid,
+                    identity_snapshot_id, identity_revision
+                )
+                    REFERENCES recording_identity_current(
+                        identity_scope_id, recording_id, session_uuid,
+                        identity_snapshot_id, identity_revision
+                    ) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+                CHECK(identity_revision > 0)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_import_receipt_bindings (
+                receipt_sha256 TEXT PRIMARY KEY,
+                dataset_id TEXT NOT NULL,
+                identity_scope_id TEXT NOT NULL,
+                identity_snapshot_id TEXT NOT NULL,
+                bound_by TEXT NOT NULL,
+                bound_at_utc TEXT NOT NULL,
+                registry_schema_version INTEGER NOT NULL,
+                FOREIGN KEY(dataset_id)
+                    REFERENCES datasets(dataset_id) ON DELETE RESTRICT,
+                FOREIGN KEY(identity_scope_id, identity_snapshot_id)
+                    REFERENCES recording_identity_revisions(
+                        identity_scope_id, identity_snapshot_id
+                    ) ON DELETE RESTRICT,
+                UNIQUE(dataset_id, identity_scope_id, identity_snapshot_id),
+                CHECK(length(receipt_sha256) = 64),
+                CHECK(receipt_sha256 NOT GLOB '*[^0-9a-f]*'),
+                CHECK(registry_schema_version >= 73),
+                CHECK(length(trim(bound_by)) > 0),
+                CHECK(bound_by = trim(bound_by)),
+                CHECK(length(trim(bound_at_utc)) > 0),
+                CHECK(bound_at_utc = trim(bound_at_utc))
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_identity_revisions_evidence
+            ON recording_identity_revisions(evidence_digest);
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS recording_identity_evidence_reject_duplicate_insert
+            BEFORE INSERT ON recording_identity_evidence
+            WHEN EXISTS (
+                SELECT 1 FROM recording_identity_evidence
+                WHERE evidence_digest = NEW.evidence_digest
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'recording identity evidence is immutable');
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS recording_identity_evidence_reject_update
+            BEFORE UPDATE ON recording_identity_evidence
+            BEGIN
+                SELECT RAISE(ABORT, 'recording identity evidence is immutable');
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS recording_identity_evidence_reject_delete
+            BEFORE DELETE ON recording_identity_evidence
+            BEGIN
+                SELECT RAISE(ABORT, 'recording identity evidence is immutable');
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS recording_identity_revisions_reject_conflicting_insert
+            BEFORE INSERT ON recording_identity_revisions
+            WHEN EXISTS (
+                SELECT 1 FROM recording_identity_revisions
+                WHERE identity_snapshot_id = NEW.identity_snapshot_id
+                   OR (
+                       identity_scope_id = NEW.identity_scope_id
+                       AND identity_revision = NEW.identity_revision
+                   )
+                   OR (
+                       NEW.supersedes_identity_snapshot_id IS NOT NULL
+                       AND supersedes_identity_snapshot_id =
+                           NEW.supersedes_identity_snapshot_id
+                   )
+            )
+            OR (
+                NEW.revision_kind = 'initial'
+                AND EXISTS (
+                    SELECT 1 FROM recording_identity_revisions
+                    WHERE identity_scope_id = NEW.identity_scope_id
+                )
+            )
+            OR (
+                NEW.revision_kind = 'correction'
+                AND (
+                    NEW.identity_revision != COALESCE(
+                        (
+                            SELECT MAX(identity_revision)
+                            FROM recording_identity_revisions
+                            WHERE identity_scope_id = NEW.identity_scope_id
+                        ),
+                        0
+                    ) + 1
+                    OR NEW.supersedes_identity_snapshot_id IS NOT (
+                        SELECT identity_snapshot_id
+                        FROM recording_identity_revisions
+                        WHERE identity_scope_id = NEW.identity_scope_id
+                        ORDER BY identity_revision DESC
+                        LIMIT 1
+                    )
+                )
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'recording identity revisions are immutable');
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS recording_identity_revisions_reject_update
+            BEFORE UPDATE ON recording_identity_revisions
+            BEGIN
+                SELECT RAISE(ABORT, 'recording identity revisions are immutable');
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS recording_identity_revisions_reject_delete
+            BEFORE DELETE ON recording_identity_revisions
+            BEGIN
+                SELECT RAISE(ABORT, 'recording identity revisions are immutable');
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS recording_import_receipt_bindings_reject_duplicate_insert
+            BEFORE INSERT ON recording_import_receipt_bindings
+            WHEN EXISTS (
+                SELECT 1 FROM recording_import_receipt_bindings
+                WHERE receipt_sha256 = NEW.receipt_sha256
+                   OR (
+                       dataset_id = NEW.dataset_id
+                       AND identity_scope_id = NEW.identity_scope_id
+                       AND identity_snapshot_id = NEW.identity_snapshot_id
+                   )
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'recording import receipt bindings are immutable');
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS recording_import_receipt_bindings_reject_update
+            BEFORE UPDATE ON recording_import_receipt_bindings
+            BEGIN
+                SELECT RAISE(ABORT, 'recording import receipt bindings are immutable');
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS recording_import_receipt_bindings_reject_delete
+            BEFORE DELETE ON recording_import_receipt_bindings
+            BEGIN
+                SELECT RAISE(ABORT, 'recording import receipt bindings are immutable');
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS recording_identity_current_reject_duplicate_insert
+            BEFORE INSERT ON recording_identity_current
+            WHEN EXISTS (
+                SELECT 1 FROM recording_identity_current
+                WHERE identity_scope_id = NEW.identity_scope_id
+                   OR recording_id = NEW.recording_id
+                   OR identity_snapshot_id = NEW.identity_snapshot_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'recording identity current pointer is immutable');
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS recording_identity_current_reject_update
+            BEFORE UPDATE ON recording_identity_current
+            BEGIN
+                SELECT RAISE(ABORT, 'recording identity current pointer is immutable');
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS recording_identity_current_reject_delete
+            BEFORE DELETE ON recording_identity_current
+            BEGIN
+                SELECT RAISE(ABORT, 'recording identity current pointer is immutable');
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS dataset_recording_identity_current_reject_duplicate_insert
+            BEFORE INSERT ON dataset_recording_identity_current
+            WHEN EXISTS (
+                SELECT 1 FROM dataset_recording_identity_current
+                WHERE dataset_id = NEW.dataset_id
+            )
+            BEGIN
+                SELECT RAISE(
+                    ABORT,
+                    'dataset recording identity current binding is immutable'
+                );
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS dataset_recording_identity_current_reject_update
+            BEFORE UPDATE ON dataset_recording_identity_current
+            BEGIN
+                SELECT RAISE(
+                    ABORT,
+                    'dataset recording identity current binding is immutable'
+                );
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS dataset_recording_identity_current_reject_delete
+            BEFORE DELETE ON dataset_recording_identity_current
+            BEGIN
+                SELECT RAISE(
+                    ABORT,
+                    'dataset recording identity current binding is immutable'
+                );
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS datasets_reject_bound_identity_locator_update
+            BEFORE UPDATE OF recording_id, session_uuid, zarr_path, path_hash
+            ON datasets
+            WHEN EXISTS (
+                SELECT 1 FROM dataset_recording_identity_current binding
+                WHERE binding.dataset_id = OLD.dataset_id
+            )
+            AND (
+                NEW.recording_id IS NOT OLD.recording_id
+                OR NEW.session_uuid IS NOT OLD.session_uuid
+                OR NEW.zarr_path IS NOT OLD.zarr_path
+                OR NEW.path_hash IS NOT OLD.path_hash
+            )
+            BEGIN
+                SELECT RAISE(
+                    ABORT,
+                    'authority-bound dataset identity and locator are immutable'
+                );
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS recordings_reject_bound_identity_context_update
+            BEFORE UPDATE OF recording_path, camera_id ON recordings
+            WHEN EXISTS (
+                SELECT 1 FROM recording_identity_current current_identity
+                WHERE current_identity.recording_id = OLD.recording_id
+            )
+            AND (
+                NEW.recording_path IS NOT OLD.recording_path
+                OR NEW.camera_id IS NOT OLD.camera_id
+            )
+            BEGIN
+                SELECT RAISE(
+                    ABORT,
+                    'authority-bound recording context is immutable'
+                );
+            END;
+            """
+        )

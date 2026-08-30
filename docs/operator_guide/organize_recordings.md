@@ -127,12 +127,19 @@ scripts/py -m fisheye.utils.draft_video_only_organizer_manifest \
 ```
 
 The draft helper discovers `Cam*.mp4`, fills `camera_id` from the filename,
-links `Cam<id>_meta.csv` when present, and reads `recording_id` /
-`timestamp_utc` from `recording_snapshot.json` when available. Fields that the
-software cannot know, such as `dish_design`, genotype, dpf, or fish count, can
-be provided as CLI flags or edited in the CSV before apply. For interactive
-manual entry, add `--prompt-metadata`; for unattended/reproducible work, prefer
-explicit flags.
+links `Cam<id>_meta.csv` when present, and reads session/source context and
+`timestamp_utc` from `recording_snapshot.json` when available. It emits one
+per-camera `recording_id`, one shared `session_uuid` for the acquisition, and
+the exact current identity-profile marker. A source-family label is retained
+separately as `organizer_recording_id`; it is not recording or session
+authority. Explicit video-only IDs are preserved. For H5 and external-IPC
+inputs that need a generated per-camera ID, the organizer instead records the
+versioned `palette.source_recording_id.session_camera_sha256.v1` mapping over
+the exact session and camera IDs; path and filename text are not mapping
+inputs. Fields that the software cannot know, such as `dish_design`,
+genotype, dpf, or fish count, can be provided as CLI flags or edited in the CSV
+before apply. For interactive manual entry, add `--prompt-metadata`; for
+unattended/reproducible work, prefer explicit flags.
 
 For Orange video-only batches, use encoded-video metadata as the ingest frame
 count source. `Cam*_meta.csv` rows and `Cam*_keyframe.json.total_frames` should
@@ -203,10 +210,13 @@ The accepted schema is:
 | `camera_video` | yes* | Alias accepted instead of `source_video`. |
 | `source_camera_metadata_csv` | no | Per-frame camera metadata CSV sidecar. |
 | `camera_metadata_csv` | no | Alias accepted instead of `source_camera_metadata_csv`. |
-| `camera_id` | recommended | Camera serial/id; inferred from `Cam<id>.mp4` if omitted. |
-| `session_uuid` | recommended | Stable session identity; defaults to `recording_id` or video stem if omitted. |
-| `recording_id` | recommended | Stable recording identity; defaults to `session_uuid` if omitted. |
-| `recording_name` | recommended | Destination folder name before filename sanitization; defaults to `session_uuid`. |
+| `source_recording_identity_profile` | yes | Must equal `palette.source_recording_identity.v2` for current input. The draft helper supplies it. |
+| `camera_id` | yes | Camera serial/id. The draft helper infers it from unambiguous `Cam<id>.mp4` names; apply rejects a filename disagreement. |
+| `session_uuid` | yes | Stable acquisition-session identity shared by the camera rows from one session. |
+| `recording_id` | yes | Stable identity of this camera recording; it must be distinct from the other camera rows in the same acquisition. |
+| `recording_id_mapping_profile` | no | Present only when the organizer derived the ID through a named mapping. Current H5/external derivation uses `palette.source_recording_id.session_camera_sha256.v1`; explicit video-only IDs omit it. |
+| `organizer_recording_id` | no | Source-family/organizer context only; never used as recording or session authority. |
+| `recording_name` | recommended | Destination folder name before filename sanitization; defaults to `recording_id` and does not define identity. |
 | `session_start_iso8601_utc` | recommended | Acquisition start time when known. |
 | `recording_type` | no | Defaults to `behavior`. |
 | `recording_subtype` | no | Defaults to `free`. |

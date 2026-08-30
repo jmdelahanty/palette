@@ -25,6 +25,10 @@ from fisheye.shared.recording_geometry_recovery import (
     publish_recording_geometry_recovery,
     validate_recording_geometry_recovery_receipt,
 )
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+)
 from fisheye.utils import organize_recordings
 
 
@@ -35,6 +39,15 @@ def _sha(payload: bytes) -> str:
 def _json_bytes(payload: object, *, newline: bool = False) -> bytes:
     result = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return result + (b"\n" if newline else b"")
+
+
+def _source_identity_meta() -> dict[str, str]:
+    return {
+        SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
+        "recording_id": "recording-1",
+        "session_uuid": "session-1",
+        "camera_id": "2010093",
+    }
 
 
 def _rim_entry(
@@ -461,6 +474,7 @@ def test_organizer_atomically_preserves_bundle_and_records_manifest(tmp_path: Pa
         cam_files=[],
         derived_files=[],
         camera_id="2010093",
+        meta=_source_identity_meta(),
         geometry_bundle_source=source,
     )
 
@@ -504,6 +518,7 @@ def test_organizer_fails_before_moves_when_geometry_is_invalid(tmp_path: Path) -
         cam_files=[],
         derived_files=[],
         camera_id="2010093",
+        meta=_source_identity_meta(),
         geometry_bundle_source=source,
     )
 

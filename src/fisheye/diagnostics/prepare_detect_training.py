@@ -37,6 +37,10 @@ from ..shared.refined_detect_curation import (
 from ..shared.zarr_helpers import open_zarr_group_direct
 from ..shared.zarr_run_completion import resolve_authoritative_run_name
 from ..shared.system_metadata import build_invocation_record
+from ..shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    load_source_recording_identity_profile,
+)
 
 
 class CameraParameters(BaseModel):
@@ -951,6 +955,17 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         dataset_label = zarr_path.name
         if not zarr_path.exists():
             raise FileNotFoundError(f"Zarr path not found: {zarr_path}")
+        current_dataset_id: str | None = None
+        if (
+            load_source_recording_identity_profile(zarr_path)
+            == SOURCE_RECORDING_IDENTITY_PROFILE
+        ):
+            if registry is None:
+                raise ValueError(
+                    "current-profile training inputs require a registry so "
+                    "their receipt-bound identity can be verified"
+                )
+            current_dataset_id = str(registry.scan_zarr(zarr_path))
         phase_started = perf_counter()
         root = open_zarr_group_direct(zarr_path, mode="r")
         _log_timing(args.timing, f"{dataset_label}: open zarr group", phase_started)
@@ -1148,9 +1163,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             zarr_path=zarr_path,
             registry=registry,
         )
-        if registry is not None and should_register_datasets:
+        if current_dataset_id is not None:
+            dataset_id = current_dataset_id
+        elif registry is not None and should_register_datasets:
             phase_started = perf_counter()
-            registered_dataset_id = registry.register_from_root(root, zarr_path)
+            registered_dataset_id = registry.scan_zarr(zarr_path)
             if registered_dataset_id:
                 dataset_id = str(registered_dataset_id)
             _log_timing(args.timing, f"{dataset_label}: registry dataset upsert", phase_started)

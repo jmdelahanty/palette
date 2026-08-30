@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -36,6 +38,43 @@ def _opts(tmp_path: Path) -> mod.RecordingPipelineOptions:
             allow_preflight_failures=False,
         ),
     )
+
+
+def test_sync_pipeline_registry_uses_shadow_publication(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    plan = RecordingAnalysisPlan(
+        recording_dir=tmp_path / "rec",
+        h5_path=None,
+        cam_video=tmp_path / "rec" / "cams" / "cam.mp4",
+        zarr_path=tmp_path / "rec" / "zarr" / "rec_analysis.zarr",
+    )
+
+    registry_path = tmp_path / "registry.sqlite"
+    receipt = object()
+    observed: dict[str, object] = {}
+
+    def _shadow(**kwargs: object) -> object:
+        observed.update(kwargs)
+        return SimpleNamespace(mutation_result={"dataset_id": "rec:bound"})
+
+    monkeypatch.setattr(mod, "shadow_synchronize_recording_import", _shadow)
+
+    assert (
+        mod._sync_pipeline_registry(
+            registry_path=registry_path,
+            plan=plan,
+            receipt=receipt,
+        )
+        == "rec:bound"
+    )
+    assert observed == {
+        "canonical_registry": registry_path,
+        "zarr_path": plan.zarr_path,
+        "receipt": receipt,
+        "decided_by": "fisheye.utils.run_recording_analysis_pipeline",
+    }
 
 
 def test_process_pipeline_returns_detect_failure(monkeypatch, tmp_path: Path) -> None:
@@ -220,14 +259,53 @@ def test_main_dry_run_with_register_does_not_open_registry(monkeypatch, tmp_path
     (rec / "cams" / "Cam2010093_foo.mp4").touch()
     (rec / "raw" / "session.h5").touch()
 
-    def _unexpected_registry(*_args, **_kwargs):
-        raise AssertionError("Registry should not be opened during dry-run")
+    def _unexpected_publish(*_args, **_kwargs):
+        raise AssertionError("Registry should not be published during dry-run")
 
-    monkeypatch.setattr(mod, "Registry", _unexpected_registry)
+    monkeypatch.setattr(mod, "shadow_synchronize_recording_import", _unexpected_publish)
 
     rc = mod.main(["--recording-dir", str(rec), "--register"])
 
     assert rc == 0
+
+
+def test_process_pipeline_rejects_current_manifest_without_register_before_import(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    recording_dir = tmp_path / "rec"
+    recording_dir.mkdir(parents=True)
+    (recording_dir / "recording_manifest.json").write_text(
+        json.dumps(
+            {
+                mod.SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: (
+                    mod.SOURCE_RECORDING_IDENTITY_PROFILE
+                )
+            }
+        ),
+        encoding="utf-8",
+    )
+    plan = RecordingAnalysisPlan(
+        recording_dir=recording_dir,
+        h5_path=None,
+        cam_video=recording_dir / "cams" / "cam.mp4",
+        zarr_path=recording_dir / "zarr" / "rec_analysis.zarr",
+    )
+    imported = False
+
+    def _unexpected_import(*_args, **_kwargs):
+        nonlocal imported
+        imported = True
+        raise AssertionError("current processing must fail before import")
+
+    monkeypatch.setattr(mod, "process_recording_import", _unexpected_import)
+
+    result = mod.process_recording_analysis_pipeline(plan, _opts(tmp_path), logger=None)
+
+    assert result.ok is False
+    assert result.failed_step == "recording_import_preflight"
+    assert "receipt-bound registry publication" in (result.error or "")
+    assert imported is False
 
 
 def test_main_rejects_deprecated_refine_max_gap(tmp_path: Path) -> None:
@@ -254,10 +332,12 @@ def test_process_pipeline_happy_path_runs_stages_in_order(monkeypatch, tmp_path:
     opts.refine_detect = True
     opts.register = True
     order: list[str] = []
+    receipt = object()
+    expected_receipt = receipt
 
     def _import(*_args, **_kwargs):
         order.append("import")
-        return RecordingImportResult(ok=True)
+        return RecordingImportResult(ok=True, receipt=receipt)  # type: ignore[arg-type]
 
     def _detect(*_args, **_kwargs):
         order.append("detect")
@@ -271,21 +351,107 @@ def test_process_pipeline_happy_path_runs_stages_in_order(monkeypatch, tmp_path:
         order.append("refine")
         return True, 0, ["refine"]
 
-    class _Registry:
-        def scan_zarr(self, _zarr_path: Path) -> str:
-            order.append("register")
-            return "rec:zdataset"
+    def _shadow(
+        *,
+        canonical_registry: Path,
+        zarr_path: Path,
+        receipt: object | None,
+        decided_by: str,
+    ) -> object:
+        assert canonical_registry == opts.registry_path
+        assert zarr_path == plan.zarr_path
+        assert decided_by == "fisheye.utils.run_recording_analysis_pipeline"
+        order.append("register" if receipt is expected_receipt else "refresh")
+        return SimpleNamespace(mutation_result={"dataset_id": "rec:zdataset"})
 
     monkeypatch.setattr(mod, "process_recording_import", _import)
     monkeypatch.setattr(mod, "run_detect_registry_model", _detect)
     monkeypatch.setattr(mod, "run_detect_quality", _quality)
     monkeypatch.setattr(mod, "run_refine_detect", _refine)
+    monkeypatch.setattr(mod, "shadow_synchronize_recording_import", _shadow)
+    monkeypatch.setattr(
+        mod,
+        "load_source_recording_identity_profile",
+        lambda _path: mod.SOURCE_RECORDING_IDENTITY_PROFILE,
+    )
 
-    result = mod.process_recording_analysis_pipeline(plan, opts, registry=_Registry(), logger=None)
+    result = mod.process_recording_analysis_pipeline(plan, opts, logger=None)
 
     assert result.ok is True
     assert result.dataset_id == "rec:zdataset"
-    assert order == ["import", "detect", "detect_quality", "refine", "register"]
+    assert order == [
+        "import",
+        "register",
+        "detect",
+        "detect_quality",
+        "refine",
+        "refresh",
+    ]
+
+
+def test_process_pipeline_bound_current_import_skips_all_import_writers(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    plan = RecordingAnalysisPlan(
+        recording_dir=tmp_path / "rec",
+        h5_path=None,
+        cam_video=tmp_path / "rec" / "cams" / "cam.mp4",
+        zarr_path=tmp_path / "rec" / "zarr" / "rec_analysis.zarr",
+    )
+    plan.zarr_path.mkdir(parents=True)
+    opts = _opts(tmp_path)
+    opts.register = True
+    order: list[str] = []
+
+    def _receipt_paths(zarr_path: Path) -> tuple[Path, ...]:
+        assert zarr_path == plan.zarr_path
+        order.append("receipt_paths")
+        return (zarr_path / ".imports" / "receipt.json",)
+
+    def _shadow(
+        *,
+        canonical_registry: Path,
+        zarr_path: Path,
+        receipt: object | None,
+        decided_by: str,
+    ) -> object:
+        assert canonical_registry == opts.registry_path
+        assert zarr_path == plan.zarr_path
+        assert receipt is None
+        assert decided_by == "fisheye.utils.run_recording_analysis_pipeline"
+        order.append("refresh")
+        return SimpleNamespace(mutation_result={"dataset_id": "rec:bound"})
+
+    monkeypatch.setattr(
+        mod,
+        "load_source_recording_identity_profile",
+        lambda _path: mod.SOURCE_RECORDING_IDENTITY_PROFILE,
+    )
+    monkeypatch.setattr(mod, "recording_import_receipt_paths", _receipt_paths)
+    monkeypatch.setattr(mod, "shadow_synchronize_recording_import", _shadow)
+    monkeypatch.setattr(
+        mod,
+        "process_recording_import",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bound replay must not invoke import writers")
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_detect_registry_model",
+        lambda *_args, **_kwargs: order.append("detect") or (True, 0, ["detect"]),
+    )
+
+    result = mod.process_recording_analysis_pipeline(
+        plan,
+        opts,
+        logger=None,
+    )
+
+    assert result.ok is True
+    assert result.dataset_id == "rec:bound"
+    assert order == ["receipt_paths", "refresh", "detect", "refresh"]
 
 
 def test_process_pipeline_returns_detect_quality_failure(monkeypatch, tmp_path: Path) -> None:
@@ -336,10 +502,12 @@ def test_process_pipeline_full_stack_runs_stages_in_order(monkeypatch, tmp_path:
     opts.refine_keypoints = True
     opts.register = True
     order: list[str] = []
+    receipt = object()
+    expected_receipt = receipt
 
     def _import(*_args, **_kwargs):
         order.append("import")
-        return RecordingImportResult(ok=True)
+        return RecordingImportResult(ok=True, receipt=receipt)  # type: ignore[arg-type]
 
     def _detect(*_args, **_kwargs):
         order.append("detect")
@@ -361,10 +529,18 @@ def test_process_pipeline_full_stack_runs_stages_in_order(monkeypatch, tmp_path:
         order.append("refine_keypoints")
         return True, 0, ["refine_keypoints"]
 
-    class _Registry:
-        def scan_zarr(self, _zarr_path: Path) -> str:
-            order.append("register")
-            return "rec:zdataset"
+    def _shadow(
+        *,
+        canonical_registry: Path,
+        zarr_path: Path,
+        receipt: object | None,
+        decided_by: str,
+    ) -> object:
+        assert canonical_registry == opts.registry_path
+        assert zarr_path == plan.zarr_path
+        assert decided_by == "fisheye.utils.run_recording_analysis_pipeline"
+        order.append("register" if receipt is expected_receipt else "refresh")
+        return SimpleNamespace(mutation_result={"dataset_id": "rec:zdataset"})
 
     monkeypatch.setattr(mod, "process_recording_import", _import)
     monkeypatch.setattr(mod, "run_detect_registry_model", _detect)
@@ -372,12 +548,27 @@ def test_process_pipeline_full_stack_runs_stages_in_order(monkeypatch, tmp_path:
     monkeypatch.setattr(mod, "run_refine_detect", _refine)
     monkeypatch.setattr(mod, "run_keypoints_batch", _keypoints)
     monkeypatch.setattr(mod, "run_refine_keypoints", _refine_keypoints)
+    monkeypatch.setattr(mod, "shadow_synchronize_recording_import", _shadow)
+    monkeypatch.setattr(
+        mod,
+        "load_source_recording_identity_profile",
+        lambda _path: mod.SOURCE_RECORDING_IDENTITY_PROFILE,
+    )
 
-    result = mod.process_recording_analysis_pipeline(plan, opts, registry=_Registry(), logger=None)
+    result = mod.process_recording_analysis_pipeline(plan, opts, logger=None)
 
     assert result.ok is True
     assert result.dataset_id == "rec:zdataset"
-    assert order == ["import", "detect", "detect_quality", "refine", "keypoints", "refine_keypoints", "register"]
+    assert order == [
+        "import",
+        "register",
+        "detect",
+        "detect_quality",
+        "refine",
+        "keypoints",
+        "refine_keypoints",
+        "refresh",
+    ]
 
 
 def test_process_pipeline_rejects_refined_keypoints_before_import(

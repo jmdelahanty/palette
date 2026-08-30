@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +9,25 @@ from fisheye.registry.db import (
     PIGMENTATION_PHENOTYPE_VOCABULARY_ID,
     Registry,
 )
+
+
+def _open_registry_through(path: Path, *, version: int) -> Registry:
+    class HistoricalRegistry(Registry):
+        def _init_schema(self) -> None:
+            self.conn.execute("PRAGMA foreign_keys = ON;")
+            self._ensure_schema_version_table()
+            self._apply_schema_migrations()
+
+        def _schema_migrations(self):
+            return [
+                migration
+                for migration in super()._schema_migrations()
+                if migration[0] <= version
+            ]
+
+    registry = HistoricalRegistry(path)
+    assert registry._current_schema_version() == version
+    return registry
 
 
 def _seed_recording_subject(registry: Registry) -> None:
@@ -93,13 +113,7 @@ def test_recording_subject_trait_migration_and_upsert(tmp_path) -> None:
 
 def test_existing_version_63_registry_upgrades_to_strain_traits(tmp_path) -> None:
     registry_path = tmp_path / "registry.sqlite"
-    registry = Registry(registry_path)
-    registry.conn.execute("DROP VIEW recording_subject_trait_resolved;")
-    registry.conn.execute("DROP TABLE strain_trait_expectations;")
-    registry.conn.execute("DROP TABLE strain_label_mappings;")
-    registry.conn.execute("DELETE FROM schema_version WHERE version >= 64;")
-    registry.conn.execute("PRAGMA user_version = 63;")
-    registry.conn.commit()
+    registry = _open_registry_through(registry_path, version=63)
     registry.close()
 
     upgraded = Registry(registry_path)
@@ -136,12 +150,10 @@ def test_legacy_bootstrap_version_64_reconciles_missing_subject_trait_table(
     tmp_path,
 ) -> None:
     registry_path = tmp_path / "legacy_bootstrap.sqlite"
-    registry = Registry(registry_path)
+    registry = _open_registry_through(registry_path, version=64)
     registry.conn.execute("DROP VIEW recording_subject_trait_resolved;")
     registry.conn.execute("DROP VIEW recording_subject_trait_overview;")
     registry.conn.execute("DROP TABLE recording_subject_traits;")
-    registry.conn.execute("DELETE FROM schema_version WHERE version >= 65;")
-    registry.conn.execute("PRAGMA user_version = 64;")
     registry.conn.commit()
     registry.close()
 

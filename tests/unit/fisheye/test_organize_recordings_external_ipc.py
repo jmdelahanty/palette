@@ -4,6 +4,11 @@ import json
 import h5py
 import pytest
 
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_ID_MAPPING_PROFILE,
+    SOURCE_RECORDING_ID_MAPPING_PROFILE_ATTR,
+    recording_id_from_session_camera,
+)
 from fisheye.utils import organize_recordings
 
 
@@ -70,7 +75,7 @@ def _make_external_ipc_batch(tmp_path: Path) -> Path:
     stale_root = Path("/home/jeremy/orange_data/exp/unsorted") / batch.name
     session = {
         "schema_version": 1,
-        "session_id": batch.name,
+        "session_id": "2026-05-29T18-11-16Z_arena_1",
         "status": "completed",
         "mode": "single_clip",
         "producer": "orange_gui_external_ipc",
@@ -153,6 +158,14 @@ def test_external_ipc_plan_maps_full_and_crop_outputs_without_shards(
     assert plan.camera_id == "2010093"
     assert plan.meta["artifact_schema_id"] == "orange_external_ipc_single_clip_v1"
     assert plan.meta["recording_backend"] == "external_ipc"
+    assert plan.meta["recording_id"] == recording_id_from_session_camera(
+        session_uuid="2026-05-29T18-11-16Z_arena_1",
+        camera_id="2010093",
+    )
+    assert plan.meta["recording_id"] != plan.name
+    assert plan.meta[SOURCE_RECORDING_ID_MAPPING_PROFILE_ATTR] == (
+        SOURCE_RECORDING_ID_MAPPING_PROFILE
+    )
 
     raw_names = [item.dest_name for item in plan.raw_files]
     assert "transfer_complete.json" in raw_names
@@ -206,6 +219,44 @@ def test_external_ipc_plan_maps_full_and_crop_outputs_without_shards(
     assert (
         video_streams["streams"]["crop"]["blank_frame_policy"]
         == "encode_black_frame_when_no_detection"
+    )
+
+
+def test_external_ipc_plan_rejects_h5_and_session_identity_disagreement(
+    tmp_path: Path,
+) -> None:
+    batch = _make_external_ipc_batch(tmp_path)
+    session_path = batch / "recording_session.json"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    session["session_id"] = "different_session"
+    session_path.write_text(json.dumps(session), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must exactly match"):
+        organize_recordings._build_external_ipc_plans(
+            batch,
+            dest_root=tmp_path / "recordings",
+            rename_cams=True,
+        )
+
+
+def test_external_ipc_plan_accepts_missing_h5_session_identity(
+    tmp_path: Path,
+) -> None:
+    batch = _make_external_ipc_batch(tmp_path)
+    [h5_path] = list(batch.rglob("*.h5"))
+    with h5py.File(h5_path, "r+") as h5:
+        del h5.attrs["session_uuid"]
+
+    [plan] = organize_recordings._build_external_ipc_plans(
+        batch,
+        dest_root=tmp_path / "recordings",
+        rename_cams=True,
+    )
+
+    assert plan.meta["session_uuid"] == "2026-05-29T18-11-16Z_arena_1"
+    assert plan.meta["recording_id"] == recording_id_from_session_camera(
+        session_uuid="2026-05-29T18-11-16Z_arena_1",
+        camera_id="2010093",
     )
 
 
@@ -271,11 +322,15 @@ def test_external_ipc_recording_only_plan_maps_full_and_crop_outputs(
 
     assert len(plans) == 1
     plan = plans[0]
-    assert plan.name == "2026_05_29_14_11_07_Cam2010093"
+    assert plan.name == "2026-05-29T18-11-16Z_arena_1_Cam2010093"
     assert plan.missing == []
     assert plan.camera_id == "2010093"
     assert plan.meta["artifact_schema_id"] == "orange_external_ipc_video_only_v1"
     assert plan.meta["recording_backend"] == "external_ipc"
+    assert plan.meta["recording_id"] == recording_id_from_session_camera(
+        session_uuid="2026-05-29T18-11-16Z_arena_1",
+        camera_id="2010093",
+    )
 
     raw_names = [item.dest_name for item in plan.raw_files]
     assert "recording_session.json" in raw_names
@@ -284,25 +339,25 @@ def test_external_ipc_recording_only_plan_maps_full_and_crop_outputs(
 
     cam_names = [item.dest_name for item in plan.cam_files]
     assert cam_names == [
-        "Cam2010093_2026_05_29_14_11_07.mp4",
-        "Cam2010093_2026_05_29_14_11_07_meta.csv",
-        "Cam2010093_2026_05_29_14_11_07_keyframe.json",
-        "Cam2010093_2026_05_29_14_11_07_external_summary.json",
+        "Cam2010093_2026-05-29T18-11-16Z_arena_1.mp4",
+        "Cam2010093_2026-05-29T18-11-16Z_arena_1_meta.csv",
+        "Cam2010093_2026-05-29T18-11-16Z_arena_1_keyframe.json",
+        "Cam2010093_2026-05-29T18-11-16Z_arena_1_external_summary.json",
     ]
 
     derived_names = [item.dest_name for item in plan.derived_files]
     assert (
-        "external_crop_recorder/Cam2010093_2026_05_29_14_11_07_crop_external.mp4"
+        "external_crop_recorder/Cam2010093_2026-05-29T18-11-16Z_arena_1_crop_external.mp4"
         in derived_names
     )
     assert (
-        "external_crop_recorder/Cam2010093_2026_05_29_14_11_07_crop_meta.csv"
+        "external_crop_recorder/Cam2010093_2026-05-29T18-11-16Z_arena_1_crop_meta.csv"
         in derived_names
     )
 
     video_streams = plan.meta["video_streams"]
     assert video_streams["streams"]["full"]["frame_clock_metadata"] == (
-        "cams/Cam2010093_2026_05_29_14_11_07_meta.csv"
+        "cams/Cam2010093_2026-05-29T18-11-16Z_arena_1_meta.csv"
     )
     assert (
         video_streams["streams"]["crop"]["video_pixel_coordinate_space"]
@@ -363,9 +418,9 @@ def test_external_ipc_recording_only_full_video_without_crop_meta_is_valid(
     plan = plans[0]
     assert plan.missing == []
     assert [item.dest_name for item in plan.cam_files] == [
-        "Cam2010093_2026_05_29_14_11_07.mp4",
-        "Cam2010093_2026_05_29_14_11_07_keyframe.json",
-        "Cam2010093_2026_05_29_14_11_07_external_summary.json",
+        "Cam2010093_2026-05-29T18-11-16Z_arena_1.mp4",
+        "Cam2010093_2026-05-29T18-11-16Z_arena_1_keyframe.json",
+        "Cam2010093_2026-05-29T18-11-16Z_arena_1_external_summary.json",
     ]
     assert "frame_clock_metadata" not in plan.meta["video_streams"]["streams"]["full"]
     assert "crop" not in plan.meta["video_streams"]["streams"]
@@ -442,7 +497,10 @@ def test_external_ipc_apply_writes_nested_sidecars_and_manifest(
     )
     assert manifest["artifact_schema_id"] == "orange_external_ipc_single_clip_v1"
     assert manifest["recording_backend"] == "external_ipc"
-    assert manifest["orange_session_id"] == "2026_05_29_14_11_07"
+    assert manifest["orange_session_id"] == "2026-05-29T18-11-16Z_arena_1"
+    assert manifest[SOURCE_RECORDING_ID_MAPPING_PROFILE_ATTR] == (
+        SOURCE_RECORDING_ID_MAPPING_PROFILE
+    )
     assert (
         "cams/Cam2010093_2026-05-29T18-11-16Z_arena_1_meta.csv"
         in manifest["files"]["cams"]
@@ -508,7 +566,7 @@ def test_external_ipc_plan_lifts_manifest_context_from_h5_and_runtime_snapshot(
         encoding="utf-8",
     )
     session = {
-        "session_id": "2026_06_14_17_11_56",
+        "session_id": "2026-06-14T21-12-08Z_arena_1",
         "producer": "orange_gui_external_ipc",
         "mode": "single_clip",
         "recording_outputs": {},

@@ -629,6 +629,14 @@ def test_registry_extraction_rejects_corrupt_semantic_trial_bytes(
 def test_migration_72_keeps_preexisting_stimulus_rows_semantically_unknown(
     tmp_path: Path,
 ) -> None:
+    class RegistryThroughMigration72(Registry):
+        def _schema_migrations(self):
+            return [
+                migration
+                for migration in super()._schema_migrations()
+                if migration[0] <= 72
+            ]
+
     registry_path = tmp_path / "registry_v71.sqlite"
     with sqlite3.connect(registry_path) as conn:
         conn.executescript(
@@ -715,7 +723,10 @@ def test_migration_72_keeps_preexisting_stimulus_rows_semantically_unknown(
             """
         )
 
-    registry = Registry(registry_path)
+    # This fixture intentionally models only the tables migration 72 touches.
+    # Pin the migration horizon so later, unrelated migrations cannot make the
+    # historical boundary fixture pretend to be a complete latest-version DB.
+    registry = RegistryThroughMigration72(registry_path)
     try:
         run = registry.conn.execute(
             """

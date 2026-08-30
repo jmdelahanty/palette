@@ -80,6 +80,13 @@ def _group(root: Any, path: str) -> Any:
     return group
 
 
+def _values(value: Any) -> np.ndarray:
+    try:
+        return np.asarray(value[...])
+    except (IndexError, TypeError):
+        return np.asarray(value)
+
+
 def build_clip_terminal_receipt(
     *,
     analysis_zarr: Path,
@@ -160,18 +167,70 @@ def build_clip_terminal_receipt(
     source_crop = _group(root, source_crop_group_path)
     if not is_run_complete(source_crop):
         raise ValueError("Clip-local source crop is not complete.")
-    source_crop_arrays = {path: source_crop[path] for path in _SOURCE_CROP_ARRAY_PATHS}
-    roi_shape = source_crop.attrs.get("roi_shape") or source_crop.attrs.get("roi_size")
-    if (
-        not isinstance(roi_shape, (list, tuple))
-        or len(roi_shape) != 2
-        or any(type(value) is not int or value <= 0 for value in roi_shape)
-    ):
-        raise ValueError("Clip-local source crop lacks a valid fixed ROI shape [H,W].")
-    source_crop_arrays["roi_sizes_full"] = np.broadcast_to(
-        np.asarray([int(roi_shape[1]), int(roi_shape[0])], dtype=np.int32),
-        (int(source_crop["instance_key"].shape[0]), 2),
-    )
+    direct_strict_crop = source_crop_run == crop.run_id
+    if direct_strict_crop:
+        observed_manifest = source_crop.attrs.get("run_manifest")
+        if (
+            not isinstance(observed_manifest, Mapping)
+            or dict(observed_manifest) != crop.manifest
+        ):
+            raise ValueError(
+                "Clip-local direct crop-v2 source differs from the terminal "
+                "geometry authority."
+            )
+        required_direct = (
+            "instance_key",
+            "frame_indices",
+            "roi_coordinates_full",
+            "roi_sizes_full",
+        )
+        missing_direct = [name for name in required_direct if name not in source_crop]
+        if missing_direct:
+            raise ValueError(
+                "Direct crop-v2 source lacks arrays: " + ", ".join(missing_direct)
+            )
+        row_count = int(source_crop["instance_key"].shape[0])
+        if row_count <= 0:
+            raise ValueError(
+                "Direct clipped keypoint finalization does not yet define an "
+                "empty crop-v2 rowset."
+            )
+        roi_sizes = np.asarray(source_crop["roi_sizes_full"][:], dtype=np.int32)
+        if (
+            roi_sizes.shape != (row_count, 2)
+            or np.any(roi_sizes <= 0)
+            or not np.all(roi_sizes == roi_sizes[0])
+        ):
+            raise ValueError(
+                "Direct crop-v2 source lacks one fixed positive ROI extent."
+            )
+        roi_shape = [int(roi_sizes[0, 1]), int(roi_sizes[0, 0])]
+        source_crop_arrays = {
+            "instance_key": source_crop["instance_key"],
+            "source_crop_row_ids": np.arange(row_count, dtype=np.int64),
+            "frame_indices": source_crop["frame_indices"],
+            "roi_coordinates_full": source_crop["roi_coordinates_full"],
+            "roi_sizes_full": source_crop["roi_sizes_full"],
+        }
+    else:
+        source_crop_arrays = {
+            path: source_crop[path] for path in _SOURCE_CROP_ARRAY_PATHS
+        }
+        roi_shape = source_crop.attrs.get("roi_shape") or source_crop.attrs.get(
+            "roi_size"
+        )
+        if (
+            not isinstance(roi_shape, (list, tuple))
+            or len(roi_shape) != 2
+            or any(type(value) is not int or value <= 0 for value in roi_shape)
+        ):
+            raise ValueError(
+                "Clip-local source crop lacks a valid fixed ROI shape [H,W]."
+            )
+        source_crop_arrays["roi_sizes_full"] = np.broadcast_to(
+            np.asarray([int(roi_shape[1]), int(roi_shape[0])], dtype=np.int32),
+            (int(source_crop["instance_key"].shape[0]), 2),
+        )
     result = clip_terminal_result_from_yolo_arrays(
         crop,
         arrays,
@@ -192,7 +251,7 @@ def build_clip_terminal_receipt(
             path: sha256_array(arrays[path][...]) for path in _SOURCE_ARRAY_PATHS
         },
         "source_crop_array_hashes": {
-            path: sha256_array(source_crop[path][...])
+            path: sha256_array(_values(source_crop_arrays[path]))
             for path in _SOURCE_CROP_ARRAY_PATHS
         },
         "source_crop_roi_shape_hw": [int(roi_shape[0]), int(roi_shape[1])],

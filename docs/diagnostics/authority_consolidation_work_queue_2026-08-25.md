@@ -19,7 +19,7 @@ finding is not an executable gate.
 
 This queue does not replace scientific-model, labeling, or performance work
 queues. It also does not fold the clipped downstream-admission work into
-recording-identity migration 72. Those are separate implementation packages
+recording-identity migration 73. Those are separate implementation packages
 that share the same consolidation rules.
 
 The authority-versus-scientific-acceptance divergence discovered during the
@@ -119,7 +119,7 @@ tests alone are insufficient when required CI is part of the gate.
 | RES-BOUT-001 | Shared resolvers | open | Close the bout-kinematics source-admission and promotion boundary so completion/layout alone cannot authorize publication. | Clipped-eye audit and pipeline survey. |
 | REP-001 | Reporting/reuse | open | Make availability, reuse, registry readiness, visualization, export, and campaign handoff consume sealed admission results instead of path, name, `latest`, completion, or forced availability. | Pipeline survey and clipped-eye audit Phases 7–9. |
 | VIS-CHASER-001 | Visualization/reuse | in_progress | Replace literal minimal-versus-receipt-bound child-object equality with one closed-profile exact-identity validator shared by Marimo discovery and loading; prove the live v4 smoke and 80-recording metadata discovery without selector, legacy, candidate, or unconsolidated fallback. Mount missing persisted views and decide any additive digest-bound interactive descriptor in later packages; do not mutate or recompute the completed scientific cohort. | [`chaser_exact_successor_marimo_status_2026-08-26.md`](chaser_exact_successor_marimo_status_2026-08-26.md) and [`chaser_exact_successor_interactive_visualization_implementation_checklist_2026-08-27.md`](chaser_exact_successor_interactive_visualization_implementation_checklist_2026-08-27.md). |
-| RID-001 | Recording identity | in_progress | Finish the current-v2 registry writer boundary, receipt/consolidation races, durable operational evidence, subtraction, canary, and required CI in the ordered packages retained in the source-of-truth plan. Do not expand migration 72 with downstream admission semantics. | Source-of-truth consolidation plan §4.7. |
+| RID-001 | Recording identity | in_progress | Finish the current-v2 registry writer boundary, receipt/consolidation races, durable operational evidence, subtraction, canary, and required CI in the ordered packages retained in the source-of-truth plan. Do not expand migration 73 with downstream admission semantics. | Source-of-truth consolidation plan §4.7. |
 | TEST-001 | Boundary tests | in_progress | Add real production writer -> publisher -> full-strength resolver -> unpatched consumer tests for crop, keypoint, assignment/eye, track/motion/bout, and reporting/reuse boundaries, plus adversarial tamper and lifecycle cases. Make the inventory/boundary workflow required CI. | PRs 61–62 and 64 cover the targeted keypoint/rebinding/eye boundary; crop, track/motion/bout, reporting, and the dedicated CI gate remain open. |
 | NAME-001 | Terminology/lint | open | Reserve authority-claiming run-name tokens such as `canonical` and `authority` for producers declaring the matching output profile, and post-validate the claim. Do not globally reserve `v2`. Replace ambiguous prose `signed hybrid provider` with `provider-record-bound` or `digest- and row-signature-bound` except where quoting an existing schema identifier. | The misleading `keypoints_geometry_authority_*` incident and issuer-authentication review. |
 | SUB-001 | Subtraction | open | Remove adapters, fallbacks, duplicate selectors, and superseded validators only after their callers resolve through the supported shared interface and the deletion gates pass. | Redundancy campaign and subtraction queue. |
@@ -256,7 +256,7 @@ new extraction layer or a recurring DAG node.
 |---|---|---|
 | Clipped-eye incident audit | Phase 4 and the evidence-only part of Phase 5 are complete. PR 62 implements the targeted Phase 6–7 consumer path. Phase 9 is this execution slice. The generic planner-state and repo-wide inventory work from Phases 1–3 remains open. | The four-camera chain may advance one admitted receipt at a time; it does not wait for the global producer inventory. |
 | Crop-contract split audit | `RES-CROP-001` and `RES-TRACK-001` remain open, including adapter retirement and the shared tracking position surface. | It does not block subject shape/eyes because their keypoint successor carries a closed crop authority. It does block claiming the general tracking profile consolidation complete. |
-| Source-of-truth consolidation plan | Recording identity (`RID-001`) remains a separate in-progress package. Executable profile declarations and typed DAG admission (`ADM-001`–`003`) remain general hardening work. | Neither migration 72 nor unrelated catalog unknowns serialize this already-proven four-camera closure. |
+| Source-of-truth consolidation plan | Recording identity (`RID-001`) remains a separate in-progress package. Executable profile declarations and typed DAG admission (`ADM-001`–`003`) remain general hardening work. | Neither migration 73 nor unrelated catalog unknowns serialize this already-proven four-camera closure. |
 | Pipeline survey and redundancy campaign | Reporting/reuse (`REP-001`), duplicate validation removal, and scan optimization remain open. | Computation can proceed through strict writers; final handoff must still use explicit selected runs and receipts rather than loose discovery. |
 | Track/motion reader optimization | Read amplification and validation-performance work remains deferred; source admission must not be weakened for speed. | Reuse existing track/swim publications if their proofs close. Recompute is a fallback, not the default plan. |
 | Sleepyfish data handoff | The 2026-08-20 status table predates the canonical keypoint successors and rebindings. | Update it only after the new subject-shape/eye publications and final dataset manifest exist. |
@@ -288,10 +288,10 @@ and the source-of-truth consolidation plan.
 Primary surfaces: `shared/source_recording_identity.py`,
 `shared/recording_import_receipt.py`,
 `registry/recording_identity_authority.py`, `registry/shadow_publish.py`, and
-migration 72 in `registry/migration_bodies.py`.
+migration 73 in `registry/migration_bodies.py`.
 
 - [ ] Finish the designated-writer boundary and read-only registry facade from
-  source-of-truth plan §4.7 without adding downstream admission to migration 72.
+  source-of-truth plan §4.7 without adding downstream admission to migration 73.
 - [ ] Close source/consolidated-generation races and preserve durable accepted
   and rejected operation evidence without making telemetry authoritative.
 - [ ] Route all current-v2 identity writers/readers, subtract superseded paths,
@@ -565,7 +565,7 @@ Disposition vocabulary:
 | B5. Separate immediate recovery from broad producer cleanup. | accepted | Targeted recovery and general hardening are parallel tracks with explicit dependencies and shared gates. | Parallel execution order; stage checklist. |
 | B6. Record the audited/document commits, observation mode/time, external manifest digest, exact artifact/report/status paths, and additional code anchors. | accepted | The incident audit now records code `6969043e`, initial document `d9cbcc42`, the exact recovery-manifest digest, bounded observation timing, direct metadata-file mode, four artifact paths, report/status evidence, and expanded source map. | Clipped-eye audit evidence identity, reproducibility evidence, and source map. |
 | B7. "Signed hybrid provider" overstates issuer authentication. | accepted | Prose now uses `provider-record-bound` or `digest- and row-signature-bound`; existing schema identifiers remain quoted unchanged. | `NAME-001`; crop-contract and clipped-eye audits. |
-| B8. Keep this work out of migration 72/current-v2 recording-identity semantics. | accepted | Downstream producer admission is a companion workstream. Migration 72 retains its bounded source-identity purpose. | `RID-001`; source-of-truth plan disposition. |
+| B8. Keep this work out of migration 73/current-v2 recording-identity semantics. | accepted | Downstream producer admission is a companion workstream. Migration 73 retains its bounded source-identity purpose. | `RID-001`; source-of-truth plan disposition. |
 
 No review finding is marked implemented merely because its documentation was
 accepted. Implementation status remains the active table above, and required

@@ -2,13 +2,13 @@
 """Single-recording analysis pipeline wrapper.
 
 Pipeline order:
-1) import_recording_analysis (archive + metadata + stimulus)
+1) import and receipt-bound current-source finalization, or verified bound replay
 2) registry-resolved detect inference with node-local atomic publication
 3) detect_quality (required before refine_detect)
 4) refine_detect (optional)
 5) keypoints (optional)
 6) refine_keypoints (optional)
-7) registry scan (optional)
+7) registry metadata refresh or compatibility scan (optional)
 """
 
 from __future__ import annotations
@@ -20,13 +20,28 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.registry.db import RegistryPaths
+from fisheye.registry.shadow_publish import (
+    shadow_synchronize_recording_import,
+)
+from fisheye.shared.recording_import_receipt import (
+    RecordingImportReceiptError,
+    recording_import_receipt_paths,
+)
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+    SourceRecordingIdentityError,
+    load_source_recording_identity_profile,
+    load_strict_json_object,
+)
 from fisheye.refinement.refine_keypoints import (
     require_future_normal_refined_keypoint_publication,
 )
 from fisheye.utils.import_recording_analysis import (
     RecordingAnalysisPlan,
     RecordingImportOptions,
+    RecordingImportResult,
     process_recording_import,
     resolve_single_recording_plan,
 )
@@ -70,6 +85,21 @@ EventLogger = Callable[[str], None]
 def _log(logger: Optional[Callable[..., None]], event: str, **fields: object) -> None:
     if logger is not None:
         logger(event, **fields)
+
+
+def _sync_pipeline_registry(
+    *,
+    registry_path: Path,
+    plan: RecordingAnalysisPlan,
+    receipt: object | None,
+) -> str:
+    publication = shadow_synchronize_recording_import(
+        canonical_registry=registry_path,
+        zarr_path=plan.zarr_path,
+        receipt=receipt,
+        decided_by="fisheye.utils.run_recording_analysis_pipeline",
+    )
+    return str(publication.mutation_result["dataset_id"])
 
 
 def run_detect_registry_model(plan: RecordingAnalysisPlan, opts: RecordingPipelineOptions) -> tuple[bool, int, List[str]]:
@@ -171,18 +201,70 @@ def process_recording_analysis_pipeline(
     plan: RecordingAnalysisPlan,
     opts: RecordingPipelineOptions,
     *,
-    registry: Optional[Registry] = None,
+    registry: object | None = None,
     logger: Optional[Callable[..., None]] = None,
 ) -> RecordingPipelineResult:
     if opts.refine_keypoints:
         require_future_normal_refined_keypoint_publication()
-    import_result = process_recording_import(plan, opts.import_opts, logger=logger)
+    dataset_id: str | None = None
+    manifest_path = plan.recording_dir / "recording_manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest_profile = load_strict_json_object(manifest_path).get(
+                SOURCE_RECORDING_IDENTITY_PROFILE_ATTR
+            )
+        except SourceRecordingIdentityError as exc:
+            return RecordingPipelineResult(
+                ok=False,
+                failed_step="recording_import_preflight",
+                error=str(exc),
+            )
+        if (
+            manifest_profile == SOURCE_RECORDING_IDENTITY_PROFILE
+            and not opts.register
+        ):
+            return RecordingPipelineResult(
+                ok=False,
+                failed_step="recording_import_preflight",
+                error="current source pipelines require receipt-bound registry publication",
+            )
+    current_profile = (
+        plan.zarr_path.exists()
+        and load_source_recording_identity_profile(plan.zarr_path)
+        == SOURCE_RECORDING_IDENTITY_PROFILE
+    )
+    sealed_replay = False
+    if opts.register and current_profile:
+        try:
+            sealed_replay = bool(recording_import_receipt_paths(plan.zarr_path))
+        except RecordingImportReceiptError as exc:
+            return RecordingPipelineResult(
+                ok=False,
+                failed_step="recording_import_preflight",
+                error=str(exc),
+            )
+    if not sealed_replay:
+        import_result = process_recording_import(plan, opts.import_opts, logger=logger)
+    else:
+        import_result = RecordingImportResult(ok=True)
     if not import_result.ok:
         return RecordingPipelineResult(
             ok=False,
             failed_step=import_result.failed_step,
             error=import_result.error,
             returncode=import_result.returncode,
+        )
+
+    current_profile = (
+        (opts.register or plan.zarr_path.exists())
+        and load_source_recording_identity_profile(plan.zarr_path)
+        == SOURCE_RECORDING_IDENTITY_PROFILE
+    )
+    if opts.register and current_profile:
+        dataset_id = _sync_pipeline_registry(
+            registry_path=opts.registry_path,
+            plan=plan,
+            receipt=import_result.receipt,
         )
 
     detect_ok, detect_rc, detect_cmd = run_detect_registry_model(plan, opts)
@@ -274,16 +356,12 @@ def process_recording_analysis_pipeline(
                 error="refine keypoints failed",
             )
 
-    dataset_id = None
     if opts.register:
-        if registry is None:
-            local_registry = Registry(opts.registry_path)
-            try:
-                dataset_id = local_registry.scan_zarr(plan.zarr_path)
-            finally:
-                local_registry.close()
-        else:
-            dataset_id = registry.scan_zarr(plan.zarr_path)
+        dataset_id = _sync_pipeline_registry(
+            registry_path=opts.registry_path,
+            plan=plan,
+            receipt=None if current_profile else import_result.receipt,
+        )
 
     return RecordingPipelineResult(ok=True, dataset_id=dataset_id)
 
@@ -443,7 +521,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Config passed to keypoints/refine_keypoints stages.",
     )
 
-    parser.add_argument("--register", action="store_true", help="Rescan resulting analysis zarr into registry.")
+    parser.add_argument(
+        "--register",
+        action="store_true",
+        help="Receipt-finalize the current source import in the registry.",
+    )
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path.")
 
     args = parser.parse_args(argv)
@@ -490,17 +572,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("Dry run: no changes were made.")
         return 0
 
-    registry: Optional[Registry] = None
     if args.register:
-        registry = Registry(registry_path)
         print(f"Registry: {registry_path}")
 
-    try:
-        opts = _build_pipeline_options(args, registry_path)
-        result = process_recording_analysis_pipeline(plan, opts, registry=registry, logger=None)
-    finally:
-        if registry is not None:
-            registry.close()
+    opts = _build_pipeline_options(args, registry_path)
+    result = process_recording_analysis_pipeline(
+        plan,
+        opts,
+        registry=None,
+        logger=None,
+    )
 
     if not result.ok:
         print(

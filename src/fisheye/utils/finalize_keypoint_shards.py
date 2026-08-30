@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish completed keypoint shard runs as one canonical keypoints run."""
+"""Publish completed keypoint shards as one compatibility keypoints run."""
 
 from __future__ import annotations
 
@@ -21,6 +21,10 @@ from fisheye.shared.keypoint_summary import build_frame_keypoint_counts
 from fisheye.shared.hybrid_crop_provider import (
     HYBRID_CROP_RUN_SCHEMA_ID,
     validate_hybrid_crop_signed_identity,
+)
+from fisheye.shared.keypoint_publication_profile import (
+    COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
+    require_compatibility_keypoint_shard_aggregate,
 )
 from fisheye.shared.row_lineage import (
     ROW_IDENTITY_ARRAYS,
@@ -960,6 +964,7 @@ def finalize_keypoint_shards(
     *,
     zarr_path: str | Path,
     shard_runs: Sequence[str],
+    publication_profile: str,
     output_run: str | None = None,
     target_crop_run: str | None = None,
     overwrite: bool = False,
@@ -967,7 +972,11 @@ def finalize_keypoint_shards(
     row_shard_rows: int = DEFAULT_CANONICAL_KEYPOINT_ROW_SHARD_ROWS,
     frame_shard_rows: int = DEFAULT_CANONICAL_KEYPOINT_FRAME_SHARD_ROWS,
 ) -> dict[str, Any]:
-    """Finalize completed ``keypoint_shard_runs`` into a normal keypoint run."""
+    """Finalize shards into an explicitly requested compatibility keypoint run."""
+
+    resolved_publication_profile = require_compatibility_keypoint_shard_aggregate(
+        publication_profile
+    )
 
     archive = Path(zarr_path).expanduser().resolve()
     root = open_zarr_root(archive, mode="r" if dry_run else "a")
@@ -1012,6 +1021,8 @@ def finalize_keypoint_shards(
         "zarr_path": str(archive),
         "output_run": resolved_output_run,
         "output_path": f"{KEYPOINT_OUTPUT_PARENT}/{resolved_output_run}",
+        "publication_profile": resolved_publication_profile,
+        "canonical_dependency_eligible": False,
         "source_keypoint_shard_runs": [shard.name for shard in shards],
         "source_keypoint_shard_run_paths": source_shard_paths,
         "source_crop_run": source_crop_run,
@@ -1089,6 +1100,9 @@ def finalize_keypoint_shards(
             {
                 "collection_finalizer_schema": FINALIZER_SCHEMA,
                 "method": "fisheye.utils.finalize_keypoint_shards",
+                "artifact_profile": resolved_publication_profile,
+                "canonical_dependency_eligible": False,
+                "compatibility_only": True,
                 "run_semantics": "finalized_keypoint_shard_collection",
                 "artifact_mutability": "raw_immutable",
                 "created_at_utc": created_at,
@@ -1140,6 +1154,7 @@ def finalize_keypoint_shards(
                     "source_crop_mapping_mode": (
                         rebase.mapping_mode if rebase is not None else None
                     ),
+                    "publication_profile": resolved_publication_profile,
                     "overwrite": bool(overwrite),
                     "row_shard_rows": int(row_shard_rows),
                     "frame_shard_rows": int(frame_shard_rows),
@@ -1157,6 +1172,7 @@ def finalize_keypoint_shards(
                 "source_crop_mapping_mode": (
                     rebase.mapping_mode if rebase is not None else None
                 ),
+                "publication_profile": resolved_publication_profile,
                 "sort_policy": "source_crop_row_ids_stable_ascending",
                 "row_identity_mode": "instance_key",
                 "row_identity_mode_schema": ROW_IDENTITY_MODE_SCHEMA,
@@ -1233,6 +1249,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shard-runs-file", type=Path, help="JSON list or mapping containing shard_runs.")
     parser.add_argument("--output-run", help="Destination keypoints_runs child name.")
     parser.add_argument(
+        "--publication-profile",
+        choices=(COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,),
+        help=(
+            "Required for publication as an explicit compatibility declaration. "
+            "This writer is not a strict-v2 canonical keypoint producer."
+        ),
+    )
+    parser.add_argument(
         "--target-crop-run",
         help=(
             "Optional merged crop_runs/<name> to rebase per-shard source_crop_row_ids onto. "
@@ -1296,6 +1320,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = finalize_keypoint_shards(
                 zarr_path=args.zarr_path,
                 shard_runs=shard_runs,
+                publication_profile=args.publication_profile,
                 output_run=args.output_run,
                 target_crop_run=args.target_crop_run,
                 overwrite=bool(args.overwrite),

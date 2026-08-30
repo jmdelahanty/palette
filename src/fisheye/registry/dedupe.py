@@ -31,6 +31,16 @@ DATASET_REF_COLUMN_NAMES = {
     "child_dataset_id",
     "parent_dataset_id",
 }
+PROTECTED_DATASET_REF_TABLES = frozenset(
+    {
+        # Identity-authority bindings may only move through their dedicated
+        # transition.  Generic dedupe must leave the RESTRICT edge intact.
+        "dataset_recording_identity_current",
+        # Receipt bindings are immutable authority evidence, not ordinary
+        # dataset references.  Generic dedupe must not repoint or delete them.
+        "recording_import_receipt_bindings",
+    }
+)
 
 
 def _json_safe(value: Any) -> Any:
@@ -131,7 +141,7 @@ def _foreign_key_dataset_columns(conn: sqlite3.Connection, table: str) -> set[st
 def discover_dataset_refs(conn: sqlite3.Connection) -> list[DatasetRef]:
     refs: list[DatasetRef] = []
     for table in _table_names(conn):
-        if table == "datasets":
+        if table == "datasets" or table in PROTECTED_DATASET_REF_TABLES:
             continue
         columns = _table_columns(conn, table)
         column_names = {str(row["name"]) for row in columns}
@@ -151,6 +161,17 @@ def discover_dataset_refs(conn: sqlite3.Connection) -> list[DatasetRef]:
                 )
             )
     return refs
+
+
+def _authority_bound_dataset_ids(conn: sqlite3.Connection) -> set[str]:
+    if "dataset_recording_identity_current" not in _table_names(conn):
+        return set()
+    return {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT dataset_id FROM dataset_recording_identity_current;"
+        ).fetchall()
+    }
 
 
 def _dependent_count(conn: sqlite3.Connection, ref: DatasetRef, dataset_id: str) -> int:
@@ -496,6 +517,7 @@ def plan_registry_dataset_dedupe(
     conn = _connect(registry)
     try:
         refs = discover_dataset_refs(conn)
+        authority_bound_ids = _authority_bound_dataset_ids(conn)
         groups = _candidate_duplicate_groups(
             conn,
             active_only=bool(active_only),
@@ -506,6 +528,7 @@ def plan_registry_dataset_dedupe(
         out_groups: list[dict[str, Any]] = []
         duplicate_dataset_count = 0
         conflict_group_count = 0
+        authority_bound_group_count = 0
         total_rows_to_repoint = 0
         total_conflicting_rows = 0
         for group in groups:
@@ -515,6 +538,11 @@ def plan_registry_dataset_dedupe(
             canonical = _choose_canonical(conn, refs, rows)
             canonical_id = str(canonical["dataset_id"])
             duplicates = [row for row in rows if str(row["dataset_id"]) != canonical_id]
+            bound_ids = sorted(
+                str(row["dataset_id"])
+                for row in rows
+                if str(row["dataset_id"]) in authority_bound_ids
+            )
             duplicate_dataset_count += len(duplicates)
             duplicate_reports = []
             group_conflict_rows = 0
@@ -548,6 +576,8 @@ def plan_registry_dataset_dedupe(
                 )
             if group_conflict_rows:
                 conflict_group_count += 1
+            if bound_ids:
+                authority_bound_group_count += 1
             total_rows_to_repoint += group_rows_to_repoint
             total_conflicting_rows += group_conflict_rows
             out_groups.append(
@@ -560,12 +590,19 @@ def plan_registry_dataset_dedupe(
                     "duplicates": duplicate_reports,
                     "rows_to_repoint": int(group_rows_to_repoint),
                     "conflicting_rows": int(group_conflict_rows),
-                    "safe_to_auto_apply": bool(group_rows_to_repoint >= 0 and group_conflict_rows == 0),
+                    "authority_bound_dataset_ids": bound_ids,
+                    "safe_to_auto_apply": bool(
+                        group_rows_to_repoint >= 0
+                        and group_conflict_rows == 0
+                        and not bound_ids
+                    ),
                 }
             )
         status = "ok"
         if total_conflicting_rows:
             status = "conflicts"
+        elif authority_bound_group_count:
+            status = "authority_bound_review"
         return {
             "schema_version": "palette.registry_dataset_dedupe_plan.v1",
             "status": status,
@@ -579,6 +616,7 @@ def plan_registry_dataset_dedupe(
             "duplicate_group_count": int(len(out_groups)),
             "duplicate_dataset_count": int(duplicate_dataset_count),
             "conflict_group_count": int(conflict_group_count),
+            "authority_bound_group_count": int(authority_bound_group_count),
             "rows_to_repoint": int(total_rows_to_repoint),
             "conflicting_rows": int(total_conflicting_rows),
             "groups": out_groups,
@@ -605,14 +643,50 @@ def apply_registry_dataset_dedupe(
     )
     conn = _connect(registry)
     try:
-        refs = discover_dataset_refs(conn)
-        ref_by_key = {(ref.table, ref.column): ref for ref in refs}
+        blocked = [
+            group
+            for group in plan["groups"]
+            if group.get("authority_bound_dataset_ids")
+        ]
+        if blocked:
+            ids = sorted(
+                {
+                    str(dataset_id)
+                    for group in blocked
+                    for dataset_id in group["authority_bound_dataset_ids"]
+                }
+            )
+            raise RuntimeError(
+                "identity-authority-bound datasets require a dedicated transition: "
+                + ", ".join(ids)
+            )
         rows_repointed = 0
         conflict_rows_deleted = 0
         self_edge_rows_deleted = 0
         dataset_rows_deleted = 0
 
-        with conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE;")
+            planned_dataset_ids = {
+                str(group["canonical_dataset_id"])
+                for group in plan["groups"]
+            }
+            planned_dataset_ids.update(
+                str(duplicate["dataset"]["dataset_id"])
+                for group in plan["groups"]
+                for duplicate in group["duplicates"]
+            )
+            newly_bound = sorted(
+                planned_dataset_ids & _authority_bound_dataset_ids(conn)
+            )
+            if newly_bound:
+                raise RuntimeError(
+                    "identity-authority-bound datasets require a dedicated transition: "
+                    + ", ".join(newly_bound)
+                )
+
+            refs = discover_dataset_refs(conn)
+            ref_by_key = {(ref.table, ref.column): ref for ref in refs}
             for group in plan["groups"]:
                 canonical_id = str(group["canonical_dataset_id"])
                 for duplicate_report in group["duplicates"]:
@@ -654,6 +728,10 @@ def apply_registry_dataset_dedupe(
                         (duplicate_id,),
                     )
                     dataset_rows_deleted += int(cursor.rowcount if cursor.rowcount is not None else 0)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
         remaining_groups = _candidate_duplicate_groups(
             conn,
