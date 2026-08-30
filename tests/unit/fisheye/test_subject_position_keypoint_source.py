@@ -16,6 +16,7 @@ from fisheye.shared.subject_position_keypoint_source import (
     KeypointPositionSourceError,
     KeypointPositionSourcePolicy,
     load_bound_keypoint_position_source,
+    load_keypoint_coordinate_successor_admission,
     load_keypoint_coordinate_successor_source,
     revalidate_bound_keypoint_position_source,
 )
@@ -550,6 +551,52 @@ def test_coordinate_successor_resolver_reuses_sealed_active_authority_digest(
 
     assert source.active_keypoint_bundle_authority == active
     assert source.active_keypoint_bundle_authority_digest == active_digest
+
+
+def test_coordinate_successor_admission_does_not_load_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _profile_value, _arrays_value, _pose_binding = _fixture(monkeypatch)
+    active = MappingProxyType({"generation": 7, "members": MappingProxyType({})})
+    active_digest = source_mod.canonical_json_sha256(
+        {"generation": 7, "members": {}}
+    )
+    authority = MappingProxyType(
+        {
+            "payload": MappingProxyType(
+                {
+                    "source_authority": MappingProxyType(
+                        {
+                            "record": active,
+                            "record_sha256": active_digest,
+                        }
+                    )
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(source_mod, "_open_root", lambda _archive: root)
+    monkeypatch.setattr(
+        source_mod,
+        "_require_coordinate_successor_authority",
+        lambda *args, **kwargs: (authority, "7" * 64),
+    )
+    monkeypatch.setattr(
+        source_mod,
+        "load_persisted_ineligible_keypoint_coordinate_surfaces",
+        lambda *_args, **_kwargs: pytest.fail(
+            "metadata-only coordinate-successor admission loaded geometry"
+        ),
+    )
+
+    admitted = load_keypoint_coordinate_successor_admission(
+        "/tmp/fake-analysis.zarr",
+        run_path=_RUN_PATH,
+    )
+
+    assert admitted.active_keypoint_bundle_authority == active
+    assert admitted.active_keypoint_bundle_authority_digest == active_digest
+    assert admitted.metadata_declarations_digest == "f" * 64
 
 
 def test_root_bundle_authority_compares_two_open_metadata_views(

@@ -16,7 +16,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import zarr
@@ -354,7 +354,11 @@ def _publish_run(
     def prepare(root: zarr.Group) -> tuple[zarr.Group]:
         return (require_runs_parent(root, "crop_runs"),)
 
-    def after_rename(root: zarr.Group, run: zarr.Group) -> dict[str, Any]:
+    def after_rename(
+        root: zarr.Group,
+        run: zarr.Group,
+        _physical_copy: Mapping[str, Any],
+    ) -> dict[str, Any]:
         # Keep the heavyweight detector stack out of planning and node-local
         # geometry computation; only its shared publication helper is needed.
         from ...detection.detect_yolo import _publish_detection_frame_evidence

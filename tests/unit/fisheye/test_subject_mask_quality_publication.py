@@ -10,6 +10,8 @@ import zarr
 from fisheye.shared.zarr.benchmark_runtime import sha256_array
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.subject_mask_quality_manifest import (
+    validate_receipt_bound_subject_mask_quality_publication,
+    validate_subject_mask_quality_publication,
     validate_subject_mask_quality_run_manifest,
 )
 from fisheye.shared.zarr.subject_mask_quality_producer import (
@@ -20,6 +22,7 @@ from fisheye.shared.zarr.subject_mask_quality_publication import (
     SubjectMaskQualityComposableSourceExpectation,
     publish_selector_ineligible_subject_mask_quality_snapshot,
     require_local_subject_mask_quality_scratch_root,
+    subject_mask_quality_metadata_declaration_maps,
     validate_subject_mask_quality_shadow_publication,
 )
 from fisheye.shared.zarr.subject_mask_final_layout_units import (
@@ -172,6 +175,78 @@ def test_bounded_selector_ineligible_publication_round_trip(tmp_path: object) ->
             np.testing.assert_allclose(observed, wanted, equal_nan=True)
         else:
             np.testing.assert_array_equal(observed, wanted)
+
+
+def test_receipt_bound_publication_validation_reads_metadata_only(
+    tmp_path: Path,
+) -> None:
+    arrays, source_manifest, source = _fixture()
+    root = tmp_path / "quality"
+    publication = publish_selector_ineligible_subject_mask_quality_snapshot(
+        arrays,
+        n_frames=4,
+        components=_components(),
+        source=source,
+        source_manifest=source_manifest,
+        destination=root / "fixture.zarr",
+        run_id="quality_receipt_001",
+        shadow_root=root,
+        source_compute_block_bytes=512,
+        created_by="pytest",
+    )
+    direct, consolidated = subject_mask_quality_metadata_declaration_maps(
+        publication.output_path,
+        run_id=publication.run_id,
+        plans=publication.plans,
+    )
+    run = zarr.open_group(
+        str(publication.output_path / "subject_mask_quality_runs" / publication.run_id),
+        mode="r",
+        use_consolidated=False,
+    )
+
+    class _MetadataOnlyArray:
+        def __init__(self, value: object) -> None:
+            self.shape = value.shape  # type: ignore[attr-defined]
+            self.dtype = value.dtype  # type: ignore[attr-defined]
+
+        def __getitem__(self, _selection: object) -> np.ndarray:
+            raise AssertionError("receipt admission must not read array payloads")
+
+    metadata_only = {
+        path: _MetadataOnlyArray(run[path])
+        for path in SUBJECT_MASK_QUALITY_SCHEMA_V1.binding_paths
+    }
+    assert (
+        validate_receipt_bound_subject_mask_quality_publication(
+            publication.manifest,
+            expected_manifest_payload_digest=publication.manifest["payload_digest"],
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+            arrays=metadata_only,
+            source_manifest=source_manifest,
+        )
+        == ()
+    )
+    assert validate_receipt_bound_subject_mask_quality_publication(
+        publication.manifest,
+        expected_manifest_payload_digest="0" * 64,
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
+        arrays=metadata_only,
+        source_manifest=source_manifest,
+    ) == ("subject-mask quality manifest differs from bundle receipt",)
+    with pytest.raises(
+        AssertionError,
+        match="receipt admission must not read array payloads",
+    ):
+        validate_subject_mask_quality_publication(
+            publication.manifest,
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+            arrays=metadata_only,
+            source_manifest=source_manifest,
+        )
 
 
 def test_composable_source_is_verified_during_required_quality_compute(

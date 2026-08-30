@@ -7,13 +7,15 @@ from contextlib import contextmanager
 import heapq
 import json
 import math
+import os
 import sys
+import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import dask
 from dask import delayed
@@ -49,6 +51,7 @@ from ..shared.proof_verification import (
 )
 from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
+from ..shared.runtime_telemetry import PhaseTelemetry
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr_run_completion import (
     mark_run_complete,
@@ -89,7 +92,10 @@ from ..shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_COORDINATE_CONTRACT,
     SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR,
     SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
+    SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR,
     SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
+    SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR,
+    SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR,
     SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
     SUBJECT_SHAPE_SOURCE_BINDING_ATTR,
     SUBJECT_SHAPE_SOURCE_BINDING_DIGEST_ATTR,
@@ -101,7 +107,13 @@ from ..shared.subject_shape_coordinate_publication import (
     DeferredSubjectShapeCoordinateActivation,
     activate_subject_shape_coordinate_publication,
     build_subject_shape_unbound_numeric_manifest_record,
-    load_completed_ineligible_subject_shape_coordinate_publication,
+    derive_canonical_subject_shape_body_frame,
+    mask_invalid_subject_shape_vectors,
+    project_subject_shape_bboxes,
+    project_subject_shape_ellipses,
+    project_subject_shape_points,
+    require_subject_shape_source_camera_numeric_projection,
+    stamp_subject_shape_source_camera_numeric_projection,
     load_exact_subject_shape_source,
     load_sealed_unbound_subject_shape_manifest as _load_shared_sealed_unbound_manifest,
     load_unbound_subject_shape_manifest as _load_shared_unbound_manifest,
@@ -109,6 +121,12 @@ from ..shared.subject_shape_coordinate_publication import (
     publish_subject_shape_coordinate_surfaces,
     selector_snapshot,
     stamp_unbound_subject_shape_manifest,
+    validate_sealed_subject_shape_publication_metadata,
+)
+from ..shared.subject_shape_storage import (
+    build_subject_shape_unbound_payload_scan_receipt,
+    load_subject_shape_deferred_storage_receipt,
+    stamp_subject_shape_deferred_storage_receipt,
 )
 from ..shared.zarr.subject_shape_bundle_source import (
     BoundSubjectShapeBundleSource,
@@ -165,6 +183,83 @@ SUPPORTED_SCHEDULERS = ("single-threaded", "threads", "processes", "distributed"
 EXECUTION_BACKENDS = ("serial_driver", "dask_worker_chunks")
 SERIAL_EXECUTION_BACKEND = "serial_driver"
 DASK_WORKER_EXECUTION_BACKEND = "dask_worker_chunks"
+_SUBJECT_SHAPE_WORKER_CONTEXT_CACHE_MAX_ENTRIES = 8
+_SUBJECT_SHAPE_WORKER_CONTEXT_CACHE: dict[
+    tuple[object, ...],
+    tuple[zarr.Group, zarr.Group, MaskStore],
+] = {}
+_SUBJECT_SHAPE_WORKER_CONTEXT_CACHE_LOCK = threading.Lock()
+
+
+def _zarr_store_identity(path: str | Path) -> tuple[object, ...]:
+    root = Path(path).expanduser().resolve()
+    metadata = root / "zarr.json"
+    if not metadata.is_file():
+        metadata = root / ".zgroup"
+    stat = metadata.stat()
+    return (
+        str(root),
+        str(metadata.name),
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+    )
+
+
+def _clear_subject_shape_worker_context_cache() -> None:
+    """Clear process-local handles; intended for bounded worker/test teardown."""
+
+    with _SUBJECT_SHAPE_WORKER_CONTEXT_CACHE_LOCK:
+        _SUBJECT_SHAPE_WORKER_CONTEXT_CACHE.clear()
+
+
+def _subject_shape_worker_context(
+    source_zarr_path: str,
+    *,
+    output_zarr_path: str,
+    refined_run: str,
+    shape_run: str,
+) -> tuple[tuple[zarr.Group, zarr.Group, MaskStore], bool]:
+    """Reuse exact subgroup handles inside one worker process.
+
+    Source publications are immutable and the output path is one exclusively
+    owned node-local stage.  Device/inode/size/mtime identity prevents a
+    deleted-and-recreated path from inheriting a prior process-local handle.
+    """
+
+    key = (
+        int(os.getpid()),
+        *_zarr_store_identity(source_zarr_path),
+        *_zarr_store_identity(output_zarr_path),
+        str(refined_run),
+        str(shape_run),
+    )
+    with _SUBJECT_SHAPE_WORKER_CONTEXT_CACHE_LOCK:
+        cached = _SUBJECT_SHAPE_WORKER_CONTEXT_CACHE.get(key)
+        if cached is not None:
+            return cached, True
+        source_root = open_zarr_root(source_zarr_path, mode="r")
+        output_root = open_zarr_root(output_zarr_path, mode="a")
+        refined_group = source_root["refined_subject_masks_runs"][refined_run]
+        mask_store = open_mask_store(
+            refined_group,
+            source_path=f"refined_subject_masks_runs/{refined_run}",
+            prefer="dense",
+        )
+        context = (
+            refined_group,
+            output_root["analysis"]["subject_shape_runs"][shape_run],
+            mask_store,
+        )
+        if (
+            len(_SUBJECT_SHAPE_WORKER_CONTEXT_CACHE)
+            >= _SUBJECT_SHAPE_WORKER_CONTEXT_CACHE_MAX_ENTRIES
+        ):
+            oldest_key = next(iter(_SUBJECT_SHAPE_WORKER_CONTEXT_CACHE))
+            del _SUBJECT_SHAPE_WORKER_CONTEXT_CACHE[oldest_key]
+        _SUBJECT_SHAPE_WORKER_CONTEXT_CACHE[key] = context
+        return context, False
 
 
 @contextmanager
@@ -1454,6 +1549,55 @@ def _compute_component_batch(masks: np.ndarray, component_name: str) -> Componen
     )
 
 
+def _projection_offsets(
+    offsets_xy: np.ndarray | None,
+    *,
+    row_count: int,
+) -> np.ndarray | None:
+    if offsets_xy is None:
+        return None
+    offsets = np.asarray(offsets_xy, dtype=np.float64)
+    if offsets.shape != (int(row_count), 2) or not np.isfinite(offsets).all():
+        raise ValueError(
+            "Subject-shape source-camera projection offsets must be finite [row,xy]."
+        )
+    return offsets
+
+
+def _project_component_batch_for_write(
+    batch: ComponentBatch,
+    offsets_xy: np.ndarray | None,
+) -> ComponentBatch:
+    offsets = _projection_offsets(
+        offsets_xy,
+        row_count=int(batch.mask_present.shape[0]),
+    )
+    if offsets is None:
+        return batch
+    return replace(
+        batch,
+        centroid_xy=project_subject_shape_points(
+            batch.centroid_xy,
+            offsets,
+            batch.centroid_valid,
+        ),
+        bbox_xyxy=project_subject_shape_bboxes(
+            batch.bbox_xyxy,
+            offsets,
+            batch.bbox_valid,
+        ),
+        principal_axis_xy=mask_invalid_subject_shape_vectors(
+            batch.principal_axis_xy,
+            batch.principal_axis_valid,
+        ),
+        ellipse_params=project_subject_shape_ellipses(
+            batch.ellipse_params,
+            offsets,
+            batch.ellipse_success,
+        ),
+    )
+
+
 def _write_component_batch(
     run_group: zarr.Group,
     component_name: str,
@@ -1605,6 +1749,33 @@ def _compute_body_frame_batch(batches: Mapping[str, ComponentBatch]) -> BodyFram
     )
 
 
+def _compute_canonical_camera_body_frame_batch(
+    batches: Mapping[str, ComponentBatch],
+) -> BodyFrameBatch:
+    labels = tuple(str(value) for value in batches)
+    centroids = np.stack(
+        [np.asarray(batches[name].centroid_xy, dtype=np.float32) for name in labels],
+        axis=1,
+    )
+    validity = np.stack(
+        [np.asarray(batches[name].centroid_valid, dtype=bool) for name in labels],
+        axis=1,
+    )
+    derived = derive_canonical_subject_shape_body_frame(
+        labels,
+        centroids,
+        validity,
+    )
+    return BodyFrameBatch(
+        origin_xy=derived["origin_xy"],
+        forward_axis_xy=derived["forward_axis_xy"],
+        left_axis_xy=derived["left_axis_xy"],
+        heading_deg=derived["heading_deg"],
+        valid=derived["valid"],
+        failure_reason_bytes=derived["failure_reason_bytes"],
+    )
+
+
 def _write_body_frame_batch(run_group: zarr.Group, row_slice: slice, batch: BodyFrameBatch) -> None:
     if "body_frame" not in run_group:
         return
@@ -1681,14 +1852,29 @@ def _compute_caudal_anchor_batch(
     )
 
 
-def _write_caudal_anchor_batch(run_group: zarr.Group, row_slice: slice, batch: CaudalAnchorBatch) -> None:
+def _write_caudal_anchor_batch(
+    run_group: zarr.Group,
+    row_slice: slice,
+    batch: CaudalAnchorBatch,
+    *,
+    source_camera_offsets_xy: np.ndarray | None = None,
+) -> None:
     components = run_group.get("components")
     if components is None or "swim_bladder" not in components:
         return
     group = components["swim_bladder"]
     if "caudal_contour_point_xy" not in group:
         return
-    group["caudal_contour_point_xy"][row_slice, :] = batch.point_xy
+    point_xy = (
+        project_subject_shape_points(
+            batch.point_xy,
+            source_camera_offsets_xy,
+            batch.valid,
+        )
+        if source_camera_offsets_xy is not None
+        else batch.point_xy
+    )
+    group["caudal_contour_point_xy"][row_slice, :] = point_xy
     group["caudal_contour_projection_px"][row_slice] = batch.projection_px
     group["caudal_contour_valid"][row_slice] = batch.valid
     group["caudal_contour_failure_reason_bytes"][row_slice, :] = batch.failure_reason_bytes
@@ -1752,14 +1938,29 @@ def _compute_snout_tip_batch(
     )
 
 
-def _write_snout_tip_batch(run_group: zarr.Group, row_slice: slice, batch: SnoutTipBatch) -> None:
+def _write_snout_tip_batch(
+    run_group: zarr.Group,
+    row_slice: slice,
+    batch: SnoutTipBatch,
+    *,
+    source_camera_offsets_xy: np.ndarray | None = None,
+) -> None:
     components = run_group.get("components")
     if components is None or "subject_body" not in components:
         return
     group = components["subject_body"]
     if "snout_tip_xy" not in group:
         return
-    group["snout_tip_xy"][row_slice, :] = batch.point_xy
+    point_xy = (
+        project_subject_shape_points(
+            batch.point_xy,
+            source_camera_offsets_xy,
+            batch.valid,
+        )
+        if source_camera_offsets_xy is not None
+        else batch.point_xy
+    )
+    group["snout_tip_xy"][row_slice, :] = point_xy
     group["snout_tip_valid"][row_slice] = batch.valid
     group["snout_tip_failure_reason_bytes"][row_slice, :] = batch.failure_reason_bytes
 
@@ -2249,19 +2450,62 @@ def _compute_centerline_batch(
     )
 
 
-def _write_centerline_batch(run_group: zarr.Group, row_slice: slice, batch: CenterlineBatch) -> None:
+def _write_centerline_batch(
+    run_group: zarr.Group,
+    row_slice: slice,
+    batch: CenterlineBatch,
+    *,
+    source_camera_offsets_xy: np.ndarray | None = None,
+) -> None:
     components = run_group.get("components")
     if components is None or "subject_body" not in components:
         return
     group = components["subject_body"]
     if "centerline_xy" not in group:
         return
-    group["centerline_xy"][row_slice, :, :] = batch.centerline_xy
+    offsets = source_camera_offsets_xy
+    centerline_xy = (
+        project_subject_shape_points(
+            batch.centerline_xy,
+            offsets,
+            batch.centerline_valid,
+        )
+        if offsets is not None
+        else batch.centerline_xy
+    )
+    head_endpoint_xy = (
+        project_subject_shape_points(
+            batch.head_endpoint_xy,
+            offsets,
+            batch.centerline_valid,
+        )
+        if offsets is not None
+        else batch.head_endpoint_xy
+    )
+    tail_tip_xy = (
+        project_subject_shape_points(
+            batch.tail_tip_xy,
+            offsets,
+            batch.centerline_valid,
+        )
+        if offsets is not None
+        else batch.tail_tip_xy
+    )
+    tail_base_xy = (
+        project_subject_shape_points(
+            batch.tail_base_xy,
+            offsets,
+            batch.tail_base_valid,
+        )
+        if offsets is not None
+        else batch.tail_base_xy
+    )
+    group["centerline_xy"][row_slice, :, :] = centerline_xy
     group["centerline_valid"][row_slice] = batch.centerline_valid
     group["centerline_failure_reason_bytes"][row_slice, :] = batch.centerline_failure_reason_bytes
-    group["head_endpoint_xy"][row_slice, :] = batch.head_endpoint_xy
-    group["tail_tip_xy"][row_slice, :] = batch.tail_tip_xy
-    group["tail_base_xy"][row_slice, :] = batch.tail_base_xy
+    group["head_endpoint_xy"][row_slice, :] = head_endpoint_xy
+    group["tail_tip_xy"][row_slice, :] = tail_tip_xy
+    group["tail_base_xy"][row_slice, :] = tail_base_xy
     group["tail_base_valid"][row_slice] = batch.tail_base_valid
     group["tail_base_arclength_px"][row_slice] = batch.tail_base_arclength_px
     group["tail_base_failure_reason_bytes"][row_slice, :] = batch.tail_base_failure_reason_bytes
@@ -2325,6 +2569,8 @@ def _write_subject_body_spline_batch(
     run_group: zarr.Group,
     row_slice: slice,
     batch: SubjectBodySplineBatch,
+    *,
+    source_camera_offsets_xy: np.ndarray | None = None,
 ) -> None:
     components = run_group.get("components")
     if components is None or "subject_body" not in components:
@@ -2332,17 +2578,63 @@ def _write_subject_body_spline_batch(
     group = components["subject_body"]
     if "bspline_sample_xy" not in group:
         return
-    group["bspline_control_points_xy"][row_slice, :, :] = batch.bspline_control_points_xy
+    offsets = source_camera_offsets_xy
+    bspline_control_points_xy = (
+        project_subject_shape_points(
+            batch.bspline_control_points_xy,
+            offsets,
+            batch.bspline_valid,
+        )
+        if offsets is not None
+        else batch.bspline_control_points_xy
+    )
+    bspline_sample_xy = (
+        project_subject_shape_points(
+            batch.bspline_sample_xy,
+            offsets,
+            batch.bspline_valid,
+        )
+        if offsets is not None
+        else batch.bspline_sample_xy
+    )
+    tail_sample_xy = (
+        project_subject_shape_points(
+            batch.tail_sample_xy,
+            offsets,
+            batch.tail_sample_valid,
+        )
+        if offsets is not None
+        else batch.tail_sample_xy
+    )
+    tail_tangent_xy = (
+        mask_invalid_subject_shape_vectors(
+            batch.tail_tangent_xy,
+            batch.tail_sample_valid,
+        )
+        if offsets is not None
+        else batch.tail_tangent_xy
+    )
+    tail_normal_xy = (
+        mask_invalid_subject_shape_vectors(
+            batch.tail_normal_xy,
+            batch.tail_sample_valid,
+        )
+        if offsets is not None
+        else batch.tail_normal_xy
+    )
+    group["bspline_control_points_xy"][row_slice, :, :] = (
+        bspline_control_points_xy
+    )
     group["bspline_knots"][row_slice, :] = batch.bspline_knots
     group["bspline_degree_used"][row_slice] = batch.bspline_degree_used
-    group["bspline_sample_xy"][row_slice, :, :] = batch.bspline_sample_xy
+    group["bspline_sample_xy"][row_slice, :, :] = bspline_sample_xy
     group["bspline_valid"][row_slice] = batch.bspline_valid
     group["bspline_failure_reason_bytes"][row_slice, :] = _encode_reasons(batch.bspline_failure_reasons)
     group["bspline_arc_length_px"][row_slice] = batch.bspline_arc_length_px
     group["centerline_curvature_px_inv"][row_slice, :] = batch.centerline_curvature_px_inv
-    group["tail_sample_xy"][row_slice, :, :] = batch.tail_sample_xy
-    group["tail_tangent_xy"][row_slice, :, :] = batch.tail_tangent_xy
-    group["tail_normal_xy"][row_slice, :, :] = batch.tail_normal_xy
+    group["tail_sample_xy"][row_slice, :, :] = tail_sample_xy
+    group["tail_tangent_xy"][row_slice, :, :] = tail_tangent_xy
+    group["tail_normal_xy"][row_slice, :, :] = tail_normal_xy
     group["tail_curvature_px_inv"][row_slice, :] = batch.tail_curvature_px_inv
     group["tail_sample_valid"][row_slice] = batch.tail_sample_valid
     group["tail_sample_failure_reason_bytes"][row_slice, :] = _encode_reasons(batch.tail_sample_failure_reasons)
@@ -2364,7 +2656,13 @@ def _eye_axis_from_ellipse_params(params: np.ndarray) -> np.ndarray:
     return np.asarray([math.cos(theta), math.sin(theta)], dtype=np.float32)
 
 
-def _write_relations(run_group: zarr.Group, row_slice: slice, batches: Mapping[str, ComponentBatch]) -> None:
+def _write_relations(
+    run_group: zarr.Group,
+    row_slice: slice,
+    batches: Mapping[str, ComponentBatch],
+    *,
+    source_camera_offsets_xy: np.ndarray | None = None,
+) -> None:
     relations = run_group.get("relations")
     if relations is None:
         return
@@ -2378,10 +2676,19 @@ def _write_relations(run_group: zarr.Group, row_slice: slice, batches: Mapping[s
             delta = left.centroid_xy[valid] - right.centroid_xy[valid]
             separation[valid] = np.linalg.norm(delta, axis=1).astype(np.float32, copy=False)
             midpoint[valid] = ((left.centroid_xy[valid] + right.centroid_xy[valid]) * 0.5).astype(np.float32)
+        persisted_midpoint = (
+            project_subject_shape_points(
+                midpoint,
+                source_camera_offsets_xy,
+                valid,
+            )
+            if source_camera_offsets_xy is not None
+            else midpoint
+        )
         group = relations["eye_pair"]
         group["separation_px"][row_slice] = separation
         group["separation_valid"][row_slice] = valid
-        group["midpoint_xy"][row_slice, :] = midpoint
+        group["midpoint_xy"][row_slice, :] = persisted_midpoint
         group["midpoint_valid"][row_slice] = valid
 
     if "swim_bladder_to_body" in relations and {"subject_body", "swim_bladder"}.issubset(batches):
@@ -2422,8 +2729,13 @@ def _write_relations(run_group: zarr.Group, row_slice: slice, batches: Mapping[s
                 body_axis = body.principal_axis_xy[int(row_idx)]
                 eye_axis = _eye_axis_from_ellipse_params(eye_batch.ellipse_params[int(row_idx)])
                 angle[int(row_idx)] = np.float32(_angle_between_unoriented_axes(body_axis, eye_axis))
+            persisted_offset = (
+                mask_invalid_subject_shape_vectors(offset, valid)
+                if source_camera_offsets_xy is not None
+                else offset
+            )
             group[f"{prefix}_eye_relation_valid"][row_slice] = valid
-            group[f"{prefix}_eye_offset_xy"][row_slice, :] = offset
+            group[f"{prefix}_eye_offset_xy"][row_slice, :] = persisted_offset
             group[f"{prefix}_eye_distance_to_body_centroid_px"][row_slice] = distance
             group[f"{prefix}_eye_axis_angle_to_body_rad"][row_slice] = angle
 
@@ -2440,6 +2752,7 @@ def _process_and_write_subject_shape_chunk_groups(
     execution_backend: str,
     output_start_row: Optional[int] = None,
     centerline_crop_to_foreground: bool = False,
+    source_camera_offsets_xy: np.ndarray | None = None,
 ) -> dict[str, object]:
     source_row_slice = slice(int(start_row), int(stop_row))
     output_start = int(start_row) if output_start_row is None else int(output_start_row)
@@ -2464,6 +2777,11 @@ def _process_and_write_subject_shape_chunk_groups(
     component_masks_by_name: dict[str, np.ndarray] = {}
     rows_with_component: dict[str, int] = {}
     source_body_qc: SourceBodyMaskQcBatch | None = None
+    chunk_offsets = _projection_offsets(
+        source_camera_offsets_xy,
+        row_count=int(stop_row) - int(start_row),
+    )
+    persisted_batches: dict[str, ComponentBatch] = {}
     for component_name, component_idx in component_indices:
         phase_start = time.perf_counter()
         read_start = time.perf_counter()
@@ -2478,10 +2796,17 @@ def _process_and_write_subject_shape_chunk_groups(
         compute_elapsed = float(time.perf_counter() - compute_start)
         compute_seconds += compute_elapsed
         write_start = time.perf_counter()
-        _write_component_batch(run_group, str(component_name), output_row_slice, batch)
+        persisted_batch = _project_component_batch_for_write(batch, chunk_offsets)
+        _write_component_batch(
+            run_group,
+            str(component_name),
+            output_row_slice,
+            persisted_batch,
+        )
         write_elapsed = float(time.perf_counter() - write_start)
         write_seconds += write_elapsed
         batches[str(component_name)] = batch
+        persisted_batches[str(component_name)] = persisted_batch
         if str(component_name) in {"subject_body", "swim_bladder"}:
             component_masks_by_name[str(component_name)] = component_masks
         if str(component_name) == "subject_body":
@@ -2512,7 +2837,12 @@ def _process_and_write_subject_shape_chunk_groups(
         compute_elapsed = float(time.perf_counter() - compute_start)
         compute_seconds += compute_elapsed
         write_start = time.perf_counter()
-        _write_body_frame_batch(run_group, output_row_slice, body_frame)
+        persisted_body_frame = (
+            _compute_canonical_camera_body_frame_batch(persisted_batches)
+            if chunk_offsets is not None
+            else body_frame
+        )
+        _write_body_frame_batch(run_group, output_row_slice, persisted_body_frame)
         write_elapsed = float(time.perf_counter() - write_start)
         write_seconds += write_elapsed
         chunk_timing["write_body_frame_seconds"] = float(time.perf_counter() - phase_start)
@@ -2532,7 +2862,12 @@ def _process_and_write_subject_shape_chunk_groups(
         compute_elapsed = float(time.perf_counter() - compute_start)
         compute_seconds += compute_elapsed
         write_start = time.perf_counter()
-        _write_snout_tip_batch(run_group, output_row_slice, snout_tip)
+        _write_snout_tip_batch(
+            run_group,
+            output_row_slice,
+            snout_tip,
+            source_camera_offsets_xy=chunk_offsets,
+        )
         write_elapsed = float(time.perf_counter() - write_start)
         write_seconds += write_elapsed
         chunk_timing["write_snout_tip_seconds"] = float(time.perf_counter() - phase_start)
@@ -2548,7 +2883,12 @@ def _process_and_write_subject_shape_chunk_groups(
         compute_elapsed = float(time.perf_counter() - compute_start)
         compute_seconds += compute_elapsed
         write_start = time.perf_counter()
-        _write_caudal_anchor_batch(run_group, output_row_slice, caudal_anchor)
+        _write_caudal_anchor_batch(
+            run_group,
+            output_row_slice,
+            caudal_anchor,
+            source_camera_offsets_xy=chunk_offsets,
+        )
         write_elapsed = float(time.perf_counter() - write_start)
         write_seconds += write_elapsed
         chunk_timing["write_caudal_anchor_seconds"] = float(time.perf_counter() - phase_start)
@@ -2571,7 +2911,12 @@ def _process_and_write_subject_shape_chunk_groups(
         compute_elapsed = float(time.perf_counter() - compute_start)
         compute_seconds += compute_elapsed
         write_start = time.perf_counter()
-        _write_centerline_batch(run_group, output_row_slice, centerline)
+        _write_centerline_batch(
+            run_group,
+            output_row_slice,
+            centerline,
+            source_camera_offsets_xy=chunk_offsets,
+        )
         write_elapsed = float(time.perf_counter() - write_start)
         write_seconds += write_elapsed
         chunk_timing["write_centerline_seconds"] = float(time.perf_counter() - phase_start)
@@ -2614,7 +2959,12 @@ def _process_and_write_subject_shape_chunk_groups(
         compute_elapsed = float(time.perf_counter() - compute_start)
         compute_seconds += compute_elapsed
         write_start = time.perf_counter()
-        _write_subject_body_spline_batch(run_group, output_row_slice, spline)
+        _write_subject_body_spline_batch(
+            run_group,
+            output_row_slice,
+            spline,
+            source_camera_offsets_xy=chunk_offsets,
+        )
         write_elapsed = float(time.perf_counter() - write_start)
         write_seconds += write_elapsed
         chunk_timing["write_subject_body_spline_seconds"] = float(time.perf_counter() - phase_start)
@@ -2624,7 +2974,12 @@ def _process_and_write_subject_shape_chunk_groups(
         rows_with_component["tail_sample_valid"] = int(np.count_nonzero(spline.tail_sample_valid))
 
     phase_start = time.perf_counter()
-    _write_relations(run_group, output_row_slice, batches)
+    _write_relations(
+        run_group,
+        output_row_slice,
+        batches,
+        source_camera_offsets_xy=chunk_offsets,
+    )
     relations_elapsed = float(time.perf_counter() - phase_start)
     chunk_timing["write_relations_seconds"] = relations_elapsed
     chunk_timing["relations_compute_write_seconds"] = relations_elapsed
@@ -2653,19 +3008,22 @@ def _process_and_write_subject_shape_chunk(
     chunk_index: int,
     centerline_crop_to_foreground: bool = False,
     native_threads: Optional[int] = None,
+    source_camera_offsets_xy: np.ndarray | None = None,
 ) -> dict[str, object]:
-    source_root = open_zarr_root(source_zarr_path, mode="r")
-    output_root = open_zarr_root(output_zarr_path, mode="a")
-    refined_group = source_root["refined_subject_masks_runs"][refined_run]
-    mask_store = open_mask_store(
-        refined_group,
-        source_path=f"refined_subject_masks_runs/{refined_run}",
-        prefer="dense",
+    context_start = time.perf_counter()
+    (refined_group, run_group, mask_store), cache_hit = (
+        _subject_shape_worker_context(
+            source_zarr_path,
+            output_zarr_path=output_zarr_path,
+            refined_run=refined_run,
+            shape_run=shape_run,
+        )
     )
+    context_seconds = float(time.perf_counter() - context_start)
     with _native_thread_limit(native_threads):
-        return _process_and_write_subject_shape_chunk_groups(
+        result = _process_and_write_subject_shape_chunk_groups(
             refined_group,
-            output_root["analysis"]["subject_shape_runs"][shape_run],
+            run_group,
             mask_store=mask_store,
             component_indices=component_indices,
             start_row=start_row,
@@ -2673,7 +3031,18 @@ def _process_and_write_subject_shape_chunk(
             chunk_index=chunk_index,
             execution_backend=DASK_WORKER_EXECUTION_BACKEND,
             centerline_crop_to_foreground=bool(centerline_crop_to_foreground),
+            source_camera_offsets_xy=source_camera_offsets_xy,
         )
+    chunk_timing = dict(result["chunk_timing"])
+    chunk_timing["worker_context_lookup_seconds"] = context_seconds
+    chunk_timing["worker_context_cache_hit"] = cache_hit
+    chunk_timing["total_seconds"] = (
+        float(chunk_timing.get("total_seconds") or 0.0) + context_seconds
+    )
+    return {
+        **result,
+        "chunk_timing": chunk_timing,
+    }
 
 
 def _compute_dask_tasks(
@@ -2725,6 +3094,12 @@ def _summarize_subject_shape_chunk_timings(
     )
     return {
         "chunk_count": len(chunk_timings),
+        "worker_context_cache_hits": sum(
+            item.get("worker_context_cache_hit") is True for item in chunk_timings
+        ),
+        "worker_context_cache_misses": sum(
+            item.get("worker_context_cache_hit") is False for item in chunk_timings
+        ),
         "mean_chunk_seconds": float(np.mean(totals)) if totals else 0.0,
         "median_chunk_seconds": float(np.median(totals)) if totals else 0.0,
         "p95_chunk_seconds": float(np.percentile(totals, 95.0)) if totals else 0.0,
@@ -2751,8 +3126,15 @@ def _unbound_numeric_manifest_record(run_group: zarr.Group) -> dict[str, object]
     return build_subject_shape_unbound_numeric_manifest_record(run_group)
 
 
-def _stamp_unbound_numeric_manifest(run_group: zarr.Group):
-    return stamp_unbound_subject_shape_manifest(run_group)
+def _stamp_unbound_numeric_manifest(
+    run_group: zarr.Group,
+    *,
+    array_content_sha256: Mapping[str, str] | None = None,
+):
+    return stamp_unbound_subject_shape_manifest(
+        run_group,
+        array_content_sha256=array_content_sha256,
+    )
 
 
 def refresh_unbound_subject_shape_manifest_after_storage_materialization(
@@ -2782,6 +3164,10 @@ def refresh_unbound_subject_shape_manifest_after_storage_materialization(
         raise ValueError(
             "Storage rematerialization requires one complete, unbound, "
             "selector-ineligible subject-shape stage."
+        )
+    if SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR in run_group.attrs:
+        raise ValueError(
+            "Storage rematerialization cannot consume an unclosed deferred receipt."
         )
     source_link = bind_persisted_coordinate_record(
         run_group,
@@ -2854,6 +3240,7 @@ def _validate_unbound_subject_shape_payload(
     require_complete: bool,
     expected_subject_mask_bundle_id: str | None = None,
     array_content_sha256: Mapping[str, str] | None = None,
+    deferred_storage_profile_id: str | None = None,
 ) -> dict[str, object]:
     expected_path = f"analysis/subject_shape_runs/{expected_run_name}"
     if str(run_group.path) != expected_path:
@@ -2942,6 +3329,15 @@ def _validate_unbound_subject_shape_payload(
             authoritative_root,
             f"refined_subject_masks_runs/{expected_refined_run}",
         )
+    projection_present = (
+        SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR in run_group.attrs
+        or SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR in run_group.attrs
+    )
+    if projection_present:
+        require_subject_shape_source_camera_numeric_projection(
+            run_group,
+            source,
+        )
     component_names = tuple(run_group.attrs.get("component_names") or ())
     if (
         len(component_names) != len(COMPONENT_ORDER)
@@ -3018,16 +3414,39 @@ def _validate_unbound_subject_shape_payload(
         node = run_group.get(path)
         if node is None or tuple(int(value) for value in node.shape) != shape:
             raise ValueError(f"Unbound subject-shape array {path!r} has wrong shape.")
-    manifest = _load_unbound_numeric_manifest(
-        run_group,
-        array_content_sha256=array_content_sha256,
-    )
+    if deferred_storage_profile_id is None:
+        if SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR in run_group.attrs:
+            raise ValueError(
+                "Manifest-bound subject-shape validation rejects a leftover "
+                "deferred storage receipt."
+            )
+        manifest = _load_unbound_numeric_manifest(
+            run_group,
+            array_content_sha256=array_content_sha256,
+        )
+        receipt_fields = {
+            "unbound_manifest_sha256": manifest.record_sha256,
+        }
+    else:
+        if array_content_sha256 is not None:
+            raise ValueError(
+                "Deferred subject-shape validation cannot accept predicted payload "
+                "digests."
+            )
+        receipt = load_subject_shape_deferred_storage_receipt(
+            run_group,
+            expected_storage_profile_id=deferred_storage_profile_id,
+        )
+        receipt_fields = {
+            "deferred_storage_receipt_sha256": receipt["record_sha256"],
+            "deferred_storage_profile_id": deferred_storage_profile_id,
+        }
     return {
         "valid": True,
         "status": expected_binding_status,
         "run_name": expected_run_name,
         "row_count": row_count,
-        "unbound_manifest_sha256": manifest.record_sha256,
+        **receipt_fields,
     }
 
 
@@ -3056,6 +3475,29 @@ def validate_unbound_subject_shape_run(
     )
 
 
+def validate_deferred_unbound_subject_shape_run(
+    authoritative_root: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    expected_refined_run: str,
+    expected_run_name: str,
+    storage_profile_id: str,
+    expected_subject_mask_bundle_id: str | None = None,
+) -> dict[str, object]:
+    """Validate a scratch writer handoff without inventing payload digests."""
+
+    return _validate_unbound_subject_shape_payload(
+        authoritative_root,
+        run_group,
+        expected_refined_run=expected_refined_run,
+        expected_run_name=expected_run_name,
+        expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+        require_complete=True,
+        expected_subject_mask_bundle_id=expected_subject_mask_bundle_id,
+        deferred_storage_profile_id=storage_profile_id,
+    )
+
+
 @proof_verification_operation
 def bind_staged_subject_shape_run(
     authoritative_root: zarr.Group,
@@ -3067,98 +3509,124 @@ def bind_staged_subject_shape_run(
     payload_run_path: str | Path | None = None,
     payload_hash_workers: int = 4,
     unbound_array_content_sha256: Mapping[str, str] | None = None,
+    staged_decoded_copy_report: Mapping[str, Any] | None = None,
+    verified_physical_copy: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     """Bind and transform an unbound stage only at its authoritative path."""
 
-    if archive_identity(authoritative_root) != archive_identity(final_run_group):
-        raise ValueError(
-            "Final subject-shape run is not inside the authoritative archive."
-        )
-    validation = _validate_unbound_subject_shape_payload(
-        authoritative_root,
-        final_run_group,
-        expected_refined_run=expected_refined_run,
-        expected_run_name=expected_run_name,
-        expected_binding_status=SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
-        require_complete=False,
-        expected_subject_mask_bundle_id=expected_subject_mask_bundle_id,
-        array_content_sha256=unbound_array_content_sha256,
+    binding_telemetry = PhaseTelemetry(
+        materializer="subject_shape_final_path_binding",
+        context={
+            "run_name": expected_run_name,
+            "refined_run": expected_refined_run,
+            "receipt_mode": (
+                "staged_transfer_receipt_v2"
+                if staged_decoded_copy_report is not None
+                else "legacy_post_binding_scan_v1"
+            ),
+        },
     )
-    source_revision_audit = audit_subject_shape_source_revisions_group(
-        authoritative_root,
-        shape_run=expected_run_name,
-        refined_run=expected_refined_run,
-    )
-    if source_revision_audit.get("status") != "current":
-        raise ValueError(
-            "Refined subject-mask revisions changed before final-path binding: "
-            f"{source_revision_audit!r}."
+    with binding_telemetry.phase("admission_revalidation"):
+        if archive_identity(authoritative_root) != archive_identity(final_run_group):
+            raise ValueError(
+                "Final subject-shape run is not inside the authoritative archive."
+            )
+        validation = _validate_unbound_subject_shape_payload(
+            authoritative_root,
+            final_run_group,
+            expected_refined_run=expected_refined_run,
+            expected_run_name=expected_run_name,
+            expected_binding_status=SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
+            require_complete=False,
+            expected_subject_mask_bundle_id=expected_subject_mask_bundle_id,
+            array_content_sha256=unbound_array_content_sha256,
         )
-    source = load_exact_subject_shape_source(authoritative_root, final_run_group)
-    unbound_manifest = _load_unbound_numeric_manifest(
-        final_run_group,
-        array_content_sha256=unbound_array_content_sha256,
-    )
-    manifest_sha256 = str(validation["unbound_manifest_sha256"])
-    if unbound_manifest.record_sha256 != manifest_sha256:
-        raise ValueError(
-            "Subject-shape unbound receipt changed between validation and consumption."
+        source_revision_audit = audit_subject_shape_source_revisions_group(
+            authoritative_root,
+            shape_run=expected_run_name,
+            refined_run=expected_refined_run,
         )
+        if source_revision_audit.get("status") != "current":
+            raise ValueError(
+                "Refined subject-mask revisions changed before final-path binding: "
+                f"{source_revision_audit!r}."
+            )
+        source = load_exact_subject_shape_source(authoritative_root, final_run_group)
+        unbound_manifest = _load_unbound_numeric_manifest(
+            final_run_group,
+            array_content_sha256=unbound_array_content_sha256,
+        )
+        manifest_sha256 = str(validation["unbound_manifest_sha256"])
+        if unbound_manifest.record_sha256 != manifest_sha256:
+            raise ValueError(
+                "Subject-shape unbound receipt changed between validation and "
+                "consumption."
+            )
 
-    # The unbound receipt hashes ROI-local numeric arrays that binding is about
-    # to transform in place. Close that immutable-input proof phase before the
-    # first final-path mutation, then start a fresh phase for the canonical
-    # source-camera payload. Otherwise the proof cache correctly reports the
-    # intentional transform as input drift at completion time.
-    finish_proof_verification()
-    restart_proof_verification()
+    # Close the producer-sealed numeric proof before final-path authority
+    # stamping. Legacy v1 stages are transformed after this boundary; projected
+    # v2 stages have already written source-camera numerics and are admitted by
+    # their freshly revalidated private projection receipt. In both cases, the
+    # bound publication starts a distinct proof phase.
+    with binding_telemetry.phase("proof_phase_transition"):
+        finish_proof_verification()
+        restart_proof_verification()
 
-    records = final_run_group.require_group("coordinate_records")
-    consumed_node = records.require_group("consumed_unbound_stage")
-    consumed = stamp_and_bind_persisted_coordinate_record(
-        consumed_node,
-        unbound_manifest.record,
-        attr_name=SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
-    )
-    if consumed.record_sha256 != manifest_sha256:
-        raise ValueError(
-            "Retained subject-shape unbound receipt differs from its validated digest."
+    with binding_telemetry.phase("unbound_receipt_consumption"):
+        records = final_run_group.require_group("coordinate_records")
+        consumed_node = records.require_group("consumed_unbound_stage")
+        consumed = stamp_and_bind_persisted_coordinate_record(
+            consumed_node,
+            unbound_manifest.record,
+            attr_name=SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
         )
-    del final_run_group.attrs[SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR]
-    del final_run_group.attrs[f"{SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR}_sha256"]
-    final_run_group.attrs["unbound_numeric_stage_manifest_sha256_consumed"] = (
-        manifest_sha256
-    )
-    component_names = tuple(
-        str(value) for value in final_run_group.attrs["component_names"]
-    )
-    identity, component_schema = prepare_subject_shape_identity_and_schema(
-        final_run_group,
-        source,
-        component_names=component_names,
-    )
-    publication = publish_subject_shape_coordinate_surfaces(
-        authoritative_root,
-        final_run_group,
-        source,
-        component_names=component_names,
-        identity=identity,
-        component_schema=component_schema,
-        payload_run_path=payload_run_path,
-        payload_hash_workers=payload_hash_workers,
-    )
-    final_run_group.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
-        SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
-    )
-    if (
-        publication.run_path
-        != f"analysis/subject_shape_runs/{expected_run_name}"
-        or publication.publication_owner
-        != final_run_group.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
-        or final_run_group.attrs.get("coordinate_contract")
-        != SUBJECT_SHAPE_COORDINATE_CONTRACT
-    ):
-        raise ValueError("Final-path subject-shape binding did not persist exactly.")
+        if consumed.record_sha256 != manifest_sha256:
+            raise ValueError(
+                "Retained subject-shape unbound receipt differs from its validated "
+                "digest."
+            )
+        del final_run_group.attrs[SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR]
+        del final_run_group.attrs[f"{SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR}_sha256"]
+        final_run_group.attrs["unbound_numeric_stage_manifest_sha256_consumed"] = (
+            manifest_sha256
+        )
+        component_names = tuple(
+            str(value) for value in final_run_group.attrs["component_names"]
+        )
+    with binding_telemetry.phase("identity_array_append"):
+        identity, component_schema = prepare_subject_shape_identity_and_schema(
+            final_run_group,
+            source,
+            component_names=component_names,
+        )
+    with binding_telemetry.phase("coordinate_publication"):
+        publication = publish_subject_shape_coordinate_surfaces(
+            authoritative_root,
+            final_run_group,
+            source,
+            component_names=component_names,
+            identity=identity,
+            component_schema=component_schema,
+            payload_run_path=payload_run_path,
+            payload_hash_workers=payload_hash_workers,
+            staged_decoded_copy_report=staged_decoded_copy_report,
+            staged_array_content_sha256=unbound_array_content_sha256,
+            verified_physical_copy=verified_physical_copy,
+            runtime_telemetry=binding_telemetry,
+        )
+    with binding_telemetry.phase("binding_status_finalize"):
+        final_run_group.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
+            SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
+        )
+        if (
+            publication.run_path
+            != f"analysis/subject_shape_runs/{expected_run_name}"
+            or publication.publication_owner
+            != final_run_group.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
+            or final_run_group.attrs.get("coordinate_contract")
+            != SUBJECT_SHAPE_COORDINATE_CONTRACT
+        ):
+            raise ValueError("Final-path subject-shape binding did not persist exactly.")
     return {
         "valid": True,
         "status": SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
@@ -3167,6 +3635,7 @@ def bind_staged_subject_shape_run(
         "publication_manifest_sha256": publication.manifest.record_sha256,
         "unbound_manifest_sha256": manifest_sha256,
         "source_revision_audit": source_revision_audit,
+        "runtime_telemetry": binding_telemetry.to_json(),
     }
 
 
@@ -3253,16 +3722,17 @@ def complete_bound_subject_shape_candidate_run(
         ),
     )
     restart_proof_verification()
-    proof = load_completed_ineligible_subject_shape_coordinate_publication(
+    proof = validate_sealed_subject_shape_publication_metadata(
         authoritative_root,
         f"analysis/subject_shape_runs/{expected_run_name}",
+        expected_selector_eligible=False,
         expected_publication_owner=publication_owner,
     )
     return {
         "valid": True,
         "status": SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
         "run_name": expected_run_name,
-        "row_count": int(proof.row_identity.leading_dimension),
+        "row_count": proof.row_count,
         "publication_manifest_sha256": proof.manifest.record_sha256,
         "selector_state": "unchanged_candidate_ineligible",
     }
@@ -3315,9 +3785,10 @@ def _complete_bound_subject_shape_run(
         ),
     )
     restart_proof_verification()
-    proof = load_completed_ineligible_subject_shape_coordinate_publication(
+    proof = validate_sealed_subject_shape_publication_metadata(
         authoritative_root,
         f"analysis/subject_shape_runs/{expected_run_name}",
+        expected_selector_eligible=False,
         expected_publication_owner=publication_owner,
     )
     activation_snapshot = selector_snapshot(parent)
@@ -3335,7 +3806,7 @@ def _complete_bound_subject_shape_run(
             "valid": True,
             "status": SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
             "run_name": expected_run_name,
-            "row_count": int(proof.row_identity.leading_dimension),
+            "row_count": proof.row_count,
             "publication_manifest_sha256": proof.manifest.record_sha256,
         },
         activation,
@@ -3365,7 +3836,10 @@ def write_subject_shape_run_group(
     subject_mask_bundle_id: str | None = None,
     allow_inactive_subject_mask_bundle: bool = False,
     assignment_keypoint_rebinding_run_id: str | None = None,
+    payload_scan_workers: int = 1,
+    payload_scan_block_rows: int | None = None,
     _unbound_coordinate_stage: bool = False,
+    _deferred_storage_profile_id: str | None = None,
 ) -> dict[str, object]:
     """Write one row-aligned subject-shape analysis run."""
 
@@ -3388,6 +3862,16 @@ def write_subject_shape_run_group(
         )
     if type(allow_inactive_subject_mask_bundle) is not bool:
         raise TypeError("allow_inactive_subject_mask_bundle must be an exact bool.")
+    if type(payload_scan_workers) is not int or payload_scan_workers <= 0:
+        raise ValueError("payload_scan_workers must be a positive integer.")
+    if payload_scan_block_rows is not None and (
+        type(payload_scan_block_rows) is not int or payload_scan_block_rows <= 0
+    ):
+        raise ValueError("payload_scan_block_rows must be a positive integer.")
+    if _deferred_storage_profile_id is not None and not _unbound_coordinate_stage:
+        raise ValueError(
+            "Deferred subject-shape storage receipts require an unbound scratch stage."
+        )
     if subject_mask_bundle_id is not None and not _unbound_coordinate_stage:
         raise ValueError(
             "Recording-bundle subject-shape v5 must be finalized through the "
@@ -3418,6 +3902,7 @@ def write_subject_shape_run_group(
                 "Explicit refined_run differs from the selected subject-mask bundle member."
             )
         refined_group = bundle_source.authority.refined_run
+        coordinate_source = bundle_source
     else:
         if allow_inactive_subject_mask_bundle:
             raise ValueError(
@@ -3434,6 +3919,7 @@ def write_subject_shape_run_group(
             raise ValueError(
                 "Logical refined-mask selection differs from canonical coordinate authority."
             )
+        coordinate_source = refined_coordinate_source
     refined_tables = load_refined_subject_masks_run_tables(
         root,
         run_name=refined_run_name,
@@ -3476,9 +3962,20 @@ def write_subject_shape_run_group(
             if backend == DASK_WORKER_EXECUTION_BACKEND
             else "requested_chunk_size"
         ),
+        "worker_context_cache_policy": (
+            "exact_store_metadata_identity_process_local_v1"
+            if backend == DASK_WORKER_EXECUTION_BACKEND
+            else "not_used_serial_driver"
+        ),
         "centerline_crop_to_foreground": bool(centerline_crop_to_foreground),
         "native_threads_per_worker": (
             max(1, int(native_threads)) if native_threads is not None else None
+        ),
+        "payload_scan_workers": int(payload_scan_workers),
+        "payload_scan_block_rows": (
+            int(payload_scan_block_rows)
+            if payload_scan_block_rows is not None
+            else int(worker_chunk_size)
         ),
         "separate_output_root": destination_root is not root,
         "mutates_archive": not bool(dry_run),
@@ -3499,7 +3996,7 @@ def write_subject_shape_run_group(
             else None
         ),
         "point_coordinate_space": (
-            "roi_local_px_unbound_numeric"
+            "source_camera_image_px_precanonical_numeric"
             if _unbound_coordinate_stage
             else "source_camera_image_px"
         ),
@@ -3531,6 +4028,15 @@ def write_subject_shape_run_group(
         overwrite=overwrite,
         bundle_source=bundle_source,
     )
+    source_camera_offsets_xy: np.ndarray | None = None
+    if _unbound_coordinate_stage:
+        source_camera_offsets_xy = (
+            stamp_subject_shape_source_camera_numeric_projection(
+                run_group,
+                coordinate_source,
+                component_names=selected_component_names,
+            )
+        )
     chunk_timings: list[dict[str, object]] = []
     rows_with_component: dict[str, int] = {name: 0 for name, _idx in component_indices}
     if backend == DASK_WORKER_EXECUTION_BACKEND:
@@ -3547,6 +4053,11 @@ def write_subject_shape_run_group(
                 chunk_index=chunk_index,
                 centerline_crop_to_foreground=bool(centerline_crop_to_foreground),
                 native_threads=native_threads,
+                source_camera_offsets_xy=(
+                    source_camera_offsets_xy[start_row:stop_row]
+                    if source_camera_offsets_xy is not None
+                    else None
+                ),
             )
             for chunk_index, (start_row, stop_row) in enumerate(chunks)
         ]
@@ -3568,6 +4079,11 @@ def write_subject_shape_run_group(
                     chunk_index=chunk_index,
                     execution_backend=SERIAL_EXECUTION_BACKEND,
                     centerline_crop_to_foreground=bool(centerline_crop_to_foreground),
+                    source_camera_offsets_xy=(
+                        source_camera_offsets_xy[start_row:stop_row]
+                        if source_camera_offsets_xy is not None
+                        else None
+                    ),
                 )
             chunk_timing = dict(result["chunk_timing"])
             chunk_timings.append(chunk_timing)
@@ -3587,6 +4103,11 @@ def write_subject_shape_run_group(
         "dask_scheduler": scheduler_key,
         "dask_num_workers": int(num_workers) if num_workers is not None else None,
         "dask_chunk_size": max(1, int(chunk_size)),
+        "worker_context_cache_policy": (
+            "exact_store_metadata_identity_process_local_v1"
+            if backend == DASK_WORKER_EXECUTION_BACKEND
+            else "not_used_serial_driver"
+        ),
         "centerline_crop_to_foreground": bool(centerline_crop_to_foreground),
         "native_threads_per_worker": (
             max(1, int(native_threads)) if native_threads is not None else None
@@ -3617,18 +4138,75 @@ def write_subject_shape_run_group(
                 fallback_command="subject_shape_runs_unbound_stage",
             ),
         )
-        _stamp_unbound_numeric_manifest(run_group)
-        validation = _validate_unbound_subject_shape_payload(
-            root,
-            run_group,
-            expected_refined_run=refined_run_name,
-            expected_run_name=target_run,
-            expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
-            require_complete=True,
-            expected_subject_mask_bundle_id=(
-                bundle_source.bundle_id if bundle_source is not None else None
-            ),
-        )
+        if _deferred_storage_profile_id is not None:
+            deferred_receipt = stamp_subject_shape_deferred_storage_receipt(
+                run_group,
+                storage_profile_id=_deferred_storage_profile_id,
+            )
+            validation = _validate_unbound_subject_shape_payload(
+                root,
+                run_group,
+                expected_refined_run=refined_run_name,
+                expected_run_name=target_run,
+                expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+                require_complete=True,
+                expected_subject_mask_bundle_id=(
+                    bundle_source.bundle_id if bundle_source is not None else None
+                ),
+                deferred_storage_profile_id=_deferred_storage_profile_id,
+            )
+            producer_receipt = {
+                "producer_payload_receipt_deferred": deferred_receipt,
+            }
+        else:
+            payload_scan = build_subject_shape_unbound_payload_scan_receipt(
+                run_group,
+                workers=payload_scan_workers,
+                block_rows=(
+                    payload_scan_block_rows
+                    if payload_scan_block_rows is not None
+                    else worker_chunk_size
+                ),
+            )
+            payload_hashes = dict(payload_scan["array_content_sha256"])
+            _stamp_unbound_numeric_manifest(
+                run_group,
+                array_content_sha256=payload_hashes,
+            )
+            validation = _validate_unbound_subject_shape_payload(
+                root,
+                run_group,
+                expected_refined_run=refined_run_name,
+                expected_run_name=target_run,
+                expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+                require_complete=True,
+                expected_subject_mask_bundle_id=(
+                    bundle_source.bundle_id if bundle_source is not None else None
+                ),
+                array_content_sha256=payload_hashes,
+            )
+            decoded_payload = dict(payload_scan["decoded_payload"])
+            producer_receipt = {
+                "producer_payload_scan_receipt": {
+                    "schema_id": payload_scan["schema_id"],
+                    "schema_version": payload_scan["schema_version"],
+                    "run_ref": payload_scan["run_ref"],
+                    "array_payload_canonicalization": payload_scan[
+                        "array_payload_canonicalization"
+                    ],
+                    "closed_array_inventory": payload_scan[
+                        "closed_array_inventory"
+                    ],
+                    "mutation_exclusion": payload_scan["mutation_exclusion"],
+                    "requested_workers": payload_scan["requested_workers"],
+                    "effective_workers": payload_scan["effective_workers"],
+                    "block_rows": payload_scan["block_rows"],
+                    "duration_seconds": payload_scan["duration_seconds"],
+                    "array_count": decoded_payload["array_count"],
+                    "decoded_bytes": decoded_payload["decoded_bytes"],
+                    "decoded_payload_root_sha256": decoded_payload["root_sha256"],
+                }
+            }
         summary.update(
             {
                 "status": SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
@@ -3638,6 +4216,7 @@ def write_subject_shape_run_group(
                 "rows_per_second": rows_per_second,
                 "rows_with_component": rows_with_component,
                 "chunk_timing_count": len(chunk_timings),
+                **producer_receipt,
             }
         )
         if include_chunk_timings:

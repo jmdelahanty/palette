@@ -37,6 +37,8 @@ from fisheye.shared.zarr.subject_mask_core_publication import (
     build_subject_mask_coordinate_successor_manifest,
     publish_selector_ineligible_subject_mask_core_snapshot,
     subject_mask_core_metadata_declaration_maps,
+    validate_persisted_subject_mask_core_publication,
+    validate_receipt_bound_persisted_subject_mask_core_publication,
     validate_subject_mask_core_run_manifest,
 )
 from fisheye.shared.zarr.subject_mask_final_layout_units import (
@@ -615,6 +617,7 @@ def _reference_receipt(
 )
 def test_subject_mask_core_publication_round_trip(
     tmp_path: object,
+    monkeypatch: pytest.MonkeyPatch,
     kind: str,
     family: str,
     payload: str,
@@ -673,6 +676,33 @@ def test_subject_mask_core_publication_round_trip(
         "authoritative_run",
     ):
         assert parent.attrs.get(selector) is None
+
+    def forbid_payload_read(
+        _array: zarr.Array,
+        _selection: object,
+    ) -> np.ndarray:
+        raise AssertionError("receipt admission must not read core payloads")
+
+    with monkeypatch.context() as admission_guard:
+        admission_guard.setattr(zarr.Array, "__getitem__", forbid_payload_read)
+        assert (
+            validate_receipt_bound_persisted_subject_mask_core_publication(
+                publication.output_path,
+                family=family,
+                run_id=run_id,
+                expected_manifest_payload_digest=publication.manifest[
+                    "payload_digest"
+                ],
+            )
+            == ()
+        )
+        assert "receipt admission must not read core payloads" in " ".join(
+            validate_persisted_subject_mask_core_publication(
+                publication.output_path,
+                family=family,
+                run_id=run_id,
+            )
+        )
 
 
 def test_streaming_publication_adopts_sealed_final_layout_payload_unit(

@@ -742,6 +742,7 @@ def _metadata_maps(
     family: str,
     run_id: str,
     paths: tuple[str, ...],
+    archive_root_metadata: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     prefix = f"{family}/{run_id}"
     direct: dict[str, dict[str, Any]] = {
@@ -749,7 +750,11 @@ def _metadata_maps(
     }
     for path in paths:
         direct[path] = _strict_json(output_path / prefix / path / "zarr.json")
-    root = _strict_json(output_path / "zarr.json")
+    root = (
+        archive_root_metadata
+        if archive_root_metadata is not None
+        else _strict_json(output_path / "zarr.json")
+    )
     envelope = root.get("consolidated_metadata")
     if not isinstance(envelope, Mapping) or envelope.get("kind") != "inline":
         raise ValueError("Subject-mask core publication lacks inline consolidation.")
@@ -808,6 +813,7 @@ def subject_mask_core_metadata_declaration_maps(
     family: str,
     run_id: str,
     manifest: Mapping[str, Any],
+    archive_root_metadata: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     """Load the exact direct/consolidated declaration inventory for one core."""
 
@@ -828,6 +834,7 @@ def subject_mask_core_metadata_declaration_maps(
         family=str(family),
         run_id=str(run_id),
         paths=tuple(str(path) for path in arrays),
+        archive_root_metadata=archive_root_metadata,
     )
 
 
@@ -905,20 +912,15 @@ def build_subject_mask_coordinate_successor_manifest(
     return successor
 
 
-def validate_persisted_subject_mask_core_publication(
+def _validate_persisted_subject_mask_core_publication(
     output_path: Path,
     *,
     family: str,
     run_id: str,
+    archive_root_metadata: Mapping[str, Any] | None = None,
+    expected_manifest_payload_digest: str | None = None,
+    recompute_bounded_samples: bool,
 ) -> tuple[str, ...]:
-    """Boundedly revalidate one persisted core after transport/import.
-
-    Logical array hashes were computed while the source was written and the
-    atomic importer separately verifies every physical file.  This gate
-    therefore checks exact metadata plus the manifest's bounded first/last
-    physical row-band samples without another full decoded scan.
-    """
-
     errors: list[str] = []
     archive = output_path.expanduser().resolve()
     try:
@@ -930,6 +932,11 @@ def validate_persisted_subject_mask_core_publication(
         manifest = run.attrs.get(SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE)
         if not isinstance(manifest, Mapping):
             return ("subject-mask core run_manifest is absent",)
+        if (
+            expected_manifest_payload_digest is not None
+            and manifest.get("payload_digest") != expected_manifest_payload_digest
+        ):
+            return ("subject-mask core manifest differs from bundle receipt",)
         errors.extend(validate_subject_mask_core_run_manifest(manifest))
         payload = manifest.get("payload")
         if not isinstance(payload, Mapping):
@@ -970,7 +977,6 @@ def validate_persisted_subject_mask_core_publication(
                         f"subject-mask core bounded samples are absent at {path}"
                     )
                     continue
-                trailing = (slice(None),) * (len(array.shape) - 1)
                 for sample in path_samples:
                     if not isinstance(sample, Mapping):
                         errors.append(
@@ -988,6 +994,9 @@ def validate_persisted_subject_mask_core_publication(
                             f"subject-mask core bounded sample range is invalid at {path}"
                         )
                         continue
+                    if not recompute_bounded_samples:
+                        continue
+                    trailing = (slice(None),) * (len(array.shape) - 1)
                     values = np.ascontiguousarray(
                         np.asarray(array[(slice(start, stop), *trailing)])
                     )
@@ -1003,6 +1012,7 @@ def validate_persisted_subject_mask_core_publication(
                 family=str(family),
                 run_id=str(run_id),
                 manifest=manifest,
+                archive_root_metadata=archive_root_metadata,
             )
             observed_digest = _metadata_digest(direct, consolidated)
             publication = payload.get("publication")
@@ -1016,6 +1026,50 @@ def validate_persisted_subject_mask_core_publication(
     except Exception as exc:
         errors.append(f"{type(exc).__name__}: {exc}")
     return tuple(errors)
+
+
+def validate_persisted_subject_mask_core_publication(
+    output_path: Path,
+    *,
+    family: str,
+    run_id: str,
+    archive_root_metadata: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Boundedly revalidate one persisted core after transport/import.
+
+    Logical array hashes were computed while the source was written and the
+    atomic importer separately verifies every physical file.  This explicit
+    audit gate checks exact metadata plus the manifest's bounded first/last
+    physical row-band samples without another full decoded scan.
+    """
+
+    return _validate_persisted_subject_mask_core_publication(
+        output_path,
+        family=family,
+        run_id=run_id,
+        archive_root_metadata=archive_root_metadata,
+        recompute_bounded_samples=True,
+    )
+
+
+def validate_receipt_bound_persisted_subject_mask_core_publication(
+    output_path: Path,
+    *,
+    family: str,
+    run_id: str,
+    expected_manifest_payload_digest: str,
+    archive_root_metadata: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Admit an outer-bundle-bound immutable core without payload reads."""
+
+    return _validate_persisted_subject_mask_core_publication(
+        output_path,
+        family=family,
+        run_id=run_id,
+        archive_root_metadata=archive_root_metadata,
+        expected_manifest_payload_digest=expected_manifest_payload_digest,
+        recompute_bounded_samples=False,
+    )
 
 
 def _resolve_kind(
@@ -2699,6 +2753,7 @@ __all__ = [
     "build_subject_mask_coordinate_successor_manifest",
     "publish_selector_ineligible_subject_mask_core_snapshot",
     "subject_mask_core_metadata_declaration_maps",
+    "validate_receipt_bound_persisted_subject_mask_core_publication",
     "validate_persisted_subject_mask_core_publication",
     "validate_subject_mask_core_run_manifest",
 ]

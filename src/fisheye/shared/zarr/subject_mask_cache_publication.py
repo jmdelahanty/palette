@@ -586,6 +586,7 @@ def _metadata_maps(
     *,
     run_id: str,
     plans: SubjectMaskSampledContourStoragePlanSet,
+    archive_root_metadata: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     prefix = f"{SUBJECT_MASK_CACHE_FAMILY}/{run_id}"
     direct: dict[str, dict[str, Any]] = {}
@@ -594,7 +595,11 @@ def _metadata_maps(
         if relative:
             path = path / relative
         direct[relative] = _strict_json(path / "zarr.json")
-    root = _strict_json(output_path / "zarr.json")
+    root = (
+        archive_root_metadata
+        if archive_root_metadata is not None
+        else _strict_json(output_path / "zarr.json")
+    )
     envelope = root.get("consolidated_metadata")
     flattened = envelope.get("metadata") if isinstance(envelope, Mapping) else None
     if (
@@ -1305,9 +1310,16 @@ def _validate_metadata_and_samples(
     run_id: str,
     plans: SubjectMaskSampledContourStoragePlanSet,
     manifest: Mapping[str, Any],
+    archive_root_metadata: Mapping[str, Any] | None = None,
+    recompute_bounded_samples: bool = True,
 ) -> tuple[str, ...]:
     errors: list[str] = []
-    direct, consolidated = _metadata_maps(output_path, run_id=run_id, plans=plans)
+    direct, consolidated = _metadata_maps(
+        output_path,
+        run_id=run_id,
+        plans=plans,
+        archive_root_metadata=archive_root_metadata,
+    )
     if (
         _metadata_digest(direct, consolidated)
         != manifest["payload"]["publication"]["metadata_digest"]
@@ -1338,6 +1350,8 @@ def _validate_metadata_and_samples(
             fill_value=0,
         )
         errors.extend(f"{path}: {error}" for error in metadata_errors)
+        if not recompute_bounded_samples:
+            continue
         trailing = (slice(None),) * (array.ndim - 1)
         for sample in samples[path]:
             start = int(sample["start_row"])
@@ -1668,14 +1682,15 @@ def publish_selector_ineligible_subject_mask_sampled_contours(
     )
 
 
-def validate_persisted_subject_mask_cache_publication(
+def _validate_persisted_subject_mask_cache_publication(
     output_path: Path,
     *,
     run_id: str,
     source_manifest: Mapping[str, Any] | None = None,
+    archive_root_metadata: Mapping[str, Any] | None = None,
+    expected_manifest_payload_digest: str | None = None,
+    recompute_bounded_samples: bool,
 ) -> tuple[str, ...]:
-    """Validate one sealed cache without opening its full contour payload."""
-
     errors: list[str] = []
     resolved_run = _safe_run_id(run_id, name="run_id")
     try:
@@ -1687,6 +1702,11 @@ def validate_persisted_subject_mask_cache_publication(
         manifest = run.attrs.get(SUBJECT_MASK_CACHE_RUN_MANIFEST_ATTRIBUTE)
         if not isinstance(manifest, Mapping):
             return ("subject-mask cache run_manifest is absent",)
+        if (
+            expected_manifest_payload_digest is not None
+            and manifest.get("payload_digest") != expected_manifest_payload_digest
+        ):
+            return ("subject-mask cache manifest differs from bundle receipt",)
         errors.extend(
             validate_subject_mask_cache_run_manifest(
                 manifest, source_manifest=source_manifest
@@ -1714,6 +1734,8 @@ def validate_persisted_subject_mask_cache_publication(
                 run_id=resolved_run,
                 plans=plans,
                 manifest=manifest,
+                archive_root_metadata=archive_root_metadata,
+                recompute_bounded_samples=recompute_bounded_samples,
             )
         )
         if run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE:
@@ -1723,6 +1745,44 @@ def validate_persisted_subject_mask_cache_publication(
     except Exception as exc:
         errors.append(f"{type(exc).__name__}: {exc}")
     return tuple(errors)
+
+
+def validate_persisted_subject_mask_cache_publication(
+    output_path: Path,
+    *,
+    run_id: str,
+    source_manifest: Mapping[str, Any] | None = None,
+    archive_root_metadata: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Validate one sealed cache with bounded contour-payload samples."""
+
+    return _validate_persisted_subject_mask_cache_publication(
+        output_path,
+        run_id=run_id,
+        source_manifest=source_manifest,
+        archive_root_metadata=archive_root_metadata,
+        recompute_bounded_samples=True,
+    )
+
+
+def validate_receipt_bound_persisted_subject_mask_cache_publication(
+    output_path: Path,
+    *,
+    run_id: str,
+    expected_manifest_payload_digest: str,
+    source_manifest: Mapping[str, Any] | None = None,
+    archive_root_metadata: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Admit an outer-bundle-bound immutable cache without payload reads."""
+
+    return _validate_persisted_subject_mask_cache_publication(
+        output_path,
+        run_id=run_id,
+        source_manifest=source_manifest,
+        archive_root_metadata=archive_root_metadata,
+        expected_manifest_payload_digest=expected_manifest_payload_digest,
+        recompute_bounded_samples=False,
+    )
 
 
 __all__ = [
@@ -1736,6 +1796,7 @@ __all__ = [
     "SubjectMaskCachePublication",
     "build_subject_mask_cache_run_manifest",
     "publish_selector_ineligible_subject_mask_sampled_contours",
+    "validate_receipt_bound_persisted_subject_mask_cache_publication",
     "validate_persisted_subject_mask_cache_publication",
     "validate_subject_mask_cache_run_manifest",
 ]

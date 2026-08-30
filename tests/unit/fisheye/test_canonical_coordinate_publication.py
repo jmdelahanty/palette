@@ -5,6 +5,7 @@ import copy
 import numpy as np
 import pytest
 
+import fisheye.shared.canonical_coordinate_publication as canonical_publication_module
 from fisheye.shared.canonical_coordinate_publication import (
     CanonicalCoordinatePublicationError,
     build_bound_canonical_coordinate_descriptor,
@@ -686,6 +687,42 @@ def test_surface_set_rejects_identity_drift_and_rolls_back_all_attrs() -> None:
         )
     assert first_node.attrs == snapshots[0]
     assert same_path_second.attrs == snapshots[1]
+
+
+def test_surface_set_uses_one_attrs_replacement_per_coordinate_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_node, _, first = _direct_binding()
+    second_node = _Array(
+        np.asarray([[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]),
+        path="analysis/detect_runs/d1/other_centers_img_xy",
+    )
+    second = build_bound_canonical_coordinate_descriptor(
+        second_node,
+        profile_id="source_camera_image_px.top_left_y_down.v1",
+        geometry_type="point_xy",
+        components=("x", "y"),
+        component_units=("px", "px"),
+        pixel_convention="pixel_center",
+        row_identity=first.row_identity,
+        reference_frame_authority=first.reference_frame_authority,
+        source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
+    )
+    original = canonical_publication_module._replace_trusted_attrs
+    replacements: list[object] = []
+
+    def counting_replace(attrs, values):
+        replacements.append(attrs)
+        original(attrs, values)
+
+    monkeypatch.setattr(
+        canonical_publication_module,
+        "_replace_trusted_attrs",
+        counting_replace,
+    )
+    stamp_bound_canonical_coordinate_descriptors((first, second))
+
+    assert replacements == [first_node.attrs, second_node.attrs]
 
 
 def test_external_lineage_is_exact_persisted_evidence_and_revalidated() -> None:

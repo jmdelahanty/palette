@@ -17,6 +17,7 @@ from fisheye.shared.zarr.subject_mask_cache_publication import (
     SUBJECT_MASK_CACHE_RUN_MANIFEST_ATTRIBUTE,
     publish_selector_ineligible_subject_mask_sampled_contours,
     validate_persisted_subject_mask_cache_publication,
+    validate_receipt_bound_persisted_subject_mask_cache_publication,
     validate_subject_mask_cache_run_manifest,
 )
 from fisheye.shared.zarr.subject_mask_cache_storage import (
@@ -195,6 +196,7 @@ def test_sampled_contour_storage_is_byte_derived_and_access_aware() -> None:
 
 def test_sampled_contours_publish_as_fresh_selector_ineligible_cache(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _refined_source(tmp_path)
     publication = publish_selector_ineligible_subject_mask_sampled_contours(
@@ -215,6 +217,33 @@ def test_sampled_contours_publish_as_fresh_selector_ineligible_cache(
         )
         == ()
     )
+
+    def forbid_payload_read(
+        _array: zarr.Array,
+        _selection: object,
+    ) -> np.ndarray:
+        raise AssertionError("receipt admission must not read cache payloads")
+
+    with monkeypatch.context() as admission_guard:
+        admission_guard.setattr(zarr.Array, "__getitem__", forbid_payload_read)
+        assert (
+            validate_receipt_bound_persisted_subject_mask_cache_publication(
+                publication.output_path,
+                run_id=publication.run_id,
+                expected_manifest_payload_digest=publication.manifest[
+                    "payload_digest"
+                ],
+                source_manifest=source.manifest,
+            )
+            == ()
+        )
+        assert "receipt admission must not read cache payloads" in " ".join(
+            validate_persisted_subject_mask_cache_publication(
+                publication.output_path,
+                run_id=publication.run_id,
+                source_manifest=source.manifest,
+            )
+        )
     root = zarr.open_group(
         str(publication.output_path), mode="r", use_consolidated=False
     )

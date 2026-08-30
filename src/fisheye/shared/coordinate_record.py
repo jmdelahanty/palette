@@ -32,6 +32,7 @@ from fisheye.shared.coordinate_reference import (
     CoordinateReferenceError,
     canonical_node_path,
 )
+from fisheye.shared.proof_verification import verify_persisted_proof
 
 
 _ATTR_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -164,10 +165,8 @@ def _trusted_mutable_attrs(node: Any) -> Any:
             "Persisted coordinate record attrs must be an exact built-in dict "
             "or exact Zarr Attributes implementation; no write was attempted."
         )
-    if not all(
-        callable(getattr(attrs, name, None))
-        for name in ("update", "__setitem__", "__delitem__")
-    ):
+    required_operations = ("clear", "update") if type(attrs) is dict else ("put",)
+    if not all(callable(getattr(attrs, name, None)) for name in required_operations):
         raise CoordinateRecordError(
             "Persisted coordinate record attrs are not a trusted mutable "
             "transaction boundary; no write was attempted."
@@ -175,13 +174,29 @@ def _trusted_mutable_attrs(node: Any) -> Any:
     return attrs
 
 
+def _replace_attrs(attrs: Any, values: Mapping[str, Any]) -> None:
+    """Replace one trusted attrs mapping with one physical metadata write.
+
+    ``MutableMapping.update`` writes every Zarr attribute independently because
+    Zarr implements it through repeated ``__setitem__`` calls.  Each such call
+    rewrites the complete metadata document.  ``Attributes.put`` replaces the
+    complete mapping atomically in one store transaction, which is the exact
+    transaction boundary this module already requires.
+    """
+
+    expected = copy.deepcopy(dict(values))
+    if type(attrs) is dict:
+        attrs.clear()
+        attrs.update(expected)
+    else:
+        # Exact Zarr Attributes was established by ``_trusted_mutable_attrs``.
+        attrs.put(expected)
+    if not _raw_equal(dict(attrs), expected):
+        raise RuntimeError("persisted attrs differ from requested replacement")
+
+
 def _restore_attrs(attrs: Any, snapshot: Mapping[str, Any]) -> None:
-    for name in tuple(attrs.keys()):
-        del attrs[name]
-    for name, value in snapshot.items():
-        attrs[name] = copy.deepcopy(value)
-    if not _raw_equal(dict(attrs), dict(snapshot)):
-        raise RuntimeError("restored attrs differ from snapshot")
+    _replace_attrs(attrs, snapshot)
 
 
 def _path(node: Any) -> str:
@@ -234,6 +249,7 @@ class BoundCoordinateRecord:
     _archive_identity: ArchiveIdentity = field(repr=False, compare=False)
     _node: Any = field(repr=False, compare=False)
     _record: Mapping[str, Any] = field(repr=False, compare=False)
+    _full_record_sha256: str = field(repr=False, compare=False)
     _embedded_payload_keys: tuple[str, str] | None = field(
         repr=False,
         compare=False,
@@ -250,6 +266,7 @@ class BoundCoordinateRecord:
         archive: ArchiveIdentity,
         node: Any,
         record: Mapping[str, Any],
+        full_record_sha256: str | None = None,
         embedded_payload_keys: tuple[str, str] | None = None,
         _seal: object | None = None,
     ) -> None:
@@ -257,6 +274,8 @@ class BoundCoordinateRecord:
             raise CoordinateRecordError(
                 "Bound coordinate records must be loaded from an exact persisted node."
             )
+        if full_record_sha256 is None:
+            full_record_sha256 = coordinate_record_sha256(record)
         object.__setattr__(self, "record_ref", record_ref)
         object.__setattr__(self, "record_sha256", record_sha256)
         object.__setattr__(self, "attr_name", attr_name)
@@ -264,6 +283,7 @@ class BoundCoordinateRecord:
         object.__setattr__(self, "_archive_identity", archive)
         object.__setattr__(self, "_node", node)
         object.__setattr__(self, "_record", copy.deepcopy(dict(record)))
+        object.__setattr__(self, "_full_record_sha256", full_record_sha256)
         object.__setattr__(self, "_embedded_payload_keys", embedded_payload_keys)
         object.__setattr__(self, "_verification_seal", _seal)
 
@@ -301,6 +321,7 @@ def bind_persisted_coordinate_record(
         archive=archive_identity(node),
         node=node,
         record=record,
+        full_record_sha256=digest,
         _seal=_BOUND_COORDINATE_RECORD_SEAL,
     )
 
@@ -361,6 +382,7 @@ def _bind_persisted_manifest_coordinate_record(
         archive=archive_identity(node),
         node=node,
         record=record,
+        full_record_sha256=coordinate_record_sha256(record),
         embedded_payload_keys=(payload_key, payload_digest_key),
         _seal=_BOUND_COORDINATE_RECORD_SEAL,
     )
@@ -375,34 +397,50 @@ def verify_bound_coordinate_record(value: Any) -> BoundCoordinateRecord:
         is not _BOUND_COORDINATE_RECORD_SEAL
     ):
         raise CoordinateRecordError("A sealed persisted coordinate record is required.")
-    if value._embedded_payload_keys is None:
-        current = bind_persisted_coordinate_record(
-            value._node,
-            attr_name=value.attr_name,
-            digest_attr_name=value.digest_attr_name,
-        )
-    else:
-        payload_key, payload_digest_key = value._embedded_payload_keys
-        current = _bind_persisted_manifest_coordinate_record(
-            value._node,
-            attr_name=value.attr_name,
-            payload_key=payload_key,
-            payload_digest_key=payload_digest_key,
-        )
-    try:
-        current_archive = archive_identity(value._node)
-    except ArchiveIdentityError as exc:
-        raise CoordinateRecordError(str(exc)) from exc
-    if (
-        current_archive != value._archive_identity
-        or current.archive_identity != value.archive_identity
-        or current.record_ref != value.record_ref
-        or current.record_sha256 != value.record_sha256
-        or current.record != value.record
-    ):
-        raise CoordinateRecordError(
-            "Persisted coordinate record changed after it was bound."
-        )
+    def verify() -> None:
+        if value._embedded_payload_keys is None:
+            current = bind_persisted_coordinate_record(
+                value._node,
+                attr_name=value.attr_name,
+                digest_attr_name=value.digest_attr_name,
+            )
+        else:
+            payload_key, payload_digest_key = value._embedded_payload_keys
+            current = _bind_persisted_manifest_coordinate_record(
+                value._node,
+                attr_name=value.attr_name,
+                payload_key=payload_key,
+                payload_digest_key=payload_digest_key,
+            )
+        try:
+            current_archive = archive_identity(value._node)
+        except ArchiveIdentityError as exc:
+            raise CoordinateRecordError(str(exc)) from exc
+        if (
+            current_archive != value._archive_identity
+            or current.archive_identity != value.archive_identity
+            or current.record_ref != value.record_ref
+            or current.record_sha256 != value.record_sha256
+            or current.record != value.record
+        ):
+            raise CoordinateRecordError(
+                "Persisted coordinate record changed after it was bound."
+            )
+
+    verify_persisted_proof(
+        (
+            "palette.bound_coordinate_record.v1",
+            value.archive_identity.kind,
+            value.archive_identity.key,
+            value.record_ref,
+            value.record_sha256,
+            value._full_record_sha256,
+            value.attr_name,
+            value.digest_attr_name,
+            value._embedded_payload_keys,
+        ),
+        verify,
+    )
     return value
 
 
@@ -430,16 +468,7 @@ def stamp_and_bind_persisted_coordinate_record(
         }
     )
     try:
-        attrs.update(
-            {
-                attr_name: copy.deepcopy(copied),
-                digest_attr_name: digest,
-            }
-        )
-        if not _raw_equal(dict(attrs), expected):
-            raise CoordinateRecordError(
-                "Coordinate record stamp did not preserve the exact full attrs mapping."
-            )
+        _replace_attrs(attrs, expected)
         bound = bind_persisted_coordinate_record(
             node,
             attr_name=attr_name,

@@ -11,6 +11,8 @@ import zarr
 from fisheye.analysis import subject_shape_runs as mod
 from fisheye.analysis.subject_shape_storage import (
     SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+    build_subject_shape_bound_payload_scan_receipt,
+    build_subject_shape_unbound_payload_scan_receipt,
     materialize_subject_shape_storage_candidate,
     validate_subject_shape_candidate_storage,
     validate_subject_shape_direct_consolidated_storage,
@@ -22,9 +24,12 @@ from fisheye.analysis_workflows.runtime_verification import (
 from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
 )
+from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.refinement.subject_body_mask_qc import write_subject_body_mask_qc_group
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.shared.proof_verification import proof_verification_scope
+from fisheye.shared import subject_shape_coordinate_publication as coordinate_publication
+from fisheye.shared.runtime_telemetry import require_runtime_telemetry
 from fisheye.shared.refined_subject_mask_mutation import (
     RefinedSubjectMaskMutationError,
 )
@@ -32,8 +37,11 @@ from fisheye.shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
     SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
     SUBJECT_SHAPE_DERIVATION_ATTR,
+    SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR,
     SUBJECT_SHAPE_PARENT_PUBLICATION_LEASE_ATTR,
     SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR,
+    SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR,
+    SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V2,
     SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR,
     SUBJECT_SHAPE_PUBLICATION_GENERATION_ATTR,
     SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
@@ -461,6 +469,126 @@ def test_subject_shape_candidate_plan_rejects_resolved_containment_and_existing_
         )
 
 
+def test_unbound_payload_scan_receipt_matches_canonical_array_digests() -> None:
+    root = zarr.group()
+    run = root.create_group("analysis/subject_shape_runs/scan_test")
+    run.attrs.update(
+        {
+            "coordinate_binding_status": "unbound_numeric_stage_complete_v1",
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        }
+    )
+    row_index = run.create_group("row_index")
+    row_index.create_array(
+        "instance_key",
+        data=np.asarray([101, 102, 103], dtype=np.int64),
+    )
+    run.create_array(
+        "row_values",
+        data=np.arange(12, dtype=np.float32).reshape(3, 4),
+        chunks=(2, 4),
+    )
+    run.create_array(
+        "static_values",
+        data=np.asarray([0.25, 0.75], dtype=np.float64),
+    )
+
+    receipt = build_subject_shape_unbound_payload_scan_receipt(
+        run,
+        workers=3,
+        block_rows=2,
+    )
+
+    expected_paths = {
+        path for path, _node in mod._iter_subject_shape_arrays(run)
+    }
+    assert set(receipt["array_content_sha256"]) == expected_paths
+    for path in expected_paths:
+        assert receipt["array_content_sha256"][path] == array_values_sha256(
+            np.asarray(run[path][:])
+        )
+    assert receipt["decoded_payload"]["array_count"] == len(expected_paths)
+    assert receipt["decoded_payload"]["decoded_bytes"] == sum(
+        int(np.asarray(run[path][:]).nbytes) for path in expected_paths
+    )
+    assert receipt["effective_workers"] == len(expected_paths)
+
+    run.attrs["palette_run_completion_status"] = "running"
+    bound_receipt = build_subject_shape_bound_payload_scan_receipt(
+        run,
+        workers=3,
+    )
+    assert bound_receipt["array_content_sha256"] == receipt[
+        "array_content_sha256"
+    ]
+    assert bound_receipt["effective_workers"] == len(expected_paths)
+    assert bound_receipt["decoded_copy_report"]["receipt_origin"] == (
+        "single_locked_post_binding_decoded_scan_v1"
+    )
+
+
+def test_subject_shape_worker_context_cache_reuses_only_exact_store_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    output = tmp_path / "output.zarr"
+    source.mkdir()
+    output.mkdir()
+    (source / "zarr.json").write_text("source-v1", encoding="utf-8")
+    (output / "zarr.json").write_text("output-v1", encoding="utf-8")
+    refined_group = object()
+    output_run = object()
+    source_root = {"refined_subject_masks_runs": {"r1": refined_group}}
+    output_root = {"analysis": {"subject_shape_runs": {"shape": output_run}}}
+    open_calls: list[tuple[str, str]] = []
+    mask_store = object()
+
+    def fake_open(path: str, *, mode: str):
+        open_calls.append((str(path), mode))
+        return source_root if Path(path).resolve() == source.resolve() else output_root
+
+    monkeypatch.setattr(mod, "open_zarr_root", fake_open)
+    monkeypatch.setattr(mod, "open_mask_store", lambda *args, **kwargs: mask_store)
+    mod._clear_subject_shape_worker_context_cache()
+    try:
+        first, first_hit = mod._subject_shape_worker_context(
+            str(source),
+            output_zarr_path=str(output),
+            refined_run="r1",
+            shape_run="shape",
+        )
+        second, second_hit = mod._subject_shape_worker_context(
+            str(source),
+            output_zarr_path=str(output),
+            refined_run="r1",
+            shape_run="shape",
+        )
+        assert first == second == (refined_group, output_run, mask_store)
+        assert first_hit is False
+        assert second_hit is True
+        assert open_calls == [(str(source), "r"), (str(output), "a")]
+
+        (output / "zarr.json").write_text("output-generation-v2", encoding="utf-8")
+        third, third_hit = mod._subject_shape_worker_context(
+            str(source),
+            output_zarr_path=str(output),
+            refined_run="r1",
+            shape_run="shape",
+        )
+        assert third == first
+        assert third_hit is False
+        assert open_calls == [
+            (str(source), "r"),
+            (str(output), "a"),
+            (str(source), "r"),
+            (str(output), "a"),
+        ]
+    finally:
+        mod._clear_subject_shape_worker_context_cache()
+
+
 def test_subject_shape_materializer_computes_shards_and_publishes(
     monkeypatch,
     tmp_path: Path,
@@ -489,7 +617,7 @@ def test_subject_shape_materializer_computes_shards_and_publishes(
         execution_backend="serial_driver",
         scheduler="single-threaded",
         num_workers=1,
-        shard_copy_workers=1,
+        shard_copy_workers=4,
         native_threads=1,
         copy_backend="python",
         apply=False,
@@ -508,7 +636,7 @@ def test_subject_shape_materializer_computes_shards_and_publishes(
         execution_backend="serial_driver",
         scheduler="single-threaded",
         num_workers=1,
-        shard_copy_workers=1,
+        shard_copy_workers=4,
         native_threads=1,
         copy_backend="python",
         apply=True,
@@ -518,6 +646,28 @@ def test_subject_shape_materializer_computes_shards_and_publishes(
     )
 
     assert result["status"] == "complete"
+    runtime = result["runtime_telemetry"]
+    require_runtime_telemetry(
+        runtime,
+        expected_materializer="subject_shape",
+        allowed_phase_order=materializer.SUBJECT_SHAPE_MATERIALIZATION_PHASE_ORDER,
+        require_current=True,
+    )
+    assert [phase["name"] for phase in runtime["phases"]] == list(
+        materializer.SUBJECT_SHAPE_MATERIALIZATION_PHASE_ORDER
+    )
+    producer_scan = result["local_materialization"]["node_local_compute"][
+        "producer_payload_scan_receipt"
+    ]
+    assert producer_scan["schema_id"] == (
+        "palette.subject_shape_unbound_payload_scan_receipt"
+    )
+    assert producer_scan["requested_workers"] == 4
+    assert producer_scan["effective_workers"] >= 1
+    assert producer_scan["block_rows"] == 2
+    assert producer_scan["array_count"] > 0
+    assert producer_scan["decoded_bytes"] > 0
+    assert len(producer_scan["decoded_payload_root_sha256"]) == 64
     node_local_sharding = result["local_materialization"]["node_local_sharding"]
     assert node_local_sharding["exact_decoded_validation"] is True
     root = zarr.open_group(str(source_path), mode="r", use_consolidated=False)
@@ -590,6 +740,20 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
 ) -> None:
     _patch_provenance(monkeypatch)
     monkeypatch.setattr(
+        coordinate_publication,
+        "_scan_subject_shape_bound_payload",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("access-aware publication performed a full decoded scan")
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_subject_shape_unbound_payload_scan_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("access-aware writer performed a post-compute decoded scan")
+        ),
+    )
+    monkeypatch.setattr(
         materializer,
         "write_best_effort_run_lineage_attrs",
         lambda *args, **kwargs: None,
@@ -612,7 +776,7 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
         execution_backend="serial_driver",
         scheduler="single-threaded",
         num_workers=1,
-        shard_copy_workers=1,
+        shard_copy_workers=4,
         native_threads=1,
         copy_backend="python",
         apply=True,
@@ -623,6 +787,19 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
 
     assert result["status"] == "complete"
     node_local_sharding = result["local_materialization"]["node_local_sharding"]
+    compute_summary = result["local_materialization"]["node_local_compute"]
+    assert "producer_payload_scan_receipt" not in compute_summary
+    assert compute_summary["producer_payload_receipt_deferred"]["receipt_role"] == (
+        "closed_scratch_writer_handoff_to_exact_access_aware_storage_transform"
+    )
+    assert node_local_sharding["producer_receipt_mode"] == (
+        "deferred_exact_storage_transform_v2"
+    )
+    assert node_local_sharding["requested_copy_workers"] == 4
+    assert node_local_sharding["effective_copy_workers"] > 1
+    assert node_local_sharding["parallel_write_ownership"] == (
+        "one_complete_destination_array_and_all_its_physical_objects_per_worker_v1"
+    )
     assert node_local_sharding["physical_write_policy"] == (
         "one_complete_nonoverlapping_outer_chunk_or_shard_per_assignment_v1"
     )
@@ -647,6 +824,71 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
     assert direct.attrs["subject_shape_storage_profile_id"] == (
         SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
     )
+    assert direct.attrs[SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR] == (
+        SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V2
+    )
+    numerical_policy = direct.attrs[
+        SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR
+    ]["numerical_policy"]
+    assert numerical_policy["array_digest_source"] == (
+        "verified_staged_transfer_plus_final_binding_readback_v2"
+    )
+    assert numerical_policy["verified_physical_copy"] == result["publish"][
+        "physical_copy"
+    ]
+    assert numerical_policy["receipt_composition"]["appended_paths"] == sorted(
+        coordinate_publication.SUBJECT_SHAPE_BINDING_APPENDED_ARRAY_PATHS
+    )
+    # The v2 receipt may reuse staged digests only because projected final
+    # binding appends authority arrays without rewriting any staged payload.
+    # Deep-audit the small fixture so a future binding rewrite cannot silently
+    # retain pre-binding digests under the receipt-backed fast path.
+    for path, digest in numerical_policy["array_content_sha256"].items():
+        assert digest == array_values_sha256(np.asarray(direct[path][:]))
+    binding_telemetry = result["publish"]["canonical_binding"][
+        "runtime_telemetry"
+    ]
+    phase_names = {phase["name"] for phase in binding_telemetry["phases"]}
+    assert {
+        "admission_revalidation",
+        "identity_array_append",
+        "coordinate_publication",
+        "binding_array_append",
+        "staged_receipt_composition",
+        "authority_stamping",
+        "authority_payload_profile",
+        "authority_temporal",
+        "authority_scientific_configuration",
+        "authority_tail_sample_axis",
+        "authority_scalar_surfaces",
+        "authority_derivation",
+        "authority_coordinate_descriptors",
+        "authority_body_frame",
+        "authority_heading_semantics",
+        "authority_manifest",
+        "authority_run_contract",
+        "physical_payload_hash",
+        "validation_receipt_stamping",
+        "binding_status_finalize",
+    } <= phase_names
+    assert "legacy_post_binding_decoded_scan" not in phase_names
+    assert binding_telemetry["phase_parent_by_name"][
+        "physical_payload_hash"
+    ] == "coordinate_publication"
+    for name in (
+        "authority_payload_profile",
+        "authority_temporal",
+        "authority_scientific_configuration",
+        "authority_tail_sample_axis",
+        "authority_scalar_surfaces",
+        "authority_derivation",
+        "authority_coordinate_descriptors",
+        "authority_body_frame",
+        "authority_heading_semantics",
+        "authority_manifest",
+        "authority_run_contract",
+    ):
+        assert binding_telemetry["phase_parent_by_name"][name] == "authority_stamping"
     assert not validate_subject_shape_candidate_storage(direct, phase="bound")
     assert not validate_subject_shape_direct_consolidated_storage(
         source_path,
@@ -657,6 +899,8 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
         mode="a",
         use_consolidated=False,
     )["analysis/subject_shape_runs/shape_byte_candidate"]
+    assert SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR not in compute.attrs
+    assert SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR in compute.attrs
     local_candidate = zarr.open_group(
         str(tmp_path / "candidate-scratch/subject-shape-sharded-run"),
         mode="r",
@@ -901,7 +1145,8 @@ def test_subject_shape_candidate_repairs_failed_visibility_after_consolidation(
             plan,
             materialization_payload={
                 "node_local_sharding": {
-                    "array_content_sha256": {"synthetic": "a" * 64}
+                    "array_content_sha256": {"synthetic": "a" * 64},
+                    "decoded_copy_report": {},
                 }
             },
             copy_backend="python",
@@ -1208,7 +1453,10 @@ def test_write_subject_shape_run_uses_dask_worker_chunks(
     assert run.attrs["subject_shape_chunk_timing_count"] == 1
     assert run.attrs["subject_shape_chunk_timing_storage"] == "summary_only"
     assert "subject_shape_chunk_timings" not in run.attrs
-    assert run.attrs["subject_shape_timing_summary"]["chunk_timings"]["chunk_count"] == 1
+    chunk_summary = run.attrs["subject_shape_timing_summary"]["chunk_timings"]
+    assert chunk_summary["chunk_count"] == 1
+    assert chunk_summary["worker_context_cache_hits"] == 0
+    assert chunk_summary["worker_context_cache_misses"] == 1
     assert run["components"]["eye_left"]["ellipse_success"][:].tolist() == [True, True]
     assert run["relations"]["eye_pair"]["separation_valid"][:].tolist() == [True, False]
     assert run["body_frame"]["valid"][:].tolist() == [True, False]
