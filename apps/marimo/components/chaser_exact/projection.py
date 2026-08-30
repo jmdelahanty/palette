@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
@@ -39,19 +39,32 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
     RUN_STATUS_COMPLETE,
 )
+from fisheye.visualization.chaser_appearance import (
+    ChaserAppearanceProjection,
+    load_chaser_appearance_projection,
+)
 
 from ..common import normalize_path
 from ..registry import CHASER_EXACT_SUCCESSOR_RENDERER, InteractiveSpecOption
+from ..chaser_exact_body_heading_contract import BODY_HEADING_ARRAY_PATHS
 from .bout_response_projection import load_exact_bout_response
 from .array_requirements import (
     BOUT_RESPONSE_ARRAYS,
+    BODY_ALIGNMENT_BY_DISTANCE_ARRAYS,
     CONTROLLER_TRIAL_ARRAYS,
+    DISTANCE_DISTRIBUTION_ARRAYS,
+    EPOCH_BEHAVIOR_ARRAYS,
     ESCAPE_FREEZE_ARRAYS,
+    GAZE_TRACKING_ARRAYS,
     RADIAL_NEAR_FIELD_ARRAYS,
+    SAME_QUADRANT_ARRAYS,
     SPATIAL_OCCUPANCY_ARRAYS,
 )
 from .controller_trial_projection import load_exact_controller_trials
 from .escape_freeze_projection import load_exact_escape_freeze
+from .epoch_behavior_projection import load_exact_epoch_behavior
+from .gaze_tracking_projection import load_exact_gaze_tracking
+from .body_alignment_projection import load_exact_body_alignment
 from .provenance import build_projection_provenance, freeze, plain
 
 PROVIDER_ROLES = ("keypoint", "detection")
@@ -73,6 +86,23 @@ _FRAME_ARRAY_NAMES = (
     "chaser_position_valid",
     "relative_distance_physical",
     "relative_physical_valid",
+)
+
+_BODY_BEARING_ARRAY_NAMES = (
+    "body_bearing_deg",
+    "body_bearing_valid",
+)
+
+_BODY_HEADING_ARRAY_NAMES = tuple(
+    path.removeprefix("body/") for path in BODY_HEADING_ARRAY_PATHS
+)
+
+_RADIAL_ARRAYS_BY_ANALYSIS = MappingProxyType(
+    {
+        "radial_near_field": RADIAL_NEAR_FIELD_ARRAYS,
+        "distance_distributions": DISTANCE_DISTRIBUTION_ARRAYS,
+        "same_quadrant_occupancy": SAME_QUADRANT_ARRAYS,
+    }
 )
 
 
@@ -218,6 +248,12 @@ class RelativeFrameProjection:
     n_chasers: int
     source_authorities: Mapping[str, Any]
     arrays: Mapping[str, np.ndarray]
+    run_manifest: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    body_arrays: Mapping[str, np.ndarray] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     verification_mode: str = "deep_audit"
     verified_array_names: tuple[str, ...] = ()
     receipt_digest: str | None = None
@@ -241,6 +277,10 @@ class RelativeFrameProjection:
             )
         return values[:, 0, ...]
 
+    def body_frame_chaser(self, name: str) -> np.ndarray:
+        values = self.body_arrays[name]
+        return values.reshape((self.n_frames, self.n_chasers) + values.shape[1:])
+
 
 @dataclass(frozen=True)
 class ExactChaserSuccessorProjection:
@@ -253,9 +293,13 @@ class ExactChaserSuccessorProjection:
     controller_trials: Any | None
     generalized_bout_response: Any | None
     escape_freeze: Any | None
+    gaze_tracking: Any | None
+    epoch_behavior: Any | None
+    body_alignment_by_distance: Any | None
     provider_ids: tuple[str, str]
     epoch_records: tuple[Mapping[str, Any], ...]
     provenance: Mapping[str, Any]
+    chaser_appearance: ChaserAppearanceProjection | None = None
 
 
 def _load_targeted_relative(
@@ -265,6 +309,7 @@ def _load_targeted_relative(
     expected_manifest_sha256: str,
     expected_recording_id: str,
     validation_receipt: str | Path | None = None,
+    required_body_arrays: Sequence[str] = (),
 ) -> RelativeFrameProjection:
     """Deep-read only arrays required by these interactive display projections."""
 
@@ -275,6 +320,7 @@ def _load_targeted_relative(
         targeted = load_chaser_relative_frame_targeted_source_handle(
             validation_receipt,
             required_base_arrays=_FRAME_ARRAY_NAMES,
+            required_body_arrays=required_body_arrays,
             collapsed_frame_arrays=(),
             expected_analysis_zarr=archive,
             expected_recording_id=expected_recording_id,
@@ -296,8 +342,17 @@ def _load_targeted_relative(
             n_chasers=targeted.n_chasers,
             source_authorities=targeted.source_authorities,
             arrays=MappingProxyType(dict(targeted.base_arrays)),
+            run_manifest=targeted.run_manifest,
+            body_arrays=MappingProxyType(dict(targeted.body_arrays)),
             verification_mode=targeted.verification_mode,
-            verified_array_names=tuple(sorted(targeted.base_arrays)),
+            verified_array_names=tuple(
+                sorted(
+                    [
+                        *targeted.base_arrays,
+                        *(f"body/{name}" for name in targeted.body_arrays),
+                    ]
+                )
+            ),
             receipt_digest=targeted.receipt_digest,
         )
     validate_direct_consolidated_subtree(archive, subtree_path=exact_path)
@@ -371,6 +426,30 @@ def _load_targeted_relative(
         copied = np.array(values, copy=True, order="C")
         copied.setflags(write=False)
         arrays[name] = copied
+    body_arrays: dict[str, np.ndarray] = {}
+    if required_body_arrays:
+        body = run["body"]
+        for name in required_body_arrays:
+            path = f"body/{name}"
+            declaration = _mapping(
+                declaration_by_path.get(path), label=f"declaration {path}"
+            )
+            values = np.asarray(body[name][...])
+            if (
+                values.dtype.str != declaration.get("dtype")
+                or list(values.shape) != declaration.get("shape")
+                or values.shape[0] != n_rows
+            ):
+                raise ExactChaserProjectionError(
+                    f"Relative-frame array {path!r} metadata changed."
+                )
+            if array_values_sha256(values) != declaration.get("content_sha256"):
+                raise ExactChaserProjectionError(
+                    f"Relative-frame array {path!r} content digest changed."
+                )
+            copied = np.array(values, copy=True, order="C")
+            copied.setflags(write=False)
+            body_arrays[name] = copied
     authorities = _mapping(
         manifest.get("source_authorities"), label="relative source authorities"
     )
@@ -383,8 +462,12 @@ def _load_targeted_relative(
         n_chasers=n_chasers,
         source_authorities=freeze(authorities),
         arrays=MappingProxyType(arrays),
+        run_manifest=freeze(manifest),
+        body_arrays=MappingProxyType(body_arrays),
         verification_mode="deep_audit",
-        verified_array_names=tuple(sorted(arrays)),
+        verified_array_names=tuple(
+            sorted([*arrays, *(f"body/{name}" for name in body_arrays)])
+        ),
     )
 
 
@@ -427,6 +510,8 @@ def _load_receipt_relative_metadata(
         n_chasers=n_chasers,
         source_authorities=authorities,
         arrays=MappingProxyType({}),
+        run_manifest=freeze(manifest),
+        body_arrays=MappingProxyType({}),
         verification_mode=RECEIPT_VERIFICATION_MODE,
         verified_array_names=(),
         receipt_digest=str(receipt["record_sha256"]),
@@ -562,9 +647,15 @@ def load_exact_chaser_projection(
     selection_identity: ExactChaserSelectionIdentity,
     load_relative: bool,
     load_relative_arrays: bool = True,
+    load_chaser_appearance: bool = False,
+    load_keypoint_body_bearing: bool = False,
+    load_keypoint_body_heading: bool = False,
     load_controller_trials: bool = False,
     load_generalized_bout_response: bool = False,
     load_escape_freeze: bool = False,
+    load_gaze_tracking: bool = False,
+    load_epoch_behavior: bool = False,
+    load_body_alignment_by_distance: bool = False,
 ) -> ExactChaserSuccessorProjection:
     """Load one exact, selector-free visualization projection."""
 
@@ -593,7 +684,10 @@ def load_exact_chaser_projection(
     def exact_receipt(key: str) -> str | None:
         if composition is None:
             return None
-        return str(composition["exact_children"][key]["receipt_path"])
+        children = composition["exact_children"]
+        if key not in children:
+            return None
+        return str(children[key]["receipt_path"])
 
     def relative_receipt(key: str) -> str | None:
         if composition is None:
@@ -644,9 +738,7 @@ def load_exact_chaser_projection(
             deep_audit=not receipt_mode,
             direct_validation_receipt=exact_receipt(receipt_key),
             required_array_names=(
-                RADIAL_NEAR_FIELD_ARRAYS
-                if receipt_mode and analysis_id == "radial_near_field"
-                else ()
+                _RADIAL_ARRAYS_BY_ANALYSIS.get(analysis_id, ())
                 if receipt_mode
                 else None
             ),
@@ -658,7 +750,12 @@ def load_exact_chaser_projection(
     provider_ids, relative_binding_proofs = _verify_bundle_children(
         spatial, radials, relative_bindings
     )
+    if load_chaser_appearance and (not load_relative or not load_relative_arrays):
+        raise ExactChaserProjectionError(
+            "Chaser appearance requires exact relative-frame identity and role arrays."
+        )
     relatives = None
+    chaser_appearance = None
     if load_relative:
         relative_values = []
         for binding, provider_role in zip(
@@ -686,6 +783,26 @@ def load_exact_chaser_projection(
                     _load_targeted_relative(
                         **arguments,
                         validation_receipt=receipt_path,
+                        required_body_arrays=(
+                            tuple(
+                                dict.fromkeys(
+                                    (
+                                        *(
+                                            _BODY_BEARING_ARRAY_NAMES
+                                            if load_keypoint_body_bearing
+                                            else ()
+                                        ),
+                                        *(
+                                            _BODY_HEADING_ARRAY_NAMES
+                                            if load_keypoint_body_heading
+                                            else ()
+                                        ),
+                                    )
+                                )
+                            )
+                            if provider_role == "keypoint"
+                            else ()
+                        ),
                     )
                 )
         relatives = tuple(relative_values)
@@ -723,6 +840,47 @@ def load_exact_chaser_projection(
                     raise ExactChaserProjectionError(
                         f"Paired exact chaser evidence differs for {name!r}."
                     )
+        if load_chaser_appearance:
+            keypoint = relatives[0]
+            identity = keypoint.frame_chaser("chaser_identity_code")
+            role = keypoint.frame_chaser("chaser_behavior_role_code")
+            if not np.all(identity == identity[:1]) or not np.all(role == role[:1]):
+                raise ExactChaserProjectionError(
+                    "Chaser appearance cannot bind unstable identity or behavior roles."
+                )
+            keypoint_contract = {
+                "chaser_occurrence": plain(
+                    _mapping(
+                        keypoint.run_manifest.get("context"),
+                        label="keypoint relative context",
+                    ).get("chaser_occurrence")
+                ),
+                "identity_registries": plain(
+                    keypoint.run_manifest.get("identity_registries")
+                ),
+            }
+            detection_contract = {
+                "chaser_occurrence": plain(
+                    _mapping(
+                        relatives[1].run_manifest.get("context"),
+                        label="detection relative context",
+                    ).get("chaser_occurrence")
+                ),
+                "identity_registries": plain(
+                    relatives[1].run_manifest.get("identity_registries")
+                ),
+            }
+            if detection_contract != keypoint_contract:
+                raise ExactChaserProjectionError(
+                    "Paired relative frames disagree on chaser occurrence or registries."
+                )
+            chaser_appearance = load_chaser_appearance_projection(
+                archive,
+                relative_manifest=keypoint.run_manifest,
+                identity_code_by_column=identity[0],
+                behavior_role_code_by_column=role[0],
+                expected_recording_id=spatial.recording_id,
+            )
     controller_trials = None
     if load_controller_trials:
         if relatives is None:
@@ -783,6 +941,67 @@ def load_exact_chaser_projection(
             direct_validation_receipt=exact_receipt("escape"),
             required_array_names=(ESCAPE_FREEZE_ARRAYS if receipt_mode else None),
         )
+    gaze_tracking = None
+    if load_gaze_tracking:
+        if relatives is None:
+            raise ExactChaserProjectionError(
+                "Gaze views require the exact keypoint relative-frame source."
+            )
+        gaze_receipt = exact_receipt("gaze")
+        if receipt_mode and gaze_receipt is None:
+            raise ExactChaserProjectionError(
+                "This projection receipt does not authorize the gaze child; seal "
+                "a schema-v2/v4/v6/v8 composition with --gaze-receipt."
+            )
+        gaze_tracking = load_exact_gaze_tracking(
+            archive,
+            option,
+            spatial=spatial,
+            radial=radials[0],
+            expected_relative_binding=relative_bindings[0],
+            relative=relatives[0],
+            direct_validation_receipt=gaze_receipt,
+            required_array_names=(GAZE_TRACKING_ARRAYS if receipt_mode else None),
+        )
+    epoch_behavior = None
+    if load_epoch_behavior:
+        epoch_receipt = exact_receipt("epoch_behavior")
+        if receipt_mode and epoch_receipt is None:
+            raise ExactChaserProjectionError(
+                "This projection receipt does not authorize the epoch-behavior "
+                "child; seal a schema-v3/v4/v7/v8 composition with "
+                "--epoch-behavior-receipt."
+            )
+        epoch_behavior = load_exact_epoch_behavior(
+            archive,
+            option,
+            spatial=spatial,
+            direct_validation_receipt=epoch_receipt,
+            required_array_paths=(EPOCH_BEHAVIOR_ARRAYS if receipt_mode else None),
+        )
+    body_alignment_by_distance = None
+    if load_body_alignment_by_distance:
+        if relatives is None:
+            raise ExactChaserProjectionError(
+                "Alignment-by-distance views require exact keypoint relative metadata."
+            )
+        alignment_receipt = exact_receipt("body_alignment_by_distance")
+        if receipt_mode and alignment_receipt is None:
+            raise ExactChaserProjectionError(
+                "This projection receipt does not authorize the body-alignment "
+                "child; seal a composition that includes its exact child receipt."
+            )
+        body_alignment_by_distance = load_exact_body_alignment(
+            archive,
+            option,
+            spatial=spatial,
+            expected_relative_binding=relative_bindings[0],
+            relative=relatives[0],
+            direct_validation_receipt=alignment_receipt,
+            required_array_names=(
+                BODY_ALIGNMENT_BY_DISTANCE_ARRAYS if receipt_mode else None
+            ),
+        )
     epoch_records = spatial.scientific_manifest.get("epoch_records")
     if not isinstance(epoch_records, (list, tuple)) or not epoch_records:
         raise ExactChaserProjectionError("Exact chaser bundle lacks epoch records.")
@@ -796,6 +1015,9 @@ def load_exact_chaser_projection(
         controller_trials=controller_trials,
         generalized_bout_response=generalized_bout_response,
         escape_freeze=escape_freeze,
+        gaze_tracking=gaze_tracking,
+        epoch_behavior=epoch_behavior,
+        body_alignment_by_distance=body_alignment_by_distance,
         provider_ids=provider_ids,
         epoch_records=tuple(freeze(record) for record in epoch_records),
         provenance=build_projection_provenance(
@@ -806,10 +1028,15 @@ def load_exact_chaser_projection(
             controller_trials=controller_trials,
             generalized_bout_response=generalized_bout_response,
             escape_freeze=escape_freeze,
+            gaze_tracking=gaze_tracking,
+            epoch_behavior=epoch_behavior,
+            body_alignment_by_distance=body_alignment_by_distance,
             relatives=relatives,
+            chaser_appearance=chaser_appearance,
             projection_verification_mode=selection_identity.verification_mode,
             projection_receipt_sha256=(selection_identity.projection_receipt_sha256),
         ),
+        chaser_appearance=chaser_appearance,
     )
 
 

@@ -198,9 +198,49 @@ CHASER_EXACT_SUCCESSOR_PROVIDER = ProviderDefinition(
             "Paired-provider persisted radial and exact-time near-field summaries.",
         ),
         AnalysisDefinition(
+            "distance_distributions",
+            "Distance distributions and controls",
+            (
+                "Persisted empirical CDFs, observed versus moving-reference "
+                "geometric radial mass, and configured wall-excluded twins."
+            ),
+        ),
+        AnalysisDefinition(
+            "same_quadrant_occupancy",
+            "Same-quadrant occupancy",
+            (
+                "Persisted scalar fish/chaser same-quadrant fractions with "
+                "valid-row and all-candidate denominators shown separately."
+            ),
+        ),
+        AnalysisDefinition(
             "distance_traces",
             "Full and exact-epoch distance",
             "Full-session and exact protocol-epoch fish–chaser distance traces.",
+        ),
+        AnalysisDefinition(
+            "body_bearing_polar",
+            "Body-frame bearing polar",
+            (
+                "Whole-circle chaser-bearing distributions from the accepted "
+                "keypoint body-axis supplier, with no detection or heading fallback."
+            ),
+        ),
+        AnalysisDefinition(
+            "body_bearing_distance",
+            "Body-frame bearing × distance",
+            (
+                "Exact anatomical-bearing point clouds and joint polar densities "
+                "using receipt-bound keypoint distance and body-axis evidence."
+            ),
+        ),
+        AnalysisDefinition(
+            "fish_heading",
+            "Anatomical fish heading",
+            (
+                "Whole-circle fish-heading distributions from the accepted "
+                "keypoint body-axis supplier, collapsed once per acquisition frame."
+            ),
         ),
         AnalysisDefinition(
             "trajectory_overlays",
@@ -238,6 +278,32 @@ CHASER_EXACT_SUCCESSOR_PROVIDER = ProviderDefinition(
                 "Persisted speed-defined escape events, separately annotated "
                 "high turns, exact-trial freeze candidates, recapture outcomes, "
                 "validity reasons, and threshold sensitivity."
+            ),
+        ),
+        AnalysisDefinition(
+            "gaze_tracking",
+            "Exact body-frame gaze tracking",
+            (
+                "Persisted eye-versus-chaser bearing, gaze error, lock fractions, "
+                "static tracking gain, and sustained lock events from exact sources."
+            ),
+        ),
+        AnalysisDefinition(
+            "epoch_behavior",
+            "Protocol-semantic epoch behavior",
+            (
+                "Persisted physical speed, path, tracking coverage, swim-bout "
+                "summaries, bout-kinematics distributions, and inter-bout "
+                "interval distributions for exact pre/training/post epochs."
+            ),
+        ),
+        AnalysisDefinition(
+            "body_alignment_by_distance",
+            "Fish alignment by chaser distance",
+            (
+                "Persisted anatomical alignment, absolute and circular bearing, "
+                "and explicit validity/support by exact semantic epoch, chaser, "
+                "and physical-distance bin."
             ),
         ),
         AnalysisDefinition(

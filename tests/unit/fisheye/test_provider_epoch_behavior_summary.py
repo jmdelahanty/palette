@@ -130,6 +130,9 @@ def test_protocol_semantic_identity_is_repeated_on_each_summary_row() -> None:
         role.encode("utf-8") for role in CHASER_WINDOW_ROLES
     ]
     assert bound["protocol_semantic_step_index"].tolist() == [1, 1, 1]
+    assert [value.rstrip(b"\x00") for value in bound["source_interval_sha256"]] == [
+        str(index + 1).encode("utf-8") * 64 for index in range(3)
+    ]
     assert all(
         value.rstrip(b"\x00") == f"sha256:{'b' * 64}".encode("utf-8")
         for value in bound["protocol_semantic_hash"]
@@ -163,9 +166,7 @@ def test_provider_epoch_summary_uses_valid_tracked_time_and_motion_validity() ->
     speed = np.asarray(
         [999.0, 10.0, 10.0, 10.0, 10.0, 999.0, 999.0, 999.0, 999.0, 999.0]
     )
-    path = np.asarray(
-        [999.0, 1.0, 1.0, 1.0, 1.0, 999.0, 999.0, 999.0, 999.0, 999.0]
-    )
+    path = np.asarray([999.0, 1.0, 1.0, 1.0, 1.0, 999.0, 999.0, 999.0, 999.0, 999.0])
     track = SimpleNamespace(
         frame_indices=np.arange(10, dtype=np.int64),
         linear_sample_valid=sample_valid,
@@ -243,11 +244,7 @@ def test_provider_epoch_bout_facts_bind_the_selected_track() -> None:
 
 def test_source_binding_digest_normalizes_immutable_nested_mappings() -> None:
     frozen = MappingProxyType(
-        {
-            "epoch": MappingProxyType(
-                {"run": "epochs_1", "digest": "a" * 64}
-            )
-        }
+        {"epoch": MappingProxyType({"run": "epochs_1", "digest": "a" * 64})}
     )
     plain = {"epoch": {"run": "epochs_1", "digest": "a" * 64}}
 

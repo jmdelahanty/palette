@@ -52,6 +52,11 @@ def _install_ready_fakes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         "load_eye_gaze_source_handle",
         lambda *args, **kwargs: _handle("eye"),
     )
+    monkeypatch.setattr(
+        operator,
+        "load_composable_chaser_successor_source_handle",
+        lambda *args, **kwargs: _handle("radial"),
+    )
     prepared_order: list[str] = []
 
     def prepared(label: str):
@@ -115,6 +120,7 @@ def _run(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
         "expected_recording_id": "recording-1",
         "eye_run_name": "eye-v1",
         "eye_convention_receipt": {"review": "accepted"},
+        "radial_run_name": "radial-v1",
     }
     values.update(overrides)
     return operator.run_composable_chaser_successors(tmp_path, **values)
@@ -239,9 +245,10 @@ def test_semantic_loader_failure_is_structured_and_blocks_all_dependents(
 
     assert result["status"] == "blocked_no_products"
     assert result["sources"]["semantic_selection"]["status"] == "blocked"
-    assert "semantic authority unavailable" in result["sources"][
-        "semantic_selection"
-    ]["error"]["message"]
+    assert (
+        "semantic authority unavailable"
+        in result["sources"]["semantic_selection"]["error"]["message"]
+    )
     assert [row["reason_code"] for row in result["modules"]] == [
         "source_handle_unavailable",
         "dependency_unavailable",

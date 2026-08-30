@@ -245,6 +245,13 @@ def test_plan_freezes_exact_recording_inputs(tmp_path: Path) -> None:
     assert entry["motion_and_bouts"]["body_frame_resolution"] == (
         "exact_provider_motion_authority_v1"
     )
+    assert entry["output_run_names"]["epoch_behavior"] == cohort.EPOCH_BEHAVIOR_RUN
+    assert entry["output_run_names"]["body_alignment_by_distance"] == (
+        cohort.BODY_ALIGNMENT_RUN
+    )
+    assert entry["output_run_names"]["body_alignment_plot_bundle"] == (
+        cohort.BODY_ALIGNMENT_RECIPE_BUNDLE_NAME
+    )
     assert len(entry["input_group_bindings"]) == 8
     assert entry["existing_output_group_paths"] == []
     assert task["safety"] == cohort.EXPECTED_SAFETY
@@ -273,9 +280,10 @@ def test_replan_freezes_versioned_body_successor_from_prior_recording_set(
     )
 
     assert replanned["recording_count"] == original["recording_count"]
-    assert replanned["selection_policy"]["successor_of_task_sha256"] == original[
-        "task_sha256"
-    ]
+    assert (
+        replanned["selection_policy"]["successor_of_task_sha256"]
+        == original["task_sha256"]
+    )
     assert replanned["selection_policy"]["body_frame_resolution"] == (
         "exact_provider_motion_authority_v1"
     )
@@ -285,9 +293,7 @@ def test_replan_freezes_versioned_body_successor_from_prior_recording_set(
     )
     assert entry["motion_and_bouts"]["body_frame_run_name"] == "body-frame-v1"
     assert len(entry["input_group_bindings"]) == 8
-    assert cohort.load_cohort_task(replanned)["task_sha256"] == replanned[
-        "task_sha256"
-    ]
+    assert cohort.load_cohort_task(replanned)["task_sha256"] == replanned["task_sha256"]
 
 
 def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> None:
@@ -298,9 +304,10 @@ def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> No
     successor = cohort.successor_cohort_task(original)
 
     assert successor["schema_version"] == cohort.TASK_SCHEMA_VERSION
-    assert successor["selection_policy"]["successor_of_task_sha256"] == original[
-        "task_sha256"
-    ]
+    assert (
+        successor["selection_policy"]["successor_of_task_sha256"]
+        == original["task_sha256"]
+    )
     entry = successor["entries"][0]
     assert entry["relative_frame_validation"]["mode"] == (
         cohort.RELATIVE_FRAME_VALIDATION_MODE
@@ -320,13 +327,15 @@ def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> No
     assert entry["output_run_names"]["detailed_bundle"] == (
         cohort.DETAILED_RECIPE_BUNDLE_NAME
     )
-    assert entry["output_run_names"]["detailed_bundle"].endswith("recipe_v5")
-    assert successor["selection_policy"]["plot_recipe_provenance"] == (
-        "self_contained_exact_parameters_v3"
+    assert entry["output_run_names"]["detailed_bundle"].endswith("recipe_v7")
+    assert entry["output_run_names"]["epoch_behavior"] == cohort.EPOCH_BEHAVIOR_RUN
+    assert entry["output_run_names"]["body_alignment_plot_bundle"] == (
+        cohort.BODY_ALIGNMENT_RECIPE_BUNDLE_NAME
     )
-    assert cohort.load_cohort_task(successor)["task_sha256"] == successor[
-        "task_sha256"
-    ]
+    assert successor["selection_policy"]["plot_recipe_provenance"] == (
+        "self_contained_exact_parameters_v5"
+    )
+    assert cohort.load_cohort_task(successor)["task_sha256"] == successor["task_sha256"]
 
 
 def test_task_successor_reuses_existing_exact_spatial_science(tmp_path: Path) -> None:
@@ -366,9 +375,7 @@ def test_task_successor_reuses_existing_exact_spatial_science(tmp_path: Path) ->
 def test_run_one_rejects_changed_frozen_input_metadata(tmp_path: Path) -> None:
     archive, _raw_h5, snapshot = _fixture(tmp_path)
     task = cohort.plan_cohort_task(snapshot, operations_root=tmp_path / "operations")
-    motion_path = Path(
-        task["entries"][0]["motion_and_bouts"]["motion_run_path"]
-    )
+    motion_path = Path(task["entries"][0]["motion_and_bouts"]["motion_run_path"])
     (archive / motion_path / "zarr.json").write_text("{}", encoding="utf-8")
 
     with pytest.raises(cohort.ComposableChaserCohortError, match="metadata changed"):
@@ -404,12 +411,15 @@ def test_run_one_dry_run_renders_complete_serial_chain(tmp_path: Path) -> None:
         "semantic_epoch_v1",
         "semantic_epoch_v2",
         "semantic_selection",
+        "epoch_behavior",
         "keypoint_relative_frame",
         "detection_relative_frame",
         "composable_successors",
         "keypoint_radial_near_field",
         "detection_radial_near_field",
+        "body_alignment_by_distance",
         "spatial_occupancy",
+        "body_alignment_by_distance_plots",
         "spatial_occupancy_plots",
         "dashboard_plots",
         "detailed_plots",
@@ -426,13 +436,14 @@ def test_run_one_dry_run_renders_complete_serial_chain(tmp_path: Path) -> None:
         if stage["stage"] == "detection_relative_frame"
     )
     successors = next(
-        stage
-        for stage in result["stages"]
-        if stage["stage"] == "composable_successors"
+        stage for stage in result["stages"] if stage["stage"] == "composable_successors"
     )
-    assert keypoint_relative["command"][
-        keypoint_relative["command"].index("--body-frame-run") + 1
-    ] == "body-frame-v1"
+    assert (
+        keypoint_relative["command"][
+            keypoint_relative["command"].index("--body-frame-run") + 1
+        ]
+        == "body-frame-v1"
+    )
     assert "--body-frame-run" not in detection_relative["command"]
     assert "--no-body-extension" not in successors["command"]
     assert result["safety"] == cohort.EXPECTED_SAFETY
@@ -440,7 +451,9 @@ def test_run_one_dry_run_renders_complete_serial_chain(tmp_path: Path) -> None:
     assert not (tmp_path / "receipts").exists()
 
 
-def test_receipt_bound_successor_dry_run_passes_targeted_receipts(tmp_path: Path) -> None:
+def test_receipt_bound_successor_dry_run_passes_targeted_receipts(
+    tmp_path: Path,
+) -> None:
     _archive, _raw_h5, snapshot = _fixture(tmp_path)
     original = cohort.plan_cohort_task(
         snapshot, operations_root=tmp_path / "operations"
@@ -459,20 +472,44 @@ def test_receipt_bound_successor_dry_run_passes_targeted_receipts(tmp_path: Path
     )
 
     names = [stage["stage"] for stage in result["stages"]]
-    assert names[6:8] == [
+    assert names[7:9] == [
         "keypoint_relative_frame_validation_receipt",
         "detection_relative_frame_validation_receipt",
     ]
     for source in (
         "semantic_selection",
+        "epoch_behavior",
         "keypoint_radial",
         "detection_radial",
         "controller",
         "bout",
         "escape",
+        "body_alignment_by_distance",
         "spatial_occupancy",
     ):
         assert f"{source}_exact_child_validation_receipt" in names
+    projection_receipt = next(
+        stage
+        for stage in result["stages"]
+        if stage["stage"] == "exact_chaser_projection_receipt"
+    )
+    assert "--epoch-behavior-receipt" in projection_receipt["command"]
+    assert "--body-alignment-by-distance-receipt" in projection_receipt["command"]
+    assert (
+        Path(
+            projection_receipt["command"][
+                projection_receipt["command"].index("--output-json") + 1
+            ]
+        ).name
+        == cohort.EPOCH_ALIGNMENT_PROJECTION_RECEIPT_NAME
+    )
+    alignment = next(
+        stage
+        for stage in result["stages"]
+        if stage["stage"] == "body_alignment_by_distance"
+    )
+    assert "--relative-frame-receipt" in alignment["command"]
+    assert "--semantic-selection-receipt" in alignment["command"]
     spatial = next(
         stage for stage in result["stages"] if stage["stage"] == "spatial_occupancy"
     )
@@ -503,18 +540,30 @@ def test_receipt_bound_successor_dry_run_passes_targeted_receipts(tmp_path: Path
     ):
         assert option in dashboard["command"]
         assert option in detailed["command"]
-    assert dashboard["command"][
-        dashboard["command"].index("--bundle-name") + 1
-    ] == cohort.DASHBOARD_RECIPE_BUNDLE_NAME
+    assert (
+        dashboard["command"][dashboard["command"].index("--bundle-name") + 1]
+        == cohort.DASHBOARD_RECIPE_BUNDLE_NAME
+    )
     occupancy_plot = next(
         stage
         for stage in result["stages"]
         if stage["stage"] == "spatial_occupancy_plots"
     )
-    assert occupancy_plot["command"][
-        occupancy_plot["command"].index("--bundle-name") + 1
-    ] == cohort.SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME
+    assert (
+        occupancy_plot["command"][occupancy_plot["command"].index("--bundle-name") + 1]
+        == cohort.SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME
+    )
     assert "--source-validation-receipt" in occupancy_plot["command"]
+    alignment_plot = next(
+        stage
+        for stage in result["stages"]
+        if stage["stage"] == "body_alignment_by_distance_plots"
+    )
+    assert (
+        alignment_plot["command"][alignment_plot["command"].index("--bundle-name") + 1]
+        == cohort.BODY_ALIGNMENT_RECIPE_BUNDLE_NAME
+    )
+    assert "--source-validation-receipt" in alignment_plot["command"]
 
 
 def test_reused_plot_receipt_is_content_verified(tmp_path: Path) -> None:
@@ -537,9 +586,7 @@ def test_reused_plot_receipt_is_content_verified(tmp_path: Path) -> None:
     receipt["payload_sha256"] = canonical_json_sha256(receipt)
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
 
-    assert cohort._validated_plot_receipt(
-        receipt_path, recording_id="recording-1"
-    )
+    assert cohort._validated_plot_receipt(receipt_path, recording_id="recording-1")
     output.write_bytes(b"changed")
     with pytest.raises(cohort.ComposableChaserCohortError, match="differs"):
         cohort._validated_plot_receipt(receipt_path, recording_id="recording-1")

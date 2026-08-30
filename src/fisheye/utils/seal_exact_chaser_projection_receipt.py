@@ -28,6 +28,31 @@ def _parser() -> argparse.ArgumentParser:
         "spatial-occupancy",
     ):
         parser.add_argument(f"--{key}-receipt", type=Path, required=True)
+    parser.add_argument(
+        "--gaze-receipt",
+        type=Path,
+        help=(
+            "Optional exact gaze successor receipt. Supplying it seals projection "
+            "receipt schema v2; omitting it preserves the closed v1 roster."
+        ),
+    )
+    parser.add_argument(
+        "--epoch-behavior-receipt",
+        type=Path,
+        help=(
+            "Optional exact semantic-v2 epoch-behavior receipt. Alone it seals "
+            "schema v3; together with gaze it seals the combined schema v4."
+        ),
+    )
+    parser.add_argument(
+        "--body-alignment-by-distance-receipt",
+        type=Path,
+        help=(
+            "Optional exact anatomical alignment-by-distance successor receipt. "
+            "It extends the closed composition roster without changing any "
+            "existing child identity."
+        ),
+    )
     parser.add_argument("--keypoint-relative-frame-receipt", type=Path, required=True)
     parser.add_argument("--detection-relative-frame-receipt", type=Path, required=True)
     return parser
@@ -47,6 +72,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "spatial_occupancy",
         )
     }
+    if args.gaze_receipt is not None:
+        exact["gaze"] = args.gaze_receipt
+    if args.epoch_behavior_receipt is not None:
+        exact["epoch_behavior"] = args.epoch_behavior_receipt
+    if args.body_alignment_by_distance_receipt is not None:
+        exact["body_alignment_by_distance"] = args.body_alignment_by_distance_receipt
     relative = {
         "keypoint": args.keypoint_relative_frame_receipt,
         "detection": args.detection_relative_frame_receipt,

@@ -79,7 +79,7 @@ CHASER_RUNNER_IMPLEMENTATIONS: Mapping[str, str] = {
     "generalized_chaser_bout_response": (
         "fisheye.analysis.generalized_bout_response_successor"
     ),
-    "chaser_gaze_tracking_v2": "fisheye.analysis.gaze_tracking_successor",
+    "chaser_gaze_tracking_v3": "fisheye.analysis.gaze_tracking_successor",
     "chaser_escape_freeze_v2": "fisheye.analysis.escape_freeze_successor",
 }
 

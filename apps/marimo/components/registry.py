@@ -52,6 +52,13 @@ from fisheye.visualization.goodcopbadcop_interactive import (
     CHASER_DASHBOARD_RENDERERS,
     LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
 )
+from fisheye.visualization.chaser_body_bearing_distance import (
+    BEARING_BIN_WIDTH_DEG,
+    DENSITY_COLOR_CMAX_QUANTILE,
+    DISPLAY_RECIPE_ID as BODY_BEARING_DISTANCE_DISPLAY_RECIPE_ID,
+    DISTANCE_BIN_WIDTH_MM,
+    INTERACTIVE_POINT_CLOUD_MAX_ROWS_PER_PANEL_CHASER,
+)
 from fisheye.visualization.bout_kinematics_interactive import (
     BOUT_EYE_GAZE_PLOT_RENDERER,
     BOUT_HEADING_PLOT_RENDERER,
@@ -68,6 +75,21 @@ from .chaser_exact_bout_response_discovery import (
 )
 from .chaser_exact_escape_freeze_discovery import (
     compatible_escape_freeze_binding,
+)
+from .chaser_exact_body_bearing_contract import (
+    compatible_body_bearing_binding,
+)
+from .chaser_exact_body_heading_contract import (
+    BODY_HEADING_ARRAY_PATHS,
+    BODY_HEADING_FRAME_COLLAPSE_POLICY,
+    compatible_body_heading_binding,
+)
+from .chaser_exact_gaze_discovery import compatible_gaze_tracking_binding
+from .chaser_exact_epoch_behavior_discovery import (
+    compatible_epoch_behavior_binding,
+)
+from .chaser_exact_body_alignment_discovery import (
+    compatible_body_alignment_binding,
 )
 
 TRACK_KINEMATICS_PLOT_RENDERER = "palette-track-kinematics-summary-v1"
@@ -885,6 +907,7 @@ def discover_exact_chaser_successor_options(
             continue
         provider_ids: list[str] = []
         relative_manifests: list[Mapping[str, Any]] = []
+        radial_manifests: list[Mapping[str, Any]] = []
         relative_binding_proofs: list[dict[str, Any]] = []
         valid = True
         for record in providers:
@@ -963,6 +986,7 @@ def discover_exact_chaser_successor_options(
                 break
             provider_ids.append(provider_id)
             relative_manifests.append(relative)
+            radial_manifests.append(radial)
             relative_binding_proofs.append(
                 {
                     "normalized_identity": dict(relative_proof.normalized_identity),
@@ -1007,17 +1031,56 @@ def discover_exact_chaser_successor_options(
             controller_trial_binding=controller_trial_binding,
             bout_response_binding=bout_response_binding,
         )
+        body_bearing_binding = compatible_body_bearing_binding(
+            relative_manifests[0],
+            expected_relative_binding=providers[0]["relative_frame"],
+        )
+        body_heading_binding = compatible_body_heading_binding(
+            relative_manifests[0],
+            expected_relative_binding=providers[0]["relative_frame"],
+        )
+        gaze_tracking_binding = compatible_gaze_tracking_binding(
+            root,
+            recording_id=recording_id,
+            spatial_sources=sources,
+            keypoint_relative_manifest=relative_manifests[0],
+            keypoint_radial_manifest=radial_manifests[0],
+        )
+        epoch_behavior_binding = compatible_epoch_behavior_binding(
+            root,
+            recording_id=recording_id,
+            spatial_sources=sources,
+        )
+        body_alignment_binding = compatible_body_alignment_binding(
+            root,
+            recording_id=recording_id,
+            spatial_sources=sources,
+            spatial_epoch_records=scientific.get("epoch_records"),
+            keypoint_relative_manifest=relative_manifests[0],
+        )
         analysis_bindings = {}
+        if body_bearing_binding is not None:
+            analysis_bindings["body_bearing"] = dict(body_bearing_binding)
+        if body_heading_binding is not None:
+            analysis_bindings["body_heading"] = dict(body_heading_binding)
         if controller_trial_binding is not None:
             analysis_bindings["controller_trials"] = dict(controller_trial_binding)
         if bout_response_binding is not None:
             analysis_bindings["generalized_bout_response"] = dict(bout_response_binding)
         if escape_freeze_binding is not None:
             analysis_bindings["escape_freeze"] = dict(escape_freeze_binding)
+        if gaze_tracking_binding is not None:
+            analysis_bindings["gaze_tracking"] = dict(gaze_tracking_binding)
+        if epoch_behavior_binding is not None:
+            analysis_bindings["epoch_behavior"] = dict(epoch_behavior_binding)
+        if body_alignment_binding is not None:
+            analysis_bindings["body_alignment_by_distance"] = dict(
+                body_alignment_binding
+            )
         title = f"Exact paired-provider chaser successors: {run_name}"
         spec = {
             "schema_id": "palette.chaser_exact_successor_explorer_spec",
-            "schema_version": 6,
+            "schema_version": 10,
             "renderer": CHASER_EXACT_SUCCESSOR_RENDERER,
             "title": title,
             "run_name": run_name,
@@ -1043,6 +1106,21 @@ def discover_exact_chaser_successor_options(
                     if escape_freeze_binding is not None
                     else {}
                 ),
+                **(
+                    {"gaze_tracking": gaze_tracking_binding["run_path"]}
+                    if gaze_tracking_binding is not None
+                    else {}
+                ),
+                **(
+                    {"epoch_behavior": epoch_behavior_binding["run_path"]}
+                    if epoch_behavior_binding is not None
+                    else {}
+                ),
+                **(
+                    {"body_alignment_by_distance": body_alignment_binding["run_path"]}
+                    if body_alignment_binding is not None
+                    else {}
+                ),
             },
             "relative_frame_binding_proofs": relative_binding_proofs,
             "adapter_semantics": (
@@ -1051,17 +1129,29 @@ def discover_exact_chaser_successor_options(
             "display_parameters": {
                 "spatial_occupancy": {
                     "recipe_id": (
-                        "paired_provider_exact_epoch_spatial_occupancy_heatmap_v2"
+                        "paired_provider_exact_epoch_spatial_occupancy_heatmap_v4"
                     ),
-                    "source_array": "occupancy_density_valid_in_arena",
+                    "source_arrays": [
+                        "occupancy_density_valid_in_arena",
+                        "occupancy_fraction_candidate_epoch",
+                    ],
+                    "default_normalization": "valid_in_arena",
+                    "available_normalizations": [
+                        "valid_in_arena",
+                        "candidate_epoch",
+                    ],
                     "density_multiplier_to_percent": 100.0,
                     "density_color_normalization": (
-                        "shared_max_across_persisted_provider_epoch_arrays"
+                        "shared_robust_p98_default_full_range_available"
                     ),
                     "provider_difference": (
                         "detection_minus_keypoint_percentage_points_per_bin"
                     ),
-                    "difference_color_normalization": "symmetric_persisted_max_abs",
+                    "difference_color_normalization": (
+                        "symmetric_shared_robust_p98_default_full_range_available"
+                    ),
+                    "display_bin_widths_mm": [2.0, 4.0],
+                    "coarsening": ("aligned_exact_2x2_count_sum_no_interpolation"),
                     "coverage_annotation_array": (
                         "in_arena_coverage_fraction_candidate"
                     ),
@@ -1069,12 +1159,104 @@ def discover_exact_chaser_successor_options(
                         "hover_evidence_only_bins_not_discarded_boundary_bins_may_straddle_circle"
                     ),
                 },
+                "distance_distributions": {
+                    "recipe_id": (
+                        "paired_provider_persisted_distance_cdf_and_geometric_mass_v1"
+                    ),
+                    "cdf_thresholds": "persisted_exact_no_interpolation",
+                    "radial_bin_edges": "persisted_exact_no_rebinning",
+                    "ordinary_denominator": "metric_valid_distance_frame_count",
+                    "wall_excluded_denominator": (
+                        "metric_wall_excluded_valid_frame_count"
+                    ),
+                    "wall_exclusion_policy": (
+                        "persisted_perimeter_band_mm_from_scientific_manifest"
+                    ),
+                    "interpolation": "prohibited",
+                    "rebinning": "prohibited",
+                },
+                "same_quadrant_occupancy": {
+                    "recipe_id": (
+                        "paired_provider_persisted_same_quadrant_denominators_v1"
+                    ),
+                    "numerator": "metric_same_quadrant_valid_frame_count",
+                    "valid_denominator": "metric_valid_distance_frame_count",
+                    "candidate_denominator": "metric_candidate_frame_count",
+                    "full_joint_quadrant_matrix": "not_persisted_separate_successor",
+                    "viewer_inference": "prohibited",
+                },
                 "distance_traces": {
                     "algorithm": (
                         "source_order_bucket_first_last_min_max_missing_break_v1"
                     ),
                     "max_points_per_series": 6000,
                     "connect_missing_gaps": False,
+                },
+                "body_bearing_polar": {
+                    "recipe_id": "accepted_body_axis_bearing_polar_histogram_v1",
+                    "source_arrays": [
+                        "body/body_bearing_deg",
+                        "body/body_bearing_valid",
+                    ],
+                    "bin_width_deg": 10.0,
+                    "normalization": "probability_within_panel_chaser",
+                    "body_axis_fallback": "prohibited",
+                    "detection_position_substitution": "prohibited",
+                },
+                "body_bearing_distance": {
+                    "recipe_id": BODY_BEARING_DISTANCE_DISPLAY_RECIPE_ID,
+                    "source_arrays": [
+                        "base/relative_distance_physical",
+                        "base/relative_physical_valid",
+                        "body/body_bearing_deg",
+                        "body/body_bearing_valid",
+                        "base/chaser_occurrence_member",
+                    ],
+                    "joint_validity": (
+                        "panel_member_and_chaser_occurrence_and_"
+                        "relative_physical_valid_and_body_bearing_valid"
+                    ),
+                    "distance_bin_width_mm": DISTANCE_BIN_WIDTH_MM,
+                    "bearing_bin_width_deg": BEARING_BIN_WIDTH_DEG,
+                    "density_normalization": "probability_within_panel_chaser",
+                    "density_color_cmax_quantile": (DENSITY_COLOR_CMAX_QUANTILE),
+                    "point_cloud_sampling": (
+                        "source_order_uniform_including_endpoints"
+                    ),
+                    "point_cloud_max_rows_per_panel_chaser": (
+                        INTERACTIVE_POINT_CLOUD_MAX_ROWS_PER_PANEL_CHASER
+                    ),
+                    "interpolation": "prohibited",
+                    "body_axis_fallback": "prohibited",
+                    "detection_position_substitution": "prohibited",
+                },
+                "fish_heading": {
+                    "recipe_id": ("accepted_body_axis_fish_heading_polar_histogram_v1"),
+                    "source_arrays": list(BODY_HEADING_ARRAY_PATHS),
+                    "frame_collapse_policy": BODY_HEADING_FRAME_COLLAPSE_POLICY,
+                    "bin_width_deg": 10.0,
+                    "normalization": (
+                        "probability_within_semantic_panel_one_row_per_frame"
+                    ),
+                    "body_axis_fallback": "prohibited",
+                    "motion_heading_fallback": "prohibited",
+                    "detection_position_substitution": "prohibited",
+                },
+                "body_alignment_by_distance": {
+                    "recipe_id": "persisted_anatomical_alignment_distance_bins_v1",
+                    "distance_bin_recipe": (
+                        dict(body_alignment_binding["distance_bin_recipe"])
+                        if body_alignment_binding is not None
+                        else None
+                    ),
+                    "distance_surface": "base/relative_distance_physical",
+                    "alignment_definition": "cos(body_bearing_deg)",
+                    "lateral_definition": "sin(body_bearing_deg)",
+                    "viewer_rebinning": "prohibited",
+                    "viewer_scientific_groupby": "prohibited",
+                    "body_axis_fallback": "prohibited",
+                    "motion_heading_fallback": "prohibited",
+                    "detection_position_substitution": "prohibited",
                 },
                 "trajectory_overlays": {
                     "algorithm": ("source_order_uniform_plus_coordinate_extrema_v1"),
@@ -1135,6 +1317,43 @@ def discover_exact_chaser_successor_options(
                         "source_order_uniform_endpoint_preserving_v1"
                     ),
                     "legacy_classifier_fallback": "prohibited",
+                },
+                "gaze_tracking": {
+                    "recipe_id": "persisted_exact_body_frame_gaze_tracking_v1",
+                    "row_source": "persisted_acquisition_frame_x_eye_x_chaser",
+                    "summary_source": "persisted_semantic_role_x_eye_x_chaser",
+                    "event_source": "persisted_contiguous_lock_on_intervals",
+                    "accessible_range": "persisted_empirical_eye_quantiles",
+                    "lock_threshold": "persisted_degrees",
+                    "rotated_spatial_controls": (
+                        "persisted_reviewed_arena_rotations_with_collision_exclusion"
+                    ),
+                    "dynamic_lag_tracking": (
+                        "persisted_zero_lag_and_causal_best_lag_summaries"
+                    ),
+                    "world_frame_gaze": "prohibited",
+                    "body_axis_fallback": "prohibited",
+                    "viewer_scientific_recomputation": False,
+                },
+                "epoch_behavior": {
+                    "recipe_id": "persisted_semantic_v2_epoch_motion_bouts_v1",
+                    "summary_source": "persisted_per_epoch_fish",
+                    "bout_distribution_source": ("persisted_per_epoch_bout_histograms"),
+                    "ibi_distribution_source": (
+                        "persisted_per_epoch_inter_bout_interval_histograms"
+                    ),
+                    "speed_level": (
+                        epoch_behavior_binding["parameters"]["physical_speed_level"]
+                        if epoch_behavior_binding is not None
+                        else None
+                    ),
+                    "rate_denominator": "valid_tracked_duration_s",
+                    "spatial_metrics": (
+                        "omitted_requires_separately_selected_position_provider"
+                    ),
+                    "viewer_epoch_recomputation": "prohibited",
+                    "viewer_rebinning": "prohibited",
+                    "viewer_scientific_recomputation": False,
                 },
                 "scientific_recomputation": False,
                 "interpolation": "prohibited",
