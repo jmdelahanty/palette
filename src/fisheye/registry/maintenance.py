@@ -16,7 +16,6 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, NoReturn, Optio
 from .db import (
     Registry,
     RegistryPaths,
-    _import_zarr,
 )
 from .extractors.crop import _extract_crop_quality_rows
 from .extractors.detect_performance import _extract_detect_performance_rows
@@ -29,17 +28,10 @@ from .extractors.masks import (
     _extract_subject_mask_performance_rows,
 )
 from .extractors.quality import _extract_detect_quality_rows, _extract_keypoint_quality_rows
-from .recording_identity_authority import (
-    RecordingIdentityAuthorityError,
-    recording_directory_for_source_target,
-)
+from .recording_identity_authority import recording_directory_for_source_target
 from .registered_geometry_readiness import project_registered_geometry_stages
+from .zarr_open import import_zarr as _import_zarr
 from fisheye.shared.experiment_setup import subdish_required
-from fisheye.shared.source_recording_identity import (
-    SOURCE_RECORDING_IDENTITY_PROFILE,
-    SourceRecordingIdentityError,
-    load_source_recording_identity_profile,
-)
 from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR,
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3,
@@ -825,39 +817,9 @@ def _backfill_recording_entities(
             continue
 
         recordings_scanned += 1
-        has_root_metadata = any(
-            (zarr_path / name).is_file() for name in ("zarr.json", ".zgroup")
-        )
-        try:
-            source_profile = (
-                load_source_recording_identity_profile(zarr_path)
-                if has_root_metadata
-                else None
-            )
-        except SourceRecordingIdentityError as exc:
-            raise RecordingIdentityAuthorityError(
-                "current-profile source evidence is invalid and requires "
-                "receipt-bound finalization before registry maintenance"
-            ) from exc
-        authority_binding = registry.conn.execute(
-            """
-            SELECT 1 FROM recording_import_receipt_bindings
-            WHERE dataset_id = ? LIMIT 1;
-            """,
-            (dataset_id,),
-        ).fetchone()
-        if (
-            source_profile == SOURCE_RECORDING_IDENTITY_PROFILE
-            and authority_binding is None
-        ):
-            raise RecordingIdentityAuthorityError(
-                "profiled current source recordings require receipt-bound "
-                "finalization before registry maintenance"
-            )
-        verified_import = (
-            registry.read_verified_recording_import(dataset_id)
-            if authority_binding is not None
-            else None
+        verified_import = registry.resolve_recording_import_admission(
+            dataset_id=dataset_id,
+            zarr_path=zarr_path,
         )
         recording_dir = (
             recording_directory_for_source_target(zarr_path.resolve())

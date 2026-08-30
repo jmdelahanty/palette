@@ -1,5 +1,5 @@
 {
-  "bare_call_count": 221,
+  "bare_call_count": 220,
   "entries": {
     "src/fisheye/analysis/analyze_goodcopbadcop_approach_avoidance.py::roles::735bd058ae5cee80f754": 1,
     "src/fisheye/analysis/analyze_goodcopbadcop_bout_kinematics_distance.py::load::d1aedb517384921480ea": 1,
@@ -69,7 +69,6 @@
     "src/fisheye/inference/predict_pose.py::_collect_no_roi_payload::42c9c744b7077c730974": 1,
     "src/fisheye/preprocessing/background.py::compute_background::a25b3aabcee91128c32a": 2,
     "src/fisheye/registry/chaser_metadata.py::_open_root::f3b8901b041ca6fbc643": 1,
-    "src/fisheye/registry/db.py::_open_zarr_group_non_consolidated::f4eef84a2ce3b565c436": 1,
     "src/fisheye/registry/extractors/crop.py::_open_child_group::80f9c70b7412620ab19e": 1,
     "src/fisheye/registry/extractors/crop.py::_open_child_group::8bdce55fc3cabc65ab82": 1,
     "src/fisheye/registry/extractors/detect_performance.py::_open_child_group::80f9c70b7412620ab19e": 1,

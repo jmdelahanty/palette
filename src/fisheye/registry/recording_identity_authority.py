@@ -15,7 +15,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 import unicodedata
 from uuid import uuid4
 
@@ -31,11 +31,14 @@ from fisheye.shared.pixel_frame_authority import (
     load_persisted_acquisition_camera_authority,
 )
 from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
     SourceRecordingIdentityClaim,
     SourceRecordingIdentityError,
     load_source_recording_identity_claim,
+    load_source_recording_identity_profile,
     SOURCE_RECORDING_IDENTITY_CLAIM_SCHEMA_ID,
 )
+from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr.manifest_digest import (
     canonical_json_bytes,
     canonical_json_sha256,
@@ -43,6 +46,7 @@ from fisheye.shared.zarr.manifest_digest import (
 
 from . import identity as registry_identity
 from .temp_store_guard import assert_temp_store_registration_allowed
+from .zarr_open import open_zarr_group_non_consolidated
 
 
 IDENTITY_REVISION_SCHEMA_ID = "palette.registry.recording_identity_revision.v1"
@@ -127,6 +131,21 @@ class VerifiedRecordingImport:
     acquisition_ownership: BoundAcquisitionImportOwnership
     acquisition_frame: BoundAcquisitionCameraFrame
     acquisition_authority_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CurrentSourceDatasetMetadata:
+    """Non-identity dataset fields projected after authority admission."""
+
+    dataset_id: str
+    session_uuid: str
+    recording_id: str
+    zarr_use: str
+    zarr_purpose: str
+    source_layout: str | None
+    source_frame_index_path: str | None
+    source_recording_frame_index_path: str | None
+    source_frame_index_schema: str | None
 
 
 def _exact_text(value: Any, *, field: str) -> str:
@@ -760,6 +779,417 @@ def _preflight_receipt_binding(
 
 class RegistryRecordingIdentityMixin:
     """One supported writer and one verified reader for recording identity."""
+
+    def _resolve_effective_dataset_id(
+        self,
+        *,
+        base_dataset_id: str,
+        session_uuid: str | None,
+        zarr_path: Path,
+    ) -> str:
+        """Preserve legacy IDs while avoiding source-recording collisions."""
+
+        current_hash = canonical_dataset_path_hash(zarr_path)
+        row = self.conn.execute(
+            "SELECT path_hash FROM datasets WHERE dataset_id = ?;",
+            (base_dataset_id,),
+        ).fetchone()
+        existing_hash = (
+            str(row["path_hash"])
+            if row and row["path_hash"] is not None
+            else ""
+        )
+        if row is not None and existing_hash == current_hash:
+            return base_dataset_id
+
+        is_source_recording = bool(session_uuid) and "/recordings/" in str(
+            zarr_path
+        ).replace("\\", "/").lower()
+        if not is_source_recording:
+            return base_dataset_id
+
+        assert session_uuid is not None
+        candidate = f"{session_uuid}:z{current_hash[:12]}"
+        for extra in (
+            "",
+            current_hash[12:16],
+            current_hash[16:20],
+            current_hash[20:24],
+        ):
+            resolved = candidate if not extra else f"{candidate}{extra}"
+            existing = self.conn.execute(
+                "SELECT path_hash FROM datasets WHERE dataset_id = ?;",
+                (resolved,),
+            ).fetchone()
+            if existing is None or str(existing["path_hash"] or "") == current_hash:
+                return resolved
+        return f"{session_uuid}:z{current_hash}"
+
+    def resolve_effective_dataset_id(
+        self,
+        base_dataset_id: str,
+        *,
+        session_uuid: str | None,
+        zarr_path: Path,
+    ) -> str:
+        """Resolve the canonical registry dataset ID for one Zarr path."""
+
+        return self._resolve_effective_dataset_id(
+            base_dataset_id=base_dataset_id,
+            session_uuid=session_uuid,
+            zarr_path=zarr_path,
+        )
+
+    def _update_current_source_dataset_metadata(
+        self,
+        *,
+        dataset_id: str,
+        recording_id: str,
+        session_uuid: str,
+        zarr_path: Path,
+        metadata: _CurrentSourceDatasetMetadata,
+    ) -> None:
+        """Update only non-identity fields on an authority-bound source row."""
+
+        resolved_path = Path(zarr_path).expanduser().resolve()
+        cursor = self.conn.execute(
+            """
+            UPDATE datasets
+            SET artifact_kind = 'source_recording',
+                zarr_origin = 'source',
+                zarr_use = 'analysis',
+                source_layout = ?,
+                source_frame_index_path = ?,
+                source_recording_frame_index_path = ?,
+                source_frame_index_schema = ?,
+                last_seen_utc = ?,
+                status = 'active'
+            WHERE dataset_id = ?
+              AND recording_id = ?
+              AND session_uuid = ?
+              AND zarr_path = ?
+              AND path_hash = ?;
+            """,
+            (
+                metadata.source_layout,
+                metadata.source_frame_index_path,
+                metadata.source_recording_frame_index_path,
+                metadata.source_frame_index_schema,
+                utc_now(),
+                dataset_id,
+                recording_id,
+                session_uuid,
+                str(resolved_path),
+                canonical_dataset_path_hash(resolved_path),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RecordingIdentityAuthorityError(
+                "current source dataset metadata update lost its exact "
+                "identity or locator binding"
+            )
+
+    def _update_current_source_recording_metadata(
+        self,
+        *,
+        recording_id: str,
+        session_uuid: str,
+        recording_path: Path,
+        camera_id: str,
+        context: Mapping[str, Any],
+    ) -> None:
+        """Update descriptive recording fields without writing identity."""
+
+        row = self.conn.execute(
+            """
+            SELECT recording_path, camera_id
+            FROM recordings
+            WHERE recording_id = ? AND session_uuid = ?;
+            """,
+            (recording_id, session_uuid),
+        ).fetchone()
+        if row is None:
+            raise RecordingIdentityAuthorityError(
+                "current source recording metadata requires its authority row"
+            )
+        canonical_recording_path = str(Path(recording_path).resolve())
+        for field, expected in (
+            ("recording_path", canonical_recording_path),
+            ("camera_id", camera_id),
+        ):
+            observed = normalize_attr(row[field])
+            if observed is not None and observed != expected:
+                raise RecordingIdentityAuthorityError(
+                    f"recordings.{field} conflicts with verified source import: "
+                    f"observed={observed!r}, expected={expected!r}"
+                )
+        optional_fields = (
+            "recording_name",
+            "started_utc",
+            "recording_type",
+            "recording_subtype",
+            "behavior_mode",
+            "artifact_schema_id",
+            "experiment_context_status",
+            "experiment_context_source",
+            "experiment_context_status_detail",
+            "stimulus_runs_available",
+            "rig_id",
+            "arena_id",
+            "canvas_name",
+            "protocol_name",
+            "dish_design",
+        )
+        updates = {
+            field: context[field]
+            for field in optional_fields
+            if context.get(field) is not None
+        }
+        updates.update(
+            recording_path=canonical_recording_path,
+            camera_id=camera_id,
+            updated_utc=utc_now(),
+        )
+        assignments = ", ".join(f"{field} = ?" for field in updates)
+        cursor = self.conn.execute(
+            f"""
+            UPDATE recordings SET {assignments}
+            WHERE recording_id = ? AND session_uuid = ?;
+            """,
+            (*updates.values(), recording_id, session_uuid),
+        )
+        if cursor.rowcount != 1:
+            raise RecordingIdentityAuthorityError(
+                "current source recording metadata update lost its exact identity"
+            )
+
+    def _project_verified_current_source_metadata(
+        self,
+        root: Any,
+        verified: VerifiedRecordingImport,
+    ) -> None:
+        """Project only metadata outside the verified identity/locator claim."""
+
+        identity = verified.identity
+        metadata = _CurrentSourceDatasetMetadata(
+            dataset_id=identity.dataset_id,
+            session_uuid=identity.session_uuid,
+            recording_id=identity.recording_id,
+            zarr_use="analysis",
+            zarr_purpose="analysis",
+            source_layout=normalize_attr(root.attrs.get("source_layout")),
+            source_frame_index_path=normalize_attr(
+                root.attrs.get("source_frame_index_path")
+            ),
+            source_recording_frame_index_path=normalize_attr(
+                root.attrs.get("source_recording_frame_index_path")
+            ),
+            source_frame_index_schema=normalize_attr(
+                root.attrs.get("source_frame_index_schema")
+            ),
+        )
+        self._update_current_source_dataset_metadata(
+            dataset_id=identity.dataset_id,
+            recording_id=identity.recording_id,
+            session_uuid=identity.session_uuid,
+            zarr_path=identity.zarr_path,
+            metadata=metadata,
+        )
+        self._project_nonidentity_from_root(
+            root,
+            identity.zarr_path,
+            dataset_id=identity.dataset_id,
+            metadata=metadata,
+            recording_id=identity.recording_id,
+            zarr_use="analysis",
+            authoritative_current_source=True,
+            verified_camera_id=verified.acquisition_frame.record.camera_id,
+        )
+
+    def finalize_current_source_import(
+        self,
+        *,
+        zarr_path: Path,
+        receipt: object,
+        decided_by: str,
+    ) -> VerifiedRecordingImport:
+        """Bind one newly minted receipt and project its non-identity metadata."""
+
+        if receipt is None:
+            raise RecordingIdentityAuthorityError(
+                "current source finalization requires the exact in-memory "
+                "import receipt"
+            )
+        resolved_path = Path(zarr_path).expanduser().resolve()
+        root = open_zarr_group_non_consolidated(resolved_path, mode="r")
+        with self._transaction_context():
+            projected = self.project_regular_source_recording_identity(
+                zarr_path=resolved_path,
+                import_receipt=receipt,
+                decided_by=decided_by,
+            )
+            verified = self.read_verified_recording_import(projected.dataset_id)
+            self._project_verified_current_source_metadata(root, verified)
+            return self.read_verified_recording_import(projected.dataset_id)
+
+    def synchronize_recording_import(
+        self,
+        *,
+        zarr_path: Path,
+        receipt: object | None,
+        decided_by: str,
+    ) -> str:
+        """Dispatch one artifact through its sole supported registry boundary."""
+
+        profile = load_source_recording_identity_profile(zarr_path)
+        if profile == SOURCE_RECORDING_IDENTITY_PROFILE:
+            verified = (
+                self.refresh_bound_current_source_import(zarr_path=zarr_path)
+                if receipt is None
+                else self.finalize_current_source_import(
+                    zarr_path=zarr_path,
+                    receipt=receipt,
+                    decided_by=decided_by,
+                )
+            )
+            return verified.identity.dataset_id
+        if receipt is not None:
+            raise RecordingIdentityAuthorityError(
+                "an import receipt cannot be applied to an unprofiled artifact"
+            )
+        dataset_id = self.scan_zarr(zarr_path)
+        if dataset_id is None:
+            raise RecordingIdentityAuthorityError(
+                "registry synchronization found no dataset at the target"
+            )
+        return str(dataset_id)
+
+    def resolve_recording_import_admission(
+        self,
+        *,
+        dataset_id: str,
+        zarr_path: Path,
+    ) -> VerifiedRecordingImport | None:
+        """Resolve current authority or the explicit unprofiled legacy state."""
+
+        has_root_metadata = any(
+            (zarr_path / name).is_file() for name in ("zarr.json", ".zgroup")
+        )
+        try:
+            profile = (
+                load_source_recording_identity_profile(zarr_path)
+                if has_root_metadata
+                else None
+            )
+        except SourceRecordingIdentityError as exc:
+            raise RecordingIdentityAuthorityError(
+                "current-profile source evidence is invalid and requires "
+                "receipt-bound finalization before registry maintenance"
+            ) from exc
+        binding = self.conn.execute(
+            """
+            SELECT 1 FROM recording_import_receipt_bindings
+            WHERE dataset_id = ? LIMIT 1;
+            """,
+            (dataset_id,),
+        ).fetchone()
+        if profile == SOURCE_RECORDING_IDENTITY_PROFILE and binding is None:
+            raise RecordingIdentityAuthorityError(
+                "profiled current source recordings require receipt-bound "
+                "finalization before registry maintenance"
+            )
+        return (
+            self.read_verified_recording_import(dataset_id)
+            if binding is not None
+            else None
+        )
+
+    def refresh_bound_current_source_import(
+        self,
+        *,
+        zarr_path: Path,
+    ) -> VerifiedRecordingImport:
+        """Refresh metadata using only the receipt already bound in SQLite."""
+
+        resolved_path = Path(zarr_path).expanduser().resolve()
+        root = open_zarr_group_non_consolidated(resolved_path, mode="r")
+        with self._transaction_context():
+            verified = self.read_verified_recording_import_by_path(resolved_path)
+            self._project_verified_current_source_metadata(root, verified)
+            return self.read_verified_recording_import(verified.identity.dataset_id)
+
+    def read_verified_recording_import_by_path(
+        self,
+        zarr_path: Path,
+    ) -> VerifiedRecordingImport:
+        """Read the one receipt-bound current import at an immutable locator."""
+
+        resolved_path = Path(zarr_path).expanduser().resolve()
+        rows = self.conn.execute(
+            """
+            SELECT d.dataset_id
+            FROM datasets d
+            INNER JOIN recording_import_receipt_bindings b
+                ON b.dataset_id = d.dataset_id
+            WHERE d.zarr_path = ? AND d.path_hash = ?
+            ORDER BY d.dataset_id;
+            """,
+            (
+                str(resolved_path),
+                canonical_dataset_path_hash(resolved_path),
+            ),
+        ).fetchall()
+        if not rows:
+            raise RecordingImportBindingNotFound(
+                "no receipt-bound current source import exists at the canonical locator"
+            )
+        if len(rows) != 1:
+            raise RecordingIdentityAuthorityError(
+                "current source operation found multiple receipt-bound datasets "
+                "at one canonical locator"
+            )
+        verified = self.read_verified_recording_import(str(rows[0]["dataset_id"]))
+        if verified.identity.zarr_path != resolved_path:
+            raise RecordingIdentityAuthorityError(
+                "receipt-bound dataset locator differs from the operation target"
+            )
+        return verified
+
+    def _profile_context_fallbacks(self, dataset_id: str) -> dict[str, Any]:
+        """Resolve recording/zarr_use/genotype/dpf fallbacks for extractors."""
+
+        row = self.conn.execute(
+            """
+            SELECT
+                d.recording_id AS recording_id,
+                d.zarr_use AS zarr_use,
+                p.genotype AS genotype,
+                p.dpf_at_acquisition AS dpf_at_acquisition
+            FROM datasets d
+            LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
+            WHERE d.dataset_id = ?
+            LIMIT 1;
+            """,
+            (str(dataset_id),),
+        ).fetchone()
+        if row is None:
+            return {
+                "recording_id": None,
+                "zarr_use": None,
+                "genotype": None,
+                "dpf_at_acquisition": None,
+            }
+        dpf_raw = row["dpf_at_acquisition"]
+        try:
+            dpf = int(dpf_raw) if dpf_raw is not None else None
+        except (TypeError, ValueError):
+            dpf = None
+        return {
+            "recording_id": normalize_attr(row["recording_id"]),
+            "zarr_use": normalize_attr(row["zarr_use"]),
+            "genotype": normalize_attr(row["genotype"]),
+            "dpf_at_acquisition": dpf,
+        }
 
     def project_regular_source_recording_identity(
         self,

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 import zarr
 
-import fisheye.registry.db as registry_db
+import fisheye.registry.recording_identity_authority as authority_module
 from fisheye.registry.db import Registry
 from fisheye.registry.recording_identity_authority import (
     RecordingIdentityAuthorityError,
@@ -393,7 +393,7 @@ def test_synchronize_current_source_with_receipt_dispatches_to_finalizer(
     registry = Registry(tmp_path / "registry.sqlite")
     try:
         monkeypatch.setattr(
-            registry_db,
+            authority_module,
             "load_source_recording_identity_profile",
             lambda _path: SOURCE_RECORDING_IDENTITY_PROFILE,
         )
@@ -450,7 +450,7 @@ def test_synchronize_current_source_without_receipt_dispatches_to_bound_refresh(
     registry = Registry(tmp_path / "registry.sqlite")
     try:
         monkeypatch.setattr(
-            registry_db,
+            authority_module,
             "load_source_recording_identity_profile",
             lambda _path: SOURCE_RECORDING_IDENTITY_PROFILE,
         )
@@ -496,7 +496,7 @@ def test_synchronize_unprofiled_with_receipt_rejects_before_legacy_scan(
     registry = Registry(tmp_path / "registry.sqlite")
     try:
         monkeypatch.setattr(
-            registry_db,
+            authority_module,
             "load_source_recording_identity_profile",
             lambda _path: None,
         )
@@ -529,7 +529,7 @@ def test_synchronize_unprofiled_without_receipt_delegates_to_legacy_scan(
     registry = Registry(tmp_path / "registry.sqlite")
     try:
         monkeypatch.setattr(
-            registry_db,
+            authority_module,
             "load_source_recording_identity_profile",
             lambda _path: None,
         )
