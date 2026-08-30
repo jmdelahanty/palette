@@ -14,6 +14,7 @@ from fisheye.cluster.keypoints.v2_finalization import (
     build_clipped_keypoint_v2_finalization_fragment,
 )
 from fisheye.cluster.lsf import LsfResources, LsfWorkflowFragment
+from fisheye.cluster.lsf.runtime import RUNTIME_JOB_ID_TOKEN, RUNTIME_USER_TOKEN
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,153 @@ class ClippedStorageKeypointChainModules:
 
     storage: ClippedStorageFinalizationModule
     keypoints: ClippedKeypointV2FinalizationModule
+
+
+@dataclass(frozen=True)
+class RecordingCropV2FinalizationInputs:
+    """One recording-refined authority to one sealed crop-v2 candidate."""
+
+    workflow_id: str
+    family: str
+    target_id: str
+    analysis_zarr: Path
+    refined_run_id: str
+    crop_run_id: str
+    crop_purpose: str
+    roi_width: int
+    roi_height: int
+    camera_id: str
+    registered_gate_requirement: str
+    registered_gate_run: str | None
+    repo: Path
+    run_root: Path
+    upstream_job_keys: tuple[str, ...] = ()
+    required_artifacts: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.registered_gate_requirement not in {"off", "if_available", "required"}:
+            raise ValueError("Unsupported registered detection gate requirement.")
+        if self.registered_gate_requirement == "required" and not str(
+            self.registered_gate_run or ""
+        ).strip():
+            raise ValueError("Required crop geometry needs one exact gate run.")
+        for name in ("roi_width", "roi_height"):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{name} must be a positive exact integer.")
+
+
+@dataclass(frozen=True)
+class RecordingCropV2FinalizationOutputs:
+    refined_archive: Path
+    refined_run_id: str
+    crop_archive: Path
+    crop_run_id: str
+    crop_result_path: Path
+    terminal_job_key: str
+    crop_artifact_key: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "refined_archive": str(self.refined_archive),
+            "refined_run_id": self.refined_run_id,
+            "crop_archive": str(self.crop_archive),
+            "crop_run_id": self.crop_run_id,
+            "crop_result_path": str(self.crop_result_path),
+            "terminal_job_key": self.terminal_job_key,
+            "crop_artifact_key": self.crop_artifact_key,
+            "selector_eligible": False,
+            "registry_updated": False,
+            "publication_partition": "complete_recording_snapshot",
+        }
+
+
+@dataclass(frozen=True)
+class RecordingCropV2FinalizationModule:
+    fragment: LsfWorkflowFragment
+    outputs: RecordingCropV2FinalizationOutputs
+
+
+def build_recording_crop_v2_finalization_fragment(
+    inputs: RecordingCropV2FinalizationInputs,
+) -> RecordingCropV2FinalizationModule:
+    """Publish crop-v2 directly from one finalized recording refined run."""
+
+    target = safe_component(inputs.target_id, default="target", max_length=56)
+    result_path = inputs.run_root / "storage_finalization" / f"{target}.crop.json"
+    scratch_root = Path(
+        f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/palette_crop_v2_{target}"
+    )
+    command: list[str] = [
+        "scripts/py",
+        "-m",
+        "fisheye.utils.publish_crop_geometry_candidate",
+        "--analysis-zarr",
+        str(inputs.analysis_zarr),
+        "--run-id",
+        inputs.crop_run_id,
+        "--purpose",
+        inputs.crop_purpose,
+        "--roi-width",
+        str(inputs.roi_width),
+        "--roi-height",
+        str(inputs.roi_height),
+        "--camera-id",
+        inputs.camera_id,
+        "--source-refined-run",
+        inputs.refined_run_id,
+        "--registered-gate-requirement",
+        inputs.registered_gate_requirement,
+        "--scratch-root",
+        str(scratch_root),
+        "--result-json",
+        str(result_path),
+    ]
+    if inputs.registered_gate_run is not None:
+        command.extend(("--registered-gate-run", inputs.registered_gate_run))
+    job_key = f"recording_crop_v2_finalize:{target}"
+    job = build_job(
+        workflow_id=inputs.workflow_id,
+        family=inputs.family,
+        repo=inputs.repo,
+        run_root=inputs.run_root,
+        job_key=job_key,
+        stage="recording_crop_geometry_finalize",
+        command=tuple(command),
+        resources=LsfResources(
+            queue="local", ncores=4, mem_gb=48, walltime="2:00", span_hosts=1
+        ),
+        upstream=inputs.upstream_job_keys,
+        expected_outputs=(
+            result_path,
+            inputs.analysis_zarr / "crop_runs" / inputs.crop_run_id / "zarr.json",
+        ),
+    )
+    artifact_key = f"selector_ineligible_crop_v2:{target}"
+    outputs = RecordingCropV2FinalizationOutputs(
+        refined_archive=inputs.analysis_zarr,
+        refined_run_id=inputs.refined_run_id,
+        crop_archive=inputs.analysis_zarr,
+        crop_run_id=inputs.crop_run_id,
+        crop_result_path=result_path,
+        terminal_job_key=job_key,
+        crop_artifact_key=artifact_key,
+    )
+    fragment = LsfWorkflowFragment(
+        fragment_id=f"recording_crop_v2_finalization:{target}",
+        jobs=(job,),
+        requires=inputs.required_artifacts,
+        provides=(artifact_key,),
+        metadata={
+            "module": "recording_crop_v2_finalization",
+            "target_id": inputs.target_id,
+            "publication_partition": "complete_recording_snapshot",
+            "selector_activation": "none_direct_path_only",
+            "registry_update": False,
+            "outputs": outputs.to_json(),
+        },
+    )
+    return RecordingCropV2FinalizationModule(fragment=fragment, outputs=outputs)
 
 
 def build_clipped_storage_finalization_fragment(
@@ -303,7 +451,11 @@ __all__ = [
     "ClippedStorageFinalizationModule",
     "ClippedStorageFinalizationOutputs",
     "ClippedStorageKeypointChainModules",
+    "RecordingCropV2FinalizationInputs",
+    "RecordingCropV2FinalizationModule",
+    "RecordingCropV2FinalizationOutputs",
     "StrictClipRefinedDetectionInput",
     "build_clipped_storage_finalization_fragment",
     "build_clipped_storage_keypoint_chain_fragments",
+    "build_recording_crop_v2_finalization_fragment",
 ]

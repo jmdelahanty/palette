@@ -43,6 +43,8 @@ from fisheye.cluster.recording_layout import (
     whole_video_recording_target,
 )
 from fisheye.shared.flat_roi_cache import FLAT_ROI_CACHE_LAYOUT, FLAT_ROI_CACHE_SCHEMA
+from fisheye.shared.model_input_transform import resolve_model_input_transform
+from fisheye.shared.pose_model_input_contract import PoseModelInputRuntimePlan
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -282,6 +284,9 @@ def _build_fixture_plan(
     registered_gate_requirement: str = "off",
     registered_gate_run: str | None = None,
     workflow_scope: str = workflow.WORKFLOW_SCOPE_FULL,
+    keypoint_publication_profile: str = (
+        workflow.COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE
+    ),
 ) -> workflow.ClippedInferencePlan:
     indexed_work_unit_count = (
         work_unit_count
@@ -306,6 +311,8 @@ def _build_fixture_plan(
     model = tmp_path / "models" / "model.pt"
     model.parent.mkdir()
     model.write_bytes(b"model")
+    pose_model_input_contract_path = tmp_path / "models" / "pose_input_contract.json"
+    pose_model_input_contract_path.write_text("{}\n", encoding="utf-8")
     detect_binding = workflow.ModelBinding(
         "detect", "detect_set", "detect_run", model, "d" * 64
     )
@@ -323,6 +330,58 @@ def _build_fixture_plan(
         workflow, "_resolve_subject_binding", lambda **_kwargs: subject_binding
     )
     monkeypatch.setattr(workflow, "_verify_binding", lambda _binding: None)
+    monkeypatch.setattr(
+        workflow,
+        "_resolve_pose_schema_binding_document",
+        lambda **_kwargs: {
+            "schema_id": "palette.pose_model_schema_binding",
+            "schema_version": 1,
+            "binding_sha256": "b" * 64,
+            "pose_schema": {
+                "keypoint_labels": [
+                    "swim_bladder",
+                    "eye_left",
+                    "eye_right",
+                    "snout_tip",
+                    "tail_tip",
+                ],
+                "edges": [[0, 1], [0, 2], [1, 2], [1, 3], [2, 3], [0, 4]],
+            },
+        },
+    )
+    model_input_runtime = PoseModelInputRuntimePlan(
+        transform=resolve_model_input_transform(
+            (512, 512), mode="identity", model_hw=(512, 512)
+        ),
+        network_shape_hw=(256, 256),
+        model_stride=32,
+        input_mode="numpy-list",
+        profile_id="fixture_pose_runtime_v1",
+        classification="training_source_geometry_exact",
+        contract_path=pose_model_input_contract_path,
+        contract_sha256="a" * 64,
+        contract_payload_digest="b" * 64,
+    )
+    model_input_contract = SimpleNamespace(
+        training_source_shape_hw=(512, 512),
+        document={
+            "schema_id": "palette.pose_model_input_contract",
+            "schema_version": 1,
+            "payload_digest": "b" * 64,
+            "payload": {"fixture": True},
+        },
+        plan_for_native_shape=lambda _shape: model_input_runtime,
+        to_json=lambda: {
+            "path": str(pose_model_input_contract_path),
+            "sha256": "a" * 64,
+            "payload_digest": "b" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        workflow,
+        "load_pose_model_input_contract",
+        lambda *_args, **_kwargs: model_input_contract,
+    )
     monkeypatch.setattr(workflow, "_repo_commit", lambda _repo: "c" * 40)
     monkeypatch.setattr(
         workflow,
@@ -402,6 +461,7 @@ def _build_fixture_plan(
         workflow_scope=workflow_scope,
         pose_set_id="pose_set",
         pose_run_id="pose_run",
+        pose_model_input_contract_path=pose_model_input_contract_path,
         subject_mask_set_id="mask_set",
         subject_mask_run_id="mask_run",
         cache_root=tmp_path / "cache_root",
@@ -410,8 +470,110 @@ def _build_fixture_plan(
         encoded_mask_packages=encoded_mask_packages,
         max_active_targets=max_active_targets,
         subject_mask_publication_profile=subject_mask_publication_profile,
+        keypoint_publication_profile=keypoint_publication_profile,
         registered_gate_requirement=registered_gate_requirement,
         registered_gate_run=registered_gate_run,
+    )
+
+
+def test_full_clipped_plan_defaults_to_strict_v2_and_fails_closed_before_io(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="fails closed.*finalize_keypoint_shards"):
+        workflow.build_plan(
+            targets=(_target(tmp_path),),
+            run_label="strict_v2_default",
+            repo=tmp_path / "repo",
+            registry_path=tmp_path / "registry.sqlite",
+            run_root=tmp_path / "run",
+            detection_set_id="detect_set",
+            detection_run_id="detect_run",
+            pose_set_id="pose_set",
+            pose_run_id="pose_run",
+            subject_mask_set_id="mask_set",
+            subject_mask_run_id="mask_run",
+        )
+
+
+def test_canonical_keypoint_scope_uses_strict_v2_without_ordinary_finalizer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        workflow_scope=workflow.WORKFLOW_SCOPE_KEYPOINTS,
+        keypoint_publication_profile=workflow.STRICT_V2_KEYPOINT_PUBLICATION_PROFILE,
+        work_unit_count=2,
+    )
+    target = plan.target_plans[0]
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+    rendered_commands = "\n".join(" ".join(job.command) for job in jobs.values())
+
+    assert plan.workflow_scope == workflow.WORKFLOW_SCOPE_KEYPOINTS
+    assert plan.keypoint_publication_profile == (
+        workflow.STRICT_V2_KEYPOINT_PUBLICATION_PROFILE
+    )
+    assert plan.keypoint_pose_schema_binding is not None
+    assert plan.keypoint_preprocessing_manifest is not None
+    assert "fisheye.utils.finalize_keypoint_shards" not in rendered_commands
+    assert "fisheye.utils.finalize_clipped_keypoint_v2_bundle" in rendered_commands
+    assert "fisheye.utils.create_clipped_collection_proxy_crop_run" not in (
+        rendered_commands
+    )
+    assert f"subject_masks_array:{target_safe}" not in jobs
+    assert f"keypoint_finalize:{target_safe}" not in jobs
+    assert f"proxy:{target_safe}" not in jobs
+
+    crop_job = jobs[f"recording_crop_v2_finalize:{target_safe}"]
+    crop_command = " ".join(crop_job.command)
+    assert "fisheye.utils.publish_crop_geometry_candidate" in crop_command
+    assert "--roi-width 512" in crop_command
+    assert "--roi-height 512" in crop_command
+    package_array = jobs[f"keypoint_pixel_packages:{target_safe}"]
+    package_task = next(iter(_execution_tasks(package_array).values()))
+    assert "fisheye.utils.build_crop_pixel_work_package" in package_task.command
+    assert "--bind-clipped-cache-to-crop-geometry" in package_task.command
+    assert "--roi-cache-manifest" in package_task.command
+
+    keypoint_array = jobs[f"keypoints_array:{target_safe}"]
+    keypoint_task = next(iter(_execution_tasks(keypoint_array).values()))
+    assert "--roi-work-package-manifest" in keypoint_task.command
+    assert "--roi-cache-manifest" not in keypoint_task.command
+    assert "--coordinate-contract-mode" in keypoint_task.command
+    mode_index = keypoint_task.command.index("--coordinate-contract-mode")
+    assert keypoint_task.command[mode_index + 1] == "legacy_noncanonical"
+    imgsz_index = keypoint_task.command.index("--imgsz")
+    model_size_index = keypoint_task.command.index("--model-input-size")
+    assert keypoint_task.command[imgsz_index + 1] == "256"
+    assert keypoint_task.command[model_size_index + 1] == "512"
+
+    fragments = {
+        fragment["fragment_id"]: fragment
+        for fragment in plan.lsf_workflow.to_json()["metadata"]["fragments"]
+    }
+    strict_fragment = fragments[f"keypoint_v2_finalization:{target_safe}"]
+    assert target["canonical_crop_geometry"]["crop_artifact_key"] in (
+        strict_fragment["requires"]
+    )
+    assert plan.lsf_workflow.metadata["ordinary_shard_finalizer_permitted"] is False
+
+    workflow.materialize_plan_bundle(plan)
+    pose_path = plan.run_root / "contracts" / "keypoint_pose_schema_binding.json"
+    preprocessing_path = plan.run_root / "contracts" / "keypoint_preprocessing.json"
+    model_input_contract_path = (
+        plan.run_root / "contracts" / "pose_model_input_contract.json"
+    )
+    assert json.loads(pose_path.read_text(encoding="utf-8")) == dict(
+        plan.keypoint_pose_schema_binding
+    )
+    assert json.loads(preprocessing_path.read_text(encoding="utf-8")) == dict(
+        plan.keypoint_preprocessing_manifest
+    )
+    assert json.loads(model_input_contract_path.read_text(encoding="utf-8")) == dict(
+        plan.keypoint_model_input_contract_document
     )
 
 
@@ -549,6 +711,16 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
         f"subject_masks_array:{target_safe}",
         f"keypoint_refine:{target_safe}",
     )
+    compatibility_finalizer = jobs[f"keypoint_finalize:{target_safe}"]
+    compatibility_command = " ".join(compatibility_finalizer.command)
+    assert "fisheye.utils.finalize_keypoint_shards" in compatibility_command
+    assert (
+        "--publication-profile compatibility_ordinary_v1"
+        in compatibility_command
+    )
+    assert plan.keypoint_publication_profile == (
+        workflow.COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE
+    )
     assert f"keypoints:{target_safe}:{clip_id}" in _execution_tasks(keypoint_array)
     assert f"subject_masks:{target_safe}:{clip_id}" in _execution_tasks(
         subject_mask_array
@@ -651,6 +823,7 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assert fragments[3]["requires"] == [strict_output["evidence"]["artifact_key"]]
     assert fragments[4]["requires"] == [strict_output["storage"]["crop_artifact_key"]]
     assert fragments[5]["requires"] == [f"crop_roi_cache:{target_safe}"]
+    assert fragments[5]["metadata"]["canonical_dependency_eligible"] is False
     assert fragments[6]["requires"] == [f"crop_roi_cache:{target_safe}"]
     assert fragments[7]["requires"] == [
         f"raw_subject_masks:{target_safe}",

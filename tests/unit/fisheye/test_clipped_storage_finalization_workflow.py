@@ -4,9 +4,11 @@ from pathlib import Path
 
 from fisheye.cluster.clipped_storage_finalization import (
     ClippedStorageFinalizationInputs,
+    RecordingCropV2FinalizationInputs,
     StrictClipRefinedDetectionInput,
     build_clipped_storage_finalization_fragment,
     build_clipped_storage_keypoint_chain_fragments,
+    build_recording_crop_v2_finalization_fragment,
 )
 from tests.unit.fisheye.test_clipped_keypoint_v2_finalization_workflow import (
     _inputs as keypoint_inputs,
@@ -66,6 +68,42 @@ def test_fragment_finalizes_refined_then_crop_without_selectors(tmp_path: Path) 
     assert module.fragment.metadata["physical_layout_source"] == (
         "shared_byte_planners"
     )
+    assert module.outputs.to_json()["selector_eligible"] is False
+
+
+def test_recording_crop_fragment_consumes_one_canonical_refined_snapshot(
+    tmp_path: Path,
+) -> None:
+    module = build_recording_crop_v2_finalization_fragment(
+        RecordingCropV2FinalizationInputs(
+            workflow_id="wf",
+            family="analysis.clipped",
+            target_id="sleepyfish",
+            analysis_zarr=tmp_path / "recording_analysis.zarr",
+            refined_run_id="refined_recording",
+            crop_run_id="crop_v2_recording",
+            crop_purpose="keypoints_subject_masks",
+            roi_width=512,
+            roi_height=512,
+            camera_id="2010095",
+            registered_gate_requirement="required",
+            registered_gate_run="gate_exact",
+            repo=tmp_path / "repo",
+            run_root=tmp_path / "run",
+            upstream_job_keys=("recording_refined:sleepyfish",),
+            required_artifacts=("canonical_refined_detection:sleepyfish",),
+        )
+    )
+
+    assert len(module.fragment.jobs) == 1
+    job = module.fragment.jobs[0]
+    rendered = " ".join(job.command)
+    assert "fisheye.utils.publish_crop_geometry_candidate" in rendered
+    assert "--source-refined-run refined_recording" in rendered
+    assert "--registered-gate-requirement required" in rendered
+    assert "--registered-gate-run gate_exact" in rendered
+    assert job.dependency.upstream_job_keys == ("recording_refined:sleepyfish",)
+    assert module.fragment.requires == ("canonical_refined_detection:sleepyfish",)
     assert module.outputs.to_json()["selector_eligible"] is False
 
 
