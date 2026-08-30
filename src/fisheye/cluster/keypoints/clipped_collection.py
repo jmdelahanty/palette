@@ -23,6 +23,12 @@ from fisheye.cluster.keypoints.common import (
     build_keypoint_run_names,
     resolve_keypoint_storage,
 )
+from fisheye.shared.keypoint_publication_profile import (
+    COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
+    KEYPOINT_PUBLICATION_PROFILES,
+    STRICT_V2_KEYPOINT_PUBLICATION_PROFILE,
+    require_compatibility_keypoint_shard_aggregate,
+)
 from fisheye.cluster.lsf import (
     CommandRunner,
     LsfDependency,
@@ -226,6 +232,7 @@ class WorkflowPlan:
     cache_dir_root: Path
     log_dir: Path
     keypoint_storage: dict[str, Any]
+    keypoint_publication_profile: str
     clips: tuple[ClipPlan, ...]
     merged_proxy_crop_run: str
     keypoint_collection_run: str
@@ -249,6 +256,7 @@ class WorkflowPlan:
             "cache_dir_root": str(self.cache_dir_root),
             "log_dir": str(self.log_dir),
             "keypoint_storage": self.keypoint_storage,
+            "keypoint_publication_profile": self.keypoint_publication_profile,
             "clips": [clip.to_json() for clip in self.clips],
             "merged_proxy_crop_run": self.merged_proxy_crop_run,
             "keypoint_collection_run": self.keypoint_collection_run,
@@ -279,6 +287,7 @@ def build_plan(
     log_dir: Path | None,
     pose_schema: str,
     batch_size: int,
+    keypoint_publication_profile: str = STRICT_V2_KEYPOINT_PUBLICATION_PROFILE,
     keypoint_roi_shard_rows: int | None = DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
     keypoint_frame_shard_rows: int = DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
     device: str,
@@ -300,6 +309,20 @@ def build_plan(
     overwrite_proxies: bool,
     overwrite_final_outputs: bool,
 ) -> WorkflowPlan:
+    resolved_keypoint_profile = str(keypoint_publication_profile).strip()
+    if resolved_keypoint_profile not in KEYPOINT_PUBLICATION_PROFILES:
+        raise ValueError(
+            "Unsupported keypoint publication profile: "
+            f"{resolved_keypoint_profile!r}."
+        )
+    if resolved_keypoint_profile == STRICT_V2_KEYPOINT_PUBLICATION_PROFILE:
+        raise ValueError(
+            "Strict-v2 canonical publication requires the recording-level crop-v2 "
+            "and terminal-evidence fragment, which this compatibility collection "
+            "planner does not yet accept. Planning fails closed instead of invoking "
+            "finalize_keypoint_shards."
+        )
+    require_compatibility_keypoint_shard_aggregate(resolved_keypoint_profile)
     zarr_path = zarr_path.expanduser().resolve()
     cache_dir_root = cache_dir_root.expanduser().resolve()
     root = _open_root(zarr_path, mode="r")
@@ -453,6 +476,8 @@ def build_plan(
         merged_proxy_crop_run,
         "--output-run",
         keypoint_collection_run,
+        "--publication-profile",
+        resolved_keypoint_profile,
         "--json",
     ]
     for clip in clip_plans:
@@ -530,6 +555,8 @@ def build_plan(
             "collection_id": collection_id,
             "zarr_path": str(zarr_path),
             "keypoint_storage": keypoint_storage,
+            "keypoint_publication_profile": resolved_keypoint_profile,
+            "canonical_dependency_eligible": False,
         },
     )
 
@@ -543,6 +570,7 @@ def build_plan(
         cache_dir_root=cache_dir_root,
         log_dir=resolved_log_dir,
         keypoint_storage=keypoint_storage,
+        keypoint_publication_profile=resolved_keypoint_profile,
         clips=tuple(clip_plans),
         merged_proxy_crop_run=merged_proxy_crop_run,
         keypoint_collection_run=keypoint_collection_run,
@@ -791,6 +819,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-dir", type=Path, help="LSF/progress log dir.")
     parser.add_argument("--pose-schema", default="traditional_v2")
     parser.add_argument("--batch-size-kp", type=int, default=256)
+    parser.add_argument(
+        "--keypoint-publication-profile",
+        choices=KEYPOINT_PUBLICATION_PROFILES,
+        default=STRICT_V2_KEYPOINT_PUBLICATION_PROFILE,
+        help=(
+            "Strict-v2 is the fail-closed default. Select the compatibility "
+            "profile explicitly to use the ordinary shard aggregator."
+        ),
+    )
     keypoint_storage_group = parser.add_mutually_exclusive_group()
     keypoint_storage_group.add_argument(
         "--keypoint-roi-shard-rows",
@@ -863,6 +900,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         log_dir=args.log_dir,
         pose_schema=args.pose_schema,
         batch_size=int(args.batch_size_kp),
+        keypoint_publication_profile=args.keypoint_publication_profile,
         keypoint_roi_shard_rows=args.keypoint_roi_shard_rows,
         keypoint_frame_shard_rows=int(args.keypoint_frame_shard_rows),
         device=args.device,
