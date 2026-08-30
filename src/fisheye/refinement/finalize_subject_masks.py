@@ -23,6 +23,11 @@ import cv2
 import numpy as np
 import zarr
 
+from ..shared.crop_row_rebase import (
+    DIRECT_SAME_CROP_MAPPING_MODE,
+    CropRowSelection,
+    resolve_crop_row_rebase,
+)
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.json_safety import json_attr_safe
 from ..shared.mask_geometry import (
@@ -297,14 +302,6 @@ _COMPONENT_METRIC_FINALIZATION_SOURCES = {
     "hole_count": ("hole_count_after", np.int32),
     "hole_area_fraction": ("hole_area_fraction_after", np.float32),
 }
-_CROP_REBASE_IDENTITY_ARRAYS = (
-    "source_clip_indices",
-    "source_clip_local_frame_indices",
-    "source_refined_row_ids",
-    "source_detect_row_index",
-    "frame_indices",
-    "roi_coordinates_full",
-)
 _CROP_REBASE_COPY_ARRAYS = (
     "frame_indices",
     "source_frame_indices",
@@ -315,7 +312,6 @@ _CROP_REBASE_COPY_ARRAYS = (
     "source_detect_row_index",
     "detection_indices",
     "instance_key",
-    "source_acquisition_frame_index",
     "source_crop_xywh",
 )
 _SUBJECT_MASK_SHARD_COMPAT_ATTRS = (
@@ -940,22 +936,6 @@ def _load_shard_names_from_file(path: Path) -> list[str]:
     )
 
 
-def _row_identity_from_group(
-    group: zarr.Group, row_ids: np.ndarray, names: Sequence[str]
-) -> list[tuple[object, ...]]:
-    arrays = {name: _array_data(group[name]) for name in names}
-    identities: list[tuple[object, ...]] = []
-    for row_id in np.asarray(row_ids, dtype=np.int64).reshape(-1):
-        parts: list[object] = []
-        for name in names:
-            value = np.asarray(arrays[name][int(row_id)])
-            parts.append(
-                value.item() if value.ndim == 0 else tuple(value.reshape(-1).tolist())
-            )
-        identities.append(tuple(parts))
-    return identities
-
-
 def _validate_subject_mask_shard_partition_role(
     root: zarr.Group,
     group: zarr.Group,
@@ -1276,6 +1256,7 @@ def _resolve_subject_mask_crop_rebase(
     shards: Sequence[_SubjectMaskShardSource],
     *,
     target_crop_run: str | None,
+    archive: Path | None = None,
 ) -> tuple[str, np.ndarray, tuple[str, ...], bool]:
     source_crop_runs = tuple(shard.source_crop_run for shard in shards)
     unique_crop_runs = tuple(sorted(set(source_crop_runs)))
@@ -1297,76 +1278,28 @@ def _resolve_subject_mask_crop_rebase(
         return unique_crop_runs[0], row_ids, unique_crop_runs, False
 
     crop_parent = root.get("crop_runs")
-    if crop_parent is None or target_crop_run not in crop_parent:
-        raise ValueError(f"target crop run not found: crop_runs/{target_crop_run}")
-
-    if unique_crop_runs == (str(target_crop_run),):
-        row_ids = np.concatenate(
-            [
-                np.asarray(shard.source.source_crop_row_ids[:], dtype=np.int64).reshape(
-                    -1
-                )
-                for shard in shards
-            ],
-            axis=0,
-        )
-        return str(target_crop_run), row_ids, unique_crop_runs, False
-
-    target_group = crop_parent[target_crop_run]
-    missing_target = [
-        name for name in _CROP_REBASE_IDENTITY_ARRAYS if name not in target_group
-    ]
-    if missing_target:
-        raise ValueError(
-            f"target crop run crop_runs/{target_crop_run} missing identity arrays: {missing_target}"
-        )
-    target_rows = np.arange(int(target_group["frame_indices"].shape[0]), dtype=np.int64)
-    target_identities = _row_identity_from_group(
-        target_group, target_rows, _CROP_REBASE_IDENTITY_ARRAYS
+    if crop_parent is None:
+        raise ValueError("Missing crop_runs group.")
+    resolution = resolve_crop_row_rebase(
+        crop_parent=crop_parent,
+        target_crop_run=str(target_crop_run),
+        selections=tuple(
+            CropRowSelection(
+                source_label=f"{SUBJECT_MASK_SHARD_PARENT}/{shard.name}",
+                source_crop_run=shard.source_crop_run,
+                source_rows=np.asarray(
+                    shard.source.source_crop_row_ids[:], dtype=np.int64
+                ),
+            )
+            for shard in shards
+        ),
+        archive=archive,
     )
-    target_map: dict[tuple[object, ...], int] = {}
-    for row_idx, identity in enumerate(target_identities):
-        if identity in target_map:
-            raise ValueError(
-                f"target crop run crop_runs/{target_crop_run} has duplicate crop row identities."
-            )
-        target_map[identity] = int(row_idx)
-
-    mapped_chunks: list[np.ndarray] = []
-    for shard in shards:
-        source_group = crop_parent.get(shard.source_crop_run)
-        if source_group is None:
-            raise ValueError(
-                f"source crop run not found: crop_runs/{shard.source_crop_run}"
-            )
-        missing_source = [
-            name for name in _CROP_REBASE_IDENTITY_ARRAYS if name not in source_group
-        ]
-        if missing_source:
-            raise ValueError(
-                f"source crop run crop_runs/{shard.source_crop_run} missing identity arrays: {missing_source}"
-            )
-        source_rows = np.asarray(
-            shard.source.source_crop_row_ids[:], dtype=np.int64
-        ).reshape(-1)
-        source_identities = _row_identity_from_group(
-            source_group, source_rows, _CROP_REBASE_IDENTITY_ARRAYS
-        )
-        mapped = np.full(source_rows.shape[0], -1, dtype=np.int64)
-        for local_idx, identity in enumerate(source_identities):
-            target_row = target_map.get(identity)
-            if target_row is None:
-                raise ValueError(
-                    f"Could not map {SUBJECT_MASK_SHARD_PARENT}/{shard.name} row {local_idx} "
-                    f"from crop_runs/{shard.source_crop_run} into crop_runs/{target_crop_run}."
-                )
-            mapped[local_idx] = int(target_row)
-        mapped_chunks.append(mapped)
     return (
-        str(target_crop_run),
-        np.concatenate(mapped_chunks, axis=0),
+        resolution.target_crop_run,
+        resolution.target_rows,
         unique_crop_runs,
-        True,
+        resolution.mapping_mode != DIRECT_SAME_CROP_MAPPING_MODE,
     )
 
 
@@ -1446,6 +1379,7 @@ def _load_subject_mask_source(
     subject_shard_runs: Sequence[str] | None = None,
     target_crop_run: str | None = None,
     collection_worker_plan: _SubjectMaskCollectionWorkerPlan | None = None,
+    archive: Path | None = None,
 ) -> tuple[SourceSubjectMaskRun, _SubjectMaskShardCollection | None]:
     if subject_shard_runs:
         if subject_run:
@@ -1514,6 +1448,7 @@ def _load_subject_mask_source(
                     root,
                     shards,
                     target_crop_run=target_crop_run,
+                    archive=archive,
                 )
             )
             source_indices = np.concatenate(
@@ -6365,6 +6300,7 @@ def _process_and_write_finalizer_shard(
         subject_shard_runs=subject_shard_runs,
         target_crop_run=target_crop_run,
         collection_worker_plan=collection_worker_plan,
+        archive=Path(zarr_path),
     )
     component_area_support_profile = _resolve_component_area_support_profile(
         source,
@@ -6704,6 +6640,7 @@ def finalize_subject_mask_run(
         subject_run=subject_run,
         subject_shard_runs=subject_shard_runs,
         target_crop_run=target_crop_run,
+        archive=(Path(zarr_path) if zarr_path is not None else None),
     )
     if require_production_proof:
         _validate_refined_production_row_identity_source(source)

@@ -62,6 +62,7 @@ def _worker_initialize_collection(
         subject_shard_runs=subject_shard_runs,
         target_crop_run=target_crop_run,
         collection_worker_plan=collection_worker_plan,
+        archive=Path(zarr_path),
     )
     source_loaded_seconds = float(time.perf_counter() - started)
     memory_after_source = _proc_memory_kib()
@@ -155,6 +156,7 @@ def benchmark_collection_worker_initialization(
         subject_run=None,
         subject_shard_runs=shard_runs,
         target_crop_run=target_crop_run,
+        archive=path,
     )
     if collection is None:
         raise RuntimeError("Parent did not resolve a subject-mask shard collection.")

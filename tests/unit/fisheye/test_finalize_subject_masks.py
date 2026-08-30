@@ -1672,6 +1672,37 @@ def test_collection_same_crop_target_does_not_require_clipped_rebase_identity() 
     np.testing.assert_array_equal(source.source_crop_row_ids[:], np.asarray([0]))
 
 
+def test_collection_rebases_to_geometry_only_target_without_legacy_clip_arrays() -> None:
+    root = _build_sharded_subject_mask_root()
+    target_crop = root["crop_runs/crop_collection"]
+    del target_crop["source_clip_indices"]
+    del target_crop["source_clip_local_frame_indices"]
+    del target_crop["source_detect_row_index"]
+
+    source, collection = mod._load_subject_mask_source(
+        root,
+        subject_run=None,
+        subject_shard_runs=["subject_masks_clip_b", "subject_masks_clip_a"],
+        target_crop_run="crop_collection",
+    )
+
+    assert collection is not None
+    assert collection.source_crop_run == "crop_collection"
+    assert collection.source_crop_rebased_from_shards is True
+    np.testing.assert_array_equal(
+        collection.source_crop_row_ids,
+        np.asarray([0, 1], dtype=np.int64),
+    )
+    np.testing.assert_array_equal(
+        source.group["instance_key"][:],
+        np.asarray([10000, 10001], dtype=np.uint64),
+    )
+    np.testing.assert_array_equal(
+        source.group["source_acquisition_frame_index"][:],
+        np.asarray([10, 11], dtype=np.int64),
+    )
+
+
 def test_collection_target_crop_frame_counts_cover_only_selected_shard_rows(
     monkeypatch,
 ) -> None:
@@ -1776,7 +1807,7 @@ def test_collection_normalizes_exact_signed_hybrid_placement_for_subject_masks(
     assert output.attrs["source_crop_xywh_normalization"] == normalization
 
 
-def test_collection_rejects_lossy_signed_hybrid_placement_normalization() -> None:
+def test_collection_rejects_disagreeing_signed_hybrid_placement_authority() -> None:
     root = _build_sharded_subject_mask_root()
     _stamp_signed_hybrid_collection_crop(
         root,
@@ -1788,13 +1819,35 @@ def test_collection_rejects_lossy_signed_hybrid_placement_normalization() -> Non
 
     with pytest.raises(
         ValueError,
-        match="cannot be represented exactly as canonical float32 placement",
+        match="authority array 'source_crop_xywh' disagrees",
     ):
         mod._load_subject_mask_source(
             root,
             subject_run=None,
             subject_shard_runs=["subject_masks_clip_b", "subject_masks_clip_a"],
             target_crop_run="crop_collection",
+        )
+
+
+def test_signed_hybrid_placement_normalizer_rejects_lossy_float32_conversion() -> None:
+    root = _build_sharded_subject_mask_root()
+    crop = _stamp_signed_hybrid_collection_crop(
+        root,
+        placement=np.asarray(
+            [[4.1, 5.0, 10.0, 10.0], [14.0, 15.0, 10.0, 10.0]],
+            dtype=np.float64,
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cannot be represented exactly as canonical float32 placement",
+    ):
+        mod.normalize_subject_mask_crop_placement(
+            crop,
+            crop_run="crop_collection",
+            target_rows=np.arange(2, dtype=np.int64),
+            values=np.asarray(crop["source_crop_xywh"][:]),
         )
 
 
