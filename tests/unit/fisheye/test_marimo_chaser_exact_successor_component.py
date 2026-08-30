@@ -55,7 +55,17 @@ def _relative(path: str, provider_id: str, provider_digest: str) -> _Group:
             "fish_position": {
                 "provider_id": provider_id,
                 "provider_digest": provider_digest,
-            }
+            },
+            "body_frame": (
+                {
+                    "source_authority_id": "accepted-body-frame-source",
+                    "source_digest": "c" * 64,
+                    "provider_id": "accepted-keypoint-body-frame",
+                    "provider_digest": "d" * 64,
+                }
+                if body_present
+                else None
+            ),
         },
         "schema_binding": {"body_extension_present": body_present},
         "array_declarations": (
@@ -71,6 +81,36 @@ def _relative(path: str, provider_id: str, provider_digest: str) -> _Group:
                     "dtype": "|b1",
                     "shape": [20],
                     "content_sha256": "2" * 64,
+                },
+                {
+                    "path": "body/body_source_row_id",
+                    "dtype": "<i8",
+                    "shape": [20],
+                    "content_sha256": "3" * 64,
+                },
+                {
+                    "path": "body/body_source_row_valid",
+                    "dtype": "|b1",
+                    "shape": [20],
+                    "content_sha256": "4" * 64,
+                },
+                {
+                    "path": "body/body_heading_deg",
+                    "dtype": "<f4",
+                    "shape": [20],
+                    "content_sha256": "5" * 64,
+                },
+                {
+                    "path": "body/body_heading_valid",
+                    "dtype": "|b1",
+                    "shape": [20],
+                    "content_sha256": "6" * 64,
+                },
+                {
+                    "path": "body/body_heading_reason_code",
+                    "dtype": "<u2",
+                    "shape": [20],
+                    "content_sha256": "7" * 64,
                 },
             ]
             if body_present
@@ -511,11 +551,23 @@ def test_exact_successor_discovery_uses_spatial_bundle_and_exact_children(
     assert len(options) == 1
     assert options[0].renderer == CHASER_EXACT_SUCCESSOR_RENDERER
     assert options[0].spec["bundle_status"] == "exact_selector_ineligible"
-    assert options[0].spec["schema_version"] == 7
+    assert options[0].spec["schema_version"] == 8
     assert options[0].spec["provider_ids"] == ["keypoint.v1", "detection.v1"]
     spatial_parameters = options[0].spec["display_parameters"]["spatial_occupancy"]
-    assert spatial_parameters["source_array"] == "occupancy_density_valid_in_arena"
+    assert spatial_parameters["source_arrays"] == [
+        "occupancy_density_valid_in_arena",
+        "occupancy_fraction_candidate_epoch",
+    ]
+    assert spatial_parameters["default_normalization"] == "valid_in_arena"
+    assert spatial_parameters["available_normalizations"] == [
+        "valid_in_arena",
+        "candidate_epoch",
+    ]
     assert spatial_parameters["density_multiplier_to_percent"] == 100.0
+    assert spatial_parameters["density_color_normalization"] == (
+        "shared_robust_p98_default_full_range_available"
+    )
+    assert spatial_parameters["display_bin_widths_mm"] == [2.0, 4.0]
     assert (
         spatial_parameters["provider_difference"]
         == "detection_minus_keypoint_percentage_points_per_bin"
@@ -536,6 +588,21 @@ def test_exact_successor_discovery_uses_spatial_bundle_and_exact_children(
         "body/body_bearing_valid",
     ]
     assert body["position_substitution"] == "prohibited"
+    heading = options[0].spec["analysis_bindings"]["body_heading"]
+    assert heading["array_paths"] == [
+        "body/body_source_row_id",
+        "body/body_source_row_valid",
+        "body/body_heading_deg",
+        "body/body_heading_valid",
+        "body/body_heading_reason_code",
+    ]
+    assert heading["frame_collapse_policy"] == (
+        "exact_equality_across_flattened_chaser_rows_then_one_row_per_acquisition_frame"
+    )
+    assert heading["motion_heading_fallback"] == "prohibited"
+    heading_parameters = options[0].spec["display_parameters"]["fish_heading"]
+    assert heading_parameters["bin_width_deg"] == 10.0
+    assert heading_parameters["motion_heading_fallback"] == "prohibited"
     bearing_distance_parameters = options[0].spec["display_parameters"][
         "body_bearing_distance"
     ]
@@ -707,7 +774,10 @@ def test_controller_trial_capability_is_hidden_when_exact_join_is_ambiguous(
     options = discover_exact_chaser_successor_options("recording.zarr")
 
     assert len(options) == 1
-    assert set(options[0].spec["analysis_bindings"]) == {"body_bearing"}
+    assert set(options[0].spec["analysis_bindings"]) == {
+        "body_bearing",
+        "body_heading",
+    }
 
 
 def test_bout_response_capability_is_hidden_when_exact_join_is_ambiguous(
@@ -871,7 +941,10 @@ def test_controller_trial_capability_is_hidden_for_wrong_relative_source(
     options = discover_exact_chaser_successor_options("recording.zarr")
 
     assert len(options) == 1
-    assert set(options[0].spec["analysis_bindings"]) == {"body_bearing"}
+    assert set(options[0].spec["analysis_bindings"]) == {
+        "body_bearing",
+        "body_heading",
+    }
 
 
 def test_controller_trial_capability_is_hidden_above_panel_bound(monkeypatch) -> None:
@@ -895,7 +968,10 @@ def test_controller_trial_capability_is_hidden_above_panel_bound(monkeypatch) ->
     options = discover_exact_chaser_successor_options("recording.zarr")
 
     assert len(options) == 1
-    assert set(options[0].spec["analysis_bindings"]) == {"body_bearing"}
+    assert set(options[0].spec["analysis_bindings"]) == {
+        "body_bearing",
+        "body_heading",
+    }
 
 
 def test_production_binding_shapes_are_not_whole_object_equal() -> None:
@@ -1139,9 +1215,9 @@ def test_discovery_hides_controller_capability_with_parent_selector(
     monkeypatch,
 ) -> None:
     root = _archive()
-    root["analysis/controller_chase_trial_runs"].attrs[
-        "authoritative_run"
-    ] = "controller-v1"
+    root["analysis/controller_chase_trial_runs"].attrs["authoritative_run"] = (
+        "controller-v1"
+    )
     monkeypatch.setattr(
         "apps.marimo.components.registry.open_zarr_root",
         lambda *args, **kwargs: root,
@@ -1150,7 +1226,10 @@ def test_discovery_hides_controller_capability_with_parent_selector(
     options = discover_exact_chaser_successor_options("recording.zarr")
 
     assert len(options) == 1
-    assert set(options[0].spec["analysis_bindings"]) == {"body_bearing"}
+    assert set(options[0].spec["analysis_bindings"]) == {
+        "body_bearing",
+        "body_heading",
+    }
 
 
 def test_discovery_does_not_retry_unconsolidated_metadata(monkeypatch) -> None:

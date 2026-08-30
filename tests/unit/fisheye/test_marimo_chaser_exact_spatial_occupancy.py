@@ -213,33 +213,80 @@ def test_spatial_heatmap_uses_persisted_density_and_provider_difference() -> Non
     display = figure.layout.meta["spatial_occupancy_display"]
     assert display["recipe_id"] == SPATIAL_OCCUPANCY_DISPLAY_RECIPE
     assert display["source_array"] == "occupancy_density_valid_in_arena"
+    assert display["source_arrays"] == [
+        "occupancy_density_valid_in_arena",
+        "occupancy_fraction_candidate_epoch",
+    ]
     assert display["scientific_recomputation"] is False
     assert display["interpolation"] == "prohibited"
-    assert display["default_display_mode"] == "2_mm_robust_p98"
-    assert display["available_display_modes"] == [
-        "2_mm_robust_p98",
-        "2_mm_full_range",
-        "4_mm_robust_p98",
-        "4_mm_full_range",
+    assert "missing=1" in figure.layout.annotations[0].text
+    assert "out=1" in figure.layout.annotations[0].text
+    assert display["provider_epoch_denominators"]["candidate_frame_count"][0][0] == 4
+    assert (
+        display["provider_epoch_denominators"]["invalid_position_frame_count"][0][0]
+        == 1
+    )
+    assert display["default_normalization"] == "valid_in_arena"
+    assert display["available_normalizations"] == [
+        "valid_in_arena",
+        "candidate_epoch",
     ]
-    assert display["display_surfaces"]["2mm"]["count_aggregation"] == "none"
-    assert display["display_surfaces"]["4mm"]["count_aggregation"] == "exact_2x2_sum"
-    assert display["display_surfaces"]["4mm"]["grid_shape"] == [1, 1]
-    density_scale = display["display_surfaces"]["2mm"][
-        "density_color_scale_percent_per_bin"
+    assert display["default_display_mode"] == "2_mm_valid_in_arena_robust_p98"
+    assert display["available_display_modes"] == [
+        "2_mm_valid_in_arena_robust_p98",
+        "2_mm_valid_in_arena_full_range",
+        "4_mm_valid_in_arena_robust_p98",
+        "4_mm_valid_in_arena_full_range",
+        "2_mm_candidate_epoch_robust_p98",
+        "2_mm_candidate_epoch_full_range",
+        "4_mm_candidate_epoch_robust_p98",
+        "4_mm_candidate_epoch_full_range",
+    ]
+    assert (
+        display["display_surfaces"]["2mm_valid_in_arena"]["count_aggregation"] == "none"
+    )
+    assert (
+        display["display_surfaces"]["4mm_valid_in_arena"]["count_aggregation"]
+        == "exact_2x2_sum"
+    )
+    assert display["display_surfaces"]["4mm_valid_in_arena"]["grid_shape"] == [
+        1,
+        1,
+    ]
+    assert (
+        display["display_surfaces"]["2mm_candidate_epoch"]["source_array"]
+        == "occupancy_fraction_candidate_epoch"
+    )
+    assert (
+        display["display_surfaces"]["2mm_candidate_epoch"]["denominator"]
+        == "candidate_frame_count"
+    )
+    density_scale = display["display_surfaces"]["2mm_valid_in_arena"][
+        "color_scale_percent_per_bin"
     ]
     assert figure.layout.coloraxis.cmax == density_scale["robust_limit"]
     assert density_scale["full_range_reference_available"] is True
     buttons = figure.layout.updatemenus[0].buttons
     assert [button.label for button in buttons] == [
-        "2 mm · robust p98",
-        "2 mm · full range",
-        "4 mm · robust p98",
-        "4 mm · full range",
+        "2 mm · valid in-arena · robust p98",
+        "2 mm · valid in-arena · full range",
+        "4 mm · valid in-arena · robust p98",
+        "4 mm · valid in-arena · full range",
+        "2 mm · candidate epoch · robust p98",
+        "2 mm · candidate epoch · full range",
+        "4 mm · candidate epoch · robust p98",
+        "4 mm · candidate epoch · full range",
     ]
     coarse_trace_z = buttons[2].args[0]["z"]
     assert np.asarray(coarse_trace_z[0]).shape == (1, 1)
     assert np.asarray(coarse_trace_z[0])[0, 0] == 100.0
+    candidate_trace_z = buttons[4].args[0]["z"]
+    assert np.asarray(candidate_trace_z[0])[0, 1] == 25.0
+    assert np.asarray(candidate_trace_z[1])[0, 1] == 50.0
+    assert np.asarray(candidate_trace_z[2])[0, 1] == 25.0
+    assert "candidate epoch" in buttons[4].args[0]["hovertemplate"][0]
+    coarse_candidate_trace_z = buttons[6].args[0]["z"]
+    assert np.asarray(coarse_candidate_trace_z[0])[0, 0] == 50.0
     overlay = display["chaser_location_overlay"]
     assert overlay["color_source"] == "sealed_protocol_rgba"
     assert overlay["role_encoding"] == "independent_marker_symbol_and_legend_text"

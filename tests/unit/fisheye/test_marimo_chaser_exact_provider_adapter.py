@@ -15,6 +15,11 @@ from apps.marimo.components.analysis_catalog import (
 from apps.marimo.components.chaser_exact.distance_traces import (
     _trace_display_projection,
 )
+from apps.marimo.components.chaser_exact.array_requirements import (
+    DISTANCE_DISTRIBUTION_ARRAYS,
+    RADIAL_NEAR_FIELD_ARRAYS,
+    SAME_QUADRANT_ARRAYS,
+)
 from apps.marimo.components.chaser_exact.controller_trials import (
     build_exact_controller_trials_output,
 )
@@ -35,6 +40,7 @@ from apps.marimo.components.chaser_exact.provider import (
 from apps.marimo.components.chaser_exact.projection import (
     ExactChaserSelectionIdentity,
     RelativeFrameProjection,
+    _RADIAL_ARRAYS_BY_ANALYSIS,
     load_exact_chaser_projection,
 )
 from apps.marimo.components.chaser_exact.trajectory_overlays import (
@@ -59,7 +65,7 @@ def _option(
     run_path = f"analysis/chaser_spatial_occupancy_runs/{run_name}"
     spec = {
         "schema_id": "palette.chaser_exact_successor_explorer_spec",
-        "schema_version": 7,
+        "schema_version": 8,
         "renderer": CHASER_EXACT_SUCCESSOR_RENDERER,
         "bundle_status": "exact_selector_ineligible",
         "bundle_manifest_sha256": manifest_sha256,
@@ -75,6 +81,25 @@ def _option(
                 ],
                 "body_axis_authority": "accepted_keypoint_body_extension",
                 "position_substitution": "prohibited",
+            },
+            "body_heading": {
+                "source_relative_frame": {
+                    "run_path": "analysis/chaser_relative_frame_runs/keypoint-v1",
+                    "manifest_sha256": "e" * 64,
+                },
+                "array_paths": [
+                    "body/body_source_row_id",
+                    "body/body_source_row_valid",
+                    "body/body_heading_deg",
+                    "body/body_heading_valid",
+                    "body/body_heading_reason_code",
+                ],
+                "body_axis_authority": "accepted_keypoint_body_extension",
+                "frame_collapse_policy": (
+                    "exact_equality_across_flattened_chaser_rows_then_one_row_per_acquisition_frame"
+                ),
+                "position_substitution": "prohibited",
+                "motion_heading_fallback": "prohibited",
             },
             "controller_trials": {
                 "run_path": "analysis/controller_chase_trial_runs/controller-v1",
@@ -299,6 +324,7 @@ def test_controller_trial_analysis_is_hidden_without_one_exact_binding(
     assert "controller_trials" not in available
     assert "body_bearing_polar" not in available
     assert "body_bearing_distance" not in available
+    assert "fish_heading" not in available
     assert "spatial_occupancy" in available
 
 
@@ -324,9 +350,12 @@ def test_escape_freeze_analysis_is_hidden_without_its_exact_binding(
 def test_provider_routes_are_closed_and_controls_are_explicit() -> None:
     assert ANALYSIS_IDS == (
         "radial_near_field",
+        "distance_distributions",
+        "same_quadrant_occupancy",
         "distance_traces",
         "body_bearing_polar",
         "body_bearing_distance",
+        "fish_heading",
         "trajectory_overlays",
         "spatial_occupancy",
         "controller_trials",
@@ -340,6 +369,16 @@ def test_provider_routes_are_closed_and_controls_are_explicit() -> None:
     assert EXACT_CHASER_PROVIDER_ADAPTER.build_controls("radial_near_field") is None
     with pytest.raises(ExactChaserUnknownAnalysisError, match="Unsupported"):
         EXACT_CHASER_PROVIDER_ADAPTER.requires_projection("distance-ish")
+
+
+def test_new_radial_routes_have_closed_receipt_target_rosters() -> None:
+    assert _RADIAL_ARRAYS_BY_ANALYSIS == {
+        "radial_near_field": RADIAL_NEAR_FIELD_ARRAYS,
+        "distance_distributions": DISTANCE_DISTRIBUTION_ARRAYS,
+        "same_quadrant_occupancy": SAME_QUADRANT_ARRAYS,
+    }
+    assert "cdf_fraction_at_or_below" in DISTANCE_DISTRIBUTION_ARRAYS
+    assert "metric_same_quadrant_fraction_candidate" in SAME_QUADRANT_ARRAYS
 
 
 def test_controller_trial_catalog_entry_belongs_to_exact_successors() -> None:
@@ -366,7 +405,9 @@ def test_only_selected_analysis_requests_relative_arrays(
     tmp_path: Path, monkeypatch
 ) -> None:
     option = _option(tmp_path / "recording.zarr")
-    observed: list[tuple[str, bool, bool, bool, bool, bool, bool, bool, bool]] = []
+    observed: list[
+        tuple[str, bool, bool, bool, bool, bool, bool, bool, bool, bool]
+    ] = []
 
     def fake_loader(
         zarr_path,
@@ -377,6 +418,7 @@ def test_only_selected_analysis_requests_relative_arrays(
         load_relative_arrays,
         load_chaser_appearance,
         load_keypoint_body_bearing,
+        load_keypoint_body_heading,
         load_controller_trials,
         load_generalized_bout_response,
         load_escape_freeze,
@@ -391,6 +433,7 @@ def test_only_selected_analysis_requests_relative_arrays(
                 load_relative_arrays,
                 load_chaser_appearance,
                 load_keypoint_body_bearing,
+                load_keypoint_body_heading,
                 load_controller_trials,
                 load_generalized_bout_response,
                 load_escape_freeze,
@@ -407,6 +450,12 @@ def test_only_selected_analysis_requests_relative_arrays(
     radial = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
         option.zarr_path, option, analysis_id="radial_near_field"
     )
+    distributions = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
+        option.zarr_path, option, analysis_id="distance_distributions"
+    )
+    same_quadrant = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
+        option.zarr_path, option, analysis_id="same_quadrant_occupancy"
+    )
     spatial = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
         option.zarr_path, option, analysis_id="spatial_occupancy"
     )
@@ -418,6 +467,9 @@ def test_only_selected_analysis_requests_relative_arrays(
     )
     body_bearing_distance = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
         option.zarr_path, option, analysis_id="body_bearing_distance"
+    )
+    fish_heading = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
+        option.zarr_path, option, analysis_id="fish_heading"
     )
     controller = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
         option.zarr_path, option, analysis_id="controller_trials"
@@ -433,10 +485,13 @@ def test_only_selected_analysis_requests_relative_arrays(
     )
 
     assert radial.analysis_id == "radial_near_field"
+    assert distributions.analysis_id == "distance_distributions"
+    assert same_quadrant.analysis_id == "same_quadrant_occupancy"
     assert spatial.analysis_id == "spatial_occupancy"
     assert distance.analysis_id == "distance_traces"
     assert body_bearing.analysis_id == "body_bearing_polar"
     assert body_bearing_distance.analysis_id == "body_bearing_distance"
+    assert fish_heading.analysis_id == "fish_heading"
     assert controller.analysis_id == "controller_trials"
     assert bout_response.analysis_id == "generalized_bout_response"
     assert escape_freeze.analysis_id == "escape_freeze"
@@ -446,6 +501,31 @@ def test_only_selected_analysis_requests_relative_arrays(
             "radial_near_field",
             False,
             True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            "distance_distributions",
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            "same_quadrant_occupancy",
+            False,
+            True,
+            False,
             False,
             False,
             False,
@@ -463,11 +543,13 @@ def test_only_selected_analysis_requests_relative_arrays(
             False,
             False,
             False,
+            False,
         ),
         (
             "distance_traces",
             True,
             True,
+            False,
             False,
             False,
             False,
@@ -485,11 +567,25 @@ def test_only_selected_analysis_requests_relative_arrays(
             False,
             False,
             False,
+            False,
         ),
         (
             "body_bearing_distance",
             True,
             True,
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            "fish_heading",
+            True,
+            True,
+            False,
             False,
             True,
             False,
@@ -503,6 +599,7 @@ def test_only_selected_analysis_requests_relative_arrays(
             True,
             False,
             False,
+            False,
             True,
             False,
             False,
@@ -511,6 +608,7 @@ def test_only_selected_analysis_requests_relative_arrays(
         (
             "generalized_bout_response",
             True,
+            False,
             False,
             False,
             False,
@@ -525,6 +623,7 @@ def test_only_selected_analysis_requests_relative_arrays(
             False,
             False,
             False,
+            False,
             True,
             True,
             True,
@@ -533,6 +632,7 @@ def test_only_selected_analysis_requests_relative_arrays(
         (
             "gaze_tracking",
             True,
+            False,
             False,
             False,
             False,

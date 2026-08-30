@@ -46,13 +46,16 @@ from fisheye.visualization.chaser_appearance import (
 
 from ..common import normalize_path
 from ..registry import CHASER_EXACT_SUCCESSOR_RENDERER, InteractiveSpecOption
+from ..chaser_exact_body_heading_contract import BODY_HEADING_ARRAY_PATHS
 from .bout_response_projection import load_exact_bout_response
 from .array_requirements import (
     BOUT_RESPONSE_ARRAYS,
     CONTROLLER_TRIAL_ARRAYS,
+    DISTANCE_DISTRIBUTION_ARRAYS,
     ESCAPE_FREEZE_ARRAYS,
     GAZE_TRACKING_ARRAYS,
     RADIAL_NEAR_FIELD_ARRAYS,
+    SAME_QUADRANT_ARRAYS,
     SPATIAL_OCCUPANCY_ARRAYS,
 )
 from .controller_trial_projection import load_exact_controller_trials
@@ -84,6 +87,18 @@ _FRAME_ARRAY_NAMES = (
 _BODY_BEARING_ARRAY_NAMES = (
     "body_bearing_deg",
     "body_bearing_valid",
+)
+
+_BODY_HEADING_ARRAY_NAMES = tuple(
+    path.removeprefix("body/") for path in BODY_HEADING_ARRAY_PATHS
+)
+
+_RADIAL_ARRAYS_BY_ANALYSIS = MappingProxyType(
+    {
+        "radial_near_field": RADIAL_NEAR_FIELD_ARRAYS,
+        "distance_distributions": DISTANCE_DISTRIBUTION_ARRAYS,
+        "same_quadrant_occupancy": SAME_QUADRANT_ARRAYS,
+    }
 )
 
 
@@ -628,6 +643,7 @@ def load_exact_chaser_projection(
     load_relative_arrays: bool = True,
     load_chaser_appearance: bool = False,
     load_keypoint_body_bearing: bool = False,
+    load_keypoint_body_heading: bool = False,
     load_controller_trials: bool = False,
     load_generalized_bout_response: bool = False,
     load_escape_freeze: bool = False,
@@ -681,7 +697,9 @@ def load_exact_chaser_projection(
         required_array_names=(
             SPATIAL_OCCUPANCY_ARRAYS
             if receipt_mode and analysis_id == "spatial_occupancy"
-            else () if receipt_mode else None
+            else ()
+            if receipt_mode
+            else None
         ),
     )
     if (
@@ -712,9 +730,9 @@ def load_exact_chaser_projection(
             deep_audit=not receipt_mode,
             direct_validation_receipt=exact_receipt(receipt_key),
             required_array_names=(
-                RADIAL_NEAR_FIELD_ARRAYS
-                if receipt_mode and analysis_id == "radial_near_field"
-                else () if receipt_mode else None
+                _RADIAL_ARRAYS_BY_ANALYSIS.get(analysis_id, ())
+                if receipt_mode
+                else None
             ),
         )
         for binding, receipt_key in zip(
@@ -758,11 +776,23 @@ def load_exact_chaser_projection(
                         **arguments,
                         validation_receipt=receipt_path,
                         required_body_arrays=(
-                            _BODY_BEARING_ARRAY_NAMES
-                            if (
-                                load_keypoint_body_bearing
-                                and provider_role == "keypoint"
+                            tuple(
+                                dict.fromkeys(
+                                    (
+                                        *(
+                                            _BODY_BEARING_ARRAY_NAMES
+                                            if load_keypoint_body_bearing
+                                            else ()
+                                        ),
+                                        *(
+                                            _BODY_HEADING_ARRAY_NAMES
+                                            if load_keypoint_body_heading
+                                            else ()
+                                        ),
+                                    )
+                                )
                             )
+                            if provider_role == "keypoint"
                             else ()
                         ),
                     )
@@ -859,7 +889,9 @@ def load_exact_chaser_projection(
             required_array_names=(
                 CONTROLLER_TRIAL_ARRAYS
                 if receipt_mode and analysis_id == "controller_trials"
-                else () if receipt_mode else None
+                else ()
+                if receipt_mode
+                else None
             ),
         )
     generalized_bout_response = None
@@ -880,7 +912,9 @@ def load_exact_chaser_projection(
             required_array_names=(
                 BOUT_RESPONSE_ARRAYS
                 if receipt_mode and analysis_id == "generalized_bout_response"
-                else () if receipt_mode else None
+                else ()
+                if receipt_mode
+                else None
             ),
         )
     escape_freeze = None
