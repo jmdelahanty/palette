@@ -11,6 +11,7 @@ recomputed inside the plotter.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -32,6 +33,7 @@ from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
 )
 from fisheye.analysis_workflows.chaser_relative_frame_validation_receipt import (
     DETAILED_PLOT_BASE_ARRAY_NAMES,
+    DETAILED_PLOT_BODY_ARRAY_NAMES,
     load_chaser_relative_frame_targeted_source_handle,
 )
 from fisheye.analysis_workflows.composable_chaser_successor_publication import (
@@ -40,13 +42,33 @@ from fisheye.analysis_workflows.composable_chaser_successor_publication import (
 )
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.visualization.chaser_appearance import (
+    ChaserAppearanceProjection,
+    ChaserAppearanceProjectionError,
+    load_chaser_appearance_projection,
+)
+from fisheye.visualization.chaser_body_bearing_distance import (
+    BEARING_BIN_WIDTH_DEG,
+    DENSITY_COLOR_CMAX_QUANTILE,
+    DISPLAY_RECIPE_ID as BODY_BEARING_DISTANCE_DISPLAY_RECIPE_ID,
+    DISTANCE_BIN_WIDTH_MM,
+    STATIC_POINT_CLOUD_MAX_ROWS_PER_PANEL_CHASER,
+    BodyBearingDistanceHistogram,
+    bearing_bin_edges_deg,
+    body_bearing_distance_histogram,
+    body_bearing_distance_valid_mask,
+    distance_bin_edges_mm,
+    positive_probability_color_max,
+    uniformly_sample_indices,
+)
 
 
 RECEIPT_SCHEMA_ID = "palette.analysis.chaser_detailed_plot_bundle.receipt"
-RECEIPT_SCHEMA_VERSION = 3
-PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v3"
+RECEIPT_SCHEMA_VERSION = 5
+PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v5"
 PLOT_DPI = 180
 DENSE_DISPLAY_ALGORITHM = "all_exact_source_rows_rasterized_no_interpolation_v1"
+STATIC_TRAJECTORY_ROLE_MARKER_MAX_PER_PANEL_CHASER = 64
 _RUN_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _CHAIN_KINDS = (
     "controller_chase_trials",
@@ -96,6 +118,88 @@ def _plain(value: Any) -> Any:
     if isinstance(value, np.generic):
         return value.item()
     return value
+
+
+def _load_exact_chaser_appearance(
+    relative_keypoint: Any,
+) -> ChaserAppearanceProjection:
+    """Bind static display semantics to the same exact protocol as Marimo."""
+
+    try:
+        archive = relative_keypoint.analysis_zarr_path
+        manifest = relative_keypoint.run_manifest
+        recording_id = relative_keypoint.recording_id
+    except AttributeError:
+        _fail(
+            "Static chaser appearance requires an exact relative-frame handle "
+            "with archive and run-manifest identity."
+        )
+    identity = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_identity_code"),
+        dtype=np.int64,
+    )
+    role = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_behavior_role_code"),
+        dtype=np.int64,
+    )
+    expected_shape = (relative_keypoint.n_frames, relative_keypoint.n_chasers)
+    if (
+        identity.shape != expected_shape
+        or role.shape != expected_shape
+        or not np.all(identity == identity[:1])
+        or not np.all(role == role[:1])
+    ):
+        _fail("Static chaser appearance has unstable identity or behavior roles.")
+    try:
+        projection = load_chaser_appearance_projection(
+            archive,
+            relative_manifest=manifest,
+            identity_code_by_column=identity[0],
+            behavior_role_code_by_column=role[0],
+            expected_recording_id=recording_id,
+        )
+    except ChaserAppearanceProjectionError as exc:
+        _fail(f"Static chaser appearance binding failed: {exc}")
+    return _validated_exact_chaser_appearance(relative_keypoint, projection)
+
+
+def _validated_exact_chaser_appearance(
+    relative_keypoint: Any,
+    projection: ChaserAppearanceProjection,
+) -> ChaserAppearanceProjection:
+    """Require a supplied appearance projection to match the plotted columns."""
+
+    if projection.recording_id != relative_keypoint.recording_id:
+        _fail("Static chaser appearance belongs to another recording.")
+    identity = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_identity_code"),
+        dtype=np.int64,
+    )
+    role = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_behavior_role_code"),
+        dtype=np.int64,
+    )
+    expected_shape = (relative_keypoint.n_frames, relative_keypoint.n_chasers)
+    if (
+        identity.shape != expected_shape
+        or role.shape != expected_shape
+        or not np.all(identity == identity[:1])
+        or not np.all(role == role[:1])
+    ):
+        _fail("Static chaser appearance has unstable identity or behavior roles.")
+    by_identity = projection.by_identity_code()
+    if (
+        len(projection.appearances) != relative_keypoint.n_chasers
+        or len(by_identity) != relative_keypoint.n_chasers
+    ):
+        _fail("Static chaser appearance cardinality differs from the plotted axis.")
+    for column in range(relative_keypoint.n_chasers):
+        appearance = by_identity.get(int(identity[0, column]))
+        if appearance is None or appearance.behavior_role_code != int(role[0, column]):
+            _fail(
+                "Static chaser appearance identity/role differs from the plotted axis."
+            )
+    return projection
 
 
 def _save_figure(figure: Any, output_stem: Path) -> tuple[Path, Path]:
@@ -227,6 +331,29 @@ def verify_detailed_plot_inputs(
         _collapsed_frame_scalar(relative, "timestamp_valid")
         _collapsed_frame_scalar(relative, "selection_member")
         _collapsed_fish_frame(relative)
+    body_authority = relative_keypoint.source_authorities.get("body_frame")
+    if not isinstance(body_authority, Mapping):
+        _fail("Keypoint relative frame lacks an explicit body-frame authority.")
+    try:
+        body_bearing = np.asarray(
+            relative_keypoint.body_frame_chaser("body_bearing_deg"),
+            dtype=np.float64,
+        )
+        body_valid = np.asarray(
+            relative_keypoint.body_frame_chaser("body_bearing_valid"), dtype=bool
+        )
+    except (KeyError, ValueError) as exc:
+        _fail(f"Keypoint relative frame lacks sealed body-bearing evidence: {exc}")
+    expected_body_shape = (
+        relative_keypoint.n_frames,
+        relative_keypoint.n_chasers,
+    )
+    if (
+        body_bearing.shape != expected_body_shape
+        or body_valid.shape != expected_body_shape
+    ):
+        _fail("Keypoint body-bearing arrays do not preserve frame/chaser shape.")
+    _body_bearing_distance_plot_data(relative_keypoint, radial_keypoint)
 
 
 def _radial_cdf_rows(handle: Any) -> dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]]:
@@ -311,6 +438,171 @@ def _collapsed_fish_frame(relative: Any) -> tuple[np.ndarray, np.ndarray]:
     collapsed = positions[:, 0, :]
     collapsed_valid = valid[:, 0] & np.all(np.isfinite(collapsed), axis=1)
     return collapsed, collapsed_valid
+
+
+@dataclass(frozen=True)
+class _BodyBearingDistancePlotData:
+    distance_mm: np.ndarray
+    bearing_deg: np.ndarray
+    frame_id: np.ndarray
+    identity: np.ndarray
+    role: np.ndarray
+    panels: tuple[tuple[str, np.ndarray], ...]
+    panel_valid: tuple[np.ndarray, ...]
+    distance_edges_mm: np.ndarray
+    bearing_edges_deg: np.ndarray
+    histograms: tuple[BodyBearingDistanceHistogram, ...]
+    role_registry: Mapping[str, Any]
+
+
+def _body_bearing_distance_plot_data(
+    relative_keypoint: Any,
+    radial_keypoint: ComposableChaserSuccessorSourceHandle,
+) -> _BodyBearingDistancePlotData:
+    """Build the shared exact-row display projection for static polar figures."""
+
+    distance = np.asarray(
+        relative_keypoint.base_frame_chaser("relative_distance_physical"),
+        dtype=np.float64,
+    )
+    distance_valid = np.asarray(
+        relative_keypoint.base_frame_chaser("relative_physical_valid"), dtype=bool
+    )
+    bearing = np.asarray(
+        relative_keypoint.body_frame_chaser("body_bearing_deg"), dtype=np.float64
+    )
+    bearing_valid = np.asarray(
+        relative_keypoint.body_frame_chaser("body_bearing_valid"), dtype=bool
+    )
+    occurrence = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_occurrence_member"), dtype=bool
+    )
+    identity = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_identity_code"), dtype=np.int64
+    )
+    role = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_behavior_role_code"),
+        dtype=np.int64,
+    )
+    expected_shape = (
+        relative_keypoint.n_frames,
+        relative_keypoint.n_chasers,
+    )
+    if any(
+        values.shape != expected_shape
+        for values in (
+            distance,
+            distance_valid,
+            bearing,
+            bearing_valid,
+            occurrence,
+            identity,
+            role,
+        )
+    ):
+        _fail("Body-bearing distance arrays do not preserve frame/chaser shape.")
+    if not np.all(identity == identity[:1]) or not np.all(role == role[:1]):
+        _fail("Body-bearing distance has unstable chaser identity or behavior role.")
+
+    frame_id = _collapsed_frame_scalar(
+        relative_keypoint, "acquisition_frame_id"
+    ).astype(np.int64)
+    selected = _collapsed_frame_scalar(relative_keypoint, "selection_member").astype(
+        bool
+    )
+    full_member = np.ones(expected_shape, dtype=bool)
+    try:
+        full_valid = body_bearing_distance_valid_mask(
+            distance,
+            bearing,
+            distance_valid,
+            bearing_valid,
+            occurrence,
+            full_member,
+        )
+    except ValueError as exc:
+        _fail(str(exc))
+    if not np.any(full_valid):
+        _fail(
+            "Keypoint body-frame evidence has no jointly valid bearing/distance rows."
+        )
+    distance_edges = distance_bin_edges_mm(distance, full_valid)
+    bearing_edges = bearing_bin_edges_deg()
+    panels: list[tuple[str, np.ndarray]] = [
+        ("full recording", np.ones(relative_keypoint.n_frames, dtype=bool))
+    ]
+    for record in _epoch_records(radial_keypoint):
+        panels.append(
+            (
+                str(record["analysis_role"]),
+                selected
+                & (frame_id >= int(record["start_frame_inclusive"]))
+                & (frame_id < int(record["end_frame_exclusive"])),
+            )
+        )
+    if any(not np.any(member) for _, member in panels):
+        _fail("A body-bearing distance panel has no exact source rows.")
+
+    panel_valid: list[np.ndarray] = []
+    histograms: list[BodyBearingDistanceHistogram] = []
+    for _label, member in panels:
+        try:
+            valid = body_bearing_distance_valid_mask(
+                distance,
+                bearing,
+                distance_valid,
+                bearing_valid,
+                occurrence,
+                np.broadcast_to(member[:, None], expected_shape),
+            )
+        except ValueError as exc:
+            _fail(str(exc))
+        panel_valid.append(valid)
+        for column in range(relative_keypoint.n_chasers):
+            try:
+                histograms.append(
+                    body_bearing_distance_histogram(
+                        distance[:, column],
+                        bearing[:, column],
+                        valid[:, column],
+                        distance_edges_mm=distance_edges,
+                        bearing_edges_deg=bearing_edges,
+                    )
+                )
+            except ValueError as exc:
+                _fail(str(exc))
+    return _BodyBearingDistancePlotData(
+        distance_mm=distance,
+        bearing_deg=bearing,
+        frame_id=frame_id,
+        identity=identity,
+        role=role,
+        panels=tuple(panels),
+        panel_valid=tuple(panel_valid),
+        distance_edges_mm=distance_edges,
+        bearing_edges_deg=bearing_edges,
+        histograms=tuple(histograms),
+        role_registry=_registry(radial_keypoint.scientific_manifest, "behavior_role"),
+    )
+
+
+def _body_bearing_distance_panel_records(
+    data: _BodyBearingDistancePlotData,
+) -> list[dict[str, Any]]:
+    records = []
+    histogram_index = 0
+    for label, _member in data.panels:
+        for column in range(data.identity.shape[1]):
+            histogram = data.histograms[histogram_index]
+            histogram_index += 1
+            records.append(
+                {
+                    "panel": label,
+                    "chaser_identity_code": int(data.identity[0, column]),
+                    "valid_row_count": histogram.denominator,
+                }
+            )
+    return records
 
 
 def _radial_metric_rows(handle: Any) -> dict[tuple[int, int, int], dict[str, float]]:
@@ -726,6 +1018,7 @@ def render_provider_epoch_trajectory_overlays(
     relative_keypoint: Any,
     relative_detection: Any,
     radial_keypoint: ComposableChaserSuccessorSourceHandle,
+    chaser_appearance: ChaserAppearanceProjection,
     *,
     output_stem: Path,
 ) -> tuple[Path, Path]:
@@ -770,8 +1063,10 @@ def render_provider_epoch_trajectory_overlays(
         _fail("Trajectory chaser positions do not preserve frame/chaser/source-xy shape.")
     if not (np.all(roles == roles[:1]) and np.all(identities == identities[:1])):
         _fail("Trajectory overlay has unstable chaser identity or behavior roles.")
-    behavior_registry = _registry(radial_keypoint.scientific_manifest, "behavior_role")
-    chaser_colors = plt.get_cmap("tab10")
+    appearance_projection = _validated_exact_chaser_appearance(
+        relative_keypoint, chaser_appearance
+    )
+    appearance_by_identity = appearance_projection.by_identity_code()
 
     figure, axes = plt.subplots(
         len(relatives),
@@ -812,18 +1107,42 @@ def render_provider_epoch_trajectory_overlays(
                     chaser_valid[epoch_rows, chaser_column]
                     & occurrence[epoch_rows, chaser_column]
                 )
-                role_code = int(roles[0, chaser_column])
-                role = behavior_registry.get(str(role_code), f"role {role_code}")
                 identity = int(identities[0, chaser_column])
+                role_code = int(roles[0, chaser_column])
+                appearance = appearance_by_identity.get(identity)
+                if appearance is None or appearance.behavior_role_code != role_code:
+                    _fail(
+                        "Trajectory identity/role columns differ from the sealed "
+                        "appearance projection."
+                    )
                 ax.scatter(
                     local_chaser[local_valid, 0],
                     local_chaser[local_valid, 1],
-                    color=chaser_colors(chaser_column % 10),
+                    color=appearance.experimental_color_hex,
                     s=1.2,
                     alpha=0.55,
                     edgecolors="none",
                     rasterized=True,
-                    label=f"{role} · chaser {identity}",
+                    label="_nolegend_",
+                )
+                role_marker_rows = uniformly_sample_indices(
+                    np.flatnonzero(local_valid),
+                    maximum=STATIC_TRAJECTORY_ROLE_MARKER_MAX_PER_PANEL_CHASER,
+                )
+                ax.scatter(
+                    local_chaser[role_marker_rows, 0],
+                    local_chaser[role_marker_rows, 1],
+                    color=appearance.experimental_color_hex,
+                    marker=appearance.matplotlib_role_marker,
+                    s=26.0,
+                    alpha=0.85,
+                    edgecolors=appearance.contrast_outline_hex,
+                    linewidths=0.45,
+                    rasterized=True,
+                    label=(
+                        f"{appearance.behavior_role} · protocol chaser "
+                        f"{appearance.chaser_index}"
+                    ),
                 )
             ax.add_patch(
                 Circle(
@@ -847,8 +1166,163 @@ def render_provider_epoch_trajectory_overlays(
     figure.suptitle(
         f"Exact-epoch fish position samples with logged chaser overlays · "
         f"{radial_keypoint.recording_id}\n"
-        "reviewed circular-arena context · direct source-camera positions · "
-        "all valid exact rows rasterized",
+        "reviewed circular-arena context · protocol color + independent role "
+        "glyphs · all valid exact rows retained",
+        fontsize=13,
+    )
+    return _save_figure(figure, output_stem)
+
+
+def _configure_body_bearing_distance_polar_axis(
+    ax: Any, *, radial_max_mm: float
+) -> None:
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(1)
+    ax.set_thetagrids(
+        [0.0, 90.0, 180.0, 270.0],
+        labels=["front", "left", "behind", "right"],
+    )
+    ax.set_ylim(0.0, float(radial_max_mm))
+    ax.grid(alpha=0.22)
+
+
+def render_keypoint_body_bearing_distance_point_cloud(
+    relative_keypoint: Any,
+    radial_keypoint: ComposableChaserSuccessorSourceHandle,
+    *,
+    output_stem: Path,
+) -> tuple[Path, Path]:
+    """Render display-bounded exact anatomical-bearing/distance point rows."""
+
+    data = _body_bearing_distance_plot_data(relative_keypoint, radial_keypoint)
+    figure, axes = plt.subplots(
+        len(data.panels),
+        relative_keypoint.n_chasers,
+        figsize=(5.2 * relative_keypoint.n_chasers, 4.4 * len(data.panels)),
+        constrained_layout=True,
+        squeeze=False,
+        subplot_kw={"projection": "polar"},
+    )
+    for row_index, (panel_label, _member) in enumerate(data.panels):
+        valid = data.panel_valid[row_index]
+        for column in range(relative_keypoint.n_chasers):
+            ax = axes[row_index, column]
+            valid_indices = np.flatnonzero(valid[:, column])
+            display_indices = uniformly_sample_indices(
+                valid_indices,
+                maximum=STATIC_POINT_CLOUD_MAX_ROWS_PER_PANEL_CHASER,
+            )
+            if display_indices.size:
+                ax.scatter(
+                    np.deg2rad(data.bearing_deg[display_indices, column]),
+                    data.distance_mm[display_indices, column],
+                    s=2.0,
+                    alpha=0.24,
+                    edgecolors="none",
+                    color=("#3b5b92", "#d95f02")[column % 2],
+                    rasterized=True,
+                )
+            else:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "no jointly valid rows",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                )
+            role_code = int(data.role[0, column])
+            role = data.role_registry.get(str(role_code), f"role {role_code}")
+            ax.set_title(
+                f"{panel_label} · {role} · chaser {int(data.identity[0, column])}\n"
+                f"valid n={valid_indices.size:,}; displayed n={display_indices.size:,}",
+                fontsize=8.5,
+            )
+            _configure_body_bearing_distance_polar_axis(
+                ax, radial_max_mm=float(data.distance_edges_mm[-1])
+            )
+    figure.suptitle(
+        f"Anatomical body-frame chaser bearing × distance point rows · "
+        f"{relative_keypoint.recording_id}\n"
+        "accepted keypoint body axis · exact acquisition rows · no interpolation",
+        fontsize=13,
+    )
+    return _save_figure(figure, output_stem)
+
+
+def render_keypoint_body_bearing_distance_density(
+    relative_keypoint: Any,
+    radial_keypoint: ComposableChaserSuccessorSourceHandle,
+    *,
+    output_stem: Path,
+) -> tuple[Path, Path]:
+    """Render all-row joint anatomical-bearing/distance probability density."""
+
+    data = _body_bearing_distance_plot_data(relative_keypoint, radial_keypoint)
+    color_max = positive_probability_color_max(data.histograms)
+    figure, axes = plt.subplots(
+        len(data.panels),
+        relative_keypoint.n_chasers,
+        figsize=(5.2 * relative_keypoint.n_chasers, 4.4 * len(data.panels)),
+        constrained_layout=True,
+        squeeze=False,
+        subplot_kw={"projection": "polar"},
+    )
+    theta_edges, radial_edges = np.meshgrid(
+        np.deg2rad(data.bearing_edges_deg),
+        data.distance_edges_mm,
+    )
+    mesh = None
+    histogram_index = 0
+    for row_index, (panel_label, _member) in enumerate(data.panels):
+        for column in range(relative_keypoint.n_chasers):
+            ax = axes[row_index, column]
+            histogram = data.histograms[histogram_index]
+            histogram_index += 1
+            ax.grid(False)
+            mesh = ax.pcolormesh(
+                theta_edges,
+                radial_edges,
+                np.ma.masked_where(histogram.counts == 0, histogram.probability),
+                shading="flat",
+                cmap="viridis",
+                vmin=0.0,
+                vmax=float(color_max),
+                rasterized=True,
+            )
+            if histogram.denominator == 0:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "no jointly valid rows",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                )
+            role_code = int(data.role[0, column])
+            role = data.role_registry.get(str(role_code), f"role {role_code}")
+            ax.set_title(
+                f"{panel_label} · {role} · chaser {int(data.identity[0, column])}\n"
+                f"joint denominator n={histogram.denominator:,}",
+                fontsize=8.5,
+            )
+            _configure_body_bearing_distance_polar_axis(
+                ax, radial_max_mm=float(data.distance_edges_mm[-1])
+            )
+    if mesh is not None:
+        figure.colorbar(
+            mesh,
+            ax=axes.reshape(-1).tolist(),
+            label="fraction of jointly valid rows per bin",
+            shrink=0.72,
+        )
+    figure.suptitle(
+        f"Anatomical body-frame chaser bearing × distance density · "
+        f"{relative_keypoint.recording_id}\n"
+        f"{DISTANCE_BIN_WIDTH_MM:g} mm × {BEARING_BIN_WIDTH_DEG:g}° bins · "
+        "probability within panel/chaser · every valid exact row",
         fontsize=13,
     )
     return _save_figure(figure, output_stem)
@@ -1161,8 +1635,11 @@ def detailed_plot_parameters(
     controller: ComposableChaserSuccessorSourceHandle,
     bout: ComposableChaserSuccessorSourceHandle,
     escape: ComposableChaserSuccessorSourceHandle,
+    relative_keypoint: Any,
     radial_keypoint: ComposableChaserSuccessorSourceHandle,
     radial_detection: ComposableChaserSuccessorSourceHandle,
+    *,
+    chaser_appearance: ChaserAppearanceProjection | None = None,
 ) -> dict[str, Any]:
     """Return every numerical coordinate and rendering choice in the bundle."""
 
@@ -1227,6 +1704,13 @@ def detailed_plot_parameters(
     arena = radial_keypoint.scientific_manifest.get("arena")
     if not isinstance(arena, Mapping):
         _fail("Provider trajectory plot arena evidence is absent.")
+    bearing_distance = _body_bearing_distance_plot_data(
+        relative_keypoint, radial_keypoint
+    )
+    appearance_projection = _validated_exact_chaser_appearance(
+        relative_keypoint,
+        chaser_appearance or _load_exact_chaser_appearance(relative_keypoint),
+    )
     return {
         "scientific_coordinates": {
             "provider_distance_cdf": cdf_parameters,
@@ -1264,6 +1748,35 @@ def detailed_plot_parameters(
                 "chaser": "chaser_position_xy_px",
                 "coordinate_space": "source_camera_continuous_pixel_xy_top_left_y_down",
                 "arena": _plain(arena),
+            },
+            "keypoint_body_bearing_distance": {
+                "recipe_id": BODY_BEARING_DISTANCE_DISPLAY_RECIPE_ID,
+                "position_provider_id": str(
+                    relative_keypoint.source_authorities["fish_position"]["provider_id"]
+                ),
+                "body_frame_authority": _plain(
+                    relative_keypoint.source_authorities["body_frame"]
+                ),
+                "source_arrays": [
+                    "base/relative_distance_physical",
+                    "base/relative_physical_valid",
+                    "body/body_bearing_deg",
+                    "body/body_bearing_valid",
+                    "base/chaser_occurrence_member",
+                ],
+                "joint_validity": (
+                    "panel_member_and_chaser_occurrence_and_"
+                    "relative_physical_valid_and_body_bearing_valid"
+                ),
+                "distance_bin_edges_mm": (bearing_distance.distance_edges_mm.tolist()),
+                "bearing_bin_edges_deg": (bearing_distance.bearing_edges_deg.tolist()),
+                "density_normalization": "probability_within_panel_chaser",
+                "panel_denominators": _body_bearing_distance_panel_records(
+                    bearing_distance
+                ),
+                "interpolation": "prohibited",
+                "body_axis_fallback": "prohibited",
+                "detection_position_substitution": "prohibited",
             },
             "missing_value_policy": "remain_missing_no_interpolation",
         },
@@ -1333,9 +1846,55 @@ def detailed_plot_parameters(
                 "all_valid_source_rows_retained": True,
                 "fish_marker_size_points_squared": 0.35,
                 "chaser_marker_size_points_squared": 1.2,
+                "chaser_color_source": "sealed_protocol_rgba",
+                "chaser_role_encoding": (
+                    "independent_bounded_exact_row_marker_shape_and_legend_text"
+                ),
+                "chaser_role_marker_max_per_panel_chaser": (
+                    STATIC_TRAJECTORY_ROLE_MARKER_MAX_PER_PANEL_CHASER
+                ),
+                "chaser_role_marker_sampling": (
+                    "source_order_uniform_including_endpoints"
+                ),
+                "chaser_role_marker_size_points_squared": 26.0,
+                "appearance_projection": appearance_projection.provenance_record(),
+                "index_or_role_color_fallback": "prohibited",
                 "pdf_dense_points_rasterized": True,
                 "position_samples_connected_by_lines": False,
                 "quantitative_occupancy_inference": False,
+            },
+            "keypoint_body_bearing_distance_point_cloud": {
+                "subplot_grid": [
+                    len(bearing_distance.panels),
+                    relative_keypoint.n_chasers,
+                ],
+                "figure_size_inches": [
+                    5.2 * relative_keypoint.n_chasers,
+                    4.4 * len(bearing_distance.panels),
+                ],
+                "display_sampling": ("source_order_uniform_including_endpoints"),
+                "max_rows_per_panel_chaser": (
+                    STATIC_POINT_CLOUD_MAX_ROWS_PER_PANEL_CHASER
+                ),
+                "pdf_dense_points_rasterized": True,
+                "scientific_inference": False,
+            },
+            "keypoint_body_bearing_distance_density": {
+                "subplot_grid": [
+                    len(bearing_distance.panels),
+                    relative_keypoint.n_chasers,
+                ],
+                "figure_size_inches": [
+                    5.2 * relative_keypoint.n_chasers,
+                    4.4 * len(bearing_distance.panels),
+                ],
+                "distance_bin_width_mm": DISTANCE_BIN_WIDTH_MM,
+                "bearing_bin_width_deg": BEARING_BIN_WIDTH_DEG,
+                "normalization": "probability_within_panel_chaser",
+                "color_cmax_quantile": DENSITY_COLOR_CMAX_QUANTILE,
+                "all_jointly_valid_exact_rows_retained": True,
+                "pdf_density_mesh_rasterized": True,
+                "scientific_recomputation": False,
             },
         },
         "output_families": [
@@ -1346,6 +1905,8 @@ def detailed_plot_parameters(
             "provider_radial_near_field_summary",
             "provider_epoch_distance_traces",
             "provider_epoch_trajectory_overlays",
+            "keypoint_body_bearing_distance_point_cloud",
+            "keypoint_body_bearing_distance_density",
         ],
     }
 
@@ -1361,8 +1922,9 @@ def render_detailed_bundle(
     *,
     output_dir: Path,
     bundle_name: str,
+    chaser_appearance: ChaserAppearanceProjection | None = None,
 ) -> tuple[Path, ...]:
-    """Validate all sources and render the seven detailed figure families."""
+    """Validate all sources and render the nine detailed figure families."""
 
     verify_detailed_plot_inputs(
         controller,
@@ -1372,6 +1934,10 @@ def render_detailed_bundle(
         relative_detection,
         radial_keypoint,
         radial_detection,
+    )
+    appearance_projection = _validated_exact_chaser_appearance(
+        relative_keypoint,
+        chaser_appearance or _load_exact_chaser_appearance(relative_keypoint),
     )
     outputs = []
     for renderer, suffix, args in (
@@ -1396,7 +1962,22 @@ def render_detailed_bundle(
         (
             render_provider_epoch_trajectory_overlays,
             "provider_epoch_trajectory_overlays",
-            (relative_keypoint, relative_detection, radial_keypoint),
+            (
+                relative_keypoint,
+                relative_detection,
+                radial_keypoint,
+                appearance_projection,
+            ),
+        ),
+        (
+            render_keypoint_body_bearing_distance_point_cloud,
+            "keypoint_body_bearing_distance_point_cloud",
+            (relative_keypoint, radial_keypoint),
+        ),
+        (
+            render_keypoint_body_bearing_distance_density,
+            "keypoint_body_bearing_distance_density",
+            (relative_keypoint, radial_keypoint),
         ),
     ):
         outputs.extend(
@@ -1455,6 +2036,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "provider_radial_near_field_summary",
         "provider_epoch_distance_traces",
         "provider_epoch_trajectory_overlays",
+        "keypoint_body_bearing_distance_point_cloud",
+        "keypoint_body_bearing_distance_density",
     )
     expected = tuple(
         output_dir / f"{bundle_name}_{suffix}.{extension}"
@@ -1501,6 +2084,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         relative_keypoint = load_chaser_relative_frame_targeted_source_handle(
             args.keypoint_relative_frame_receipt,
             required_base_arrays=DETAILED_PLOT_BASE_ARRAY_NAMES,
+            required_body_arrays=DETAILED_PLOT_BODY_ARRAY_NAMES,
             collapsed_frame_arrays=(),
             expected_analysis_zarr=archive,
             expected_recording_id=args.expected_recording_id,
@@ -1545,6 +2129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         deep_audit=True,
         direct_validation_receipt=args.detection_radial_validation_receipt,
     )
+    chaser_appearance = _load_exact_chaser_appearance(relative_keypoint)
     outputs = render_detailed_bundle(
         controller,
         bout,
@@ -1555,13 +2140,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         radial_detection,
         output_dir=output_dir,
         bundle_name=bundle_name,
+        chaser_appearance=chaser_appearance,
     )
     plot_parameters = detailed_plot_parameters(
         controller,
         bout,
         escape,
+        relative_keypoint,
         radial_keypoint,
         radial_detection,
+        chaser_appearance=chaser_appearance,
     )
     source_bindings = {
         "controller_chase_trials": {
@@ -1604,6 +2192,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "verification_mode": relative_keypoint.verification_mode,
             "validation_receipt_sha256": getattr(
                 relative_keypoint, "receipt_digest", None
+            ),
+            "body_array_paths": [
+                f"body/{name}" for name in DETAILED_PLOT_BODY_ARRAY_NAMES
+            ],
+            "body_frame_authority": _plain(
+                relative_keypoint.source_authorities["body_frame"]
             ),
         },
         "relative_frame_detection": {
@@ -1663,6 +2257,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "scientific_arrays": "persisted_arrays_only",
             "plot_transforms": (
                 "sorting_masking_exact_time_origin_subtraction_and_"
+                "display_only_body_bearing_distance_histogramming_and_"
                 "dense_artist_rasterization_only"
             ),
             "interpolation": "prohibited",
@@ -1673,7 +2268,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "individual_near_visits": "not_persisted_in_radial_successor_v1",
             "escape_aligned_distance_traces": "not_persisted_in_escape_successor_v2",
             "ring_entry_video": "deferred_sealed_video_successor",
-            "gaze_and_bearing": "reviewed_body_frame_and_eye_orientation_unavailable",
+            "gaze": (
+                "reviewed_eye_orientation_successor_not_supplied_to_"
+                "detailed_plot_bundle_v4"
+            ),
         },
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "selector_eligible": False,
@@ -1699,6 +2297,8 @@ __all__ = [
     "detailed_plot_parameters",
     "render_bout_response_details",
     "render_detailed_bundle",
+    "render_keypoint_body_bearing_distance_density",
+    "render_keypoint_body_bearing_distance_point_cloud",
     "render_provider_distance_cdf",
     "render_provider_epoch_distance_traces",
     "render_provider_epoch_trajectory_overlays",

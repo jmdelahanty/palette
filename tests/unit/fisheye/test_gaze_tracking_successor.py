@@ -8,6 +8,7 @@ import pytest
 from fisheye.analysis_workflows.gaze_tracking_successor import (
     GazeTrackingInput,
     GazeTrackingSuccessorError,
+    _dynamic_fit,
     prepare_gaze_tracking_successor,
 )
 from fisheye.analysis_workflows.generalized_bout_response_successor import (
@@ -19,6 +20,11 @@ def _source() -> GazeTrackingInput:
     n_frames = 6
     bearing = np.asarray([-20.0, -10.0, 0.0, 10.0, 20.0, 30.0], dtype=np.float32)
     gaze = np.stack([bearing, bearing + 5.0], axis=1).astype(np.float32)
+    center = np.asarray([100.0, 100.0], dtype=np.float64)
+    radians = np.deg2rad(bearing.astype(np.float64))
+    chaser_xy = center + np.column_stack(
+        (100.0 * np.cos(radians), -100.0 * np.sin(radians))
+    )
     return GazeTrackingInput(
         recording_id="recording-1",
         source_relative_frame_run_path="analysis/chaser_relative_frame_runs/r1",
@@ -31,6 +37,14 @@ def _source() -> GazeTrackingInput:
             "right_gaze_signed_deg_smoothed:vergence_eye_angle_deg_smoothed"
         ),
         source_semantic_selection_manifest_sha256="d" * 64,
+        source_radial_run_path="analysis/chaser_radial_near_field_runs/radial-1",
+        source_radial_manifest_sha256="e" * 64,
+        source_radial_payload_sha256="f" * 64,
+        source_arena_geometry_and_scale={"authority_sha256": "1" * 64},
+        arena_center_xy_px=center,
+        arena_radius_px=200.0,
+        arena_radius_mm=20.0,
+        pixels_per_mm=10.0,
         n_frames=n_frames,
         n_chasers=1,
         acquisition_frame_id_by_frame=np.arange(100, 106, dtype=np.int64),
@@ -40,6 +54,19 @@ def _source() -> GazeTrackingInput:
             n_frames, ROLE_CODES["chaser_training"], dtype=np.uint8
         ),
         chaser_identity_code=np.ones(n_frames, dtype=np.uint16),
+        fish_position_xy_px=np.broadcast_to(center, (n_frames, 2)).copy(),
+        fish_position_valid=np.ones(n_frames, dtype=bool),
+        chaser_position_xy_px=chaser_xy,
+        chaser_position_valid=np.ones(n_frames, dtype=bool),
+        chaser_occurrence_member=np.ones(n_frames, dtype=bool),
+        body_origin_xy_px=np.broadcast_to(center, (n_frames, 2)).copy(),
+        body_forward_axis_xy=np.tile(
+            np.asarray([1.0, 0.0], dtype=np.float64), (n_frames, 1)
+        ),
+        body_left_axis_xy=np.tile(
+            np.asarray([0.0, -1.0], dtype=np.float64), (n_frames, 1)
+        ),
+        body_axes_valid=np.ones(n_frames, dtype=bool),
         distance_mm=np.full(n_frames, 10.0, dtype=np.float32),
         distance_valid=np.ones(n_frames, dtype=bool),
         chaser_bearing_deg=bearing,
@@ -50,6 +77,7 @@ def _source() -> GazeTrackingInput:
         vergence_valid=np.ones(n_frames, dtype=bool),
         lock_threshold_deg=10.0,
         minimum_lock_duration_s=0.1,
+        minimum_regression_samples=3,
     )
 
 
@@ -75,6 +103,11 @@ def test_body_frame_gaze_rows_summaries_and_lock_events() -> None:
     assert result.array("lock_event_sample_count").tolist() == [4, 5]
     assert result.manifest["policy"]["world_frame_gaze"] == "prohibited"
     assert result.manifest["policy"]["orientation_fallback"] == "prohibited"
+    assert result.manifest["scientific_schema"]["schema_version"] == 3
+    assert result.array("virtual_candidate_row_id").size == 5
+    assert result.array("control_summary_row_id").size == result.n_summary_rows
+    assert np.all(result.array("control_virtual_reference_count") > 0)
+    assert "summary_dynamic_best_lag_gain" in result.arrays
     assert result.manifest["selector_eligible"] is False
 
 
@@ -105,3 +138,67 @@ def test_eye_convention_receipt_is_mandatory() -> None:
         prepare_gaze_tracking_successor(
             replace(_source(), source_eye_convention_receipt_sha256="")
         )
+
+
+def test_rotated_candidates_retain_collision_exclusion_evidence() -> None:
+    result = prepare_gaze_tracking_successor(
+        replace(_source(), minimum_virtual_separation_mm=1_000.0)
+    )
+
+    assert result.array("virtual_candidate_row_id").size == 5
+    assert not np.any(result.array("virtual_candidate_accepted"))
+    assert result.array("virtual_reference_row_id").size == 0
+    assert np.all(result.array("control_virtual_reference_count") == 0)
+    assert np.all(result.array("control_tracking_gain_virtual_valid_count") == 0)
+
+
+def test_dynamic_fit_selects_only_causal_contiguous_lag() -> None:
+    rng = np.random.default_rng(41)
+    driver = rng.normal(size=79)
+    bearing = np.concatenate(([0.0], np.cumsum(driver)))
+    gaze_delta = np.concatenate(([0.0], driver[:-1]))
+    gaze = np.concatenate(([0.0], np.cumsum(gaze_delta)))
+    frames = np.arange(80, dtype=np.int64)
+    timestamps = frames * 100_000_000
+
+    fit = _dynamic_fit(
+        bearing,
+        gaze,
+        np.ones(80, dtype=bool),
+        frames,
+        timestamps,
+        np.ones(80, dtype=bool),
+        maximum_lag_s=0.3,
+        minimum_samples=30,
+    )
+
+    assert fit[0] >= 30
+    assert fit[3] == 1
+    assert fit[4] == pytest.approx(0.1)
+    assert fit[2] == pytest.approx(1.0)
+
+
+def test_lock_events_split_at_exact_acquisition_frame_gaps() -> None:
+    source = replace(
+        _source(),
+        acquisition_frame_id_by_frame=np.asarray(
+            [100, 101, 102, 104, 105, 106], dtype=np.int64
+        ),
+        accessible_quantiles=(0.0, 1.0),
+    )
+
+    result = prepare_gaze_tracking_successor(source)
+
+    assert result.array("lock_event_sample_count").tolist() == [3, 3, 2, 3]
+    assert result.array("lock_event_start_acquisition_frame_id").tolist() == [
+        100,
+        104,
+        101,
+        104,
+    ]
+    assert result.array("lock_event_end_acquisition_frame_id_inclusive").tolist() == [
+        102,
+        106,
+        102,
+        106,
+    ]

@@ -68,6 +68,7 @@ from fisheye.shared.atomic_run_publisher import (
     AtomicRunPublishSpec,
     atomic_publish_run_group,
 )
+from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr.columnar import (
@@ -111,6 +112,8 @@ SEMANTIC_MATERIALIZATION_SCHEMA_ID = (
 )
 LEGACY_PUBLISH_SCHEMA_ID = "palette.provider_epoch_behavior_summary_publish.v1"
 SEMANTIC_PUBLISH_SCHEMA_ID = "palette.provider_epoch_behavior_summary_publish.v2"
+MANIFEST_ATTR = "provider_epoch_behavior_summary_manifest"
+MANIFEST_DIGEST_ATTR = "provider_epoch_behavior_summary_manifest_sha256"
 # Preserve the original public constants for legacy callers. Semantic-v2 plans
 # select their successor identifiers from the result binding mode.
 MATERIALIZATION_SCHEMA_ID = LEGACY_MATERIALIZATION_SCHEMA_ID
@@ -386,16 +389,18 @@ def _windows_from_protocol_semantic_binding(
             "Protocol-semantic role-record digest is stale."
         )
     observed_roles = tuple(record.get("analysis_role") for record in epoch_records)
-    if observed_roles != CHASER_WINDOW_ROLES or tuple(
-        record.get("analysis_role") for record in role_records
-    ) != CHASER_WINDOW_ROLES:
+    if (
+        observed_roles != CHASER_WINDOW_ROLES
+        or tuple(record.get("analysis_role") for record in role_records)
+        != CHASER_WINDOW_ROLES
+    ):
         raise ProviderEpochBehaviorSummaryError(
             "Protocol-semantic epoch roles must be exact chaser pre/training/post."
         )
-    source_by_id = {int(interval.window_id): interval for interval in selection.intervals}
-    semantic_by_role = {
-        str(record["analysis_role"]): record for record in role_records
+    source_by_id = {
+        int(interval.window_id): interval for interval in selection.intervals
     }
+    semantic_by_role = {str(record["analysis_role"]): record for record in role_records}
     windows: list[ChaserDistanceWindow] = []
     for record in epoch_records:
         role = str(record["analysis_role"])
@@ -416,11 +421,9 @@ def _windows_from_protocol_semantic_binding(
         semantic = semantic_by_role[role]
         if (
             record.get("source_label") != source.label
-            or record.get("source_interval_sha256")
-            != source.source_interval_digest
+            or record.get("source_interval_sha256") != source.source_interval_digest
             or semantic.get("source_window_id") != source_id
-            or semantic.get("source_interval_sha256")
-            != source.source_interval_digest
+            or semantic.get("source_interval_sha256") != source.source_interval_digest
             or semantic.get("selected_start_frame") != start
             or semantic.get("selected_end_frame_exclusive") != end
             or start < source.start_frame
@@ -498,9 +501,7 @@ def _swim_bout_binding(
         raise ProviderEpochBehaviorSummaryError(
             "Swim-bout frame-axis contract is absent."
         )
-    frames = np.asarray(
-        provider.source_acquisition_frame_index[rows], dtype=np.int64
-    )
+    frames = np.asarray(provider.source_acquisition_frame_index[rows], dtype=np.int64)
     frame_sha256 = canonical_frame_axis_sha256(frames)
     if frame_contract.get("content_sha256") != frame_sha256:
         raise ProviderEpochBehaviorSummaryError(
@@ -595,7 +596,9 @@ def _make_per_epoch_fish(
     linear_valid = np.asarray(track.linear_sample_valid, dtype=bool)
     transition_valid = np.asarray(track.transition_valid, dtype=bool)
     speed = np.asarray(track.speed_mm_by_level[speed_level], dtype=np.float64)
-    path_source = speed_level if speed_level in {"raw", "filtered", "smoothed"} else "smoothed"
+    path_source = (
+        speed_level if speed_level in {"raw", "filtered", "smoothed"} else "smoothed"
+    )
     path = np.asarray(
         track.frame_path_distance_mm_by_level[path_source], dtype=np.float64
     )
@@ -614,9 +617,7 @@ def _make_per_epoch_fish(
     bout_event_frame = _first_nonnegative_frame(
         bouts, "peak_frame", "core_start_frame", "start_frame"
     )
-    bout_time_s = _structured_field(
-        bouts, "peak_time_s", "start_time_s", "start_s"
-    )
+    bout_time_s = _structured_field(bouts, "peak_time_s", "start_time_s", "start_s")
     bout_duration_s = _structured_field(
         bouts, "duration_s", "observed_duration_s", "elapsed_duration_s"
     )
@@ -651,9 +652,8 @@ def _make_per_epoch_fish(
         )
         if bout_event_frame is not None:
             event_frame = np.asarray(bout_event_frame, dtype=np.int64)
-            bout_mask = (
-                (event_frame >= int(window.start_frame))
-                & (event_frame <= int(window.end_frame))
+            bout_mask = (event_frame >= int(window.start_frame)) & (
+                event_frame <= int(window.end_frame)
             )
         else:
             bout_mask = _window_time_mask(
@@ -732,9 +732,7 @@ def _make_per_epoch_fish(
             interval_values = np.asarray([], dtype=np.float64)
             interval_mask = np.zeros(0, dtype=bool)
         interval_summary = _finite_summary(
-            interval_values[interval_mask]
-            if interval_values.size
-            else np.asarray([])
+            interval_values[interval_mask] if interval_values.size else np.asarray([])
         )
         interval_rate = (
             float(interval_summary[0]) / (valid_duration / 60.0)
@@ -809,6 +807,75 @@ def _bind_track_id(records: np.ndarray, *, track_id: int) -> np.ndarray:
     return result
 
 
+def _array_declarations(
+    result: ProviderEpochBehaviorSummaryResult,
+) -> list[dict[str, Any]]:
+    """Declare every physical column written by the immutable summary."""
+
+    tables = {
+        "per_epoch_fish": result.per_epoch_fish,
+        "per_epoch_bouts": result.per_epoch_bouts,
+        "per_epoch_bout_histograms": result.per_epoch_bout_histograms,
+        "per_epoch_inter_bout_interval_histograms": (
+            result.per_epoch_inter_bout_interval_histograms
+        ),
+    }
+    declarations: list[dict[str, Any]] = []
+    for table_name, table in tables.items():
+        if table.dtype.names is None:
+            raise ProviderEpochBehaviorSummaryError(
+                f"{table_name} must be one structured table."
+            )
+        for field_name in table.dtype.names:
+            values = np.asarray(table[field_name])
+            declarations.append(
+                {
+                    "path": f"{table_name}/{field_name}",
+                    "dtype": values.dtype.str,
+                    "shape": list(values.shape),
+                    "content_sha256": array_values_sha256(values),
+                }
+            )
+    return declarations
+
+
+def _summary_manifest(
+    result: ProviderEpochBehaviorSummaryResult,
+    *,
+    run_path: str,
+    source_refs: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    body = {
+        "scientific_schema": {
+            "schema_id": SCHEMA_ID,
+            "schema_version": result.schema_version,
+        },
+        "method_id": METHOD_ID,
+        "method_version": result.method_version,
+        "epoch_binding_mode": result.epoch_binding_mode,
+        "run_path": run_path,
+        "recording_id": result.recording_id,
+        "dimensions": {
+            "n_epoch_rows": int(result.per_epoch_fish.shape[0]),
+            "n_bout_rows": int(result.per_epoch_bouts.shape[0]),
+            "n_bout_histogram_rows": int(result.per_epoch_bout_histograms.shape[0]),
+            "n_inter_bout_interval_histogram_rows": int(
+                result.per_epoch_inter_bout_interval_histograms.shape[0]
+            ),
+        },
+        "sources": dict(source_refs),
+        "parameters": dict(parameters),
+        "analysis_offer_sha256": result.analysis_offer_sha256,
+        "array_declarations": _array_declarations(result),
+        "selector_eligible": False,
+        "selection": "none",
+        "production_authority": False,
+        "registry_update": False,
+    }
+    return {**body, "payload_digest": canonical_json_sha256(body)}
+
+
 def _bind_protocol_semantic_row_identity(
     records: np.ndarray,
     *,
@@ -827,6 +894,7 @@ def _bind_protocol_semantic_row_identity(
         )
     added_names = (
         "analysis_role",
+        "source_interval_sha256",
         "protocol_semantic_hash",
         "protocol_semantic_step_index",
         "protocol_semantic_step_ref",
@@ -856,6 +924,7 @@ def _bind_protocol_semantic_row_identity(
         [(name, source.dtype.fields[name][0]) for name in source.dtype.names]
         + [
             ("analysis_role", "S32"),
+            ("source_interval_sha256", "S64"),
             ("protocol_semantic_hash", "S72"),
             ("protocol_semantic_step_index", np.int32),
             ("protocol_semantic_step_ref", "S112"),
@@ -872,22 +941,30 @@ def _bind_protocol_semantic_row_identity(
                 f"Summary row references non-semantic window_id={window_id}."
             )
         role = record.get("analysis_role")
+        source_interval_sha256 = record.get("source_interval_sha256")
         semantic_hash = record.get("protocol_semantic_hash")
         step_index = record.get("protocol_semantic_step_index")
         step_ref = record.get("protocol_semantic_step_ref")
         expected_step_ref = (
-            "protocol_semantic_snapshot@recipe.steps"
-            f"[{step_index}]"
+            f"protocol_semantic_snapshot@recipe.steps[{step_index}]"
             if type(step_index) is int
             else None
         )
         if (
             type(role) is not str
             or role not in CHASER_WINDOW_ROLES
+            or type(source_interval_sha256) is not str
+            or len(source_interval_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in source_interval_sha256
+            )
             or type(semantic_hash) is not str
             or len(semantic_hash) != 71
             or not semantic_hash.startswith("sha256:")
-            or any(character not in "0123456789abcdef" for character in semantic_hash[7:])
+            or any(
+                character not in "0123456789abcdef" for character in semantic_hash[7:]
+            )
             or semantic_hash != binding.get("protocol_semantic_hash")
             or type(step_index) is not int
             or step_index < 0
@@ -900,6 +977,9 @@ def _bind_protocol_semantic_row_identity(
                 "Protocol-semantic row identity is incomplete."
             )
         result["analysis_role"][row_index] = role.encode("utf-8")
+        result["source_interval_sha256"][row_index] = source_interval_sha256.encode(
+            "utf-8"
+        )
         result["protocol_semantic_hash"][row_index] = semantic_hash.encode("utf-8")
         result["protocol_semantic_step_index"][row_index] = step_index
         result["protocol_semantic_step_ref"][row_index] = step_ref.encode("utf-8")
@@ -1032,11 +1112,9 @@ def _compute_result(
             per_epoch_bout_histograms,
             binding=semantic_binding,
         )
-        per_epoch_inter_bout_interval_histograms = (
-            _bind_protocol_semantic_row_identity(
-                per_epoch_inter_bout_interval_histograms,
-                binding=semantic_binding,
-            )
+        per_epoch_inter_bout_interval_histograms = _bind_protocol_semantic_row_identity(
+            per_epoch_inter_bout_interval_histograms,
+            binding=semantic_binding,
         )
     source_bindings = {
         "epoch_binding_mode": epoch_binding_mode,
@@ -1137,6 +1215,11 @@ def build_provider_epoch_behavior_summary_plan(
     if level not in SUPPORTED_SPEED_LEVELS:
         raise ProviderEpochBehaviorSummaryError(
             f"speed_level must be one of {SUPPORTED_SPEED_LEVELS!r}."
+        )
+    if semantic is not None and level == "raw":
+        raise ProviderEpochBehaviorSummaryError(
+            "Semantic-v2 publication rejects raw speed; choose filtered, "
+            "smoothed, or averaged physical speed."
         )
     local = scratch / "provider-epoch-behavior-summary.zarr"
     target = source.joinpath(*f"{PARENT_PATH}/{run}".split("/"))
@@ -1239,6 +1322,12 @@ def _write_local(plan: ProviderEpochBehaviorSummaryPlan) -> None:
             else "legacy_exact_epoch_selection_without_protocol_role_authority"
         ),
     }
+    manifest = _summary_manifest(
+        plan.result,
+        run_path=plan.run_path,
+        source_refs=source_refs,
+        parameters=parameters,
+    )
     run.attrs.update(
         json_attr_safe(
             {
@@ -1248,6 +1337,7 @@ def _write_local(plan: ProviderEpochBehaviorSummaryPlan) -> None:
                 "method_version": plan.result.method_version,
                 "epoch_binding_mode": plan.result.epoch_binding_mode,
                 "run_name": plan.run_name,
+                "run_path": plan.run_path,
                 "recording_id": plan.result.recording_id,
                 "row_axis": "track_x_stimulus_epoch",
                 "fps": plan.result.fps,
@@ -1257,6 +1347,11 @@ def _write_local(plan: ProviderEpochBehaviorSummaryPlan) -> None:
                 "parameters": parameters,
                 "analysis_offer": dict(plan.result.analysis_offer),
                 "analysis_offer_sha256": plan.result.analysis_offer_sha256,
+                MANIFEST_ATTR: manifest,
+                MANIFEST_DIGEST_ATTR: canonical_json_sha256(manifest),
+                "production_authority": False,
+                "registry_update": False,
+                "selection": "none",
                 "summary": {
                     "epoch_count": int(plan.result.per_epoch_fish.shape[0]),
                     "bout_count": int(plan.result.per_epoch_bouts.shape[0]),
@@ -1264,9 +1359,9 @@ def _write_local(plan: ProviderEpochBehaviorSummaryPlan) -> None:
                         bytes(value).rstrip(b"\x00").decode("utf-8")
                         for value in plan.result.per_epoch_fish["window_label"]
                     ],
-                    "bout_counts": plan.result.per_epoch_fish[
-                        "bout_count"
-                    ].astype(int).tolist(),
+                    "bout_counts": plan.result.per_epoch_fish["bout_count"]
+                    .astype(int)
+                    .tolist(),
                 },
                 "run_provenance": build_writer_run_provenance(
                     command="provider_epoch_behavior_summary_materializer",
@@ -1339,8 +1434,27 @@ def _validate_group(
         errors.append("run is not selector-ineligible")
     if attrs.get("analysis_offer_sha256") != result.analysis_offer_sha256:
         errors.append("analysis-offer digest mismatch")
-    if canonical_json_sha256(attrs.get("analysis_offer")) != result.analysis_offer_sha256:
+    if (
+        canonical_json_sha256(attrs.get("analysis_offer"))
+        != result.analysis_offer_sha256
+    ):
         errors.append("analysis-offer payload is stale")
+    expected_manifest = _summary_manifest(
+        result,
+        run_path=f"{PARENT_PATH}/{result.run_name}",
+        source_refs=json_attr_safe(dict(result.source_bindings)),
+        parameters=attrs.get("parameters", {}),
+    )
+    if attrs.get(MANIFEST_ATTR) != expected_manifest:
+        errors.append("immutable summary manifest mismatch")
+    if attrs.get(MANIFEST_DIGEST_ATTR) != canonical_json_sha256(expected_manifest):
+        errors.append("immutable summary manifest digest mismatch")
+    if (
+        attrs.get("production_authority") is not False
+        or attrs.get("registry_update") is not False
+        or attrs.get("selection") != "none"
+    ):
+        errors.append("immutable summary safety state mismatch")
     source_refs = attrs.get("source_refs")
     if not isinstance(source_refs, Mapping):
         errors.append("source bindings are absent")
@@ -1369,7 +1483,9 @@ def _validate_group(
         if table_attrs.get("epoch_binding_mode") != result.epoch_binding_mode:
             errors.append(f"{name} epoch binding mode differs")
     if errors:
-        raise ProviderEpochBehaviorSummaryError("Invalid provider epoch summary: " + "; ".join(errors))
+        raise ProviderEpochBehaviorSummaryError(
+            "Invalid provider epoch summary: " + "; ".join(errors)
+        )
     return {
         "valid": True,
         "epoch_count": int(result.per_epoch_fish.shape[0]),
@@ -1414,9 +1530,7 @@ def materialize_provider_epoch_behavior_summary(
         scratch_root=scratch_root,
         run_name=run_name,
         epoch_run_name=epoch_run_name,
-        protocol_semantic_selection_run_name=(
-            protocol_semantic_selection_run_name
-        ),
+        protocol_semantic_selection_run_name=(protocol_semantic_selection_run_name),
         motion_run=motion_run,
         swim_bout_run_name=swim_bout_run_name,
         track_id=track_id,
@@ -1544,8 +1658,7 @@ def materialize_provider_epoch_behavior_summary(
                 lock_suffix="provider-epoch-behavior-summary",
                 publish_schema_id=(
                     SEMANTIC_PUBLISH_SCHEMA_ID
-                    if plan.result.epoch_binding_mode
-                    == SEMANTIC_EPOCH_BINDING_MODE
+                    if plan.result.epoch_binding_mode == SEMANTIC_EPOCH_BINDING_MODE
                     else LEGACY_PUBLISH_SCHEMA_ID
                 ),
                 policy=(
@@ -1584,12 +1697,14 @@ def materialize_provider_epoch_behavior_summary(
                         bytes(value).rstrip(b"\x00").decode("utf-8")
                         for value in plan.result.per_epoch_fish["window_label"]
                     ],
-                    "bout_counts": plan.result.per_epoch_fish[
-                        "bout_count"
-                    ].astype(int).tolist(),
+                    "bout_counts": plan.result.per_epoch_fish["bout_count"]
+                    .astype(int)
+                    .tolist(),
                     "bout_rates_per_min": plan.result.per_epoch_fish[
                         "bout_rate_per_min"
-                    ].astype(float).tolist(),
+                    ]
+                    .astype(float)
+                    .tolist(),
                 }
             ),
         )
@@ -1640,9 +1755,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         scratch_root=args.scratch_root or _default_scratch(args.run_name),
         run_name=args.run_name,
         epoch_run_name=args.epoch_run,
-        protocol_semantic_selection_run_name=(
-            args.protocol_semantic_selection_run
-        ),
+        protocol_semantic_selection_run_name=(args.protocol_semantic_selection_run),
         motion_run=args.motion_run,
         swim_bout_run_name=args.swim_bout_run,
         track_id=args.track_id,
@@ -1661,8 +1774,12 @@ if __name__ == "__main__":  # pragma: no cover
 
 __all__ = [
     "ANALYSIS_CLASS_ID",
+    "MANIFEST_ATTR",
+    "MANIFEST_DIGEST_ATTR",
     "METHOD_ID",
     "PARENT_PATH",
+    "SEMANTIC_EPOCH_BINDING_MODE",
+    "SEMANTIC_SCHEMA_VERSION",
     "ProviderEpochBehaviorSummaryError",
     "ProviderEpochBehaviorSummaryPlan",
     "ProviderEpochBehaviorSummaryResult",

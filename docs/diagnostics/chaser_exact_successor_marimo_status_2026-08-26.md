@@ -2,8 +2,8 @@
 
 <!-- contract-meta
 status: active
-implementation: reader-through-generalized-merged-escape-freeze-locally-validated-ci-pending
-last_verified: 2026-08-29
+implementation: first-class-body-bearing-and-gaze-local-validation-complete-ci-pending
+last_verified: 2026-08-30
 -->
 
 ## Purpose
@@ -42,7 +42,10 @@ The declared interactive views are:
    response;
 7. exact-trial escape/freeze outcomes, event facts, trace-validity reasons, and
    persisted threshold sensitivity; and
-8. exact manifest, child identity, provider authority, and display-projection
+8. conditional keypoint-authority body-bearing polar distributions;
+9. conditional schema-v3 exact eye-gaze tracking, dynamic summaries, lock
+   events, and rotated spatial controls; and
+10. exact manifest, child identity, provider authority, and display-projection
    provenance.
 
 The adapter resolves no `latest`, default, promoted, or fallback selector. It
@@ -417,6 +420,317 @@ The smoke composition resides only under `/tmp`; no recording, registry,
 selector, existing receipt, or shared checkout was modified. Required CI for
 this new branch is pending, so it is not merge-ready or deployed.
 
+The receipt-bound reader subsequently passed required CI and merged through
+PR 76 as merge commit `e0521c6bcf39859634c8d52bc4a8bc98f73cf721`.
+The temporary smoke receipt remains non-durable and no selector or shared
+checkout was changed by that merge.
+
+## Gaze, bearing, distance-distribution, and heatmap audit — 2026-08-30
+
+### Gaze was not lost by the explorer
+
+The frozen 84-entry body-frame cohort task never requested
+`chaser_gaze_tracking_v2`, never selected an exact eye-angle child, and never
+supplied the required gaze-convention review receipt. A direct metadata-file
+census of those 84 archive paths found zero `analysis/eye_angle_runs`, zero
+`analysis/subject_shape_runs`, and zero modern subject/refined-subject mask
+families. The audited smoke archive consequently contains no
+`analysis/chaser_gaze_tracking_runs` child.
+
+The absence occurs at three separate boundaries:
+
+1. the cohort producer requested controller, generalized bout-response, and
+   escape/freeze successors but not gaze;
+2. no modern reviewed eye-orientation source was available to that frozen
+   cohort; and
+3. exact projection-receipt schema v1 and the exact Marimo provider contain no
+   gaze child or gaze route.
+
+This is an upstream production and composition gap, not a hidden panel and not
+authorization to use the legacy `analysis/chaser_distance_runs/.../gaze_tracking`
+component. The modern successor already fails closed on an exact compact-v7
+eye-angle payload, its exact biological-direction convention receipt, the
+protocol-semantic selection, and the anatomical body-bearing relative-frame
+extension. It prohibits world-frame gaze, nasal-positive eye-angle
+substitution, motion-heading substitution, and selector resolution.
+
+### Lock fraction and sustained lock events
+
+The modern successor defines one row per acquisition frame x eye x chaser. A
+row is valid only when it has a nonzero semantic role, valid reviewed eye gaze,
+valid anatomical chaser bearing, valid physical distance, and distance no
+greater than the configured 50 mm default. Each eye's accessible bearing range
+is the configured empirical gaze interval; the current successor default is
+the 2.5th through 97.5th percentiles of that eye's valid gaze values.
+
+For a semantic role x eye x chaser stratum:
+
+```text
+lock_fraction = count(valid and accessible and abs(wrapped_gaze_error) <= 10 deg)
+                / count(valid and accessible)
+```
+
+The 10-degree threshold, 50 mm distance limit, empirical quantiles, numerator,
+and denominator are successor provenance. A lock fraction is descriptive
+alignment occupancy; it is not alone evidence that the eye actively followed
+the chaser.
+
+A lock event is one contiguous run of lock rows for the same semantic role,
+eye, and chaser whose timestamp span is at least the configured 0.10 seconds.
+The successor persists start/end acquisition-frame identities, timestamp-derived
+duration, sample count, and median absolute gaze error. Invalid or non-lock
+rows split events; the current contract does not bridge gaps.
+
+### Rotated spatial null controls are missing from the modern successor
+
+The legacy gaze component constructed virtual references by rotating each real
+chaser trajectory around the reviewed arena center by 60, 120, 180, 240, and
+300 degrees. This preserves the reference trajectory's arena radius, motion,
+and wall proximity while moving it to an unoccupied location. A virtual
+reference was rejected when it came within 8 mm of a real chaser for more than
+5 percent of finite samples. The legacy recording summary compared the real
+chaser with the mean of its retained virtual twins for lock fraction, static
+tracking gain, zero/best-lag dynamic gain, and median absolute gaze error.
+
+This is a spatial arena/wall-geometry null, not a temporal shuffle. The modern
+`palette.analysis.chaser_gaze_tracking` schema version 2 persists gaze error,
+lock occupancy, static regression, and sustained events but does not persist
+the rotated controls or dynamic-lag summaries. The older catalog description
+still promises rotated controls, so the catalog and modern payload currently
+diverge. First-class gaze publication must close that divergence in a new
+successor schema before the cohort is materialized; Marimo must not recreate a
+null from displayed rows.
+
+### First-class exact gaze and bearing boundary
+
+"First-class gaze" means a conditional analysis capability of the exact chaser
+provider with its own immutable successor lineage, source bindings, validation
+receipt, composition-receipt child, discovery proof, projection loader, array
+roster, renderer, and explicit unavailable state. It is not a third position
+provider. Keypoint anatomical-triad and detection bbox-centroid remain paired
+first-class position providers. Detection can support position, distance,
+radial, and spatial analytics, but it cannot provide anatomical bearing without
+an independently bound body axis.
+
+The anatomical keypoint relative-frame child already persists body-frame
+chaser bearing. A keypoint-only polar bearing view can therefore be added now,
+independently of eye-angle cohort readiness. It must display the provider/body-
+frame asymmetry explicitly rather than invent detection bearing. The gaze view
+then compares reviewed left/right eye direction with that same sealed
+anatomical bearing and adds error, tracking, lock, event, and rotated-control
+panels.
+
+Existing projection-receipt schema v1 remains valid for the seven exact
+children it closes. A gaze-capable composition must use a new closed receipt
+schema/version that requires an exact gaze child; a supplied v1 receipt cannot
+silently deep-audit or discover gaze. No-receipt diagnostic mode may retain its
+explicit exhaustive-audit behavior.
+
+### Distance distributions and exact spatial heatmaps
+
+Both radial successors already persist exact epoch x behavior x chaser CDFs,
+observed radial probability mass, moving-reference geometric expected mass,
+selection indices, and 5 mm wall-excluded twins. The current exact Marimo
+radial roster loads only medians/interquartile ranges, near-field summaries,
+and selection indices. The missing per-epoch distributions are therefore a
+reader parity gap, not a scientific-publication gap.
+
+The safe interactive addition is a receipt-bound `distance_distributions`
+route that reads those persisted arrays without framewise reconstruction or
+rebinning. It should display paired-provider CDFs, observed versus geometrically
+expected radial probability mass, and explicitly separate wall-excluded twins.
+Every exact bin edge and denominator remains successor evidence and every
+display parameter remains in figure metadata.
+
+The current exact spatial heatmap is already on the latest scientific surface:
+the sealed 2 mm reviewed-arena grid, pre/training/post epochs, paired providers,
+valid-in-arena conditional density, candidate-epoch fraction, complete coverage
+denominators, shared provider scale, and no interpolation. Static and Marimo
+renderers duplicate their validation and display-parameter derivation. They
+should share one scientific display projection. Conditional valid-in-arena
+occupancy remains primary; the already-persisted candidate-epoch-normalized
+surface should be available as an explicitly coverage-sensitive companion.
+
+### First-class gaze and body-bearing implementation addendum — 2026-08-30
+
+The implementation branch now mounts the accepted keypoint body-bearing
+extension as a conditional `body_bearing_polar` capability. It uses fixed
+10-degree whole-circle bins for the full recording and exact semantic epochs,
+normalizes within panel and chaser, and records the display recipe in figure
+metadata. Detection bbox centroid remains a first-class position and distance
+provider, but neither detection nor motion heading is permitted to supply an
+anatomical body axis.
+
+The scientific gaze successor is advanced to schema version 3. It binds the
+exact reviewed eye-orientation payload and convention receipt, keypoint
+relative-frame body extension, protocol-semantic selection, and the exact
+radial successor that seals reviewed arena geometry and physical scale. The
+payload now retains every rotated candidate and its collision decision,
+accepted virtual-reference summaries, finite per-metric null denominators,
+real-minus-virtual gain/lock contrasts, virtual-minus-real error improvement,
+zero-lag dynamic gain, and causal nonnegative best-lag gain. Sustained lock
+events and their exact-frame/timestamp evidence remain persisted scientific
+outputs rather than viewer reconstructions.
+
+The exact explorer now has a closed gaze array roster, metadata-only discovery,
+strict projection loader, typed unavailable state, and persisted-array panels
+for gaze versus bearing, gaze-error distributions, lock/static summaries,
+dynamic tracking, real-versus-rotated controls, and sustained events. A
+projection receipt containing the original seven exact children remains schema
+v1. Adding the gaze child produces the closed schema-v2 roster. A supplied v1
+receipt cannot authorize gaze and cannot silently fall back to deep audit.
+
+This makes the code path ready for validated schema-v3 gaze publications, but
+does not manufacture gaze for the frozen body-frame cohort: those recordings
+still need explicit reviewed eye-angle sources, biological-direction convention
+receipts, and newly materialized immutable gaze successors. Required CI and a
+live gaze-capable artifact smoke remain release evidence, not assumptions.
+
+A read-only live smoke on
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat` validates the independent bearing
+path. Metadata discovery exposes `body_bearing_polar`; the existing projection
+receipt permits targeted rehash of exactly `body/body_bearing_deg` and
+`body/body_bearing_valid`; and the renderer returns eight polar traces for two
+chasers across the full recording and three exact semantic epochs. The same
+recording truthfully omits gaze because it has no schema-v3 gaze successor.
+
+### Exact body-bearing × distance parity addendum — 2026-08-30
+
+The earlier GoodCopBadCop viewer retained two related products that had not
+been migrated into the exact-successor provider: a polar point cloud whose
+angle is anatomical chaser bearing and whose radius is fish--chaser distance,
+and a joint distance-by-bearing polar density. The exact provider exposed only
+the one-dimensional `body_bearing_polar` marginal, so neither older product was
+discoverable for the live recording even though its exact keypoint relative
+frame already contained the required evidence.
+
+The implementation branch now adds a distinct conditional
+`body_bearing_distance` analysis. It is available only through the same closed
+accepted-keypoint body-bearing binding as `body_bearing_polar`; detection
+centroids remain a first-class distance provider but are not substituted for
+an anatomical body-axis supplier. The view intersects exact panel membership,
+`chaser_occurrence_member`, `relative_physical_valid`, and
+`body_bearing_valid`. Declared-valid non-finite, negative-distance, or
+out-of-circle bearing values fail closed. Missing or invalid rows remain
+excluded evidence and no interpolation occurs.
+
+Both Marimo and static publication use the shared plotting-library-neutral
+recipe `accepted_body_axis_bearing_distance_display_v1`. Density uses fixed
+5 mm distance bins and 30-degree whole-circle bearing bins, normalizes within
+each panel and chaser, and records realized bin edges and exact denominators.
+Its color scale uses the recorded 0.98 positive-bin probability quantile shared
+across panels. The interactive point cloud is deterministically limited to
+4,000 source-ordered rows per panel/chaser; static publication is limited to
+20,000. The density always consumes every jointly valid exact row.
+
+The detailed static receipt is advanced to schema/recipe v4 and grows from
+seven to nine figure families (14 to 18 PNG/PDF files). The two added families
+are `keypoint_body_bearing_distance_point_cloud` and
+`keypoint_body_bearing_distance_density`. Receipt-bound publication now
+target-rehashes the two body arrays in addition to its base-array roster and
+seals body authority, source paths, bin edges, panel denominators, sampling
+limits, normalization, and color scaling. Cohort recipe names advance to the
+non-colliding detailed bundle v4 / receipt-bound recipe v6 identities; earlier
+bundles remain immutable.
+
+This closes single-recording interactive and receipt-sealed static parity for
+the keypoint-authority bearing--distance views. It does not yet create a
+persisted cross-recording joint-histogram successor, so group/cohort pooling of
+this exact product remains a separate versioned publication step.
+
+A read-only receipt-bound smoke against
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat` discovers the new analysis only
+on the body-frame-authorized v4 bundle. The targeted load completed in 4.042 s
+and rendering in 0.174 s. Both figures contain eight panel/chaser traces (full
+recording plus three semantic epochs for two chasers). Their eight denominators
+sum to 592,362 jointly valid panel rows; density retained all of them and the
+display-only point clouds retained the configured 32,000-row total. Focused
+validation passed 79 tests, the neighboring receipt/materialization surface
+passed 67 tests, and Marimo check passed. Required CI remains pending release
+evidence.
+
+### Protocol-authored chaser appearance and exact location overlays — 2026-08-30
+
+The earlier exact trajectory reader assigned green, purple, and later palette
+colors by chaser column. That was a display defect: experimental color is a
+protocol datum and is not a synonym for behavior role. A blue rendered object
+may be aggressive, random non-chasing, or inert. The spatial occupancy reader
+also omitted the pre/post logged chaser locations even though its bound
+relative-frame children retained them.
+
+The implementation branch now resolves one shared fail-closed appearance
+projection. The relative-frame manifest already seals a self-digested chaser
+occurrence record containing the exact stimulus-run path, complete protocol
+SHA-256, protocol chaser index, stimulus-run-scoped identity, and behavior
+role. The reader opens that exact run through consolidated metadata, rehashes
+the complete `protocol_json`, resolves its chaser list, and requires exact
+identity/role/cardinality agreement with both paired relative-frame manifests
+and their stable frame-column codes. Missing explicit RGBA, stale digest,
+mismatched role, or selector-like path makes the panel unavailable; no
+role-color, index-palette, or default-black substitution is allowed.
+
+Marker fill now uses the protocol-authored RGBA. Role is a separate glyph and
+text layer: aggressive is a star, random non-chasing a diamond, inert a circle,
+and unknown an X. Exact identity and protocol index remain in hover/legend;
+the contrast outline is display-only. This contract is used by the interactive
+trajectory view and by new spatial pre/post overlays. Spatial locations are
+medians of all exact valid logged rows within the sealed pre or post interval,
+with sample count and median/p95/maximum drift retained in figure metadata and
+hover. The moving training epoch is deliberately not collapsed to one static
+marker; its logged path remains in the trajectory view.
+
+The live receipt-bound smoke target proves the distinction: both configured
+objects are experimentally black, while their roles are aggressive and inert.
+Both views render black fills with star/circle glyphs. The complete exact-chaser
+Marimo unit surface passed 82 tests, including an adversarial two-blue-chaser
+case, and `marimo check` passed outside the sandbox. Required CI remains a
+release gate.
+
+### Occupancy display range and static appearance parity — 2026-08-30
+
+The canonical spatial-occupancy evidence remains the persisted 2 mm count,
+density, candidate-fraction, edge, mask, and denominator arrays. The viewer now
+defaults to one shared p98 color limit computed over strictly positive bins
+across both providers and all three epochs. This is a display transform only:
+bins above the limit are color-saturated, while their exact persisted density
+and count remain available in hover. A full-range reference is selectable from
+the same figure, and both robust and full limits, quantile method, positive-bin
+count, and saturated-bin count are sealed in figure metadata.
+
+The same menu offers an aligned 4 mm display. It sums complete 2 by 2 blocks of
+the canonical 2 mm integer counts, proves count conservation independently for
+every provider/epoch, and normalizes with the original persisted in-arena and
+candidate denominators. It does not interpolate, alter the source Zarr, or
+become a scientific authority. The four explicit modes are 2 mm robust, 2 mm
+full range, 4 mm robust, and 4 mm full range; the 2 mm robust view is the
+default.
+
+The receipt-sealed static trajectory publication now uses the same fail-closed
+appearance projection as the interactive viewer. Every valid exact row remains
+in the dense path and uses protocol RGBA. An independent, bounded set of exact
+source-order rows carries the behavior-role glyph, including endpoints; it is
+display sampling, not scientific downsampling. The detailed receipt advances
+to schema/recipe v5 and records the appearance projection, glyph limit and
+sampling policy, color source, and prohibited fallbacks. Cohort output names
+advance to detailed bundle v5 / recipe v7 so existing immutable publications
+are never overwritten. The publisher resolves and validates this appearance
+projection once, then supplies that same object to both the trajectory renderer
+and receipt-parameter builder so the receipt cannot describe a separately
+reloaded appearance snapshot.
+
+The receipt-bound live smoke selected the exact v4 occupancy child from two
+discoverable bundles. Its canonical 42 by 42 grid became a 21 by 21 aligned
+display, with all six provider/epoch count totals conserved exactly. The 2 mm
+density scale was 0.636491%/bin at p98 versus a 59.106231% full maximum; 53 of
+2,621 positive bins exceeded the robust limit. The 4 mm scale was 1.715864%
+versus 59.466676%; 20 of 964 positive bins exceeded the robust limit. Both
+chasers remained protocol black and rendered as aggressive/star versus
+inert/circle. A separate receipt-bound static smoke produced non-empty PNG and
+PDF trajectory files using appearance projection
+`966103d63f0b1081b43c97ea1068cb9adc2ea7e1f05cbc6c1d3b4156453b45e6`.
+The 107-test affected surface and Marimo check passed outside the sandbox.
+Required CI remains the release gate.
+
 ## Persisted but not yet mounted in this capability
 
 These products are safe candidates for later read-only panels, but were kept
@@ -431,10 +745,11 @@ arrays without recomputing trial membership, event classification, timing, or
 geometry.
 
 The currently declared exact-successor analyses are
-`radial_near_field`, `distance_traces`, `trajectory_overlays`,
+`radial_near_field`, `distance_traces`, conditionally `body_bearing_polar`,
+conditionally `body_bearing_distance`, `trajectory_overlays`,
 `spatial_occupancy`, conditionally `controller_trials`, conditionally
-`generalized_bout_response`, conditionally `escape_freeze`, and `provenance`. They
-do not provide interactive
+`generalized_bout_response`, conditionally `escape_freeze`, conditionally
+`gaze_tracking`, and `provenance`. They do not provide interactive
 equivalents for all nine static figure families. In particular,
 event-aligned escape distance trajectories and the composed full dashboard
 remain absent from this exact reader. Older GoodCopBadCop components or

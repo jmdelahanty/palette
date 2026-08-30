@@ -23,6 +23,9 @@ import zarr
 from fisheye.analysis_workflows.controller_trial_successor import (
     PreparedControllerTrials,
 )
+from fisheye.analysis_workflows.chaser_body_alignment_by_distance_successor import (
+    PreparedChaserBodyAlignmentByDistance,
+)
 from fisheye.analysis_workflows.chaser_radial_near_field_successor import (
     PreparedChaserRadialNearField,
 )
@@ -121,6 +124,10 @@ _TYPE_INFO: Mapping[type[Any], tuple[str, str]] = MappingProxyType(
             "chaser_spatial_occupancy",
             "analysis/chaser_spatial_occupancy_runs",
         ),
+        PreparedChaserBodyAlignmentByDistance: (
+            "chaser_body_alignment_by_distance",
+            "analysis/chaser_body_alignment_by_distance_runs",
+        ),
     }
 )
 
@@ -207,7 +214,9 @@ def _digest(value: object, *, name: str) -> str:
     return value
 
 
-def _prepared_info(prepared: object) -> tuple[str, str, str, Mapping[str, np.ndarray], dict[str, Any]]:
+def _prepared_info(
+    prepared: object,
+) -> tuple[str, str, str, Mapping[str, np.ndarray], dict[str, Any]]:
     info = _TYPE_INFO.get(type(prepared))
     if info is None:
         raise TypeError("prepared is not a supported composable chaser successor.")
@@ -358,9 +367,7 @@ def _validate_persistent_run(
     group = (
         run
         if run is not None
-        else zarr.open_group(
-            str(path), mode="r", zarr_format=3, use_consolidated=False
-        )
+        else zarr.open_group(str(path), mode="r", zarr_format=3, use_consolidated=False)
     )
     manifest = _manifest_from_run(group)
     if expected_manifest is not None and manifest != _plain(expected_manifest):
@@ -407,10 +414,9 @@ def _validate_persistent_run(
         if type(name) is not str or not name or "/" in name:
             _fail("Persistent successor array path is invalid.")
         value = np.asarray(group[name][:])
-        if (
-            value.dtype.str != declaration.get("dtype")
-            or list(value.shape) != declaration.get("shape")
-        ):
+        if value.dtype.str != declaration.get("dtype") or list(
+            value.shape
+        ) != declaration.get("shape"):
             _fail(f"Persistent successor array {name!r} metadata is stale.")
         if verify_content_hashes and array_values_sha256(value) != declaration.get(
             "content_sha256"
@@ -507,7 +513,11 @@ def publish_composable_chaser_successor_run(
                 expected_manifest=plan.manifest,
                 expected_run_path=plan.run_path,
             )
-            return {key: value for key, value in result.items() if key not in {"arrays", "manifest"}}
+            return {
+                key: value
+                for key, value in result.items()
+                if key not in {"arrays", "manifest"}
+            }
 
         def prepare(root: Any) -> tuple[Any]:
             nonlocal parent_snapshot
@@ -562,9 +572,7 @@ def publish_composable_chaser_successor_run(
                 "recording_id": plan.recording_id,
                 "run_path": plan.run_path,
                 "successor_kind": plan.successor_kind,
-                "scientific_payload_sha256": plan.manifest[
-                    "scientific_payload_sha256"
-                ],
+                "scientific_payload_sha256": plan.manifest["scientific_payload_sha256"],
                 "selector_activation": "none",
             },
         )
@@ -746,6 +754,15 @@ class ComposableChaserSuccessorSourceHandle:
                 grid_columns=int(dimensions["grid_columns"]),
                 **values,
             )
+        if self.successor_kind == "chaser_body_alignment_by_distance":
+            return PreparedChaserBodyAlignmentByDistance(
+                n_frames=int(dimensions["n_frames"]),
+                n_chasers=int(dimensions["n_chasers"]),
+                n_frame_rows=int(dimensions["n_frame_rows"]),
+                n_summary_rows=int(dimensions["n_summary_rows"]),
+                n_distance_bins=int(dimensions["n_distance_bins"]),
+                **values,
+            )
         _fail(f"Unsupported successor kind {self.successor_kind!r}.")
 
     def module_product_binding(self, *, module_id: str) -> Any:
@@ -826,9 +843,7 @@ def load_composable_chaser_successor_source_handle(
             metadata = validate_direct_consolidated_subtree(
                 archive, subtree_path=run_path
             ).to_json()
-            root = open_zarr_root(
-                archive, mode="r", use_consolidated=use_consolidated
-            )
+            root = open_zarr_root(archive, mode="r", use_consolidated=use_consolidated)
             run = root[run_path]
         else:
             receipt_path = Path(direct_validation_receipt).expanduser().resolve()
@@ -849,9 +864,7 @@ def load_composable_chaser_successor_source_handle(
                 ]["inventory_sha256"],
                 "archive_root_consolidated_metadata_reparse": False,
             }
-            run = open_zarr_root(
-                archive / run_path, mode="r", use_consolidated=False
-            )
+            run = open_zarr_root(archive / run_path, mode="r", use_consolidated=False)
     except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
         raise ComposableChaserSuccessorPublicationError(
             f"Unable to open exact successor run: {exc}"

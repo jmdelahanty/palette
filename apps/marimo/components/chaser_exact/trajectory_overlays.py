@@ -46,8 +46,10 @@ def build_exact_trajectory_overlays_output(
 ) -> Any:
     """Render display-only fish and logged-chaser positions by exact epoch."""
 
-    if projection.relatives is None:
-        raise ValueError("Trajectory overlays require exact relative-frame sources.")
+    if projection.relatives is None or projection.chaser_appearance is None:
+        raise ValueError(
+            "Trajectory overlays require exact relative-frame and appearance sources."
+        )
     from plotly.subplots import make_subplots
 
     keypoint = projection.relatives[0]
@@ -59,6 +61,11 @@ def build_exact_trajectory_overlays_output(
     ) & keypoint.frame_chaser("chaser_occurrence_member")
     identities = keypoint.frame_chaser("chaser_identity_code")
     roles = keypoint.frame_chaser("chaser_behavior_role_code")
+    if not np.all(identities == identities[:1]) or not np.all(roles == roles[:1]):
+        raise ValueError("Exact chaser identity or behavior role changes by frame.")
+    appearance_by_code = projection.chaser_appearance.by_identity_code()
+    if set(appearance_by_code) != set(int(value) for value in identities[0]):
+        raise ValueError("Chaser appearance identities differ from trajectory columns.")
     registry = identity_registry(
         projection.radials[0].scientific_manifest, "behavior_role"
     )
@@ -77,7 +84,6 @@ def build_exact_trajectory_overlays_output(
     figure = make_subplots(
         rows=2, cols=len(projection.epoch_records), subplot_titles=titles
     )
-    chaser_colors = ("#2ca02c", "#9467bd", "#8c564b", "#e377c2")
     for provider_index, (provider_id, relative) in enumerate(
         zip(projection.provider_ids, projection.relatives, strict=True), start=1
     ):
@@ -115,7 +121,15 @@ def build_exact_trajectory_overlays_output(
                 role = registry.get(
                     str(int(roles[0, column])), f"role {int(roles[0, column])}"
                 )
-                label = f"{role} · chaser {int(identities[0, column])}"
+                appearance = appearance_by_code[int(identities[0, column])]
+                if (
+                    appearance.behavior_role_code != int(roles[0, column])
+                    or appearance.behavior_role != role
+                ):
+                    raise ValueError(
+                        "Chaser appearance role differs from trajectory evidence."
+                    )
+                label = f"{role} · protocol chaser {appearance.chaser_index}"
                 figure.add_trace(
                     go.Scattergl(
                         x=chaser_xy[chaser_rows, column, 0],
@@ -125,10 +139,21 @@ def build_exact_trajectory_overlays_output(
                         legendgroup=label,
                         showlegend=provider_index == 1 and epoch_index == 1,
                         marker={
-                            "color": chaser_colors[column % len(chaser_colors)],
-                            "size": 3,
-                            "opacity": 0.55,
+                            "color": appearance.experimental_color_css,
+                            "symbol": appearance.plotly_role_symbol,
+                            "size": 4,
+                            "opacity": 0.62,
+                            "line": {
+                                "color": appearance.contrast_outline_hex,
+                                "width": 0.7,
+                            },
                         },
+                        hovertemplate=(
+                            f"{role} · protocol chaser {appearance.chaser_index}<br>"
+                            f"identity={appearance.identity}<br>"
+                            f"experimental color={appearance.experimental_color_hex}<br>"
+                            "x=%{x:.2f} px<br>y=%{y:.2f} px<extra></extra>"
+                        ),
                     ),
                     row=provider_index,
                     col=epoch_index,
@@ -163,12 +188,21 @@ def build_exact_trajectory_overlays_output(
             f"{projection.recording_id}"
         ),
         height=820,
-        meta=plain(projection.provenance),
+        meta={
+            **plain(projection.provenance),
+            "trajectory_chaser_appearance": {
+                "color_source": "sealed_protocol_rgba",
+                "role_encoding": "independent_marker_symbol_and_legend_text",
+                "identity_encoding": "protocol_chaser_index_and_exact_identity_hover",
+                "index_palette_fallback": "prohibited",
+                "display_opacity": 0.62,
+            },
+        },
     )
     return mo.vstack(
         [
             mo.callout(
-                f"Display-only deterministic source-order projection, at most {TRAJECTORY_MAX_POINTS:,} valid points per series and panel; scientific occupancy remains in the persisted successor.",
+                f"Display-only deterministic source-order projection, at most {TRAJECTORY_MAX_POINTS:,} valid points per series and panel. Marker fill is the sealed experimental protocol color; shape and text independently encode behavior role. Scientific occupancy remains in the persisted successor.",
                 kind="info",
             ),
             figure,
