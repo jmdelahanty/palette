@@ -129,6 +129,10 @@ apps/marimo/palette_explorer.py                 # thin recording-app shell
 apps/marimo/components/analysis_catalog.py      # provider/analysis declarations
 apps/marimo/components/chaser_exact_successors.py
                                                   # compatibility facade only
+apps/marimo/components/chaser_exact_escape_freeze_contract.py
+                                                  # shared closed admission grammar
+apps/marimo/components/chaser_exact_escape_freeze_discovery.py
+                                                  # consolidated metadata-only join
 apps/marimo/components/chaser_exact/
     provider.py                                  # closed load/render dispatch
     projection.py                                # shared verified bundle projection
@@ -139,6 +143,7 @@ apps/marimo/components/chaser_exact/
     controller_trials.py                         # logged active trial members
     bout_response.py                             # persisted segmented-bout response
     escape_freeze.py                             # persisted event classifications
+    escape_freeze_projection.py                  # exact binding and deep loader
     full_profile.py                              # exact cross-module composition
     provenance.py                                # readable sealed identities
 ```
@@ -174,10 +179,10 @@ interface; it is not a prerequisite for publishing the missing exact views.
 - Focused component tests and a top-level routing test are both required.
   `marimo check` and real-artifact smokes remain release gates.
 
-The first incremental implementation combines the mechanical exact-chaser
-facade/package split with the persisted spatial-occupancy heatmap module. Later
-controller-trial, bout-response, escape/freeze, and full-profile modules plug
-into the same closed adapter without adding branches to the top-level app.
+The incremental implementation now includes the mechanical package split,
+spatial occupancy, controller trials, generalized bout response, and
+escape/freeze. Each plugged into the same closed adapter without adding a
+top-level app branch. Full-profile composition remains the next planned module.
 
 ## Current Renderer Registry and Providers
 

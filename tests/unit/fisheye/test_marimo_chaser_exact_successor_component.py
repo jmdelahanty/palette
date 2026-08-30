@@ -290,6 +290,80 @@ def _archive() -> _Group:
     bout_parent = _Group({bout_name: bout})
     root["analysis/generalized_chaser_bout_response_runs"] = bout_parent
     root[bout_path] = bout
+    escape_name = "escape-v1"
+    escape_path = f"analysis/chaser_escape_freeze_runs/{escape_name}"
+    bout_manifest = bout.attrs["composable_chaser_successor_manifest"]
+    bout_scientific = bout_manifest["scientific_manifest"]
+    escape = _successor(
+        escape_path,
+        "chaser_escape_freeze",
+        {
+            "scientific_schema": {
+                "schema_id": "palette.analysis.chaser_escape_freeze",
+                "schema_version": 2,
+                "method_id": ("exact_trial_speed_escape_optional_high_turn_freeze_v1"),
+                "event_unit": "speed_thresholded_exact_swim_bout_x_chaser",
+                "trial_unit": "exact_logged_controller_trial",
+            },
+            "sources": {
+                "motion": {
+                    **bout_scientific["sources"]["motion"],
+                    "speed_level": "filtered",
+                },
+                "controller_trial_payload_sha256": controller_payload,
+                "bout_response_payload_sha256": bout_manifest[
+                    "scientific_payload_sha256"
+                ],
+            },
+            "parameters": {
+                "escape_speed_threshold_mm_s": 20.0,
+                "high_turn_threshold_deg": 45.0,
+                "freeze_speed_threshold_mm_s": 2.0,
+                "freeze_window_s": 1.0,
+                "freeze_fraction_threshold": 0.8,
+                "minimum_freeze_valid_fraction": 0.5,
+                "threshold_sweep_mm_s": [10.0, 20.0, 30.0],
+            },
+            "dimensions": {"n_trials": 2, "n_events": 1, "n_sweep_rows": 6},
+            "policy": {
+                "speed_escape": "bout_peak_speed_greater_equal_threshold",
+                "high_turn_tier": (
+                    "optional_directed_annotation_separate_from_speed_class"
+                ),
+                "freeze": ("no_speed_escape_and_low_speed_fraction_with_coverage_gate"),
+                "trial_attachment": ("exactly_one_controller_trial_row_at_bout_onset"),
+                "event_counts": ("retained_even_when_recapture_trace_unusable"),
+                "recapture": (
+                    "first_post_event_exact_trial_member_at_or_below_onset_distance"
+                ),
+                "fallback_trial_segmentation": "prohibited",
+                "trial_gaps": (
+                    "excluded_from_membership_time_and_event_attachment;"
+                    "retained_as_coverage_evidence"
+                ),
+            },
+            "identity_registries": {
+                "response_class": {
+                    "0": "insufficient_valid_freeze_window",
+                    "1": "speed_escape",
+                    "2": "freeze_candidate",
+                    "3": "other_response",
+                },
+                "trace_exclusion_reason": {
+                    "0": "valid",
+                    "1": "no_post_event_valid_distance_in_trial",
+                    "2": "event_frame_unavailable",
+                },
+            },
+            "selector_eligible": False,
+            "selection": "none",
+            "production_authority": False,
+            "registry_update": False,
+        },
+    )
+    escape_parent = _Group({escape_name: escape})
+    root["analysis/chaser_escape_freeze_runs"] = escape_parent
+    root[escape_path] = escape
     return root
 
 
@@ -321,7 +395,7 @@ def test_exact_successor_discovery_uses_spatial_bundle_and_exact_children(
     assert len(options) == 1
     assert options[0].renderer == CHASER_EXACT_SUCCESSOR_RENDERER
     assert options[0].spec["bundle_status"] == "exact_selector_ineligible"
-    assert options[0].spec["schema_version"] == 5
+    assert options[0].spec["schema_version"] == 6
     assert options[0].spec["provider_ids"] == ["keypoint.v1", "detection.v1"]
     spatial_parameters = options[0].spec["display_parameters"]["spatial_occupancy"]
     assert spatial_parameters["source_array"] == "occupancy_density_valid_in_arena"
@@ -360,6 +434,21 @@ def test_exact_successor_discovery_uses_spatial_bundle_and_exact_children(
     bout_parameters = options[0].spec["display_parameters"]["generalized_bout_response"]
     assert bout_parameters["distance_band_edges"] == "persisted_no_rebinning"
     assert bout_parameters["bout_resegmentation"] == "prohibited"
+    escape = options[0].spec["analysis_bindings"]["escape_freeze"]
+    assert escape["run_path"] == "analysis/chaser_escape_freeze_runs/escape-v1"
+    assert (
+        escape["controller_trial_payload_sha256"]
+        == controller["scientific_payload_sha256"]
+    )
+    assert escape["bout_response_payload_sha256"] == bout["scientific_payload_sha256"]
+    assert escape["classifier_parameters"]["freeze_window_s"] == 1.0
+    escape_parameters = options[0].spec["display_parameters"]["escape_freeze"]
+    assert escape_parameters["response_classes"] == (
+        "persisted_no_viewer_reclassification"
+    )
+    assert escape_parameters["event_trace_samples"] == (
+        "not_persisted_no_viewer_reconstruction"
+    )
     assert group_specs_by_provider(options) == {
         "stimulus_chaser_exact_successors": options
     }
@@ -446,6 +535,62 @@ def test_bout_response_capability_is_hidden_when_exact_join_is_ambiguous(
     bindings = options[0].spec["analysis_bindings"]
     assert "controller_trials" in bindings
     assert "generalized_bout_response" not in bindings
+    assert "escape_freeze" not in bindings
+
+
+def test_escape_freeze_capability_is_hidden_when_exact_join_is_ambiguous(
+    monkeypatch,
+) -> None:
+    root = _archive()
+    parent = root["analysis/chaser_escape_freeze_runs"]
+    original = parent["escape-v1"]
+    scientific = dict(
+        original.attrs["composable_chaser_successor_manifest"]["scientific_manifest"]
+    )
+    scientific.pop("payload_digest")
+    duplicate_path = "analysis/chaser_escape_freeze_runs/escape-v2"
+    duplicate = _successor(duplicate_path, "chaser_escape_freeze", scientific)
+    parent["escape-v2"] = duplicate
+    root[duplicate_path] = duplicate
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    bindings = options[0].spec["analysis_bindings"]
+    assert "generalized_bout_response" in bindings
+    assert "escape_freeze" not in bindings
+
+
+def test_escape_freeze_capability_is_hidden_for_wrong_bout_payload(
+    monkeypatch,
+) -> None:
+    root = _archive()
+    escape = root["analysis/chaser_escape_freeze_runs/escape-v1"]
+    manifest = escape.attrs["composable_chaser_successor_manifest"]
+    scientific = manifest["scientific_manifest"]
+    scientific["sources"]["bout_response_payload_sha256"] = "9" * 64
+    scientific["payload_digest"] = canonical_json_sha256(
+        {key: value for key, value in scientific.items() if key != "payload_digest"}
+    )
+    manifest["scientific_payload_sha256"] = scientific["payload_digest"]
+    escape.attrs["composable_chaser_successor_manifest_sha256"] = canonical_json_sha256(
+        manifest
+    )
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    bindings = options[0].spec["analysis_bindings"]
+    assert "generalized_bout_response" in bindings
+    assert "escape_freeze" not in bindings
 
 
 def test_bout_response_capability_is_hidden_for_wrong_controller_payload(

@@ -19,6 +19,11 @@ from .controller_trial_projection import (
 )
 from .controller_trials import build_exact_controller_trials_output
 from .distance_traces import build_exact_distance_traces_output
+from .escape_freeze import build_exact_escape_freeze_output
+from .escape_freeze_projection import (
+    ExactEscapeFreezeProjectionError,
+    option_escape_freeze_binding,
+)
 from .projection import (
     ExactChaserSelectionIdentity,
     ExactChaserSuccessorProjection,
@@ -60,6 +65,7 @@ class ExactChaserAnalysisRoute:
     renderer: Renderer | None
     load_controller_trials: bool = False
     load_generalized_bout_response: bool = False
+    load_escape_freeze: bool = False
 
 
 _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
@@ -102,6 +108,15 @@ _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
             renderer=build_exact_bout_response_output,
             load_controller_trials=True,
             load_generalized_bout_response=True,
+        ),
+        "escape_freeze": ExactChaserAnalysisRoute(
+            analysis_id="escape_freeze",
+            display_parameter_version="exact-escape-freeze-display-v1",
+            load_relative=True,
+            renderer=build_exact_escape_freeze_output,
+            load_controller_trials=True,
+            load_generalized_bout_response=True,
+            load_escape_freeze=True,
         ),
         "provenance": ExactChaserAnalysisRoute(
             analysis_id="provenance",
@@ -151,7 +166,8 @@ class ExactChaserProviderAdapter:
         available = [
             value
             for value in ANALYSIS_IDS
-            if value not in {"controller_trials", "generalized_bout_response"}
+            if value
+            not in {"controller_trials", "generalized_bout_response", "escape_freeze"}
         ]
         try:
             option_controller_trial_binding(option)
@@ -163,6 +179,11 @@ class ExactChaserProviderAdapter:
         except ExactBoutResponseProjectionError:
             return tuple(available)
         available.insert(5, "generalized_bout_response")
+        try:
+            option_escape_freeze_binding(option)
+        except ExactEscapeFreezeProjectionError:
+            return tuple(available)
+        available.insert(6, "escape_freeze")
         return tuple(available)
 
     def requires_projection(self, analysis_id: str) -> bool:
@@ -207,6 +228,7 @@ class ExactChaserProviderAdapter:
             load_relative=route.load_relative,
             load_controller_trials=route.load_controller_trials,
             load_generalized_bout_response=(route.load_generalized_bout_response),
+            load_escape_freeze=route.load_escape_freeze,
         )
 
     def require_current_projection(

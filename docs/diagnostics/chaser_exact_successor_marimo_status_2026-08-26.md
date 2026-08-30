@@ -2,7 +2,7 @@
 
 <!-- contract-meta
 status: active
-implementation: reader-and-modular-spatial-merged-controller-trial-locally-validated-ci-pending
+implementation: reader-through-generalized-merged-escape-freeze-locally-validated-ci-pending
 last_verified: 2026-08-29
 -->
 
@@ -35,8 +35,14 @@ The declared interactive views are:
 3. exact protocol-epoch fish positions with logged chaser-position overlays in
    the reviewed circular arena; and
 4. exact protocol-epoch paired-provider spatial occupancy and the sealed-array
-   detection-minus-keypoint display; and
-5. exact manifest, child identity, provider authority, and display-projection
+   detection-minus-keypoint display;
+5. producer-logged exact controller-trial membership and trigger-aligned
+   distance;
+6. generalized bout-rate, kinematic, separation, and optional body-frame
+   response;
+7. exact-trial escape/freeze outcomes, event facts, trace-validity reasons, and
+   persisted threshold sensitivity; and
+8. exact manifest, child identity, provider authority, and display-projection
    provenance.
 
 The adapter resolves no `latest`, default, promoted, or fallback selector. It
@@ -345,15 +351,51 @@ The deep audit loaded 1,445 bouts, 2,890 bout-by-chaser rows, and 30 persisted
 summary rows in 13.361 seconds. Of 2,466 base-valid rows, all 2,466 carried
 valid body-frame axes. Eight rows began during exact active controller-trial
 membership; the remaining rows retained their explicit non-trial attachment
-state. Focused validation passes 57 tests. Required CI for this new branch is
-pending, so the generalized view is not yet merge-ready or deployed.
+state. Focused validation passed 57 tests and all 23 required checks passed.
+The generalized view merged through PR 74 as merge commit
+`267553f548d0590958938d1d2227e5c87f19ec8a`. It was not deployed and did not
+activate a selector.
+
+The next modular package adds conditional `escape_freeze` availability only
+when exactly one immutable version-2 escape/freeze successor binds the selected
+recording's exact controller scientific payload, generalized bout-response
+scientific payload, and identical motion source/projection. Discovery also
+validates the complete classifier parameter record, dimensions, method,
+policies, response-class registry, trace-reason registry, and selector-
+ineligible state. Ambiguity or any mismatch hides only this capability. The
+loader deep-audits every persisted array and rechecks the payload joins and
+classifier contract.
+
+The viewer uses the persisted trial response classes, event outcomes,
+recapture facts, reason codes, and threshold-sweep rows. It never derives a
+class from displayed points, resegments a bout, reconstructs a trial, changes a
+threshold, substitutes orientation, or interpolates evidence. Event rows may
+undergo source-order, endpoint-preserving display thinning capped at 6,000
+points; event tables are capped at 1,000 rows and all recording totals remain
+persisted values. Version 2 records whether an event has a usable recapture
+trace and its outcome, but does not persist aligned distance samples. The
+viewer therefore states that trace trajectories are unavailable and does not
+reconstruct them.
+
+The receipt-bound v4 live smoke explicitly selected the v4 spatial bundle from
+two visible immutable choices and joined
+`analysis/chaser_escape_freeze_runs/goodbatbadbat_chaser_successors_20260827_body_frame_projection_v4`.
+Its outer manifest digest is
+`2fcc8807b7c362ea98a0639f57c302b5ee03fcabb81276a51b8551316f999c70`
+and its scientific payload digest is
+`839db255e9f9ede7a46a08f1d706c6032f332bf0f5754a022179ebba581a2774`.
+The 12.971-second deep load validated four trials, five events, twenty
+persisted sweep rows, one escape trial, three freeze candidates, zero
+high-turn events, and five trace-usable events. All five event trace-reason
+codes were `valid`. The implementation passes 59 focused tests, the 163-test
+Marimo suite (148 passed and 15 expected xfails), and Marimo check. Required CI
+is pending, so this branch is not merge-ready or deployed.
 
 ## Persisted but not yet mounted in this capability
 
 These products are safe candidates for later read-only panels, but were kept
 out of the initial component:
 
-- escape/freeze trial and event summaries;
 - gaze/controller-trial views where a complete gaze successor is present; and
 - the full-profile readiness and module-binding envelope.
 
@@ -365,11 +407,11 @@ geometry.
 The currently declared exact-successor analyses are
 `radial_near_field`, `distance_traces`, `trajectory_overlays`,
 `spatial_occupancy`, conditionally `controller_trials`, conditionally
-`generalized_bout_response`, and `provenance`. They
+`generalized_bout_response`, conditionally `escape_freeze`, and `provenance`. They
 do not provide interactive
 equivalents for all nine static figure families. In particular,
-escape/freeze detail and the composed full dashboard remain absent from this
-exact reader. Older GoodCopBadCop components or
+event-aligned escape distance trajectories and the composed full dashboard
+remain absent from this exact reader. Older GoodCopBadCop components or
 candidate views must not be used as an implicit fallback for these
 receipt-bound successors.
 
@@ -404,4 +446,5 @@ visible, the source dropdown starts unselected and no analysis projection loads
 until the operator chooses one. A sole exact bundle remains the unambiguous
 default. The reader and modular spatial implementation are present on `main`;
 the controller-trial addition above is merged. The generalized bout-response
-addition remains on its locally validated, CI-pending branch.
+addition is also merged. The escape/freeze addition remains on its locally
+validated, CI-pending branch.

@@ -11,6 +11,7 @@ from .chaser_exact.distance_traces import (
 )
 from .chaser_exact.controller_trials import build_exact_controller_trials_output
 from .chaser_exact.bout_response import build_exact_bout_response_output
+from .chaser_exact.escape_freeze import build_exact_escape_freeze_output
 from .chaser_exact.projection import (
     ExactChaserSelectionIdentity,
     ExactChaserSuccessorProjection,
@@ -42,6 +43,7 @@ __all__ = [
     "build_exact_distance_traces_output",
     "build_exact_controller_trials_output",
     "build_exact_bout_response_output",
+    "build_exact_escape_freeze_output",
     "build_exact_radial_near_field_output",
     "build_exact_spatial_occupancy_output",
     "build_exact_trajectory_overlays_output",

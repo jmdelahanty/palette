@@ -20,6 +20,9 @@ from apps.marimo.components.chaser_exact.controller_trials import (
 from apps.marimo.components.chaser_exact.bout_response import (
     build_exact_bout_response_output,
 )
+from apps.marimo.components.chaser_exact.escape_freeze import (
+    build_exact_escape_freeze_output,
+)
 from apps.marimo.components.chaser_exact.provider import (
     ANALYSIS_IDS,
     EXACT_CHASER_PROVIDER_ADAPTER,
@@ -45,11 +48,12 @@ def _option(
     trace_max_points: int = 6_000,
     controller_manifest_sha256: str = "c" * 64,
     bout_manifest_sha256: str = "1" * 64,
+    escape_manifest_sha256: str = "9" * 64,
 ) -> InteractiveSpecOption:
     run_path = f"analysis/chaser_spatial_occupancy_runs/{run_name}"
     spec = {
         "schema_id": "palette.chaser_exact_successor_explorer_spec",
-        "schema_version": 5,
+        "schema_version": 6,
         "renderer": CHASER_EXACT_SUCCESSOR_RENDERER,
         "bundle_status": "exact_selector_ineligible",
         "bundle_manifest_sha256": manifest_sha256,
@@ -111,6 +115,50 @@ def _option(
                 "controller_trial_payload_sha256": "d" * 64,
                 "body_extension_present": True,
             },
+            "escape_freeze": {
+                "run_path": "analysis/chaser_escape_freeze_runs/escape-v1",
+                "manifest_sha256": escape_manifest_sha256,
+                "scientific_payload_sha256": "a" * 64,
+                "source_motion": {
+                    "run_path": "analysis/track_kinematics_runs/provider/motion-v1",
+                    "manifest_sha256": "3" * 64,
+                    "relative_frame_projection": {
+                        "schema_id": (
+                            "palette.provider_motion.relative_frame_projection"
+                        ),
+                        "schema_version": 1,
+                        "join_key": "exact_acquisition_frame_id",
+                        "join_policy": (
+                            "left_join_missing_provider_rows_invalid_no_interpolation"
+                        ),
+                        "provider_frame_count": 10,
+                        "relative_frame_count": 10,
+                        "matched_relative_frame_count": 10,
+                        "missing_relative_frame_count": 0,
+                        "provider_only_frame_count": 0,
+                        "provider_frame_ids_sha256": "4" * 64,
+                        "relative_frame_ids_sha256": "5" * 64,
+                        "provider_row_index_by_relative_frame_sha256": "6" * 64,
+                        "provider_frame_present_sha256": "7" * 64,
+                        "fallback": "prohibited",
+                    },
+                    "speed_level": "filtered",
+                },
+                "controller_trial_payload_sha256": "d" * 64,
+                "bout_response_payload_sha256": "2" * 64,
+                "classifier_parameters": {
+                    "escape_speed_threshold_mm_s": 20.0,
+                    "high_turn_threshold_deg": 45.0,
+                    "freeze_speed_threshold_mm_s": 2.0,
+                    "freeze_window_s": 1.0,
+                    "freeze_fraction_threshold": 0.8,
+                    "minimum_freeze_valid_fraction": 0.5,
+                    "threshold_sweep_mm_s": [10.0, 20.0, 30.0],
+                },
+                "n_trials": 2,
+                "n_events": 1,
+                "n_sweep_rows": 6,
+            },
         },
         "display_parameters": {
             "distance_traces": {
@@ -171,6 +219,25 @@ def test_controller_trial_analysis_is_hidden_without_one_exact_binding(
     assert "spatial_occupancy" in available
 
 
+def test_escape_freeze_analysis_is_hidden_without_its_exact_binding(
+    tmp_path: Path,
+) -> None:
+    option = _option(tmp_path / "recording.zarr")
+    spec = dict(option.spec)
+    bindings = dict(spec["analysis_bindings"])
+    bindings.pop("escape_freeze")
+    spec["analysis_bindings"] = bindings
+
+    available = EXACT_CHASER_PROVIDER_ADAPTER.available_analysis_ids(
+        option.zarr_path,
+        replace(option, spec=spec),
+    )
+
+    assert "controller_trials" in available
+    assert "generalized_bout_response" in available
+    assert "escape_freeze" not in available
+
+
 def test_provider_routes_are_closed_and_controls_are_explicit() -> None:
     assert ANALYSIS_IDS == (
         "radial_near_field",
@@ -179,6 +246,7 @@ def test_provider_routes_are_closed_and_controls_are_explicit() -> None:
         "spatial_occupancy",
         "controller_trials",
         "generalized_bout_response",
+        "escape_freeze",
         "provenance",
     )
     assert EXACT_CHASER_PROVIDER_ADAPTER.requires_projection("distance_traces")
@@ -212,7 +280,7 @@ def test_only_selected_analysis_requests_relative_arrays(
     tmp_path: Path, monkeypatch
 ) -> None:
     option = _option(tmp_path / "recording.zarr")
-    observed: list[tuple[str, bool, bool, bool]] = []
+    observed: list[tuple[str, bool, bool, bool, bool]] = []
 
     def fake_loader(
         zarr_path,
@@ -222,6 +290,7 @@ def test_only_selected_analysis_requests_relative_arrays(
         load_relative,
         load_controller_trials,
         load_generalized_bout_response,
+        load_escape_freeze,
     ):
         assert zarr_path == option.zarr_path
         assert selected_option is option
@@ -231,6 +300,7 @@ def test_only_selected_analysis_requests_relative_arrays(
                 load_relative,
                 load_controller_trials,
                 load_generalized_bout_response,
+                load_escape_freeze,
             )
         )
         return selection_identity
@@ -255,18 +325,23 @@ def test_only_selected_analysis_requests_relative_arrays(
     bout_response = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
         option.zarr_path, option, analysis_id="generalized_bout_response"
     )
+    escape_freeze = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
+        option.zarr_path, option, analysis_id="escape_freeze"
+    )
 
     assert radial.analysis_id == "radial_near_field"
     assert spatial.analysis_id == "spatial_occupancy"
     assert distance.analysis_id == "distance_traces"
     assert controller.analysis_id == "controller_trials"
     assert bout_response.analysis_id == "generalized_bout_response"
+    assert escape_freeze.analysis_id == "escape_freeze"
     assert observed == [
-        ("radial_near_field", False, False, False),
-        ("spatial_occupancy", False, False, False),
-        ("distance_traces", True, False, False),
-        ("controller_trials", True, True, False),
-        ("generalized_bout_response", True, True, True),
+        ("radial_near_field", False, False, False, False),
+        ("spatial_occupancy", False, False, False, False),
+        ("distance_traces", True, False, False, False),
+        ("controller_trials", True, True, False, False),
+        ("generalized_bout_response", True, True, True, False),
+        ("escape_freeze", True, True, True, True),
     ]
 
 
@@ -289,12 +364,14 @@ def test_selection_identity_binds_display_parameters_and_exact_source(
     changed_run = _option(archive, run_name="paired-spatial-v2")
     changed_controller = _option(archive, controller_manifest_sha256="9" * 64)
     changed_bout = _option(archive, bout_manifest_sha256="0" * 64)
+    changed_escape = _option(archive, escape_manifest_sha256="0" * 64)
     for changed in (
         changed_display,
         changed_manifest,
         changed_run,
         changed_controller,
         changed_bout,
+        changed_escape,
     ):
         assert (
             EXACT_CHASER_PROVIDER_ADAPTER.selection_identity(
@@ -360,6 +437,7 @@ def test_compatibility_facade_reexports_focused_components() -> None:
         is build_exact_controller_trials_output
     )
     assert facade.build_exact_bout_response_output is build_exact_bout_response_output
+    assert facade.build_exact_escape_freeze_output is build_exact_escape_freeze_output
     assert facade.EXACT_CHASER_PROVIDER_ADAPTER is EXACT_CHASER_PROVIDER_ADAPTER
 
 

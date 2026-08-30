@@ -7,6 +7,7 @@ from .provider import (
 )
 from .controller_trials import build_exact_controller_trials_output
 from .bout_response import build_exact_bout_response_output
+from .escape_freeze import build_exact_escape_freeze_output
 
 __all__ = [
     "ANALYSIS_IDS",
@@ -14,4 +15,5 @@ __all__ = [
     "ExactChaserProviderAdapter",
     "build_exact_controller_trials_output",
     "build_exact_bout_response_output",
+    "build_exact_escape_freeze_output",
 ]
