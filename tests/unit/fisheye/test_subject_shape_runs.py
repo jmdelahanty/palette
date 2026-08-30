@@ -228,6 +228,10 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     assert run.attrs["schema_version"] == 4
     assert run.attrs["method"] == "subject_shape_from_refined_masks_v11"
     assert run.attrs["method_version"] == 11
+    assert (
+        run["components/eye_left"].attrs["ellipse_method"]
+        == "cv2.fitEllipse_component_contour_min_13_foreground_pixels_v2"
+    )
     assert run.attrs["snout_tip_estimator"] == "subject_body_contour_max_forward_projection_v1"
     assert run.attrs["centerline_method"] == "snout_anchored_skeleton_longest_endpoint_path_v1"
     assert run.attrs["centerline_skeleton_method"] == "skeleton_longest_endpoint_path_v1"

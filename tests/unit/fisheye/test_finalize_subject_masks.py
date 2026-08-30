@@ -945,6 +945,89 @@ def _build_probability_root(
     return root
 
 
+def test_finalizer_applies_and_seals_model_bound_component_area_support(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    zarr_path = tmp_path / "model-area-support.zarr"
+    root = _build_probability_root(zarr_path)
+    source = root["subject_mask_runs/subject_probs_001"]
+    probabilities = np.zeros((2, 3, 384, 384), dtype=np.uint8)
+    probabilities[:, 1, 1:5, 1:5] = np.uint8(255)
+    probabilities[:, 1, 1:5, 6:10] = np.uint8(255)
+    probabilities[:, 2, 20:25, 30:35] = np.uint8(255)
+    del source["mask_probs_roi"]
+    source.create_array("mask_probs_roi", data=probabilities, overwrite=True)
+    source.attrs[mod.REFINED_SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR] = (
+        mod.build_subject_mask_scientific_identity(
+            stage_kind="raw_subject_mask",
+            model={
+                "registry_set_id": (
+                    "subject_mask_cedar_shadow_omnifin0_gray_"
+                    "subject_v1_union_c6ff03ae_v001"
+                ),
+                "registry_run_id": "subject_masks_union_all_components_v001",
+                "artifact_sha256": (
+                    "217da20cd6ed780f5efe2c16add7cb932f40f08aac2f6e44795c0c381283839c"
+                ),
+                "label_schema_id": "subject_v1_union",
+            },
+            crop={},
+            pixels={},
+            row_identity={},
+            inference_contract={},
+            schema_version=1,
+        )
+    )
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        zarr_path=zarr_path,
+        subject_run="subject_probs_001",
+        refined_run="refined_model_supported_area",
+        components=("eye_left", "eye_right", "swim_bladder"),
+        write_component_contours=False,
+        write_sampled_component_contours=False,
+        execution_backend="process_shards",
+        num_workers=1,
+    )
+
+    run = root["refined_subject_masks_runs/refined_model_supported_area"]
+    assert (
+        summary["component_area_support_profile"]["component_bindings"]["swim_bladder"][
+            "minimum_area_px"
+        ]
+        == 94
+    )
+    assert int(np.count_nonzero(run["masks_roi"][:])) == 0
+    reasons = read_reason_labels(run["components/swim_bladder"])
+    assert all(
+        "needs_review_below_model_supported_area" in reason for reason in reasons
+    )
+    for component_name in ("eye_left", "eye_right"):
+        eye_reasons = read_reason_labels(run[f"components/{component_name}"])
+        assert all(
+            "needs_review_below_model_supported_area" in reason
+            for reason in eye_reasons
+        )
+    assert summary["eyes_union_assignment_summary"]["all_rows_failed"] is True
+    assert (
+        summary["eyes_union_assignment_summary"]["component_failure_publication_policy"]
+        == "record_failures_without_blocking_refined_run_publication_v1"
+    )
+    assert summary["eye_geometry_reuse_status"] == "assignment_reuse"
+    binding = run.attrs["component_area_support_profile"]
+    assert binding["model_binding"]["artifact_sha256"] == (
+        "217da20cd6ed780f5efe2c16add7cb932f40f08aac2f6e44795c0c381283839c"
+    )
+    science = run.attrs[mod.REFINED_SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR]
+    component_source = science["payload"]["inference_contract"][
+        "component_sources_and_policies"
+    ]["swim_bladder"]
+    assert component_source["component_area_support"]["minimum_area_px"] == 94
+
+
 def _build_sharded_subject_mask_root(zarr_path: Path | None = None) -> zarr.Group:
     root = (
         zarr.open_group(str(zarr_path), mode="w")
@@ -3490,6 +3573,27 @@ def test_production_proof_finalizer_binds_draft_audit_and_stays_inactive(
         "source_crop_xywh",
         data=np.asarray([[2, 3, 10, 10], [4, 5, 10, 10]], dtype=np.float32),
         overwrite=True,
+    )
+    raw.attrs[mod.REFINED_SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR] = (
+        mod.build_subject_mask_scientific_identity(
+            stage_kind="raw_subject_mask",
+            model={
+                "registry_set_id": (
+                    "subject_mask_cedar_shadow_omnifin0_gray_"
+                    "subject_v1_union_c6ff03ae_v001"
+                ),
+                "registry_run_id": "subject_masks_union_all_components_v001",
+                "artifact_sha256": (
+                    "217da20cd6ed780f5efe2c16add7cb932f40f08aac2f6e44795c0c381283839c"
+                ),
+                "label_schema_id": "subject_v1_union",
+            },
+            crop={},
+            pixels={},
+            row_identity={},
+            inference_contract={},
+            schema_version=1,
+        )
     )
     science = mod.build_subject_mask_scientific_identity(
         stage_kind="refined_subject_mask",

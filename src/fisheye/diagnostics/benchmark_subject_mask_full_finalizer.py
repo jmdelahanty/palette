@@ -40,6 +40,11 @@ from ..shared.refined_subject_eye_geometry import (
     EYE_GEOMETRY_SCHEMA_ID,
     EYE_PAIR_RELATION_SCHEMA_ID,
 )
+from ..shared.mask_geometry import (
+    DEFAULT_MIN_ELLIPSE_FOREGROUND_PIXELS,
+    MASK_ELLIPSE_METHOD,
+    measure_mask_ellipse as _measure_mask,
+)
 from ..shared.workflow_profile import WorkflowProfiler
 from ..shared.workflow_profile import json_safe
 from ..shared.zarr_run_completion import require_runs_parent
@@ -373,8 +378,6 @@ def _compute_subject_mask_postcompute_shard(
     write_eye_geometry: bool,
     write_component_contours: bool,
 ) -> dict[str, object]:
-    from ..shared.mask_geometry import measure_mask_ellipse as _measure_mask
-
     started = time.perf_counter()
     root = open_zarr_root(zarr_path, mode="r")
     run_group = root["refined_subject_masks_runs"][refined_run]
@@ -401,7 +404,10 @@ def _compute_subject_mask_postcompute_shard(
                 comp_idx = int(label_map[component_name])
                 if comp_idx >= int(available.shape[0]) or not bool(available[comp_idx]):
                     continue
-                success, ellipse, centroid, contour, _failure = _measure_mask(masks[local_idx, comp_idx])
+                success, ellipse, centroid, contour, _failure = _measure_mask(
+                    masks[local_idx, comp_idx],
+                    min_foreground_pixels=DEFAULT_MIN_ELLIPSE_FOREGROUND_PIXELS,
+                )
                 ellipse_params[local_idx, eye_idx] = np.asarray(ellipse, dtype=np.float32)
                 ellipse_success[local_idx, eye_idx] = bool(success)
                 centroids[local_idx, eye_idx] = np.asarray(centroid, dtype=np.float32)
@@ -586,7 +592,7 @@ def _write_sharded_eye_geometry(
         component_group = components_parent.require_group(component_name)
         geometry_group = component_group.require_group("geometry")
         geometry_group.attrs["geometry_schema_id"] = EYE_GEOMETRY_SCHEMA_ID
-        geometry_group.attrs["geometry_method"] = "fit_ellipse_from_refined_subject_component_mask"
+        geometry_group.attrs["geometry_method"] = MASK_ELLIPSE_METHOD
         geometry_group.attrs["source_mask_component"] = component_name
         geometry_group.attrs["updated_at_utc"] = _utc_now()
         geometry_group.attrs["benchmark_postcompute_mode"] = "sharded_parent_merge"

@@ -42,7 +42,12 @@ from ..shared.coordinate_record import (
     stamp_and_bind_persisted_coordinate_record,
 )
 from ..shared.json_safety import json_attr_safe
-from ..shared.mask_geometry import batch_mask_spatial_metrics, measure_mask_ellipse as _measure_mask
+from ..shared.mask_geometry import (
+    DEFAULT_MIN_ELLIPSE_FOREGROUND_PIXELS,
+    MASK_ELLIPSE_METHOD,
+    batch_mask_spatial_metrics,
+    measure_mask_ellipse as _measure_mask,
+)
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.proof_verification import (
     finish_proof_verification,
@@ -823,7 +828,7 @@ def _prepare_component_group(run_group: zarr.Group, component_name: str, *, tota
         )
 
     if component_name in ELLIPSE_COMPONENTS:
-        component_group.attrs["ellipse_method"] = "cv2.fitEllipse_component_contour_v1"
+        component_group.attrs["ellipse_method"] = MASK_ELLIPSE_METHOD
         _create_array(
             component_group,
             "ellipse_params",
@@ -1510,7 +1515,10 @@ def _compute_ellipse_metrics(masks: np.ndarray) -> tuple[np.ndarray, np.ndarray]
     ellipse_params = np.full((row_count, 5), np.nan, dtype=np.float32)
     ellipse_success = np.zeros((row_count,), dtype=bool)
     for row_idx in range(row_count):
-        success, ellipse, _centroid, _contour, _reason = _measure_mask(masks_u8[row_idx])
+        success, ellipse, _centroid, _contour, _reason = _measure_mask(
+            masks_u8[row_idx],
+            min_foreground_pixels=DEFAULT_MIN_ELLIPSE_FOREGROUND_PIXELS,
+        )
         ellipse_params[row_idx] = np.asarray(ellipse, dtype=np.float32)
         ellipse_success[row_idx] = bool(success)
     return ellipse_params, ellipse_success

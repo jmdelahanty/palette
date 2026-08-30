@@ -41,7 +41,9 @@ def test_subject_body_finalization_fills_holes_and_removes_small_islands() -> No
     assert result.metrics["component_count_after"] == 1.0
 
 
-def test_subject_body_finalization_routes_removed_high_probability_islands_to_review() -> None:
+def test_subject_body_finalization_routes_removed_high_probability_islands_to_review() -> (
+    None
+):
     surface = np.zeros((20, 20), dtype=np.float32)
     surface[5:15, 5:15] = 0.9
     surface[1:4, 1:4] = 0.95
@@ -69,7 +71,9 @@ def test_subject_body_finalization_routes_removed_high_probability_islands_to_re
     assert result.quality_score >= 100.0
 
 
-def test_subject_body_finalization_hysteresis_keeps_low_support_touching_high_seed_only() -> None:
+def test_subject_body_finalization_hysteresis_keeps_low_support_touching_high_seed_only() -> (
+    None
+):
     surface = np.zeros((12, 12), dtype=np.float32)
     surface[3:8, 3:8] = 0.4
     surface[5, 5] = 0.9
@@ -95,7 +99,9 @@ def test_subject_body_finalization_rejects_policy_component_mismatch() -> None:
     policy = ComponentFinalizationPolicy(component_name="subject_body")
 
     with pytest.raises(ValueError, match="Policy component"):
-        finalize_component_mask("swim_bladder", np.zeros((4, 4), dtype=np.float32), policy=policy)
+        finalize_component_mask(
+            "swim_bladder", np.zeros((4, 4), dtype=np.float32), policy=policy
+        )
 
 
 def test_subject_body_finalization_requires_explicit_component_policy() -> None:
@@ -118,7 +124,9 @@ def test_swim_bladder_finalization_fills_hole_and_keeps_one_component() -> None:
     assert "cleanup_kept_largest_component" in result.reason_tags
 
 
-def test_eyes_union_finalization_preserves_two_eye_components_and_removes_tiny_island() -> None:
+def test_eyes_union_finalization_preserves_two_eye_components_and_removes_tiny_island() -> (
+    None
+):
     surface = np.zeros((20, 20), dtype=np.float32)
     surface[4:8, 4:8] = 0.9
     surface[4:8, 12:16] = 0.9
@@ -145,3 +153,29 @@ def test_eyes_union_finalization_routes_three_plausible_components_to_review() -
     assert result.metrics["component_count_after"] == 2.0
     assert result.review_recommendation == "needs_review"
     assert "needs_review_multiple_components" in result.reason_tags
+
+
+def test_model_supported_area_floor_rejects_tiny_component_with_explicit_reason() -> (
+    None
+):
+    surface = np.zeros((16, 16), dtype=np.float32)
+    surface[4:7, 5:9] = 0.9
+    policy = ComponentFinalizationPolicy(
+        component_name="swim_bladder",
+        threshold=0.5,
+        closing_radius=0,
+        fill_holes=False,
+        min_component_area_px=20,
+        keep_largest_component=True,
+        component_area_support_profile_id="training-support-v1",
+        component_area_support_profile_digest="a" * 64,
+        component_area_support_minimum_px=20,
+    )
+
+    result = finalize_component_mask("swim_bladder", surface, policy=policy)
+
+    assert int(result.source_mask.sum()) == 12
+    assert int(result.mask.sum()) == 0
+    assert "cleanup_removed_below_model_supported_area" in result.reason_tags
+    assert "needs_review_below_model_supported_area" in result.reason_tags
+    assert result.review_recommendation == "needs_review"
