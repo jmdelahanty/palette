@@ -11,6 +11,9 @@ from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
 from fisheye.analysis_workflows.controller_trial_successor import (
     controller_trial_input_from_handles,
 )
+from fisheye.analysis_workflows.composable_chaser_successor_publication import (
+    ComposableChaserSuccessorSourceHandle,
+)
 from fisheye.analysis_workflows.escape_freeze_successor import (
     escape_freeze_input_from_handles,
 )
@@ -47,6 +50,19 @@ def _relative(archive: Path) -> ChaserRelativeFrameSourceHandle:
         "chaser_identity_code": np.ones(5, dtype=np.uint16),
         "selection_member": np.zeros(5, dtype=bool),
         "chaser_occurrence_member": np.ones(5, dtype=bool),
+        "fish_position_xy_px": np.tile([100.0, 100.0], (5, 1)).astype(np.float32),
+        "fish_position_valid": np.ones(5, dtype=bool),
+        "chaser_position_xy_px": np.asarray(
+            [
+                [110.0, 100.0],
+                [110.0, 100.0],
+                [110.0, 98.0],
+                [108.0, 106.0],
+                [109.0, 105.0],
+            ],
+            dtype=np.float32,
+        ),
+        "chaser_position_valid": np.ones(5, dtype=bool),
         "trial_id": np.ones(5, dtype=np.int64),
         "trial_valid": np.ones(5, dtype=bool),
         "active_state_code": np.ones(5, dtype=np.uint8),
@@ -57,9 +73,11 @@ def _relative(archive: Path) -> ChaserRelativeFrameSourceHandle:
         "relative_physical_valid": np.ones(5, dtype=bool),
     }
     body = {
-        "body_heading_deg": np.asarray(
-            [0.0, 0.0, 20.0, 20.0, 10.0], dtype=np.float32
-        ),
+        "body_origin_xy_px": np.tile([100.0, 100.0], (5, 1)).astype(np.float32),
+        "body_forward_axis_xy": np.tile([1.0, 0.0], (5, 1)).astype(np.float32),
+        "body_left_axis_xy": np.tile([0.0, -1.0], (5, 1)).astype(np.float32),
+        "body_axes_valid": np.ones(5, dtype=bool),
+        "body_heading_deg": np.asarray([0.0, 0.0, 20.0, 20.0, 10.0], dtype=np.float32),
         "body_heading_valid": np.ones(5, dtype=bool),
         "body_bearing_deg": np.asarray(
             [30.0, 30.0, 10.0, -40.0, -30.0], dtype=np.float32
@@ -75,7 +93,13 @@ def _relative(archive: Path) -> ChaserRelativeFrameSourceHandle:
         n_frames=5,
         n_chasers=1,
         n_rows=5,
-        run_manifest={"scale_policy": {"unit": "mm"}},
+        run_manifest={"scale_policy": {"unit": "mm", "pixels_per_unit": 10.0}},
+        source_authorities={
+            "fish_position": {
+                "provider_id": "keypoint.v1",
+                "provider_digest": "provider-digest",
+            }
+        },
         base_arrays=MappingProxyType(base),
         body_arrays=MappingProxyType(body),
         context={
@@ -97,6 +121,8 @@ def _semantic(archive: Path) -> ProtocolSemanticChaserSelectionSourceHandle:
         object.__new__(ProtocolSemanticChaserSelectionSourceHandle),
         analysis_zarr=archive,
         recording_id="recording-1",
+        run_name="s1",
+        run_path="analysis/protocol_semantic_chaser_selection_runs/s1",
         manifest={
             "role_records": [
                 {
@@ -164,8 +190,48 @@ def _eye(archive: Path) -> EyeGazeSourceHandle:
     )
 
 
+def _radial(archive: Path) -> ComposableChaserSuccessorSourceHandle:
+    scientific = {
+        "sources": {
+            "relative_frame": {
+                "run_path": "analysis/chaser_relative_frame_runs/r1",
+                "manifest_sha256": "a" * 64,
+            },
+            "protocol_semantic_selection": {
+                "run_path": "analysis/protocol_semantic_chaser_selection_runs/s1",
+                "manifest_sha256": "a" * 64,
+            },
+            "arena_geometry_and_scale": {"authority_sha256": "8" * 64},
+        },
+        "position_provider": {
+            "provider_id": "keypoint.v1",
+            "provider_digest": "provider-digest",
+            "status": "first_class_explicit_authority",
+        },
+        "arena": {
+            "center_xy_px": [100.0, 100.0],
+            "radius_px": 200.0,
+            "radius_mm": 20.0,
+        },
+    }
+    return _set(
+        object.__new__(ComposableChaserSuccessorSourceHandle),
+        analysis_zarr=archive,
+        successor_kind="chaser_radial_near_field",
+        run_path="analysis/chaser_radial_near_field_runs/radial-v1",
+        run_name="radial-v1",
+        recording_id="recording-1",
+        manifest={
+            "scientific_manifest": scientific,
+            "scientific_payload_sha256": "9" * 64,
+        },
+    )
+
+
 def _install_current_handle_stubs(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setattr(ChaserRelativeFrameSourceHandle, "assert_current", lambda self: None)
+    monkeypatch.setattr(
+        ChaserRelativeFrameSourceHandle, "assert_current", lambda self: None
+    )
     monkeypatch.setattr(
         ChaserRelativeFrameSourceHandle,
         "manifest_sha256",
@@ -184,12 +250,15 @@ def _install_current_handle_stubs(monkeypatch) -> None:  # type: ignore[no-untyp
     monkeypatch.setattr(
         ProtocolSemanticChaserSelectionSourceHandle,
         "source_binding",
-        lambda self: {
-            "source_epoch_selection": {"selection_id": "exact-selection"}
-        },
+        lambda self: {"source_epoch_selection": {"selection_id": "exact-selection"}},
     )
-    monkeypatch.setattr(ProviderTrackMotionSourceHandle, "assert_current", lambda self: None)
+    monkeypatch.setattr(
+        ProviderTrackMotionSourceHandle, "assert_current", lambda self: None
+    )
     monkeypatch.setattr(EyeGazeSourceHandle, "assert_current", lambda self: None)
+    monkeypatch.setattr(
+        ComposableChaserSuccessorSourceHandle, "assert_current", lambda self: None
+    )
 
 
 def test_gaze_adapter_binds_reviewed_channels_and_semantic_axis(
@@ -199,13 +268,14 @@ def test_gaze_adapter_binds_reviewed_channels_and_semantic_axis(
     archive = (tmp_path / "analysis.zarr").resolve()
 
     source = gaze_tracking_input_from_handles(
-        _relative(archive), _semantic(archive), _eye(archive)
+        _relative(archive), _semantic(archive), _eye(archive), _radial(archive)
     )
 
     assert source.acquisition_frame_id_by_frame.tolist() == [100, 101, 102, 103, 104]
     assert source.semantic_role_code_by_frame.tolist() == [2, 2, 2, 2, 2]
     assert source.source_eye_channel_policy.startswith("smoothed:")
     np.testing.assert_allclose(source.gaze_signed_deg, [[1.0, 2.0]] * 5)
+    assert source.source_radial_run_path.endswith("/radial-v1")
 
 
 def test_controller_adapter_projects_semantic_bounds_by_acquisition_frame(
@@ -214,9 +284,7 @@ def test_controller_adapter_projects_semantic_bounds_by_acquisition_frame(
     _install_current_handle_stubs(monkeypatch)
     archive = (tmp_path / "analysis.zarr").resolve()
 
-    source = controller_trial_input_from_handles(
-        _relative(archive), _semantic(archive)
-    )
+    source = controller_trial_input_from_handles(_relative(archive), _semantic(archive))
 
     # The stored relative-frame selection is deliberately all false and its
     # temporal context is not the epoch-selection record. Exact semantic
@@ -293,4 +361,10 @@ def test_generalized_and_escape_adapters_share_exact_axes_and_dependencies(
     assert generalized.array("controller_trial_row_id").tolist() == [0]
     assert escape_input.source_speed_level == "filtered"
     np.testing.assert_allclose(escape_input.speed_mm_s_by_frame, [1, 2, 3, 4, 5])
-    assert escape_input.acquisition_frame_id_by_frame.tolist() == [100, 101, 102, 103, 104]
+    assert escape_input.acquisition_frame_id_by_frame.tolist() == [
+        100,
+        101,
+        102,
+        103,
+        104,
+    ]

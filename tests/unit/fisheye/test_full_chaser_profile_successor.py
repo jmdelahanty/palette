@@ -121,14 +121,12 @@ def test_complete_full_profile_binds_every_exact_product_and_waves() -> None:
     assert result.readiness == "complete"
     assert result.array("product_bound").tolist() == [True] * len(selected)
     waves = result.array("execution_wave")
-    wave_by_id = {
-        module.module_id: int(wave) for module, wave in zip(selected, waves)
-    }
+    wave_by_id = {module.module_id: int(wave) for module, wave in zip(selected, waves)}
     assert wave_by_id["stimulus_epochs"] == 0
     assert wave_by_id["detection_occupancy"] == 1
     assert wave_by_id["chaser_distance"] == 1
     assert wave_by_id["controller_chase_trials"] == 2
-    assert wave_by_id["chaser_gaze_tracking_v2"] == 3
+    assert wave_by_id["chaser_gaze_tracking_v3"] == 3
     assert wave_by_id["generalized_chaser_bout_response"] == 3
     assert wave_by_id["chaser_escape_freeze_v2"] == 4
     assert len(result.manifest["module_products"]) == len(selected)

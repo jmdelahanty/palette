@@ -101,10 +101,10 @@ modules:
     required_capabilities:
       [positioned_chaser, temporal_authority, chase_trials]
 
-  - id: chaser_gaze_tracking_v2
+  - id: chaser_gaze_tracking_v3
     implementation: fisheye.analysis.gaze_tracking_successor
     schema_id: palette.analysis.chaser_gaze_tracking
-    schema_version: 2
+    schema_version: 3
     depends_on: [chaser_egocentric_bearing]
     execution_cardinality: recording
     default_enabled: true

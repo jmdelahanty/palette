@@ -2,7 +2,7 @@
 
 <!-- contract-meta
 status: implementation-in-progress
-implementation: receipt-bound-reader-merged-first-class-gaze-and-distribution-work-in-progress
+implementation: first-class-body-bearing-and-gaze-local-validation-complete-ci-pending
 last_verified: 2026-08-30
 -->
 
@@ -87,12 +87,21 @@ current zero-option defect.
       or modern subject-mask source family in the frozen body-frame cohort.
 - [x] The frozen cohort invocation did not request `chaser_gaze_tracking_v2`
       and supplied no eye run or gaze-convention review receipt.
-- [x] The modern gaze successor retains exact body-frame gaze/bearing rows,
-      summaries, and sustained lock events but does not retain the legacy
-      rotated spatial controls or dynamic-lag summaries.
+- [x] The pre-implementation schema-v2 gaze audit found exact body-frame
+      gaze/bearing rows, summaries, and sustained lock events but no rotated
+      spatial controls or dynamic-lag summaries; schema v3 now closes that gap.
 - [x] The paired radial successors already seal the missing CDF and observed /
       geometric-expected distribution arrays; no successor migration is needed
       for the distance-distribution reader.
+- [x] The implementation branch now defines a conditional keypoint-only
+      body-bearing polar route and a separately conditional exact gaze route.
+      Focused local validation is complete; required CI and a live gaze-capable
+      artifact smoke remain release gates.
+- [x] A read-only receipt-bound smoke on
+      `2026-08-10T17-20-55Z_arena_1_goodbatbadbat` discovers the body-bearing
+      capability, rehashes `body/body_bearing_deg` and
+      `body/body_bearing_valid`, and renders eight polar traces: full recording
+      plus three exact epochs for two chasers.
 
 ## Safety invariants
 
@@ -370,35 +379,35 @@ not derive a new scientific product in the UI.
 
 ### 5E — First-class exact bearing and gaze
 
-- [ ] Add a keypoint-only anatomical body-bearing polar view from the persisted
+- [x] Add a keypoint-only anatomical body-bearing polar view from the persisted
       relative-frame body extension. State explicitly that detection bbox
       centroid remains first-class for position/distance but supplies no body
       axis or anatomical bearing.
-- [ ] Define first-class gaze as a conditional capability of the exact chaser
+- [x] Define first-class gaze as a conditional capability of the exact chaser
       provider, not as a third position provider and not as a legacy fallback.
-- [ ] Version the modern gaze successor before cohort materialization to seal
+- [x] Version the modern gaze successor before cohort materialization to seal
       the rotated spatial null controls and required real-minus-virtual
       recording summaries. Preserve the exact reviewed arena geometry,
       rotation list, collision exclusion, distance/accessibility gates, and
       null denominators in provenance.
-- [ ] Decide and persist the required dynamic tracking surface. The legacy
+- [x] Decide and persist the required dynamic tracking surface. The legacy
       component includes zero-lag and causal best-lag gain; the current modern
       successor does not. Do not leave the catalog promising a metric absent
       from the payload.
-- [ ] Keep lock occupancy descriptive: persist and display its exact valid,
+- [x] Keep lock occupancy descriptive: persist and display its exact valid,
       accessible, and locked counts alongside the fraction.
-- [ ] Keep sustained lock events as contiguous exact-frame intervals with
+- [x] Keep sustained lock events as contiguous exact-frame intervals with
       timestamp-derived duration, explicit 0.10-second default, sample count,
       and median absolute error. Do not bridge invalid gaps in the viewer.
-- [ ] Add a closed gaze array roster, exact discovery proof, projection loader,
+- [x] Add a closed gaze array roster, exact discovery proof, projection loader,
       renderer, and typed unavailable state. Require the exact recording,
       keypoint relative-frame/body extension, semantic selection, reviewed eye
       run logical digest, and gaze-convention receipt digest.
-- [ ] Add exact gaze-child validation receipts and a versioned projection
+- [x] Add exact gaze-child validation receipts and a versioned projection
       composition schema that requires gaze for a gaze-capable receipt. A
       supplied v1 composition receipt must not silently fall back to a deep
       audit for gaze.
-- [ ] Add body-bearing polar, gaze-versus-bearing, gaze-error, tracking,
+- [x] Add body-bearing polar, gaze-versus-bearing, gaze-error, tracking,
       lock-fraction, lock-event, and real-versus-rotated-control panels from
       persisted arrays only.
 - [ ] Add cohort planning fields for an explicit eye-angle run and exact

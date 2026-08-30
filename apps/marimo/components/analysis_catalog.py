@@ -203,6 +203,14 @@ CHASER_EXACT_SUCCESSOR_PROVIDER = ProviderDefinition(
             "Full-session and exact protocol-epoch fish–chaser distance traces.",
         ),
         AnalysisDefinition(
+            "body_bearing_polar",
+            "Body-frame bearing polar",
+            (
+                "Whole-circle chaser-bearing distributions from the accepted "
+                "keypoint body-axis supplier, with no detection or heading fallback."
+            ),
+        ),
+        AnalysisDefinition(
             "trajectory_overlays",
             "Exact-epoch position overlays",
             "Fish positions with exact logged chaser positions in the reviewed arena.",
@@ -238,6 +246,14 @@ CHASER_EXACT_SUCCESSOR_PROVIDER = ProviderDefinition(
                 "Persisted speed-defined escape events, separately annotated "
                 "high turns, exact-trial freeze candidates, recapture outcomes, "
                 "validity reasons, and threshold sensitivity."
+            ),
+        ),
+        AnalysisDefinition(
+            "gaze_tracking",
+            "Exact body-frame gaze tracking",
+            (
+                "Persisted eye-versus-chaser bearing, gaze error, lock fractions, "
+                "static tracking gain, and sustained lock events from exact sources."
             ),
         ),
         AnalysisDefinition(

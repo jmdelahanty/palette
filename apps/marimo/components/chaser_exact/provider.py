@@ -8,6 +8,11 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
 from ..registry import InteractiveSpecOption
+from ..chaser_exact_body_bearing_contract import (
+    ExactBodyBearingContractError,
+    option_body_bearing_binding,
+)
+from .body_bearing import build_exact_body_bearing_output
 from .bout_response import build_exact_bout_response_output
 from .bout_response_projection import (
     ExactBoutResponseProjectionError,
@@ -23,6 +28,11 @@ from .escape_freeze import build_exact_escape_freeze_output
 from .escape_freeze_projection import (
     ExactEscapeFreezeProjectionError,
     option_escape_freeze_binding,
+)
+from .gaze_tracking import build_exact_gaze_tracking_output
+from .gaze_tracking_projection import (
+    ExactGazeTrackingProjectionError,
+    option_gaze_tracking_binding,
 )
 from .projection import (
     ExactChaserSelectionIdentity,
@@ -64,9 +74,11 @@ class ExactChaserAnalysisRoute:
     load_relative: bool
     renderer: Renderer | None
     load_relative_arrays: bool = True
+    load_keypoint_body_bearing: bool = False
     load_controller_trials: bool = False
     load_generalized_bout_response: bool = False
     load_escape_freeze: bool = False
+    load_gaze_tracking: bool = False
 
 
 _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
@@ -82,6 +94,13 @@ _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
             display_parameter_version="exact-distance-trace-display-v1",
             load_relative=True,
             renderer=build_exact_distance_traces_output,
+        ),
+        "body_bearing_polar": ExactChaserAnalysisRoute(
+            analysis_id="body_bearing_polar",
+            display_parameter_version="exact-body-bearing-polar-display-v1",
+            load_relative=True,
+            load_keypoint_body_bearing=True,
+            renderer=build_exact_body_bearing_output,
         ),
         "trajectory_overlays": ExactChaserAnalysisRoute(
             analysis_id="trajectory_overlays",
@@ -120,6 +139,14 @@ _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
             load_controller_trials=True,
             load_generalized_bout_response=True,
             load_escape_freeze=True,
+        ),
+        "gaze_tracking": ExactChaserAnalysisRoute(
+            analysis_id="gaze_tracking",
+            display_parameter_version="exact-gaze-tracking-display-v1",
+            load_relative=True,
+            load_relative_arrays=False,
+            renderer=build_exact_gaze_tracking_output,
+            load_gaze_tracking=True,
         ),
         "provenance": ExactChaserAnalysisRoute(
             analysis_id="provenance",
@@ -166,28 +193,46 @@ class ExactChaserProviderAdapter:
         _option_bundle(option)
         if option.spec.get("bundle_status") != "exact_selector_ineligible":
             return ()
-        available = [
+        available = {
             value
             for value in ANALYSIS_IDS
             if value
-            not in {"controller_trials", "generalized_bout_response", "escape_freeze"}
-        ]
+            not in {
+                "body_bearing_polar",
+                "controller_trials",
+                "generalized_bout_response",
+                "escape_freeze",
+                "gaze_tracking",
+            }
+        }
+        try:
+            option_body_bearing_binding(option)
+        except ExactBodyBearingContractError:
+            pass
+        else:
+            available.add("body_bearing_polar")
+        try:
+            option_gaze_tracking_binding(option)
+        except ExactGazeTrackingProjectionError:
+            pass
+        else:
+            available.add("gaze_tracking")
         try:
             option_controller_trial_binding(option)
         except ExactControllerTrialProjectionError:
-            return tuple(available)
-        available.insert(4, "controller_trials")
+            return tuple(value for value in ANALYSIS_IDS if value in available)
+        available.add("controller_trials")
         try:
             option_bout_response_binding(option)
         except ExactBoutResponseProjectionError:
-            return tuple(available)
-        available.insert(5, "generalized_bout_response")
+            return tuple(value for value in ANALYSIS_IDS if value in available)
+        available.add("generalized_bout_response")
         try:
             option_escape_freeze_binding(option)
         except ExactEscapeFreezeProjectionError:
-            return tuple(available)
-        available.insert(6, "escape_freeze")
-        return tuple(available)
+            return tuple(value for value in ANALYSIS_IDS if value in available)
+        available.add("escape_freeze")
+        return tuple(value for value in ANALYSIS_IDS if value in available)
 
     def requires_projection(self, analysis_id: str) -> bool:
         """Return whether the provider, rather than the shared shell, renders it."""
@@ -226,6 +271,8 @@ class ExactChaserProviderAdapter:
         projection_receipt_path: str | Path | None = None,
     ) -> ExactChaserSuccessorProjection:
         route = self.route(analysis_id)
+        if route.load_keypoint_body_bearing:
+            option_body_bearing_binding(option)
         identity = self.selection_identity(
             zarr_path,
             option,
@@ -238,9 +285,11 @@ class ExactChaserProviderAdapter:
             selection_identity=identity,
             load_relative=route.load_relative,
             load_relative_arrays=route.load_relative_arrays,
+            load_keypoint_body_bearing=route.load_keypoint_body_bearing,
             load_controller_trials=route.load_controller_trials,
             load_generalized_bout_response=(route.load_generalized_bout_response),
             load_escape_freeze=route.load_escape_freeze,
+            load_gaze_tracking=route.load_gaze_tracking,
         )
 
     def require_current_projection(

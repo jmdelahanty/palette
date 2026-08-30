@@ -2,7 +2,7 @@
 
 <!-- contract-meta
 status: active
-implementation: receipt-bound-reader-merged-first-class-gaze-and-distribution-design-in-progress
+implementation: first-class-body-bearing-and-gaze-local-validation-complete-ci-pending
 last_verified: 2026-08-30
 -->
 
@@ -42,7 +42,10 @@ The declared interactive views are:
    response;
 7. exact-trial escape/freeze outcomes, event facts, trace-validity reasons, and
    persisted threshold sensitivity; and
-8. exact manifest, child identity, provider authority, and display-projection
+8. conditional keypoint-authority body-bearing polar distributions;
+9. conditional schema-v3 exact eye-gaze tracking, dynamic summaries, lock
+   events, and rotated spatial controls; and
+10. exact manifest, child identity, provider authority, and display-projection
    provenance.
 
 The adapter resolves no `latest`, default, promoted, or fallback selector. It
@@ -547,6 +550,49 @@ renderers duplicate their validation and display-parameter derivation. They
 should share one scientific display projection. Conditional valid-in-arena
 occupancy remains primary; the already-persisted candidate-epoch-normalized
 surface should be available as an explicitly coverage-sensitive companion.
+
+### First-class gaze and body-bearing implementation addendum — 2026-08-30
+
+The implementation branch now mounts the accepted keypoint body-bearing
+extension as a conditional `body_bearing_polar` capability. It uses fixed
+10-degree whole-circle bins for the full recording and exact semantic epochs,
+normalizes within panel and chaser, and records the display recipe in figure
+metadata. Detection bbox centroid remains a first-class position and distance
+provider, but neither detection nor motion heading is permitted to supply an
+anatomical body axis.
+
+The scientific gaze successor is advanced to schema version 3. It binds the
+exact reviewed eye-orientation payload and convention receipt, keypoint
+relative-frame body extension, protocol-semantic selection, and the exact
+radial successor that seals reviewed arena geometry and physical scale. The
+payload now retains every rotated candidate and its collision decision,
+accepted virtual-reference summaries, finite per-metric null denominators,
+real-minus-virtual gain/lock contrasts, virtual-minus-real error improvement,
+zero-lag dynamic gain, and causal nonnegative best-lag gain. Sustained lock
+events and their exact-frame/timestamp evidence remain persisted scientific
+outputs rather than viewer reconstructions.
+
+The exact explorer now has a closed gaze array roster, metadata-only discovery,
+strict projection loader, typed unavailable state, and persisted-array panels
+for gaze versus bearing, gaze-error distributions, lock/static summaries,
+dynamic tracking, real-versus-rotated controls, and sustained events. A
+projection receipt containing the original seven exact children remains schema
+v1. Adding the gaze child produces the closed schema-v2 roster. A supplied v1
+receipt cannot authorize gaze and cannot silently fall back to deep audit.
+
+This makes the code path ready for validated schema-v3 gaze publications, but
+does not manufacture gaze for the frozen body-frame cohort: those recordings
+still need explicit reviewed eye-angle sources, biological-direction convention
+receipts, and newly materialized immutable gaze successors. Required CI and a
+live gaze-capable artifact smoke remain release evidence, not assumptions.
+
+A read-only live smoke on
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat` validates the independent bearing
+path. Metadata discovery exposes `body_bearing_polar`; the existing projection
+receipt permits targeted rehash of exactly `body/body_bearing_deg` and
+`body/body_bearing_valid`; and the renderer returns eight polar traces for two
+chasers across the full recording and three exact semantic epochs. The same
+recording truthfully omits gaze because it has no schema-v3 gaze successor.
 
 ## Persisted but not yet mounted in this capability
 

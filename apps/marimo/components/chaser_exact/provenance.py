@@ -57,6 +57,7 @@ def build_projection_provenance(
     controller_trials: Any | None = None,
     generalized_bout_response: Any | None = None,
     escape_freeze: Any | None = None,
+    gaze_tracking: Any | None = None,
     relatives: Sequence[Any] | None = None,
     projection_verification_mode: str = "deep_audit",
     projection_receipt_sha256: str | None = None,
@@ -125,7 +126,9 @@ def build_projection_provenance(
                     ),
                     "body_extension_present": generalized_bout_response.scientific_manifest.get(
                         "scientific_schema", {}
-                    ).get("body_extension_present"),
+                    ).get(
+                        "body_extension_present"
+                    ),
                     "deep_audited": generalized_bout_response.deep_audited,
                     **_verification(generalized_bout_response),
                 }
@@ -150,6 +153,26 @@ def build_projection_provenance(
                     **_verification(escape_freeze),
                 }
                 if escape_freeze is not None
+                else None
+            ),
+            "gaze_tracking_binding": (
+                {
+                    "run_path": gaze_tracking.run_path,
+                    "manifest_sha256": gaze_tracking.manifest_sha256,
+                    "scientific_payload_sha256": (
+                        gaze_tracking.scientific_payload_sha256
+                    ),
+                    "sources": plain(gaze_tracking.scientific_manifest.get("sources")),
+                    "parameters": plain(
+                        gaze_tracking.scientific_manifest.get("parameters")
+                    ),
+                    "method_id": gaze_tracking.scientific_manifest.get(
+                        "scientific_schema", {}
+                    ).get("method_id"),
+                    "deep_audited": gaze_tracking.deep_audited,
+                    **_verification(gaze_tracking),
+                }
+                if gaze_tracking is not None
                 else None
             ),
             "adapter_semantics": (

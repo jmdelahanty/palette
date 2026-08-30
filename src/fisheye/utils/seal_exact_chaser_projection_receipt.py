@@ -28,6 +28,14 @@ def _parser() -> argparse.ArgumentParser:
         "spatial-occupancy",
     ):
         parser.add_argument(f"--{key}-receipt", type=Path, required=True)
+    parser.add_argument(
+        "--gaze-receipt",
+        type=Path,
+        help=(
+            "Optional exact gaze successor receipt. Supplying it seals projection "
+            "receipt schema v2; omitting it preserves the closed v1 roster."
+        ),
+    )
     parser.add_argument("--keypoint-relative-frame-receipt", type=Path, required=True)
     parser.add_argument("--detection-relative-frame-receipt", type=Path, required=True)
     return parser
@@ -47,6 +55,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "spatial_occupancy",
         )
     }
+    if args.gaze_receipt is not None:
+        exact["gaze"] = args.gaze_receipt
     relative = {
         "keypoint": args.keypoint_relative_frame_receipt,
         "detection": args.detection_relative_frame_receipt,

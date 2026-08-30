@@ -1,5 +1,7 @@
 """Closed persisted-array rosters consumed by exact-chaser renderers."""
 
+from ..chaser_exact_gaze_arrays import GAZE_TRACKING_ARRAYS
+
 RADIAL_NEAR_FIELD_ARRAYS = (
     "metric_epoch_role_code",
     "metric_behavior_role_code",
@@ -160,10 +162,12 @@ ESCAPE_FREEZE_ARRAYS = (
     "recording_trace_usable_event_count",
 )
 
+
 __all__ = [
     "BOUT_RESPONSE_ARRAYS",
     "CONTROLLER_TRIAL_ARRAYS",
     "ESCAPE_FREEZE_ARRAYS",
+    "GAZE_TRACKING_ARRAYS",
     "RADIAL_NEAR_FIELD_ARRAYS",
     "SPATIAL_OCCUPANCY_ARRAYS",
 ]

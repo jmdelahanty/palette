@@ -69,6 +69,10 @@ from .chaser_exact_bout_response_discovery import (
 from .chaser_exact_escape_freeze_discovery import (
     compatible_escape_freeze_binding,
 )
+from .chaser_exact_body_bearing_contract import (
+    compatible_body_bearing_binding,
+)
+from .chaser_exact_gaze_discovery import compatible_gaze_tracking_binding
 
 TRACK_KINEMATICS_PLOT_RENDERER = "palette-track-kinematics-summary-v1"
 TRACK_KINEMATICS_INTERACTIVE_ARTIFACT = "track_kinematics_summary_track_0_interactive"
@@ -885,6 +889,7 @@ def discover_exact_chaser_successor_options(
             continue
         provider_ids: list[str] = []
         relative_manifests: list[Mapping[str, Any]] = []
+        radial_manifests: list[Mapping[str, Any]] = []
         relative_binding_proofs: list[dict[str, Any]] = []
         valid = True
         for record in providers:
@@ -963,6 +968,7 @@ def discover_exact_chaser_successor_options(
                 break
             provider_ids.append(provider_id)
             relative_manifests.append(relative)
+            radial_manifests.append(radial)
             relative_binding_proofs.append(
                 {
                     "normalized_identity": dict(relative_proof.normalized_identity),
@@ -1007,17 +1013,32 @@ def discover_exact_chaser_successor_options(
             controller_trial_binding=controller_trial_binding,
             bout_response_binding=bout_response_binding,
         )
+        body_bearing_binding = compatible_body_bearing_binding(
+            relative_manifests[0],
+            expected_relative_binding=providers[0]["relative_frame"],
+        )
+        gaze_tracking_binding = compatible_gaze_tracking_binding(
+            root,
+            recording_id=recording_id,
+            spatial_sources=sources,
+            keypoint_relative_manifest=relative_manifests[0],
+            keypoint_radial_manifest=radial_manifests[0],
+        )
         analysis_bindings = {}
+        if body_bearing_binding is not None:
+            analysis_bindings["body_bearing"] = dict(body_bearing_binding)
         if controller_trial_binding is not None:
             analysis_bindings["controller_trials"] = dict(controller_trial_binding)
         if bout_response_binding is not None:
             analysis_bindings["generalized_bout_response"] = dict(bout_response_binding)
         if escape_freeze_binding is not None:
             analysis_bindings["escape_freeze"] = dict(escape_freeze_binding)
+        if gaze_tracking_binding is not None:
+            analysis_bindings["gaze_tracking"] = dict(gaze_tracking_binding)
         title = f"Exact paired-provider chaser successors: {run_name}"
         spec = {
             "schema_id": "palette.chaser_exact_successor_explorer_spec",
-            "schema_version": 6,
+            "schema_version": 7,
             "renderer": CHASER_EXACT_SUCCESSOR_RENDERER,
             "title": title,
             "run_name": run_name,
@@ -1041,6 +1062,11 @@ def discover_exact_chaser_successor_options(
                 **(
                     {"escape_freeze": escape_freeze_binding["run_path"]}
                     if escape_freeze_binding is not None
+                    else {}
+                ),
+                **(
+                    {"gaze_tracking": gaze_tracking_binding["run_path"]}
+                    if gaze_tracking_binding is not None
                     else {}
                 ),
             },
@@ -1075,6 +1101,17 @@ def discover_exact_chaser_successor_options(
                     ),
                     "max_points_per_series": 6000,
                     "connect_missing_gaps": False,
+                },
+                "body_bearing_polar": {
+                    "recipe_id": "accepted_body_axis_bearing_polar_histogram_v1",
+                    "source_arrays": [
+                        "body/body_bearing_deg",
+                        "body/body_bearing_valid",
+                    ],
+                    "bin_width_deg": 10.0,
+                    "normalization": "probability_within_panel_chaser",
+                    "body_axis_fallback": "prohibited",
+                    "detection_position_substitution": "prohibited",
                 },
                 "trajectory_overlays": {
                     "algorithm": ("source_order_uniform_plus_coordinate_extrema_v1"),
@@ -1135,6 +1172,23 @@ def discover_exact_chaser_successor_options(
                         "source_order_uniform_endpoint_preserving_v1"
                     ),
                     "legacy_classifier_fallback": "prohibited",
+                },
+                "gaze_tracking": {
+                    "recipe_id": "persisted_exact_body_frame_gaze_tracking_v1",
+                    "row_source": "persisted_acquisition_frame_x_eye_x_chaser",
+                    "summary_source": "persisted_semantic_role_x_eye_x_chaser",
+                    "event_source": "persisted_contiguous_lock_on_intervals",
+                    "accessible_range": "persisted_empirical_eye_quantiles",
+                    "lock_threshold": "persisted_degrees",
+                    "rotated_spatial_controls": (
+                        "persisted_reviewed_arena_rotations_with_collision_exclusion"
+                    ),
+                    "dynamic_lag_tracking": (
+                        "persisted_zero_lag_and_causal_best_lag_summaries"
+                    ),
+                    "world_frame_gaze": "prohibited",
+                    "body_axis_fallback": "prohibited",
+                    "viewer_scientific_recomputation": False,
                 },
                 "scientific_recomputation": False,
                 "interpolation": "prohibited",

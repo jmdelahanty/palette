@@ -24,6 +24,7 @@ from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
 )
 from fisheye.analysis_workflows.composable_chaser_successor_publication import (
     build_composable_chaser_successor_publication_plan,
+    load_composable_chaser_successor_source_handle,
     publish_composable_chaser_successor_run,
 )
 from fisheye.analysis_workflows.controller_trial_successor import (
@@ -49,7 +50,6 @@ from fisheye.analysis_workflows.provider_track_motion_source_handle import (
 )
 from fisheye.shared.json_safety import write_json_atomic
 
-
 REPORT_SCHEMA_ID = "palette.analysis.composable_chaser_successor.operator_report"
 REPORT_SCHEMA_VERSION = 1
 DISPOSITION = "selector_ineligible_non_authoritative_trial_v1"
@@ -57,7 +57,7 @@ DISPOSITION = "selector_ineligible_non_authoritative_trial_v1"
 CONTROLLER = "controller_chase_trials"
 BOUT_RESPONSE = "generalized_chaser_bout_response"
 ESCAPE_FREEZE = "chaser_escape_freeze_v2"
-GAZE_TRACKING = "chaser_gaze_tracking_v2"
+GAZE_TRACKING = "chaser_gaze_tracking_v3"
 MODULE_ORDER = (CONTROLLER, BOUT_RESPONSE, ESCAPE_FREEZE, GAZE_TRACKING)
 MODULE_DEPENDENCIES: Mapping[str, tuple[str, ...]] = {
     CONTROLLER: (),
@@ -224,6 +224,7 @@ def run_composable_chaser_successors(
     eye_run_name: str | None = None,
     eye_convention_receipt: Mapping[str, Any] | None = None,
     eye_channel_variant: str = "smoothed",
+    radial_run_name: str | None = None,
     include_body_extension: bool = True,
     speed_level: str = "filtered",
     modules: Sequence[str] | None = None,
@@ -250,12 +251,10 @@ def run_composable_chaser_successors(
     handles: dict[str, Any | None] = {}
 
     if relative_frame_run is None:
-        handles["relative_frame"], sources["relative_frame"] = (
-            _missing_operator_source(
-                "relative_frame",
-                reason_code="missing_operator_argument",
-                message="--relative-frame-run is required by every successor.",
-            )
+        handles["relative_frame"], sources["relative_frame"] = _missing_operator_source(
+            "relative_frame",
+            reason_code="missing_operator_argument",
+            message="--relative-frame-run is required by every successor.",
         )
     else:
         handles["relative_frame"], sources["relative_frame"] = _attempt_source(
@@ -277,17 +276,15 @@ def run_composable_chaser_successors(
             )
         )
     else:
-        handles["semantic_selection"], sources["semantic_selection"] = (
-            _attempt_source(
-                source_id="semantic_selection",
-                loader=lambda: load_protocol_semantic_chaser_selection_source_handle(
-                    archive,
-                    run_name=semantic_selection_run,
-                    expected_recording_id=expected_recording_id,
-                    use_consolidated=True,
-                    deep_audit=True,
-                ),
-            )
+        handles["semantic_selection"], sources["semantic_selection"] = _attempt_source(
+            source_id="semantic_selection",
+            loader=lambda: load_protocol_semantic_chaser_selection_source_handle(
+                archive,
+                run_name=semantic_selection_run,
+                expected_recording_id=expected_recording_id,
+                use_consolidated=True,
+                deep_audit=True,
+            ),
         )
 
     if BOUT_RESPONSE in needed or ESCAPE_FREEZE in needed:
@@ -303,15 +300,13 @@ def run_composable_chaser_successors(
                 )
             )
         else:
-            handles["provider_motion"], sources["provider_motion"] = (
-                _attempt_source(
-                    source_id="provider_motion",
-                    loader=lambda: load_provider_track_motion_source_handle(
-                        archive,
-                        provider_motion_run_path,
-                        use_consolidated=True,
-                    ),
-                )
+            handles["provider_motion"], sources["provider_motion"] = _attempt_source(
+                source_id="provider_motion",
+                loader=lambda: load_provider_track_motion_source_handle(
+                    archive,
+                    provider_motion_run_path,
+                    use_consolidated=True,
+                ),
             )
         if swim_bout_run_name is None:
             sources["swim_bouts"] = {
@@ -328,6 +323,30 @@ def run_composable_chaser_successors(
             }
 
     if GAZE_TRACKING in needed:
+        if radial_run_name is None:
+            handles["radial_near_field"], sources["radial_near_field"] = (
+                _missing_operator_source(
+                    "radial_near_field",
+                    reason_code="reviewed_arena_geometry_source_not_supplied",
+                    message=(
+                        "Gaze v3 requires --radial-run-name to bind the reviewed "
+                        "arena geometry, physical scale, and position provider."
+                    ),
+                )
+            )
+        else:
+            handles["radial_near_field"], sources["radial_near_field"] = (
+                _attempt_source(
+                    source_id="radial_near_field",
+                    loader=lambda: load_composable_chaser_successor_source_handle(
+                        archive,
+                        successor_kind="chaser_radial_near_field",
+                        run_name=radial_run_name,
+                        expected_recording_id=expected_recording_id,
+                        deep_audit=True,
+                    ),
+                )
+            )
         if eye_run_name is None or eye_convention_receipt is None:
             handles["eye_gaze"], sources["eye_gaze"] = _missing_operator_source(
                 "eye_gaze",
@@ -351,7 +370,9 @@ def run_composable_chaser_successors(
     module_records: dict[str, dict[str, Any]] = {}
 
     def source_block(module_id: str, required: Sequence[str]) -> bool:
-        missing = [source_id for source_id in required if handles.get(source_id) is None]
+        missing = [
+            source_id for source_id in required if handles.get(source_id) is None
+        ]
         if missing:
             module_records[module_id] = _blocked_module(
                 module_id,
@@ -418,13 +439,19 @@ def run_composable_chaser_successors(
             elif module_id == GAZE_TRACKING:
                 if source_block(
                     module_id,
-                    ("relative_frame", "semantic_selection", "eye_gaze"),
+                    (
+                        "relative_frame",
+                        "semantic_selection",
+                        "eye_gaze",
+                        "radial_near_field",
+                    ),
                 ):
                     continue
                 result = prepare_gaze_tracking_successor_from_handles(
                     handles["relative_frame"],
                     handles["semantic_selection"],
                     handles["eye_gaze"],
+                    handles["radial_near_field"],
                 )
             else:  # pragma: no cover - MODULE_ORDER is closed above
                 raise AssertionError(module_id)
@@ -582,6 +609,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--swim-bout-run-name")
     parser.add_argument("--track-id", type=int, default=0)
     parser.add_argument("--eye-run-name")
+    parser.add_argument("--radial-run-name")
     parser.add_argument("--eye-convention-receipt", type=Path)
     parser.add_argument(
         "--eye-channel-variant",
@@ -629,6 +657,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         eye_run_name=args.eye_run_name,
         eye_convention_receipt=_receipt(args.eye_convention_receipt),
         eye_channel_variant=args.eye_channel_variant,
+        radial_run_name=args.radial_run_name,
         include_body_extension=not args.no_body_extension,
         speed_level=args.speed_level,
         modules=args.module,

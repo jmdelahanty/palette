@@ -37,17 +37,12 @@ from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_io import open_zarr_root
 
-
-RECEIPT_SCHEMA_ID = (
-    "palette.analysis.chaser_relative_frame.reusable_validation_receipt"
-)
+RECEIPT_SCHEMA_ID = "palette.analysis.chaser_relative_frame.reusable_validation_receipt"
 RECEIPT_SCHEMA_VERSION = 1
 RECEIPT_STATUS = "complete_selector_ineligible_direct_subtree_audit"
 VERIFICATION_MODE = "receipt_bound_targeted_array_rehash_v1"
 VALIDATION_POLICY = {
-    "initial_validation": (
-        "streaming_all_declared_arrays_direct_content_sha256_v1"
-    ),
+    "initial_validation": ("streaming_all_declared_arrays_direct_content_sha256_v1"),
     "reuse_metadata_validation": "all_direct_subtree_zarr_json_sha256",
     "reuse_array_validation": "consumer_required_arrays_content_sha256",
     "archive_root_consolidated_metadata_reparse": False,
@@ -152,7 +147,9 @@ def _plain(value: Any) -> Any:
 
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+        return MappingProxyType(
+            {str(key): _freeze(item) for key, item in value.items()}
+        )
     if isinstance(value, list):
         return tuple(_freeze(item) for item in value)
     if isinstance(value, tuple):
@@ -357,14 +354,17 @@ def build_chaser_relative_frame_validation_receipt(
     manifest_digest = canonical_json_sha256(manifest)
     if attrs.get(MANIFEST_DIGEST_ATTR) != manifest_digest:
         _fail("Relative-frame child manifest digest is stale.")
-    if expected_manifest_sha256 is not None and _digest(
-        expected_manifest_sha256, field="expected_manifest_sha256"
-    ) != manifest_digest:
+    if (
+        expected_manifest_sha256 is not None
+        and _digest(expected_manifest_sha256, field="expected_manifest_sha256")
+        != manifest_digest
+    ):
         _fail("Relative-frame child differs from the expected manifest digest.")
     recording_id = _text(manifest.get("recording_id"), field="recording_id")
-    if expected_recording_id is not None and _text(
-        expected_recording_id, field="expected_recording_id"
-    ) != recording_id:
+    if (
+        expected_recording_id is not None
+        and _text(expected_recording_id, field="expected_recording_id") != recording_id
+    ):
         _fail("Relative-frame child belongs to another recording.")
     if manifest.get("run_path") not in (None, exact_run_path):
         _fail("Relative-frame manifest names another run path.")
@@ -522,9 +522,10 @@ def validate_chaser_relative_frame_validation_receipt(
     _git_commit(software["commit"], field="software_authority.commit")
     if body["validation_policy"] != VALIDATION_POLICY:
         _fail("Receipt validation policy is invalid.")
-    if expected_analysis_zarr is not None and archive != Path(
-        expected_analysis_zarr
-    ).expanduser().resolve():
+    if (
+        expected_analysis_zarr is not None
+        and archive != Path(expected_analysis_zarr).expanduser().resolve()
+    ):
         _fail("Receipt names another analysis archive.")
     if expected_recording_id is not None and recording_id != _text(
         expected_recording_id, field="expected_recording_id"
@@ -592,10 +593,8 @@ def validate_chaser_relative_frame_validation_receipt(
     inventory = body["direct_metadata_inventory"]
     if (
         not isinstance(inventory, dict)
-        or set(inventory)
-        != {"policy_id", "file_count", "files", "inventory_sha256"}
-        or inventory["policy_id"]
-        != "all_direct_subtree_zarr_json_files_sha256_v1"
+        or set(inventory) != {"policy_id", "file_count", "files", "inventory_sha256"}
+        or inventory["policy_id"] != "all_direct_subtree_zarr_json_files_sha256_v1"
         or not isinstance(inventory["files"], list)
         or int(inventory["file_count"]) != len(inventory["files"])
         or canonical_json_sha256(inventory["files"])
@@ -626,9 +625,8 @@ def validate_chaser_relative_frame_validation_receipt(
             field=f"direct_metadata_inventory.files[{index}].sha256",
         )
         metadata_paths.append(metadata_path)
-    if (
-        "zarr.json" not in metadata_paths
-        or len(metadata_paths) != len(set(metadata_paths))
+    if "zarr.json" not in metadata_paths or len(metadata_paths) != len(
+        set(metadata_paths)
     ):
         _fail("Receipt metadata inventory root or uniqueness is invalid.")
     if validate_current_metadata:
@@ -685,7 +683,11 @@ def ensure_chaser_relative_frame_validation_receipt(
             palette_commit, field="palette_commit"
         ):
             _fail("Existing validation receipt was created by another commit.")
-        return {**_plain(validated), "receipt_path": str(output), "mode": "reused_exact"}
+        return {
+            **_plain(validated),
+            "receipt_path": str(output),
+            "mode": "reused_exact",
+        }
     receipt = build_chaser_relative_frame_validation_receipt(
         analysis_zarr,
         run_name=run_name,
@@ -699,7 +701,7 @@ def ensure_chaser_relative_frame_validation_receipt(
 
 @dataclass(frozen=True, slots=True)
 class ChaserRelativeFrameTargetedSourceHandle:
-    """Receipt-bound read-only frame-axis arrays for bounded consumers."""
+    """Receipt-bound read-only relative-frame arrays for bounded consumers."""
 
     analysis_zarr_path: Path
     run_path: str
@@ -713,6 +715,7 @@ class ChaserRelativeFrameTargetedSourceHandle:
     run_manifest: Mapping[str, Any] = field(repr=False, compare=False)
     source_authorities: Mapping[str, Any] = field(repr=False, compare=False)
     base_arrays: Mapping[str, np.ndarray] = field(repr=False, compare=False)
+    body_arrays: Mapping[str, np.ndarray] = field(repr=False, compare=False)
     frame_arrays: Mapping[str, np.ndarray] = field(repr=False, compare=False)
     receipt: Mapping[str, Any] = field(repr=False, compare=False)
     receipt_path: Path = field(repr=False, compare=False)
@@ -732,9 +735,19 @@ class ChaserRelativeFrameTargetedSourceHandle:
 
     def base_frame_chaser(self, name: str) -> np.ndarray:
         values = self.base_array(name)
-        return values.reshape(
-            (self.n_frames, self.n_chasers) + values.shape[1:]
-        )
+        return values.reshape((self.n_frames, self.n_chasers) + values.shape[1:])
+
+    def body_array(self, name: str) -> np.ndarray:
+        try:
+            return self.body_arrays[name]
+        except KeyError as exc:
+            raise KeyError(
+                f"Targeted relative-frame handle lacks body array {name!r}."
+            ) from exc
+
+    def body_frame_chaser(self, name: str) -> np.ndarray:
+        values = self.body_array(name)
+        return values.reshape((self.n_frames, self.n_chasers) + values.shape[1:])
 
     def frame_array(self, name: str) -> np.ndarray:
         try:
@@ -756,12 +769,13 @@ def load_chaser_relative_frame_targeted_source_handle(
     receipt_path: str | Path,
     *,
     required_base_arrays: Sequence[str] = OCCUPANCY_FRAME_ARRAY_NAMES,
+    required_body_arrays: Sequence[str] = (),
     collapsed_frame_arrays: Sequence[str] = OCCUPANCY_FRAME_ARRAY_NAMES,
     expected_analysis_zarr: str | Path | None = None,
     expected_recording_id: str | None = None,
     expected_run_name: str | None = None,
 ) -> ChaserRelativeFrameTargetedSourceHandle:
-    """Load and content-rehash only requested repeated frame-axis arrays."""
+    """Load and content-rehash only the explicitly requested arrays."""
 
     path = Path(receipt_path).expanduser().resolve()
     receipt = read_chaser_relative_frame_validation_receipt(
@@ -771,31 +785,38 @@ def load_chaser_relative_frame_targeted_source_handle(
         expected_run_name=expected_run_name,
     )
     names = tuple(required_base_arrays)
-    if not names or len(names) != len(set(names)) or any(
-        type(name) is not str or not name for name in names
+    if (
+        not names
+        or len(names) != len(set(names))
+        or any(type(name) is not str or not name for name in names)
     ):
         _fail("required_base_arrays must be unique non-empty strings.")
+    body_names = tuple(required_body_arrays)
+    if len(body_names) != len(set(body_names)) or any(
+        type(name) is not str or not name for name in body_names
+    ):
+        _fail("required_body_arrays must be unique non-empty strings.")
     collapsed = tuple(collapsed_frame_arrays)
     if len(collapsed) != len(set(collapsed)) or not set(collapsed).issubset(names):
         _fail("collapsed_frame_arrays must be a unique subset of required arrays.")
-    declarations = {
-        item["path"]: item for item in receipt["array_declarations"]
-    }
+    declarations = {item["path"]: item for item in receipt["array_declarations"]}
     missing = [name for name in names if f"base/{name}" not in declarations]
     if missing:
         _fail(f"Receipt omits required targeted arrays: {missing!r}")
+    missing_body = [name for name in body_names if f"body/{name}" not in declarations]
+    if missing_body:
+        _fail(f"Receipt omits required targeted body arrays: {missing_body!r}")
     dimensions = receipt["dimensions"]
     n_frames = int(dimensions["n_frames"])
     n_chasers = int(dimensions["n_chasers"])
     n_rows = int(dimensions["n_rows"])
     if n_frames <= 0 or n_chasers <= 0 or n_rows != n_frames * n_chasers:
         _fail("Receipt frame/chaser dimensions are invalid.")
-    run_directory = (
-        Path(receipt["analysis_zarr"]) / PARENT_PATH / receipt["run_name"]
-    )
+    run_directory = Path(receipt["analysis_zarr"]) / PARENT_PATH / receipt["run_name"]
     run = open_zarr_root(run_directory, mode="r", use_consolidated=False)
     base = run["base"]
     base_arrays: dict[str, np.ndarray] = {}
+    body_arrays: dict[str, np.ndarray] = {}
     frame_arrays: dict[str, np.ndarray] = {}
     content_bindings: dict[str, str] = {}
     for name in names:
@@ -831,6 +852,24 @@ def load_chaser_relative_frame_targeted_source_handle(
             frame_values.setflags(write=False)
             frame_arrays[name] = frame_values
         content_bindings[f"base/{name}"] = digest
+    if body_names:
+        body = run["body"]
+        for name in body_names:
+            declaration = declarations[f"body/{name}"]
+            values = np.asarray(body[name][...])
+            if (
+                values.dtype.str != declaration["dtype"]
+                or list(values.shape) != declaration["shape"]
+                or values.shape[0] != n_rows
+            ):
+                _fail(f"Targeted array body/{name} shape or dtype changed.")
+            digest = array_values_sha256(values)
+            if digest != declaration["content_sha256"]:
+                _fail(f"Targeted array body/{name} content digest changed.")
+            body_values = np.array(values, copy=True, order="C")
+            body_values.setflags(write=False)
+            body_arrays[name] = body_values
+            content_bindings[f"body/{name}"] = digest
     manifest = receipt["run_manifest"]
     authorities = manifest.get("source_authorities")
     if not isinstance(authorities, Mapping):
@@ -854,6 +893,7 @@ def load_chaser_relative_frame_targeted_source_handle(
         run_manifest=_freeze(manifest),
         source_authorities=_freeze(authorities),
         base_arrays=MappingProxyType(base_arrays),
+        body_arrays=MappingProxyType(body_arrays),
         frame_arrays=MappingProxyType(frame_arrays),
         receipt=_freeze(receipt),
         receipt_path=path,

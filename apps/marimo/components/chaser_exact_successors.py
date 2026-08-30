@@ -9,9 +9,11 @@ from .chaser_exact.distance_traces import (
     _trace_display_projection,
     build_exact_distance_traces_output,
 )
+from .chaser_exact.body_bearing import build_exact_body_bearing_output
 from .chaser_exact.controller_trials import build_exact_controller_trials_output
 from .chaser_exact.bout_response import build_exact_bout_response_output
 from .chaser_exact.escape_freeze import build_exact_escape_freeze_output
+from .chaser_exact.gaze_tracking import build_exact_gaze_tracking_output
 from .chaser_exact.projection import (
     ExactChaserSelectionIdentity,
     ExactChaserSuccessorProjection,
@@ -41,9 +43,11 @@ __all__ = [
     "RelativeFrameProjection",
     "available_exact_chaser_successor_analysis_ids",
     "build_exact_distance_traces_output",
+    "build_exact_body_bearing_output",
     "build_exact_controller_trials_output",
     "build_exact_bout_response_output",
     "build_exact_escape_freeze_output",
+    "build_exact_gaze_tracking_output",
     "build_exact_radial_near_field_output",
     "build_exact_spatial_occupancy_output",
     "build_exact_trajectory_overlays_output",

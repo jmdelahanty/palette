@@ -341,6 +341,7 @@ def test_reusable_receipt_targets_arrays_without_archive_root_reparse(tmp_path):
     (archive / "zarr.json").write_text("{not valid root metadata", encoding="utf-8")
     handle = load_chaser_relative_frame_targeted_source_handle(
         receipt_path,
+        required_body_arrays=("body_bearing_deg", "body_bearing_valid"),
         expected_analysis_zarr=archive,
         expected_recording_id="recording-1",
         expected_run_name="candidate-v1",
@@ -348,22 +349,27 @@ def test_reusable_receipt_targets_arrays_without_archive_root_reparse(tmp_path):
 
     assert created["mode"] == "created"
     assert reused["mode"] == "reused_exact"
-    assert created["manifest_sha256"] == canonical_json_sha256(
-        created["run_manifest"]
+    assert created["manifest_sha256"] == canonical_json_sha256(created["run_manifest"])
+    assert (
+        created["validation_policy"]["archive_root_consolidated_metadata_reparse"]
+        is False
     )
-    assert created["validation_policy"]["archive_root_consolidated_metadata_reparse"] is False
     assert created["direct_subtree_validation"]["policy_id"] == (
         "streaming_all_declared_arrays_direct_content_sha256_v1"
     )
-    assert created["direct_subtree_validation"][
-        "maximum_requested_block_bytes"
-    ] == 32 * 1024 * 1024
+    assert (
+        created["direct_subtree_validation"]["maximum_requested_block_bytes"]
+        == 32 * 1024 * 1024
+    )
     assert handle.verification_mode == "receipt_bound_targeted_array_rehash_v1"
     np.testing.assert_array_equal(
         handle.frame_array("acquisition_frame_id"),
         np.asarray([10, 11, 12], dtype=np.int64),
     )
     assert handle.receipt_digest == created["record_sha256"]
+    assert set(handle.body_arrays) == {"body_bearing_deg", "body_bearing_valid"}
+    assert handle.body_frame_chaser("body_bearing_deg").shape == (3, 1)
+    assert np.all(handle.body_frame_chaser("body_bearing_valid"))
 
     run = open_zarr_root(
         archive / PARENT_PATH / "candidate-v1",
