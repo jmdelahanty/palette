@@ -11,6 +11,20 @@ receipt creation independently streams every manifest-declared array. This
 deferred step would let each immutable producer emit the same evidence while
 those arrays and their content digests are already in hand.
 
+## Consumer-side progress — 2026-08-30
+
+The interactive reader now has a separate, implemented optimization boundary.
+One `palette.analysis.exact_chaser.projection_receipt` v1 record composes the
+independent exact-child and relative-frame receipts by canonical path and
+digest. The selected renderer revalidates direct metadata once per consumed
+child and rehashes only arrays it actually displays. The composition record is
+not a selector, production authority, cache authority, or replacement for the
+lineage-specific receipts.
+
+This does not complete the producer optimization below. Existing cohorts still
+pay the one-time post-publication receipt-creation scan; future producer-bound
+receipt emission can remove that cost without changing the reader contract.
+
 ## Proposed successor
 
 Add a versioned common immutable-child publisher/finalizer that:

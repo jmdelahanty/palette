@@ -15,7 +15,7 @@ from pathlib import Path
 import re
 import tempfile
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Collection, Mapping
 
 import numpy as np
 import zarr
@@ -352,6 +352,7 @@ def _validate_persistent_run(
     expected_manifest: Mapping[str, Any] | None = None,
     expected_run_path: str | None = None,
     verify_content_hashes: bool = True,
+    required_array_names: Collection[str] | None = None,
     run: Any | None = None,
 ) -> dict[str, Any]:
     group = (
@@ -387,8 +388,22 @@ def _validate_persistent_run(
     }
     if len(by_path) != len(declarations) or set(group.array_keys()) != set(by_path):
         _fail("Persistent successor array inventory is missing, duplicated, or extra.")
+    selected_names = (
+        set(by_path)
+        if required_array_names is None
+        else {str(value) for value in required_array_names}
+    )
+    if any(not value or "/" in value for value in selected_names):
+        _fail("Requested successor array names must be exact direct children.")
+    missing = selected_names.difference(by_path)
+    if missing:
+        _fail(
+            "Requested successor arrays are absent from the sealed manifest: "
+            + ", ".join(sorted(missing))
+        )
     arrays: dict[str, np.ndarray] = {}
-    for name, declaration in sorted(by_path.items()):
+    for name in sorted(selected_names):
+        declaration = by_path[name]
         if type(name) is not str or not name or "/" in name:
             _fail("Persistent successor array path is invalid.")
         value = np.asarray(group[name][:])
@@ -590,6 +605,9 @@ class ComposableChaserSuccessorSourceHandle:
     arrays: Mapping[str, np.ndarray] = field(repr=False, compare=False)
     metadata_equivalence: Mapping[str, Any] = field(repr=False)
     deep_audited: bool
+    verification_mode: str
+    verified_array_names: tuple[str, ...]
+    receipt_digest: str | None
     _seal: object = field(repr=False, compare=False)
 
     def __init__(self, *, _seal: object | None = None, **values: Any) -> None:
@@ -625,6 +643,38 @@ class ComposableChaserSuccessorSourceHandle:
             return self.arrays[name]
         except KeyError as exc:
             raise KeyError(f"Unknown published successor array {name!r}.") from exc
+
+    def require_verified_arrays(self, names: Collection[str]) -> None:
+        """Require receipt-authorized or deeply audited content for loaded arrays."""
+
+        required = {str(value) for value in names}
+        missing = required.difference(self.arrays)
+        unverified = required.difference(self.verified_array_names)
+        if missing:
+            _fail(
+                "Successor handle did not load required arrays: "
+                + ", ".join(sorted(missing))
+            )
+        if unverified or self.verification_mode not in {
+            "deep_audit",
+            "receipt_bound_targeted_array_rehash_v1",
+        }:
+            _fail(
+                "Successor arrays lack an accepted content-verification mode: "
+                + ", ".join(sorted(unverified or required))
+            )
+
+    def require_verified_authority(self) -> None:
+        """Require a deep audit or a current exact-child receipt authority."""
+
+        if self.verification_mode == "deep_audit" and self.deep_audited is True:
+            return
+        if (
+            self.verification_mode == "receipt_bound_targeted_array_rehash_v1"
+            and self.receipt_digest is not None
+        ):
+            return
+        _fail("Successor handle lacks an accepted verification authority.")
 
     def prepared_successor(self) -> Any:
         """Rehydrate the exact prepared dependency after a deep content audit."""
@@ -732,6 +782,13 @@ class ComposableChaserSuccessorSourceHandle:
             run_name=self.run_name,
             expected_recording_id=self.recording_id,
             deep_audit=self.deep_audited,
+            required_array_names=(
+                None
+                if self.deep_audited
+                else tuple(self.verified_array_names)
+                if self.verification_mode == "receipt_bound_targeted_array_rehash_v1"
+                else None
+            ),
             direct_validation_receipt=(
                 str(receipt_path) if receipt_path is not None else None
             ),
@@ -749,6 +806,7 @@ def load_composable_chaser_successor_source_handle(
     use_consolidated: bool = True,
     deep_audit: bool = False,
     direct_validation_receipt: str | Path | None = None,
+    required_array_names: Collection[str] | None = None,
 ) -> ComposableChaserSuccessorSourceHandle:
     """Load one exact successor run without selector discovery."""
 
@@ -759,6 +817,10 @@ def load_composable_chaser_successor_source_handle(
     archive = _archive(analysis_zarr)
     parent_path = parent_by_kind[successor_kind]
     run_path = f"{parent_path}/{name}"
+    if deep_audit and required_array_names is not None:
+        _fail("Deep audit cannot be combined with a targeted array roster.")
+    if required_array_names is not None and direct_validation_receipt is None:
+        _fail("Targeted successor loading requires an exact validation receipt.")
     try:
         if direct_validation_receipt is None:
             metadata = validate_direct_consolidated_subtree(
@@ -797,7 +859,8 @@ def load_composable_chaser_successor_source_handle(
     validation = _validate_persistent_run(
         archive / run_path,
         expected_run_path=run_path,
-        verify_content_hashes=deep_audit,
+        verify_content_hashes=(deep_audit or required_array_names is not None),
+        required_array_names=required_array_names,
         run=run,
     )
     if validation["successor_kind"] != successor_kind:
@@ -818,6 +881,21 @@ def load_composable_chaser_successor_source_handle(
         arrays=validation["arrays"],
         metadata_equivalence=metadata,
         deep_audited=deep_audit,
+        verification_mode=(
+            "deep_audit"
+            if deep_audit
+            else "receipt_bound_targeted_array_rehash_v1"
+            if required_array_names is not None
+            else "metadata_only_full_array_read"
+        ),
+        verified_array_names=(
+            tuple(sorted(validation["arrays"]))
+            if deep_audit or required_array_names is not None
+            else ()
+        ),
+        receipt_digest=(
+            str(metadata["receipt_sha256"]) if "receipt_sha256" in metadata else None
+        ),
         _seal=_HANDLE_SEAL,
     )
 

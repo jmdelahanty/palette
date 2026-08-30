@@ -288,6 +288,7 @@ def test_only_selected_analysis_requests_relative_arrays(
         *,
         selection_identity,
         load_relative,
+        load_relative_arrays,
         load_controller_trials,
         load_generalized_bout_response,
         load_escape_freeze,
@@ -298,6 +299,7 @@ def test_only_selected_analysis_requests_relative_arrays(
             (
                 selection_identity.analysis_id,
                 load_relative,
+                load_relative_arrays,
                 load_controller_trials,
                 load_generalized_bout_response,
                 load_escape_freeze,
@@ -336,12 +338,12 @@ def test_only_selected_analysis_requests_relative_arrays(
     assert bout_response.analysis_id == "generalized_bout_response"
     assert escape_freeze.analysis_id == "escape_freeze"
     assert observed == [
-        ("radial_near_field", False, False, False, False),
-        ("spatial_occupancy", False, False, False, False),
-        ("distance_traces", True, False, False, False),
-        ("controller_trials", True, True, False, False),
-        ("generalized_bout_response", True, True, True, False),
-        ("escape_freeze", True, True, True, True),
+        ("radial_near_field", False, True, False, False, False),
+        ("spatial_occupancy", False, True, False, False, False),
+        ("distance_traces", True, True, False, False, False),
+        ("controller_trials", True, True, True, False, False),
+        ("generalized_bout_response", True, False, True, True, False),
+        ("escape_freeze", True, False, True, True, True),
     ]
 
 

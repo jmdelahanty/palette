@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 
+from .array_requirements import RADIAL_NEAR_FIELD_ARRAYS
 from .projection import ExactChaserSuccessorProjection, identity_registry
 from .provenance import plain
 
@@ -53,6 +54,8 @@ def build_exact_radial_near_field_output(
     """Render sealed paired-provider radial and exact-time near-field summaries."""
 
     handles = projection.radials
+    for handle in handles:
+        handle.require_verified_arrays(RADIAL_NEAR_FIELD_ARRAYS)
     rows = tuple(_metric_rows(handle) for handle in handles)
     if set(rows[0]) != set(rows[1]) or not rows[0]:
         raise ValueError("Paired radial products expose different or empty strata.")

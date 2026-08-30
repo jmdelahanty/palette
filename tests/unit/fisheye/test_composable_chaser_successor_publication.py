@@ -51,7 +51,9 @@ def _archive(tmp_path):
     return archive
 
 
-def test_controller_trial_publication_is_immutable_and_strictly_readable(tmp_path) -> None:
+def test_controller_trial_publication_is_immutable_and_strictly_readable(
+    tmp_path,
+) -> None:
     archive = _archive(tmp_path)
     prepared = prepare_controller_trial_successor(_trial_source())
     plan = build_composable_chaser_successor_publication_plan(
@@ -99,7 +101,9 @@ def test_deep_audit_rejects_array_tampering(tmp_path) -> None:
     values[0] = 999
     consolidate_metadata_capture_expected_warnings(archive)
 
-    with pytest.raises(ComposableChaserSuccessorPublicationError, match="content digest"):
+    with pytest.raises(
+        ComposableChaserSuccessorPublicationError, match="content digest"
+    ):
         load_composable_chaser_successor_source_handle(
             archive,
             successor_kind="controller_chase_trials",
@@ -221,6 +225,25 @@ def test_exact_child_receipt_avoids_root_parse_and_rejects_array_change(
     )
 
     (archive / "zarr.json").write_text("root metadata must not be parsed")
+    targeted = load_composable_chaser_successor_source_handle(
+        archive,
+        successor_kind="controller_chase_trials",
+        run_name="controller-v1",
+        expected_recording_id="recording-1",
+        direct_validation_receipt=receipt_path,
+        required_array_names=("logged_trial_id",),
+    )
+    assert set(targeted.arrays) == {"logged_trial_id"}
+    assert targeted.deep_audited is False
+    assert targeted.verification_mode == "receipt_bound_targeted_array_rehash_v1"
+    assert targeted.receipt_digest == receipt["record_sha256"]
+    targeted.require_verified_authority()
+    targeted.require_verified_arrays(("logged_trial_id",))
+    with pytest.raises(ComposableChaserSuccessorPublicationError, match="did not load"):
+        targeted.require_verified_arrays(("trial_row_id",))
+    with pytest.raises(ComposableChaserSuccessorPublicationError, match="deep-audited"):
+        targeted.prepared_successor()
+
     handle = load_composable_chaser_successor_source_handle(
         archive,
         successor_kind="controller_chase_trials",
@@ -231,9 +254,10 @@ def test_exact_child_receipt_avoids_root_parse_and_rejects_array_change(
     )
     assert handle.scientific_payload_sha256 == prepared.payload_digest
     assert handle.metadata_equivalence["receipt_sha256"] == receipt["record_sha256"]
-    assert handle.metadata_equivalence[
-        "archive_root_consolidated_metadata_reparse"
-    ] is False
+    assert (
+        handle.metadata_equivalence["archive_root_consolidated_metadata_reparse"]
+        is False
+    )
 
     child = open_zarr_root(
         archive / plan.run_path,
@@ -241,7 +265,9 @@ def test_exact_child_receipt_avoids_root_parse_and_rejects_array_change(
         use_consolidated=False,
     )
     child["logged_trial_id"][0] = 999
-    with pytest.raises(ComposableChaserSuccessorPublicationError, match="content digest"):
+    with pytest.raises(
+        ComposableChaserSuccessorPublicationError, match="content digest"
+    ):
         load_composable_chaser_successor_source_handle(
             archive,
             successor_kind="controller_chase_trials",

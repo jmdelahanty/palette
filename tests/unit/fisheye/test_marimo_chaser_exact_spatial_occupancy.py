@@ -76,6 +76,9 @@ class _SpatialHandle:
     def array(self, name: str) -> np.ndarray:
         return self.arrays[name]
 
+    def require_verified_arrays(self, names) -> None:
+        assert set(names).issubset(self.arrays)
+
 
 class _Marimo:
     @staticmethod

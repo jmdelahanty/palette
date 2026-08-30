@@ -384,12 +384,38 @@ Its outer manifest digest is
 `2fcc8807b7c362ea98a0639f57c302b5ee03fcabb81276a51b8551316f999c70`
 and its scientific payload digest is
 `839db255e9f9ede7a46a08f1d706c6032f332bf0f5754a022179ebba581a2774`.
-The 12.971-second deep load validated four trials, five events, twenty
+The original 12.971-second deep load validated four trials, five events, twenty
 persisted sweep rows, one escape trial, three freeze candidates, zero
 high-turn events, and five trace-usable events. All five event trace-reason
 codes were `valid`. The implementation passes 59 focused tests, the 163-test
-Marimo suite (148 passed and 15 expected xfails), and Marimo check. Required CI
-is pending, so this branch is not merge-ready or deployed.
+Marimo suite (148 passed and 15 expected xfails), and Marimo check. It passed
+all 23 required checks and merged through PR 75 as merge commit
+`8c6b2d7d1a1b1491098b1f82680c2fd1596edddd`.
+
+### Receipt-bound exact projection reader — 2026-08-30
+
+The current follow-up adds one external composition receipt over the seven
+exact immutable children and two relative-frame children used by the exact
+viewer. Each producer receipt remains an independent lineage record. The
+composition is a closed consumer choice and is explicitly selector-ineligible,
+production-ineligible, registry-ineligible, and not a cache authority.
+
+With `--exact-chaser-receipt`, each composable child is opened through its
+direct receipt rather than reparsing the 16.5 MB archive-root consolidated
+document. The typed loader rehashes only the selected renderer's declared array
+roster. Bout and escape/freeze routes validate relative-frame receipt metadata,
+dimensions, authorities, and exact joins without reading relative arrays they
+do not render. No-receipt launch retains the exhaustive deep-audit path; a
+supplied stale or mismatched receipt fails closed and never falls back.
+
+On the same live receipt-bound v4 target, escape/freeze loaded in 4.151 seconds
+and renderer validation completed in 0.001 seconds. The load rehashed 53
+escape/freeze arrays and read zero spatial, radial, controller, bout, or
+relative arrays. Figure provenance records the projection receipt digest,
+child receipt digests, verification modes, and exact verified array rosters.
+The smoke composition resides only under `/tmp`; no recording, registry,
+selector, existing receipt, or shared checkout was modified. Required CI for
+this new branch is pending, so it is not merge-ready or deployed.
 
 ## Persisted but not yet mounted in this capability
 

@@ -1631,6 +1631,46 @@ def run_one(
                 apply=apply,
             )
         )
+        projection_receipt = (
+            relative_receipt_dir / "exact_chaser.projection_receipt.json"
+        )
+        stages.append(
+            _invoke(
+                stage="exact_chaser_projection_receipt",
+                command=_stage_command(
+                    py,
+                    "fisheye.utils.seal_exact_chaser_projection_receipt",
+                    "--analysis-zarr",
+                    archive,
+                    "--palette-commit",
+                    commit,
+                    "--output-json",
+                    projection_receipt,
+                    "--expected-recording-id",
+                    recording_id,
+                    "--semantic-selection-receipt",
+                    exact_child_receipts["semantic_selection"],
+                    "--keypoint-radial-receipt",
+                    exact_child_receipts["keypoint_radial"],
+                    "--detection-radial-receipt",
+                    exact_child_receipts["detection_radial"],
+                    "--controller-receipt",
+                    exact_child_receipts["controller"],
+                    "--bout-receipt",
+                    exact_child_receipts["bout"],
+                    "--escape-receipt",
+                    exact_child_receipts["escape"],
+                    "--spatial-occupancy-receipt",
+                    exact_child_receipts["spatial_occupancy"],
+                    "--keypoint-relative-frame-receipt",
+                    relative_receipts["keypoint"],
+                    "--detection-relative-frame-receipt",
+                    relative_receipts["detection"],
+                ),
+                log_dir=receipt_dir,
+                apply=apply,
+            )
+        )
 
     spatial_receipt = (
         spatial_plot_dir

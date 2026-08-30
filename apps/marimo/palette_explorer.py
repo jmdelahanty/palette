@@ -150,6 +150,20 @@ def _(Path, discover_protocol_recording_options, mo):
     initial_renderer = cli_args.get("renderer")
     initial_run_path = cli_args.get("run-path")
     initial_artifact = cli_args.get("artifact")
+    exact_chaser_receipt_raw = cli_args.get("exact-chaser-receipt")
+    exact_chaser_receipt_path = (
+        Path(str(exact_chaser_receipt_raw)).expanduser().resolve()
+        if exact_chaser_receipt_raw
+        else None
+    )
+    if (
+        exact_chaser_receipt_path is not None
+        and not exact_chaser_receipt_path.is_file()
+    ):
+        raise ValueError(
+            "Exact-chaser projection receipt was not found: "
+            f"{exact_chaser_receipt_path}"
+        )
     workspace_mode = str(cli_args.get("workspace") or "").strip().lower() in {
         "1",
         "true",
@@ -178,6 +192,7 @@ def _(Path, discover_protocol_recording_options, mo):
     else:
         recording_scope_label = f"Selected recording only: `{seed_zarr_path}`"
     return (
+        exact_chaser_receipt_path,
         initial_artifact,
         initial_renderer,
         initial_run_path,
@@ -935,6 +950,7 @@ def _(
 @app.cell(hide_code=True)
 def _(
     EXACT_CHASER_PROVIDER_ADAPTER,
+    exact_chaser_receipt_path,
     selected_analysis_id,
     selected_provider,
     selected_spec,
@@ -954,6 +970,7 @@ def _(
                 zarr_path,
                 selected_spec,
                 analysis_id=selected_analysis_id,
+                projection_receipt_path=exact_chaser_receipt_path,
             )
         except Exception as exc:
             exact_chaser_projection_error = f"{type(exc).__name__}: {exc}"
@@ -1083,6 +1100,7 @@ def _(
     chaser_window,
     exact_chaser_projection,
     exact_chaser_projection_error,
+    exact_chaser_receipt_path,
     go,
     mo,
     px,
@@ -1144,6 +1162,7 @@ def _(
             zarr_path=zarr_path,
             option=selected_spec,
             analysis_id=selected_analysis_id,
+            projection_receipt_path=exact_chaser_receipt_path,
         )
     elif selected_analysis_id == "gaze_tracking" and chaser_gaze_view is not None:
         chaser_output = build_chaser_gaze_tracking_output(
