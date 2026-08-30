@@ -74,7 +74,7 @@ def _seed_identity_chain(
             decided_by, decided_at_utc, correction_reason,
             evidence_digest, initiating_dataset_id, registry_schema_version
         ) VALUES (?, ?, ?, ?, 1, NULL, ?, 'initial', 'pytest',
-                  '2026-08-25T12:00:00Z', NULL, ?, ?, 72);
+                  '2026-08-25T12:00:00Z', NULL, ?, ?, 73);
         """,
         (
             identity_snapshot_id,
@@ -103,7 +103,7 @@ def _insert_binding(
             receipt_sha256, dataset_id, identity_scope_id,
             identity_snapshot_id, bound_by, bound_at_utc,
             registry_schema_version
-        ) VALUES (?, ?, ?, ?, 'pytest', '2026-08-25T12:01:00Z', 72);
+        ) VALUES (?, ?, ?, ?, 'pytest', '2026-08-25T12:01:00Z', 73);
         """,
         (
             receipt_sha256,
@@ -178,7 +178,7 @@ def test_receipt_binding_accepts_exact_row_and_rejects_foreign_keys(
             "22222222-2222-4222-8222-222222222222",
             "pytest",
             "2026-08-25T12:01:00Z",
-            72,
+            73,
         )
 
         with pytest.raises(sqlite3.IntegrityError):
@@ -240,7 +240,7 @@ def test_receipt_binding_rejects_update_delete_and_insert_or_replace(
                     identity_snapshot_id, bound_by, bound_at_utc,
                     registry_schema_version
                 ) VALUES (?, 'dataset-a', ?, ?, 'other',
-                          '2026-08-25T12:02:00Z', 72);
+                          '2026-08-25T12:02:00Z', 73);
                 """,
                 (
                     "a" * 64,

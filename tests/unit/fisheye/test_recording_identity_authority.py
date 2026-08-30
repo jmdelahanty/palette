@@ -224,7 +224,7 @@ def _insert_fixture_revision(
             evidence_digest, initiating_dataset_id,
             registry_schema_version
         ) VALUES (?, ?, 'recording-a', 'session-a', ?, ?, ?, ?,
-                  'fixture', '2026-08-25T13:00:00+00:00', ?, ?, ?, 72);
+                  'fixture', '2026-08-25T13:00:00+00:00', ?, ?, ?, 73);
         """,
         (
             identity_snapshot_id,
@@ -501,7 +501,7 @@ def test_receipt_projection_inserts_exact_binding_and_returns_digest(
             result.identity_snapshot_id,
             "pytest",
             DECIDED_AT,
-            72,
+            73,
         )
         assert _receipt_authority_counts(registry)[
             "recording_import_receipt_bindings"
@@ -1021,7 +1021,7 @@ def test_unadvanced_current_pointer_fails_closed(tmp_path: Path) -> None:
                 '22222222-2222-4222-8222-222222222222', ?,
                 'recording-a', 'session-a', 2, ?, ?, 'correction',
                 'fixture', '2026-08-25T13:00:00+00:00', 'fixture correction',
-                ?, ?, 72
+                ?, ?, 73
             );
             """,
             (

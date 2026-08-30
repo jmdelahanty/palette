@@ -11453,11 +11453,23 @@ def test_subject_mask_registry_semantics_columns_migrate_existing_registry(tmp_p
             """
             CREATE TABLE datasets (
                 dataset_id TEXT PRIMARY KEY,
+                session_uuid TEXT,
                 zarr_path TEXT,
+                recording_id TEXT,
                 zarr_origin TEXT,
                 zarr_use TEXT,
                 artifact_kind TEXT,
                 status TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE recordings (
+                recording_id TEXT PRIMARY KEY,
+                session_uuid TEXT,
+                recording_path TEXT,
+                camera_id TEXT
             );
             """
         )
