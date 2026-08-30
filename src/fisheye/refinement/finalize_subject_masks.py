@@ -25,7 +25,12 @@ import zarr
 
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.json_safety import json_attr_safe
-from ..shared.mask_geometry import batch_mask_spatial_metrics
+from ..shared.mask_geometry import (
+    DEFAULT_MIN_ELLIPSE_FOREGROUND_PIXELS,
+    MASK_ELLIPSE_METHOD,
+    batch_mask_spatial_metrics,
+    measure_mask_ellipse as _measure_mask,
+)
 from ..shared.mask_probability_encoding import decode_probability_values
 from ..shared.mask_bitpack import (
     MASK_BITPACKED_AXIS,
@@ -72,6 +77,14 @@ from ..shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
     refined_subject_mask_storage_row_chunk,
     refined_subject_mask_storage_chunks,
+)
+from ..shared.subject_mask_component_support import (
+    COMPONENT_AREA_SUPPORT_DERIVATION_METHOD,
+    COMPONENT_AREA_SUPPORT_SCHEMA_ID,
+    COMPONENT_AREA_SUPPORT_SCHEMA_VERSION,
+    SubjectMaskComponentAreaSupportProfile,
+    SubjectMaskComponentSupportError,
+    require_subject_mask_component_area_support_profile,
 )
 from ..shared.subject_mask_crop_placement import (
     normalize_subject_mask_crop_placement,
@@ -314,6 +327,90 @@ _SUBJECT_MASK_SHARD_COMPAT_ATTRS = (
     "threshold_by_component",
     "threshold_by_label",
 )
+
+
+def _subject_mask_source_model_identity(
+    source: SourceSubjectMaskRun,
+    *,
+    required: bool,
+) -> dict[str, object] | None:
+    science = source.group.attrs.get(REFINED_SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR)
+    if science is None:
+        if required:
+            raise ValueError(
+                "Production refined-mask component-area admission requires the "
+                "source subject-mask scientific identity."
+            )
+        return None
+    if not isinstance(science, Mapping):
+        raise ValueError("Source subject-mask scientific identity is malformed.")
+    errors = validate_subject_mask_scientific_identity(science)
+    if errors:
+        raise ValueError(
+            "Source subject-mask scientific identity is invalid: " + "; ".join(errors)
+        )
+    payload = science.get("payload")
+    model = payload.get("model") if isinstance(payload, Mapping) else None
+    if not isinstance(model, Mapping):
+        raise ValueError(
+            "Source subject-mask scientific identity lacks model evidence."
+        )
+    required_fields = (
+        "registry_set_id",
+        "registry_run_id",
+        "artifact_sha256",
+        "label_schema_id",
+    )
+    identity = {field: model.get(field) for field in required_fields}
+    if any(not str(value or "").strip() for value in identity.values()):
+        if required:
+            raise ValueError(
+                "Source subject-mask scientific identity has incomplete model evidence."
+            )
+        return None
+    return identity
+
+
+def _resolve_component_area_support_profile(
+    source: SourceSubjectMaskRun,
+    *,
+    required: bool,
+) -> SubjectMaskComponentAreaSupportProfile | None:
+    model_identity = _subject_mask_source_model_identity(source, required=required)
+    if model_identity is None:
+        return None
+    try:
+        return require_subject_mask_component_area_support_profile(model_identity)
+    except SubjectMaskComponentSupportError:
+        if required:
+            raise
+        return None
+
+
+def _component_area_support_publication_binding(
+    profile: SubjectMaskComponentAreaSupportProfile | None,
+    *,
+    component_names: Sequence[str],
+    mask_shape_hw: Sequence[int],
+) -> dict[str, object] | None:
+    if profile is None:
+        return None
+    return {
+        "schema_id": COMPONENT_AREA_SUPPORT_SCHEMA_ID,
+        "schema_version": COMPONENT_AREA_SUPPORT_SCHEMA_VERSION,
+        "profile_id": profile.profile_id,
+        "profile_payload_digest": profile.payload_digest,
+        "profile_document_sha256": profile.document_sha256,
+        "derivation_method": COMPONENT_AREA_SUPPORT_DERIVATION_METHOD,
+        "model_binding": dict(profile.model_binding),
+        "training_evidence": dict(profile.training_evidence),
+        "component_bindings": {
+            str(component_name): profile.component_binding(
+                str(component_name), mask_shape_hw=mask_shape_hw
+            )
+            for component_name in component_names
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -1133,8 +1230,14 @@ def _validate_subject_mask_shard_compatibility(
     shards: Sequence[_SubjectMaskShardSource],
 ) -> None:
     first = shards[0].source
+    first_model = _subject_mask_source_model_identity(first, required=False)
     for shard in shards[1:]:
         source = shard.source
+        source_model = _subject_mask_source_model_identity(source, required=False)
+        if source_model != first_model:
+            raise ValueError(
+                f"Shard model identity differs between {shards[0].name} and {shard.name}."
+            )
         if tuple(source.mask_labels) != tuple(first.mask_labels):
             raise ValueError(
                 f"Shard mask_labels differ between {shards[0].name} and {shard.name}."
@@ -2037,12 +2140,17 @@ def _component_surface_batch(
 def _finalize_source_component(
     source: SourceSubjectMaskRun,
     component_name: str,
+    *,
+    component_area_support_profile: (
+        SubjectMaskComponentAreaSupportProfile | None
+    ) = None,
 ) -> _FinalizedComponentBatch:
     return _finalize_source_component_rows(
         source,
         component_name,
         start_row=0,
         stop_row=int(source.masks_roi.shape[0]),
+        component_area_support_profile=component_area_support_profile,
     )
 
 
@@ -2052,6 +2160,9 @@ def _finalize_source_component_rows(
     *,
     start_row: int,
     stop_row: int,
+    component_area_support_profile: (
+        SubjectMaskComponentAreaSupportProfile | None
+    ) = None,
 ) -> _FinalizedComponentBatch:
     surfaces, is_probability, surface_path, encoding, threshold, _component_idx = (
         _component_surface_rows(
@@ -2068,6 +2179,24 @@ def _finalize_source_component_rows(
         )
     base_policy = _default_policy_for_component(component_name)
     policy = replace(base_policy, threshold=float(threshold))
+    if component_area_support_profile is not None:
+        support_binding = component_area_support_profile.component_binding(
+            component_name,
+            mask_shape_hw=surfaces.shape[1:],
+        )
+        support_minimum = int(support_binding["minimum_area_px"])
+        effective_minimum = max(int(policy.min_component_area_px), support_minimum)
+        policy = replace(
+            policy,
+            min_component_area_px=effective_minimum,
+            component_area_support_profile_id=(
+                component_area_support_profile.profile_id
+            ),
+            component_area_support_profile_digest=(
+                component_area_support_profile.payload_digest
+            ),
+            component_area_support_minimum_px=support_minimum,
+        )
 
     total_rows = int(surfaces.shape[0])
     masks = np.zeros(surfaces.shape, dtype=np.uint8)
@@ -2121,6 +2250,10 @@ def _finalize_source_component_rows(
 def _source_payload_for_finalized_component(
     source: SourceSubjectMaskRun,
     batch: _FinalizedComponentBatch,
+    *,
+    component_area_support_profile: (
+        SubjectMaskComponentAreaSupportProfile | None
+    ) = None,
 ) -> dict[str, object]:
     payload = _source_component_provenance_payload(source, batch.component_name)
     source_parent = (
@@ -2136,6 +2269,13 @@ def _source_payload_for_finalized_component(
         f"{source_parent}/{source.run_name}/{batch.source_surface_path}"
     )
     payload["source_surface_kind"] = batch.source_surface_kind
+    if component_area_support_profile is not None:
+        payload["component_area_support"] = (
+            component_area_support_profile.component_binding(
+                batch.component_name,
+                mask_shape_hw=batch.masks.shape[1:],
+            )
+        )
     if batch.source_surface_kind == "probability":
         payload["source_probability_path"] = (
             f"{source_parent}/{source.run_name}/{batch.source_surface_path}"
@@ -2164,6 +2304,9 @@ def _source_payload_for_assigned_eye_component(
     keypoint_group_name: str,
     keypoint_success_dataset: str,
     keypoint_source_kind: str,
+    component_area_support_profile: (
+        SubjectMaskComponentAreaSupportProfile | None
+    ) = None,
 ) -> dict[str, object]:
     source_parent = (
         SUBJECT_MASK_SHARD_PARENT
@@ -2196,6 +2339,13 @@ def _source_payload_for_assigned_eye_component(
     label_schema_id = source.group.attrs.get("label_schema_id")
     if label_schema_id is not None:
         payload["source_label_schema_id"] = str(label_schema_id)
+    if component_area_support_profile is not None:
+        payload["component_area_support"] = (
+            component_area_support_profile.component_binding(
+                component_name,
+                mask_shape_hw=union_batch.masks.shape[1:],
+            )
+        )
     created_at = source.group.attrs.get("created_at_utc") or source.group.attrs.get(
         "created_utc"
     )
@@ -2556,7 +2706,21 @@ def _assign_finalized_eyes_union_rows(
     *,
     start_row: int,
     stop_row: int,
+    component_area_support_profile: (
+        SubjectMaskComponentAreaSupportProfile | None
+    ) = None,
 ) -> _EyeAssignmentChunk:
+    minimum_area_by_name = (
+        {
+            component_name: component_area_support_profile.minimum_area_px(
+                component_name,
+                mask_shape_hw=union_batch.masks.shape[1:],
+            )
+            for component_name in _EYE_COMPONENTS
+        }
+        if component_area_support_profile is not None
+        else None
+    )
     assignment = assign_eyes_union_to_lr(
         np.asarray(union_batch.masks, dtype=np.uint8),
         keypoints_roi=np.asarray(
@@ -2566,6 +2730,7 @@ def _assign_finalized_eyes_union_rows(
             context.keypoint_success[int(start_row) : int(stop_row)], dtype=bool
         ),
         eye_keypoint_indices=context.eye_keypoint_indices,
+        minimum_component_area_px_by_name=minimum_area_by_name,
     )
     summary = dict(assignment.summary)
     summary["keypoint_run"] = context.keypoint_run_name
@@ -2627,6 +2792,7 @@ def _merge_assignment_summary(
                 "failed_rows": 0,
                 "status_counts": {},
                 "reason_counts": {},
+                "below_model_supported_area_rows_by_component": {},
                 "keypoint_run": chunk_summary.get("keypoint_run"),
                 "keypoint_group": chunk_summary.get("keypoint_group"),
                 "keypoint_success_dataset": chunk_summary.get(
@@ -2654,6 +2820,18 @@ def _merge_assignment_summary(
         for item_key, item_value in dict(chunk_summary.get(key) or {}).items():
             merged[str(item_key)] = int(merged.get(str(item_key), 0)) + int(item_value)
         target[key] = merged
+    component_support_counts = dict(
+        target.get("below_model_supported_area_rows_by_component") or {}
+    )
+    for component_name, count in dict(
+        chunk_summary.get("below_model_supported_area_rows_by_component") or {}
+    ).items():
+        component_support_counts[str(component_name)] = int(
+            component_support_counts.get(str(component_name), 0)
+        ) + int(count)
+    target["below_model_supported_area_rows_by_component"] = (
+        component_support_counts
+    )
     return target
 
 
@@ -4190,8 +4368,6 @@ def _compute_refined_subject_postcompute_shard(
     write_component_contours: bool,
     sampled_contour_counts: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
-    from ..shared.mask_geometry import measure_mask_ellipse as _measure_mask
-
     started = time.perf_counter()
     root = open_zarr_root(zarr_path, mode="r")
     run_group = root["refined_subject_masks_runs"][refined_run]
@@ -4226,7 +4402,8 @@ def _compute_refined_subject_postcompute_shard(
                 if comp_idx >= int(available.shape[0]) or not bool(available[comp_idx]):
                     continue
                 success, ellipse, centroid, contour, _failure = _measure_mask(
-                    masks[local_idx, comp_idx]
+                    masks[local_idx, comp_idx],
+                    min_foreground_pixels=DEFAULT_MIN_ELLIPSE_FOREGROUND_PIXELS,
                 )
                 ellipse_params[local_idx, eye_idx] = np.asarray(
                     ellipse, dtype=np.float32
@@ -4475,9 +4652,7 @@ def _write_sharded_eye_geometry(
         component_group = components_parent.require_group(component_name)
         geometry_group = component_group.require_group("geometry")
         geometry_group.attrs["geometry_schema_id"] = EYE_GEOMETRY_SCHEMA_ID
-        geometry_group.attrs["geometry_method"] = (
-            "fit_ellipse_from_refined_subject_component_mask"
-        )
+        geometry_group.attrs["geometry_method"] = MASK_ELLIPSE_METHOD
         geometry_group.attrs["source_mask_component"] = component_name
         geometry_group.attrs["source_measurement"] = geometry_source
         geometry_group.attrs["updated_at_utc"] = _utc_now()
@@ -5988,6 +6163,7 @@ def _process_and_write_finalizer_chunk_open(
     chunk_index: int,
     metric_level: str,
     eye_assignment_context: _EyeAssignmentContext | None,
+    component_area_support_profile: SubjectMaskComponentAreaSupportProfile | None,
     retain_source_seeds: bool,
     execution_backend: str = _PROCESS_SHARD_EXECUTION_BACKEND,
 ) -> dict[str, object]:
@@ -6021,6 +6197,7 @@ def _process_and_write_finalizer_chunk_open(
             raw_component,
             start_row=start_row,
             stop_row=stop_row,
+            component_area_support_profile=component_area_support_profile,
         )
         elapsed = timing.add(
             f"finalize_{raw_component}", time.perf_counter() - phase_start
@@ -6081,6 +6258,7 @@ def _process_and_write_finalizer_chunk_open(
             eye_assignment_context,
             start_row=start_row,
             stop_row=stop_row,
+            component_area_support_profile=component_area_support_profile,
         )
         elapsed = timing.add("eye_assignment", time.perf_counter() - phase_start)
         chunk_timing["eye_assignment_seconds"] = elapsed
@@ -6169,6 +6347,10 @@ def _process_and_write_finalizer_shard(
     metric_level: str,
     assignment_keypoint_group: Optional[str],
     assignment_keypoints_run: Optional[str],
+    require_component_area_support: bool,
+    expected_component_area_support_profile_id: str | None,
+    expected_component_area_support_payload_digest: str | None,
+    expected_component_area_support_document_sha256: str | None,
     retain_source_seeds: bool,
     shard_index: int,
     total_shards: int,
@@ -6184,6 +6366,35 @@ def _process_and_write_finalizer_shard(
         target_crop_run=target_crop_run,
         collection_worker_plan=collection_worker_plan,
     )
+    component_area_support_profile = _resolve_component_area_support_profile(
+        source,
+        required=bool(require_component_area_support),
+    )
+    expected_support_identity = (
+        expected_component_area_support_profile_id,
+        expected_component_area_support_payload_digest,
+        expected_component_area_support_document_sha256,
+    )
+    if any(value is not None for value in expected_support_identity):
+        if any(value is None for value in expected_support_identity):
+            raise RuntimeError(
+                "Expected component-area support worker identity is incomplete."
+            )
+        if component_area_support_profile is None:
+            raise RuntimeError(
+                "Worker could not resolve the parent-admitted component-area "
+                "support profile."
+            )
+        actual_support_identity = (
+            component_area_support_profile.profile_id,
+            component_area_support_profile.payload_digest,
+            component_area_support_profile.document_sha256,
+        )
+        if actual_support_identity != expected_support_identity:
+            raise RuntimeError(
+                "Worker component-area support profile differs from the exact "
+                "parent-admitted profile."
+            )
     run_group = root["refined_subject_masks_runs"][refined_run]
     component_names = tuple(str(name) for name in component_names)
     progress = _ProgressJsonlReporter(
@@ -6224,6 +6435,7 @@ def _process_and_write_finalizer_shard(
                 chunk_index=int(chunk_index),
                 metric_level=metric_level,
                 eye_assignment_context=eye_assignment_context,
+                component_area_support_profile=component_area_support_profile,
                 retain_source_seeds=retain_source_seeds,
                 execution_backend=_PROCESS_SHARD_EXECUTION_BACKEND,
             )
@@ -6279,6 +6491,8 @@ def _compute_finalizer_process_shards(
     metric_level: str,
     assignment_keypoint_group: Optional[str],
     assignment_keypoints_run: Optional[str],
+    require_component_area_support: bool,
+    component_area_support_profile: SubjectMaskComponentAreaSupportProfile | None,
     retain_source_seeds: bool,
     num_workers: Optional[int],
     progress: Optional[_ProgressJsonlReporter] = None,
@@ -6324,6 +6538,22 @@ def _compute_finalizer_process_shards(
                 metric_level=metric_level,
                 assignment_keypoint_group=assignment_keypoint_group,
                 assignment_keypoints_run=assignment_keypoints_run,
+                require_component_area_support=bool(require_component_area_support),
+                expected_component_area_support_profile_id=(
+                    component_area_support_profile.profile_id
+                    if component_area_support_profile is not None
+                    else None
+                ),
+                expected_component_area_support_payload_digest=(
+                    component_area_support_profile.payload_digest
+                    if component_area_support_profile is not None
+                    else None
+                ),
+                expected_component_area_support_document_sha256=(
+                    component_area_support_profile.document_sha256
+                    if component_area_support_profile is not None
+                    else None
+                ),
                 retain_source_seeds=retain_source_seeds,
                 shard_index=int(shard_index),
                 total_shards=int(len(shards)),
@@ -6477,6 +6707,10 @@ def finalize_subject_mask_run(
     )
     if require_production_proof:
         _validate_refined_production_row_identity_source(source)
+    component_area_support_profile = _resolve_component_area_support_profile(
+        source,
+        required=bool(require_production_proof),
+    )
     future_canonical = bool(source.canonical_coordinates and shard_collection is None)
     if future_canonical and retain_source_seeds:
         raise ValueError(
@@ -6569,6 +6803,12 @@ def finalize_subject_mask_run(
             raise ValueError(f"Unsupported raw component {raw_component!r}.")
         _require_available_component(source, raw_component, "subject_mask_runs")
 
+    component_area_support_binding = _component_area_support_publication_binding(
+        component_area_support_profile,
+        component_names=component_names,
+        mask_shape_hw=(height, width),
+    )
+
     target_run = str(refined_run or _default_refined_run_name())
     refined_parent = root.get("refined_subject_masks_runs")
     target_exists = refined_parent is not None and target_run in refined_parent
@@ -6621,6 +6861,7 @@ def finalize_subject_mask_run(
         "source_surface_kind": source.mask_surface_kind,
         "canonical_coordinate_publication": future_canonical,
         "review_draft": bool(review_draft),
+        "component_area_support_profile": component_area_support_binding,
     }
     if shard_collection is not None:
         summary.update(
@@ -6826,6 +7067,10 @@ def finalize_subject_mask_run(
             for component_name in component_names
         },
     }
+    if component_area_support_binding is not None:
+        extra_attrs["component_area_support_profile"] = dict(
+            component_area_support_binding
+        )
     if shard_collection is not None:
         extra_attrs.update(
             {
@@ -6890,6 +7135,10 @@ def finalize_subject_mask_run(
         "postcompute_num_workers": normalized_postcompute_num_workers,
         **execution_metadata,
     }
+    if component_area_support_binding is not None:
+        provenance_inputs["component_area_support_profile"] = dict(
+            component_area_support_binding
+        )
     if shard_collection is not None:
         provenance_inputs.update(
             {
@@ -6948,13 +7197,20 @@ def finalize_subject_mask_run(
                         raw_component,
                         start_row=0,
                         stop_row=min(1, total_rows),
+                        component_area_support_profile=(component_area_support_profile),
                     )
                     first_batches.setdefault(raw_component, sample_batch)
                     if raw_component == _RAW_EYE_UNION_COMPONENT:
                         continue
                     source_payloads.setdefault(
                         raw_component,
-                        _source_payload_for_finalized_component(source, sample_batch),
+                        _source_payload_for_finalized_component(
+                            source,
+                            sample_batch,
+                            component_area_support_profile=(
+                                component_area_support_profile
+                            ),
+                        ),
                     )
 
         with progress.phase("process_shard_compute"):
@@ -6972,6 +7228,8 @@ def finalize_subject_mask_run(
                     metric_level=metric_level,
                     assignment_keypoint_group=assignment_keypoint_group,
                     assignment_keypoints_run=assignment_keypoints_run,
+                    require_component_area_support=bool(require_production_proof),
+                    component_area_support_profile=component_area_support_profile,
                     retain_source_seeds=bool(retain_source_seeds),
                     num_workers=normalized_num_workers,
                     progress=progress,
@@ -7077,6 +7335,7 @@ def finalize_subject_mask_run(
                     raw_component,
                     start_row=start_row,
                     stop_row=stop_row,
+                    component_area_support_profile=(component_area_support_profile),
                 )
                 elapsed = timing.add(
                     f"finalize_{raw_component}", time.perf_counter() - phase_start
@@ -7137,7 +7396,11 @@ def finalize_subject_mask_run(
                 _add_review_counts(review_counts, raw_component, labels)
                 source_payloads.setdefault(
                     raw_component,
-                    _source_payload_for_finalized_component(source, batch),
+                    _source_payload_for_finalized_component(
+                        source,
+                        batch,
+                        component_area_support_profile=(component_area_support_profile),
+                    ),
                 )
 
             if eye_assignment_context is not None:
@@ -7149,6 +7412,7 @@ def finalize_subject_mask_run(
                     eye_assignment_context,
                     start_row=start_row,
                     stop_row=stop_row,
+                    component_area_support_profile=(component_area_support_profile),
                 )
                 elapsed = timing.add(
                     "eye_assignment", time.perf_counter() - phase_start
@@ -7310,11 +7574,11 @@ def finalize_subject_mask_run(
         usable_rows = int(
             eyes_union_assignment_summary.get("assigned_rows") or 0
         ) + int(eyes_union_assignment_summary.get("assigned_needs_review_rows") or 0)
-        if usable_rows <= 0:
-            raise ValueError(
-                f"eyes_union assignment for subject_mask_runs/{source.run_name} produced no usable LR eye rows; "
-                f"summary={eyes_union_assignment_summary!r}."
-            )
+        eyes_union_assignment_summary["usable_rows"] = int(usable_rows)
+        eyes_union_assignment_summary["all_rows_failed"] = bool(usable_rows <= 0)
+        eyes_union_assignment_summary["component_failure_publication_policy"] = (
+            "record_failures_without_blocking_refined_run_publication_v1"
+        )
         union_batch = first_batches[_RAW_EYE_UNION_COMPONENT]
         run_group.attrs["eyes_union_assignment_summary"] = dict(
             _json_safe(eyes_union_assignment_summary)
@@ -7337,6 +7601,7 @@ def finalize_subject_mask_run(
                     keypoint_group_name=eye_assignment_context.keypoint_group_name,
                     keypoint_success_dataset=eye_assignment_context.keypoint_success_dataset,
                     keypoint_source_kind=eye_assignment_context.keypoint_source_kind,
+                    component_area_support_profile=(component_area_support_profile),
                 )
             )
 
@@ -8452,8 +8717,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--require-production-proof",
         action="store_true",
         help=(
-            "Fail closed unless upstream scientific/proof bindings and a durable "
-            "refined worker semantic receipt can be persisted."
+            "Fail closed unless upstream scientific/proof bindings, an exact "
+            "model-bound component-area support profile, and a durable refined "
+            "worker semantic receipt can be persisted."
         ),
     )
     parser.add_argument(

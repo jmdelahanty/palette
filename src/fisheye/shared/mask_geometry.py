@@ -7,10 +7,18 @@ stage-specific review routing in the caller.
 
 from __future__ import annotations
 
+import operator
+
 import cv2
 import numpy as np
 
 _COORD_GRID_CACHE: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+
+# OpenCV's ellipse fit is numerically unstable for the 4--12 foreground-pixel
+# components observed in production.  Keep the fail-closed boundary explicit so
+# scientific producers can stamp the exact estimator they used.
+DEFAULT_MIN_ELLIPSE_FOREGROUND_PIXELS = 13
+MASK_ELLIPSE_METHOD = "cv2.fitEllipse_component_contour_min_13_foreground_pixels_v2"
 
 
 def fill_holes(mask: np.ndarray) -> np.ndarray:
@@ -215,15 +223,51 @@ def measure_mask_ellipse(
     mask: np.ndarray,
     min_contour_points: int = 5,
     min_axis_length_px: float = 1.0,
+    min_foreground_pixels: int = DEFAULT_MIN_ELLIPSE_FOREGROUND_PIXELS,
 ) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray | None, str | None]:
-    """Extract ellipse metrics from a binary mask using OpenCV ellipse fitting."""
+    """Extract ellipse metrics from a binary mask using OpenCV ellipse fitting.
 
-    if mask.sum() == 0:
+    Masks below ``min_foreground_pixels`` fail before ``cv2.fitEllipse``.  The
+    default boundary covers the production population for which repeated calls
+    on identical 4--12-pixel masks returned different fits.
+    """
+
+    try:
+        minimum_foreground = operator.index(min_foreground_pixels)
+    except TypeError as exc:
+        raise ValueError(
+            "min_foreground_pixels must be an integer, "
+            f"got {min_foreground_pixels!r}."
+        ) from exc
+    if isinstance(min_foreground_pixels, (bool, np.bool_)) or minimum_foreground < 1:
+        raise ValueError(
+            "min_foreground_pixels must be a positive integer, "
+            f"got {min_foreground_pixels!r}."
+        )
+
+    mask_u8 = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8, copy=False)
+    if mask_u8.ndim != 2:
+        raise ValueError(f"Expected a 2D mask, got shape {mask_u8.shape!r}.")
+    foreground_pixels = int(np.count_nonzero(mask_u8))
+
+    if foreground_pixels == 0:
         ellipse = np.full(5, np.nan, dtype=np.float32)
         centroid = np.full(2, np.nan, dtype=np.float32)
         return False, ellipse, centroid, None, "empty_mask"
 
-    contour = extract_mask_contour(mask.astype(float), min_contour_points)
+    if foreground_pixels < minimum_foreground:
+        ellipse = np.full(5, np.nan, dtype=np.float32)
+        centroid = mask_pixel_centroid(mask_u8)
+        contour = extract_mask_contour(mask_u8, 1)
+        return (
+            False,
+            ellipse,
+            centroid,
+            contour,
+            "ellipse_insufficient_foreground_support",
+        )
+
+    contour = extract_mask_contour(mask_u8, min_contour_points)
     if contour is None:
         ellipse = np.full(5, np.nan, dtype=np.float32)
         centroid = np.full(2, np.nan, dtype=np.float32)
@@ -235,7 +279,7 @@ def measure_mask_ellipse(
         (xc, yc), (axis_a, axis_b), angle = cv2.fitEllipse(contour)
     except cv2.error:
         ellipse = np.full(5, np.nan, dtype=np.float32)
-        centroid = mask_pixel_centroid(mask)
+        centroid = mask_pixel_centroid(mask_u8)
         return False, ellipse, centroid, contour, "ellipse_estimate_failed"
 
     major = float(axis_a)
@@ -257,7 +301,7 @@ def measure_mask_ellipse(
         or minor < minimum_axis
     ):
         ellipse = np.full(5, np.nan, dtype=np.float32)
-        centroid = mask_pixel_centroid(mask)
+        centroid = mask_pixel_centroid(mask_u8)
         return False, ellipse, centroid, contour, "ellipse_invalid_params"
 
     centroid = np.array([float(xc), float(yc)], dtype=np.float32)

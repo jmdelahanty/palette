@@ -10,8 +10,12 @@ from typing import Mapping
 import numpy as np
 
 from ..shared.mask_geometry import measure_mask_ellipse as _measure_mask
-from ..shared.mask_geometry import connected_component_labels as _connected_component_labels
-from ..shared.mask_geometry import select_component_near_point as _select_component_near_point
+from ..shared.mask_geometry import (
+    connected_component_labels as _connected_component_labels,
+)
+from ..shared.mask_geometry import (
+    select_component_near_point as _select_component_near_point,
+)
 
 EYES_UNION_ASSIGNMENT_METHOD = "subject_eyes_union_keypoint_assignment_v1"
 EYE_COMPONENTS = ("eye_left", "eye_right")
@@ -112,8 +116,12 @@ def _split_union_by_keypoints(
 
     x_coords = xs.astype(np.float32)
     y_coords = ys.astype(np.float32)
-    dist_left = (x_coords - float(eye_left[0])) ** 2 + (y_coords - float(eye_left[1])) ** 2
-    dist_right = (x_coords - float(eye_right[0])) ** 2 + (y_coords - float(eye_right[1])) ** 2
+    dist_left = (x_coords - float(eye_left[0])) ** 2 + (
+        y_coords - float(eye_left[1])
+    ) ** 2
+    dist_right = (x_coords - float(eye_right[0])) ** 2 + (
+        y_coords - float(eye_right[1])
+    ) ** 2
     assign_left = dist_left <= dist_right
     left_mask[ys[assign_left], xs[assign_left]] = True
     right_mask[ys[~assign_left], xs[~assign_left]] = True
@@ -140,7 +148,9 @@ def _split_union_by_keypoints_distance_batch_into(
 
     union_bool = np.asarray(union_masks, dtype=bool)
     if union_bool.ndim != 3:
-        raise ValueError(f"union_masks must have shape (N,H,W), got {tuple(union_bool.shape)}.")
+        raise ValueError(
+            f"union_masks must have shape (N,H,W), got {tuple(union_bool.shape)}."
+        )
     height = int(union_bool.shape[1])
     width = int(union_bool.shape[2])
     x_grid = np.arange(width, dtype=np.float32).reshape(1, 1, width)
@@ -188,7 +198,9 @@ def _split_union_by_keypoints_halfplane_batch_into(
 
     union_bool = np.asarray(union_masks, dtype=bool)
     if union_bool.ndim != 3:
-        raise ValueError(f"union_masks must have shape (N,H,W), got {tuple(union_bool.shape)}.")
+        raise ValueError(
+            f"union_masks must have shape (N,H,W), got {tuple(union_bool.shape)}."
+        )
     height = int(union_bool.shape[1])
     width = int(union_bool.shape[2])
     x_grid = np.arange(width, dtype=np.float32).reshape(1, 1, width)
@@ -212,21 +224,21 @@ def _split_union_by_keypoints_halfplane_batch_into(
             ).reshape(-1, 1, 1)
         )
         assign_left = signed_distance_delta <= 0.0
-        boundary = union & (np.abs(signed_distance_delta) <= _HALFPLANE_EXACT_BOUNDARY_EPS)
+        boundary = union & (
+            np.abs(signed_distance_delta) <= _HALFPLANE_EXACT_BOUNDARY_EPS
+        )
         if bool(np.any(boundary)):
             local_rows, ys, xs = np.nonzero(boundary)
             x_coords = xs.astype(np.float32, copy=False)
             y_coords = ys.astype(np.float32, copy=False)
             boundary_left = left[local_rows]
             boundary_right = right[local_rows]
-            dist_left = (
-                (x_coords - boundary_left[:, 0]) * (x_coords - boundary_left[:, 0])
-                + (y_coords - boundary_left[:, 1]) * (y_coords - boundary_left[:, 1])
-            )
-            dist_right = (
-                (x_coords - boundary_right[:, 0]) * (x_coords - boundary_right[:, 0])
-                + (y_coords - boundary_right[:, 1]) * (y_coords - boundary_right[:, 1])
-            )
+            dist_left = (x_coords - boundary_left[:, 0]) * (
+                x_coords - boundary_left[:, 0]
+            ) + (y_coords - boundary_left[:, 1]) * (y_coords - boundary_left[:, 1])
+            dist_right = (x_coords - boundary_right[:, 0]) * (
+                x_coords - boundary_right[:, 0]
+            ) + (y_coords - boundary_right[:, 1]) * (y_coords - boundary_right[:, 1])
             assign_left[local_rows, ys, xs] = dist_left <= dist_right
         left_out[batch_rows] = np.asarray(union & assign_left, dtype=np.uint8)
         right_out[batch_rows] = np.asarray(union & ~assign_left, dtype=np.uint8)
@@ -256,7 +268,9 @@ def _split_union_by_keypoints_sparse_batch_into(
 
     union_bool = np.asarray(union_masks, dtype=bool)
     if union_bool.ndim != 3:
-        raise ValueError(f"union_masks must have shape (N,H,W), got {tuple(union_bool.shape)}.")
+        raise ValueError(
+            f"union_masks must have shape (N,H,W), got {tuple(union_bool.shape)}."
+        )
 
     left_points = np.asarray(eye_left, dtype=np.float32)
     right_points = np.asarray(eye_right, dtype=np.float32)
@@ -274,14 +288,12 @@ def _split_union_by_keypoints_sparse_batch_into(
         y_coords = ys.astype(np.float32, copy=False)
         left = left_points[global_rows]
         right = right_points[global_rows]
-        dist_left = (
-            (x_coords - left[:, 0]) * (x_coords - left[:, 0])
-            + (y_coords - left[:, 1]) * (y_coords - left[:, 1])
-        )
-        dist_right = (
-            (x_coords - right[:, 0]) * (x_coords - right[:, 0])
-            + (y_coords - right[:, 1]) * (y_coords - right[:, 1])
-        )
+        dist_left = (x_coords - left[:, 0]) * (x_coords - left[:, 0]) + (
+            y_coords - left[:, 1]
+        ) * (y_coords - left[:, 1])
+        dist_right = (x_coords - right[:, 0]) * (x_coords - right[:, 0]) + (
+            y_coords - right[:, 1]
+        ) * (y_coords - right[:, 1])
         assign_left = dist_left <= dist_right
         left_out[global_rows[assign_left], ys[assign_left], xs[assign_left]] = 1
         right_out[global_rows[~assign_left], ys[~assign_left], xs[~assign_left]] = 1
@@ -317,10 +329,9 @@ def _select_label_near_point(
     centroid_x = np.divide(sum_x, areas, out=np.zeros_like(sum_x), where=areas > 0)
     centroid_y = np.divide(sum_y, areas, out=np.zeros_like(sum_y), where=areas > 0)
     point = np.asarray(point_xy, dtype=np.float32).reshape(-1)
-    distances = (
-        (centroid_x[candidate_labels] - float(point[0])) ** 2
-        + (centroid_y[candidate_labels] - float(point[1])) ** 2
-    )
+    distances = (centroid_x[candidate_labels] - float(point[0])) ** 2 + (
+        centroid_y[candidate_labels] - float(point[1])
+    ) ** 2
     best_label = int(candidate_labels[int(np.argmin(distances))])
     if best_label > 0:
         selected = labels == best_label
@@ -349,7 +360,9 @@ def _assign_union_components_fast_batch_into(
 
     union_bool = np.asarray(union_masks, dtype=bool)
     if union_bool.ndim != 3:
-        raise ValueError(f"union_masks must have shape (N,H,W), got {tuple(union_bool.shape)}.")
+        raise ValueError(
+            f"union_masks must have shape (N,H,W), got {tuple(union_bool.shape)}."
+        )
 
     left_points = np.asarray(eye_left, dtype=np.float32)
     right_points = np.asarray(eye_right, dtype=np.float32)
@@ -370,18 +383,18 @@ def _assign_union_components_fast_batch_into(
         y_coords = ys.astype(np.float32, copy=False)
         left = left_points[row_idx]
         right = right_points[row_idx]
-        dist_left = (
-            (x_coords - left[0]) * (x_coords - left[0])
-            + (y_coords - left[1]) * (y_coords - left[1])
-        )
-        dist_right = (
-            (x_coords - right[0]) * (x_coords - right[0])
-            + (y_coords - right[1]) * (y_coords - right[1])
-        )
+        dist_left = (x_coords - left[0]) * (x_coords - left[0]) + (
+            y_coords - left[1]
+        ) * (y_coords - left[1])
+        dist_right = (x_coords - right[0]) * (x_coords - right[0]) + (
+            y_coords - right[1]
+        ) * (y_coords - right[1])
         assign_left = dist_left <= dist_right
 
         counts = np.bincount(label_values, minlength=int(component_count) + 1)
-        left_counts = np.bincount(label_values[assign_left], minlength=int(component_count) + 1)
+        left_counts = np.bincount(
+            label_values[assign_left], minlength=int(component_count) + 1
+        )
         right_counts = counts - left_counts
         crosses_split = (left_counts[1:] > 0) & (right_counts[1:] > 0)
         if bool(np.any(crosses_split)):
@@ -443,7 +456,9 @@ def _join_reason_tags(tags: list[str]) -> str:
 
 
 def _add_phase(phase_seconds: dict[str, float], name: str, started_at: float) -> None:
-    phase_seconds[str(name)] = float(phase_seconds.get(str(name), 0.0)) + float(time.perf_counter() - started_at)
+    phase_seconds[str(name)] = float(phase_seconds.get(str(name), 0.0)) + float(
+        time.perf_counter() - started_at
+    )
 
 
 def assign_eyes_union_to_lr(
@@ -455,6 +470,7 @@ def assign_eyes_union_to_lr(
     split_batch_size: int = 32,
     use_component_fast_path: bool = False,
     measure_ellipses: bool = True,
+    minimum_component_area_px_by_name: Mapping[str, int] | None = None,
 ) -> EyesUnionAssignmentResult:
     """Convert raw ``eyes_union`` masks into canonical LR eye component masks.
 
@@ -470,13 +486,32 @@ def assign_eyes_union_to_lr(
 
     union = np.asarray(union_masks, dtype=np.uint8)
     if union.ndim != 3:
-        raise ValueError(f"eyes_union masks must have shape (N,H,W), got {tuple(union.shape)}.")
+        raise ValueError(
+            f"eyes_union masks must have shape (N,H,W), got {tuple(union.shape)}."
+        )
     total_rows = int(union.shape[0])
     height = int(union.shape[1])
     width = int(union.shape[2])
+    minimum_area_by_name: dict[str, int] = {}
+    for name, value in dict(minimum_component_area_px_by_name or {}).items():
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value, (int, np.integer)
+        ):
+            raise ValueError("Eye component-area minima must be positive integers.")
+        minimum_area_by_name[str(name)] = int(value)
+    if set(minimum_area_by_name) - set(EYE_COMPONENTS):
+        raise ValueError(
+            "Eye component-area minima may only name eye_left and eye_right."
+        )
+    if any(value <= 0 for value in minimum_area_by_name.values()):
+        raise ValueError("Eye component-area minima must be positive integers.")
 
     keypoints = np.asarray(keypoints_roi, dtype=np.float32)
-    if keypoints.ndim != 3 or int(keypoints.shape[0]) != total_rows or int(keypoints.shape[2]) < 2:
+    if (
+        keypoints.ndim != 3
+        or int(keypoints.shape[0]) != total_rows
+        or int(keypoints.shape[2]) < 2
+    ):
         raise ValueError(
             "keypoints_roi must have shape (N,K,>=2) and match eyes_union rows; "
             f"got {tuple(keypoints.shape)} for {total_rows} rows."
@@ -510,6 +545,10 @@ def assign_eyes_union_to_lr(
         "eye_left": [None] * total_rows,
         "eye_right": [None] * total_rows,
     }
+    support_rejected = {
+        component_name: np.zeros((total_rows,), dtype=bool)
+        for component_name in EYE_COMPONENTS
+    }
 
     phase_start = time.perf_counter()
     union_bool = union > 0
@@ -519,7 +558,9 @@ def assign_eyes_union_to_lr(
     left_valid = np.all(np.isfinite(left_points), axis=1)
     right_valid = np.all(np.isfinite(right_points), axis=1)
     coincident = np.all(np.isclose(left_points, right_points, atol=1e-3), axis=1)
-    candidate_rows = np.flatnonzero(union_nonempty & success & left_valid & right_valid & ~coincident)
+    candidate_rows = np.flatnonzero(
+        union_nonempty & success & left_valid & right_valid & ~coincident
+    )
     fast_path_rows = np.zeros((0,), dtype=np.int64)
     fast_path_mask = np.zeros((total_rows,), dtype=bool)
     if bool(use_component_fast_path):
@@ -578,9 +619,14 @@ def assign_eyes_union_to_lr(
                     right_masks[row_idx] = 0
                     phase_start = time.perf_counter()
                     selected_left = _select_component_near_point(split_left, eye_left)
-                    selected_right = _select_component_near_point(split_right, eye_right)
+                    selected_right = _select_component_near_point(
+                        split_right, eye_right
+                    )
                     _add_phase(phase_seconds, "select_components", phase_start)
-                if int(np.count_nonzero(selected_left)) <= 0 or int(np.count_nonzero(selected_right)) <= 0:
+                if (
+                    int(np.count_nonzero(selected_left)) <= 0
+                    or int(np.count_nonzero(selected_right)) <= 0
+                ):
                     tags.append("split_empty_component")
                     status = "failed_empty_split_component"
                 elif bool(np.any(np.logical_and(selected_left, selected_right))):
@@ -590,32 +636,71 @@ def assign_eyes_union_to_lr(
                     left_masks[row_idx] = selected_left.astype(np.uint8, copy=False)
                     right_masks[row_idx] = selected_right.astype(np.uint8, copy=False)
                     tags.append("split_by_keypoint")
+                    left_minimum = minimum_area_by_name.get("eye_left")
+                    right_minimum = minimum_area_by_name.get("eye_right")
+                    support_rejected["eye_left"][row_idx] = bool(
+                        left_minimum is not None
+                        and int(np.count_nonzero(selected_left)) < int(left_minimum)
+                    )
+                    support_rejected["eye_right"][row_idx] = bool(
+                        right_minimum is not None
+                        and int(np.count_nonzero(selected_right)) < int(right_minimum)
+                    )
                     if measure_ellipses:
                         phase_start = time.perf_counter()
-                        left_success, _left_ellipse, _left_centroid, _left_contour, left_failure = _measure_mask(
-                            left_masks[row_idx]
-                        )
-                        right_success, _right_ellipse, _right_centroid, _right_contour, right_failure = _measure_mask(
-                            right_masks[row_idx]
-                        )
-                        ellipse_params[row_idx, 0] = np.asarray(_left_ellipse, dtype=np.float32)
-                        ellipse_params[row_idx, 1] = np.asarray(_right_ellipse, dtype=np.float32)
-                        ellipse_success[row_idx, 0] = bool(left_success)
-                        ellipse_success[row_idx, 1] = bool(right_success)
-                        centroids[row_idx, 0] = np.asarray(_left_centroid, dtype=np.float32)
-                        centroids[row_idx, 1] = np.asarray(_right_centroid, dtype=np.float32)
-                        contours["eye_left"][row_idx] = _left_contour
-                        contours["eye_right"][row_idx] = _right_contour
+                        measurement_results: dict[
+                            str,
+                            tuple[
+                                bool,
+                                tuple[float, float, float, float, float],
+                                tuple[float, float],
+                                np.ndarray | None,
+                                str | None,
+                            ],
+                        ] = {}
+                        for eye_idx, component_name in enumerate(EYE_COMPONENTS):
+                            if bool(support_rejected[component_name][row_idx]):
+                                continue
+                            component_mask = (
+                                left_masks[row_idx]
+                                if component_name == "eye_left"
+                                else right_masks[row_idx]
+                            )
+                            measurement = _measure_mask(component_mask)
+                            measurement_results[component_name] = measurement
+                            (
+                                measured_success,
+                                measured_ellipse,
+                                measured_centroid,
+                                measured_contour,
+                                _measured_failure,
+                            ) = measurement
+                            ellipse_params[row_idx, eye_idx] = np.asarray(
+                                measured_ellipse, dtype=np.float32
+                            )
+                            ellipse_success[row_idx, eye_idx] = bool(measured_success)
+                            centroids[row_idx, eye_idx] = np.asarray(
+                                measured_centroid, dtype=np.float32
+                            )
+                            contours[component_name][row_idx] = measured_contour
                         _add_phase(phase_seconds, "measure_ellipse", phase_start)
-                        if not bool(left_success):
-                            tags.append("ellipse_fail_left")
-                            if left_failure:
-                                tags.append(f"{left_failure}_left")
-                        if not bool(right_success):
-                            tags.append("ellipse_fail_right")
-                            if right_failure:
-                                tags.append(f"{right_failure}_right")
-                        if not bool(left_success and right_success):
+                        for component_name, suffix in (
+                            ("eye_left", "left"),
+                            ("eye_right", "right"),
+                        ):
+                            measurement = measurement_results.get(component_name)
+                            if measurement is None:
+                                continue
+                            measured_success, *_rest, measured_failure = measurement
+                            if not bool(measured_success):
+                                tags.append(f"ellipse_fail_{suffix}")
+                                if measured_failure:
+                                    tags.append(f"{measured_failure}_{suffix}")
+                        if any(
+                            bool(support_rejected[name][row_idx])
+                            or not bool(ellipse_success[row_idx, eye_idx])
+                            for eye_idx, name in enumerate(EYE_COMPONENTS)
+                        ):
                             status = "assigned_needs_review"
 
         phase_start = time.perf_counter()
@@ -623,9 +708,53 @@ def assign_eyes_union_to_lr(
         assignment_status[row_idx] = status
         reason_labels["eye_left"][row_idx] = reason
         reason_labels["eye_right"][row_idx] = reason
-        status_counts[str(status)] += 1
-        reason_counts[reason] += 1
         _add_phase(phase_seconds, "reason_labels", phase_start)
+
+    for eye_idx, component_name in enumerate(EYE_COMPONENTS):
+        minimum_area = minimum_area_by_name.get(component_name)
+        if minimum_area is None:
+            continue
+        component_masks = left_masks if component_name == "eye_left" else right_masks
+        rejected_rows = np.flatnonzero(support_rejected[component_name])
+        for row_idx in rejected_rows:
+            component_masks[int(row_idx)] = 0
+            reason_labels[component_name][int(row_idx)] = _join_reason_tags(
+                [
+                    str(reason_labels[component_name][int(row_idx)]),
+                    "needs_review_below_model_supported_area",
+                ]
+            )
+            ellipse_params[int(row_idx), eye_idx] = np.nan
+            ellipse_success[int(row_idx), eye_idx] = False
+            centroids[int(row_idx), eye_idx] = np.nan
+            contours[component_name][int(row_idx)] = None
+
+    for row_idx in range(total_rows):
+        status = str(assignment_status[row_idx])
+        if status in {"assigned", "assigned_needs_review"}:
+            left_present = bool(np.any(left_masks[row_idx]))
+            right_present = bool(np.any(right_masks[row_idx]))
+            any_support_rejected = any(
+                "needs_review_below_model_supported_area"
+                in str(reason_labels[name][row_idx])
+                for name in EYE_COMPONENTS
+            )
+            if any_support_rejected:
+                status = (
+                    "assigned_needs_review"
+                    if left_present or right_present
+                    else "failed_below_model_supported_area"
+                )
+                assignment_status[row_idx] = status
+        status_counts[status] += 1
+        left_reason = str(reason_labels["eye_left"][row_idx])
+        right_reason = str(reason_labels["eye_right"][row_idx])
+        reason_key = (
+            left_reason
+            if left_reason == right_reason
+            else f"eye_left={left_reason};eye_right={right_reason}"
+        )
+        reason_counts[reason_key] += 1
 
     assigned_count = int(status_counts.get("assigned", 0))
     needs_review_count = int(status_counts.get("assigned_needs_review", 0))
@@ -642,6 +771,11 @@ def assign_eyes_union_to_lr(
         "component_fast_path_rows": int(fast_path_rows.size),
         "distance_split_rows": int(fallback_rows.size),
         "ellipse_measurement_requested": bool(measure_ellipses),
+        "minimum_component_area_px_by_name": dict(minimum_area_by_name),
+        "below_model_supported_area_rows_by_component": {
+            component_name: int(np.count_nonzero(support_rejected[component_name]))
+            for component_name in EYE_COMPONENTS
+        },
     }
     return EyesUnionAssignmentResult(
         masks={"eye_left": left_masks, "eye_right": right_masks},

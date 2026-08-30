@@ -356,6 +356,14 @@ valid publication. Until that policy lands, this canary remains
 selector-ineligible even though the receipt-v2 performance and composition
 checks passed.
 
+Follow-up status (2026-08-30): the implementation and evidence are documented
+in `docs/diagnostics/subject_mask_component_area_support_2026-08-30.md`. The
+candidate combines an exact model/training-bound refinement floor with a
+13-foreground-pixel defensive ellipse guard, preserves raw inference evidence,
+and records component failure without invalidating the publication. The canary
+must remain selector-ineligible until that change completes required CI and a
+new successor is explicitly validated; this note does not activate it.
+
 ## Compatibility and migration
 
 Existing consumers may require a historical flat content digest. During a

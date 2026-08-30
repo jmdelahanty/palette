@@ -17,7 +17,6 @@ import numpy as np
 from ..shared.mask_geometry import fill_holes as _fill_holes
 from ..shared.mask_geometry import hole_stats as _hole_stats
 
-
 QUALITY_CLEAN = 0
 QUALITY_CLEANUP_APPLIED = 10
 QUALITY_NEEDS_REVIEW = 50
@@ -38,6 +37,9 @@ class ComponentFinalizationPolicy:
     max_component_count: Optional[int] = 1
     max_removed_high_prob_mass_fraction: float = 0.01
     max_changed_area_fraction: float = 0.20
+    component_area_support_profile_id: Optional[str] = None
+    component_area_support_profile_digest: Optional[str] = None
+    component_area_support_minimum_px: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -70,7 +72,9 @@ class _MaskComponentStats:
 
     @property
     def largest_component_fraction(self) -> float:
-        return float(self.largest_area / self.total_area) if self.total_area > 0 else 0.0
+        return (
+            float(self.largest_area / self.total_area) if self.total_area > 0 else 0.0
+        )
 
 
 def default_subject_body_policy() -> ComponentFinalizationPolicy:
@@ -143,15 +147,40 @@ def finalize_component_mask(
         raise ValueError(
             f"Policy component {resolved_policy.component_name!r} does not match {component_name!r}"
         )
-    probabilities = _coerce_probability_surface(surface, surface_is_probability=surface_is_probability)
-    initial_mask, initial_stats = _threshold_surface_with_stats(probabilities, resolved_policy)
+    support_fields = (
+        resolved_policy.component_area_support_profile_id,
+        resolved_policy.component_area_support_profile_digest,
+        resolved_policy.component_area_support_minimum_px,
+    )
+    if any(value is not None for value in support_fields):
+        if any(value is None for value in support_fields):
+            raise ValueError(
+                "Model-supported component-area policy fields must be all present or all absent."
+            )
+        if int(resolved_policy.component_area_support_minimum_px) > int(
+            resolved_policy.min_component_area_px
+        ):
+            raise ValueError(
+                "Model-supported component-area minimum cannot exceed "
+                "min_component_area_px."
+            )
+    probabilities = _coerce_probability_surface(
+        surface, surface_is_probability=surface_is_probability
+    )
+    initial_mask, initial_stats = _threshold_surface_with_stats(
+        probabilities, resolved_policy
+    )
     closed_mask = _binary_close(initial_mask, resolved_policy.closing_radius)
-    filled_mask = _fill_holes(closed_mask) if resolved_policy.fill_holes else closed_mask
+    filled_mask = (
+        _fill_holes(closed_mask) if resolved_policy.fill_holes else closed_mask
+    )
     min_area_mask, min_area_stats = _remove_small_components_with_stats(
         filled_mask,
         resolved_policy.min_component_area_px,
     )
-    selected_mask, final_stats = _select_components_with_stats(min_area_mask, resolved_policy, stats=min_area_stats)
+    selected_mask, final_stats = _select_components_with_stats(
+        min_area_mask, resolved_policy, stats=min_area_stats
+    )
     final_mask = selected_mask
 
     metrics = _build_metrics(
@@ -173,7 +202,9 @@ def finalize_component_mask(
         policy=resolved_policy,
         min_area_stats=min_area_stats,
     )
-    quality_code, quality_score, review_recommendation = _review_routing(reason_tags, metrics)
+    quality_code, quality_score, review_recommendation = _review_routing(
+        reason_tags, metrics
+    )
     return ComponentFinalizationResult(
         mask=final_mask.astype(np.uint8, copy=False),
         source_mask=initial_mask.astype(np.uint8, copy=False),
@@ -195,7 +226,9 @@ def _default_policy_for_component(component_name: str) -> ComponentFinalizationP
     raise NotImplementedError(f"No default finalization policy for {component_name!r}")
 
 
-def _coerce_probability_surface(surface: np.ndarray, *, surface_is_probability: bool) -> np.ndarray:
+def _coerce_probability_surface(
+    surface: np.ndarray, *, surface_is_probability: bool
+) -> np.ndarray:
     arr = np.asarray(surface, dtype=np.float32)
     if arr.ndim != 2:
         raise ValueError(f"Expected a 2D component surface, got shape {arr.shape}")
@@ -263,7 +296,9 @@ def _empty_component_stats(shape: tuple[int, ...]) -> _MaskComponentStats:
     )
 
 
-def _subset_component_stats(stats: _MaskComponentStats, keep_labels: np.ndarray) -> _MaskComponentStats:
+def _subset_component_stats(
+    stats: _MaskComponentStats, keep_labels: np.ndarray
+) -> _MaskComponentStats:
     labels_to_keep = np.asarray(keep_labels, dtype=np.int32).reshape(-1)
     if labels_to_keep.size == 0 or stats.component_count == 0:
         return _empty_component_stats(tuple(stats.labels.shape))
@@ -273,7 +308,9 @@ def _subset_component_stats(stats: _MaskComponentStats, keep_labels: np.ndarray)
     labels = np.where(keep[stats.labels], stats.labels, 0).astype(np.int32, copy=False)
 
     area_by_label = np.zeros((max_label + 1,), dtype=np.int64)
-    area_by_label[np.asarray(stats.component_labels, dtype=np.int32)] = np.asarray(stats.areas, dtype=np.int64)
+    area_by_label[np.asarray(stats.component_labels, dtype=np.int32)] = np.asarray(
+        stats.areas, dtype=np.int64
+    )
     areas = area_by_label[labels_to_keep]
     present = areas > 0
     component_labels = labels_to_keep[present].astype(np.int32, copy=False)
@@ -290,7 +327,9 @@ def _component_areas(mask: np.ndarray) -> List[int]:
     return [int(area) for area in _component_stats(mask).areas]
 
 
-def _remove_small_components_with_stats(mask: np.ndarray, min_area_px: int) -> tuple[np.ndarray, _MaskComponentStats]:
+def _remove_small_components_with_stats(
+    mask: np.ndarray, min_area_px: int
+) -> tuple[np.ndarray, _MaskComponentStats]:
     stats = _component_stats(mask)
     if min_area_px <= 1 or stats.component_count == 0:
         return stats.labels > 0, stats
@@ -315,8 +354,12 @@ def _select_components_with_stats(
         if resolved_stats.component_count <= 1:
             return resolved_stats.labels > 0, resolved_stats
         max_area = int(resolved_stats.areas.max())
-        keep_label = int(resolved_stats.component_labels[resolved_stats.areas == max_area].max())
-        selected = _subset_component_stats(resolved_stats, np.asarray([keep_label], dtype=np.int32))
+        keep_label = int(
+            resolved_stats.component_labels[resolved_stats.areas == max_area].max()
+        )
+        selected = _subset_component_stats(
+            resolved_stats, np.asarray([keep_label], dtype=np.int32)
+        )
         return selected.labels > 0, selected
     if policy.max_component_count is not None:
         count = int(policy.max_component_count)
@@ -327,13 +370,14 @@ def _select_components_with_stats(
             return resolved_stats.labels > 0, resolved_stats
         areas = [
             (int(area), int(label))
-            for area, label in zip(resolved_stats.areas, resolved_stats.component_labels)
+            for area, label in zip(
+                resolved_stats.areas, resolved_stats.component_labels
+            )
         ]
-        keep_labels = [
-            label
-            for _area, label in sorted(areas, reverse=True)[:count]
-        ]
-        selected = _subset_component_stats(resolved_stats, np.asarray(keep_labels, dtype=np.int32))
+        keep_labels = [label for _area, label in sorted(areas, reverse=True)[:count]]
+        selected = _subset_component_stats(
+            resolved_stats, np.asarray(keep_labels, dtype=np.int32)
+        )
         return selected.labels > 0, selected
     return mask.astype(bool, copy=True), resolved_stats
 
@@ -348,7 +392,9 @@ def _select_components(
     return selected
 
 
-def _largest_component_fraction(mask: np.ndarray, *, stats: _MaskComponentStats | None = None) -> float:
+def _largest_component_fraction(
+    mask: np.ndarray, *, stats: _MaskComponentStats | None = None
+) -> float:
     return (stats or _component_stats(mask)).largest_component_fraction
 
 
@@ -370,17 +416,27 @@ def _build_metrics(
     changed = removed | added
     removed_area = int(np.count_nonzero(removed))
     changed_area = int(np.count_nonzero(changed))
-    initial_prob_mass = float(probabilities[initial_mask].sum()) if initial_area else 0.0
+    initial_prob_mass = (
+        float(probabilities[initial_mask].sum()) if initial_area else 0.0
+    )
     removed_prob_mass = float(probabilities[removed].sum()) if removed_area else 0.0
-    high_threshold = float(policy.high_threshold if policy.high_threshold is not None else policy.threshold)
-    removed_high_prob_area = int(np.count_nonzero(removed & (probabilities >= high_threshold)))
-    hole_count_before, hole_fraction_before, _hole_area_before = _hole_stats(initial_mask)
+    high_threshold = float(
+        policy.high_threshold if policy.high_threshold is not None else policy.threshold
+    )
+    removed_high_prob_area = int(
+        np.count_nonzero(removed & (probabilities >= high_threshold))
+    )
+    hole_count_before, hole_fraction_before, _hole_area_before = _hole_stats(
+        initial_mask
+    )
     if policy.fill_holes:
         # Closing/filling happens before area filtering and component selection; those later
         # steps can remove pixels/components but cannot introduce enclosed background holes.
         hole_count_after, hole_fraction_after = 0, 0.0
     else:
-        hole_count_after, hole_fraction_after, _hole_area_after = _hole_stats(final_mask)
+        hole_count_after, hole_fraction_after, _hole_area_after = _hole_stats(
+            final_mask
+        )
     component_count_before = int(initial_component_stats.component_count)
     component_count_after = int(final_component_stats.component_count)
     return {
@@ -388,13 +444,21 @@ def _build_metrics(
         "area_px_after": float(final_area),
         "component_count_before": float(component_count_before),
         "component_count_after": float(component_count_after),
-        "largest_component_fraction_before": float(_largest_component_fraction(initial_mask, stats=initial_component_stats)),
-        "largest_component_fraction_after": float(_largest_component_fraction(final_mask, stats=final_component_stats)),
-        "removed_component_count": float(max(0, component_count_before - component_count_after)),
+        "largest_component_fraction_before": float(
+            _largest_component_fraction(initial_mask, stats=initial_component_stats)
+        ),
+        "largest_component_fraction_after": float(
+            _largest_component_fraction(final_mask, stats=final_component_stats)
+        ),
+        "removed_component_count": float(
+            max(0, component_count_before - component_count_after)
+        ),
         "removed_area_px": float(removed_area),
         "removed_area_fraction": float(removed_area / max(1, initial_area)),
         "removed_prob_mass": float(removed_prob_mass),
-        "removed_prob_mass_fraction": float(removed_prob_mass / max(1.0, initial_prob_mass)),
+        "removed_prob_mass_fraction": float(
+            removed_prob_mass / max(1.0, initial_prob_mass)
+        ),
         "removed_high_prob_area_px": float(removed_high_prob_area),
         "changed_area_px": float(changed_area),
         "changed_area_fraction": float(changed_area / max(1, initial_area)),
@@ -425,19 +489,28 @@ def _build_reason_tags(
         tags.append("cleanup_filled_holes")
     if not np.array_equal(filled_mask, min_area_mask):
         tags.append("cleanup_removed_small_islands")
+        if policy.component_area_support_profile_id is not None:
+            tags.append("cleanup_removed_below_model_supported_area")
+            if np.any(filled_mask) and not np.any(min_area_mask):
+                tags.append("needs_review_below_model_supported_area")
     if not np.array_equal(min_area_mask, selected_mask):
         tags.append("cleanup_kept_largest_component")
     if metrics["area_px_after"] <= 0:
         tags.append("needs_review_empty_mask")
     if metrics["removed_high_prob_area_px"] > 0 and (
-        metrics["removed_prob_mass_fraction"] > float(policy.max_removed_high_prob_mass_fraction)
+        metrics["removed_prob_mass_fraction"]
+        > float(policy.max_removed_high_prob_mass_fraction)
     ):
         tags.append("needs_review_removed_high_prob_island")
     if metrics["changed_area_fraction"] > float(policy.max_changed_area_fraction):
         tags.append("needs_review_large_cleanup_delta")
     max_component_count = policy.max_component_count
-    post_filter_component_count = float((min_area_stats or _component_stats(min_area_mask)).component_count)
-    if max_component_count is not None and post_filter_component_count > float(max_component_count):
+    post_filter_component_count = float(
+        (min_area_stats or _component_stats(min_area_mask)).component_count
+    )
+    if max_component_count is not None and post_filter_component_count > float(
+        max_component_count
+    ):
         tags.append("needs_review_multiple_components")
     if (
         max_component_count is not None

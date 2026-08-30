@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from fisheye.refinement import subject_eye_assignment as assignment_mod
+
 from fisheye.refinement.subject_eye_assignment import (
     _split_union_by_keypoints,
     _split_union_by_keypoints_batch_into,
@@ -14,7 +16,9 @@ from fisheye.refinement.subject_eye_assignment import (
 )
 
 
-def test_reconcile_keypoint_mask_row_identity_accepts_matching_source_crop_rows() -> None:
+def test_reconcile_keypoint_mask_row_identity_accepts_matching_source_crop_rows() -> (
+    None
+):
     summary = reconcile_keypoint_mask_row_identity(
         keypoint_source_crop_row_ids=np.asarray([4, 8, 9], dtype=np.int64),
         mask_source_crop_row_ids=np.asarray([4, 8, 9], dtype=np.int64),
@@ -29,7 +33,9 @@ def test_reconcile_keypoint_mask_row_identity_accepts_matching_source_crop_rows(
 
 
 def test_reconcile_keypoint_mask_row_identity_rejects_same_length_mismatch() -> None:
-    with pytest.raises(ValueError, match="row identity mismatch.*row 1.*keypoint=7.*mask=6"):
+    with pytest.raises(
+        ValueError, match="row identity mismatch.*row 1.*keypoint=7.*mask=6"
+    ):
         reconcile_keypoint_mask_row_identity(
             keypoint_source_crop_row_ids=np.asarray([5, 7, 9], dtype=np.int64),
             mask_source_crop_row_ids=np.asarray([5, 6, 9], dtype=np.int64),
@@ -55,7 +61,9 @@ def test_reconcile_keypoint_mask_row_identity_skips_when_legacy_ids_missing() ->
     assert summary["mask_has_source_crop_row_ids"] is True
 
 
-def test_reconcile_keypoint_mask_row_identity_rejects_keypoint_row_count_mismatch() -> None:
+def test_reconcile_keypoint_mask_row_identity_rejects_keypoint_row_count_mismatch() -> (
+    None
+):
     with pytest.raises(
         ValueError,
         match=r"keypoints_runs/kp_001: keypoint source_crop_row_ids has 2 rows, expected 3",
@@ -112,10 +120,14 @@ def test_reconcile_keypoint_mask_row_identity_skips_when_both_sides_missing() ->
     assert summary["mask_has_source_crop_row_ids"] is False
 
 
-def test_reconcile_keypoint_mask_row_identity_rejects_reordered_ids_without_reordering() -> None:
+def test_reconcile_keypoint_mask_row_identity_rejects_reordered_ids_without_reordering() -> (
+    None
+):
     # Same id set, different order: the check is strict positional equality.
     # The reconciler never reorders rows to make the sides match.
-    with pytest.raises(ValueError, match=r"row identity mismatch.*row 0.*keypoint=4.*mask=9"):
+    with pytest.raises(
+        ValueError, match=r"row identity mismatch.*row 0.*keypoint=4.*mask=9"
+    ):
         reconcile_keypoint_mask_row_identity(
             keypoint_source_crop_row_ids=np.asarray([4, 8, 9], dtype=np.int64),
             mask_source_crop_row_ids=np.asarray([9, 8, 4], dtype=np.int64),
@@ -125,7 +137,9 @@ def test_reconcile_keypoint_mask_row_identity_rejects_reordered_ids_without_reor
         )
 
 
-def test_reconcile_keypoint_mask_row_identity_accepts_sliceable_zarr_like_sources() -> None:
+def test_reconcile_keypoint_mask_row_identity_accepts_sliceable_zarr_like_sources() -> (
+    None
+):
     # Call sites pass zarr arrays; the reader consumes them via value[:].
     summary = reconcile_keypoint_mask_row_identity(
         keypoint_source_crop_row_ids=[4, 8, 9],
@@ -288,7 +302,9 @@ def test_halfplane_split_preserves_tie_goes_left_contract() -> None:
 
     assert bool(left_out[0, 5, 5])
     assert not bool(right_out[0, 5, 5])
-    expected_left, expected_right = _split_union_by_keypoints(union[0], eye_left[0], eye_right[0])
+    expected_left, expected_right = _split_union_by_keypoints(
+        union[0], eye_left[0], eye_right[0]
+    )
     np.testing.assert_array_equal(left_out[0].astype(bool), expected_left)
     np.testing.assert_array_equal(right_out[0].astype(bool), expected_right)
 
@@ -435,13 +451,67 @@ def test_assign_eyes_union_can_skip_ellipse_measurement_for_diagnostics() -> Non
     assert "measure_ellipse" in measured.phase_seconds
     assert "measure_ellipse" not in skipped.phase_seconds
     for component in ("eye_left", "eye_right"):
-        np.testing.assert_array_equal(skipped.masks[component], measured.masks[component])
-        np.testing.assert_array_equal(skipped.reason_labels[component], measured.reason_labels[component])
+        np.testing.assert_array_equal(
+            skipped.masks[component], measured.masks[component]
+        )
+        np.testing.assert_array_equal(
+            skipped.reason_labels[component], measured.reason_labels[component]
+        )
     np.testing.assert_array_equal(skipped.assignment_status, measured.assignment_status)
     assert not np.asarray(skipped.eye_geometry["ellipse_success"], dtype=bool).any()
-    assert np.isnan(np.asarray(skipped.eye_geometry["ellipse_params"], dtype=np.float32)).all()
+    assert np.isnan(
+        np.asarray(skipped.eye_geometry["ellipse_params"], dtype=np.float32)
+    ).all()
     assert all(item is None for item in skipped.eye_geometry["contours"]["eye_left"])
     assert all(item is None for item in skipped.eye_geometry["contours"]["eye_right"])
+
+
+def test_assign_eyes_union_rejects_below_support_eye_before_ellipse_measurement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    union = np.zeros((1, 40, 40), dtype=np.uint8)
+    union[0, 8:11, 7:10] = 1
+    union[0, 8:16, 24:32] = 1
+    keypoints = np.zeros((1, 2, 2), dtype=np.float32)
+    keypoints[0, 0] = np.asarray([8.0, 9.0], dtype=np.float32)
+    keypoints[0, 1] = np.asarray([28.0, 12.0], dtype=np.float32)
+    original_measure = assignment_mod._measure_mask
+    measured_areas: list[int] = []
+
+    def guarded_measure(mask: np.ndarray):
+        area = int(np.count_nonzero(mask))
+        measured_areas.append(area)
+        assert area >= 20
+        return original_measure(mask)
+
+    monkeypatch.setattr(assignment_mod, "_measure_mask", guarded_measure)
+
+    result = assign_eyes_union_to_lr(
+        union,
+        keypoints_roi=keypoints,
+        keypoint_success=np.asarray([True], dtype=bool),
+        eye_keypoint_indices=(0, 1),
+        minimum_component_area_px_by_name={"eye_left": 20, "eye_right": 20},
+    )
+
+    assert measured_areas == [64]
+    assert int(result.masks["eye_left"].sum()) == 0
+    assert int(result.masks["eye_right"].sum()) == 64
+    assert result.assignment_status.tolist() == ["assigned_needs_review"]
+    assert "needs_review_below_model_supported_area" in str(
+        result.reason_labels["eye_left"][0]
+    )
+    assert "needs_review_below_model_supported_area" not in str(
+        result.reason_labels["eye_right"][0]
+    )
+    assert result.summary["minimum_component_area_px_by_name"] == {
+        "eye_left": 20,
+        "eye_right": 20,
+    }
+    assert result.summary["below_model_supported_area_rows_by_component"] == {
+        "eye_left": 1,
+        "eye_right": 0,
+    }
 
 
 def test_component_fast_path_assignment_matches_standard_assignment() -> None:
@@ -483,7 +553,9 @@ def test_component_fast_path_assignment_matches_standard_assignment() -> None:
     assert fast.summary["distance_split_rows"] >= 1
     for component in ("eye_left", "eye_right"):
         np.testing.assert_array_equal(fast.masks[component], standard.masks[component])
-        np.testing.assert_array_equal(fast.reason_labels[component], standard.reason_labels[component])
+        np.testing.assert_array_equal(
+            fast.reason_labels[component], standard.reason_labels[component]
+        )
     np.testing.assert_array_equal(fast.assignment_status, standard.assignment_status)
     np.testing.assert_allclose(
         np.asarray(fast.eye_geometry["ellipse_params"], dtype=np.float32),

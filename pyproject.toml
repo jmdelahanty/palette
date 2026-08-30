@@ -94,6 +94,9 @@ fisheye = ["**/*.json", "**/*.yaml", "**/*.yml", "**/*.html", "**/*.css", "**/*.
 "share/palette/configs/fisheye/pose_schemas" = [
   "configs/fisheye/pose_schemas/*.json",
 ]
+"share/palette/configs/fisheye/subject_mask_component_support" = [
+  "configs/fisheye/subject_mask_component_support/*.json",
+]
 
 [tool.black]
 # Keep formatter grammar aligned with scripts/py and the supported runtime.

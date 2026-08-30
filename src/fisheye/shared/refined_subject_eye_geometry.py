@@ -8,6 +8,7 @@ from typing import Any, Optional, Sequence
 import numpy as np
 import zarr
 
+from .mask_geometry import MASK_ELLIPSE_METHOD
 from .mask_store import MaskStoreError, open_mask_store
 
 EYE_COMPONENTS = ("eye_left", "eye_right")
@@ -51,9 +52,15 @@ def _write_array(group: zarr.Group, name: str, data: np.ndarray, *, chunks: tupl
 
 def _measure_eye_mask(mask: np.ndarray):
     """Import mask ellipse measurement only when geometry is materialized."""
-    from .mask_geometry import measure_mask_ellipse
+    from .mask_geometry import (
+        DEFAULT_MIN_ELLIPSE_FOREGROUND_PIXELS,
+        measure_mask_ellipse,
+    )
 
-    return measure_mask_ellipse(mask)
+    return measure_mask_ellipse(
+        mask,
+        min_foreground_pixels=DEFAULT_MIN_ELLIPSE_FOREGROUND_PIXELS,
+    )
 
 
 def _write_component_contours(*args, **kwargs):
@@ -120,7 +127,7 @@ def write_refined_subject_eye_geometry(
         component_group = components_parent.require_group(component_name)
         geometry_group = component_group.require_group("geometry")
         geometry_group.attrs["geometry_schema_id"] = EYE_GEOMETRY_SCHEMA_ID
-        geometry_group.attrs["geometry_method"] = "fit_ellipse_from_refined_subject_component_mask"
+        geometry_group.attrs["geometry_method"] = MASK_ELLIPSE_METHOD
         geometry_group.attrs["source_mask_component"] = component_name
         geometry_group.attrs["updated_at_utc"] = _utc_now()
         _write_array(
