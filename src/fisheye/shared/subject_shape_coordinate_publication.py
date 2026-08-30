@@ -5121,81 +5121,92 @@ def publish_subject_shape_coordinate_surfaces(
             )
             receipt_profile = SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_V1
     with phase("authority_stamping"):
-        run.attrs[SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR] = receipt_profile
+        with phase("authority_payload_profile"):
+            run.attrs[SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR] = receipt_profile
         with _subject_shape_array_digest_scope(array_digests):
-            temporal = stamp_subject_shape_temporal_authority(run, source, identity)
-            scientific_configuration = _stamp_scientific_configuration(run)
-            tail_sample_axis = _stamp_tail_sample_axis(run)
-            scalar_surfaces, scalar_surface_inventory = _scalar_surface_bindings(
-                run,
-                identity=identity,
-                scientific_configuration=scientific_configuration,
-                tail_sample_axis=tail_sample_axis,
-                load=False,
-            )
-            derivation = stamp_subject_shape_derivation(
-                run,
-                source,
-                source_binding,
-                identity,
-                component_schema,
-                temporal,
-                scientific_configuration,
-                tail_sample_axis,
-                scalar_surface_inventory,
-            )
-            descriptors = _descriptor_bindings(
-                run,
-                source=source,
-                source_binding=source_binding,
-                identity=identity,
-                component_schema=component_schema,
-                scientific_configuration=scientific_configuration,
-                tail_sample_axis=tail_sample_axis,
-                derivation=derivation,
-                component_names=component_names,
-                load=False,
-            )
-            stamp_bound_canonical_coordinate_descriptors(descriptors.values())
-            body_frame = _stamp_body_frame(
-                run,
-                source=source,
-                source_binding=source_binding,
-                identity=identity,
-                component_schema=component_schema,
-                scientific_configuration=scientific_configuration,
-                tail_sample_axis=tail_sample_axis,
-                derivation=derivation,
-            )
-            heading_semantics = _stamp_heading_semantics(
-                run,
-                identity=identity,
-                forward_descriptor=descriptors["body_frame/forward_axis_xy"],
-                body_frame=body_frame,
-            )
-            manifest_record = _manifest_record(
-                run,
-                source=source,
-                source_binding=source_binding,
-                identity=identity,
-                temporal=temporal,
-                component_schema=component_schema,
-                scientific_configuration=scientific_configuration,
-                tail_sample_axis=tail_sample_axis,
-                scalar_surfaces=scalar_surfaces,
-                scalar_surface_inventory=scalar_surface_inventory,
-                derivation=derivation,
-                descriptors=descriptors,
-                body_frame=body_frame,
-                heading_semantics=heading_semantics,
-            )
-            manifest = stamp_and_bind_persisted_coordinate_record(
-                run,
-                manifest_record,
-                attr_name=SUBJECT_SHAPE_MANIFEST_ATTR,
-            )
-        run.attrs["publication_manifest_sha256"] = manifest.record_sha256
-        run.attrs["coordinate_contract"] = SUBJECT_SHAPE_COORDINATE_CONTRACT
+            with phase("authority_temporal"):
+                temporal = stamp_subject_shape_temporal_authority(run, source, identity)
+            with phase("authority_scientific_configuration"):
+                scientific_configuration = _stamp_scientific_configuration(run)
+            with phase("authority_tail_sample_axis"):
+                tail_sample_axis = _stamp_tail_sample_axis(run)
+            with phase("authority_scalar_surfaces"):
+                scalar_surfaces, scalar_surface_inventory = _scalar_surface_bindings(
+                    run,
+                    identity=identity,
+                    scientific_configuration=scientific_configuration,
+                    tail_sample_axis=tail_sample_axis,
+                    load=False,
+                )
+            with phase("authority_derivation"):
+                derivation = stamp_subject_shape_derivation(
+                    run,
+                    source,
+                    source_binding,
+                    identity,
+                    component_schema,
+                    temporal,
+                    scientific_configuration,
+                    tail_sample_axis,
+                    scalar_surface_inventory,
+                )
+            with phase("authority_coordinate_descriptors"):
+                descriptors = _descriptor_bindings(
+                    run,
+                    source=source,
+                    source_binding=source_binding,
+                    identity=identity,
+                    component_schema=component_schema,
+                    scientific_configuration=scientific_configuration,
+                    tail_sample_axis=tail_sample_axis,
+                    derivation=derivation,
+                    component_names=component_names,
+                    load=False,
+                )
+                stamp_bound_canonical_coordinate_descriptors(descriptors.values())
+            with phase("authority_body_frame"):
+                body_frame = _stamp_body_frame(
+                    run,
+                    source=source,
+                    source_binding=source_binding,
+                    identity=identity,
+                    component_schema=component_schema,
+                    scientific_configuration=scientific_configuration,
+                    tail_sample_axis=tail_sample_axis,
+                    derivation=derivation,
+                )
+            with phase("authority_heading_semantics"):
+                heading_semantics = _stamp_heading_semantics(
+                    run,
+                    identity=identity,
+                    forward_descriptor=descriptors["body_frame/forward_axis_xy"],
+                    body_frame=body_frame,
+                )
+            with phase("authority_manifest"):
+                manifest_record = _manifest_record(
+                    run,
+                    source=source,
+                    source_binding=source_binding,
+                    identity=identity,
+                    temporal=temporal,
+                    component_schema=component_schema,
+                    scientific_configuration=scientific_configuration,
+                    tail_sample_axis=tail_sample_axis,
+                    scalar_surfaces=scalar_surfaces,
+                    scalar_surface_inventory=scalar_surface_inventory,
+                    derivation=derivation,
+                    descriptors=descriptors,
+                    body_frame=body_frame,
+                    heading_semantics=heading_semantics,
+                )
+                manifest = stamp_and_bind_persisted_coordinate_record(
+                    run,
+                    manifest_record,
+                    attr_name=SUBJECT_SHAPE_MANIFEST_ATTR,
+                )
+        with phase("authority_run_contract"):
+            run.attrs["publication_manifest_sha256"] = manifest.record_sha256
+            run.attrs["coordinate_contract"] = SUBJECT_SHAPE_COORDINATE_CONTRACT
     with phase("physical_payload_hash"):
         integrity_receipt = _build_subject_shape_payload_integrity(
             run,

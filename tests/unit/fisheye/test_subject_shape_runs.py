@@ -856,6 +856,17 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
         "binding_array_append",
         "staged_receipt_composition",
         "authority_stamping",
+        "authority_payload_profile",
+        "authority_temporal",
+        "authority_scientific_configuration",
+        "authority_tail_sample_axis",
+        "authority_scalar_surfaces",
+        "authority_derivation",
+        "authority_coordinate_descriptors",
+        "authority_body_frame",
+        "authority_heading_semantics",
+        "authority_manifest",
+        "authority_run_contract",
         "physical_payload_hash",
         "validation_receipt_stamping",
         "binding_status_finalize",
@@ -864,6 +875,20 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
     assert binding_telemetry["phase_parent_by_name"][
         "physical_payload_hash"
     ] == "coordinate_publication"
+    for name in (
+        "authority_payload_profile",
+        "authority_temporal",
+        "authority_scientific_configuration",
+        "authority_tail_sample_axis",
+        "authority_scalar_surfaces",
+        "authority_derivation",
+        "authority_coordinate_descriptors",
+        "authority_body_frame",
+        "authority_heading_semantics",
+        "authority_manifest",
+        "authority_run_contract",
+    ):
+        assert binding_telemetry["phase_parent_by_name"][name] == "authority_stamping"
     assert not validate_subject_shape_candidate_storage(direct, phase="bound")
     assert not validate_subject_shape_direct_consolidated_storage(
         source_path,
