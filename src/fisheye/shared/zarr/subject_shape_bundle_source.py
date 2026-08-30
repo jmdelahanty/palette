@@ -23,6 +23,7 @@ from fisheye.shared.pixel_frame_authority import (
     load_persisted_acquisition_camera_authority,
     load_source_camera_pixel_frame_authority,
 )
+from fisheye.shared.proof_verification import verify_persisted_proof
 
 SUBJECT_SHAPE_BUNDLE_SOURCE_SCHEMA_ID = (
     "palette.subject_shape.recording_mask_bundle_source"
@@ -351,18 +352,30 @@ class BoundSubjectShapeBundleSource:
         ).reshape(self.row_count, 4)
 
     def assert_verified(self) -> None:
-        current = load_subject_shape_bundle_source(
-            self.archive_path,
-            bundle_id=self.bundle_id,
-            allow_inactive=True,
-            assignment_keypoint_rebinding_run_id=(
-                self.assignment_keypoint_rebinding_run_id
-            ),
-        )
-        if current.source_digest != self.source_digest:
-            raise SubjectShapeBundleSourceError(
-                "Subject-shape bundle source changed after binding."
+        def verify() -> None:
+            current = load_subject_shape_bundle_source(
+                self.archive_path,
+                bundle_id=self.bundle_id,
+                allow_inactive=True,
+                assignment_keypoint_rebinding_run_id=(
+                    self.assignment_keypoint_rebinding_run_id
+                ),
             )
+            if current.source_digest != self.source_digest:
+                raise SubjectShapeBundleSourceError(
+                    "Subject-shape bundle source changed after binding."
+                )
+
+        verify_persisted_proof(
+            (
+                "palette.bound_subject_shape_bundle_source.v1",
+                str(self.archive_path.expanduser().resolve()),
+                self.bundle_id,
+                self.source_digest,
+                self.assignment_keypoint_rebinding_run_id,
+            ),
+            verify,
+        )
 
 
 def load_subject_shape_bundle_source(

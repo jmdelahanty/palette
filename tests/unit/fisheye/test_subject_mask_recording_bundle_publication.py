@@ -15,6 +15,7 @@ from fisheye.shared.zarr import subject_mask_bundle_publication as bundle_public
 from fisheye.shared.zarr import subject_mask_cache_publication as cache_publication
 from fisheye.shared.zarr import subject_mask_core_publication as core_publication
 from fisheye.shared.zarr import subject_mask_quality_publication as quality_publication
+from fisheye.shared.zarr import subject_shape_bundle_source as shape_source_module
 from fisheye.analysis.subject_shape_storage import (
     SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
     SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID,
@@ -63,6 +64,7 @@ from fisheye.shared.subject_mask_worker_receipt import (
 from fisheye.shared.refined_subject_component_contours import (
     write_sampled_component_contour_arrays,
 )
+from fisheye.shared.proof_verification import proof_verification_scope
 from fisheye.shared.import_source_fingerprint import source_stat_fingerprint_attrs
 from fisheye.shared.import_video_metadata import (
     publish_external_video_acquisition_authority,
@@ -107,6 +109,7 @@ from fisheye.shared.zarr.subject_shape_bundle_source import (
     BoundSubjectShapeBundleSource,
     SubjectShapeBundleSourceError,
     load_subject_shape_bundle_source,
+    require_bound_subject_shape_bundle_source,
 )
 from fisheye.shared.zarr.subject_mask_schema import (
     SubjectMaskComponentRegistry,
@@ -1345,6 +1348,25 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
         "eye_right",
         "swim_bladder",
     ]
+    source_reloads = 0
+    original_source_loader = shape_source_module.load_subject_shape_bundle_source
+
+    def count_source_reload(*args, **kwargs):
+        nonlocal source_reloads
+        source_reloads += 1
+        return original_source_loader(*args, **kwargs)
+
+    with monkeypatch.context() as proof_guard:
+        proof_guard.setattr(
+            shape_source_module,
+            "load_subject_shape_bundle_source",
+            count_source_reload,
+        )
+        with proof_verification_scope():
+            assert require_bound_subject_shape_bundle_source(shape_source) is shape_source
+            assert require_bound_subject_shape_bundle_source(shape_source) is shape_source
+            assert require_bound_subject_shape_bundle_source(shape_source) is shape_source
+    assert source_reloads == 2
     offsets = shape_source.translation_offsets()
     np.testing.assert_array_equal(
         shape_source.transform_roi_points(np.zeros((4, 2), dtype=np.float32)),
