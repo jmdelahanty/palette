@@ -19,6 +19,11 @@ from ..chaser_exact_body_heading_contract import (
 from .body_bearing import build_exact_body_bearing_output
 from .body_bearing_distance import build_exact_body_bearing_distance_output
 from .body_heading import build_exact_body_heading_output
+from .body_alignment import build_exact_body_alignment_output
+from .body_alignment_projection import (
+    ExactBodyAlignmentProjectionError,
+    option_body_alignment_binding,
+)
 from .bout_response import build_exact_bout_response_output
 from .bout_response_projection import (
     ExactBoutResponseProjectionError,
@@ -35,6 +40,11 @@ from .escape_freeze import build_exact_escape_freeze_output
 from .escape_freeze_projection import (
     ExactEscapeFreezeProjectionError,
     option_escape_freeze_binding,
+)
+from .epoch_behavior import build_exact_epoch_behavior_output
+from .epoch_behavior_projection import (
+    ExactEpochBehaviorProjectionError,
+    option_epoch_behavior_binding,
 )
 from .gaze_tracking import build_exact_gaze_tracking_output
 from .gaze_tracking_projection import (
@@ -89,6 +99,8 @@ class ExactChaserAnalysisRoute:
     load_generalized_bout_response: bool = False
     load_escape_freeze: bool = False
     load_gaze_tracking: bool = False
+    load_epoch_behavior: bool = False
+    load_body_alignment_by_distance: bool = False
 
 
 _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
@@ -186,6 +198,21 @@ _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
             renderer=build_exact_gaze_tracking_output,
             load_gaze_tracking=True,
         ),
+        "epoch_behavior": ExactChaserAnalysisRoute(
+            analysis_id="epoch_behavior",
+            display_parameter_version="exact-semantic-epoch-behavior-display-v1",
+            load_relative=False,
+            renderer=build_exact_epoch_behavior_output,
+            load_epoch_behavior=True,
+        ),
+        "body_alignment_by_distance": ExactChaserAnalysisRoute(
+            analysis_id="body_alignment_by_distance",
+            display_parameter_version="exact-body-alignment-distance-display-v1",
+            load_relative=True,
+            load_relative_arrays=False,
+            renderer=build_exact_body_alignment_output,
+            load_body_alignment_by_distance=True,
+        ),
         "provenance": ExactChaserAnalysisRoute(
             analysis_id="provenance",
             display_parameter_version="shared-spec-provenance-display-v1",
@@ -243,6 +270,8 @@ class ExactChaserProviderAdapter:
                 "generalized_bout_response",
                 "escape_freeze",
                 "gaze_tracking",
+                "epoch_behavior",
+                "body_alignment_by_distance",
             }
         }
         try:
@@ -264,6 +293,18 @@ class ExactChaserProviderAdapter:
             pass
         else:
             available.add("gaze_tracking")
+        try:
+            option_epoch_behavior_binding(option)
+        except ExactEpochBehaviorProjectionError:
+            pass
+        else:
+            available.add("epoch_behavior")
+        try:
+            option_body_alignment_binding(option)
+        except ExactBodyAlignmentProjectionError:
+            pass
+        else:
+            available.add("body_alignment_by_distance")
         try:
             option_controller_trial_binding(option)
         except ExactControllerTrialProjectionError:
@@ -341,6 +382,8 @@ class ExactChaserProviderAdapter:
             load_generalized_bout_response=(route.load_generalized_bout_response),
             load_escape_freeze=route.load_escape_freeze,
             load_gaze_tracking=route.load_gaze_tracking,
+            load_epoch_behavior=route.load_epoch_behavior,
+            load_body_alignment_by_distance=(route.load_body_alignment_by_distance),
         )
 
     def require_current_projection(

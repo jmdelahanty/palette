@@ -551,7 +551,7 @@ def test_exact_successor_discovery_uses_spatial_bundle_and_exact_children(
     assert len(options) == 1
     assert options[0].renderer == CHASER_EXACT_SUCCESSOR_RENDERER
     assert options[0].spec["bundle_status"] == "exact_selector_ineligible"
-    assert options[0].spec["schema_version"] == 8
+    assert options[0].spec["schema_version"] == 10
     assert options[0].spec["provider_ids"] == ["keypoint.v1", "detection.v1"]
     spatial_parameters = options[0].spec["display_parameters"]["spatial_occupancy"]
     assert spatial_parameters["source_arrays"] == [

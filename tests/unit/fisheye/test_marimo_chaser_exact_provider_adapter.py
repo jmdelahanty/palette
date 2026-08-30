@@ -65,7 +65,7 @@ def _option(
     run_path = f"analysis/chaser_spatial_occupancy_runs/{run_name}"
     spec = {
         "schema_id": "palette.chaser_exact_successor_explorer_spec",
-        "schema_version": 8,
+        "schema_version": 10,
         "renderer": CHASER_EXACT_SUCCESSOR_RENDERER,
         "bundle_status": "exact_selector_ineligible",
         "bundle_manifest_sha256": manifest_sha256,
@@ -239,6 +239,76 @@ def _option(
                     "minimum_regression_span_deg": 5.0,
                 },
             },
+            "epoch_behavior": {
+                "run_path": ("analysis/stimulus_epoch_behavior_summary_runs/epoch-v2"),
+                "manifest_sha256": "7" * 64,
+                "payload_digest": "8" * 64,
+                "source_protocol_semantic_selection": {
+                    "run_path": (
+                        "analysis/protocol_semantic_chaser_selection_runs/semantic-v1"
+                    ),
+                    "manifest_sha256": "f" * 64,
+                },
+                "source_provider_motion": {
+                    "run_path": "analysis/track_kinematics_runs/provider/motion-v1",
+                    "manifest_sha256": "3" * 64,
+                },
+                "source_swim_bouts": {
+                    "run_path": "analysis/swim_bout_runs/bouts-v1",
+                    "lineage_hash": "8" * 64,
+                },
+                "parameters": {
+                    "physical_speed_level": "filtered",
+                    "rate_denominator": "valid_tracked_duration_s",
+                    "spatial_metrics": (
+                        "omitted_requires_separately_selected_position_provider"
+                    ),
+                },
+                "dimensions": {
+                    "n_epoch_rows": 3,
+                    "n_bout_rows": 2,
+                    "n_bout_histogram_rows": 30,
+                    "n_inter_bout_interval_histogram_rows": 6,
+                },
+                "array_declaration_count": 84,
+            },
+            "body_alignment_by_distance": {
+                "run_path": (
+                    "analysis/chaser_body_alignment_by_distance_runs/alignment-v1"
+                ),
+                "manifest_sha256": "4" * 64,
+                "scientific_payload_sha256": "5" * 64,
+                "source_relative_frame": {
+                    "run_path": "analysis/chaser_relative_frame_runs/keypoint-v1",
+                    "manifest_sha256": "e" * 64,
+                },
+                "source_protocol_semantic_selection": {
+                    "run_path": (
+                        "analysis/protocol_semantic_chaser_selection_runs/semantic-v1"
+                    ),
+                    "manifest_sha256": "f" * 64,
+                },
+                "source_fish_position_authority": {
+                    "provider_id": "keypoint.v1",
+                    "provider_digest": "6" * 64,
+                },
+                "source_body_frame_authority": {
+                    "provider_id": "body.v1",
+                    "provider_digest": "7" * 64,
+                },
+                "distance_bin_recipe": {
+                    "policy_id": "fixed-v1",
+                    "edges_mm": [0.0, 5.0],
+                },
+                "dimensions": {
+                    "n_frames": 10,
+                    "n_chasers": 2,
+                    "n_distance_bins": 1,
+                    "n_summary_rows": 6,
+                },
+                "epoch_records": [],
+                "identity_registries": {},
+            },
         },
         "source_paths": {
             "position_providers": [
@@ -362,6 +432,8 @@ def test_provider_routes_are_closed_and_controls_are_explicit() -> None:
         "generalized_bout_response",
         "escape_freeze",
         "gaze_tracking",
+        "epoch_behavior",
+        "body_alignment_by_distance",
         "provenance",
     )
     assert EXACT_CHASER_PROVIDER_ADAPTER.requires_projection("distance_traces")
@@ -406,7 +478,20 @@ def test_only_selected_analysis_requests_relative_arrays(
 ) -> None:
     option = _option(tmp_path / "recording.zarr")
     observed: list[
-        tuple[str, bool, bool, bool, bool, bool, bool, bool, bool, bool]
+        tuple[
+            str,
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+        ]
     ] = []
 
     def fake_loader(
@@ -423,6 +508,8 @@ def test_only_selected_analysis_requests_relative_arrays(
         load_generalized_bout_response,
         load_escape_freeze,
         load_gaze_tracking,
+        load_epoch_behavior,
+        load_body_alignment_by_distance,
     ):
         assert zarr_path == option.zarr_path
         assert selected_option is option
@@ -438,6 +525,8 @@ def test_only_selected_analysis_requests_relative_arrays(
                 load_generalized_bout_response,
                 load_escape_freeze,
                 load_gaze_tracking,
+                load_epoch_behavior,
+                load_body_alignment_by_distance,
             )
         )
         return selection_identity
@@ -483,6 +572,12 @@ def test_only_selected_analysis_requests_relative_arrays(
     gaze = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
         option.zarr_path, option, analysis_id="gaze_tracking"
     )
+    epoch = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
+        option.zarr_path, option, analysis_id="epoch_behavior"
+    )
+    alignment = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
+        option.zarr_path, option, analysis_id="body_alignment_by_distance"
+    )
 
     assert radial.analysis_id == "radial_near_field"
     assert distributions.analysis_id == "distance_distributions"
@@ -496,151 +591,194 @@ def test_only_selected_analysis_requests_relative_arrays(
     assert bout_response.analysis_id == "generalized_bout_response"
     assert escape_freeze.analysis_id == "escape_freeze"
     assert gaze.analysis_id == "gaze_tracking"
+    assert epoch.analysis_id == "epoch_behavior"
+    assert alignment.analysis_id == "body_alignment_by_distance"
+    expected_flags = {
+        "radial_near_field": (
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        "distance_distributions": (
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        "same_quadrant_occupancy": (
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        "spatial_occupancy": (
+            True,
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        "distance_traces": (
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        "body_bearing_polar": (
+            True,
+            True,
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        "body_bearing_distance": (
+            True,
+            True,
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        "fish_heading": (
+            True,
+            True,
+            False,
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        "controller_trials": (
+            True,
+            True,
+            False,
+            False,
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        "generalized_bout_response": (
+            True,
+            False,
+            False,
+            False,
+            False,
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+        ),
+        "escape_freeze": (
+            True,
+            False,
+            False,
+            False,
+            False,
+            True,
+            True,
+            True,
+            False,
+            False,
+            False,
+        ),
+        "gaze_tracking": (
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            True,
+            False,
+            False,
+        ),
+        "epoch_behavior": (
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            True,
+            False,
+        ),
+        "body_alignment_by_distance": (
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            True,
+        ),
+    }
     assert observed == [
-        (
-            "radial_near_field",
-            False,
-            True,
-            False,
-            False,
-            False,
-            False,
-            False,
-            False,
-            False,
-        ),
-        (
-            "distance_distributions",
-            False,
-            True,
-            False,
-            False,
-            False,
-            False,
-            False,
-            False,
-            False,
-        ),
-        (
-            "same_quadrant_occupancy",
-            False,
-            True,
-            False,
-            False,
-            False,
-            False,
-            False,
-            False,
-            False,
-        ),
-        (
-            "spatial_occupancy",
-            True,
-            True,
-            True,
-            False,
-            False,
-            False,
-            False,
-            False,
-            False,
-        ),
-        (
-            "distance_traces",
-            True,
-            True,
-            False,
-            False,
-            False,
-            False,
-            False,
-            False,
-            False,
-        ),
-        (
-            "body_bearing_polar",
-            True,
-            True,
-            False,
-            True,
-            False,
-            False,
-            False,
-            False,
-            False,
-        ),
-        (
-            "body_bearing_distance",
-            True,
-            True,
-            False,
-            True,
-            False,
-            False,
-            False,
-            False,
-            False,
-        ),
-        (
-            "fish_heading",
-            True,
-            True,
-            False,
-            False,
-            True,
-            False,
-            False,
-            False,
-            False,
-        ),
-        (
-            "controller_trials",
-            True,
-            True,
-            False,
-            False,
-            False,
-            True,
-            False,
-            False,
-            False,
-        ),
-        (
-            "generalized_bout_response",
-            True,
-            False,
-            False,
-            False,
-            False,
-            True,
-            True,
-            False,
-            False,
-        ),
-        (
-            "escape_freeze",
-            True,
-            False,
-            False,
-            False,
-            False,
-            True,
-            True,
-            True,
-            False,
-        ),
-        (
-            "gaze_tracking",
-            True,
-            False,
-            False,
-            False,
-            False,
-            False,
-            False,
-            False,
-            True,
-        ),
+        (analysis_id, *flags) for analysis_id, flags in expected_flags.items()
     ]
 
 

@@ -1,11 +1,11 @@
 # Exact chaser analytics full gap-closure implementation checklist
 
 <!-- contract-meta
-version: 2
+version: 3
 status: implementation-in-progress
-implementation: phase-1-reader-and-fish-heading-local-validation
+implementation: phase-2-epoch-and-alignment-local-validation
 last_verified: 2026-08-30
-audited_commit: 34e87b945b6224090be7ba759664865782a44484
+audited_commit: c89d689c36bc6088e5abd5495861c533caa25649
 -->
 
 ## Purpose
@@ -90,6 +90,55 @@ Real receipt-bound recording canary on 2026-08-30:
 Every figure passed Plotly JSON validation. Per-route receipt-bound load time
 was 1.29-3.74 seconds; render time was 0.01-0.12 seconds. No selector was read
 or changed and no scientific successor was recomputed.
+
+### Phase 2/3 implementation addendum — 2026-08-30
+
+The next local slice is implemented on
+`agent/palette/chaser-epoch-alignment-phase2-20260830`, stacked on
+`c89d689c36bc6088e5abd5495861c533caa25649`. It adds two independently
+governed exact children rather than expanding one shared lineage:
+
+- the existing semantic-v2 provider epoch-behavior product now has a strict
+  source handle, semantic-v2-only admission, filtered-speed publication guard,
+  exact discovery, receipt-targeted array roster, Marimo route, provenance,
+  exact child receipt, and cohort stage;
+- `palette.chaser.body_alignment_by_distance.v1` persists frame evidence and
+  semantic-epoch x chaser x exact 5 mm distance-bin summaries from the base
+  keypoint distance surface and accepted anatomical body frame;
+- the alignment child explicitly retains distance-invalid/body-valid evidence,
+  forbids shortest-axis truncation, body-origin distance substitution,
+  interpolation, viewer rebinning, and motion-heading fallback;
+- static PNG/PDF alignment publication and the Marimo alignment route share
+  `validate_persisted_body_alignment_summary`, so their bins, support, and
+  statistics enter through the same conservation checks;
+- each alignment artifact receipt binds the exact child manifest/payload,
+  targeted verified array roster, full bin/angle/denominator/display recipe,
+  and output hashes; and
+- exact projection receipts use closed versions v5-v8 for alignment-only,
+  gaze+alignment, epoch+alignment, and gaze+epoch+alignment compositions.
+
+The explorer spec is version 10 and conditionally discovers exactly one
+source-compatible alignment child. The cohort runner now materializes and
+seals semantic-v2 epoch behavior and body alignment, composes them into the
+versioned epoch+alignment projection receipt v7 without overwriting an older
+composition receipt, and produces the receipt-bound static alignment bundle.
+
+The widened affected exact-chaser regression set passes locally (159 tests),
+along with changed-module Ruff, `py_compile`, `git diff --check`, and Marimo
+validation. A read-only receipt-bound dry run against
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat` also passed without writing the
+archive: 149,936 acquisition frames expanded to 299,872 exact frame-chaser
+rows, then 90 summary rows across three semantic epochs, two chasers, and
+fifteen zero-anchored 5 mm bins. The planned scientific payload SHA-256 is
+`e8dd52bf3751f9a747b0ede9d857de139ac88536e1a3764ff45c7cf068d49d8b` and
+the distance-bin recipe SHA-256 is
+`2021219f051e95d529c0b00cadf286a7e5117ea5697eba9bcc34095f22dff3a0`.
+
+That read-only plan is validation evidence, not a published canary. A real
+immutable recording canary, full required CI, cross-recording alignment
+export, and the separate epoch-spatial child remain outstanding. This
+addendum is not merge-readiness, deployment, selector, or
+production-authority evidence.
 
 ## Definition of complete
 
@@ -366,24 +415,24 @@ bout, IBI, and denominator semantics:
 
 ### 2A. Integrate the existing semantic-v2 motion/bout product
 
-- [ ] Admit only semantic schema version 2 for the new exact route.
-- [ ] Reject or quarantine raw speed for published summaries even though
+- [x] Admit only semantic schema version 2 for the new exact route.
+- [x] Reject or quarantine raw speed for published summaries even though
       SUPPORTED_SPEED_LEVELS currently includes raw at line 121.
-- [ ] Require exact provider-motion and same-track swim-bout handles.
-- [ ] Preserve sample_valid, transition_valid, valid tracked duration, bout
+- [x] Require exact provider-motion and same-track swim-bout handles.
+- [x] Preserve sample_valid, transition_valid, valid tracked duration, bout
       denominator, semantic role/hash/step identity, and source interval
       digest in every row/view.
-- [ ] Add an exact loader and catalog route; do not use the legacy dashboard
+- [x] Add an exact loader and catalog route; do not use the legacy dashboard
       loader that expects per_epoch_chaser.
-- [ ] Remove viewer-side epoch recomputation from scientific admission. If
+- [x] Remove viewer-side epoch recomputation from scientific admission. If
       retained for diagnostics, label it unsealed and keep it unavailable from
       exact routes.
-- [ ] Render speed/path summaries, valid duration/coverage, bout counts/rates,
+- [x] Render speed/path summaries, valid duration/coverage, bout counts/rates,
       bout kinematics distributions, and IBI distributions from persisted
       tables.
-- [ ] Show source speed level and proxy-alignment limitations directly in the
+- [x] Show source speed level and proxy-alignment limitations directly in the
       panel.
-- [ ] Add the exact semantic-v2 product to the composable cohort runner and
+- [x] Add the exact semantic-v2 product to the composable cohort runner and
       its child-receipt composition.
 
 ### 2B. Add a separate epoch-spatial extension
@@ -494,39 +543,39 @@ Source:
 
 Persist frame evidence sufficient for audit:
 
-- [ ] acquisition frame, epoch/window identity, chaser identity and role;
-- [ ] body source row ID, heading/bearing validity and reason;
-- [ ] body bearing, alignment_cos = cos(bearing), and
+- [x] acquisition frame, epoch/window identity, chaser identity and role;
+- [x] body source row ID, heading/bearing validity and reason;
+- [x] body bearing, alignment_cos = cos(bearing), and
       lateral_sin = sin(bearing);
-- [ ] base physical distance, distance validity, and reason.
+- [x] base physical distance, distance validity, and reason.
 
 Persist scientific summary rows keyed by epoch x chaser x distance bin:
 
-- [ ] exact bin start/end/center in mm and bin recipe digest;
-- [ ] candidate row count, jointly valid row count, and invalid-reason counts;
-- [ ] mean alignment, mean absolute bearing, circular mean/resultant length,
+- [x] exact bin start/end/center in mm and bin recipe digest;
+- [x] candidate row count, jointly valid row count, and invalid-reason counts;
+- [x] mean alignment, mean absolute bearing, circular mean/resultant length,
       and declared descriptive spread/quantiles;
-- [ ] provider/body/relative/semantic source handles and digests.
+- [x] provider/body/relative/semantic source handles and digests.
 
-- [ ] Define distance as the base relative_distance_physical requiring the
+- [x] Define distance as the base relative_distance_physical requiring the
       selected position provider; do not silently substitute body-origin
       distance.
-- [ ] Reject source-axis length mismatch instead of reproducing the legacy
+- [x] Reject source-axis length mismatch instead of reproducing the legacy
       shortest-axis truncation in chaser_egocentric_bearing.py:296-300.
-- [ ] Preserve the canonical camera +Y-down to world +Y-up heading convention
+- [x] Preserve the canonical camera +Y-down to world +Y-up heading convention
       and atan2(left, forward) bearing convention.
-- [ ] Load persisted summary bins in Marimo. Remove the scientific group-by
+- [x] Load persisted summary bins in Marimo. Remove the scientific group-by
       and viewer-selected rebinning at
       apps/marimo/components/goodcopbadcop_chaser.py:2391-2403.
-- [ ] Permit only plot filtering/sampling in the interactive layer.
+- [x] Permit only plot filtering/sampling in the interactive layer.
 
 Acceptance:
 
-- [ ] Closed-form synthetic fixtures cover 0, +/-90, and +/-180 degree
+- [x] Closed-form synthetic fixtures cover 0, +/-90, and +/-180 degree
       heading/bearing/alignment values.
-- [ ] Missing body rows never acquire a motion-heading fallback.
-- [ ] Fish-position-invalid/body-valid policy is explicit and tested.
-- [ ] Static and interactive views use identical persisted bins and support.
+- [x] Missing body rows never acquire a motion-heading fallback.
+- [x] Fish-position-invalid/body-valid policy is explicit and tested.
+- [x] Static and interactive views use identical persisted bins and support.
 - [ ] Cohort exports aggregate by recording/session rather than pooling
       framewise alignment rows.
 
@@ -1044,13 +1093,13 @@ The notebook remains an orchestrator.
 
 ### 10B. Route checklist
 
-- [ ] distance_distributions
-- [ ] spatial_occupancy candidate-normalized mode
-- [ ] same_quadrant_occupancy
+- [x] distance_distributions
+- [x] spatial_occupancy candidate-normalized mode
+- [x] same_quadrant_occupancy
 - [ ] quadrant_joint_occupancy when its successor exists
-- [ ] epoch_behavior
-- [ ] fish_heading
-- [ ] alignment_by_distance
+- [x] epoch_behavior
+- [x] fish_heading
+- [x] alignment_by_distance
 - [ ] escape_trajectories
 - [ ] near_field_visits
 - [ ] ring_entry_static
@@ -1141,8 +1190,9 @@ The maintained exact cohort runner currently materializes relative, controller,
 bout, escape/freeze, radial, spatial, projection receipts, and plot bundles in
 materialize_composable_chaser_successor_cohort.py:1306-1826.
 
-- [ ] Add semantic-v2 epoch behavior and epoch-spatial children.
-- [ ] Add body-alignment summary.
+- [x] Add semantic-v2 epoch behavior.
+- [ ] Add the separately governed epoch-spatial child.
+- [x] Add body-alignment summary.
 - [ ] Add escape-events v4.
 - [ ] Add near-field visits.
 - [ ] Add response-regimes v2.

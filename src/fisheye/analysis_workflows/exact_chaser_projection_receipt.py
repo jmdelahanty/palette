@@ -25,8 +25,14 @@ from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 RECEIPT_SCHEMA_ID = "palette.analysis.exact_chaser.projection_receipt"
-RECEIPT_SCHEMA_VERSION = 2
+RECEIPT_SCHEMA_VERSION = 8
 LEGACY_RECEIPT_SCHEMA_VERSION = 1
+GAZE_RECEIPT_SCHEMA_VERSION = 2
+EPOCH_RECEIPT_SCHEMA_VERSION = 3
+GAZE_EPOCH_RECEIPT_SCHEMA_VERSION = 4
+ALIGNMENT_RECEIPT_SCHEMA_VERSION = 5
+GAZE_ALIGNMENT_RECEIPT_SCHEMA_VERSION = 6
+EPOCH_ALIGNMENT_RECEIPT_SCHEMA_VERSION = 7
 RECEIPT_STATUS = "complete_selector_ineligible_receipt_composition"
 VERIFICATION_MODE = "receipt_bound_targeted_array_rehash_v1"
 EXACT_CHILD_KEYS = (
@@ -39,6 +45,12 @@ EXACT_CHILD_KEYS = (
     "spatial_occupancy",
 )
 EXACT_CHILD_KEYS_V2 = (*EXACT_CHILD_KEYS, "gaze")
+EXACT_CHILD_KEYS_V3 = (*EXACT_CHILD_KEYS, "epoch_behavior")
+EXACT_CHILD_KEYS_V4 = (*EXACT_CHILD_KEYS_V2, "epoch_behavior")
+EXACT_CHILD_KEYS_V5 = (*EXACT_CHILD_KEYS, "body_alignment_by_distance")
+EXACT_CHILD_KEYS_V6 = (*EXACT_CHILD_KEYS_V2, "body_alignment_by_distance")
+EXACT_CHILD_KEYS_V7 = (*EXACT_CHILD_KEYS_V3, "body_alignment_by_distance")
+EXACT_CHILD_KEYS_V8 = (*EXACT_CHILD_KEYS_V4, "body_alignment_by_distance")
 RELATIVE_CHILD_KEYS = ("keypoint", "detection")
 POLICY = {
     "child_choice": "exact_receipt_path_and_record_sha256",
@@ -141,8 +153,26 @@ def build_exact_chaser_projection_receipt(
         schema_version = LEGACY_RECEIPT_SCHEMA_VERSION
         ordered_exact_keys = EXACT_CHILD_KEYS
     elif set(exact_keys) == set(EXACT_CHILD_KEYS_V2):
-        schema_version = RECEIPT_SCHEMA_VERSION
+        schema_version = GAZE_RECEIPT_SCHEMA_VERSION
         ordered_exact_keys = EXACT_CHILD_KEYS_V2
+    elif set(exact_keys) == set(EXACT_CHILD_KEYS_V3):
+        schema_version = EPOCH_RECEIPT_SCHEMA_VERSION
+        ordered_exact_keys = EXACT_CHILD_KEYS_V3
+    elif set(exact_keys) == set(EXACT_CHILD_KEYS_V4):
+        schema_version = GAZE_EPOCH_RECEIPT_SCHEMA_VERSION
+        ordered_exact_keys = EXACT_CHILD_KEYS_V4
+    elif set(exact_keys) == set(EXACT_CHILD_KEYS_V5):
+        schema_version = ALIGNMENT_RECEIPT_SCHEMA_VERSION
+        ordered_exact_keys = EXACT_CHILD_KEYS_V5
+    elif set(exact_keys) == set(EXACT_CHILD_KEYS_V6):
+        schema_version = GAZE_ALIGNMENT_RECEIPT_SCHEMA_VERSION
+        ordered_exact_keys = EXACT_CHILD_KEYS_V6
+    elif set(exact_keys) == set(EXACT_CHILD_KEYS_V7):
+        schema_version = EPOCH_ALIGNMENT_RECEIPT_SCHEMA_VERSION
+        ordered_exact_keys = EXACT_CHILD_KEYS_V7
+    elif set(exact_keys) == set(EXACT_CHILD_KEYS_V8):
+        schema_version = RECEIPT_SCHEMA_VERSION
+        ordered_exact_keys = EXACT_CHILD_KEYS_V8
     else:
         _fail("Exact-child receipt keys are missing or unexpected.")
     if set(relative_frame_receipts) != set(RELATIVE_CHILD_KEYS):
@@ -258,7 +288,17 @@ def validate_exact_chaser_projection_receipt(
     schema_version = value["schema_version"]
     if (
         value["schema_id"] != RECEIPT_SCHEMA_ID
-        or schema_version not in {LEGACY_RECEIPT_SCHEMA_VERSION, RECEIPT_SCHEMA_VERSION}
+        or schema_version
+        not in {
+            LEGACY_RECEIPT_SCHEMA_VERSION,
+            GAZE_RECEIPT_SCHEMA_VERSION,
+            EPOCH_RECEIPT_SCHEMA_VERSION,
+            GAZE_EPOCH_RECEIPT_SCHEMA_VERSION,
+            ALIGNMENT_RECEIPT_SCHEMA_VERSION,
+            GAZE_ALIGNMENT_RECEIPT_SCHEMA_VERSION,
+            EPOCH_ALIGNMENT_RECEIPT_SCHEMA_VERSION,
+            RECEIPT_SCHEMA_VERSION,
+        }
         or value["status"] != RECEIPT_STATUS
         or value["policy"] != POLICY
         or value["safety"] != SAFETY
@@ -288,11 +328,16 @@ def validate_exact_chaser_projection_receipt(
     _text(value["created_at_utc"], field="created_at_utc")
     exact = value["exact_children"]
     relative = value["relative_frame_children"]
-    exact_keys = (
-        EXACT_CHILD_KEYS_V2
-        if schema_version == RECEIPT_SCHEMA_VERSION
-        else EXACT_CHILD_KEYS
-    )
+    exact_keys = {
+        LEGACY_RECEIPT_SCHEMA_VERSION: EXACT_CHILD_KEYS,
+        GAZE_RECEIPT_SCHEMA_VERSION: EXACT_CHILD_KEYS_V2,
+        EPOCH_RECEIPT_SCHEMA_VERSION: EXACT_CHILD_KEYS_V3,
+        GAZE_EPOCH_RECEIPT_SCHEMA_VERSION: EXACT_CHILD_KEYS_V4,
+        ALIGNMENT_RECEIPT_SCHEMA_VERSION: EXACT_CHILD_KEYS_V5,
+        GAZE_ALIGNMENT_RECEIPT_SCHEMA_VERSION: EXACT_CHILD_KEYS_V6,
+        EPOCH_ALIGNMENT_RECEIPT_SCHEMA_VERSION: EXACT_CHILD_KEYS_V7,
+        RECEIPT_SCHEMA_VERSION: EXACT_CHILD_KEYS_V8,
+    }[schema_version]
     if not isinstance(exact, Mapping) or set(exact) != set(exact_keys):
         _fail("Exact-chaser projection exact-child roster is inexact.")
     if not isinstance(relative, Mapping) or set(relative) != set(RELATIVE_CHILD_KEYS):
@@ -394,6 +439,18 @@ def ensure_exact_chaser_projection_receipt(
 __all__ = [
     "EXACT_CHILD_KEYS",
     "EXACT_CHILD_KEYS_V2",
+    "EXACT_CHILD_KEYS_V3",
+    "EXACT_CHILD_KEYS_V4",
+    "EXACT_CHILD_KEYS_V5",
+    "EXACT_CHILD_KEYS_V6",
+    "EXACT_CHILD_KEYS_V7",
+    "EXACT_CHILD_KEYS_V8",
+    "ALIGNMENT_RECEIPT_SCHEMA_VERSION",
+    "EPOCH_RECEIPT_SCHEMA_VERSION",
+    "GAZE_RECEIPT_SCHEMA_VERSION",
+    "GAZE_EPOCH_RECEIPT_SCHEMA_VERSION",
+    "GAZE_ALIGNMENT_RECEIPT_SCHEMA_VERSION",
+    "EPOCH_ALIGNMENT_RECEIPT_SCHEMA_VERSION",
     "LEGACY_RECEIPT_SCHEMA_VERSION",
     "RELATIVE_CHILD_KEYS",
     "RECEIPT_SCHEMA_ID",
