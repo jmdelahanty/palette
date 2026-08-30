@@ -14,7 +14,7 @@ import hashlib
 import json
 from pathlib import Path
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from uuid import uuid4
 
 import numpy as np
@@ -39,16 +39,19 @@ from fisheye.shared.zarr.subject_mask_core_publication import (
     SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
     validate_persisted_subject_mask_core_publication,
+    validate_receipt_bound_persisted_subject_mask_core_publication,
     validate_subject_mask_core_run_manifest,
 )
 from fisheye.shared.zarr.subject_mask_cache_publication import (
     SUBJECT_MASK_CACHE_FAMILY,
     SUBJECT_MASK_CACHE_RUN_MANIFEST_ATTRIBUTE,
     validate_persisted_subject_mask_cache_publication,
+    validate_receipt_bound_persisted_subject_mask_cache_publication,
     validate_subject_mask_cache_run_manifest,
 )
 from fisheye.shared.zarr.subject_mask_quality_manifest import (
     SUBJECT_MASK_QUALITY_RUN_MANIFEST_ATTRIBUTE,
+    validate_receipt_bound_subject_mask_quality_publication,
     validate_subject_mask_quality_publication,
     validate_subject_mask_quality_run_manifest,
 )
@@ -628,10 +631,19 @@ def _normalized_bundle_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _bundle_metadata_digest(archive: Path, *, bundle_id: str) -> str:
+def _bundle_metadata_digest(
+    archive: Path,
+    *,
+    bundle_id: str,
+    archive_root_metadata: Mapping[str, Any] | None = None,
+) -> str:
     run_path = archive / SUBJECT_MASK_BUNDLE_FAMILY / bundle_id
     direct = _strict_json(run_path / "zarr.json")
-    root = _strict_json(archive / "zarr.json")
+    root = (
+        archive_root_metadata
+        if archive_root_metadata is not None
+        else _strict_json(archive / "zarr.json")
+    )
     envelope = root.get("consolidated_metadata")
     flattened = envelope.get("metadata") if isinstance(envelope, Mapping) else None
     full_path = f"{SUBJECT_MASK_BUNDLE_FAMILY}/{bundle_id}"
@@ -980,25 +992,62 @@ def _persisted_core_producer_evidence(
     return evidence
 
 
-def _validate_persisted_members(
+SubjectMaskQualityMemberValidator = Callable[
+    [
+        Mapping[str, Any],
+        Mapping[str, Mapping[str, Any]],
+        Mapping[str, Mapping[str, Any]],
+        Mapping[str, Any],
+        Mapping[str, Any],
+    ],
+    tuple[str, ...],
+]
+
+
+def _validate_persisted_members_with_quality_validator(
     archive: Path,
     *,
     raw_run_id: str,
     refined_run_id: str,
     quality_run_id: str,
     refined_manifest: Mapping[str, Any],
+    quality_validator: SubjectMaskQualityMemberValidator,
     cache_run_id: str | None = None,
+    archive_root_metadata: Mapping[str, Any] | None = None,
+    member_manifest_payload_digests: Mapping[str, str] | None = None,
 ) -> None:
-    raw_errors = validate_persisted_subject_mask_core_publication(
-        archive,
-        family="subject_mask_runs",
-        run_id=raw_run_id,
-    )
-    refined_errors = validate_persisted_subject_mask_core_publication(
-        archive,
-        family="refined_subject_masks_runs",
-        run_id=refined_run_id,
-    )
+    if member_manifest_payload_digests is None:
+        raw_errors = validate_persisted_subject_mask_core_publication(
+            archive,
+            family="subject_mask_runs",
+            run_id=raw_run_id,
+            archive_root_metadata=archive_root_metadata,
+        )
+        refined_errors = validate_persisted_subject_mask_core_publication(
+            archive,
+            family="refined_subject_masks_runs",
+            run_id=refined_run_id,
+            archive_root_metadata=archive_root_metadata,
+        )
+    else:
+        raw_errors = validate_receipt_bound_persisted_subject_mask_core_publication(
+            archive,
+            family="subject_mask_runs",
+            run_id=raw_run_id,
+            expected_manifest_payload_digest=member_manifest_payload_digests["raw"],
+            archive_root_metadata=archive_root_metadata,
+        )
+        refined_errors = (
+            validate_receipt_bound_persisted_subject_mask_core_publication(
+                archive,
+                family="refined_subject_masks_runs",
+                run_id=refined_run_id,
+                expected_manifest_payload_digest=member_manifest_payload_digests[
+                    "refined"
+                ],
+                archive_root_metadata=archive_root_metadata,
+            )
+        )
     quality_run = zarr.open_group(
         str(archive / "subject_mask_quality_runs" / quality_run_id),
         mode="r",
@@ -1036,17 +1085,18 @@ def _validate_persisted_members(
                 archive,
                 run_id=quality_run_id,
                 plans=_Plans(),
+                archive_root_metadata=archive_root_metadata,
             )
             arrays = {
                 path: quality_run[path]
                 for path in SUBJECT_MASK_QUALITY_SCHEMA_V1.binding_paths
             }
-            quality_errors = validate_subject_mask_quality_publication(
+            quality_errors = quality_validator(
                 quality_manifest,
-                direct_metadata_declarations=direct,
-                consolidated_metadata_declarations=consolidated,
-                arrays=arrays,
-                source_manifest=refined_manifest,
+                direct,
+                consolidated,
+                arrays,
+                refined_manifest,
             )
             if quality_run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE:
                 quality_errors = (*quality_errors, "quality run is not complete")
@@ -1057,11 +1107,25 @@ def _validate_persisted_members(
                 )
     cache_errors: tuple[str, ...] = ()
     if cache_run_id is not None:
-        cache_errors = validate_persisted_subject_mask_cache_publication(
-            archive,
-            run_id=cache_run_id,
-            source_manifest=refined_manifest,
-        )
+        if member_manifest_payload_digests is None:
+            cache_errors = validate_persisted_subject_mask_cache_publication(
+                archive,
+                run_id=cache_run_id,
+                source_manifest=refined_manifest,
+                archive_root_metadata=archive_root_metadata,
+            )
+        else:
+            cache_errors = (
+                validate_receipt_bound_persisted_subject_mask_cache_publication(
+                    archive,
+                    run_id=cache_run_id,
+                    expected_manifest_payload_digest=(
+                        member_manifest_payload_digests["presentation_cache"]
+                    ),
+                    source_manifest=refined_manifest,
+                    archive_root_metadata=archive_root_metadata,
+                )
+            )
     producer_join_errors: tuple[str, ...] = ()
     if (
         not raw_errors
@@ -1105,6 +1169,88 @@ def _validate_persisted_members(
             f"quality={list(quality_errors)}, cache={list(cache_errors)}, "
             f"producer_join={list(producer_join_errors)}"
         )
+
+
+def _validate_persisted_members(
+    archive: Path,
+    *,
+    raw_run_id: str,
+    refined_run_id: str,
+    quality_run_id: str,
+    refined_manifest: Mapping[str, Any],
+    cache_run_id: str | None = None,
+    archive_root_metadata: Mapping[str, Any] | None = None,
+) -> None:
+    """Run the explicit decoded member audit used by publication/finalization."""
+
+    def validate_quality(
+        manifest: Mapping[str, Any],
+        direct: Mapping[str, Mapping[str, Any]],
+        consolidated: Mapping[str, Mapping[str, Any]],
+        arrays: Mapping[str, Any],
+        source_manifest: Mapping[str, Any],
+    ) -> tuple[str, ...]:
+        return validate_subject_mask_quality_publication(
+            manifest,
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+            arrays=arrays,
+            source_manifest=source_manifest,
+        )
+
+    _validate_persisted_members_with_quality_validator(
+        archive,
+        raw_run_id=raw_run_id,
+        refined_run_id=refined_run_id,
+        quality_run_id=quality_run_id,
+        refined_manifest=refined_manifest,
+        quality_validator=validate_quality,
+        cache_run_id=cache_run_id,
+        archive_root_metadata=archive_root_metadata,
+    )
+
+
+def _validate_receipt_bound_persisted_members(
+    archive: Path,
+    *,
+    raw_run_id: str,
+    refined_run_id: str,
+    quality_run_id: str,
+    refined_manifest: Mapping[str, Any],
+    quality_manifest_payload_digest: str,
+    member_manifest_payload_digests: Mapping[str, str],
+    cache_run_id: str | None = None,
+    archive_root_metadata: Mapping[str, Any] | None = None,
+) -> None:
+    """Admit immutable members using the enclosing bundle's sealed receipts."""
+
+    def validate_quality(
+        manifest: Mapping[str, Any],
+        direct: Mapping[str, Mapping[str, Any]],
+        consolidated: Mapping[str, Mapping[str, Any]],
+        arrays: Mapping[str, Any],
+        source_manifest: Mapping[str, Any],
+    ) -> tuple[str, ...]:
+        return validate_receipt_bound_subject_mask_quality_publication(
+            manifest,
+            expected_manifest_payload_digest=quality_manifest_payload_digest,
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+            arrays=arrays,
+            source_manifest=source_manifest,
+        )
+
+    _validate_persisted_members_with_quality_validator(
+        archive,
+        raw_run_id=raw_run_id,
+        refined_run_id=refined_run_id,
+        quality_run_id=quality_run_id,
+        refined_manifest=refined_manifest,
+        quality_validator=validate_quality,
+        cache_run_id=cache_run_id,
+        archive_root_metadata=archive_root_metadata,
+        member_manifest_payload_digests=member_manifest_payload_digests,
+    )
 
 
 def publish_subject_mask_bundle_candidate(
@@ -1407,9 +1553,14 @@ def publish_subject_mask_bundle_candidate(
     }
 
 
-def _validate_live_bundle(
-    archive: Path, *, bundle_id: str
-) -> tuple[dict[str, Any], dict[str, Mapping[str, Any]]]:
+def _validate_live_bundle_envelope(archive: Path, *, bundle_id: str) -> tuple[
+    dict[str, Any],
+    dict[str, Mapping[str, Any]],
+    dict[str, str],
+    Mapping[str, Any],
+    Mapping[str, Any],
+]:
+    archive_root_metadata = _strict_json(archive / "zarr.json")
     root = open_zarr_root(archive, mode="r")
     bundle = root[f"{SUBJECT_MASK_BUNDLE_FAMILY}/{bundle_id}"]
     manifest = bundle.attrs.get(SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE)
@@ -1454,6 +1605,19 @@ def _validate_live_bundle(
         )
         if expected != members[role]:
             raise RuntimeError(f"Subject-mask bundle member changed for {role}.")
+    return dict(manifest), manifests, member_ids, members, archive_root_metadata
+
+
+def _validate_live_bundle(
+    archive: Path, *, bundle_id: str
+) -> tuple[dict[str, Any], dict[str, Mapping[str, Any]]]:
+    (
+        manifest,
+        manifests,
+        member_ids,
+        _members,
+        archive_root_metadata,
+    ) = _validate_live_bundle_envelope(archive, bundle_id=bundle_id)
     _validate_persisted_members(
         archive,
         raw_run_id=member_ids["raw"],
@@ -1461,10 +1625,57 @@ def _validate_live_bundle(
         quality_run_id=member_ids["quality"],
         refined_manifest=manifests["refined"],
         cache_run_id=member_ids.get("presentation_cache"),
+        archive_root_metadata=archive_root_metadata,
     )
     if (
-        _bundle_metadata_digest(archive, bundle_id=bundle_id)
-        != payload["publication"]["metadata_digest"]
+        _bundle_metadata_digest(
+            archive,
+            bundle_id=bundle_id,
+            archive_root_metadata=archive_root_metadata,
+        )
+        != manifest["payload"]["publication"]["metadata_digest"]
+    ):
+        raise RuntimeError("Subject-mask bundle metadata digest changed.")
+    return dict(manifest), manifests
+
+
+def _validate_receipt_bound_live_bundle(
+    archive: Path, *, bundle_id: str
+) -> tuple[dict[str, Any], dict[str, Mapping[str, Any]]]:
+    (
+        manifest,
+        manifests,
+        member_ids,
+        members,
+        archive_root_metadata,
+    ) = _validate_live_bundle_envelope(archive, bundle_id=bundle_id)
+    quality_member = members["quality"]
+    expected_quality_digest = quality_member.get("manifest_payload_digest")
+    if not isinstance(expected_quality_digest, str):
+        raise RuntimeError(
+            "Subject-mask bundle lacks its quality-member receipt digest."
+        )
+    _validate_receipt_bound_persisted_members(
+        archive,
+        raw_run_id=member_ids["raw"],
+        refined_run_id=member_ids["refined"],
+        quality_run_id=member_ids["quality"],
+        refined_manifest=manifests["refined"],
+        quality_manifest_payload_digest=expected_quality_digest,
+        member_manifest_payload_digests={
+            role: str(reference["manifest_payload_digest"])
+            for role, reference in members.items()
+        },
+        cache_run_id=member_ids.get("presentation_cache"),
+        archive_root_metadata=archive_root_metadata,
+    )
+    if (
+        _bundle_metadata_digest(
+            archive,
+            bundle_id=bundle_id,
+            archive_root_metadata=archive_root_metadata,
+        )
+        != manifest["payload"]["publication"]["metadata_digest"]
     ):
         raise RuntimeError("Subject-mask bundle metadata digest changed.")
     return dict(manifest), manifests
@@ -1480,6 +1691,36 @@ def validate_subject_mask_bundle_candidate(
     manifest, manifests = _validate_live_bundle(archive, bundle_id=resolved_bundle)
     return {
         "status": "valid",
+        "analysis_zarr": str(archive),
+        "bundle_id": resolved_bundle,
+        "bundle_manifest_digest": str(manifest["payload_digest"]),
+        "member_manifest_digests": {
+            role: str(value["payload_digest"])
+            for role, value in sorted(manifests.items())
+        },
+        "selector_eligible": False,
+    }
+
+
+def validate_subject_mask_bundle_admission(
+    *, analysis_zarr: Path, bundle_id: str
+) -> dict[str, object]:
+    """Admit one immutable bundle through its sealed member receipts.
+
+    This is the normal downstream-consumer gate.  The explicit candidate
+    validator above remains the decoded audit and publication-finalization
+    surface.
+    """
+
+    archive = analysis_zarr.expanduser().resolve()
+    resolved_bundle = _require_run_id(bundle_id, name="bundle_id")
+    manifest, manifests = _validate_receipt_bound_live_bundle(
+        archive,
+        bundle_id=resolved_bundle,
+    )
+    return {
+        "status": "admitted",
+        "validation_profile": "sealed_member_receipts_v1",
         "analysis_zarr": str(archive),
         "bundle_id": resolved_bundle,
         "bundle_manifest_digest": str(manifest["payload_digest"]),
@@ -1752,6 +1993,7 @@ __all__ = [
     "activate_subject_mask_bundle",
     "build_subject_mask_bundle_manifest",
     "publish_subject_mask_bundle_candidate",
+    "validate_subject_mask_bundle_admission",
     "validate_subject_mask_bundle_candidate",
     "validate_subject_mask_bundle_manifest",
 ]

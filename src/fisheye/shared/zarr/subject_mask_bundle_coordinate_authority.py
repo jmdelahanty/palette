@@ -30,7 +30,7 @@ from fisheye.shared.zarr.subject_mask_bundle_publication import (
     SUBJECT_MASK_BUNDLE_FAMILY,
     SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE,
     SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR,
-    validate_subject_mask_bundle_candidate,
+    validate_subject_mask_bundle_admission,
 )
 from fisheye.shared.zarr.subject_mask_core_publication import (
     SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
@@ -79,6 +79,7 @@ class BoundRecordingSubjectMaskCoordinateAuthority:
     refined_producer_evidence: Mapping[str, Any] = field(repr=False)
     assignment_keypoint_collection: Mapping[str, Any] = field(repr=False)
     coordinate_binding: Mapping[str, Any] = field(repr=False)
+    admission_receipt: Mapping[str, Any] = field(repr=False)
     authority_digest: str
     active: bool
     _root: Any = field(repr=False, compare=False)
@@ -323,7 +324,7 @@ def load_recording_subject_mask_coordinate_authority(
         bundle_id=bundle_id,
         allow_inactive=allow_inactive,
     )
-    validate_subject_mask_bundle_candidate(
+    admission_receipt = validate_subject_mask_bundle_admission(
         analysis_zarr=archive,
         bundle_id=selected,
     )
@@ -503,6 +504,7 @@ def load_recording_subject_mask_coordinate_authority(
         refined_producer_evidence=refined_evidence,
         assignment_keypoint_collection=assignment_keypoints,
         coordinate_binding=dict(coordinate),
+        admission_receipt=dict(admission_receipt),
         authority_digest=canonical_json_sha256(authority_document),
         active=active,
         _root=root,
@@ -510,8 +512,24 @@ def load_recording_subject_mask_coordinate_authority(
     )
 
 
+def require_bound_recording_subject_mask_coordinate_authority(
+    value: Any,
+) -> BoundRecordingSubjectMaskCoordinateAuthority:
+    """Require an authority created by this module's receipt-backed loader."""
+
+    if (
+        type(value) is not BoundRecordingSubjectMaskCoordinateAuthority
+        or value._seal is not _BOUND_AUTHORITY_SEAL
+    ):
+        raise SubjectMaskBundleCoordinateAuthorityError(
+            "A sealed recording subject-mask coordinate authority is required."
+        )
+    return value
+
+
 __all__ = [
     "BoundRecordingSubjectMaskCoordinateAuthority",
     "SubjectMaskBundleCoordinateAuthorityError",
     "load_recording_subject_mask_coordinate_authority",
+    "require_bound_recording_subject_mask_coordinate_authority",
 ]

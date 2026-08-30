@@ -414,6 +414,7 @@ def subject_mask_quality_metadata_declaration_maps(
     *,
     run_id: str,
     plans: SubjectMaskQualityStoragePlanSet,
+    archive_root_metadata: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     relative_paths = ("", *(entry.rule.path for entry in plans.entries))
     run_prefix = f"subject_mask_quality_runs/{run_id}"
@@ -424,7 +425,11 @@ def subject_mask_quality_metadata_declaration_maps(
             metadata_path = metadata_path / relative
         direct[relative] = _read_strict_json(metadata_path / "zarr.json")
 
-    archive_root = _read_strict_json(output_path / "zarr.json")
+    archive_root = (
+        archive_root_metadata
+        if archive_root_metadata is not None
+        else _read_strict_json(output_path / "zarr.json")
+    )
     envelope = archive_root.get("consolidated_metadata")
     if not isinstance(envelope, Mapping):
         raise ValueError("Subject-mask quality shadow lacks consolidated metadata.")

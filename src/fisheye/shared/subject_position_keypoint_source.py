@@ -113,6 +113,7 @@ _SELECTOR_ALIAS_NAMES = frozenset(
 )
 
 _BOUND_SOURCE_SEAL = object()
+_BOUND_COORDINATE_SUCCESSOR_ADMISSION_SEAL = object()
 _BOUND_COORDINATE_SUCCESSOR_SEAL = object()
 _REQUIRED_SOURCE_CROP_ARRAYS = (
     "instance_key",
@@ -201,6 +202,47 @@ class BoundKeypointPositionSource:
         """Exact anatomy source-binding identity used by this adapter."""
 
         return self._binding_id
+
+
+@dataclass(frozen=True, init=False)
+class BoundKeypointCoordinateSuccessorAdmission:
+    """Metadata-only admission for one sealed coordinate successor.
+
+    The admission proves the same manifest, successor authority, lifecycle,
+    selector, and direct/consolidated metadata grammar as the full source
+    loader.  It deliberately does not open or derive coordinate payload
+    surfaces.  Consumers that need scientific values must use
+    :func:`load_keypoint_coordinate_successor_source` instead.
+    """
+
+    analysis_zarr: Path
+    run_path: str
+    run_id: str
+    run_group: Any = field(repr=False, compare=False)
+    manifest: Mapping[str, Any] = field(repr=False)
+    manifest_digest: str
+    metadata_declarations_digest: str
+    successor_authority: Mapping[str, Any] = field(repr=False)
+    successor_authority_digest: str
+    active_keypoint_bundle_authority: Mapping[str, Any] = field(repr=False)
+    active_keypoint_bundle_authority_digest: str
+    _root: Any = field(repr=False, compare=False)
+    _seal: object = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        *,
+        _verification_seal: object | None = None,
+        **values: Any,
+    ) -> None:
+        if _verification_seal is not _BOUND_COORDINATE_SUCCESSOR_ADMISSION_SEAL:
+            raise KeypointPositionSourceError(
+                "Coordinate-successor admissions must be produced by the shared "
+                "resolver."
+            )
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "_seal", _verification_seal)
 
 
 @dataclass(frozen=True, init=False)
@@ -791,16 +833,17 @@ def _require_coordinate_successor_authority(
     return _readonly_mapping(authority), canonical_json_sha256(authority)
 
 
-def load_keypoint_coordinate_successor_source(
+def load_keypoint_coordinate_successor_admission(
     analysis_zarr: str | Path,
     *,
     run_path: str,
-) -> BoundKeypointCoordinateSuccessorSource:
-    """Resolve the maintained coordinate-successor profile without anatomy.
+) -> BoundKeypointCoordinateSuccessorAdmission:
+    """Admit the maintained coordinate-successor profile without payload reads.
 
-    This is the shared evidence branch used by planners and downstream
-    assignment consumers.  It performs the same full-strength authority,
-    lifecycle, metadata, and coordinate validation as the anatomy adapter.
+    This is the shared evidence branch for read-only planning and dependency
+    admission.  It performs full-strength manifest, authority, lifecycle,
+    selector, and metadata validation.  Coordinate payload validation remains
+    owned by the full source loader, which reuses this exact admission.
     """
 
     archive = Path(analysis_zarr).expanduser().resolve()
@@ -819,32 +862,67 @@ def load_keypoint_coordinate_successor_source(
         manifest=manifest,
         payload=payload,
     )
-    _validate_published_metadata(
+    metadata_declarations_digest = _validate_published_metadata(
         archive,
         run_path=normalized_path,
         run_id=run_id,
         payload=payload,
     )
-    surfaces = require_bound_ineligible_keypoint_coordinate_surfaces(
-        load_persisted_ineligible_keypoint_coordinate_surfaces(
-            root,
-            normalized_path,
-        )
-    )
     active = authority["payload"]["source_authority"]["record"]
     active_digest = authority["payload"]["source_authority"]["record_sha256"]
-    return BoundKeypointCoordinateSuccessorSource(
+    return BoundKeypointCoordinateSuccessorAdmission(
         analysis_zarr=archive,
         run_path=normalized_path,
         run_id=run_id,
         run_group=run,
         manifest=_readonly_mapping(manifest),
         manifest_digest=canonical_json_sha256(manifest),
-        surfaces=surfaces,
+        metadata_declarations_digest=metadata_declarations_digest,
         successor_authority=authority,
         successor_authority_digest=authority_digest,
         active_keypoint_bundle_authority=_readonly_mapping(active),
         active_keypoint_bundle_authority_digest=active_digest,
+        _root=root,
+        _verification_seal=_BOUND_COORDINATE_SUCCESSOR_ADMISSION_SEAL,
+    )
+
+
+def load_keypoint_coordinate_successor_source(
+    analysis_zarr: str | Path,
+    *,
+    run_path: str,
+) -> BoundKeypointCoordinateSuccessorSource:
+    """Resolve and fully load the maintained coordinate-successor profile.
+
+    Scientific consumers use this interface.  It first invokes the same
+    metadata-only admission used by planners, then validates and materializes
+    the complete coordinate surfaces.
+    """
+
+    admission = load_keypoint_coordinate_successor_admission(
+        analysis_zarr,
+        run_path=run_path,
+    )
+    surfaces = require_bound_ineligible_keypoint_coordinate_surfaces(
+        load_persisted_ineligible_keypoint_coordinate_surfaces(
+            admission._root,
+            admission.run_path,
+        )
+    )
+    return BoundKeypointCoordinateSuccessorSource(
+        analysis_zarr=admission.analysis_zarr,
+        run_path=admission.run_path,
+        run_id=admission.run_id,
+        run_group=admission.run_group,
+        manifest=admission.manifest,
+        manifest_digest=admission.manifest_digest,
+        surfaces=surfaces,
+        successor_authority=admission.successor_authority,
+        successor_authority_digest=admission.successor_authority_digest,
+        active_keypoint_bundle_authority=admission.active_keypoint_bundle_authority,
+        active_keypoint_bundle_authority_digest=(
+            admission.active_keypoint_bundle_authority_digest
+        ),
         _verification_seal=_BOUND_COORDINATE_SUCCESSOR_SEAL,
     )
 
@@ -1241,6 +1319,7 @@ def require_bound_keypoint_position_source(
 
 
 __all__ = [
+    "BoundKeypointCoordinateSuccessorAdmission",
     "BoundKeypointCoordinateSuccessorSource",
     "BoundKeypointPositionSource",
     "KeypointPositionSourceError",
@@ -1254,6 +1333,7 @@ __all__ = [
     "SOURCE_KIND",
     "SOURCE_MODALITY",
     "load_bound_keypoint_position_source",
+    "load_keypoint_coordinate_successor_admission",
     "load_keypoint_coordinate_successor_source",
     "revalidate_bound_keypoint_position_source",
     "require_bound_keypoint_position_source",

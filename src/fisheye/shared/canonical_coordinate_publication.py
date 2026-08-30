@@ -118,6 +118,20 @@ def _exact_value_equal(left: Any, right: Any) -> bool:
     return type(left) is type(right) and bool(left == right)
 
 
+def _replace_trusted_attrs(attrs: Any, values: Mapping[str, Any]) -> None:
+    """Replace an exact attrs mapping in one Zarr metadata transaction."""
+
+    expected = copy.deepcopy(dict(values))
+    if type(attrs) is dict:
+        attrs.clear()
+        attrs.update(expected)
+    else:
+        # Preflight admits only the exact Zarr Attributes implementation here.
+        attrs.put(expected)
+    if not _exact_value_equal(dict(attrs), expected):
+        raise RuntimeError("persisted attrs differ from requested replacement")
+
+
 def _node_shape(node: Any) -> tuple[int, ...]:
     raw = getattr(node, "shape", None)
     if not isinstance(raw, (tuple, list)):
@@ -1074,7 +1088,6 @@ def stamp_bound_canonical_coordinate_descriptors(
         )
     attrs_targets: list[Any] = []
     snapshots: list[dict[str, Any]] = []
-    intended_payloads: list[dict[str, Any]] = []
     expected_final_attrs: list[dict[str, Any]] = []
     for item in bindings:
         attrs = getattr(item.coordinate_node, "attrs", None)
@@ -1091,9 +1104,10 @@ def stamp_bound_canonical_coordinate_descriptors(
             except ImportError:  # pragma: no cover - Palette depends on zarr
                 ZarrAttributes = None  # type: ignore[assignment,misc]
             trusted = ZarrAttributes is not None and type(attrs) is ZarrAttributes
+        required_operations = ("clear", "update") if type(attrs) is dict else ("put",)
         if not trusted or not all(
             callable(getattr(attrs, operation, None))
-            for operation in ("update", "__setitem__", "__delitem__")
+            for operation in required_operations
         ):
             _fail(
                 "coordinate_attrs_transaction_untrusted",
@@ -1128,17 +1142,16 @@ def stamp_bound_canonical_coordinate_descriptors(
         expected = copy.deepcopy(snapshot)
         expected.update(copy.deepcopy(payload))
         snapshots.append(snapshot)
-        intended_payloads.append(payload)
         expected_final_attrs.append(expected)
     try:
-        for attrs, payload, expected in zip(
+        for attrs, expected in zip(
             attrs_targets,
-            intended_payloads,
             expected_final_attrs,
             strict=True,
         ):
-            attrs.update(payload)
-            if not _exact_value_equal(dict(attrs), expected):
+            try:
+                _replace_trusted_attrs(attrs, expected)
+            except RuntimeError:
                 _fail(
                     "coordinate_surface_stamp_exact_attrs_mismatch",
                     "$",
@@ -1189,12 +1202,7 @@ def stamp_bound_canonical_coordinate_descriptors(
             strict=True,
         ):
             try:
-                for name in tuple(attrs.keys()):
-                    if name not in snapshot:
-                        del attrs[name]
-                attrs.update(copy.deepcopy(snapshot))
-                if not _exact_value_equal(dict(attrs), snapshot):
-                    raise RuntimeError("restored attrs differ from snapshot")
+                _replace_trusted_attrs(attrs, snapshot)
             except Exception as rollback_exc:  # pragma: no cover - hostile mapping
                 rollback_failures.append(f"{path}: {rollback_exc}")
         code = (

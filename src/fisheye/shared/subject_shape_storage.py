@@ -9,10 +9,12 @@ retaining distinct selector lifecycles.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import math
 from pathlib import Path
 import re
+import time
 from typing import Any, Mapping
 
 import numpy as np
@@ -27,6 +29,7 @@ from fisheye.shared.subject_shape_coordinate_publication import (
     CANONICAL_SUBJECT_SHAPE_PROFILE_ID,
     SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
     SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR,
+    SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR,
     SUBJECT_SHAPE_HISTORICAL_SOURCE_KIND,
     SUBJECT_SHAPE_SOURCE_KIND_ATTR,
     SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR,
@@ -41,11 +44,17 @@ from fisheye.shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR,
     SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_SCHEMA_ID,
     SUBJECT_SHAPE_MANIFEST_ATTR,
+    SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR,
+    SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR,
+    SUBJECT_SHAPE_PROJECTED_UNBOUND_BINDING_STATUS,
+    SUBJECT_SHAPE_PROJECTED_UNBOUND_MANIFEST_SCHEMA_VERSION,
+    SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
     SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
     SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID,
     SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
     build_subject_shape_schema_inventory_record,
     load_unbound_subject_shape_manifest,
+    stamp_unbound_subject_shape_manifest,
 )
 from fisheye.shared.zarr.analysis_array_contracts import (
     AnalysisArrayDeclaration,
@@ -71,6 +80,9 @@ from fisheye.shared.zarr.metadata_equivalence import (
 )
 from fisheye.shared.zarr.storage_intent import AccessPattern, WriteMode
 from fisheye.shared.zarr.storage_profiles import KIB, MIB, StorageProfile
+from fisheye.shared.zarr_payload_receipt import (
+    decoded_payload_receipt_from_copy_report,
+)
 
 
 SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE = "legacy_explicit_chunks"
@@ -174,6 +186,125 @@ def _iter_arrays(group: Any, prefix: str = ""):
     for name in sorted(str(value) for value in group.group_keys()):
         path = f"{prefix}/{name}" if prefix else name
         yield from _iter_arrays(group[name], path)
+
+
+def _deferred_storage_receipt_body(
+    run_group: Any,
+    *,
+    storage_profile_id: str,
+) -> dict[str, object]:
+    subject_shape_access_aware_storage_profile(storage_profile_id)
+    if (
+        run_group.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
+        != SUBJECT_SHAPE_UNBOUND_STAGE_STATUS
+        or run_group.attrs.get("palette_run_completion_status") != "complete"
+        or run_group.attrs.get("stage_selector_eligible") is not False
+    ):
+        raise ValueError(
+            "Deferred subject-shape storage requires one complete, unbound, "
+            "selector-ineligible scratch stage."
+        )
+    if (
+        SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR in run_group.attrs
+        or f"{SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR}_sha256" in run_group.attrs
+    ):
+        raise ValueError(
+            "Deferred subject-shape storage cannot coexist with an unbound manifest."
+        )
+    projection = run_group.attrs.get(SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR)
+    projection_sha256 = run_group.attrs.get(
+        SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR
+    )
+    if (
+        not isinstance(projection, Mapping)
+        or type(projection_sha256) is not str
+        or coordinate_record_sha256(projection) != projection_sha256
+    ):
+        raise ValueError(
+            "Deferred subject-shape storage requires exact projected numeric evidence."
+        )
+    arrays = {
+        path: {
+            "dtype": np.dtype(node.dtype).str,
+            "shape": [int(value) for value in node.shape],
+        }
+        for path, node in _iter_arrays(run_group)
+    }
+    if not arrays:
+        raise ValueError("Deferred subject-shape storage has no numeric arrays.")
+    return {
+        "schema_id": "palette.subject_shape_deferred_storage_transform_receipt",
+        "schema_version": 1,
+        "receipt_role": (
+            "closed_scratch_writer_handoff_to_exact_access_aware_storage_transform"
+        ),
+        "run_ref": f"/{str(run_group.path).strip('/')}",
+        "run_name": run_group.attrs.get("palette_run_name"),
+        "publication_owner_uuid": run_group.attrs.get(
+            SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR
+        ),
+        "source_refined_subject_masks_run": run_group.attrs.get(
+            "source_refined_subject_masks_run"
+        ),
+        "storage_profile_id": storage_profile_id,
+        "numeric_projection_sha256": projection_sha256,
+        "arrays": arrays,
+        "array_metadata_sha256": coordinate_record_sha256(arrays),
+        "closed_array_inventory": True,
+        "decoded_payload_identity_deferred": True,
+        "required_consumer": (
+            "materialize_subject_shape_access_aware_storage_exact_readback_v2"
+        ),
+        "mutation_exclusion": "exclusive_node_local_writer_to_transform_handoff_v1",
+    }
+
+
+def stamp_subject_shape_deferred_storage_receipt(
+    run_group: Any,
+    *,
+    storage_profile_id: str,
+) -> dict[str, object]:
+    """Seal a scratch-only handoff without reading numeric payload values."""
+
+    if SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR in run_group.attrs:
+        raise ValueError("Subject-shape deferred storage receipt is occupied.")
+    body = _deferred_storage_receipt_body(
+        run_group,
+        storage_profile_id=storage_profile_id,
+    )
+    receipt = {**body, "record_sha256": coordinate_record_sha256(body)}
+    run_group.attrs[SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR] = receipt
+    if run_group.attrs.get(SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR) != receipt:
+        raise RuntimeError("Subject-shape deferred storage receipt did not persist.")
+    return receipt
+
+
+def load_subject_shape_deferred_storage_receipt(
+    run_group: Any,
+    *,
+    expected_storage_profile_id: str | None = None,
+) -> dict[str, object]:
+    """Revalidate one scratch handoff against the closed live array metadata."""
+
+    raw = run_group.attrs.get(SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR)
+    if not isinstance(raw, Mapping):
+        raise ValueError("Subject-shape deferred storage receipt is absent.")
+    profile_id = raw.get("storage_profile_id")
+    if type(profile_id) is not str or (
+        expected_storage_profile_id is not None
+        and profile_id != expected_storage_profile_id
+    ):
+        raise ValueError("Subject-shape deferred storage profile changed.")
+    body = _deferred_storage_receipt_body(
+        run_group,
+        storage_profile_id=profile_id,
+    )
+    expected = {**body, "record_sha256": coordinate_record_sha256(body)}
+    if dict(raw) != expected:
+        raise ValueError(
+            "Subject-shape deferred storage receipt differs from live metadata."
+        )
+    return expected
 
 
 def _iter_groups(group: Any, prefix: str = ""):
@@ -769,10 +900,20 @@ def validate_subject_shape_storage_source_manifest_link(
         )
     else:
         bundle_binding_valid = bundle_source_binding is None
+    source_schema_version = source_manifest.get("schema_version")
+    source_binding_status = source_manifest.get("binding_status")
+    supported_unbound_profile = (
+        source_schema_version == 1
+        and source_binding_status == "unbound_roi_local_numeric_payload"
+    ) or (
+        source_schema_version
+        == SUBJECT_SHAPE_PROJECTED_UNBOUND_MANIFEST_SCHEMA_VERSION
+        and source_binding_status == SUBJECT_SHAPE_PROJECTED_UNBOUND_BINDING_STATUS
+    )
     if (
         source_manifest.get("schema_id")
         != SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID
-        or source_manifest.get("schema_version") != 1
+        or not supported_unbound_profile
         or set(source_manifest) != expected_manifest_fields
         or logical_profile_id
         not in {
@@ -834,12 +975,21 @@ def materialize_subject_shape_access_aware_storage(
     profile: StorageProfile,
     phase: str = "unbound",
     copy_block_rows: int = 1_024,
+    workers: int = 1,
 ) -> dict[str, object]:
-    """Write one complete node-local access-aware run through the shared factory."""
+    """Write one complete node-local access-aware run through the shared factory.
+
+    Destination arrays and their metadata are created serially.  Payload copies
+    may then run concurrently across arrays; each worker owns every physical
+    chunk/shard of exactly one destination array, so no physical Zarr object is
+    shared between workers.
+    """
 
     destination = Path(destination_path).expanduser().resolve()
     if destination.exists():
         raise FileExistsError(f"Refusing existing subject-shape output: {destination}")
+    if type(workers) is not int or workers <= 0:
+        raise ValueError("Subject-shape storage copy workers must be positive.")
     if (
         source_run.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
         != SUBJECT_SHAPE_UNBOUND_STAGE_STATUS
@@ -852,18 +1002,32 @@ def materialize_subject_shape_access_aware_storage(
         )
     raw_manifest = source_run.attrs.get(SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR)
     raw_arrays = raw_manifest.get("arrays") if isinstance(raw_manifest, Mapping) else None
-    if not isinstance(raw_arrays, Mapping) or not raw_arrays:
-        raise ValueError("Subject-shape producer seal lacks its array inventory.")
-    persisted_digests = {
-        str(path): str(record.get("content_sha256"))
-        for path, record in raw_arrays.items()
-        if isinstance(record, Mapping)
-    }
-    sealed_manifest = load_unbound_subject_shape_manifest(
-        source_run,
-        array_content_sha256=persisted_digests,
-    )
-    sealed_arrays = sealed_manifest.record["arrays"]
+    deferred_receipt: dict[str, object] | None = None
+    if isinstance(raw_arrays, Mapping) and raw_arrays:
+        persisted_digests = {
+            str(path): str(record.get("content_sha256"))
+            for path, record in raw_arrays.items()
+            if isinstance(record, Mapping)
+        }
+        sealed_manifest = load_unbound_subject_shape_manifest(
+            source_run,
+            array_content_sha256=persisted_digests,
+        )
+        sealed_arrays: Mapping[str, Any] | None = sealed_manifest.record["arrays"]
+        producer_receipt_mode = "preexisting_unbound_manifest_v1"
+    elif SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR in source_run.attrs:
+        deferred_receipt = load_subject_shape_deferred_storage_receipt(
+            source_run,
+            expected_storage_profile_id=profile.profile_id,
+        )
+        sealed_manifest = None
+        sealed_arrays = None
+        producer_receipt_mode = "deferred_exact_storage_transform_v2"
+    else:
+        raise ValueError(
+            "Subject-shape storage source lacks either its producer seal or the "
+            "exact deferred-transform receipt."
+        )
     receipt = build_subject_shape_storage_receipt(
         source_run,
         phase=phase,
@@ -877,9 +1041,7 @@ def materialize_subject_shape_access_aware_storage(
         use_consolidated=False,
     )
     _copy_group_attributes(source_run, destination_run)
-    hashes: dict[str, str] = {}
-    write_leaves: dict[str, list[dict[str, object]]] = {}
-    outer_write_rows: dict[str, int] = {}
+    copy_assignments: list[tuple[str, Any, Any, Any]] = []
     for path, source_array in _iter_arrays(source_run):
         entry = entry_by_path[path]
         parent, leaf = _parent_and_leaf(destination_run, path)
@@ -891,23 +1053,119 @@ def materialize_subject_shape_access_aware_storage(
             fill_value=subject_shape_fill_value(path, source_array.dtype),
             attributes=dict(source_array.attrs),
         )
+        copy_assignments.append(
+            (path, source_array, destination_array, entry.plan)
+        )
+
+    effective_workers = min(workers, max(1, len(copy_assignments)))
+
+    def copy_assignment(assignment: tuple[str, Any, Any, Any]):
+        path, source_array, destination_array, plan = assignment
         destination_hash, leaves = _copy_array_by_outer_units(
             source_array,
             destination_array,
-            plan=entry.plan,
+            plan=plan,
             path=path,
         )
-        expected_hash = sealed_arrays[path]["content_sha256"]
-        if destination_hash != expected_hash:
+        if (
+            sealed_arrays is not None
+            and destination_hash != sealed_arrays[path]["content_sha256"]
+        ):
             raise RuntimeError(
                 f"Decoded candidate differs from the producer seal for {path!r}."
             )
-        hashes[path] = destination_hash
-        write_leaves[path] = leaves
-        outer_write_rows[path] = _outer_write_rows(
-            entry.plan,
-            shape=tuple(int(value) for value in source_array.shape),
+        return {
+            "path": path,
+            "plan": {
+                "path": path,
+                "shape": [int(value) for value in source_array.shape],
+                "dtype": str(np.dtype(source_array.dtype)),
+            },
+            "content_sha256": destination_hash,
+            "leaves": leaves,
+            "outer_write_rows": _outer_write_rows(
+                plan,
+                shape=tuple(int(value) for value in source_array.shape),
+            ),
+        }
+
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        copy_results = sorted(
+            executor.map(copy_assignment, copy_assignments),
+            key=lambda value: str(value["path"]),
         )
+    hashes = {
+        str(result["path"]): str(result["content_sha256"])
+        for result in copy_results
+    }
+    write_leaves = {
+        str(result["path"]): list(result["leaves"])
+        for result in copy_results
+    }
+    outer_write_rows = {
+        str(result["path"]): int(result["outer_write_rows"])
+        for result in copy_results
+    }
+    decoded_copy_report = {
+        "schema_id": "palette.zarr_sharded_run_copy.v1",
+        "status": "complete",
+        "source_run": f"/{str(source_run.path).strip('/')}",
+        "destination_run": f"/{str(destination_run.path).strip('/')}",
+        "array_count": len(copy_results),
+        "arrays": [dict(result["plan"]) for result in copy_results],
+        "shards": [
+            dict(leaf)
+            for result in copy_results
+            for leaf in result["leaves"]
+            if "start_row" in leaf
+        ],
+        "static_arrays": [
+            dict(leaf)
+            for result in copy_results
+            for leaf in result["leaves"]
+            if "start_row" not in leaf
+        ],
+        "decoded_bytes_copied": sum(
+            int(leaf["decoded_bytes"])
+            for result in copy_results
+            for leaf in result["leaves"]
+        ),
+        "exact_decoded_validation": True,
+        "receipt_origin": "access_aware_storage_outer_unit_readback_v1",
+    }
+    decoded_payload = decoded_payload_receipt_from_copy_report(
+        decoded_copy_report
+    )
+    if deferred_receipt is not None:
+        live_deferred = load_subject_shape_deferred_storage_receipt(
+            source_run,
+            expected_storage_profile_id=profile.profile_id,
+        )
+        if live_deferred != deferred_receipt:
+            raise RuntimeError(
+                "Subject-shape deferred storage source changed during conversion."
+            )
+        del source_run.attrs[SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR]
+        sealed_manifest = stamp_unbound_subject_shape_manifest(
+            source_run,
+            array_content_sha256=hashes,
+        )
+        if (
+            destination_run.attrs.get(SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR)
+            != deferred_receipt
+        ):
+            raise RuntimeError(
+                "Subject-shape deferred storage receipt changed during metadata copy."
+            )
+        del destination_run.attrs[SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR]
+        destination_run.attrs[SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR] = (
+            sealed_manifest.record
+        )
+        destination_run.attrs[f"{SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR}_sha256"] = (
+            sealed_manifest.record_sha256
+        )
+    if sealed_manifest is None:  # pragma: no cover - both branches close it above
+        raise RuntimeError("Subject-shape storage conversion lacks its final source seal.")
     source_manifest_link = persist_subject_shape_storage_source_manifest_link(
         destination_run,
         sealed_manifest,
@@ -933,16 +1191,204 @@ def materialize_subject_shape_access_aware_storage(
         "array_count": len(hashes),
         "decoded_equality": True,
         "exact_decoded_validation": True,
+        "producer_receipt_mode": producer_receipt_mode,
+        "deferred_producer_receipt_sha256": (
+            deferred_receipt["record_sha256"]
+            if deferred_receipt is not None
+            else None
+        ),
         "physical_write_policy": (
             "one_complete_nonoverlapping_outer_chunk_or_shard_per_assignment_v1"
         ),
         "requested_copy_block_rows": int(copy_block_rows),
+        "requested_copy_workers": workers,
+        "effective_copy_workers": effective_workers,
+        "parallel_write_ownership": (
+            "one_complete_destination_array_and_all_its_physical_objects_per_worker_v1"
+        ),
         "effective_write_grid_policy": "physical_outer_grid_overrides_logical_block_rows_v1",
         "outer_write_rows": outer_write_rows,
         "decoded_write_leaves": write_leaves,
+        "decoded_payload": decoded_payload,
+        "decoded_copy_report": decoded_copy_report,
         "array_content_sha256": hashes,
         "source_manifest_link": source_manifest_link,
         "storage_plan": receipt.as_manifest(),
+    }
+
+
+def compose_subject_shape_bound_payload_receipt(
+    run_group: Any,
+    *,
+    staged_decoded_copy_report: Mapping[str, Any],
+    staged_array_content_sha256: Mapping[str, str],
+    appended_paths: tuple[str, ...],
+    workers: int = 1,
+) -> dict[str, object]:
+    """Compose unchanged staged arrays with final-binding array readbacks.
+
+    The staged report was produced by the access-aware storage transform while
+    reading back every complete physical write unit.  Atomic publication has
+    already verified the staged tree's physical copy before this function is
+    called.  Only arrays created during final-path binding are therefore read
+    here; every other array must match the closed staged inventory exactly.
+    """
+
+    if type(workers) is not int or workers <= 0:
+        raise ValueError("Subject-shape receipt composition workers must be positive.")
+    if (
+        not isinstance(staged_decoded_copy_report, Mapping)
+        or not isinstance(staged_array_content_sha256, Mapping)
+    ):
+        raise ValueError("Subject-shape staged receipt evidence is malformed.")
+    if (
+        not isinstance(appended_paths, tuple)
+        or not appended_paths
+        or any(type(path) is not str or not path for path in appended_paths)
+        or len(set(appended_paths)) != len(appended_paths)
+    ):
+        raise ValueError("Subject-shape appended array inventory is invalid.")
+
+    staged_decoded = decoded_payload_receipt_from_copy_report(
+        staged_decoded_copy_report
+    )
+    staged_arrays = {
+        str(record["path"]): record
+        for record in staged_decoded["arrays"]
+    }
+    appended = frozenset(appended_paths)
+    live_arrays = dict(_iter_arrays(run_group))
+    if set(staged_arrays) & appended:
+        raise ValueError(
+            "Subject-shape staged receipt already contains a final-binding array."
+        )
+    if set(live_arrays) != set(staged_arrays) | appended:
+        raise ValueError(
+            "Subject-shape staged and final-binding receipts do not close the live "
+            "array inventory."
+        )
+    if set(staged_array_content_sha256) != set(staged_arrays):
+        raise ValueError(
+            "Subject-shape staged array digests differ from the staged receipt."
+        )
+    for path, record in staged_arrays.items():
+        node = live_arrays[path]
+        digest = staged_array_content_sha256[path]
+        if (
+            record.get("dtype") != str(np.dtype(node.dtype))
+            or record.get("shape") != [int(value) for value in node.shape]
+            or type(digest) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise ValueError(
+                f"Subject-shape staged receipt declaration differs for {path!r}."
+            )
+
+    row_count = _row_count(run_group)
+    effective_workers = min(workers, len(appended_paths))
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        futures = [
+            executor.submit(
+                _scan_subject_shape_array_once,
+                path,
+                live_arrays[path],
+                row_count=row_count,
+                block_rows=None,
+            )
+            for path in appended_paths
+        ]
+        appended_results = sorted(
+            (future.result() for future in futures),
+            key=lambda value: str(value["path"]),
+        )
+
+    plans: list[dict[str, object]] = []
+    shard_leaves: list[dict[str, object]] = []
+    static_leaves: list[dict[str, object]] = []
+    for path, record in sorted(staged_arrays.items()):
+        plans.append(
+            {
+                "path": path,
+                "dtype": str(record["dtype"]),
+                "shape": [int(value) for value in record["shape"]],
+            }
+        )
+        for leaf in record["leaves"]:
+            kind = leaf["kind"]
+            if kind == "empty_array":
+                continue
+            raw = {
+                "path": path,
+                "decoded_bytes": int(leaf["decoded_bytes"]),
+                "decoded_sha256": str(leaf["decoded_sha256"]),
+            }
+            if kind == "row_shard":
+                raw.update(
+                    {
+                        "start_row": int(leaf["start_row"]),
+                        "stop_row": int(leaf["stop_row"]),
+                    }
+                )
+                shard_leaves.append(raw)
+            elif kind == "whole_array":
+                static_leaves.append(raw)
+            else:  # pragma: no cover - canonical decoder rejects this first
+                raise ValueError("Subject-shape staged receipt leaf kind is invalid.")
+    for result in appended_results:
+        plans.append(dict(result["plan"]))
+        destination = shard_leaves if result["row_aligned"] is True else static_leaves
+        destination.extend(dict(leaf) for leaf in result["leaves"])
+    plans.sort(key=lambda value: str(value["path"]))
+    shard_leaves.sort(
+        key=lambda value: (
+            str(value["path"]),
+            int(value["start_row"]),
+            int(value["stop_row"]),
+        )
+    )
+    static_leaves.sort(key=lambda value: str(value["path"]))
+    copy_report = {
+        "schema_id": "palette.zarr_sharded_run_copy.v1",
+        "status": "complete",
+        "source_run": str(staged_decoded_copy_report.get("source_run", "staged")),
+        "destination_run": f"/{str(run_group.path).strip('/')}",
+        "array_count": len(plans),
+        "arrays": plans,
+        "shards": shard_leaves,
+        "static_arrays": static_leaves,
+        "decoded_bytes_copied": sum(
+            int(value["decoded_bytes"])
+            for value in (*shard_leaves, *static_leaves)
+        ),
+        "exact_decoded_validation": True,
+        "receipt_origin": (
+            "verified_staged_transfer_plus_final_binding_readback_v2"
+        ),
+    }
+    decoded_payload = decoded_payload_receipt_from_copy_report(copy_report)
+    appended_digests = {
+        str(result["path"]): str(result["content_sha256"])
+        for result in appended_results
+    }
+    array_content_sha256 = {
+        **{
+            str(path): str(staged_array_content_sha256[path])
+            for path in sorted(staged_array_content_sha256)
+        },
+        **appended_digests,
+    }
+    return {
+        "schema_id": "palette.subject_shape_bound_payload_receipt_composition",
+        "schema_version": 1,
+        "receipt_origin": copy_report["receipt_origin"],
+        "staged_decoded_payload_root_sha256": staged_decoded["root_sha256"],
+        "appended_paths": list(sorted(appended)),
+        "appended_decoded_bytes": sum(
+            int(result["decoded_bytes"]) for result in appended_results
+        ),
+        "array_content_sha256": array_content_sha256,
+        "decoded_payload": decoded_payload,
+        "decoded_copy_report": copy_report,
     }
 
 
@@ -952,6 +1398,7 @@ def materialize_subject_shape_storage_candidate(
     *,
     phase: str = "unbound",
     copy_block_rows: int = 1_024,
+    workers: int = 1,
 ) -> dict[str, object]:
     """Preserve the explicit unpromoted-candidate materialization API."""
 
@@ -961,11 +1408,197 @@ def materialize_subject_shape_storage_candidate(
         profile=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_V1,
         phase=phase,
         copy_block_rows=copy_block_rows,
+        workers=workers,
     )
+
+
+def _scan_subject_shape_array_once(
+    path: str,
+    array: Any,
+    *,
+    row_count: int,
+    block_rows: int | None,
+) -> dict[str, object]:
+    """Read one array once into canonical digest and decoded leaf evidence."""
+
+    dtype = np.dtype(array.dtype)
+    shape = tuple(int(value) for value in array.shape)
+    if dtype.hasobject:
+        raise TypeError(f"{path}: object arrays have no payload receipt grammar.")
+    digest = _array_digest_header(dtype=dtype, shape=shape)
+    leaves: list[dict[str, object]] = []
+    decoded_bytes = 0
+    row_aligned = bool(shape and shape[0] == row_count)
+    if row_aligned:
+        if block_rows is None:
+            try:
+                metadata = array.metadata.to_dict()
+                outer_shape = metadata["chunk_grid"]["configuration"][
+                    "chunk_shape"
+                ]
+                step = int(outer_shape[0])
+            except (
+                AttributeError,
+                KeyError,
+                TypeError,
+                ValueError,
+                IndexError,
+            ) as exc:
+                raise ValueError(
+                    f"{path}: physical outer grid is unavailable: {exc}."
+                ) from exc
+        else:
+            step = block_rows
+        if step <= 0:
+            raise ValueError(f"{path}: decoded scan row step is invalid.")
+        trailing = (slice(None),) * (len(shape) - 1)
+        for start in range(0, shape[0], step):
+            stop = min(shape[0], start + step)
+            values = np.ascontiguousarray(
+                array[(slice(start, stop), *trailing)]
+            )
+            if values.dtype != dtype or values.shape != (stop - start, *shape[1:]):
+                raise RuntimeError(f"{path}: decoded scan metadata changed.")
+            payload = values.tobytes(order="C")
+            digest.update(payload)
+            decoded_bytes += len(payload)
+            leaves.append(
+                {
+                    "path": path,
+                    "start_row": start,
+                    "stop_row": stop,
+                    "decoded_bytes": len(payload),
+                    "decoded_sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            )
+    else:
+        values = np.ascontiguousarray(array[...])
+        if values.dtype != dtype or values.shape != shape:
+            raise RuntimeError(f"{path}: decoded static scan metadata changed.")
+        payload = values.tobytes(order="C")
+        digest.update(payload)
+        decoded_bytes = len(payload)
+        leaves.append(
+            {
+                "path": path,
+                "decoded_bytes": len(payload),
+                "decoded_sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+    if np.dtype(array.dtype) != dtype or tuple(int(value) for value in array.shape) != shape:
+        raise RuntimeError(f"{path}: array metadata changed during payload scan.")
+    return {
+        "path": path,
+        "plan": {"path": path, "shape": list(shape), "dtype": str(dtype)},
+        "row_aligned": row_aligned,
+        "leaves": leaves,
+        "decoded_bytes": decoded_bytes,
+        "content_sha256": digest.hexdigest(),
+    }
+
+
+def build_subject_shape_unbound_payload_scan_receipt(
+    run_group: Any,
+    *,
+    workers: int = 1,
+    block_rows: int = 1_024,
+) -> dict[str, object]:
+    """Scan an exclusive local unbound payload once into reusable evidence.
+
+    The caller owns the node-local scratch artifact exclusively and has closed
+    every scientific write.  Array reads are parallelized across the closed
+    inventory, while each individual array is traversed in canonical row-major
+    order so its digest is byte-identical to ``array_payload_sha256``.  The
+    later storage materialization re-reads every value and checks these direct
+    digests, closing the boundary before authoritative publication.
+    """
+
+    if type(workers) is not int or workers <= 0:
+        raise ValueError("Subject-shape payload scan workers must be positive.")
+    if type(block_rows) is not int or block_rows <= 0:
+        raise ValueError("Subject-shape payload scan block_rows must be positive.")
+    if (
+        run_group.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
+        != SUBJECT_SHAPE_UNBOUND_STAGE_STATUS
+        or run_group.attrs.get("palette_run_completion_status") != "complete"
+        or run_group.attrs.get("stage_selector_eligible") is not False
+    ):
+        raise ValueError(
+            "Subject-shape unbound payload scan requires one complete, "
+            "selector-ineligible unbound stage."
+        )
+    arrays = list(_iter_arrays(run_group))
+    row_count = _row_count(run_group)
+    effective_workers = min(workers, max(1, len(arrays)))
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        futures = [
+            executor.submit(
+                _scan_subject_shape_array_once,
+                path,
+                array,
+                row_count=row_count,
+                block_rows=block_rows,
+            )
+            for path, array in arrays
+        ]
+        results = sorted(
+            (future.result() for future in futures),
+            key=lambda value: str(value["path"]),
+        )
+    plans = [dict(result["plan"]) for result in results]
+    shard_leaves = [
+        dict(leaf)
+        for result in results
+        if result["row_aligned"] is True
+        for leaf in result["leaves"]
+    ]
+    static_leaves = [
+        dict(leaf)
+        for result in results
+        if result["row_aligned"] is False
+        for leaf in result["leaves"]
+    ]
+    content_sha256 = {
+        str(result["path"]): str(result["content_sha256"])
+        for result in results
+    }
+    decoded_bytes = sum(int(result["decoded_bytes"]) for result in results)
+    copy_report = {
+        "schema_id": "palette.zarr_sharded_run_copy.v1",
+        "status": "complete",
+        "source_run": f"/{str(run_group.path).strip('/')}",
+        "destination_run": f"/{str(run_group.path).strip('/')}",
+        "array_count": len(plans),
+        "arrays": plans,
+        "shards": shard_leaves,
+        "static_arrays": static_leaves,
+        "decoded_bytes_copied": decoded_bytes,
+        "exact_decoded_validation": True,
+        "receipt_origin": "single_exclusive_post_compute_decoded_scan_v1",
+    }
+    decoded_payload = decoded_payload_receipt_from_copy_report(copy_report)
+    return {
+        "schema_id": "palette.subject_shape_unbound_payload_scan_receipt",
+        "schema_version": 1,
+        "run_ref": f"/{str(run_group.path).strip('/')}",
+        "array_payload_canonicalization": ARRAY_PAYLOAD_CANONICALIZATION,
+        "closed_array_inventory": True,
+        "mutation_exclusion": "exclusive_node_local_writer_v1",
+        "requested_workers": workers,
+        "effective_workers": effective_workers,
+        "block_rows": block_rows,
+        "duration_seconds": float(time.perf_counter() - started),
+        "array_content_sha256": content_sha256,
+        "decoded_payload": decoded_payload,
+        "decoded_copy_report": copy_report,
+    }
 
 
 def build_subject_shape_bound_payload_scan_receipt(
     run_group: Any,
+    *,
+    workers: int = 1,
 ) -> dict[str, object]:
     """Scan one final bound payload once into reusable decoded digest evidence.
 
@@ -982,65 +1615,44 @@ def build_subject_shape_bound_payload_scan_receipt(
         raise ValueError(
             "Subject-shape payload scan requires one running, ineligible child."
         )
+    if type(workers) is not int or workers <= 0:
+        raise ValueError("Subject-shape bound payload scan workers must be positive.")
     row_count = _row_count(run_group)
-    plans: list[dict[str, object]] = []
-    shard_leaves: list[dict[str, object]] = []
-    static_leaves: list[dict[str, object]] = []
-    content_sha256: dict[str, str] = {}
-    decoded_bytes = 0
-    for path, array in _iter_arrays(run_group):
-        dtype = np.dtype(array.dtype)
-        shape = tuple(int(value) for value in array.shape)
-        if dtype.hasobject:
-            raise TypeError(f"{path}: object arrays have no payload receipt grammar.")
-        plans.append({"path": path, "shape": list(shape), "dtype": str(dtype)})
-        digest = _array_digest_header(dtype=dtype, shape=shape)
-        if shape and shape[0] == row_count:
-            try:
-                metadata = array.metadata.to_dict()
-                outer_shape = metadata["chunk_grid"]["configuration"]["chunk_shape"]
-                step = int(outer_shape[0])
-            except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
-                raise ValueError(
-                    f"{path}: physical outer grid is unavailable: {exc}."
-                ) from exc
-            if step <= 0:
-                raise ValueError(f"{path}: physical outer row extent is invalid.")
-            trailing = (slice(None),) * (len(shape) - 1)
-            for start in range(0, shape[0], step):
-                stop = min(shape[0], start + step)
-                values = np.ascontiguousarray(
-                    array[(slice(start, stop), *trailing)]
-                )
-                if values.dtype != dtype:
-                    raise RuntimeError(f"{path}: decoded scan dtype changed.")
-                payload = values.tobytes(order="C")
-                digest.update(payload)
-                decoded_bytes += len(payload)
-                shard_leaves.append(
-                    {
-                        "path": path,
-                        "start_row": start,
-                        "stop_row": stop,
-                        "decoded_bytes": len(payload),
-                        "decoded_sha256": hashlib.sha256(payload).hexdigest(),
-                    }
-                )
-        else:
-            values = np.ascontiguousarray(array[...])
-            if values.dtype != dtype or values.shape != shape:
-                raise RuntimeError(f"{path}: decoded static scan metadata changed.")
-            payload = values.tobytes(order="C")
-            digest.update(payload)
-            decoded_bytes += len(payload)
-            static_leaves.append(
-                {
-                    "path": path,
-                    "decoded_bytes": len(payload),
-                    "decoded_sha256": hashlib.sha256(payload).hexdigest(),
-                }
+    arrays = list(_iter_arrays(run_group))
+    effective_workers = min(workers, max(1, len(arrays)))
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        futures = [
+            executor.submit(
+                _scan_subject_shape_array_once,
+                path,
+                array,
+                row_count=row_count,
+                block_rows=None,
             )
-        content_sha256[path] = digest.hexdigest()
+            for path, array in arrays
+        ]
+        results = sorted(
+            (future.result() for future in futures),
+            key=lambda value: str(value["path"]),
+        )
+    plans = [dict(result["plan"]) for result in results]
+    shard_leaves = [
+        dict(leaf)
+        for result in results
+        if result["row_aligned"] is True
+        for leaf in result["leaves"]
+    ]
+    static_leaves = [
+        dict(leaf)
+        for result in results
+        if result["row_aligned"] is False
+        for leaf in result["leaves"]
+    ]
+    content_sha256 = {
+        str(result["path"]): str(result["content_sha256"])
+        for result in results
+    }
+    decoded_bytes = sum(int(result["decoded_bytes"]) for result in results)
 
     copy_report = {
         "schema_id": "palette.zarr_sharded_run_copy.v1",
@@ -1061,6 +1673,8 @@ def build_subject_shape_bound_payload_scan_receipt(
         "run_ref": f"/{str(run_group.path).strip('/')}",
         "array_payload_canonicalization": ARRAY_PAYLOAD_CANONICALIZATION,
         "closed_array_inventory": True,
+        "requested_workers": workers,
+        "effective_workers": effective_workers,
         "array_content_sha256": content_sha256,
         "decoded_copy_report": copy_report,
     }
@@ -1414,17 +2028,21 @@ __all__ = [
     "SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE",
     "SUBJECT_SHAPE_STORAGE_PROFILE_CHOICES",
     "build_subject_shape_bound_payload_scan_receipt",
+    "build_subject_shape_unbound_payload_scan_receipt",
     "build_subject_shape_storage_receipt",
+    "compose_subject_shape_bound_payload_receipt",
     "create_bound_subject_shape_access_aware_array",
     "create_bound_subject_shape_candidate_array",
     "finalize_bound_subject_shape_storage_receipt",
     "is_subject_shape_access_aware_storage",
     "is_subject_shape_storage_candidate",
+    "load_subject_shape_deferred_storage_receipt",
     "materialize_subject_shape_access_aware_storage",
     "materialize_subject_shape_storage_candidate",
     "persist_subject_shape_storage_receipt",
     "persist_subject_shape_storage_source_manifest_link",
     "set_subject_shape_metadata_visibility_policy",
+    "stamp_subject_shape_deferred_storage_receipt",
     "subject_shape_fill_value",
     "subject_shape_access_aware_storage_profile",
     "validate_subject_shape_access_aware_storage",

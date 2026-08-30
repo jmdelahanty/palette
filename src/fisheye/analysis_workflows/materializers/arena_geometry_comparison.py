@@ -947,7 +947,7 @@ def publish_arena_geometry_comparison(
             prepare_parents=prepare,
             complete_run=complete,
             verify_pointers=verify,
-            after_rename=lambda _root, _run: {
+            after_rename=lambda _root, _run, _physical_copy: {
                 "source_revision_audit": _revalidate_sources(plan)
             },
             payload_metadata={"algorithm_version": COMPARISON_ALGORITHM_VERSION},
