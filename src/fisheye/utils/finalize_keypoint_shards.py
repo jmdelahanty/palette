@@ -17,11 +17,13 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import zarr
 
-from fisheye.shared.keypoint_summary import build_frame_keypoint_counts
-from fisheye.shared.hybrid_crop_provider import (
-    HYBRID_CROP_RUN_SCHEMA_ID,
-    validate_hybrid_crop_signed_identity,
+from fisheye.shared.crop_row_rebase import (
+    DIRECT_SAME_CROP_MAPPING_MODE,
+    IDENTITY_REBASE_MAPPING_MODE,
+    CropRowSelection,
+    resolve_crop_row_rebase,
 )
+from fisheye.shared.keypoint_summary import build_frame_keypoint_counts
 from fisheye.shared.keypoint_publication_profile import (
     COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
     require_compatibility_keypoint_shard_aggregate,
@@ -37,7 +39,6 @@ from fisheye.shared.zarr.chunk_profiles import (
     create_geometry_preload_array,
     geometry_preload_chunks_for_data,
 )
-from fisheye.shared.zarr.crop_shadow import open_persisted_crop_geometry_publication
 from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
 )
@@ -88,22 +89,6 @@ REQUIRED_ROW_ARRAYS: tuple[str, ...] = (
 )
 
 COUNT_ARRAYS: tuple[str, ...] = ("frame_counts", "n_rois", "n_keypoints")
-
-CROP_REBASE_REQUIRED_AUTHORITY_ARRAYS: tuple[str, ...] = (
-    "instance_key",
-    "source_refined_row_ids",
-    "frame_indices",
-    "roi_coordinates_full",
-)
-
-CROP_REBASE_CORROBORATION_ARRAYS: tuple[str, ...] = (
-    "source_acquisition_frame_index",
-    "roi_sizes_full",
-    "source_crop_xywh",
-    "bbox_img_xyxy",
-    "bbox_norm_coords",
-    "bbox_roi_xyxy",
-)
 
 CROP_REBASE_COPY_ARRAYS: tuple[str, ...] = (
     "instance_key",
@@ -198,10 +183,6 @@ class CropRebase:
     target_row_ids: np.ndarray
     source_crop_runs: tuple[str, ...]
     mapping_mode: str
-
-
-DIRECT_SAME_CROP_MAPPING_MODE = "direct_same_crop_row_ids"
-IDENTITY_REBASE_MAPPING_MODE = "identity_rebase"
 
 
 def _utc_now() -> str:
@@ -479,71 +460,6 @@ def _sort_and_validate_row_arrays(row_arrays: Mapping[str, np.ndarray]) -> tuple
     return sorted_rows, order
 
 
-def _validate_rebase_profile_authorities(
-    *,
-    archive: Path,
-    target_crop_run: str,
-    target_group: zarr.Group,
-    source_groups: Mapping[str, zarr.Group],
-) -> None:
-    target_manifest = target_group.attrs.get("run_manifest")
-    target_refined_run: str | None = None
-    if isinstance(target_manifest, Mapping):
-        publication = open_persisted_crop_geometry_publication(
-            archive,
-            run_id=target_crop_run,
-        )
-        payload = publication.manifest.get("payload")
-        refined = (
-            payload.get("source_refined_snapshot")
-            if isinstance(payload, Mapping)
-            else None
-        )
-        if isinstance(refined, Mapping):
-            target_refined_run = str(refined.get("run_id") or "").strip() or None
-
-    for source_run, source_group in source_groups.items():
-        if str(source_group.attrs.get("schema_id") or "") != HYBRID_CROP_RUN_SCHEMA_ID:
-            continue
-        provider_digest = str(
-            source_group.attrs.get("provider_record_sha256") or ""
-        ).strip()
-        validate_hybrid_crop_signed_identity(
-            source_group,
-            expected_provider_record_sha256=provider_digest,
-        )
-        source_refined_run = str(
-            source_group.attrs.get("source_refined_detect_run") or ""
-        ).strip()
-        if target_refined_run is not None and source_refined_run != target_refined_run:
-            raise ValueError(
-                f"Signed hybrid crop crop_runs/{source_run} binds refined run "
-                f"{source_refined_run!r}, but crop_runs/{target_crop_run} binds "
-                f"{target_refined_run!r}."
-            )
-
-
-def _target_rows_for_instance_keys(
-    *,
-    sorted_target_keys: np.ndarray,
-    target_key_order: np.ndarray,
-    source_keys: np.ndarray,
-    source_label: str,
-    target_crop_run: str,
-) -> np.ndarray:
-    positions = np.searchsorted(sorted_target_keys, source_keys)
-    in_range = positions < sorted_target_keys.shape[0]
-    matches = np.zeros(source_keys.shape[0], dtype=bool)
-    matches[in_range] = sorted_target_keys[positions[in_range]] == source_keys[in_range]
-    if not np.all(matches):
-        first = int(np.flatnonzero(~matches)[0])
-        raise ValueError(
-            f"Could not map {source_label} row {first} by instance_key into "
-            f"crop_runs/{target_crop_run}."
-        )
-    return target_key_order[positions].astype(np.int64, copy=False)
-
-
 def _resolve_crop_rebase(
     root: zarr.Group,
     shards: Sequence[Shard],
@@ -554,155 +470,27 @@ def _resolve_crop_rebase(
     if not target_crop_run:
         return None
     crop_parent = root.get("crop_runs")
-    if crop_parent is None or target_crop_run not in crop_parent:
-        raise ValueError(f"target crop run not found: crop_runs/{target_crop_run}")
-    target_group = crop_parent[target_crop_run]
-
-    # A target run is not automatically a rebase authority. Modern clipped
-    # inference partitions one recording-level hybrid crop and every shard
-    # already stores row IDs in that exact crop. Preserve those direct IDs;
-    # requiring legacy clip/local-frame identity arrays here would invent a
-    # cross-crop translation that neither occurred nor is needed.
-    if all(shard.source_crop_run == target_crop_run for shard in shards):
-        target_total = int(target_group["frame_indices"].shape[0])
-        direct_chunks: list[np.ndarray] = []
-        source_crop_runs: list[str] = []
-        for shard in shards:
-            source_crop_runs.append(shard.source_crop_run)
-            source_rows = _as_array(shard.group, SOURCE_CROP_ROW_IDS_ARRAY).astype(
-                np.int64,
-                copy=False,
-            ).reshape(-1)
-            if source_rows.size and (
-                int(source_rows.min()) < 0 or int(source_rows.max()) >= target_total
-            ):
-                raise ValueError(
-                    f"{KEYPOINT_SHARD_PARENT}/{shard.name} has source_crop_row_ids "
-                    f"outside crop_runs/{target_crop_run}."
-                )
-            direct_chunks.append(source_rows)
-        target_rows = (
-            np.concatenate(direct_chunks, axis=0)
-            if direct_chunks
-            else np.zeros(0, dtype=np.int64)
-        )
-        return CropRebase(
-            target_crop_run=str(target_crop_run),
-            target_crop_group=target_group,
-            target_row_ids=target_rows,
-            source_crop_runs=tuple(source_crop_runs),
-            mapping_mode=DIRECT_SAME_CROP_MAPPING_MODE,
-        )
-
-    missing_target = [
-        name
-        for name in CROP_REBASE_REQUIRED_AUTHORITY_ARRAYS
-        if name not in target_group
-    ]
-    if missing_target:
-        raise ValueError(
-            f"target crop run crop_runs/{target_crop_run} missing authority arrays: "
-            f"{missing_target}"
-        )
-
-    target_total = int(target_group["frame_indices"].shape[0])
-    target_keys = _validated_instance_keys(
-        target_group,
-        label=f"crop_runs/{target_crop_run}",
-        expected_rows=target_total,
-        require_unique=True,
-    )
-    target_key_order = np.argsort(target_keys, kind="stable")
-    sorted_target_keys = target_keys[target_key_order]
-    source_groups: dict[str, zarr.Group] = {}
-    for shard in shards:
-        source_group = crop_parent.get(shard.source_crop_run)
-        if source_group is None:
-            raise ValueError(
-                f"source crop run not found: crop_runs/{shard.source_crop_run}"
+    if crop_parent is None:
+        raise ValueError("Missing crop_runs group.")
+    resolution = resolve_crop_row_rebase(
+        crop_parent=crop_parent,
+        target_crop_run=str(target_crop_run),
+        selections=tuple(
+            CropRowSelection(
+                source_label=f"{KEYPOINT_SHARD_PARENT}/{shard.name}",
+                source_crop_run=shard.source_crop_run,
+                source_rows=_as_array(shard.group, SOURCE_CROP_ROW_IDS_ARRAY),
             )
-        source_groups[shard.source_crop_run] = source_group
-    _validate_rebase_profile_authorities(
+            for shard in shards
+        ),
         archive=archive,
-        target_crop_run=str(target_crop_run),
-        target_group=target_group,
-        source_groups=source_groups,
     )
-
-    target_authority = {
-        name: _as_array(target_group, name)
-        for name in (
-            *CROP_REBASE_REQUIRED_AUTHORITY_ARRAYS,
-            *CROP_REBASE_CORROBORATION_ARRAYS,
-        )
-        if name in target_group
-    }
-    source_authority: dict[str, dict[str, np.ndarray]] = {}
-    source_keys_by_run: dict[str, np.ndarray] = {}
-    for source_run, source_group in source_groups.items():
-        missing_source = [
-            name
-            for name in CROP_REBASE_REQUIRED_AUTHORITY_ARRAYS
-            if name not in source_group
-        ]
-        if missing_source:
-            raise ValueError(
-                f"source crop run crop_runs/{source_run} missing authority arrays: "
-                f"{missing_source}"
-            )
-        source_total = int(source_group["frame_indices"].shape[0])
-        source_keys_by_run[source_run] = _validated_instance_keys(
-            source_group,
-            label=f"crop_runs/{source_run}",
-            expected_rows=source_total,
-            require_unique=True,
-        )
-        source_authority[source_run] = {
-            name: _as_array(source_group, name)
-            for name in (
-                *CROP_REBASE_REQUIRED_AUTHORITY_ARRAYS,
-                *CROP_REBASE_CORROBORATION_ARRAYS,
-            )
-            if name in source_group and name in target_authority
-        }
-
-    rebased_chunks: list[np.ndarray] = []
-    source_crop_runs: list[str] = []
-    for shard in shards:
-        source_crop_runs.append(shard.source_crop_run)
-        source_rows = (
-            _as_array(shard.group, SOURCE_CROP_ROW_IDS_ARRAY)
-            .astype(np.int64, copy=False)
-            .reshape(-1)
-        )
-        source_keys = source_keys_by_run[shard.source_crop_run][source_rows]
-        source_label = f"{KEYPOINT_SHARD_PARENT}/{shard.name}"
-        mapped = _target_rows_for_instance_keys(
-            sorted_target_keys=sorted_target_keys,
-            target_key_order=target_key_order,
-            source_keys=source_keys,
-            source_label=source_label,
-            target_crop_run=str(target_crop_run),
-        )
-        for name, source_values in source_authority[shard.source_crop_run].items():
-            if name == "instance_key":
-                continue
-            if not np.array_equal(
-                source_values[source_rows],
-                target_authority[name][mapped],
-            ):
-                raise ValueError(
-                    f"{source_label} authority array {name!r} disagrees with "
-                    f"crop_runs/{target_crop_run} after instance_key mapping."
-                )
-        rebased_chunks.append(mapped)
-    target_rows = np.concatenate(rebased_chunks, axis=0) if rebased_chunks else np.zeros(0, dtype=np.int64)
     return CropRebase(
-        target_crop_run=str(target_crop_run),
-        target_crop_group=target_group,
-        target_row_ids=target_rows,
-        source_crop_runs=tuple(source_crop_runs),
-        mapping_mode=IDENTITY_REBASE_MAPPING_MODE,
+        target_crop_run=resolution.target_crop_run,
+        target_crop_group=resolution.target_crop_group,
+        target_row_ids=resolution.target_rows,
+        source_crop_runs=resolution.source_crop_runs,
+        mapping_mode=resolution.mapping_mode,
     )
 
 

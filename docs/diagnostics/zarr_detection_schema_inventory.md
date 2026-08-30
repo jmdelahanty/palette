@@ -273,9 +273,9 @@ Canonical detection bounding boxes and centers use exact `float32` in the first 
 | artifact_row_id | 1 | ["uint64"] | [] |
 | detection_indices | 17 | ["int32","int64"] | ["crop","eye_masks","keypoints","refined_eye_masks","refined_keypoints","refined_subject_masks","subject_masks"] |
 | detection_source | 29 | ["int8"] | ["crop","eye_masks","keypoints","refined_keypoints","refined_subject_masks","subject_masks"] |
-| instance_key | 19 | ["uint64"] | ["crop","eye_masks","keypoints","refined_eye_masks","refined_keypoints","refined_subject_masks","subject_masks","tracking"] |
+| instance_key | 18 | ["uint64"] | ["crop","eye_masks","keypoints","refined_eye_masks","refined_keypoints","refined_subject_masks","subject_masks","tracking"] |
 | source_detect_row_index | 14 | ["int32"] | ["crop","eye_masks","keypoints","refined_eye_masks","refined_keypoints","refined_subject_masks","subject_masks","tracking"] |
-| source_refined_row_ids | 19 | ["int64"] | ["crop","eye_masks","keypoints","refined_eye_masks","refined_keypoints","refined_subject_masks","subject_masks","subject_shape","tail_kinematics","tail_posture_view","tracking"] |
+| source_refined_row_ids | 18 | ["int64"] | ["crop","eye_masks","keypoints","refined_eye_masks","refined_keypoints","refined_subject_masks","subject_masks","subject_shape","tail_kinematics","tail_posture_view","tracking"] |
 
 ## Contract Checklist
 
