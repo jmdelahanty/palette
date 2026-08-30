@@ -563,6 +563,7 @@ def run_keypoints_with_registry_model(
     roi_cache_dir: Optional[Path] = None,
     roi_cache_manifest: Optional[Path] = None,
     roi_cache_expected_archive_path: Optional[Path] = None,
+    roi_work_package_manifest: Optional[Path] = None,
     stage_roi_cache_to_scratch: bool = False,
     roi_cache_staging_dir: Optional[Path] = None,
     profile_timings: bool = False,
@@ -611,6 +612,7 @@ def run_keypoints_with_registry_model(
         roi_cache_dir=roi_cache_dir,
         roi_cache_manifest=roi_cache_manifest,
         roi_cache_expected_archive_path=roi_cache_expected_archive_path,
+        roi_work_package_manifest=roi_work_package_manifest,
         stage_roi_cache_to_scratch=bool(stage_roi_cache_to_scratch),
         roi_cache_staging_dir=roi_cache_staging_dir,
         profile_timings=bool(profile_timings),
@@ -828,6 +830,7 @@ def run_keypoints_with_registry_model(
             roi_cache_dir=roi_cache_dir,
             roi_cache_manifest=effective_roi_cache_manifest,
             roi_cache_expected_archive_path=roi_cache_expected_archive_path,
+            roi_work_package_manifest=roi_work_package_manifest,
             roi_cache_source_tier=roi_cache_staging_details.get("effective_source_tier"),
             roi_cache_staged_to_node_scratch=bool(roi_cache_staging_details.get("staged", False)),
             roi_cache_staging_details=roi_cache_staging_details or None,
@@ -1008,6 +1011,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--roi-work-package-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Optional crop-pixel work package for noncanonical terminal shard "
+            "inference. Mutually exclusive with --roi-cache-manifest."
+        ),
+    )
+    parser.add_argument(
         "--stage-roi-cache-to-scratch",
         action="store_true",
         help="Copy --roi-cache-manifest and payload to node-local scratch before inference.",
@@ -1096,6 +1108,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         roi_cache_dir=args.roi_cache_dir,
         roi_cache_manifest=args.roi_cache_manifest,
         roi_cache_expected_archive_path=args.roi_cache_expected_archive_path,
+        roi_work_package_manifest=args.roi_work_package_manifest,
         stage_roi_cache_to_scratch=bool(args.stage_roi_cache_to_scratch),
         roi_cache_staging_dir=args.roi_cache_staging_dir,
         profile_timings=bool(args.profile_timings),

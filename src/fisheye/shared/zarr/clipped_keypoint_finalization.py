@@ -521,12 +521,12 @@ def clip_terminal_result_from_yolo_arrays(
         or np.any(source_rows >= source_crop_keys.shape[0])
     ):
         raise ClippedKeypointFinalizationError(
-            "YOLO source crop arrays do not have the exact legacy proxy dtypes and "
-            "shapes."
+            "YOLO source crop arrays do not have the exact direct-row mapping "
+            "dtypes and shapes."
         )
     if not np.array_equal(source_crop_row_ids, np.arange(source_crop_keys.size)):
         raise ClippedKeypointFinalizationError(
-            "YOLO source crop row ids must be the direct contiguous proxy mapping."
+            "YOLO source crop row ids must be one direct contiguous mapping."
         )
     comparisons = (
         ("instance_key", keys, crop_keys[rows]),
