@@ -594,6 +594,101 @@ receipt permits targeted rehash of exactly `body/body_bearing_deg` and
 chasers across the full recording and three exact semantic epochs. The same
 recording truthfully omits gaze because it has no schema-v3 gaze successor.
 
+### Exact body-bearing × distance parity addendum — 2026-08-30
+
+The earlier GoodCopBadCop viewer retained two related products that had not
+been migrated into the exact-successor provider: a polar point cloud whose
+angle is anatomical chaser bearing and whose radius is fish--chaser distance,
+and a joint distance-by-bearing polar density. The exact provider exposed only
+the one-dimensional `body_bearing_polar` marginal, so neither older product was
+discoverable for the live recording even though its exact keypoint relative
+frame already contained the required evidence.
+
+The implementation branch now adds a distinct conditional
+`body_bearing_distance` analysis. It is available only through the same closed
+accepted-keypoint body-bearing binding as `body_bearing_polar`; detection
+centroids remain a first-class distance provider but are not substituted for
+an anatomical body-axis supplier. The view intersects exact panel membership,
+`chaser_occurrence_member`, `relative_physical_valid`, and
+`body_bearing_valid`. Declared-valid non-finite, negative-distance, or
+out-of-circle bearing values fail closed. Missing or invalid rows remain
+excluded evidence and no interpolation occurs.
+
+Both Marimo and static publication use the shared plotting-library-neutral
+recipe `accepted_body_axis_bearing_distance_display_v1`. Density uses fixed
+5 mm distance bins and 30-degree whole-circle bearing bins, normalizes within
+each panel and chaser, and records realized bin edges and exact denominators.
+Its color scale uses the recorded 0.98 positive-bin probability quantile shared
+across panels. The interactive point cloud is deterministically limited to
+4,000 source-ordered rows per panel/chaser; static publication is limited to
+20,000. The density always consumes every jointly valid exact row.
+
+The detailed static receipt is advanced to schema/recipe v4 and grows from
+seven to nine figure families (14 to 18 PNG/PDF files). The two added families
+are `keypoint_body_bearing_distance_point_cloud` and
+`keypoint_body_bearing_distance_density`. Receipt-bound publication now
+target-rehashes the two body arrays in addition to its base-array roster and
+seals body authority, source paths, bin edges, panel denominators, sampling
+limits, normalization, and color scaling. Cohort recipe names advance to the
+non-colliding detailed bundle v4 / receipt-bound recipe v6 identities; earlier
+bundles remain immutable.
+
+This closes single-recording interactive and receipt-sealed static parity for
+the keypoint-authority bearing--distance views. It does not yet create a
+persisted cross-recording joint-histogram successor, so group/cohort pooling of
+this exact product remains a separate versioned publication step.
+
+A read-only receipt-bound smoke against
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat` discovers the new analysis only
+on the body-frame-authorized v4 bundle. The targeted load completed in 4.042 s
+and rendering in 0.174 s. Both figures contain eight panel/chaser traces (full
+recording plus three semantic epochs for two chasers). Their eight denominators
+sum to 592,362 jointly valid panel rows; density retained all of them and the
+display-only point clouds retained the configured 32,000-row total. Focused
+validation passed 79 tests, the neighboring receipt/materialization surface
+passed 67 tests, and Marimo check passed. Required CI remains pending release
+evidence.
+
+### Protocol-authored chaser appearance and exact location overlays — 2026-08-30
+
+The earlier exact trajectory reader assigned green, purple, and later palette
+colors by chaser column. That was a display defect: experimental color is a
+protocol datum and is not a synonym for behavior role. A blue rendered object
+may be aggressive, random non-chasing, or inert. The spatial occupancy reader
+also omitted the pre/post logged chaser locations even though its bound
+relative-frame children retained them.
+
+The implementation branch now resolves one shared fail-closed appearance
+projection. The relative-frame manifest already seals a self-digested chaser
+occurrence record containing the exact stimulus-run path, complete protocol
+SHA-256, protocol chaser index, stimulus-run-scoped identity, and behavior
+role. The reader opens that exact run through consolidated metadata, rehashes
+the complete `protocol_json`, resolves its chaser list, and requires exact
+identity/role/cardinality agreement with both paired relative-frame manifests
+and their stable frame-column codes. Missing explicit RGBA, stale digest,
+mismatched role, or selector-like path makes the panel unavailable; no
+role-color, index-palette, or default-black substitution is allowed.
+
+Marker fill now uses the protocol-authored RGBA. Role is a separate glyph and
+text layer: aggressive is a star, random non-chasing a diamond, inert a circle,
+and unknown an X. Exact identity and protocol index remain in hover/legend;
+the contrast outline is display-only. This contract is used by the interactive
+trajectory view and by new spatial pre/post overlays. Spatial locations are
+medians of all exact valid logged rows within the sealed pre or post interval,
+with sample count and median/p95/maximum drift retained in figure metadata and
+hover. The moving training epoch is deliberately not collapsed to one static
+marker; its logged path remains in the trajectory view.
+
+The live receipt-bound smoke target proves the distinction: both configured
+objects are experimentally black, while their roles are aggressive and inert.
+Both views render black fills with star/circle glyphs. The complete exact-chaser
+Marimo unit surface passed 82 tests, including an adversarial two-blue-chaser
+case, and `marimo check` passed outside the sandbox. Required CI remains a
+release gate. The receipt-sealed
+static trajectory plot still uses its earlier column palette and is explicitly
+deferred for migration to this shared appearance projection; it must not be
+described as color-parity complete yet.
+
 ## Persisted but not yet mounted in this capability
 
 These products are safe candidates for later read-only panels, but were kept
@@ -608,10 +703,11 @@ arrays without recomputing trial membership, event classification, timing, or
 geometry.
 
 The currently declared exact-successor analyses are
-`radial_near_field`, `distance_traces`, `trajectory_overlays`,
+`radial_near_field`, `distance_traces`, conditionally `body_bearing_polar`,
+conditionally `body_bearing_distance`, `trajectory_overlays`,
 `spatial_occupancy`, conditionally `controller_trials`, conditionally
-`generalized_bout_response`, conditionally `escape_freeze`, and `provenance`. They
-do not provide interactive
+`generalized_bout_response`, conditionally `escape_freeze`, conditionally
+`gaze_tracking`, and `provenance`. They do not provide interactive
 equivalents for all nine static figure families. In particular,
 event-aligned escape distance trajectories and the composed full dashboard
 remain absent from this exact reader. Older GoodCopBadCop components or

@@ -52,6 +52,13 @@ from fisheye.visualization.goodcopbadcop_interactive import (
     CHASER_DASHBOARD_RENDERERS,
     LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
 )
+from fisheye.visualization.chaser_body_bearing_distance import (
+    BEARING_BIN_WIDTH_DEG,
+    DENSITY_COLOR_CMAX_QUANTILE,
+    DISPLAY_RECIPE_ID as BODY_BEARING_DISTANCE_DISPLAY_RECIPE_ID,
+    DISTANCE_BIN_WIDTH_MM,
+    INTERACTIVE_POINT_CLOUD_MAX_ROWS_PER_PANEL_CHASER,
+)
 from fisheye.visualization.bout_kinematics_interactive import (
     BOUT_EYE_GAZE_PLOT_RENDERER,
     BOUT_HEADING_PLOT_RENDERER,
@@ -1110,6 +1117,33 @@ def discover_exact_chaser_successor_options(
                     ],
                     "bin_width_deg": 10.0,
                     "normalization": "probability_within_panel_chaser",
+                    "body_axis_fallback": "prohibited",
+                    "detection_position_substitution": "prohibited",
+                },
+                "body_bearing_distance": {
+                    "recipe_id": BODY_BEARING_DISTANCE_DISPLAY_RECIPE_ID,
+                    "source_arrays": [
+                        "base/relative_distance_physical",
+                        "base/relative_physical_valid",
+                        "body/body_bearing_deg",
+                        "body/body_bearing_valid",
+                        "base/chaser_occurrence_member",
+                    ],
+                    "joint_validity": (
+                        "panel_member_and_chaser_occurrence_and_"
+                        "relative_physical_valid_and_body_bearing_valid"
+                    ),
+                    "distance_bin_width_mm": DISTANCE_BIN_WIDTH_MM,
+                    "bearing_bin_width_deg": BEARING_BIN_WIDTH_DEG,
+                    "density_normalization": "probability_within_panel_chaser",
+                    "density_color_cmax_quantile": (DENSITY_COLOR_CMAX_QUANTILE),
+                    "point_cloud_sampling": (
+                        "source_order_uniform_including_endpoints"
+                    ),
+                    "point_cloud_max_rows_per_panel_chaser": (
+                        INTERACTIVE_POINT_CLOUD_MAX_ROWS_PER_PANEL_CHASER
+                    ),
+                    "interpolation": "prohibited",
                     "body_axis_fallback": "prohibited",
                     "detection_position_substitution": "prohibited",
                 },

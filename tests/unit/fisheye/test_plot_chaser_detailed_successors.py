@@ -44,8 +44,14 @@ class _Relative:
     n_rows: int = 12
 
     def __post_init__(self) -> None:
+        is_keypoint = self.fish_provider.startswith("keypoint_")
         self.source_authorities = {
-            "fish_position": {"provider_id": self.fish_provider}
+            "fish_position": {"provider_id": self.fish_provider},
+            "body_frame": (
+                {"provider_id": "accepted_keypoint_body_extension.v1"}
+                if is_keypoint
+                else None
+            ),
         }
         self.manifest = {
             "coordinate_policy": {"policy_id": "camera-v1"},
@@ -75,6 +81,15 @@ class _Relative:
             ),
             "chaser_position_valid": np.ones(self.n_rows, dtype=bool),
         }
+        bearing = np.linspace(-150.0, 150.0, self.n_frames, dtype=np.float32)
+        self.body_values = (
+            {
+                "body_bearing_deg": np.column_stack((bearing, -bearing)).reshape(-1),
+                "body_bearing_valid": np.ones(self.n_rows, dtype=bool),
+            }
+            if is_keypoint
+            else {}
+        )
 
     def base_frame_chaser(self, name: str) -> np.ndarray:
         values = self.values[name]
@@ -84,6 +99,10 @@ class _Relative:
 
     def base_array(self, name: str) -> np.ndarray:
         return self.values[name]
+
+    def body_frame_chaser(self, name: str) -> np.ndarray:
+        values = self.body_values[name]
+        return values.reshape((self.n_frames, self.n_chasers) + values.shape[1:])
 
 
 def _inputs() -> tuple[
@@ -279,16 +298,16 @@ def _inputs() -> tuple[
     )
 
 
-def test_render_detailed_bundle_writes_fourteen_files(tmp_path: Path) -> None:
+def test_render_detailed_bundle_writes_eighteen_files(tmp_path: Path) -> None:
     inputs = _inputs()
     outputs = render_detailed_bundle(
         *inputs, output_dir=tmp_path, bundle_name="detailed"
     )
     parameters = detailed_plot_parameters(
-        inputs[0], inputs[1], inputs[2], inputs[5], inputs[6]
+        inputs[0], inputs[1], inputs[2], inputs[3], inputs[5], inputs[6]
     )
 
-    assert len(outputs) == 14
+    assert len(outputs) == 18
     assert all(path.is_file() and path.stat().st_size > 0 for path in outputs)
     assert parameters["scientific_coordinates"]["bout_distance_bins"][1][
         "end_mm_exclusive"
@@ -303,10 +322,30 @@ def test_render_detailed_bundle_writes_fourteen_files(tmp_path: Path) -> None:
     assert parameters["rendering"]["provider_epoch_distance_traces"][
         "subplot_grid"
     ] == [4, 2]
-    assert parameters["output_families"][-3:] == [
-        "provider_radial_near_field_summary",
-        "provider_epoch_distance_traces",
-        "provider_epoch_trajectory_overlays",
+    assert parameters["output_families"][-2:] == [
+        "keypoint_body_bearing_distance_point_cloud",
+        "keypoint_body_bearing_distance_density",
+    ]
+    bearing = parameters["scientific_coordinates"]["keypoint_body_bearing_distance"]
+    assert bearing["distance_bin_edges_mm"] == [
+        0.0,
+        5.0,
+        10.0,
+        15.0,
+        20.0,
+        25.0,
+    ]
+    assert bearing["bearing_bin_edges_deg"][0] == -180.0
+    assert bearing["bearing_bin_edges_deg"][-1] == 180.0
+    assert [row["valid_row_count"] for row in bearing["panel_denominators"]] == [
+        6,
+        6,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
     ]
 
 
@@ -357,6 +396,25 @@ def test_detailed_bundle_rejects_nonrepeated_fish_position() -> None:
     inputs[3].values["fish_position_xy_px"][1, 0] += 1.0
 
     with pytest.raises(ChaserDetailedPlotError, match="repeated identically"):
+        verify_detailed_plot_inputs(*inputs)
+
+
+def test_detailed_bundle_rejects_missing_body_frame_authority() -> None:
+    inputs = list(_inputs())
+    inputs[3].source_authorities["body_frame"] = None
+
+    with pytest.raises(ChaserDetailedPlotError, match="body-frame authority"):
+        verify_detailed_plot_inputs(*inputs)
+
+
+def test_detailed_bundle_rejects_declared_valid_nonfinite_body_bearing() -> None:
+    inputs = list(_inputs())
+    inputs[3].body_values["body_bearing_deg"] = (
+        inputs[3].body_values["body_bearing_deg"].copy()
+    )
+    inputs[3].body_values["body_bearing_deg"][0] = np.nan
+
+    with pytest.raises(ChaserDetailedPlotError, match="body-bearing values"):
         verify_detailed_plot_inputs(*inputs)
 
 

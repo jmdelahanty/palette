@@ -320,9 +320,9 @@ def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> No
     assert entry["output_run_names"]["detailed_bundle"] == (
         cohort.DETAILED_RECIPE_BUNDLE_NAME
     )
-    assert entry["output_run_names"]["detailed_bundle"].endswith("recipe_v5")
+    assert entry["output_run_names"]["detailed_bundle"].endswith("recipe_v6")
     assert successor["selection_policy"]["plot_recipe_provenance"] == (
-        "self_contained_exact_parameters_v3"
+        "self_contained_exact_parameters_v4"
     )
     assert cohort.load_cohort_task(successor)["task_sha256"] == successor[
         "task_sha256"

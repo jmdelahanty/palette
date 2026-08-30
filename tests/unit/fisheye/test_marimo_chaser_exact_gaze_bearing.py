@@ -9,6 +9,9 @@ from apps.marimo.components.chaser_exact.body_bearing import (
     _bearing_histogram,
     build_exact_body_bearing_output,
 )
+from apps.marimo.components.chaser_exact.body_bearing_distance import (
+    build_exact_body_bearing_distance_output,
+)
 from apps.marimo.components.chaser_exact.gaze_tracking import (
     _histogram_probability,
     _uniform_indices,
@@ -20,6 +23,12 @@ from fisheye.analysis_workflows.gaze_tracking_successor import (
     prepare_gaze_tracking_successor,
 )
 from fisheye.analysis_workflows.generalized_bout_response_successor import ROLE_CODES
+from fisheye.visualization.chaser_body_bearing_distance import (
+    bearing_bin_edges_deg,
+    body_bearing_distance_histogram,
+    body_bearing_distance_valid_mask,
+    distance_bin_edges_mm,
+)
 
 
 class _Mo:
@@ -94,6 +103,94 @@ def test_body_bearing_renderer_uses_only_keypoint_body_extension() -> None:
         figure.layout.meta["display_recipe"]["detection_position_substitution"]
         == "prohibited"
     )
+
+
+def test_body_bearing_distance_histogram_uses_exact_joint_validity() -> None:
+    distance = np.asarray([2.0, 7.0, 12.0, np.nan])
+    bearing = np.asarray([-170.0, -10.0, 40.0, 90.0])
+    valid = body_bearing_distance_valid_mask(
+        distance,
+        bearing,
+        np.asarray([True, True, True, False]),
+        np.asarray([True, True, False, True]),
+        np.asarray([True, True, True, True]),
+        np.asarray([True, True, True, True]),
+    )
+    edges = distance_bin_edges_mm(distance, valid)
+    histogram = body_bearing_distance_histogram(
+        distance,
+        bearing,
+        valid,
+        distance_edges_mm=edges,
+        bearing_edges_deg=bearing_bin_edges_deg(),
+    )
+
+    np.testing.assert_array_equal(valid, np.asarray([True, True, False, False]))
+    np.testing.assert_allclose(edges, np.asarray([0.0, 5.0, 10.0]))
+    assert histogram.denominator == 2
+    assert int(np.sum(histogram.counts)) == 2
+    np.testing.assert_allclose(np.sum(histogram.probability), 1.0)
+
+
+def test_body_bearing_distance_renderer_exposes_point_rows_and_joint_density() -> None:
+    arrays = {
+        "acquisition_frame_id": np.arange(5, dtype=np.int64),
+        "selection_member": np.ones(5, dtype=bool),
+        "chaser_occurrence_member": np.asarray([True, True, True, False, True]),
+        "chaser_identity_code": np.ones(5, dtype=np.uint16),
+        "chaser_behavior_role_code": np.ones(5, dtype=np.uint8),
+        "relative_distance_physical": np.asarray(
+            [2.0, 7.0, 12.0, np.nan, 17.0], dtype=np.float32
+        ),
+        "relative_physical_valid": np.asarray([True, True, True, False, True]),
+    }
+    relative = RelativeFrameProjection(
+        run_path="analysis/chaser_relative_frame_runs/keypoint-v1",
+        run_name="keypoint-v1",
+        recording_id="recording-1",
+        manifest_sha256="a" * 64,
+        n_frames=5,
+        n_chasers=1,
+        source_authorities={},
+        arrays=arrays,
+        body_arrays={
+            "body_bearing_deg": np.asarray(
+                [-170.0, -10.0, 40.0, 90.0, 170.0], dtype=np.float32
+            ),
+            "body_bearing_valid": np.asarray([True, True, False, True, True]),
+        },
+    )
+    projection = SimpleNamespace(
+        relatives=(relative, SimpleNamespace()),
+        radials=(
+            SimpleNamespace(
+                scientific_manifest={"identity_registries": {"behavior_role": {}}}
+            ),
+            SimpleNamespace(),
+        ),
+        epoch_records=(
+            {
+                "analysis_role": "chaser_pre",
+                "start_frame": 0,
+                "end_frame_exclusive": 2,
+            },
+        ),
+        provenance={"verification_mode": "receipt_bound_targeted_array_rehash_v1"},
+        recording_id="recording-1",
+    )
+
+    output = build_exact_body_bearing_distance_output(_Mo, go, projection)
+
+    assert len(output) == 3
+    point_cloud, density = output[1:]
+    assert len(point_cloud.data) == len(density.data) == 2
+    recipe = density.layout.meta["display_recipe"]
+    assert recipe["distance_bin_width_mm"] == 5.0
+    assert recipe["bearing_bin_width_deg"] == 30.0
+    assert recipe["density_normalization"] == "probability_within_panel_chaser"
+    assert [row["valid_row_count"] for row in recipe["panel_records"]] == [3, 2]
+    assert int(np.sum(density.data[0].customdata[:, 0])) == 3
+    np.testing.assert_allclose(np.sum(density.data[0].marker.color), 1.0)
 
 
 def _prepared_gaze():

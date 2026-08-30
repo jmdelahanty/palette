@@ -7,6 +7,10 @@ from typing import Any, Mapping
 import numpy as np
 
 from .array_requirements import SPATIAL_OCCUPANCY_ARRAYS
+from .chaser_locations import (
+    CHASER_LOCATION_DISPLAY_RECIPE,
+    exact_static_chaser_epoch_locations,
+)
 from .projection import ExactChaserSuccessorProjection, identity_registry
 from .provenance import freeze, plain
 
@@ -209,6 +213,7 @@ def build_exact_spatial_occupancy_output(
     from plotly.subplots import make_subplots
 
     values = _spatial_values(projection)
+    chaser_locations = exact_static_chaser_epoch_locations(projection)
     density_percent = (
         np.asarray(values["density"]) * SPATIAL_OCCUPANCY_DENSITY_MULTIPLIER
     )
@@ -276,6 +281,45 @@ def build_exact_spatial_occupancy_output(
             row=3,
             col=epoch_index + 1,
         )
+    for location in chaser_locations:
+        appearance = location.appearance
+        label = (
+            f"{appearance.behavior_role} · protocol chaser "
+            f"{appearance.chaser_index}"
+        )
+        for row in range(1, 4):
+            figure.add_trace(
+                go.Scatter(
+                    x=[location.x_mm],
+                    y=[location.y_mm],
+                    mode="markers",
+                    name=label,
+                    legendgroup=f"chaser-{appearance.identity_code}",
+                    showlegend=(location.analysis_role == "chaser_pre" and row == 1),
+                    marker={
+                        "color": appearance.experimental_color_css,
+                        "symbol": appearance.plotly_role_symbol,
+                        "size": 14,
+                        "line": {
+                            "color": appearance.contrast_outline_hex,
+                            "width": 1.5,
+                        },
+                    },
+                    hovertemplate=(
+                        f"{location.analysis_role} · {appearance.behavior_role}<br>"
+                        f"protocol chaser {appearance.chaser_index}<br>"
+                        f"identity={appearance.identity}<br>"
+                        f"experimental color={appearance.experimental_color_hex}<br>"
+                        "median x=%{x:.2f} mm<br>median y=%{y:.2f} mm<br>"
+                        f"valid logged samples={location.sample_count:,}<br>"
+                        f"p95 drift={location.p95_drift_mm:.3g} mm<br>"
+                        f"maximum drift={location.maximum_drift_mm:.3g} mm"
+                        "<extra></extra>"
+                    ),
+                ),
+                row=row,
+                col=location.epoch_index + 1,
+            )
     for row in range(1, 4):
         for column in range(1, 4):
             axis_index = (row - 1) * 3 + column
@@ -323,6 +367,19 @@ def build_exact_spatial_occupancy_output(
         "coordinate_orientation": "+x_right_+y_down",
         "interpolation": "prohibited",
         "scientific_recomputation": False,
+        "chaser_location_overlay": {
+            "recipe_id": CHASER_LOCATION_DISPLAY_RECIPE,
+            "epochs": ["chaser_pre", "chaser_post"],
+            "position_summary": "median_of_exact_valid_logged_rows",
+            "training_location_summary": "omitted_dynamic_trajectory_available_separately",
+            "color_source": "sealed_protocol_rgba",
+            "role_encoding": "independent_marker_symbol_and_legend_text",
+            "identity_encoding": "protocol_chaser_index_and_exact_identity_hover",
+            "index_or_role_color_fallback": "prohibited",
+            "locations": [
+                location.provenance_record() for location in chaser_locations
+            ],
+        },
     }
     figure_meta = plain(projection.provenance)
     figure_meta["spatial_occupancy_display"] = display_parameters
@@ -349,7 +406,7 @@ def build_exact_spatial_occupancy_output(
     return mo.vstack(
         [
             mo.callout(
-                "Persisted conditional valid-in-arena occupancy on the sealed shared physical grid; coverage retains missing and out-of-arena evidence. No bins are recomputed or interpolated.",
+                "Persisted conditional valid-in-arena occupancy on the sealed shared physical grid; coverage retains missing and out-of-arena evidence. Pre/post chaser markers use exact logged median positions: fill is the sealed experimental protocol color, while shape and text independently encode role. The moving training trajectory remains in the trajectory view. No occupancy bins are recomputed or interpolated.",
                 kind="info",
             ),
             figure,

@@ -211,6 +211,14 @@ CHASER_EXACT_SUCCESSOR_PROVIDER = ProviderDefinition(
             ),
         ),
         AnalysisDefinition(
+            "body_bearing_distance",
+            "Body-frame bearing × distance",
+            (
+                "Exact anatomical-bearing point clouds and joint polar densities "
+                "using receipt-bound keypoint distance and body-axis evidence."
+            ),
+        ),
+        AnalysisDefinition(
             "trajectory_overlays",
             "Exact-epoch position overlays",
             "Fish positions with exact logged chaser positions in the reviewed arena.",

@@ -12,6 +12,10 @@ from apps.marimo.components.chaser_exact.spatial_occupancy import (
     _spatial_values,
     build_exact_spatial_occupancy_output,
 )
+from fisheye.visualization.chaser_appearance import (
+    ChaserAppearance,
+    ChaserAppearanceProjection,
+)
 
 
 class _SpatialHandle:
@@ -63,7 +67,12 @@ class _SpatialHandle:
                     "2": "chaser_post",
                 },
             },
-            "arena": {"radius_mm": 1.0},
+            "arena": {
+                "center_x_px": 100.0,
+                "center_y_px": 100.0,
+                "radius_mm": 1.0,
+                "mm_per_pixel": 0.01,
+            },
             "grid": {
                 "coordinate_orientation": "+x_right_+y_down",
                 "normalization_policy_id": (
@@ -90,11 +99,97 @@ class _Marimo:
         return values
 
 
+class _Relative:
+    n_frames = 6
+    n_chasers = 2
+
+    def __init__(self) -> None:
+        frame = np.arange(self.n_frames, dtype=np.int64)
+        identity = np.tile(np.asarray([1, 2], dtype=np.uint16), self.n_frames)
+        role = np.tile(np.asarray([1, 2], dtype=np.uint8), self.n_frames)
+        chaser = np.tile(
+            np.asarray([[50.0, 100.0], [150.0, 100.0]], dtype=np.float64),
+            (self.n_frames, 1, 1),
+        )
+        chaser[4:, :, 1] = 150.0
+        self.arrays = {
+            "acquisition_frame_id": np.repeat(frame, self.n_chasers),
+            "selection_member": np.ones(self.n_frames * self.n_chasers, dtype=bool),
+            "chaser_position_xy_px": chaser.reshape(-1, 2),
+            "chaser_position_valid": np.ones(
+                self.n_frames * self.n_chasers, dtype=bool
+            ),
+            "chaser_occurrence_member": np.ones(
+                self.n_frames * self.n_chasers, dtype=bool
+            ),
+            "chaser_identity_code": identity,
+            "chaser_behavior_role_code": role,
+        }
+
+    def frame_chaser(self, name: str) -> np.ndarray:
+        values = self.arrays[name]
+        return values.reshape((self.n_frames, self.n_chasers) + values.shape[1:])
+
+    def collapsed_frame(self, name: str) -> np.ndarray:
+        return self.frame_chaser(name)[:, 0, ...]
+
+
+def _appearance() -> ChaserAppearanceProjection:
+    values = []
+    for identity_code, index, role_code, role, symbol in (
+        (1, 0, 1, "aggressive", "star"),
+        (2, 1, 2, "inert", "circle"),
+    ):
+        values.append(
+            ChaserAppearance(
+                identity_code=identity_code,
+                chaser_index=index,
+                identity=f"stimulus-v1:chaser_index:{index}",
+                behavior_role_code=role_code,
+                behavior_role=role,
+                experimental_color_rgba=(0.0, 0.0, 1.0, 1.0),
+                experimental_color_hex="#0000ff",
+                experimental_color_css="rgba(0,0,255,1)",
+                plotly_role_symbol=symbol,
+                matplotlib_role_marker="*" if role == "aggressive" else "o",
+                contrast_outline_hex="#ffffff",
+            )
+        )
+    return ChaserAppearanceProjection(
+        recording_id="recording-1",
+        source_stimulus_run_path="analysis/stimulus_runs/stimulus-v1",
+        source_protocol_sha256="a" * 64,
+        occurrence_binding_sha256="b" * 64,
+        appearances=tuple(values),
+        projection_sha256="c" * 64,
+    )
+
+
 def _projection(handle: _SpatialHandle | None = None) -> Any:
+    relative = _Relative()
     return SimpleNamespace(
         spatial=handle or _SpatialHandle(),
         recording_id="recording-1",
         provider_ids=("keypoint.v1", "detection.v1"),
+        relatives=(relative, relative),
+        chaser_appearance=_appearance(),
+        epoch_records=(
+            {
+                "analysis_role": "chaser_pre",
+                "start_frame": 0,
+                "end_frame_exclusive": 2,
+            },
+            {
+                "analysis_role": "chaser_training",
+                "start_frame": 2,
+                "end_frame_exclusive": 4,
+            },
+            {
+                "analysis_role": "chaser_post",
+                "start_frame": 4,
+                "end_frame_exclusive": 6,
+            },
+        ),
         provenance={"bundle_manifest_sha256": "a" * 64},
     )
 
@@ -103,7 +198,7 @@ def test_spatial_heatmap_uses_persisted_density_and_provider_difference() -> Non
     output = build_exact_spatial_occupancy_output(_Marimo, go, _projection())
 
     figure = output[1]
-    assert len(figure.data) == 9
+    assert len(figure.data) == 21
     keypoint_pre = np.asarray(figure.data[0].z)
     detection_pre = np.asarray(figure.data[1].z)
     difference_pre = np.asarray(figure.data[2].z)
@@ -117,6 +212,12 @@ def test_spatial_heatmap_uses_persisted_density_and_provider_difference() -> Non
     assert display["source_array"] == "occupancy_density_valid_in_arena"
     assert display["scientific_recomputation"] is False
     assert display["interpolation"] == "prohibited"
+    overlay = display["chaser_location_overlay"]
+    assert overlay["color_source"] == "sealed_protocol_rgba"
+    assert overlay["role_encoding"] == "independent_marker_symbol_and_legend_text"
+    marker_traces = [trace for trace in figure.data if trace.type == "scatter"]
+    assert {trace.marker.color for trace in marker_traces} == {"rgba(0,0,255,1)"}
+    assert {trace.marker.symbol for trace in marker_traces} == {"star", "circle"}
 
 
 def test_spatial_projection_rejects_denominator_nonconservation() -> None:

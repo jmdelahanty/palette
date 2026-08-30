@@ -39,6 +39,10 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
     RUN_STATUS_COMPLETE,
 )
+from fisheye.visualization.chaser_appearance import (
+    ChaserAppearanceProjection,
+    load_chaser_appearance_projection,
+)
 
 from ..common import normalize_path
 from ..registry import CHASER_EXACT_SUCCESSOR_RENDERER, InteractiveSpecOption
@@ -225,6 +229,9 @@ class RelativeFrameProjection:
     n_chasers: int
     source_authorities: Mapping[str, Any]
     arrays: Mapping[str, np.ndarray]
+    run_manifest: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     body_arrays: Mapping[str, np.ndarray] = field(
         default_factory=lambda: MappingProxyType({})
     )
@@ -271,6 +278,7 @@ class ExactChaserSuccessorProjection:
     provider_ids: tuple[str, str]
     epoch_records: tuple[Mapping[str, Any], ...]
     provenance: Mapping[str, Any]
+    chaser_appearance: ChaserAppearanceProjection | None = None
 
 
 def _load_targeted_relative(
@@ -313,6 +321,7 @@ def _load_targeted_relative(
             n_chasers=targeted.n_chasers,
             source_authorities=targeted.source_authorities,
             arrays=MappingProxyType(dict(targeted.base_arrays)),
+            run_manifest=targeted.run_manifest,
             body_arrays=MappingProxyType(dict(targeted.body_arrays)),
             verification_mode=targeted.verification_mode,
             verified_array_names=tuple(
@@ -432,6 +441,7 @@ def _load_targeted_relative(
         n_chasers=n_chasers,
         source_authorities=freeze(authorities),
         arrays=MappingProxyType(arrays),
+        run_manifest=freeze(manifest),
         body_arrays=MappingProxyType(body_arrays),
         verification_mode="deep_audit",
         verified_array_names=tuple(
@@ -479,6 +489,7 @@ def _load_receipt_relative_metadata(
         n_chasers=n_chasers,
         source_authorities=authorities,
         arrays=MappingProxyType({}),
+        run_manifest=freeze(manifest),
         body_arrays=MappingProxyType({}),
         verification_mode=RECEIPT_VERIFICATION_MODE,
         verified_array_names=(),
@@ -615,6 +626,7 @@ def load_exact_chaser_projection(
     selection_identity: ExactChaserSelectionIdentity,
     load_relative: bool,
     load_relative_arrays: bool = True,
+    load_chaser_appearance: bool = False,
     load_keypoint_body_bearing: bool = False,
     load_controller_trials: bool = False,
     load_generalized_bout_response: bool = False,
@@ -712,7 +724,12 @@ def load_exact_chaser_projection(
     provider_ids, relative_binding_proofs = _verify_bundle_children(
         spatial, radials, relative_bindings
     )
+    if load_chaser_appearance and (not load_relative or not load_relative_arrays):
+        raise ExactChaserProjectionError(
+            "Chaser appearance requires exact relative-frame identity and role arrays."
+        )
     relatives = None
+    chaser_appearance = None
     if load_relative:
         relative_values = []
         for binding, provider_role in zip(
@@ -785,6 +802,47 @@ def load_exact_chaser_projection(
                     raise ExactChaserProjectionError(
                         f"Paired exact chaser evidence differs for {name!r}."
                     )
+        if load_chaser_appearance:
+            keypoint = relatives[0]
+            identity = keypoint.frame_chaser("chaser_identity_code")
+            role = keypoint.frame_chaser("chaser_behavior_role_code")
+            if not np.all(identity == identity[:1]) or not np.all(role == role[:1]):
+                raise ExactChaserProjectionError(
+                    "Chaser appearance cannot bind unstable identity or behavior roles."
+                )
+            keypoint_contract = {
+                "chaser_occurrence": plain(
+                    _mapping(
+                        keypoint.run_manifest.get("context"),
+                        label="keypoint relative context",
+                    ).get("chaser_occurrence")
+                ),
+                "identity_registries": plain(
+                    keypoint.run_manifest.get("identity_registries")
+                ),
+            }
+            detection_contract = {
+                "chaser_occurrence": plain(
+                    _mapping(
+                        relatives[1].run_manifest.get("context"),
+                        label="detection relative context",
+                    ).get("chaser_occurrence")
+                ),
+                "identity_registries": plain(
+                    relatives[1].run_manifest.get("identity_registries")
+                ),
+            }
+            if detection_contract != keypoint_contract:
+                raise ExactChaserProjectionError(
+                    "Paired relative frames disagree on chaser occurrence or registries."
+                )
+            chaser_appearance = load_chaser_appearance_projection(
+                archive,
+                relative_manifest=keypoint.run_manifest,
+                identity_code_by_column=identity[0],
+                behavior_role_code_by_column=role[0],
+                expected_recording_id=spatial.recording_id,
+            )
     controller_trials = None
     if load_controller_trials:
         if relatives is None:
@@ -889,9 +947,11 @@ def load_exact_chaser_projection(
             escape_freeze=escape_freeze,
             gaze_tracking=gaze_tracking,
             relatives=relatives,
+            chaser_appearance=chaser_appearance,
             projection_verification_mode=selection_identity.verification_mode,
             projection_receipt_sha256=(selection_identity.projection_receipt_sha256),
         ),
+        chaser_appearance=chaser_appearance,
     )
 
 

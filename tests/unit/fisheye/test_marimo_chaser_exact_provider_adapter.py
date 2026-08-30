@@ -297,6 +297,8 @@ def test_controller_trial_analysis_is_hidden_without_one_exact_binding(
     )
 
     assert "controller_trials" not in available
+    assert "body_bearing_polar" not in available
+    assert "body_bearing_distance" not in available
     assert "spatial_occupancy" in available
 
 
@@ -324,6 +326,7 @@ def test_provider_routes_are_closed_and_controls_are_explicit() -> None:
         "radial_near_field",
         "distance_traces",
         "body_bearing_polar",
+        "body_bearing_distance",
         "trajectory_overlays",
         "spatial_occupancy",
         "controller_trials",
@@ -363,7 +366,7 @@ def test_only_selected_analysis_requests_relative_arrays(
     tmp_path: Path, monkeypatch
 ) -> None:
     option = _option(tmp_path / "recording.zarr")
-    observed: list[tuple[str, bool, bool, bool, bool, bool, bool, bool]] = []
+    observed: list[tuple[str, bool, bool, bool, bool, bool, bool, bool, bool]] = []
 
     def fake_loader(
         zarr_path,
@@ -372,6 +375,7 @@ def test_only_selected_analysis_requests_relative_arrays(
         selection_identity,
         load_relative,
         load_relative_arrays,
+        load_chaser_appearance,
         load_keypoint_body_bearing,
         load_controller_trials,
         load_generalized_bout_response,
@@ -385,6 +389,7 @@ def test_only_selected_analysis_requests_relative_arrays(
                 selection_identity.analysis_id,
                 load_relative,
                 load_relative_arrays,
+                load_chaser_appearance,
                 load_keypoint_body_bearing,
                 load_controller_trials,
                 load_generalized_bout_response,
@@ -411,6 +416,9 @@ def test_only_selected_analysis_requests_relative_arrays(
     body_bearing = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
         option.zarr_path, option, analysis_id="body_bearing_polar"
     )
+    body_bearing_distance = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
+        option.zarr_path, option, analysis_id="body_bearing_distance"
+    )
     controller = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
         option.zarr_path, option, analysis_id="controller_trials"
     )
@@ -428,19 +436,82 @@ def test_only_selected_analysis_requests_relative_arrays(
     assert spatial.analysis_id == "spatial_occupancy"
     assert distance.analysis_id == "distance_traces"
     assert body_bearing.analysis_id == "body_bearing_polar"
+    assert body_bearing_distance.analysis_id == "body_bearing_distance"
     assert controller.analysis_id == "controller_trials"
     assert bout_response.analysis_id == "generalized_bout_response"
     assert escape_freeze.analysis_id == "escape_freeze"
     assert gaze.analysis_id == "gaze_tracking"
     assert observed == [
-        ("radial_near_field", False, True, False, False, False, False, False),
-        ("spatial_occupancy", False, True, False, False, False, False, False),
-        ("distance_traces", True, True, False, False, False, False, False),
-        ("body_bearing_polar", True, True, True, False, False, False, False),
-        ("controller_trials", True, True, False, True, False, False, False),
+        (
+            "radial_near_field",
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            "spatial_occupancy",
+            True,
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            "distance_traces",
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            "body_bearing_polar",
+            True,
+            True,
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            "body_bearing_distance",
+            True,
+            True,
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            "controller_trials",
+            True,
+            True,
+            False,
+            False,
+            True,
+            False,
+            False,
+            False,
+        ),
         (
             "generalized_bout_response",
             True,
+            False,
             False,
             False,
             True,
@@ -448,8 +519,28 @@ def test_only_selected_analysis_requests_relative_arrays(
             False,
             False,
         ),
-        ("escape_freeze", True, False, False, True, True, True, False),
-        ("gaze_tracking", True, False, False, False, False, False, True),
+        (
+            "escape_freeze",
+            True,
+            False,
+            False,
+            False,
+            True,
+            True,
+            True,
+            False,
+        ),
+        (
+            "gaze_tracking",
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            True,
+        ),
     ]
 
 

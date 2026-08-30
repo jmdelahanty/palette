@@ -75,6 +75,11 @@ DETAILED_PLOT_BASE_ARRAY_NAMES = (
     "relative_physical_valid",
 )
 
+DETAILED_PLOT_BODY_ARRAY_NAMES = (
+    "body_bearing_deg",
+    "body_bearing_valid",
+)
+
 _RUN_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _GIT_COMMIT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -904,6 +909,7 @@ def load_chaser_relative_frame_targeted_source_handle(
 
 __all__ = [
     "DETAILED_PLOT_BASE_ARRAY_NAMES",
+    "DETAILED_PLOT_BODY_ARRAY_NAMES",
     "OCCUPANCY_FRAME_ARRAY_NAMES",
     "RECEIPT_SCHEMA_ID",
     "RECEIPT_SCHEMA_VERSION",

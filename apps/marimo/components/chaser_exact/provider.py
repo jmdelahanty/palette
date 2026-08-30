@@ -13,6 +13,7 @@ from ..chaser_exact_body_bearing_contract import (
     option_body_bearing_binding,
 )
 from .body_bearing import build_exact_body_bearing_output
+from .body_bearing_distance import build_exact_body_bearing_distance_output
 from .bout_response import build_exact_bout_response_output
 from .bout_response_projection import (
     ExactBoutResponseProjectionError,
@@ -74,6 +75,7 @@ class ExactChaserAnalysisRoute:
     load_relative: bool
     renderer: Renderer | None
     load_relative_arrays: bool = True
+    load_chaser_appearance: bool = False
     load_keypoint_body_bearing: bool = False
     load_controller_trials: bool = False
     load_generalized_bout_response: bool = False
@@ -102,16 +104,25 @@ _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
             load_keypoint_body_bearing=True,
             renderer=build_exact_body_bearing_output,
         ),
+        "body_bearing_distance": ExactChaserAnalysisRoute(
+            analysis_id="body_bearing_distance",
+            display_parameter_version=("exact-body-bearing-distance-display-v1"),
+            load_relative=True,
+            load_keypoint_body_bearing=True,
+            renderer=build_exact_body_bearing_distance_output,
+        ),
         "trajectory_overlays": ExactChaserAnalysisRoute(
             analysis_id="trajectory_overlays",
-            display_parameter_version="exact-trajectory-overlay-display-v1",
+            display_parameter_version="exact-trajectory-overlay-display-v2",
             load_relative=True,
+            load_chaser_appearance=True,
             renderer=build_exact_trajectory_overlays_output,
         ),
         "spatial_occupancy": ExactChaserAnalysisRoute(
             analysis_id="spatial_occupancy",
-            display_parameter_version="exact-spatial-occupancy-display-v1",
-            load_relative=False,
+            display_parameter_version="exact-spatial-occupancy-display-v2",
+            load_relative=True,
+            load_chaser_appearance=True,
             renderer=build_exact_spatial_occupancy_output,
         ),
         "controller_trials": ExactChaserAnalysisRoute(
@@ -199,6 +210,7 @@ class ExactChaserProviderAdapter:
             if value
             not in {
                 "body_bearing_polar",
+                "body_bearing_distance",
                 "controller_trials",
                 "generalized_bout_response",
                 "escape_freeze",
@@ -211,6 +223,7 @@ class ExactChaserProviderAdapter:
             pass
         else:
             available.add("body_bearing_polar")
+            available.add("body_bearing_distance")
         try:
             option_gaze_tracking_binding(option)
         except ExactGazeTrackingProjectionError:
@@ -285,6 +298,7 @@ class ExactChaserProviderAdapter:
             selection_identity=identity,
             load_relative=route.load_relative,
             load_relative_arrays=route.load_relative_arrays,
+            load_chaser_appearance=route.load_chaser_appearance,
             load_keypoint_body_bearing=route.load_keypoint_body_bearing,
             load_controller_trials=route.load_controller_trials,
             load_generalized_bout_response=(route.load_generalized_bout_response),

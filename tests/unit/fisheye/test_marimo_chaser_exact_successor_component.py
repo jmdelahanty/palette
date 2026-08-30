@@ -536,6 +536,15 @@ def test_exact_successor_discovery_uses_spatial_bundle_and_exact_children(
         "body/body_bearing_valid",
     ]
     assert body["position_substitution"] == "prohibited"
+    bearing_distance_parameters = options[0].spec["display_parameters"][
+        "body_bearing_distance"
+    ]
+    assert bearing_distance_parameters["distance_bin_width_mm"] == 5.0
+    assert bearing_distance_parameters["bearing_bin_width_deg"] == 30.0
+    assert bearing_distance_parameters["density_normalization"] == (
+        "probability_within_panel_chaser"
+    )
+    assert bearing_distance_parameters["interpolation"] == "prohibited"
     controller = options[0].spec["analysis_bindings"]["controller_trials"]
     assert controller["run_path"] == (
         "analysis/controller_chase_trial_runs/controller-v1"

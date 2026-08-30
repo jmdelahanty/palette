@@ -10,6 +10,9 @@ from .chaser_exact.distance_traces import (
     build_exact_distance_traces_output,
 )
 from .chaser_exact.body_bearing import build_exact_body_bearing_output
+from .chaser_exact.body_bearing_distance import (
+    build_exact_body_bearing_distance_output,
+)
 from .chaser_exact.controller_trials import build_exact_controller_trials_output
 from .chaser_exact.bout_response import build_exact_bout_response_output
 from .chaser_exact.escape_freeze import build_exact_escape_freeze_output
@@ -44,6 +47,7 @@ __all__ = [
     "available_exact_chaser_successor_analysis_ids",
     "build_exact_distance_traces_output",
     "build_exact_body_bearing_output",
+    "build_exact_body_bearing_distance_output",
     "build_exact_controller_trials_output",
     "build_exact_bout_response_output",
     "build_exact_escape_freeze_output",

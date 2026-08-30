@@ -59,6 +59,7 @@ def build_projection_provenance(
     escape_freeze: Any | None = None,
     gaze_tracking: Any | None = None,
     relatives: Sequence[Any] | None = None,
+    chaser_appearance: Any | None = None,
     projection_verification_mode: str = "deep_audit",
     projection_receipt_sha256: str | None = None,
 ) -> Mapping[str, Any]:
@@ -93,6 +94,11 @@ def build_projection_provenance(
             "relative_binding_proofs": [
                 plain(proof.provenance_record()) for proof in relative_binding_proofs
             ],
+            "chaser_appearance_binding": (
+                plain(chaser_appearance.provenance_record())
+                if chaser_appearance is not None
+                else None
+            ),
             "controller_trial_binding": (
                 {
                     "run_path": controller_trials.run_path,
