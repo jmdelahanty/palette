@@ -17,6 +17,10 @@ from ..pose.schema import (
     resolve_required_keypoint_indices_from_attrs,
 )
 from ..shared.json_safety import json_attr_safe
+from ..shared.keypoint_success_authority import (
+    resolve_keypoint_success_array,
+    resolve_raw_keypoint_success_array,
+)
 from ..shared.mask_store import MaskStore, MaskStoreError, open_mask_store
 from ..shared.provenance_attrs import (
     ASSIGNMENT_KEYPOINT_CONTRACT_VALUE,
@@ -65,12 +69,6 @@ _REFINED_SUBJECT_MASKS_STATUS_SOURCE = "runtime_assemble_refined_subject_masks"
 _EYE_COMPONENTS = ("eye_left", "eye_right")
 _RAW_EYE_UNION_COMPONENT = "eyes_union"
 _KEYPOINT_GROUP_CHOICES = ("refined_keypoints_runs", "keypoints_runs")
-_KEYPOINT_SUCCESS_DATASET_CANDIDATES = (
-    "usable_keypoints",
-    "detection_success",
-    "refined_success",
-    "source_success",
-)
 _SOURCE_VIEW_CROP_SIGNATURE_DIFF_PATHS = frozenset(
     {
         "source_crop_signature.detection_source_path",
@@ -544,16 +542,6 @@ def _resolve_subject_keypoint_group(
     )
 
 
-def _resolve_keypoint_success_array(kp_group: zarr.Group, keypoint_run_name: str) -> tuple[np.ndarray, str]:
-    for candidate in _KEYPOINT_SUCCESS_DATASET_CANDIDATES:
-        if candidate in kp_group:
-            return np.asarray(kp_group[candidate][:], dtype=bool), candidate
-    raise ValueError(
-        f"Keypoint run {keypoint_run_name!r} missing success flags "
-        f"({', '.join(_KEYPOINT_SUCCESS_DATASET_CANDIDATES)}); cannot assign eyes_union."
-    )
-
-
 def _resolve_eye_keypoint_indices(kp_group: zarr.Group, keypoint_run_name: str) -> tuple[int, int]:
     keypoints_roi = kp_group.get("keypoints_roi")
     if keypoints_roi is None:
@@ -660,15 +648,13 @@ def _assign_eyes_union_component_seeds(
     if keypoints_roi is None:
         raise ValueError(f"Keypoint run {keypoint_run_name!r} missing keypoints_roi; cannot assign eyes_union.")
     if source.canonical_coordinates or source.group.attrs.get("coordinate_contract") == "canonical_v2":
-        success_node = kp_group.get("detection_success")
-        if success_node is None or np.dtype(success_node.dtype) != np.dtype("bool"):
-            raise ValueError(
-                "Canonical raw-keypoint eye assignment requires exact bool detection_success."
-            )
-        keypoint_success = np.asarray(success_node[:], dtype=bool)
-        success_dataset = "detection_success"
+        keypoint_success, success_dataset = resolve_raw_keypoint_success_array(
+            kp_group, keypoint_run_name
+        )
     else:
-        keypoint_success, success_dataset = _resolve_keypoint_success_array(kp_group, keypoint_run_name)
+        keypoint_success, success_dataset = resolve_keypoint_success_array(
+            kp_group, keypoint_run_name
+        )
     eye_keypoint_indices = _resolve_eye_keypoint_indices(kp_group, keypoint_run_name)
     reconcile_keypoint_mask_row_identity(
         keypoint_source_crop_row_ids=kp_group.get("source_crop_row_ids"),
