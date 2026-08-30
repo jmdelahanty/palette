@@ -2,6 +2,10 @@
 
 **Date:** 2026-08-24
 
+**Latest deferral update:** 2026-08-25. Section 10 records subject-shape
+source-mask scan reuse and publication read amplification observed during the
+four-recording clipped analytics workload.
+
 **Method:** five parallel read-only Luna xhigh audits (reader hot path, Zarr read
 amplification, receipt integrity, downstream projections, and test design),
 combined with direct inspection of the four-recording production workload and
@@ -600,3 +604,264 @@ are true:
 
 No selector activation, publication-policy change, shared-checkout update, or
 claim of production readiness is implied by this audit document.
+
+---
+
+## 10. Deferred subject-shape read-amplification optimization (2026-08-25)
+
+### 10.1 Scope and status
+
+This addendum records a read-only inspection of the subject-shape workload that
+followed the track-motion audit. It is an optimization deferral, not an
+implementation or authorization to weaken publication validation. No running
+job, source mask, subject-shape publication, selector, or production authority
+was changed while collecting this evidence.
+
+The implementation inspected was the commit-pinned production checkout at
+Palette commit `d8cb0c21`:
+
+```text
+/groups/johnson/johnsonlab/jeremy/gitrepos/
+  palette-worktrees/subject-shape-v5-supported-20260824-d8cb0c21
+```
+
+The size census used metadata from the running camera-94 child:
+
+```text
+analysis/subject_shape_runs/
+  subject_shape_sleepyfish_2026_08_06_core_behavior_v007_cam2010094
+```
+
+That child has 2,745,488 rows and 106 arrays. Sizes below are decoded logical
+sizes computed from array shape and dtype. They are not physical Zarr bytes,
+network-filesystem transfer measurements, or a completed-publication size
+claim.
+
+### 10.2 Source component masks: one storage read, repeated in-memory scans
+
+The scientific compute loop requests each refined `masks_roi` channel once per
+row block:
+
+- `subject_body`;
+- `swim_bladder`;
+- `eye_left`;
+- `eye_right`.
+
+The camera-94 dense array has shape `(2,745,488, 4, 384, 384)`, outer chunk
+shape `(2,688, 1, 384, 384)`, and indexed inner chunk shape
+`(8, 1, 384, 384)`. The component axis is physically chunked at one channel,
+so requesting one anatomy component does not require decoding all four.
+`subject_body` and `swim_bladder` blocks are retained in
+`component_masks_by_name` and reused for later geometry calculations. The
+compute loop therefore does not issue a second Zarr mask read for snout,
+caudal-anchor, or centerline work.
+
+The same in-memory masks are nevertheless scanned by multiple algorithms:
+
+| Component | Full-mask work performed over the same in-memory block |
+|---|---|
+| `subject_body` | spatial metrics; PCA from foreground pixels; snout emptiness, connected-component, and contour checks; a second connected-component check; foreground bounding; skeletonization; and centerline/snout-bridge support checks |
+| `swim_bladder` | spatial metrics; ellipse contour extraction; emptiness and connected-component checks; and a separate caudal-anchor contour extraction |
+| `eye_left` | spatial metrics followed by ellipse contour extraction |
+| `eye_right` | spatial metrics followed by ellipse contour extraction |
+
+The stored fixed-cardinality
+`components/<component>/sampled_contours/points_xy` caches are not consumed by
+subject-shape. They are derived display/archive caches, while dense
+`masks_roi` remains the authoritative surface. Sampled contours could be
+evaluated as an optional acceleration for contour-derived landmarks and
+ellipses, but they cannot replace the dense mask for PCA, connectivity,
+skeletonization, or centerline extraction. Any such use requires exact-output
+equivalence tests and a dense-mask fallback; a fixed-K display contour must not
+silently become a new scientific authority.
+
+Additional source-side full reads are much smaller than the masks:
+
+- every component `row_revision` array is read while the subject-shape source
+  revision snapshot is created and again during the final binding audit;
+- the subject-body QC arrays `severe_qc_failure`, `requires_review`, and
+  `reason_bytes` are read once across the row blocks;
+- source row-identity and frame-mapping arrays are reread at authority and
+  alignment boundaries.
+
+Relevant implementation:
+
+- `src/fisheye/analysis/subject_shape_runs.py:1373-1443`
+- `src/fisheye/analysis/subject_shape_runs.py:1492-1521`
+- `src/fisheye/analysis/subject_shape_runs.py:1639-1748`
+- `src/fisheye/analysis/subject_shape_runs.py:1829-1877`
+- `src/fisheye/analysis/subject_shape_runs.py:2128-2249`
+- `src/fisheye/analysis/subject_shape_runs.py:2430-2638`
+
+### 10.3 Subject-shape output dominates repeated I/O
+
+The camera-94 child represents approximately 11.023 GB of decoded logical
+arrays. The inventory is heavily concentrated in the subject body:
+
+| Output family | Decoded logical size |
+|---|---:|
+| `components/subject_body` | 9.661 GB |
+| `components/swim_bladder` | 0.354 GB |
+| `body_frame` | 0.258 GB |
+| `relations` | 0.167 GB |
+| `components/eye_left` | 0.143 GB |
+| `components/eye_right` | 0.143 GB |
+| source revisions, aggregate centroids, identity, and row index | 0.297 GB |
+| **Total** | **11.023 GB** |
+
+The largest individual surfaces are:
+
+| Array | Decoded logical size |
+|---|---:|
+| `components/subject_body/centerline_xy` | 1.406 GB |
+| `components/subject_body/bspline_sample_xy` | 1.406 GB |
+| `components/subject_body/bspline_control_points_xy` | 1.406 GB |
+| `components/subject_body/bspline_knots` | 0.747 GB |
+| `components/subject_body/tail_tangent_xy` | 0.703 GB |
+| `components/subject_body/tail_sample_xy` | 0.703 GB |
+| `components/subject_body/tail_normal_xy` | 0.703 GB |
+| `components/subject_body/centerline_curvature_px_inv` | 0.703 GB |
+| `components/subject_body/tail_curvature_px_inv` | 0.351 GB |
+
+Nine fixed-width 64-byte reason arrays contribute another 1.581 GB. Eight are
+176 MB each in the body/body-frame families, and the ninth is the swim-bladder
+caudal-contour reason. A compact reason-code array plus a sealed controlled
+vocabulary is therefore a material storage and reread optimization candidate,
+not merely metadata cleanup.
+
+Every all-array decoded pass over this recording is approximately 11 GB. The
+same logical surfaces, across the ordinary compute copy, access-aware local
+copy, and authoritative publication copy, are revisited for:
+
+1. the unbound producer manifest seal;
+2. immediate live-payload comparison with that unbound seal;
+3. loading the sealed source before storage conversion;
+4. copying every decoded source array into its planned physical layout;
+5. hashing every decoded destination array for exact equality;
+6. physical source inventory, atomic copy, and checksum verification;
+7. final-path source-manifest content verification;
+8. final-path unbound manifest refresh and binding validation;
+9. canonical surface and whole-run manifest construction; and
+10. completion, selector activation, and consolidated-authority reloads.
+
+The decoded and physical passes are distinct. Physical file checks operate on
+compressed files, while manifest and coordinate proofs reconstruct decoded
+array content. Operating-system caches may reduce physical device reads, but
+they do not remove decoding, memory movement, hashing, or process I/O.
+
+`array_payload_sha256()` establishes a stable snapshot by reading the complete
+array and immediately rereading it for TOCTOU comparison. An active proof scope
+may perform another complete closing recheck before mutation or selector
+commit. The integrity purpose is valid, but repeating that protocol across
+several publication phases makes the effective number of full logical reads
+of the major surfaces reach double digits over the complete lifecycle.
+
+Relevant implementation:
+
+- `src/fisheye/shared/coordinate_frame_record.py:640-710`
+- `src/fisheye/shared/subject_shape_coordinate_publication.py:1848-1935`
+- `src/fisheye/shared/subject_shape_coordinate_publication.py:3180-3480`
+- `src/fisheye/shared/subject_shape_storage.py:454-477`
+- `src/fisheye/shared/subject_shape_storage.py:523-799`
+- `src/fisheye/analysis_workflows/materializers/subject_shape.py:1010-1128`
+- `src/fisheye/shared/atomic_run_publisher.py:208-326`
+
+### 10.4 Redundant final-path geometry read/write passes
+
+Final-path coordinate binding currently applies invalid-value masking and
+camera translation as separate whole-array operations. For each positional
+subject-body surface below, `_mask_invalid()` reads and rewrites the complete
+array, then `_translate_points_node()` reads and rewrites it again:
+
+- `centerline_xy`;
+- `bspline_control_points_xy`;
+- `bspline_sample_xy`;
+- `tail_sample_xy`;
+- `snout_tip_xy`;
+- `head_endpoint_xy`;
+- `tail_tip_xy`;
+- `tail_base_xy`.
+
+The four component centroid arrays, swim-bladder caudal point, and eye-pair
+midpoint follow the same two-pass pattern. Subject-body `principal_axis_xy`,
+`tail_tangent_xy`, and `tail_normal_xy` receive an additional full
+invalid-value masking pass even though vectors do not require translation.
+Bboxes and ellipses use their own whole-array translation passes.
+
+The largest four duplicated point operations alone cover about 4.92 GB per
+read or write pass on camera 94. Masking and translation can be fused into one
+bounded operation without changing the declared coordinate transform or NaN
+policy. Moving that fused transform to the node-local prepublication phase may
+yield a larger benefit, but doing so requires a contract design that preserves
+the exact final-path authority binding; it must not create an alternate
+publication grammar or bypass the shared resolver.
+
+Relevant implementation:
+
+- `src/fisheye/shared/subject_shape_coordinate_publication.py:584-699`
+
+### 10.5 Deferred optimization order
+
+1. **Add unavoidable per-phase I/O accounting.** Record array path, decoded
+   bytes, full-payload read count, hash bytes, physical bytes, wall time, CPU
+   time, and whether the access came from compute, storage conversion,
+   binding, publication, activation, or consolidated reload. Keep
+   process-tree telemetry enabled for the complete workflow.
+2. **Fuse invalid masking and translation.** Process each geometry surface in
+   row blocks, perform validity masking and translation once, and write each
+   output block once. Preserve exact float dtype, NaN placement, vector
+   semantics, and half-open bbox conventions.
+3. **Consolidate immutable-payload evidence.** Define one receipt-backed path
+   for carrying already-proven decoded content through physical
+   rematerialization. Prefer writer-owned per-chunk digests plus a sealed
+   aggregate and one final decoded verification over repeated complete-array
+   reconstruction. This must preserve archive identity, source authority,
+   physical-copy integrity, and selector-last activation.
+4. **Fuse source-mask feature extraction.** Reuse mask presence, connected
+   components, foreground coordinates/moments, and contours inside each row
+   block. In particular, avoid separate body connected-component work for
+   snout and centerline, derive PCA from shared moments where exact, and avoid
+   separate swim-bladder contour extraction where one controlled contour
+   result can prove both consumers' semantics.
+5. **Evaluate sampled-contour acceleration narrowly.** Benchmark landmark and
+   ellipse calculations against dense-mask results. Require exact or explicitly
+   tolerance-governed scientific equivalence, component/schema identity, cache
+   freshness, and dense fallback. Do not use sampled contours for skeleton or
+   centerline authority.
+6. **Compact reason surfaces.** Replace repeated 64-byte row strings with
+   compact numeric reason codes and a sealed vocabulary only through an
+   explicit schema version and reader migration. Preserve lossless reason
+   meaning and compatibility export.
+
+The first optimization pass should prioritize publication/seal amplification
+and fused final-path geometry. Stored sampled contours address only part of
+the in-memory contour cost and do not explain the tens of gigabytes of current
+read/write traffic.
+
+### 10.6 Required evidence and hard gates
+
+An optimization is acceptable only when:
+
+1. every decoded subject-shape array is byte-for-byte equal to the current
+   method for the same source, including dtype, shape, NaNs, reason semantics,
+   row order, and component order;
+2. a real subject-mask publisher to real unpatched subject-shape reader round
+   trip remains in required CI;
+3. counting-store tests enforce the declared maximum source-mask, intermediate,
+   final-path, and hash read counts instead of relying on wall-clock timing;
+4. tampering with a source mask, row identity, planned chunk, copied physical
+   file, decoded output, manifest, consolidated generation, or selector epoch
+   still fails closed;
+5. a fused coordinate transform matches the current two-pass implementation
+   for valid and invalid rows, all point/vector/ellipse/bbox surfaces, and
+   clipped crop-placement offsets;
+6. sampled-contour use, if adopted, proves the exact component, schema,
+   derivation, and freshness state and never substitutes a display cache for
+   required dense-mask authority;
+7. parallel writes continue to own whole, non-overlapping physical Zarr chunks
+   for every output array; and
+8. the final selector-visible immutable publication is consolidated and its
+   direct and consolidated metadata generations agree.
+
+No selector activation, publication-policy change, shared-checkout update, or
+claim of production readiness is implied by this 2026-08-25 deferral.
