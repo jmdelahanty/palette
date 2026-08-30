@@ -22,12 +22,12 @@ from fisheye.diagnostics.benchmark_subject_mask_probability_sharding import (
 from fisheye.refinement.assemble_refined_subject_masks import _resolve_keypoint_success_array
 from fisheye.refinement.finalize_subject_masks import (
     _CROP_REBASE_COPY_ARRAYS,
-    _CROP_REBASE_IDENTITY_ARRAYS,
     _load_subject_mask_source,
     _resolve_eye_assignment_context,
     finalize_subject_masks,
 )
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.crop_row_rebase import CROP_REBASE_REQUIRED_AUTHORITY_ARRAYS
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_STRICT,
@@ -134,7 +134,7 @@ def _copy_context_arrays(
             "benchmark_source_crop_rows_max": int(target_crop_rows.max()) if target_crop_rows.size else None,
         }
     )
-    crop_names = tuple(dict.fromkeys((*_CROP_REBASE_IDENTITY_ARRAYS, *_CROP_REBASE_COPY_ARRAYS)))
+    crop_names = tuple(dict.fromkeys((*CROP_REBASE_REQUIRED_AUTHORITY_ARRAYS, *_CROP_REBASE_COPY_ARRAYS)))
     copied_crop_arrays: list[str] = []
     for name in crop_names:
         if name not in source_crop:
@@ -442,6 +442,7 @@ def build_finalizer_ab_fixture(
         subject_run=None,
         subject_shard_runs=[str(source_shard_run)],
         target_crop_run=str(target_crop_run),
+        archive=source_path,
     )
     if collection is None:
         raise RuntimeError("Could not resolve source shard as a collection fixture.")
