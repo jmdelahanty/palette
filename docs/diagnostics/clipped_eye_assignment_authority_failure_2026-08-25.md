@@ -2,6 +2,23 @@
 
 **Date:** 2026-08-25
 
+**Status:** incident evidence and accepted design constraints. Implementation
+status is owned by
+[`authority_consolidation_work_queue_2026-08-25.md`](authority_consolidation_work_queue_2026-08-25.md).
+The finding-by-finding dispositions for both supervisor-agent reviews are
+preserved in the active queue's
+[supervisor review record](authority_consolidation_work_queue_2026-08-25.md#supervisor-agent-review-disposition).
+
+**Evidence identity:** audited code
+`6969043ef801b2a01028f28f9da9194b31aa9924`; initial document commit
+`d9cbcc426f5ac1818c8d18ba574586da489cc524`; recovery-manifest SHA-256
+`d3b9a82ffb3506a340795a4b1e22891d2a82c8095685a2a0fe854c810df8132a`.
+The original audit recorded the date but not an exact observation interval; do
+not reconstruct one. A follow-up metadata-file verification occurred at
+`2026-08-25T11:52:42-04:00`. Both passes used direct `zarr.json`/JSON metadata
+reads rather than treating a Zarr traversal or a consolidated catalog as an
+authority oracle.
+
 **Scope:** read-only inspection of the four Sleepyfish clipped-recording
 operations, their selected keypoint artifacts, the active workflow commands,
 and the producer/consumer boundary in Palette, followed by fifteen parallel
@@ -13,20 +30,32 @@ for this audit.
 
 The required policy is fail closed:
 
-> A production workload may enter planning only when every required input
-> authority resolves through a supported, full-strength profile and the plan
-> seals the exact resolved artifact and proof. Completion, selector
-> eligibility, a familiar path, or an authority-sounding run name is not
-> sufficient.
+> Planning is always read-only and returns admitted, pending-receipt, or
+> blocked nodes. A node cannot be marked reusable, runnable, or submittable,
+> and cannot create scratch or output state, until every concrete required
+> input resolves through a supported full-strength profile. Completion,
+> selector eligibility, a familiar path, or an authority-sounding run name is
+> not sufficient.
 
-If a boundary cannot be satisfied, planning must return a typed admission
-failure before expensive payload validation, scratch creation, cluster
-submission, or output publication. A workflow must not try another profile,
-infer authority from arrays, or fall back to a legacy run.
+For an existing input, planning seals the concrete resolved artifact and proof
+or returns a typed admission failure. For an output that an earlier node will
+produce, planning records only the statically supported producer, output
+profile, and receipt contract and leaves the consumer `pending_receipt`. It
+must not invent a future digest, authority record, selector snapshot, or
+metadata generation. After publication, the same profile resolver validates
+the concrete receipt before the downstream node can become runnable.
 
-Before repairing the eye-angle consumer, Palette must inventory the producers
-used by active processing workloads. Otherwise a stricter consumer can expose
-the next noncanonical producer only after another expensive run.
+If a boundary cannot be satisfied, planning must return a typed blocked result
+before expensive payload validation, scratch creation, cluster submission, or
+output publication. A workflow must not try another profile, infer authority
+from arrays, or fall back to a legacy run.
+
+The global producer inventory and the targeted Sleepyfish repair proceed in
+parallel. Before a particular Sleepyfish node can execute, every producer in
+that requested node's transitive dependency closure must be declared and
+admitted. Unrelated unknown catalog entries do not block this chain. The
+repository-wide inventory and CI ratchet remain required to prevent the same
+class of defect from entering another maintained production path.
 
 ## Parallel audit verdict
 
@@ -40,12 +69,12 @@ The audit found these highest-priority facts:
 | Boundary | Implemented machinery | Active-production finding |
 |---|---|---|
 | Detection | Native artifact-first detection, recording-level canonical publication, registered geometry gate, quality/refinement receipts | The real Sleepyfish detection operation used this strong path. However, the default full clipped CLI still falls back to the legacy detection fragment when the registered gate is `off`. |
-| Crop and pixels | Sealed geometry-only crop-v2, signed hybrid provider, materialized canonical crop, strict per-profile validators | The shared position resolver still lacks the sealed crop-v2 branch; the process-global geometry-only adapter is still live; active clipped keypoint/mask production still uses proxy crops. |
+| Crop and pixels | Sealed geometry-only crop-v2, provider-record- and row-signature-bound hybrid pixel source, materialized canonical crop, strict per-profile validators | The shared position resolver still lacks the sealed crop-v2 branch; the process-global geometry-only adapter is still live; active clipped keypoint/mask production still uses proxy crops. |
 | Keypoints | Whole-recording and clipped strict-v2 candidate chains, bundle activation evidence, coordinate-successor machinery | Both active clipped planners still terminate with `finalize_keypoint_shards`. That writer produces an ordinary selector-visible run, not a strict coordinate-v2 authority. Current shard commands also omit the required `legacy_noncanonical` mode, and the following legacy refinement command is no longer a production path. |
 | Subject masks | Strong receipt-composed recording bundle publisher, dense refined-mask authority, component review gates | Assignment-keypoint ingress can still select by path/completion, fall back to ordinary `keypoints_runs`, and preserve legacy assignments into an otherwise well-sealed bundle. The bundle publisher preserves evidence; it does not upgrade it. |
 | Subject shape | Historical v4 and recording-bundle v5 publication machinery with strict loaders | Maintained v4 is normal selector-visible production. Bundle v5 is currently candidate-only and selector-ineligible. The real v003 Sleepyfish attempt failed at this authorization boundary before eye angles ran. |
 | Eye angles | Strong runtime row/time/keypoint proof, staged integrity receipts, atomic publication, strict output validation | The bundle assignment resolver is absent. Staging permits a null assignment pointer, while the later reader assumes the historical `.context` object shape. Planner admission does not resolve this indirect authority. |
-| Core workflow | Correct scientific DAG and strong stage-local materializers | Availability/reuse is based on run names, completion, and selector eligibility rather than producer profile and authority proof. Forced availability can bypass discovery entirely. Under the new policy, every executable node is unknown/blocking until it receives typed admission. |
+| Core workflow | Correct scientific DAG and strong stage-local materializers | Availability/reuse is based on run names, completion, and selector eligibility rather than producer profile and authority proof. Forced availability can bypass discovery entirely. Under the new policy, planning reports each node as admitted, pending receipt, or blocked; only concretely admitted nodes can become reusable, runnable, or submittable. |
 | Downstream and reporting | Strict source checks exist in many writers and exports | Bout-kinematics storage promotion can start from a completion/layout-only source. Reporting, registry readiness, visualization discovery, reuse, and campaign handoff contain additional path/`latest`/completion-only decisions. |
 | Tests and CI | Many strong isolated producer and reader tests | No qualifying real production writer -> unpatched authority resolver/consumer test covers the keypoint or bundle-to-eye boundary. Several suites monkeypatch the exact boundary under test. CI has no dedicated boundary-test gate. |
 
@@ -209,15 +238,75 @@ eye-angle scratch staging and publication. Changing only that line would leave
 the earlier producer, assignment, lifecycle, and workflow-admission defects
 intact.
 
+## Reproducibility evidence
+
+The recovery producer manifest inspected by this audit is:
+
+```text
+/groups/johnson/johnsonlab/jeremy/operations/sleepyfish_2026_08_06_keypoint_geometry_authority_recovery_20260824_v001/recovery_manifest.json
+sha256=d3b9a82ffb3506a340795a4b1e22891d2a82c8095685a2a0fe854c810df8132a
+```
+
+The four selected artifact groups were inspected directly at:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/2026_08_06_19_13_35_cam2010093/zarr/2026_08_06_19_13_35_cam2010093_analysis.zarr/keypoints_runs/keypoints_geometry_authority_20260824_v001_sleepyfish_cam2010093
+/groups/johnson/johnsonlab/jeremy/recordings/2026_08_06_19_13_35_cam2010094/zarr/2026_08_06_19_13_35_cam2010094_analysis.zarr/keypoints_runs/keypoints_geometry_authority_20260824_v001_sleepyfish_cam2010094
+/groups/johnson/johnsonlab/jeremy/recordings/2026_08_06_19_13_35_cam2010095/zarr/2026_08_06_19_13_35_cam2010095_analysis.zarr/keypoints_runs/keypoints_geometry_authority_20260824_v001_sleepyfish_cam2010095
+/groups/johnson/johnsonlab/jeremy/recordings/2026_08_06_19_13_35_cam2010096/zarr/2026_08_06_19_13_35_cam2010096_analysis.zarr/keypoints_runs/keypoints_geometry_authority_20260824_v001_sleepyfish_cam2010096
+```
+
+The v001 report and status evidence is below the absolute operation root
+`/groups/johnson/johnsonlab/jeremy/operations/sleepyfish_2026_08_06_keypoint_geometry_authority_recovery_20260824_v001`:
+
+```text
+reports/sleepyfish_cam2010093.json
+reports/sleepyfish_cam2010094.json
+reports/sleepyfish_cam2010095.json
+reports/sleepyfish_cam2010096.json
+status/keypoint_authority_sleepyfish_cam2010093.153737034.1.json
+status/keypoint_authority_sleepyfish_cam2010094.153737034.2.json
+status/keypoint_authority_sleepyfish_cam2010095.153737034.3.json
+status/keypoint_authority_sleepyfish_cam2010096.153737034.4.json
+status/core_behavior_sleepyfish_cam2010093.153737035.1.json
+status/core_behavior_sleepyfish_cam2010094.153737035.2.json
+status/core_behavior_sleepyfish_cam2010095.153737035.3.json
+status/core_behavior_sleepyfish_cam2010096.153737035.4.json
+```
+
+The downstream v003 report and failure status evidence is below the absolute
+operation root
+`/groups/johnson/johnsonlab/jeremy/operations/sleepyfish_2026_08_06_authority_downstream_recovery_20260824_v003`:
+
+```text
+recovery_manifest.json
+lsf_plan.json
+lsf_submission.json
+reports/sleepyfish_cam2010093.json
+reports/sleepyfish_cam2010094.json
+reports/sleepyfish_cam2010095.json
+reports/sleepyfish_cam2010096.json
+status/core_behavior_sleepyfish_cam2010093.153737380.1.json
+status/core_behavior_sleepyfish_cam2010094.153737380.2.json
+status/core_behavior_sleepyfish_cam2010095.153737380.3.json
+status/core_behavior_sleepyfish_cam2010096.153737380.4.json
+```
+
+Metadata conclusions were obtained from direct group and parent `zarr.json`
+files plus the operation JSON above. They do not claim that a consolidated
+metadata generation was validated. Future admission must choose and record its
+metadata mode explicitly and, for selector-visible immutable publications,
+validate the published consolidated generation.
+
 ## Active-chain inventory synthesis
 
 This table combines real-operation evidence with the parallel source audit.
 
 | Active chain surface | Observed producer/profile | Current disposition |
 |---|---|---|
-| Geometry-only crop | Sealed crop-v2 geometry profile with signed hybrid pixel authority | Producer and strict profile reader exist, but the shared position resolver branch and real tracking boundary test do not. The monkeypatch adapter remains active. Block shared downstream consumption. |
+| Geometry-only crop | Sealed crop-v2 geometry profile with provider-record- and row-signature-bound hybrid pixel authority | Producer and strict profile reader exist, but the shared position resolver branch and real tracking boundary test do not. The monkeypatch adapter remains active. Block shared downstream consumption. |
 | Clipped keypoint shard merge | `fisheye.utils.finalize_keypoint_shards`; ordinary selector-visible keypoint run | Valid legacy merger output, but **not admitted** as a canonical coordinate producer. Block for canonical downstream use. |
-| Four selected recovered keypoint runs | Complete, eligible, identity-rebased, 55 shards; no canonical coordinate records; `source_detect_run=unknown` | The existing coordinate-successor publisher cannot consume these ordinary runs. Require a new immutable migration bridge and an explicit production-consumption lifecycle. Do not mutate or reinterpret in place. |
+| Four selected recovered keypoint runs | Complete, eligible, identity-rebased, 55 shards; no canonical coordinate records; `source_detect_run=unknown` | The existing coordinate-successor publisher cannot consume these ordinary runs. Run the proof-sufficiency check first. If the required crop/frame/model/pixel/row claims are provable, use a supported direct-hybrid terminal-evidence profile and the maintained strict-v2 publisher; otherwise return `unmigratable` and rerun the admitted producer. Do not mutate or reinterpret in place. |
 | Refined subject-mask assignment | Bundle assignment collection retains exact worker/keypoint references | Upstream selection is legacy-capable and per-worker collections can name different runs. Require one normalized assignment resolver and republish/rebind immutable dependents after migration. |
 | Bundle-backed subject shape | Bundle v5 is a strong, distinct profile but currently candidate-only and selector-ineligible | The v003 workload correctly rejected normal publication. Eye-angle use remains blocked until both lifecycle admission and assignment-keypoint authority are implemented. |
 | Eye-angle materializer | Canonical consumer and atomic publisher after successful input resolution | Blocked before rerun. It must consume the shared resolver result and seal that proof into staging and output receipts. |
@@ -227,11 +316,13 @@ This table combines real-operation evidence with the parallel source audit.
 
 ## Producer inventory contract
 
-The parallel audit established the initial evidence baseline. The first code
-deliverable remains a generated, reviewable inventory/CI ratchet covering every
-producer reachable from active production workflow catalogs, operation
-builders, submission scripts, and maintained CLIs. For the clipped core-
-behavior chain, it must cover at least:
+The parallel audit established the initial evidence baseline. The inventory
+must be generated from executable producer/profile declarations used by the
+planner, not maintained as a third authority table. The same edge model feeds
+the CI ratchet and the future provenance proof walker. It covers every producer
+reachable from active production workflow catalogs, operation builders,
+submission scripts, and maintained CLIs. For the clipped core-behavior chain,
+it must cover at least:
 
 ```text
 detect -> quality -> refinement/finalization
@@ -244,7 +335,7 @@ detect -> quality -> refinement/finalization
        -> downstream immutable exports
 ```
 
-Each inventory row must record:
+Each executable declaration and generated inventory edge must record:
 
 | Field | Required evidence |
 |---|---|
@@ -256,11 +347,20 @@ Each inventory row must record:
 | Boundary coverage | Real writer -> unpatched resolver/consumer test and required CI check. |
 | Disposition | Canonical producer, supported profile, compatible legacy producer requiring successor, diagnostic-only, tombstoned, or unknown/blocking. |
 
-Unknown is a blocking result. The inventory must inspect code-generated command
-templates and real operation plans; module names, output names, status, and
-schema markers cannot stand in for producer proof.
+Unknown blocks the requested workload's transitive dependency closure. An
+unrelated unknown catalog entry does not block a valid workload, while the CI
+ratchet rejects a newly added maintained production entry point without a
+profile, resolver, and boundary-test declaration. The generator must inspect
+code-generated command templates and real operation plans; module names,
+output names, status, and schema markers cannot stand in for producer proof.
 
-## Updated implementation order
+## Incident-specific dependency sequence
+
+Live status and cross-document ordering are maintained in
+[`authority_consolidation_work_queue_2026-08-25.md`](authority_consolidation_work_queue_2026-08-25.md).
+The global hardening phases below and the targeted Sleepyfish recovery phases
+run in parallel. Only the requested chain's transitive dependencies block its
+recovery.
 
 ### Phase 0 — Freeze unsafe admission
 
@@ -269,41 +369,58 @@ schema markers cannot stand in for producer proof.
 - Do not mutate, rename, or promote the four recovered keypoint runs.
 - Treat the current artifacts as valid legacy evidence, not canonical inputs.
 
+This freeze is currently procedural. The executable planner gate that makes it
+automatic is Phase 2; the audit and this sentence do not themselves enforce it.
+
 **Gate:** no new work plan can label an input canonical solely from completion,
 eligibility, path, or run name.
 
 ### Phase 1 — Ratify and automate the active-producer inventory
 
 - Preserve this parallel audit as the human-reviewed baseline.
-- Generate the maintained entry-point/producer/profile matrix from workflow
-  catalogs, command builders, CLIs, submitters, and recovery planners.
+- Define executable producer/profile declarations, then generate the maintained
+  entry-point/producer/profile matrix from workflow catalogs, command builders,
+  CLIs, submitters, and recovery planners.
 - Classify every produced profile against its full-strength loader/resolver and
   real boundary test.
 - Record unknown, adapter-only, compatibility-default, and legacy-only
-  producers as blocking.
+  producers as blocking when they fall within the requested canonical
+  workload's dependency closure.
 - Add a CI ratchet so a new production command generator cannot appear without
   a profile, resolver branch, and boundary-test disposition.
 
-**Gate:** every node required by the requested workload has one named admitted
-producer profile or a named migration. No unknown row remains, and the
-generated inventory agrees with this audited baseline.
+**Gate:** every node required by the requested workload has one named supported
+producer profile or a named migration/rerun disposition. No unknown row remains
+inside that closure, and the generated inventory agrees with this audited
+baseline. Unrelated catalog debt remains visible but does not serialize this
+recovery.
 
 ### Phase 2 — Add producer admission to workflow planning
 
-- Add a profile-neutral admission result for each required stage input.
-- Require exact producer/profile/manifest or successor evidence before a node
-  is runnable.
-- Persist proof mode, exact run/path, authority digest, row count, recording,
-  camera, temporal identity, selector snapshot, and consolidated metadata
-  generation in the dry-run plan and handoff.
+- Add profile-neutral `admitted`, `pending_receipt`, and typed `blocked` results
+  for each required stage input.
+- Make static producer capability and dynamic artifact evidence two operations
+  of the same executable profile declaration. The planner must not reimplement
+  a resolver's grammar.
+- For an existing input, require exact producer/profile/manifest or successor
+  evidence before a node is runnable and persist the resolved proof mode,
+  run/path, authority digest, row count, recording, camera, temporal identity,
+  selector snapshot, and consolidated metadata generation.
+- For an output not yet produced, persist only the selected producer, output
+  profile, receipt schema, and dependency. Leave the consumer
+  `pending_receipt`; do not predict concrete artifact evidence.
+- After upstream publication, resolve the concrete receipt through the same
+  profile declaration before making a downstream node runnable.
 - Make plan reuse depend on those identities and digests.
 - Remove forced availability from production mode or require it to carry an
   independently validated admission receipt.
 - Revalidate admitted inputs immediately before worker launch.
 
-**Gate:** the current four keypoint runs fail planning with a typed
-`unsupported_canonical_keypoint_authority` result before payload scans or job
-submission.
+**Gate:** planning still returns a useful DAG, but the current four keypoint
+runs leave their canonical consumers blocked with a typed
+`unsupported_canonical_keypoint_authority` result before payload scans, scratch
+creation, or job submission. A future upstream artifact remains
+`pending_receipt`, never falsely admitted.
 
 ### Phase 3 — Wire maintained producers into active command generation
 
@@ -325,19 +442,31 @@ submission.
 all compatibility commands are explicitly labeled and cannot satisfy a
 canonical dependency.
 
-### Phase 4 — Define and publish a migration profile for the four keypoint runs
+### Phase 4 — Prove migration sufficiency, publish or rerun
 
 - Do not reuse the existing keypoint coordinate-successor publisher: it
   requires an already-sealed selector-ineligible production candidate and
   cannot consume these ordinary selector-visible shard-finalizer runs.
-- Build a CPU-only legacy-clipped-keypoint migration bridge; inference must not
-  be rerun when scientific equivalence can be proved.
-- Pin source metadata, selectors, and direct/consolidated generations; prove
-  full row/order/time/crop equivalence; compare every scientific keypoint
-  array; and record byte identity, exact numeric equality, or bounded
-  canonicalizing conversion accurately.
-- Publish a new immutable strict-v2 candidate while leaving the legacy source
-  untouched.
+- First run a read-only proof-sufficiency check over all 220 source shards.
+  Validate their provider record, crop-v2 geometry, pose-model binding,
+  preprocessing, complete nonoverlapping clip coverage, row/order/time/crop
+  equivalence, and every scientific keypoint array. Pin source metadata,
+  selector snapshots, and direct/consolidated generations.
+- Treat `source_detect_run=unknown` as evidence requiring disposition, not as
+  an automatic reconstruction target. It is blocking only if a required
+  lineage claim cannot instead be proven by the sealed crop-v2 source lineage
+  and exact row/frame/geometry binding.
+- If any required claim is absent or conflicting, return a typed
+  `unmigratable` result and rerun the admitted upstream producer. Never infer
+  authority from proximity, names, or precedence.
+- If the proof closes, add a supported general direct-hybrid terminal-evidence
+  profile and use the maintained strict-v2 finalizer without rerunning GPU
+  inference. The current terminal-receipt profile cannot be invoked unchanged:
+  all 220 shards are `legacy_noncanonical` but have a null
+  `source_crop_pixel_work_package_manifest`, while that profile requires the
+  exact package path and digest.
+- Publish a new immutable strict-v2 candidate while leaving all legacy sources
+  untouched. Do not build a four-run name-based migration publisher.
 - Decide and implement the normal-consumption lifecycle explicitly. The
   current eye reader accepts selector-visible canonical surfaces, while strict
   v2 bundle/successor members are selector-ineligible. Either create a reviewed
@@ -345,10 +474,54 @@ canonical dependency.
   bundle-authority members as a supported normal profile. Do not flip a boolean
   without a contract.
 
-**Gate:** real legacy writer -> migration publisher -> chosen normal resolver
-succeeds under the declared lifecycle; tamper, row reorder, crop mismatch,
-missing authority, partial copy, consolidated-metadata drift, and selector
-movement fail closed.
+**Gate:** proof sufficiency produces exactly one of `migratable` or
+`unmigratable`. For `migratable`, real legacy writer -> supported direct-hybrid
+terminal evidence -> maintained strict-v2 publisher -> chosen normal resolver
+succeeds under the declared lifecycle. For `unmigratable`, no publication is
+created and the plan selects the admitted inference producer. Tamper, row
+reorder, crop mismatch, missing authority, partial copy,
+consolidated-metadata drift, and selector movement fail closed.
+
+#### Phase 4 working-tree evidence — 2026-08-25
+
+The read-only proof-sufficiency audit now returns `migratable` for all 220
+source shards. The admitted profile is
+`signed_hybrid_pixels_with_strict_crop_v2_geometry_v1`: signed hybrid pixels
+and one independently sealed crop-v2 geometry authority, resolved through one
+typed terminal-pixel-evidence interface. This is a maintained split-crop
+profile, not a Sleepyfish name/path adapter.
+
+| Target | Crop rows covered exactly once | Shards | Proof payload digest |
+|---|---:|---:|---|
+| `sleepyfish_cam2010093` | 2,936,291 | 55/55 | `8fe24f5801fe24d1c73c8552159bc9969277064f5ba313298e5d6b2bf6e86d20` |
+| `sleepyfish_cam2010094` | 2,745,488 | 55/55 | `9d9b51c01aca0ce54df191fc614730ea721c2a94aab88c95b350de69d65a1aae` |
+| `sleepyfish_cam2010095` | 2,873,607 | 55/55 | `4d36bec9d25866c0569a9ed4f77a3258e9c187c109146e3509858e9ee9a560cd` |
+| `sleepyfish_cam2010096` | 2,914,539 | 55/55 | `636fe1208895f38a5512065cd65310ca959f124dfe913e125bbc357ee155e18c` |
+
+The proof revalidated the complete crop-v2 manifest, the hybrid provider's
+collection-aware signed row identity, exact equality of the six ordered
+provider/crop geometry arrays, the live content-addressed model and registered
+training-manifest pose binding, every inference-time scientific-array hash,
+terminal failure semantics, and complete nonoverlapping row coverage. The
+initial audit exposed that this branch's older hybrid validator omitted the
+two clipped-collection member-index arrays that the publishing mainline
+contract signed. The validator was restored to that exact grammar; no
+integrity check was bypassed.
+
+A real selector-ineligible terminal artifact was then atomically materialized
+for `cam2010093` under `/tmp` and accepted by the unpatched terminal loader:
+2,936,291 rows, 55 source shards, model SHA-256
+`cce63d534a8f1491db1e2c71cb9236768c445722013dc39faeaf62a9d0a9a377`,
+and terminal receipt digest
+`e93483fe7873427c6a3b690c2679ba6bdbdf8b07a6494b396188381fe631bcf5`.
+It reports `production_state_changes: []`; it is not a production
+publication or durable campaign handoff.
+
+Focused outside-sandbox validation is green (`122 passed` across the clipped
+keypoint, crop, hybrid-provider, terminal-writer, and strict-v2 finalization
+suite). Required CI has not run, and this working branch is not yet integrated
+with the latest `origin/main`; therefore this evidence does not authorize a
+merge, shared-checkout update, selector activation, or production publication.
 
 ### Phase 5 — Republish immutable assignment dependents
 
@@ -467,10 +640,18 @@ publication.
 ## Source map
 
 - `src/fisheye/utils/finalize_keypoint_shards.py:627-810`
+- `src/fisheye/cluster/keypoints/clipped_collection.py:399-484`
+- `src/fisheye/cluster/clipped_inference.py:1704-1791`
+- `src/fisheye/cluster/keypoints/v2_finalization.py:163-334`
+- `src/fisheye/utils/write_keypoint_clip_terminal_receipt.py:82-213`
+- `src/fisheye/utils/finalize_clipped_keypoint_v2_bundle.py:80-290`
 - `src/fisheye/analysis_workflows/execution.py:274-311`
 - `src/fisheye/analysis_workflows/availability.py:345-411`
+- `src/fisheye/utils/plan_analysis_workflow.py:32-60,117-124,250-251`
 - `src/fisheye/shared/eye_geometry_source.py:240-355`
 - `src/fisheye/analysis/eye_angle_analysis.py:3205-3425`
+- `src/fisheye/analysis_workflows/materializers/subject_shape.py:902-1090`
+- `src/fisheye/shared/zarr/subject_shape_bundle_source.py:186-329`
 - `src/fisheye/shared/zarr/keypoint_coordinate_successor.py:537-661`
 - `src/fisheye/shared/subject_mask_worker_receipt.py:944-1081`
 - `src/fisheye/cluster/clipped_inference.py:1357-2101`

@@ -5,6 +5,11 @@
 **Repo state at audit:** branch `agent/palette/clipped-geometry-acquisition-authority-20260821`, HEAD `a2859cb0`.
 **Status:** direction DECIDED (2026-08-24, see §8). The previously in-flight attr-stamped `crop_manifest_position_authority` bridge is **abandoned** — it would have been a fifth authority grammar and required republishing existing artifacts.
 
+**Plan disposition (2026-08-25):** preserve this document as the crop-profile
+decision and implementation-tripwire record. Resolver wiring, adapter
+retirement, planner admission, and boundary-test status is tracked only in
+[`authority_consolidation_work_queue_2026-08-25.md`](authority_consolidation_work_queue_2026-08-25.md).
+
 ---
 
 ## 0. Verdict
@@ -64,7 +69,12 @@ job. The defect is architectural: contracts were added without disposing of thei
   creation is an isolated legacy workflow") and `tracking/crop.py:3992–3993`. **By B's own labels,
   the current v2 producer's output is "legacy" on the day it is published.**
 
-### C. Signed hybrid crop provider (pixel origin)
+### C. Provider-record-bound hybrid crop provider (pixel origin)
+
+Historical code and schema identifiers use "signed" for this profile. The
+mechanism provides digest and row-signature integrity binding; it does not
+authenticate an authorized issuer. This document therefore uses
+"provider-record-bound" except when quoting an existing identifier.
 
 - `src/fisheye/shared/hybrid_crop_provider.py`, schema
   `palette.hybrid_acquisition_offline_crop_run.v3` (`:25`); `crop_storage_mode:"geometry_only"`
@@ -151,7 +161,7 @@ Note also: `finalize_keypoint_shards.py:751` stamps merged keypoint runs
 | 2 | `stage_selector_eligible is True` (obs `:2708`) | frozen `False` in digested payload; downstream requires it **stay** `False` (adapter `:1013`, `incremental_crop.py:1248`) | flipping = corruption per producer's own `_require_unselected` |
 | 3 | one of three live attr-stamped lineage records (obs `:4739–4746`) | lineage = `source_refined_snapshot` (refined_detect, digest-identified) inside manifest | loader can't dispatch on the family; adding an attr breaks the digest |
 | 4 | crop branch requires array `detection_indices` (obs `:4544`) | schema has `source_refined_row_ids` (`crop_schema.py:319`) | adding an array breaks adapter topology check (`:1021–1026`) and `logical_content` |
-| 5 | `crop_storage_mode == "materialized"` + `roi_images` (obs `:4610–4620`) | geometry-only, no pixels stored | pixels live with the signed hybrid provider by design |
+| 5 | `crop_storage_mode == "materialized"` + `roi_images` (obs `:4610–4620`) | geometry-only, no pixels stored | pixels live with the provider-record-bound hybrid source by design |
 
 **Immutability vs consumability:** `metadata_declarations_digest` covers the entire attribute set
 with only `run_manifest` redacted (`crop_manifest.py:435–524`). Any retrofit attribute
@@ -306,7 +316,7 @@ Profile roster under this policy (to confirm during implementation):
 - **A. geometry_only sealed (crop-v2)** — supported; gains its resolver branch in this wave.
 - **B. materialized canonical_v2** — supported; already has its resolver branch (the
   `crop_geometry_selection` path); comments claiming exclusivity get neutralized.
-- **C. signed hybrid provider** — not a crop publication profile; it is a pixel-origin *input*
+- **C. provider-record-bound hybrid provider** — not a crop publication profile; it is a pixel-origin *input*
   authority consumed by A. Keep as-is, label accordingly.
 - **D. collection-proxy crops** — legacy: keep readable (proxy-successor bridge stands), tombstone
   for new publication.

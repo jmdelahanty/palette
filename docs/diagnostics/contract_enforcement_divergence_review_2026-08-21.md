@@ -4,6 +4,11 @@
 **Lenses:** (1) sources-of-truth census, (2) contract enforcement classification, (3) registry write-path sprawl, (4) divergence detection/repair coverage.
 **Live evidence feeding this review:** the sleepyfish registry lag (37/37 step rows stale, reconciled 2026-08-20), the duplicate bare-vs-`:zXXXX` step-status rows, the `--reconcile-dataset --dry-run` write incident (`docs/diagnostics/dry_run_audit_2026-08-20.md`), and the legacy-epoch RuntimeWarning during the cam2010095 reconcile.
 
+**Plan disposition (2026-08-25):** audit evidence. Overlapping authority,
+admission, resolver, and enforcement work is tracked only in
+[`authority_consolidation_work_queue_2026-08-25.md`](authority_consolidation_work_queue_2026-08-25.md).
+The waves below are not an independent active status source.
+
 ---
 
 ## Unified diagnosis

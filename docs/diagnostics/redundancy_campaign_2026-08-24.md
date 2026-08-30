@@ -5,11 +5,18 @@
 **Companions:** `pipeline_survey_2026-08-24.md` §4 (validator fan-out, receipt-vs-rescan, crop contracts, known dedups), `crop_contract_split_audit_2026-08-24.md`, the 2026-08-21 subtraction queue.
 **Campaign rules:** one definition per fact; one implementation per guarantee; when a receipt/engine covers something, delete the rescan/script it replaces; superseded generations are deleted on sight, not kept alongside their guarded replacements.
 
+**Plan disposition (2026-08-25):** redundancy evidence and deletion
+constraints. Overlapping authority, resolver, admission, and adapter-retirement
+status is tracked only in
+[`authority_consolidation_work_queue_2026-08-25.md`](authority_consolidation_work_queue_2026-08-25.md).
+The waves below remain evidence and acceptance guidance, not a competing active
+queue.
+
 ## Meta-findings (read first)
 
-- **`docs/diagnostics/subtraction_queue_2026-08-21.md` is NOT in this branch's working tree** —
-  it exists only in git history (commit `d065360c`). Restore/merge it before the campaign starts;
-  three of four hunters hit this wall independently.
+- **Historical audit state:** `docs/diagnostics/subtraction_queue_2026-08-21.md`
+  was absent from the audited working tree and existed only at `d065360c`.
+  Commit `236a9be6` restored it; this is no longer an execution blocker.
 - The "six definitions of latest" from the 2026-08-21 enforcement review is now
   **~12 distinguishable semantics** at HEAD (strict/legacy/authoritative trio in
   `zarr_run_completion.py:597-672`; `registry/maintenance.py:4097-4134`; `registry/db.py:1142`;

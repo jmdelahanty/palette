@@ -4,6 +4,12 @@
 **Lenses:** dead code, superseded twins, extraction targets, non-code cruft.
 **Companion:** `docs/diagnostics/contract_enforcement_divergence_review_2026-08-21.md` (Waves A–D). Several items below are the same work seen from the subtraction side; cross-references marked [=Bn].
 
+**Plan disposition (2026-08-25):** scoped deletion census. Overlapping
+authority, resolver, selector, and adapter-retirement status is absorbed into
+[`authority_consolidation_work_queue_2026-08-25.md`](authority_consolidation_work_queue_2026-08-25.md).
+Unrelated deletion candidates remain evidence here and require current
+call-site verification before removal.
+
 **Headline totals:** ~27,500 LOC of high-confidence dead code; ~2,000 more LOC deletable after repointing ≤2 call sites each; ~1,400 LOC of backfill loops deletable once the dry-run fix lands; 62 doc/script/config/brief files DELETE or ARCHIVE; and ~10 extraction moves that collapse 300+ duplicated sites (including two live bug classes: 35 CLIs accepting `--apply --dry-run` together, and 21 read-intent tools opening the registry writable).
 
 ---

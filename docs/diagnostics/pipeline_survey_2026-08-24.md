@@ -6,6 +6,13 @@
 **Companion docs:** `crop_contract_split_audit_2026-08-24.md` (the crop→keypoint→tracking boundary, audited separately and not repeated here), `validation_receipt_audit_2026-08-17.md`, `contract_enforcement_divergence_review_2026-08-21.md`.
 **Coverage gaps of this survey:** detection/refinement stage internals, the mask/shape segment, and the chaser component family were surveyed only via adjacent lenses (import, orchestration, provenance, immobility) — a dedicated pass on those segments was cut short by a session limit and can be rerun on request.
 
+**Plan disposition (2026-08-25):** end-to-end evidence and finding catalog.
+Overlapping authority/admission/resolver work is tracked only in
+[`authority_consolidation_work_queue_2026-08-25.md`](authority_consolidation_work_queue_2026-08-25.md).
+Scientific and performance findings remain scoped evidence for their own work
+queues; the numbered queue below is not an independent authority-work status
+source.
+
 ---
 
 ## 0. Verdict

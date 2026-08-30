@@ -2,22 +2,34 @@
 
 **Date:** 2026-08-25
 
+**Plan disposition:** governing architecture and recording-identity
+implementation record. Cross-cutting authority/admission execution status is
+owned by
+[`authority_consolidation_work_queue_2026-08-25.md`](authority_consolidation_work_queue_2026-08-25.md).
+The ordered current-v2 recording-identity packages in §4.7 remain the scoped
+implementation checklist for that workstream; downstream producer admission is
+not part of migration 72. Stage-level execution and supervisor-review
+dispositions are maintained in the active queue rather than duplicated here.
+
 **Method:** eight parallel read-only Luna xhigh reviews of recording identity,
 frame authority, epochs and speed, run selection and completion, mirrors and
 manifest coverage, registry reconciliation, omitted authority paths, and the
 cross-cutting architecture, followed by direct source confirmation, the
-Step 1 recording-identity census, and parallel review of that evidence.
+Step 1 recording-identity census, and parallel review of that evidence. Six
+additional parallel read-only Luna xhigh inventories reviewed the committed
+Step 2 checkpoint for writer access, subtraction, safety, activation, plan
+drift, and next-stage sequencing.
 
 **Original review state:** branch
 `agent/palette/clipped-geometry-acquisition-authority-20260821`, HEAD
 `e58443c3` (`docs: record track reader optimization audit`).
 
-**Implementation update:** branch
-`agent/palette/recording-identity-evidence-20260825`, committed baseline
-`bf8b7c6d188e` (`docs: update source-of-truth implementation plan`).
-
-**Working-tree checkpoint:** Step 1 remains committed at `d816771d11cb`. Step 2
-now has an uncommitted `palette.source_recording_identity.v2` producer profile
+**Implementation checkpoint:** branch
+`agent/palette/recording-identity-evidence-20260825`, HEAD
+`6969043ef801b2a01028f28f9da9194b31aa9924`
+(`registry: add recording identity safety checkpoint`). Step 1 remains
+committed at `d816771d11cb`. Step 2 now has a committed
+`palette.source_recording_identity.v2` producer profile
 and one complete `palette.source_recording_identity_claim.v2` over current Zarr
 v3 source roots, an initial authority projection, migration-72 ledger,
 immutable `palette.recording_import_receipt.v2` binding, verified
@@ -28,7 +40,7 @@ organizer/importer paths agree on one per-camera `recording_id`, one shared
 acquisition `session_uuid`, explicit `camera_id`, and exact root
 classification; newly created profiled artifacts use this contract while
 unmarked historical artifacts remain on the deferred compatibility path.
-Current-profile generic registration is fenced; the organized importer and
+Central current-profile generic registration is fenced; the organized importer and
 single-recording pipeline call the `shadow_synchronize_recording_import()`
 gateway through a designated-writer-host boundary, bound reconciliation uses
 the verified reader, and maintenance rejects an unbound current profile before
@@ -48,23 +60,26 @@ actual Zarr/acquisition publication through receipt minting, registry
 projection, close/reopen, and the newly added verified reader; media probing,
 frame-clock application, and Git identity are controlled test doubles.
 
-At `bf8b7c6d188e` plus the uncommitted working tree, 328 focused tests passed
-outside the sandbox on `2026-08-25`, including the latest routing, schema,
-submitter, and two-session/eight-camera changes. Required repository CI has not
-run, so this branch is incomplete and not merge-ready. The authenticated issuer
-boundary, operational enforcement that all registry writers use the designated-host
-shadow gateway (including quiescence or fencing of noncooperating writers),
-durable conflict reporting, implementation compaction and deletion work, and
-the required CI remain open activation gates. Identity correction, locator
-movement, and current clipped-output support are deliberately unsupported for
-the initial immutable v2 profile and remain separate future contracts, not
-silent legacy fallbacks.
+At `6969043ef801b2a01028f28f9da9194b31aa9924`, 328 focused tests passed
+outside the sandbox on `2026-08-25`; the final 112-test rerun also passed. The
+unrelated Track audit edit and Sleepyfish handoff are outside this checkpoint.
+Required repository CI has not run, so this branch is incomplete and not
+merge-ready. Issuer authorization, operational enforcement that all canonical
+registry writers use the designated-host shadow gateway (including quiescence
+or fencing of noncooperating writers), durable rejected-attempt and publication
+evidence, implementation compaction and deletion work, a quarantined physical
+canary, and required CI remain open activation gates. Identity correction,
+locator movement, and current clipped-output support are deliberately
+unsupported for the initial immutable v2 profile and remain separate future
+contracts, not silent legacy fallbacks.
 
 **Companion audits:**
+[`authority_consolidation_work_queue_2026-08-25.md`](authority_consolidation_work_queue_2026-08-25.md),
 [`redundancy_campaign_2026-08-24.md`](redundancy_campaign_2026-08-24.md),
 [`pipeline_survey_2026-08-24.md`](pipeline_survey_2026-08-24.md),
 [`track_motion_reader_optimization_2026-08-24.md`](track_motion_reader_optimization_2026-08-24.md),
 [`crop_contract_split_audit_2026-08-24.md`](crop_contract_split_audit_2026-08-24.md),
+[`clipped_eye_assignment_authority_failure_2026-08-25.md`](clipped_eye_assignment_authority_failure_2026-08-25.md),
 [`contract_enforcement_divergence_review_2026-08-21.md`](contract_enforcement_divergence_review_2026-08-21.md),
 [`subtraction_queue_2026-08-21.md`](subtraction_queue_2026-08-21.md), and the
 implemented Step 1 evidence record
@@ -237,8 +252,8 @@ or architectural corrections that must be carried into implementation.
 | Eight million-row frame indexes imply 31 long recordings or duplicated frame data. | The 31 count is per-camera source-artifact/registry entities, not acquisition sessions or frame indexes. The 8 Parquets are two acquisition families times four cameras. Their 1,188,000- or 2,937,604-row counts are expected; row count alone is not a defect. A separate whole-file hash check found no duplicate Parquet files. |
 | Existing downstream provenance proves which Palette importer created a recording root. | Modern `run_provenance` and `stage_provenance` often bind downstream code, config, inputs, and runtime, but they identify the downstream producer. Root schema/layout markers and the acquisition producer label do not bind the exact Palette importer commit. New source publication needs its own immutable import receipt. |
 | A run marked `complete` necessarily passed producer-provenance validation. | Parentless completion skips the strict parent-scoped provenance gate. A bounded Goodbat review found 355 selector-ineligible, unselected runs marked complete with `run_provenance.git_sha=null` and one failed run. None was authoritative, but the completion contract still has a loophole. |
-| The ordinary `recordings` upsert freezes an existing `session_uuid`. | `COALESCE(excluded.session_uuid, recordings.session_uuid)` at `registry/db.py:2618` lets any non-null incoming value overwrite the existing value; it preserves the existing value only when the incoming value is null. The maintenance writer at `registry/maintenance.py:914` hard-overwrites and can also erase with null. Both are last-writer-sensitive. |
-| The identity problem is confined to `recordings`. | `datasets` is also mutable in conflict with policy: `session_uuid=excluded.session_uuid` and a non-null incoming `recording_id` wins at `registry/db.py:2534-2536`. Governance declares `datasets.session_uuid` immutable generally and `datasets.recording_id` immutable for `artifact_kind='source_recording'`. Joined views can therefore consume identity from different registry copies. |
+| The ordinary `recordings` upsert freezes an existing `session_uuid`. | `COALESCE(excluded.session_uuid, recordings.session_uuid)` at `registry/db.py:2638-2640` lets any non-null incoming value overwrite the existing value; it preserves the existing value only when the incoming value is null. The maintenance writer at `registry/maintenance.py:961-963` hard-overwrites and can also erase with null. Both are last-writer-sensitive. |
+| The identity problem is confined to `recordings`. | `datasets` is also mutable in conflict with policy: `session_uuid=excluded.session_uuid` and a non-null incoming `recording_id` wins at `registry/db.py:2554-2557`. Governance declares `datasets.session_uuid` immutable generally and `datasets.recording_id` immutable for `artifact_kind='source_recording'`. Joined views can therefore consume identity from different registry copies. |
 | There are two central frame-count resolvers. | There are at least three: `shared/frame_domains.py:492-503`, `analysis/stimulus_epoch_runs.py:132-145`, and `shared/metadata.py`'s compatibility resolver. The first two already apply opposite source-versus-stored precedence. |
 | The five manifest-validator tables contain 57 direct production sites. | The location cells contain 54 direct calls or callback references: 16 subject-mask, 11 refined-detection, 10 crop, 8 canonical-detection, and 9 keypoint sites. Transitive validations are a separate call-graph question. |
 | Five manifest families exclude `cluster_output_staging`. | At least two additional exclusion sites exist in `shared/zarr/subject_mask_core_publication.py:109` and `shared/tail_coordinate_publication.py:169`. A separate subject-mask batch writer also emits a different staging schema at `utils/run_subject_mask_batch_pipeline.py:1132,1178`. |
@@ -321,13 +336,13 @@ be inferred from this corpus.
 ### 4.2 Why precedence cleanup is insufficient
 
 `resolve_dataset_id()` prefers existing Zarr identity attrs and consults the
-manifest only when they are absent (`registry/db.py:606-612`). Normal recording
+manifest only when they are absent (`registry/db.py:618-624`). Normal recording
 context extraction reads root attrs, embedded context, and the manifest in that
-order (`registry/db.py:730-761`). The maintenance backfill reads the manifest
-without opening the Zarr (`registry/maintenance.py:824-948`).
+order (`registry/db.py:742-818`). The maintenance backfill reads the manifest
+without opening the Zarr (`registry/maintenance.py:785-948`).
 
 The fallback also treats `recording_manifest.recording_id` as a candidate
-`session_uuid` when the latter is absent (`registry/db.py:609-610`). The new
+`session_uuid` when the latter is absent (`registry/db.py:620-623`). The new
 resolver must preserve those as distinct facts and reject that substitution
 unless a versioned manifest contract explicitly proves equivalence.
 
@@ -520,38 +535,40 @@ precedence.
 
 ### 4.6 Step 2 implementation checkpoint and live checklist
 
-This checkpoint wires the current-profile call paths, but the branch remains
-non-production and ineligible for production activation. It proves the initial identity
-boundary without claiming that a caller holding artifact and registry write
-access is an authenticated publisher. Historical-artifact compatibility and
-corpus repair remain deferred, but current activation gates are not deferred.
+This checkpoint wires selected current-profile call paths, but the branch
+remains non-production and ineligible for production activation. It proves the
+initial identity boundary without claiming that a caller holding artifact and
+registry write access is an authenticated publisher. Historical-artifact
+compatibility and corpus repair remain deferred, but current activation gates
+are not deferred.
 
 | Work item | Status at this checkpoint | Remaining gate |
 |---|---|---|
 | Exact current-source profile and identity claim | Implemented for new profiled artifacts | `palette.source_recording_identity.v2` defines one per-camera `recording_id`, a shared acquisition `session_uuid`, explicit `camera_id`, and exact current-source root classification. The shared loader emits one locator-free `palette.source_recording_identity_claim.v2` with the normalized identity, verified source roles, root classification, and `claim_sha256`; its optional deterministic session/camera mapping claim is sealed and checked, while independently supplied IDs remain valid without that claim. Newly created organizer and analysis-import outputs use the shared strict contract; existing unprofiled roots retain an explicit compatibility path and are not inferred or backfilled. |
 | Paired-profile classifier and typed resolver | Implemented at the current v2 boundary | Manifest/root profile declarations are classified together. One-sided current declarations, mismatched claims, and current roots without exact source classification fail closed; an entirely unprofiled pair is the explicit compatibility state. Required facts remain distinct and there is no precedence or cross-fact fallback. |
-| Final consolidated current publication | Implemented in the current importer | Current source publication consolidates only after payload, identity, classification, and acquisition/crop checks complete; it reopens the consolidated view and rechecks the claim and classification before minting the receipt. Mutable writers/readers continue to use unconsolidated metadata. |
+| Final consolidated current publication | Implemented final step; activation hardening open | Current source publication consolidates only after payload, identity, classification, and acquisition/crop checks complete; it reopens the consolidated view and rechecks the claim and classification before minting the receipt. Before activation, bind or recheck a stable generation across consolidation and receipt minting, and make every mutable importer open explicitly unconsolidated. |
 | Migration-72 authority ledger | Implemented, opt-in | No authority rows are backfilled. The migration creates the ledger tables, indexes, triggers, and schema fingerprint; evidence/revision/receipt rows are append-only, current and dataset pointers are exact, the revision trigger is contiguous, and concurrent migration version is rechecked under the write lock. |
 | Initial projection writer | Implemented, opt-in | Creates/fills only recording/session identity, never lifecycle classification or locator moves; exact replay is idempotent; it does not yet authorize correction. |
-| Verified bound-identity reader | Implemented and routed for current-v2 | Rechecks dataset, recording, current pointer, latest revision, stored evidence, live manifest/root evidence, bound receipt, and acquisition authority. Bound scan/reconcile, maintenance, the pipeline replay, and detection-training input now use it; direct canonical NFS publication remains disabled by the activation gate below. |
+| Verified bound-identity reader | Implemented and routed for current-v2 | Rechecks dataset, recording, current pointer, latest revision, stored evidence, live manifest/root evidence, bound receipt, and acquisition authority. Bound scan/reconcile, maintenance, the pipeline replay, and detection-training input now use it. Direct canonical NFS publication for the two current import routes remains disabled by the activation gate; `registry_rescan --safe-shadow-publish` remains an activation-blocking bypass until it uses the designated-host gateway. |
 | Generic prune and dedupe safety | Implemented | Authority-bound datasets are excluded from generic mutation; dedupe rechecks bindings under `BEGIN IMMEDIATE`; FK `RESTRICT` remains the final backstop. |
-| Strict source and relational adversarial tests | Expanded focused suite green | The latest claim, authority, receipt, importer, organizer, pipeline, reconciliation, schema, submitter, profile, and historical-tool boundary runs passed 328 focused tests outside the sandbox on `2026-08-25` against baseline `bf8b7c6d188e` plus the uncommitted working tree. They cover malformed input, transaction-fence mutation, exact replay, append-only state, parent/current corruption, receipt/acquisition tampering, close/reopen verification, sealed re-import, early finalization, bound replay, two-session/eight-camera identity grouping, designated-host submission, and pre-mutation compatibility fences. Required repository CI remains unrun. |
-| Exact producer/import receipt | Implemented, routed, not authenticated | `palette.recording_import_receipt.v2` is a bounded, digest-named immutable sidecar bound append-only in migration 72. It embeds exactly one `palette.source_recording_identity_claim.v2`, plus the clean producer commit, invocation-configuration digest, target-relative path, and existing acquisition ownership/frame references and digests. It does not turn the semantic claim into a locator-bearing object. Projection revalidates live acquisition authority before mutation and at both transaction fences. The configuration digest is invocation provenance, not proof of stimulus/setup outputs. The self-digest is not authentication against an actor with both artifact and registry write access. |
+| Strict source and relational adversarial tests | Expanded focused suite green | The latest claim, authority, receipt, importer, organizer, pipeline, reconciliation, schema, submitter, profile, and historical-tool boundary runs passed 328 focused tests outside the sandbox on `2026-08-25` at `6969043ef801b2a01028f28f9da9194b31aa9924`; the final 112-test rerun also passed. They cover malformed input, transaction-fence mutation, exact replay, append-only state, parent/current corruption, receipt/acquisition tampering, close/reopen verification, sealed re-import, early finalization, bound replay, two-session/eight-camera identity grouping, designated-host submission, and pre-mutation compatibility fences. Required repository CI remains unrun. |
+| Exact producer/import receipt | Implemented, routed, not issuer-authenticated | `palette.recording_import_receipt.v2` is a bounded, digest-named immutable sidecar bound append-only in migration 72. It embeds exactly one `palette.source_recording_identity_claim.v2`, plus the clean producer commit, invocation-configuration digest, target-relative path, and existing acquisition ownership/frame references and digests. It does not turn the semantic claim into a locator-bearing object. The projection verifies the receipt sidecar before entering its write transaction and calls live acquisition/receipt verification immediately before and after projection writes. Shadow publication adds host, lock, candidate, backup, and canonical-registry hash fences. The configuration digest is invocation provenance, not proof of stimulus/setup outputs. The self-digest is not issuer authorization against an actor with both artifact and registry write access. |
 | Source-import receipt lifecycle | Initial one-shot policy implemented | Clean producer state is checked before writers run; any existing valid receipt sidecar seals the current source-import surface; bound pipeline replay skips import; fresh current identity is finalized before downstream inference. Receipt replacement, overwrite of a sealed current source, and new publication generations are rejected rather than improvised. Exact recovery of an unbound receipt remains a quarantine/manual-finalization task. |
 | Real importer round trip | Current identity matrix green; physical canary still required | One focused test crosses real importer orchestration and actual Zarr/acquisition publication, receipt minting, registry projection, close/reopen, and `read_verified_recording_import()` with media probe, frame-clock, and Git test doubles. A second test uses the real draft-manifest, organizer, analysis-root, receipt, registry-sync, and verified-reader paths for two sessions times four cameras: it proves eight unique `recording_id` values, two shared `session_uuid` values, four cameras per session, and eight exact receipt bindings. External media and Git probes remain controlled doubles, so a commit-pinned physical canary is still required before production activation. The reader is new, so this is not an “unpatched-reader” compatibility proof. |
 | Explicit correction path | Deferred and unsupported by current v2 | The ordinary writer accepts only the initial immutable decision and exact replay. Conflicts fail before mutation. Do not expose correction semantics until a separate stable-scope CAS contract, multi-dataset rebinding, durable reason/evidence, and correction-aware reader are implemented and tested. This is not an activation blocker for an explicitly immutable current-v2 publication. |
 | Locator transition | Deferred and unsupported by current v2 | Migration 72 now rejects direct identity or locator mutation for bound datasets. Initial projection binds the canonical locator; relocation requires a future dedicated CAS/history contract. This is not an activation blocker while current-v2 publication explicitly forbids moves. |
 | Durable conflict report | Not implemented | Current conflicts fail before mutation but are not persisted. A rejected-attempt report must commit outside the rolled-back projection transaction. |
-| Multi-host registry writer boundary | Implemented for current import routes; activation blocked | Organized import and the single-recording pipeline call `shadow_synchronize_recording_import()` through an explicit designated-writer-host check, host-local mutex, node-local candidate, durable backup, and existing NFS lock/hash publication fences. The gateway never opens the canonical registry writable. This is not yet a global funnel: noncooperating direct writers must be quiesced or fenced and issuer authentication remains open. |
-| Normal registration, maintenance, and refresh routing | Partially routed; activation blocked | Current import routes use the gateway and the central `synchronize_recording_import()` dispatch; bound reconcile and maintenance use verified authority, while unbound maintenance fails before legacy SQL. The registry projection-refresh `--apply` path is explicitly disabled until it uses the gateway. Historical mutators reject current-v2 before writes, and detection-training inputs require registry verification. Remaining work is global writer quiescence/fencing, authenticated issuance, durable conflict reporting, and deletion of superseded identity SQL after all supported current callers pass. |
+| Multi-host registry writer boundary | Implemented for two current import routes; activation blocked | Organized import and the single-recording pipeline call `shadow_synchronize_recording_import()` through an explicit designated-writer-host check, host-local mutex, node-local candidate, durable backup, and existing NFS lock/hash publication fences. The gateway never opens the canonical registry writable. This is not yet a global funnel: noncooperating direct writers can race the final hash/replace interval and must be quiesced or fenced; issuer authorization remains open. |
+| Normal registration, maintenance, and refresh routing | Partially routed; activation blocked | Current import routes use the gateway and the central `synchronize_recording_import()` dispatch; bound reconcile and maintenance use verified authority, while unbound maintenance fails before legacy SQL. Disabling the projection-refresh submitter's `--apply` mode covers only one path. `registry_rescan --safe-shadow-publish` still bypasses the designated-host gateway, and scan/rescan/reconcile, stage completion, inline refresh, maintenance/admin tools, and derived/training finalizers still contain direct writable registry entry points. Inventory and fence `scan_zarr()`, `refresh_bound_current_source_import()`, `reconcile_dataset_from_root()`, legacy `refresh_*_from_root()` methods, maintenance backfills, and `inline_refresh`; migrate read-only consumers to query-only connections. Remaining work is global writer quiescence/fencing, authorized issuance, durable rejected-attempt/publication evidence, and deletion of superseded current identity SQL after all supported current callers pass. |
 | Clipped sidecar/donor binding | Not started | Keep deferred compatibility separate, but current clipped output must not activate until sidecar, donor, recording/session, camera, and frame-map bindings use the authority. |
 | Historical corpus repair | Deferred by decision | No backfill or repair of Batman, Goodbatbadbat, the four-camera conflict families, or other old archives in this implementation slice. |
 | Generated schema reference | Current | Regenerated for migration 72 (63 tables, 55 views, 3,109 columns); the standalone generator `--check` passes. Required repository CI is still unrun. |
 
-The working tree is still substantially additive. Relative to `bf8b7c6d188e`,
-tracked production files add 2,131 lines and remove 322, while the three new
-production modules contain 2,164 lines. The honest current total is therefore
-approximately 4,295 added and 322 removed, net **+3,973 production lines**.
+The committed checkpoint is still substantially additive. Relative to
+`bf8b7c6d188e`, tracked production and script files add 4,295 lines and remove
+322, net **+3,973 lines**. The four new foundational modules
+(`source_recording_identity.py`, `recording_import_receipt.py`,
+`recording_identity_authority.py`, and `shadow_publish.py`) contain 2,596 lines.
 The organized importer itself is net -69 lines, and several current call sites
 are routed, but the campaign has not made the repository smaller yet. This is a
 safety implementation, not yet a streamlining win. Step 2 must not be counted
@@ -600,6 +617,75 @@ scripts/py -m pytest -p no:cacheprovider \
   tests/unit/fisheye/test_organize_recordings_video_only.py \
   tests/unit/fisheye/test_two_session_four_camera_current_authority.py -q
 ```
+
+### 4.7 Post-commit inventory and ordered completion package
+
+Six parallel read-only inventories reviewed `6969043ef801` for writer entry
+points, subtraction, current-v2 safety, operational activation, plan drift, and
+sequencing. They agree that Step 3 must not start yet. The Step 2 implementation
+is coherent for cooperating callers, but it has not established one global
+canonical-registry writer boundary and has not yet displaced enough old code to
+count as consolidation.
+
+The inventory separates four kinds of registry access that must not be treated
+as one undifferentiated writer list:
+
+| Access class | Current disposition | Required boundary |
+|---|---|---|
+| Current-v2 identity and locator projection | Only the organized importer and single-recording pipeline use the designated-host shadow gateway. | One authorized gateway; no generic `upsert_dataset()`, `upsert_recording()`, scan, refresh, or maintenance path may infer or mutate current-v2 identity. |
+| Derived/status/profile projection | These paths generally do not own source identity, but many still open the canonical SQLite file directly and can transitively update `datasets`. | Preserve their semantic work and operation-specific callbacks; publish canonical-registry changes through the shared shadow/CAS boundary and consume verified source identity without routing them through the source-identity projection API. |
+| Destructive administration | Prune, dedupe, repair, and path-audit tools have different purposes and some bound-row fences, but still perform independent canonical writes. | Require explicit admin mode, durable backup, shadow publication, complete Palette-runtime integrity checks, and source/bound-row rejection. |
+| Read-only query/report/model selection | Many callers instantiate `Registry(path)`, which opens a writable connection and may initialize or migrate the schema even when the operation is logically read-only. | Add/use a read-only facade or `mode=ro` plus `PRAGMA query_only=1`; readers must not create journals, run migrations, or participate in writer coordination. |
+
+The highest-priority concrete bypasses are `registry_rescan` (whose
+`--safe-shadow-publish` path calls the generic publisher without the
+designated-host gateway), `reconcile_sweep`, registry scan/reconcile entry
+points, `stage_complete`, `inline_refresh`, maintenance backfills, clipped
+metadata repair, prune/dedupe, and several cluster, derived, and training
+finalizers. Existing LSF callers of `registry_rescan --safe-shadow-publish`
+include whole-video detection, native-detection campaigns, geometry approval,
+and arena-geometry review. The disabled projection-refresh `--apply` submitter
+does not fence these paths.
+
+#### Issuer decision: authorization before cryptography
+
+The receipt self-digest proves integrity, not who was authorized to publish it.
+Likewise, a host name supplied through an environment variable is a routing
+assertion, not authentication. Before adding another contract or signature,
+write down the actual threat model:
+
+- If the threat is accidental or concurrent jobs in a trusted lab account,
+  make operating-system permissions and an access-controlled designated writer
+  service the authorization boundary. Only that service may write the canonical
+  registry, lock, shadow temp root, and backup root; submitted jobs carry an
+  allowlisted operation/commit and the gateway records host, job, actor, and
+  hashes.
+- If an actor with arbitrary artifact and canonical-registry write access is in
+  scope, the present design cannot authenticate authorship. That stronger model
+  requires managed signing keys or an external trusted service. Do not simulate
+  authentication with another self-digest or caller-provided string.
+
+This decision is an activation gate, but cryptographic signing is not assumed
+to be necessary without the stronger threat model.
+
+#### Ordered completion packages
+
+| Order | Package | Implementation scope | Acceptance and deletion gate |
+|---:|---|---|---|
+| 1 | Close the registry access boundary | Finish the generated writer/read-access census. Make apply paths targeting the durable canonical registry use one designated-host shadow publisher with operation-specific callbacks, move query-only users to read-only SQLite connections, and add a static CI ratchet for unapproved writable canonical opens. Filesystem/service authorization is an operational prerequisite; hashes and CI cannot fence an actor that independently retains canonical write permission. Quiesce or fence noncooperating writers so none can mutate the canonical file between the shadow publisher's final source hash and `os.replace()`. | Every production entry point has an explicit class and owner. Direct canonical writes outside approved gateway callbacks fail. Read-only paths run with `query_only=1`, perform no migration, and create no WAL/journal sidecars. |
+| 2 | Close current-v2 publication races | Bind or recheck one stable source/consolidated metadata generation at the receipt boundary; make every mutable importer open explicitly unconsolidated; reject redirected receipt files and redirected `.imports` directories; reopen the finalized root before downstream projection; and decide/enforce whether `(session_uuid, camera_id)` is unique within the current-v2 source-recording profile. | Mutation between source reads, consolidation and receipt minting, or receipt and projection fails without authority rows. Direct and consolidated reopen agree. A second recording claim for the same session/camera fails if the current-v2 profile declares that invariant. |
+| 3 | Preserve operational evidence without creating a second authority | Persist the full `RegistryShadowPublication` result for successful operations. Emit an idempotent rejected-attempt report outside the rolled-back projection transaction, bound to operation/attempt ID, claim and receipt digests when available, artifact, reason, host/job/actor, source hash, backup/runtime context, and only the state-specific candidate/staged/published fields that exist. Reports are telemetry/evidence and never select identity. | Injected conflicts leave identity/receipt/current tables unchanged while exactly one durable report survives. Successful operations retain the candidate/staged/published hash and backup evidence rather than reducing the result to `dataset_id`. Rejected reports never fabricate later-phase fields. |
+| 4 | Route, then subtract current identity implementations | Remove current-profile identity inference and mutation only after all supported current callers use the gateway or verified reader. Split maintenance artifact inventory from identity SQL; retain explicit unprofiled/derived compatibility behind one named boundary. Do not delete generic dataset/recording registration wholesale because it still serves derived and historical artifacts. | No current-v2 caller reaches legacy precedence or direct identity SQL. Delete the maintenance `recordings` upsert and `datasets.recording_id` update (about 86 production lines), plus approximately 60–95 lines of normal current-profile fallback/call-site plumbing. Report actual diff, not estimates. |
+| 5 | Compact the new implementation | Remove only demonstrated duplicate work and dead API surface; keep the five migration-72 tables, append-only/duplicate-insert triggers, receipt/source rereads, transaction fences, sidecar checks, and consolidated-publication verification unless an equivalent stronger boundary replaces them. | The current-v2 campaign slice becomes materially smaller and has one implementation per guarantee. The unrelated approximately 258-line dead refined-keypoint status subsystem is a separate Step 4 deletion and must not disguise Step 2 accounting. |
+| 6 | Prove the final reduced boundary | After packages 1–5, rerun focused tests and use a clean commit-pinned deployment for a quarantined physical canary with real media probing, frame clock, Git identity, consolidated reopen, four cameras sharing one session, receipt binding, verified read, and failure injection. The canary uses scratch Zarr and registry paths and is selector-ineligible. | Exact writer -> receipt -> shadow projection -> close/reopen -> verified reader succeeds with no canonical or production-selector side effect. Canary evidence applies to the code that will be reviewed, not a pre-subtraction implementation. |
+| 7 | Run required CI and stage any later production rollout | Run every required workflow check. A later canonical migration/operational smoke requires a Palette-runtime backup and complete `integrity_check`/`foreign_key_check`, plus explicit approval; it is not part of this documentation update. | All required checks succeed. Until then, and until the operational gates above close, the branch remains incomplete, not merge-ready, and prohibited from shared-checkout or production activation. |
+
+Compatibility remains deferred by decision, but current-v2 entry points must
+fail before mutation rather than fall through to unprofiled precedence. The
+direct `repair_recording_identities.py` mutator remains unsupported until it is
+retired or redesigned around a future correction revision. Its deletion would
+be useful cleanup, but it would not prove that the current identity writer is
+complete.
 
 ## 5. Second implementation target: typed frame domains
 
@@ -708,6 +794,19 @@ authority, evidence, projection, exact mirror, cache, receipt, supported
 profile, migrate, or tombstone. Include a dry-run conflict census for identity,
 frame domains, run selectors, status, geometry/calibration, epochs, and mirrors.
 
+Inventory active workload producers as a separate, execution-facing slice
+generated from the executable producer/profile declarations used by planning.
+For every producer reachable from a maintained workflow catalog, operation
+builder, submission script, or CLI, record the generated command, exact writer
+or publisher, output profile and canonical claim, full-strength resolver
+branch, and real-writer-to-unpatched-reader coverage. Completion, selector
+eligibility, a schema marker, or an authority-sounding run name does not prove
+that the producer emits the authority required by its downstream node. Unknown,
+adapter-only, and legacy-only rows block a requested canonical workload only
+when reachable in its transitive dependency closure. The repository CI ratchet
+separately rejects newly added maintained production entry points that lack a
+declaration and boundary-test disposition.
+
 The recording-identity slice is implemented at `d816771d11cb`. It inventories
 the registry schema globally but applies row-level artifact findings only to
 the declared `explicit_source_layout` scope. The result closes the bounded
@@ -722,6 +821,11 @@ identity or repair, records capped evidence as incomplete/non-success with
 severity determined by cap type, and is bound to the registry snapshot it
 inspected. For every other slice, no proposed deletion or new authority
 proceeds without an explicit disposition and a named consumer migration.
+Planning remains read-only and may always report a DAG. A node is not reusable,
+runnable, or submittable until every concrete required input names a supported
+producer profile or exact successor and passes the shared consumer resolver.
+Outputs not yet produced remain pending real publication receipts; planning
+does not invent their artifact digests or authority records.
 
 ### Step 2 — Consolidate recording identity, including `datasets`
 
@@ -730,10 +834,12 @@ route normal registration and maintenance through it and normalize
 profile/status joins. Add the source-import receipt that binds the exact
 producer commit, dirty state, configuration, source evidence, and identity
 decision. The initial current-v2 implementation is immutable and rejects
-correction; a durable conflict report and explicit correction revision are
-future campaign contracts, not activation requirements for that deliberately
-narrow initial profile. Do not use the selected existing corpus or downstream
-run provenance as a current-writer oracle.
+correction. An explicit correction revision is a future campaign contract, not
+an activation requirement for that deliberately narrow initial profile. A
+durable rejected-attempt report is an activation requirement because it closes
+the operational audit trail without becoming another identity authority. Do
+not use the selected existing corpus or downstream run provenance as a
+current-writer oracle.
 
 **Gate:** `recording_id` and `session_uuid` remain separate; ordinary backfill
 cannot change a non-null identity or erase one with null; unsupported correction
@@ -858,6 +964,34 @@ the crop resolver work from the crop audit: multiple supported crop profiles,
 one position-authority interface, full validation per branch, and no
 process-global monkey-patch adapter.
 
+Run the global producer-inventory hardening and the targeted Sleepyfish repair
+in parallel. Before a particular clipped analytics node can execute, complete
+the Step 1 inventory and dynamic artifact admission for that node's transitive
+dependency closure; unrelated unknown catalog entries do not block the chain.
+The 2026-08-24 Sleepyfish recovery demonstrated why this local gate is required:
+`finalize_keypoint_shards` produced a valid complete ordinary keypoint run, but
+the workload treated it as canonical geometry authority without a canonical
+coordinate manifest or successor proof. The generic planner then submitted a
+bundle-backed subject-shape source without understanding that its maintained v5
+profile was candidate-only; the real v003 workload failed there before eye
+angles ran. The next reachable eye-angle boundary still lacks a normalized
+indirect assignment-keypoint resolver. The existing keypoint successor
+publisher also cannot consume the four ordinary shard-finalizer runs, and a new
+keypoint publication cannot retarget already-sealed bundle/subject-shape
+assignments without immutable rebinding. The exact evidence and phased repair
+are recorded in
+[`clipped_eye_assignment_authority_failure_2026-08-25.md`](clipped_eye_assignment_authority_failure_2026-08-25.md).
+
+Recovery begins with a read-only proof-sufficiency result. If any required
+pixel-provider, crop, frame, row, model, preprocessing, or scientific-array
+claim is absent or conflicting, the result is `unmigratable` and the admitted
+upstream producer must rerun. If the proof closes, the preferred route is a
+general direct-hybrid terminal-evidence profile feeding the maintained strict-
+v2 finalizer, not a Sleepyfish-specific migration publisher. The existing 220
+shards are correctly labeled `legacy_noncanonical`, but none names the crop-
+pixel work-package manifest required by the current terminal-receipt profile,
+so that current profile cannot consume them unchanged.
+
 The selected arena contract deliberately does not write the legacy `dish_mask`
 projection. Production readers cannot be switched by merely changing an attr
 name: first give each reader a profile-aware selected-geometry path (or an
@@ -866,10 +1000,17 @@ read. Likewise, registry calibration must call the full
 `load_selected_calibration_snapshot()` path; its current scalar ladder can
 report a present group as `ok` even when `usable_camera_scale` is false.
 
-**Gate:** each supported profile has a real-writer-to-unpatched-reader CI test;
-the registry cannot mark calibration usable when the canonical selected-
-calibration loader rejects reciprocity or manifest binding, and status `ok`
-alone is never treated as proof of a usable scale.
+**Gate:** each supported profile in the requested closure has a real-writer-to-
+unpatched-reader CI test; the registry cannot mark calibration usable when the
+canonical selected-calibration loader rejects reciprocity or manifest binding,
+and status `ok` alone is never treated as proof of a usable scale. A canonical
+downstream plan
+must also bind the exact producer profile, artifact/run, authority proof mode,
+and authority digest for every existing indirect dependency. An output not yet
+published remains pending its declared receipt rather than receiving predicted
+evidence. An unsatisfied assignment, coordinate, temporal, or successor
+boundary leaves the node blocked during metadata preflight, before payload
+scans, scratch creation, submission, or publication.
 
 ### Step 7 — Bind epoch projections, label speed semantics, and enforce mirror policy
 
@@ -1074,6 +1215,14 @@ applicable gates below.
 13. **Bounded evidence fails closed.** Observation, metadata-node, or identity-
     cardinality caps make a scope incomplete and produce a non-success result.
     Large frame-index row counts remain valid and are not treated as caps.
+14. **Producer admission precedes consumer execution, not read-only planning.**
+    Every active workload node names an executable producer/profile declaration
+    and resolves concrete direct and indirect authorities through shared full-
+    strength interfaces. Future upstream outputs remain `pending_receipt` until
+    their real publication receipts resolve. Completion, eligibility, paths,
+    names, and schema markers are supporting evidence, not substitutes for the
+    declared authority proof. Unknown or unsatisfied boundaries produce typed
+    blocked nodes and cannot create scratch state or be submitted.
 
 ## 9. Deferrals and non-goals
 
@@ -1110,10 +1259,24 @@ The main governing contracts and implementations for this plan are:
   [`recording_identity_census_2026-08-25.md`](recording_identity_census_2026-08-25.md),
   `registry/recording_identity_census.py:1-3082`, and
   `tests/unit/fisheye/test_recording_identity_census.py`.
+- Committed current-v2 identity implementation at `6969043ef801`:
+  `shared/source_recording_identity.py`,
+  `shared/recording_import_receipt.py`,
+  `registry/recording_identity_authority.py`,
+  `registry/shadow_publish.py`, and migration 72 at
+  `registry/migration_bodies.py:8528-8991`.
+- Activation-blocking registry writer surfaces:
+  `utils/registry_rescan.py`, `registry/reconcile_sweep.py`,
+  `registry/scan.py`, `registry/stage_complete.py`,
+  `registry/inline_refresh.py`, `registry/maintenance.py`,
+  `registry/prune_stale_datasets.py`, `registry/dedupe.py`, and
+  `utils/backfill_clipped_analysis_metadata.py`. These are different
+  functional classes; the required common property is that none may mutate the
+  durable canonical SQLite file outside the approved publication boundary.
 - Registry authority and immutable identity policy:
   [`registry_data_governance_policy.md`](../registry_data_governance_policy.md),
-  `registry/db.py:606-612,730-761,2534-2536,2601-2618`, and
-  `registry/maintenance.py:824-948`, with joined-view identity sources at
+  `registry/db.py:618-624,742-818,2554-2557,2621-2640`, and
+  `registry/maintenance.py:785-948`, with joined-view identity sources at
   `registry/migration_bodies.py:4430-4477,6580-6582,6760-6764`; the independent
   direct mutator requiring disposition is
   `registry/repair_recording_identities.py:1-6,132-183,214-274`.
@@ -1122,7 +1285,7 @@ The main governing contracts and implementations for this plan are:
   and
   [`acquisition_batch_registry_contract.md`](../acquisition_batch_registry_contract.md).
 - Source-import versus downstream producer provenance:
-  `utils/import_recording_analysis.py:201-296`,
+  `utils/import_recording_analysis.py:225-342`,
   `shared/import_video_metadata.py:393-535`,
   `shared/run_provenance.py:114-133,241-289,405-435`, and
   `shared/stage_provenance.py:136-201`.
@@ -1141,7 +1304,7 @@ The main governing contracts and implementations for this plan are:
   [`run_resolution_semantics.md`](../run_resolution_semantics.md),
   `shared/run_resolution.py:20-44,73-79,175-305`,
   `shared/zarr_run_completion.py:107-116,197-231,258-307,397-443,506-681`, and
-  `registry/maintenance.py:4097-4134,4164-4194`; representative parentless
+  `registry/maintenance.py:4151-4188,4218-4248`; representative parentless
   completion/provenance call sites are
   `analysis_workflows/materializers/subject_position.py:399-410,811-816`,
   `analysis_workflows/materializers/provider_epoch_behavior_summary.py:955-975,1138-1145`,
@@ -1153,21 +1316,21 @@ The main governing contracts and implementations for this plan are:
   `shared/zarr/detection_snapshot_publication.py:627-635,967-975`, and
   `analysis_workflows/materializers/provider_position_comparison.py:507-513,540-548`.
 - Zarr metadata lifecycle:
-  `shared/zarr_io.py:14-48`, `registry/db.py:206-216`,
-  `registry/maintenance.py:132-142`, `registry/chaser_metadata.py:85-90`, and
+  `shared/zarr_io.py:14-48`, `registry/db.py:218-228`,
+  `registry/maintenance.py:141-151`, `registry/chaser_metadata.py:85-90`, and
   `registry/stimulus_metadata_backfill.py:80-85`, plus the compatibility opener
   in `shared/zarr_helpers.py:413-425` and its generic caller at
   `shared/recording.py:167-174`.
 - Recording-step status and completion:
   `registry/status_ledger.py:11-12,105-244`,
   `registry/stage_complete.py:488-495`,
-  `registry/maintenance.py:5311-5412,6917-7013`, and
+  `registry/maintenance.py:5357-5386,6971-7060`, and
   `registry/migration_bodies.py:3242-3261`.
 - Existing serialized-stage finalizer and detection coverage gap:
   `analysis_workflows/registry_finalize.py:1-121,310-633` and
   `analysis_workflows/storage_contract_catalog.py:227-451`.
 - Registry scientific-projection refresh paths:
-  `registry/db.py:5320,5983,6619-6787`,
+  `registry/db.py:5347,6010,6892,7127`,
   `registry/maintenance.py:2560-4055`, and
   `registry/inline_refresh.py:1-166`.
 - Epoch and speed divergence:
@@ -1184,7 +1347,7 @@ The main governing contracts and implementations for this plan are:
   `segmentation/subject_segmentation.py:226-278`,
   `tracking/arena_assignment.py:362-446`,
   `shared/selected_calibration.py:2946-3003,4044-4325`, and
-  `registry/maintenance.py:3969-4016`.
+  `registry/maintenance.py:4023-4108`.
 - Versioned scientific metadata digest scopes:
   `shared/zarr/canonical_detection_manifest.py:568-597`,
   `shared/zarr/refined_detection_manifest.py:320-350`,
