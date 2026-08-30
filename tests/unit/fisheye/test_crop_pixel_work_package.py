@@ -3,9 +3,12 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import zarr
 
@@ -61,6 +64,124 @@ def test_build_package_cli_accepts_authenticated_flat_cache_provider(
     assert args.roi_cache_expected_archive_path == (
         tmp_path / "canonical_analysis.zarr"
     )
+
+
+def test_build_package_cli_selects_complete_crop_domain() -> None:
+    args = build_package_cli._parser().parse_args(
+        [
+            "analysis.zarr",
+            "--crop-run",
+            "crop_proxy_clip_0",
+            "--manifest",
+            "package.json",
+            "--all-crop-rows",
+        ]
+    )
+
+    np.testing.assert_array_equal(
+        build_package_cli._load_rows(args, total_rows=4),
+        np.arange(4, dtype=np.int64),
+    )
+    with pytest.raises(ValueError, match="resolved crop row count"):
+        build_package_cli._load_rows(args)
+
+
+def test_clipped_cache_binds_directly_to_canonical_crop_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Group(dict):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)
+            self.attrs = {"roi_shape": [4, 4]}
+
+    crop = _Group(
+        instance_key=np.asarray([10, 20, 30], dtype=np.uint64),
+        frame_indices=np.asarray([0, 100, 101], dtype=np.int64),
+        roi_coordinates_full=np.asarray([[0, 0], [4, 5], [6, 7]], dtype=np.int32),
+        source_clip_indices=np.asarray([0, 1, 1], dtype=np.int64),
+        source_clip_local_frame_indices=np.asarray([0, 0, 1], dtype=np.int64),
+    )
+    root = {"crop_runs/crop_v2": crop}
+    cache_manifest = tmp_path / "cache.json"
+    cache_manifest.write_text("{}\n", encoding="utf-8")
+    row_index = tmp_path / "cache.rows.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "roi_row_index": [0, 1],
+                "clip_id": ["clip_1", "clip_1"],
+                "clip_index": [1, 1],
+                "instance_key": pa.array([30, 20], type=pa.uint64()),
+                "parent_frame_index": [101, 100],
+                "clip_local_frame_index": [1, 0],
+                "roi_x": [6, 4],
+                "roi_y": [7, 5],
+            }
+        ),
+        row_index,
+    )
+    pixels = np.stack(
+        (
+            np.full((4, 4), 30, dtype=np.uint8),
+            np.full((4, 4), 20, dtype=np.uint8),
+        )
+    )
+    closed = {"value": False}
+
+    class _Cache:
+        shape = pixels.shape
+        manifest = {
+            "row_index": {"path": row_index.name},
+            "array": {"sha256": "a" * 64},
+            "builder": {
+                "pixel_contract": {
+                    "name": "orange_mono_pynvvc_luma_v1",
+                    "version": 1,
+                }
+            },
+        }
+
+        def __getitem__(self, key: object) -> np.ndarray:
+            return pixels[key]
+
+        def close(self) -> None:
+            closed["value"] = True
+
+    monkeypatch.setattr(
+        build_package_cli,
+        "open_persisted_crop_geometry_publication",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        build_package_cli,
+        "open_flat_roi_cache",
+        lambda *_args, **_kwargs: _Cache(),
+    )
+
+    source = build_package_cli._open_geometry_bound_flat_cache_source(
+        root=root,
+        zarr_path=tmp_path / "analysis.zarr",
+        crop_run="crop_v2",
+        cache_manifest_path=cache_manifest,
+        clip_id="clip_1",
+        clip_index=1,
+        frame_start=100,
+        frame_stop=102,
+    )
+    try:
+        np.testing.assert_array_equal(
+            source.bound_crop_rows, np.asarray([1, 2], dtype=np.int64)
+        )
+        batch = source.read_indices(np.asarray([1, 2], dtype=np.int64))
+        assert np.all(batch[0] == 20)
+        assert np.all(batch[1] == 30)
+        identity = source._build_frame_source_identity()
+        assert identity["crop_run"] == "crop_v2"
+        assert identity["clip_id"] == "clip_1"
+        assert identity["row_count"] == 2
+    finally:
+        source.close()
+    assert closed["value"] is True
 
 
 def _crop_root() -> tuple[Any, Any]:

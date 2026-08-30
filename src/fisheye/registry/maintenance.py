@@ -16,7 +16,6 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, NoReturn, Optio
 from .db import (
     Registry,
     RegistryPaths,
-    _import_zarr,
 )
 from .extractors.crop import _extract_crop_quality_rows
 from .extractors.detect_performance import _extract_detect_performance_rows
@@ -29,7 +28,9 @@ from .extractors.masks import (
     _extract_subject_mask_performance_rows,
 )
 from .extractors.quality import _extract_detect_quality_rows, _extract_keypoint_quality_rows
+from .recording_identity_authority import recording_directory_for_source_target
 from .registered_geometry_readiness import project_registered_geometry_stages
+from .zarr_open import import_zarr as _import_zarr
 from fisheye.shared.experiment_setup import subdish_required
 from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR,
@@ -816,11 +817,15 @@ def _backfill_recording_entities(
             continue
 
         recordings_scanned += 1
-        try:
-            recording_dir = zarr_path.parent.parent
-        except Exception:
-            manifests_missing += 1
-            continue
+        verified_import = registry.resolve_recording_import_admission(
+            dataset_id=dataset_id,
+            zarr_path=zarr_path,
+        )
+        recording_dir = (
+            recording_directory_for_source_target(zarr_path.resolve())
+            if verified_import is not None
+            else zarr_path.parent.parent
+        )
         manifest_path = recording_dir / "recording_manifest.json"
         if not manifest_path.exists():
             manifests_missing += 1
@@ -832,9 +837,14 @@ def _backfill_recording_entities(
             continue
 
         manifest_session_uuid = manifest.get("session_uuid")
-        recording_id = _normalize_recording_id(
-            session_uuid=str(manifest_session_uuid or session_uuid or "").strip() or None,
-            recording_dir=recording_dir,
+        recording_id = (
+            verified_import.identity.recording_id
+            if verified_import is not None
+            else _normalize_recording_id(
+                session_uuid=str(manifest_session_uuid or session_uuid or "").strip()
+                or None,
+                recording_dir=recording_dir,
+            )
         )
         now = registry.conn.execute("SELECT datetime('now') AS now;").fetchone()["now"]
         recording_name = manifest.get("recording_name") or recording_dir.name
@@ -896,7 +906,7 @@ def _backfill_recording_entities(
         if existing_recording is None:
             recordings_upserted += 1
 
-        if not dry_run:
+        if not dry_run and verified_import is None:
             registry.conn.execute(
                 """
                 INSERT INTO recordings (
@@ -970,7 +980,13 @@ def _backfill_recording_entities(
 
         current_recording_id = row["recording_id"]
         current_artifact_kind = row["artifact_kind"]
-        if current_recording_id != recording_id or current_artifact_kind != "source_recording":
+        if (
+            verified_import is None
+            and (
+                current_recording_id != recording_id
+                or current_artifact_kind != "source_recording"
+            )
+        ):
             datasets_linked += 1
             if not dry_run:
                 registry.conn.execute(

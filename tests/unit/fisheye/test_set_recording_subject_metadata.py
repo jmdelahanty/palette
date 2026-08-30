@@ -3,10 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import zarr
 
 from fisheye.shared.experiment_setup import resolve_experiment_setup
 from fisheye.shared.subject_metadata import resolve_subject_metadata
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+)
 from fisheye.utils import set_recording_subject_metadata as setter
 
 
@@ -74,6 +79,38 @@ def test_apply_publishes_count_only_authorities_and_manifest_audit(tmp_path: Pat
     assert setup.source["kind"] == "recording_manifest_subject_metadata"
     assert root.attrs["subject_count"] == 5
     assert root.attrs["species"] == "Danionella cerebrum"
+
+
+def test_apply_fences_current_profile_before_manifest_or_zarr_mutation(
+    tmp_path: Path,
+) -> None:
+    recording_dir = _recording(tmp_path)
+    plan = setter.plan_recording(
+        recording_dir,
+        species="Danionella cerebrum",
+        dpf=7,
+        subject_count=5,
+    )
+    zarr_path = recording_dir / "zarr" / "Cam2010093_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="r+", use_consolidated=False)
+    root.attrs[SOURCE_RECORDING_IDENTITY_PROFILE_ATTR] = (
+        SOURCE_RECORDING_IDENTITY_PROFILE
+    )
+    manifest_path = recording_dir / "recording_manifest.json"
+    manifest_before = manifest_path.read_bytes()
+
+    with pytest.raises(ValueError, match="current-profile"):
+        setter.apply_plan(
+            plan,
+            repair_id="test_repair",
+            reason="known acquisition metadata",
+            registry=None,
+        )
+
+    assert manifest_path.read_bytes() == manifest_before
+    reopened = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    assert "analysis/subject_metadata_runs" not in reopened
+    assert "analysis/experiment_setup_runs" not in reopened
 
 
 def test_plan_rejects_conflicting_manifest_metadata(tmp_path: Path) -> None:

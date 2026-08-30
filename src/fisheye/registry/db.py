@@ -65,6 +65,16 @@ from .acquisition_batches import (
 )
 from .migration_bodies import RegistryMigrationMixin
 from .migrations import bind_migrations
+from .recording_identity_authority import (
+    RecordingIdentityAuthorityError,
+    RegistryRecordingIdentityMixin,
+    canonical_dataset_path_hash,
+    recording_directory_for_source_target,
+)
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    load_source_recording_identity_profile,
+)
 from . import identity as registry_identity
 from .stimulus_protocol_storage import (
     RECORDING_STIMULUS_RUN_INSERT_SQL,
@@ -74,6 +84,9 @@ from .stimulus_protocol_storage import (
     recording_stimulus_payload,
 )
 from .temp_store_guard import assert_temp_store_registration_allowed
+from .zarr_open import (
+    open_zarr_group_non_consolidated as _open_zarr_group_non_consolidated,
+)
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 EYE_MASK_REGISTRY_WRITES_RETIRED_MESSAGE = (
     "Standalone eye-mask registry write paths are retired. Historical "
@@ -197,29 +210,6 @@ def _load_registry_path(default_root: Path) -> Optional[Path]:
     if not path.is_absolute():
         path = (config_path.parent / path).resolve()
     return path
-
-
-def _import_zarr():
-    """Lazy import to keep SQL-only registry commands independent of zarr."""
-    try:
-        import zarr  # type: ignore
-    except ModuleNotFoundError as exc:  # pragma: no cover - environment-dependent
-        raise ModuleNotFoundError(
-            "zarr is required for scan/register operations. Install zarr to read Zarr archives."
-        ) from exc
-    return zarr
-
-
-def _open_zarr_group_non_consolidated(zarr_path: Path, *, mode: str = "r"):
-    """Open a zarr root without trusting possibly stale consolidated metadata."""
-    zarr = _import_zarr()
-    try:
-        return zarr.open_group(str(zarr_path), mode=mode, use_consolidated=False)
-    except TypeError:
-        try:
-            return zarr.open_group(str(zarr_path), mode=mode, consolidated=False)
-        except TypeError:
-            return zarr.open_group(str(zarr_path), mode=mode)
 
 
 _utc_now = utc_now
@@ -594,7 +584,7 @@ def _normalize_parents(value: Any) -> List[Dict[str, Optional[str]]]:
 
 
 def _compute_path_hash(path: Path) -> str:
-    return sha256(str(path.resolve()).encode("utf-8")).hexdigest()
+    return canonical_dataset_path_hash(path)
 
 
 def _extract_session_uuid(root: zarr.Group) -> Optional[str]:
@@ -1243,6 +1233,7 @@ def _build_detection_source_records(root: zarr.Group) -> List[Dict[str, Any]]:
 class Registry(
     RegistryAcquisitionBatchMixin,
     RegistryAnalyticsReportMixin,
+    RegistryRecordingIdentityMixin,
     RegistryMigrationMixin,
 ):
     def __init__(self, path: Path):
@@ -1391,6 +1382,14 @@ class Registry(
                 continue
             self.conn.execute("BEGIN IMMEDIATE;")
             try:
+                # Another opener may have migrated while this connection was
+                # waiting for the write lock.  Re-read under the lock so a
+                # stale pre-lock version cannot replay the migration body.
+                locked_current = self._current_schema_version() or 0
+                if version <= locked_current:
+                    self.conn.commit()
+                    current = locked_current
+                    continue
                 apply_fn()
                 self._record_schema_version(version=version, name=name)
                 self.conn.execute(f"PRAGMA user_version = {int(version)};")
@@ -3024,6 +3023,7 @@ class Registry(
         recording_id: Optional[str],
         snapshot: Optional[Mapping[str, Any]],
         snapshot_source: Optional[str],
+        require_existing_recording: bool = False,
     ) -> None:
         """Project explicit acquisition subject identity into normalized tables.
 
@@ -3049,6 +3049,11 @@ class Registry(
             (recording_id,),
         ).fetchone()
         if recording_row is None:
+            if require_existing_recording:
+                raise RuntimeError(
+                    "subject projection requires an existing authoritative "
+                    f"recording row: {recording_id}"
+                )
             self.upsert_recording(recording_id=recording_id)
         subject_count = _as_int(snapshot.get("subject_count"))
         if subject_count is not None and len(subject_ids) > subject_count:
@@ -6543,73 +6548,125 @@ class Registry(
         sql.append("ORDER BY recording_id, stage_group, eye_mask_method")
         return list(self.conn.execute(" ".join(sql), params).fetchall())
 
-    def _resolve_effective_dataset_id(
+    def _project_nonidentity_from_root(
         self,
-        *,
-        base_dataset_id: str,
-        session_uuid: Optional[str],
+        root: zarr.Group,
         zarr_path: Path,
-    ) -> str:
-        """
-        Resolve dataset identity for registration without breaking legacy IDs.
-
-        Behavior:
-        - If base dataset_id is unused, keep it.
-        - If base dataset_id already points to the same path_hash, keep it.
-        - If base dataset_id collides with a different path and a session UUID is present,
-          deterministically suffix with the current path hash so multiple datasets can
-          coexist per recording/session.
-        """
-        current_hash = _compute_path_hash(zarr_path)
-        row = self.conn.execute(
-            "SELECT path_hash FROM datasets WHERE dataset_id = ?;",
-            (base_dataset_id,),
-        ).fetchone()
-        existing_hash = str(row["path_hash"]) if row and row["path_hash"] is not None else ""
-        if row is not None and existing_hash == current_hash:
-            return base_dataset_id
-
-        is_source_recording = bool(session_uuid) and "/recordings/" in str(zarr_path).replace("\\", "/").lower()
-        if not is_source_recording:
-            # For non-recording artifacts, preserve caller-provided IDs.
-            return base_dataset_id
-
-        # For source recordings, prefer canonical dataset IDs derived from path hash.
-        # This prevents reintroducing legacy dataset_id=session_uuid rows during rescans.
-        assert session_uuid is not None  # for type checkers
-        candidate = f"{session_uuid}:z{current_hash[:12]}"
-        for extra in (
-            "",
-            current_hash[12:16],
-            current_hash[16:20],
-            current_hash[20:24],
-        ):
-            resolved = candidate if not extra else f"{candidate}{extra}"
-            existing = self.conn.execute(
-                "SELECT path_hash FROM datasets WHERE dataset_id = ?;",
-                (resolved,),
-            ).fetchone()
-            if existing is None:
-                return resolved
-            if str(existing["path_hash"] or "") == current_hash:
-                return resolved
-
-        # Extremely unlikely fallback: use full hash to guarantee uniqueness.
-        return f"{session_uuid}:z{current_hash}"
-
-    def resolve_effective_dataset_id(
-        self,
-        base_dataset_id: str,
         *,
-        session_uuid: Optional[str],
-        zarr_path: Path,
-    ) -> str:
-        """Resolve the canonical registry dataset ID for one Zarr path."""
+        dataset_id: str,
+        metadata: DatasetMetadata,
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+        authoritative_current_source: bool = False,
+        verified_camera_id: Optional[str] = None,
+    ) -> None:
+        """Project registry metadata after identity has been decided elsewhere."""
 
-        return self._resolve_effective_dataset_id(
-            base_dataset_id=base_dataset_id,
-            session_uuid=session_uuid,
+        protocol_name, protocol_hash = _extract_protocol(root)
+        snapshot, snapshot_source = _extract_snapshot(root)
+        provenance = _extract_provenance(snapshot)
+        context = _extract_session_context(root)
+        acquisition = _extract_acquisition(root)
+        recording_context = _extract_recording_context(
+            root,
+            zarr_path,
+            metadata,
+            context=context,
+            acquisition=acquisition,
+            protocol_name=protocol_name,
+        )
+        if authoritative_current_source and not recording_context:
+            raise RecordingIdentityAuthorityError(
+                "current source root is missing required recording context"
+            )
+        if recording_context:
+            if authoritative_current_source:
+                if (
+                    recording_id is None
+                    or metadata.session_uuid is None
+                    or verified_camera_id is None
+                ):
+                    raise RecordingIdentityAuthorityError(
+                        "current source non-identity projection requires verified "
+                        "recording, session, and camera identity"
+                    )
+                self._update_current_source_recording_metadata(
+                    recording_id=recording_id,
+                    session_uuid=metadata.session_uuid,
+                    recording_path=recording_directory_for_source_target(
+                        Path(zarr_path).resolve()
+                    ),
+                    camera_id=verified_camera_id,
+                    context=recording_context,
+                )
+            else:
+                self.upsert_recording(**recording_context)
+        self.upsert_provenance(
+            dataset_id,
+            provenance=provenance,
+            context=context,
+            protocol_name=protocol_name,
+            protocol_hash=protocol_hash,
+            acquisition=acquisition,
+            zarr_purpose=metadata.zarr_purpose,
+        )
+        self.upsert_subject_snapshot_entities(
+            dataset_id,
+            recording_id=recording_id,
+            snapshot=snapshot,
+            snapshot_source=snapshot_source,
+            require_existing_recording=authoritative_current_source,
+        )
+        self.replace_detection_sources(dataset_id, _build_detection_source_records(root))
+        acquisition_rows = _extract_acquisition_video_stream_rows(
+            root, zarr_path=zarr_path, recording_id=recording_id, zarr_use=zarr_use
+        )
+        self.replace_acquisition_video_streams(dataset_id, acquisition_rows)
+        chaser_metadata = extract_recording_chaser_metadata(
+            root,
             zarr_path=zarr_path,
+            recording_id=recording_id,
+        )
+        self.replace_recording_chasers(dataset_id, chaser_metadata.rows)
+        stimulus_metadata = extract_stimulus_metadata(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+        )
+        self.replace_stimulus_metadata(
+            dataset_id,
+            protocols=stimulus_metadata.protocols,
+            protocol_steps=stimulus_metadata.protocol_steps,
+            recording_runs=stimulus_metadata.recording_runs,
+            recording_steps=stimulus_metadata.recording_steps,
+            recording_modes=stimulus_metadata.recording_modes,
+        )
+        self.replace_detect_quality(
+            dataset_id, _extract_detect_quality_rows(root, zarr_path=zarr_path)
+        )
+        extractor_args = {
+            "zarr_path": zarr_path,
+            "recording_id": recording_id,
+            "zarr_use": zarr_use,
+        }
+        self.replace_detect_performance(
+            dataset_id, _extract_detect_performance_rows(root, **extractor_args)
+        )
+        self.replace_crop_quality(
+            dataset_id, _extract_crop_quality_rows(root, **extractor_args)
+        )
+        self.replace_keypoint_quality(
+            dataset_id, _extract_keypoint_quality_rows(root, zarr_path=zarr_path)
+        )
+        self.replace_keypoint_performance(
+            dataset_id, _extract_keypoint_performance_rows(root, **extractor_args)
+        )
+        self.replace_subject_mask_performance(
+            dataset_id, _extract_subject_mask_performance_rows(root, **extractor_args)
+        )
+        self.replace_subject_mask_component_quality(
+            dataset_id,
+            _extract_subject_mask_component_quality_rows(root, **extractor_args),
         )
 
     def register_from_root(self, root: zarr.Group, zarr_path: Path) -> str:
@@ -6617,6 +6674,12 @@ class Registry(
             return self._register_from_root_in_transaction(root, zarr_path)
 
     def _register_from_root_in_transaction(self, root: zarr.Group, zarr_path: Path) -> str:
+        profile = load_source_recording_identity_profile(zarr_path)
+        if profile == SOURCE_RECORDING_IDENTITY_PROFILE:
+            raise RecordingIdentityAuthorityError(
+                "profiled current source recordings require receipt-bound "
+                "finalization; generic registry registration is forbidden"
+            )
         metadata = extract_dataset_metadata(root, zarr_path)
         base_dataset_id = metadata.dataset_id
         session_uuid = metadata.session_uuid
@@ -6644,141 +6707,15 @@ class Registry(
         ).fetchone()
         recording_id = _decode_attr(dataset_row["recording_id"]) if dataset_row is not None else None
         zarr_use = _decode_attr(dataset_row["zarr_use"]) if dataset_row is not None else None
-
-        protocol_name, protocol_hash = _extract_protocol(root)
-        snapshot, snapshot_source = _extract_snapshot(root)
-        provenance = _extract_provenance(snapshot)
-        context = _extract_session_context(root)
-        acquisition = _extract_acquisition(root)
-        recording_context = _extract_recording_context(
+        self._project_nonidentity_from_root(
             root,
             zarr_path,
-            metadata,
-            context=context,
-            acquisition=acquisition,
-            protocol_name=protocol_name,
-        )
-        if recording_context:
-            self.upsert_recording(**recording_context)
-        self.upsert_provenance(
-            dataset_id,
-            provenance=provenance,
-            context=context,
-            protocol_name=protocol_name,
-            protocol_hash=protocol_hash,
-            acquisition=acquisition,
-            zarr_purpose=zarr_purpose,
-        )
-        self.upsert_subject_snapshot_entities(
-            dataset_id,
-            recording_id=recording_id,
-            snapshot=snapshot,
-            snapshot_source=snapshot_source,
-        )
-        detection_records = _build_detection_source_records(root)
-        self.replace_detection_sources(dataset_id, detection_records)
-        acquisition_video_stream_rows = _extract_acquisition_video_stream_rows(
-            root,
-            zarr_path=zarr_path,
+            dataset_id=dataset_id,
+            metadata=metadata,
             recording_id=recording_id,
             zarr_use=zarr_use,
         )
-        self.replace_acquisition_video_streams(dataset_id, acquisition_video_stream_rows)
-        chaser_metadata = extract_recording_chaser_metadata(
-            root,
-            zarr_path=zarr_path,
-            recording_id=recording_id,
-        )
-        self.replace_recording_chasers(dataset_id, chaser_metadata.rows)
-        stimulus_metadata = extract_stimulus_metadata(
-            root,
-            zarr_path=zarr_path,
-            recording_id=recording_id,
-        )
-        self.replace_stimulus_metadata(
-            dataset_id,
-            protocols=stimulus_metadata.protocols,
-            protocol_steps=stimulus_metadata.protocol_steps,
-            recording_runs=stimulus_metadata.recording_runs,
-            recording_steps=stimulus_metadata.recording_steps,
-            recording_modes=stimulus_metadata.recording_modes,
-        )
-        detect_quality_rows = _extract_detect_quality_rows(root, zarr_path=zarr_path)
-        self.replace_detect_quality(dataset_id, detect_quality_rows)
-        detect_performance_rows = _extract_detect_performance_rows(
-            root,
-            zarr_path=zarr_path,
-            recording_id=recording_id,
-            zarr_use=zarr_use,
-        )
-        self.replace_detect_performance(dataset_id, detect_performance_rows)
-        crop_quality_rows = _extract_crop_quality_rows(
-            root,
-            zarr_path=zarr_path,
-            recording_id=recording_id,
-            zarr_use=zarr_use,
-        )
-        self.replace_crop_quality(dataset_id, crop_quality_rows)
-        keypoint_quality_rows = _extract_keypoint_quality_rows(root, zarr_path=zarr_path)
-        self.replace_keypoint_quality(dataset_id, keypoint_quality_rows)
-        keypoint_performance_rows = _extract_keypoint_performance_rows(
-            root,
-            zarr_path=zarr_path,
-            recording_id=recording_id,
-            zarr_use=zarr_use,
-        )
-        self.replace_keypoint_performance(dataset_id, keypoint_performance_rows)
-        subject_mask_performance_rows = _extract_subject_mask_performance_rows(
-            root,
-            zarr_path=zarr_path,
-            recording_id=recording_id,
-            zarr_use=zarr_use,
-        )
-        self.replace_subject_mask_performance(dataset_id, subject_mask_performance_rows)
-        subject_mask_component_quality_rows = _extract_subject_mask_component_quality_rows(
-            root,
-            zarr_path=zarr_path,
-            recording_id=recording_id,
-            zarr_use=zarr_use,
-        )
-        self.replace_subject_mask_component_quality(dataset_id, subject_mask_component_quality_rows)
         return dataset_id
-
-    def _profile_context_fallbacks(self, dataset_id: str) -> Dict[str, Any]:
-        """Resolve recording/zarr_use/genotype/dpf fallbacks for profile extractors."""
-
-        row = self.conn.execute(
-            """
-            SELECT
-                d.recording_id AS recording_id,
-                d.zarr_use AS zarr_use,
-                p.genotype AS genotype,
-                p.dpf_at_acquisition AS dpf_at_acquisition
-            FROM datasets d
-            LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
-            WHERE d.dataset_id = ?
-            LIMIT 1;
-            """,
-            (str(dataset_id),),
-        ).fetchone()
-        if row is None:
-            return {
-                "recording_id": None,
-                "zarr_use": None,
-                "genotype": None,
-                "dpf_at_acquisition": None,
-            }
-        dpf_raw = row["dpf_at_acquisition"]
-        try:
-            dpf = int(dpf_raw) if dpf_raw is not None else None
-        except (TypeError, ValueError):
-            dpf = None
-        return {
-            "recording_id": _decode_attr(row["recording_id"]),
-            "zarr_use": _decode_attr(row["zarr_use"]),
-            "genotype": _decode_attr(row["genotype"]),
-            "dpf_at_acquisition": dpf,
-        }
 
     def reconcile_dataset_from_root(
         self,
@@ -6800,8 +6737,15 @@ class Registry(
         scripts and the per-table profile backfills for a single dataset.
         """
 
+        profile = load_source_recording_identity_profile(zarr_path)
         with self._transaction_context():
-            dataset_id = self._register_from_root_in_transaction(root, zarr_path)
+            if profile == SOURCE_RECORDING_IDENTITY_PROFILE:
+                verified = self.refresh_bound_current_source_import(
+                    zarr_path=zarr_path
+                )
+                dataset_id = verified.identity.dataset_id
+            else:
+                dataset_id = self._register_from_root_in_transaction(root, zarr_path)
             fallbacks = self._profile_context_fallbacks(dataset_id)
 
             detection_profile_rows = _extract_detection_data_profile_rows(
@@ -8187,6 +8131,25 @@ class Registry(
             return None
         if _is_empty_zarr_stub(zarr_path):
             return None
+        profile = load_source_recording_identity_profile(zarr_path)
+        if profile == SOURCE_RECORDING_IDENTITY_PROFILE:
+            verified = self.refresh_bound_current_source_import(
+                zarr_path=zarr_path
+            )
+            dataset_id = verified.identity.dataset_id
+            if include_step_status:
+                from .maintenance import reconcile_recording_step_status_for_dataset
+
+                root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
+                reconcile_recording_step_status_for_dataset(
+                    self,
+                    dataset_id=dataset_id,
+                    zarr_path=zarr_path,
+                    root=root,
+                    recording_id=verified.identity.recording_id,
+                    zarr_use="analysis",
+                )
+            return dataset_id
         root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
         dataset_id = self.register_from_root(root, zarr_path)
         if include_step_status:

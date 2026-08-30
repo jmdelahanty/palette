@@ -6,10 +6,15 @@ from types import SimpleNamespace
 
 import zarr
 
+from fisheye.shared.keypoint_publication_profile import (
+    COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
+    STRICT_V2_KEYPOINT_PUBLICATION_PROFILE,
+)
 from fisheye.utils.plan_clipped_collection_keypoints_bsub import (
     _parse_bsub_job_id,
     _replace_job_placeholders,
     apply_plan,
+    build_arg_parser,
     build_plan,
 )
 
@@ -70,6 +75,7 @@ def test_build_plan_resolves_manifests_and_dependency_commands(tmp_path: Path) -
         log_dir=tmp_path / "logs",
         pose_schema="traditional_v2",
         batch_size=256,
+        keypoint_publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
         device="0",
         queue="gpu_l4",
         ncores=4,
@@ -95,6 +101,9 @@ def test_build_plan_resolves_manifests_and_dependency_commands(tmp_path: Path) -
     assert plan.merged_proxy_crop_run == "crop_proxy_test_run_collection"
     assert plan.keypoint_collection_run == "keypoints_test_run"
     assert plan.refined_keypoints_run == "refined_keypoints_test_run"
+    assert plan.keypoint_publication_profile == (
+        COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE
+    )
     assert plan.keypoint_storage["effective"] == {
         "keypoint_storage_layout": "indexed_sharding_v1",
         "keypoint_storage_policy": "default_indexed_sharding_v1",
@@ -148,6 +157,9 @@ def test_build_plan_resolves_manifests_and_dependency_commands(tmp_path: Path) -
     assert finalizer_dependency == "done(<jobid:kp_test_run_clip_000001>) && done(<jobid:kp_test_run_clip_000002>)"
     assert "keypoint_shard_test_run_clip_000001" in plan.finalize_command
     assert "keypoint_shard_test_run_clip_000002" in plan.finalize_command
+    assert plan.finalize_command[
+        plan.finalize_command.index("--publication-profile") + 1
+    ] == COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE
     assert plan.refine_bsub_command[plan.refine_bsub_command.index("-w") + 1] == "done(<jobid:kp_finalize_test_run>)"
 
 
@@ -170,6 +182,7 @@ def test_build_plan_marks_missing_cache_without_keypoint_command(tmp_path: Path)
         log_dir=tmp_path / "logs",
         pose_schema="traditional_v2",
         batch_size=256,
+        keypoint_publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
         keypoint_roi_shard_rows=None,
         keypoint_frame_shard_rows=262144,
         device="0",
@@ -210,6 +223,23 @@ def test_parse_and_replace_bsub_job_placeholders() -> None:
     ]
 
 
+def test_collection_cli_defaults_to_strict_v2_intent() -> None:
+    args = build_arg_parser().parse_args(
+        [
+            "--zarr",
+            "/tmp/example.zarr",
+            "--collection-id",
+            "collection",
+            "--cache-dir-root",
+            "/tmp/cache",
+            "--all-clips",
+            "--dry-run",
+        ]
+    )
+
+    assert args.keypoint_publication_profile == STRICT_V2_KEYPOINT_PUBLICATION_PROFILE
+
+
 def test_apply_plan_creates_proxies_and_submits_dependency_dag(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording" / "zarr" / "sample_analysis.zarr"
     collection_id = "collection_test"
@@ -231,6 +261,7 @@ def test_apply_plan_creates_proxies_and_submits_dependency_dag(tmp_path: Path) -
         log_dir=tmp_path / "logs",
         pose_schema="traditional_v2",
         batch_size=256,
+        keypoint_publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
         keypoint_roi_shard_rows=None,
         keypoint_frame_shard_rows=262144,
         device="0",

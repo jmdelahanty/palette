@@ -10,7 +10,7 @@ import os
 import re
 import subprocess
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -46,6 +46,11 @@ from fisheye.cluster.keypoints.common import (
     safe_component,
     validate_registered_analysis_zarr,
 )
+from fisheye.cluster.keypoints.v2_finalization import (
+    ClipKeypointV2FinalizationInput,
+    ClippedKeypointV2FinalizationInputs,
+    build_clipped_keypoint_v2_finalization_fragment,
+)
 from fisheye.cluster.lsf import (
     CommandRunner,
     LsfExecutionMode,
@@ -72,7 +77,9 @@ from fisheye.cluster.recording_detection_postprocess import (
 )
 from fisheye.cluster.clipped_storage_finalization import (
     ClippedStorageFinalizationInputs,
+    RecordingCropV2FinalizationInputs,
     StrictClipRefinedDetectionInput,
+    build_recording_crop_v2_finalization_fragment,
 )
 from fisheye.cluster.crop_snapshot import (
     CropSnapshotFragmentInputs,
@@ -97,6 +104,21 @@ from fisheye.registry.model_resolution import (
     resolve_recording_id,
     verify_deployment_artifact_content,
 )
+from fisheye.shared.keypoint_publication_profile import (
+    COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
+    KEYPOINT_PUBLICATION_PROFILES,
+    STRICT_V2_KEYPOINT_PUBLICATION_PROFILE,
+    require_compatibility_keypoint_shard_aggregate,
+)
+from fisheye.shared.pose_model_input_contract import (
+    PoseModelInputContractBinding,
+    PoseModelInputRuntimePlan,
+    load_pose_model_input_contract,
+)
+from fisheye.shared.pose_model_schema_binding import (
+    resolve_registered_pose_model_schema_binding,
+)
+from fisheye.shared.zarr.keypoint_manifest import KeypointPreprocessingReference
 from fisheye.shared.zarr.refined_detection_crop_source import (
     bind_refined_detection_crop_source,
 )
@@ -111,10 +133,12 @@ SUPPORTED_PLAN_SCHEMAS = frozenset((LEGACY_PLAN_SCHEMA, PLAN_SCHEMA))
 TARGET_MANIFEST_SCHEMA = "palette.clipped_inference_targets.v1"
 FAMILY = "clipped_inference"
 WORKFLOW_SCOPE_FULL = "full"
+WORKFLOW_SCOPE_KEYPOINTS = "keypoints"
 WORKFLOW_SCOPE_DETECTION = "detection"
 WORKFLOW_SCOPE_DOWNSTREAM = "downstream"
 WORKFLOW_SCOPES = (
     WORKFLOW_SCOPE_FULL,
+    WORKFLOW_SCOPE_KEYPOINTS,
     WORKFLOW_SCOPE_DETECTION,
     WORKFLOW_SCOPE_DOWNSTREAM,
 )
@@ -213,6 +237,12 @@ class ClippedInferencePlan:
     resume_existing_detections: bool
     encoded_mask_packages: bool
     subject_mask_publication_profile: str
+    keypoint_publication_profile: str
+    keypoint_pose_schema_binding: Mapping[str, Any] | None
+    keypoint_preprocessing_manifest: Mapping[str, Any] | None
+    keypoint_model_input_contract: Mapping[str, Any] | None
+    keypoint_model_input_runtime: Mapping[str, Any] | None
+    keypoint_model_input_contract_document: Mapping[str, Any] | None
     detect_array_concurrency: int
     gpu_array_concurrency: int
     cache_array_concurrency: int
@@ -243,6 +273,29 @@ class ClippedInferencePlan:
             "resume_existing_detections": self.resume_existing_detections,
             "encoded_mask_packages": self.encoded_mask_packages,
             "subject_mask_publication_profile": self.subject_mask_publication_profile,
+            "keypoint_publication_profile": self.keypoint_publication_profile,
+            "keypoint_contracts": {
+                "pose_schema_binding": (
+                    dict(self.keypoint_pose_schema_binding)
+                    if self.keypoint_pose_schema_binding is not None
+                    else None
+                ),
+                "preprocessing": (
+                    dict(self.keypoint_preprocessing_manifest)
+                    if self.keypoint_preprocessing_manifest is not None
+                    else None
+                ),
+                "model_input_contract": (
+                    dict(self.keypoint_model_input_contract)
+                    if self.keypoint_model_input_contract is not None
+                    else None
+                ),
+                "model_input_runtime": (
+                    dict(self.keypoint_model_input_runtime)
+                    if self.keypoint_model_input_runtime is not None
+                    else None
+                ),
+            },
             "registered_dish_geometry": {
                 "gate_requirement": self.registered_gate_requirement,
                 "gate_run": self.registered_gate_run,
@@ -326,6 +379,53 @@ def _verify_binding(binding: ModelBinding) -> None:
             f"Registered {binding.task} model is not content-pinned: "
             f"{json.dumps(verification.to_dict(), sort_keys=True)}"
         )
+
+
+def _resolve_pose_schema_binding_document(
+    *, registry_path: Path, binding: ModelBinding
+) -> dict[str, Any]:
+    if binding.task != "pose":
+        raise ValueError("Pose schema binding requires the selected pose model.")
+    registry = Registry(registry_path.expanduser().resolve())
+    try:
+        return resolve_registered_pose_model_schema_binding(
+            registry,
+            run_id=binding.run_id,
+            expected_set_id=binding.set_id,
+            expected_model_path=str(binding.path),
+            expected_model_sha256=binding.sha256,
+        )
+    finally:
+        registry.close()
+
+
+def _strict_clipped_keypoint_preprocessing_manifest(
+    runtime: PoseModelInputRuntimePlan,
+) -> dict[str, Any]:
+    transform = runtime.transform
+    return KeypointPreprocessingReference(
+        profile_id="yolo_pose_crop_work_package_v1",
+        profile_version=1,
+        input_mode="crop_pixel_work_package",
+        document={
+            "clip_source_contract": {
+                "coordinate_contract_mode": "legacy_noncanonical",
+                "input_mode_effective": runtime.input_mode,
+                "model_input_transform": transform.to_attrs(),
+            },
+            "source_pixel_profile": "crop_pixel_work_package_v1",
+            "source_pixel_dtype": "uint8",
+            "source_pixel_channels": "grayscale",
+            "model_input_mode": runtime.input_mode,
+            "model_input_transform": transform.to_attrs(),
+            "network_input_size": runtime.network_imgsz,
+            "model_input_stride": runtime.model_stride,
+            "model_input_contract": runtime.to_json(),
+            "confidence_threshold": 0.25,
+            "iou_threshold": 0.5,
+            "max_detections_per_roi": 1,
+        },
+    ).as_manifest()
 
 
 def _resolve_ranked_binding(
@@ -523,17 +623,35 @@ def _refuse_output_collisions(
     )
     if planned_gate_group:
         outputs.append(zarr / planned_gate_group)
-    if workflow_scope == WORKFLOW_SCOPE_FULL:
+    if workflow_scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_KEYPOINTS}:
         for clip in target_plan["clips"]:
-            outputs.extend(
-                [
-                    zarr / "crop_runs" / str(clip["proxy_crop_run"]),
-                    zarr / "keypoint_shard_runs" / str(clip["keypoint_shard_run"]),
-                    zarr
-                    / "subject_mask_shard_runs"
-                    / str(clip["subject_mask_shard_run"]),
-                ]
+            outputs.append(
+                zarr / "keypoint_shard_runs" / str(clip["keypoint_shard_run"])
             )
+            if workflow_scope == WORKFLOW_SCOPE_FULL:
+                outputs.extend(
+                    (
+                        zarr / "crop_runs" / str(clip["proxy_crop_run"]),
+                        zarr
+                        / "subject_mask_shard_runs"
+                        / str(clip["subject_mask_shard_run"]),
+                    )
+                )
+        outputs.extend(
+            [
+                Path(str(target_plan["cache_dir"])),
+                Path(str(target_plan["package_dir"])),
+            ]
+        )
+        strict_bundle = str(target_plan.get("strict_storage_bundle_root") or "")
+        if strict_bundle:
+            outputs.append(Path(strict_bundle))
+    if workflow_scope == WORKFLOW_SCOPE_KEYPOINTS:
+        canonical_crop_run = str(target_plan.get("canonical_crop_run") or "")
+        if not canonical_crop_run:
+            raise ValueError("Canonical keypoint planning requires a crop-v2 run id.")
+        outputs.append(zarr / "crop_runs" / canonical_crop_run)
+    if workflow_scope == WORKFLOW_SCOPE_FULL:
         outputs.extend(
             [
                 zarr / "crop_runs" / str(target_plan["merged_proxy_crop_run"]),
@@ -555,13 +673,8 @@ def _refuse_output_collisions(
                 zarr
                 / "subject_mask_bundle_runs"
                 / str(target_plan["subject_mask_bundle_id"]),
-                Path(str(target_plan["cache_dir"])),
-                Path(str(target_plan["package_dir"])),
             ]
         )
-        strict_bundle = str(target_plan.get("strict_storage_bundle_root") or "")
-        if strict_bundle:
-            outputs.append(Path(strict_bundle))
     collisions = [path for path in outputs if path.exists()]
     if collisions:
         raise FileExistsError(
@@ -1737,6 +1850,7 @@ def build_plan(
     detection_run_id: str | None = None,
     pose_set_id: str | None = None,
     pose_run_id: str | None = None,
+    pose_model_input_contract_path: Path | None = None,
     subject_mask_set_id: str | None = None,
     subject_mask_run_id: str | None = None,
     workflow_scope: str = WORKFLOW_SCOPE_FULL,
@@ -1751,6 +1865,7 @@ def build_plan(
     resume_existing_detections: bool = False,
     encoded_mask_packages: bool = False,
     subject_mask_publication_profile: str = (SUBJECT_MASK_PUBLICATION_RECEIPT_COMPOSED),
+    keypoint_publication_profile: str = STRICT_V2_KEYPOINT_PUBLICATION_PROFILE,
     detect_array_concurrency: int = 8,
     gpu_array_concurrency: int = 4,
     cache_array_concurrency: int = 2,
@@ -1767,23 +1882,31 @@ def build_plan(
     scope = str(workflow_scope).strip()
     if scope not in WORKFLOW_SCOPES:
         raise ValueError(f"workflow_scope must be one of {WORKFLOW_SCOPES!r}.")
-    downstream_model_ids = {
-        "pose_set_id": pose_set_id,
-        "pose_run_id": pose_run_id,
-        "subject_mask_set_id": subject_mask_set_id,
-        "subject_mask_run_id": subject_mask_run_id,
-    }
+    downstream_model_ids = {}
+    if scope in {
+        WORKFLOW_SCOPE_FULL,
+        WORKFLOW_SCOPE_KEYPOINTS,
+        WORKFLOW_SCOPE_DOWNSTREAM,
+    }:
+        downstream_model_ids.update(
+            {"pose_set_id": pose_set_id, "pose_run_id": pose_run_id}
+        )
+    if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}:
+        downstream_model_ids.update(
+            {
+                "subject_mask_set_id": subject_mask_set_id,
+                "subject_mask_run_id": subject_mask_run_id,
+            }
+        )
     missing_downstream_ids = sorted(
         name
         for name, value in downstream_model_ids.items()
         if not str(value or "").strip()
     )
-    if (
-        scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
-        and missing_downstream_ids
-    ):
+    if missing_downstream_ids:
         raise ValueError(
-            "Full/downstream workflow scope requires exact downstream model identifiers: "
+            f"{scope.capitalize()} workflow scope requires exact downstream model "
+            "identifiers: "
             + ", ".join(missing_downstream_ids)
         )
     if (
@@ -1817,6 +1940,38 @@ def build_plan(
                 "Downstream scope consumes an exact finalized detection run; "
                 "--resume-existing-detections is not applicable."
             )
+    resolved_keypoint_profile = str(keypoint_publication_profile).strip()
+    if resolved_keypoint_profile not in KEYPOINT_PUBLICATION_PROFILES:
+        raise ValueError(
+            "Unsupported keypoint publication profile: "
+            f"{resolved_keypoint_profile!r}."
+        )
+    if (
+        scope == WORKFLOW_SCOPE_FULL
+        and resolved_keypoint_profile == STRICT_V2_KEYPOINT_PUBLICATION_PROFILE
+    ):
+        raise ValueError(
+            "Strict-v2 canonical clipped keypoint publication is not yet wired "
+            "through the full subject-mask/assignment consumers. Planning fails "
+            "closed instead of substituting finalize_keypoint_shards. Use "
+            f"{COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE!r} only for an "
+            "explicitly noncanonical compatibility workload."
+        )
+    if scope == WORKFLOW_SCOPE_FULL:
+        require_compatibility_keypoint_shard_aggregate(resolved_keypoint_profile)
+    if (
+        scope == WORKFLOW_SCOPE_KEYPOINTS
+        and resolved_keypoint_profile != STRICT_V2_KEYPOINT_PUBLICATION_PROFILE
+    ):
+        raise ValueError(
+            "The keypoints workflow scope is canonical-only and requires the "
+            f"{STRICT_V2_KEYPOINT_PUBLICATION_PROFILE!r} publication profile."
+        )
+    if scope == WORKFLOW_SCOPE_KEYPOINTS and pose_model_input_contract_path is None:
+        raise ValueError(
+            "Canonical keypoint planning requires --pose-model-input-contract; "
+            "crop and network extents cannot be inferred from a default."
+        )
     gate_requirement = str(registered_gate_requirement).strip()
     if gate_requirement not in REGISTERED_GATE_REQUIREMENTS:
         raise ValueError(
@@ -1859,7 +2014,8 @@ def build_plan(
     repo_commit = _repo_commit(repo)
     modern_registered_pipeline = gate_requirement != "off"
     canonical_recording_pipeline = (
-        scope == WORKFLOW_SCOPE_DETECTION or modern_registered_pipeline
+        scope in {WORKFLOW_SCOPE_DETECTION, WORKFLOW_SCOPE_KEYPOINTS}
+        or modern_registered_pipeline
     )
 
     detect_bindings: list[ModelBinding] = []
@@ -1880,7 +2036,11 @@ def build_plan(
                     run_id=str(detection_run_id),
                 )
             )
-        if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}:
+        if scope in {
+            WORKFLOW_SCOPE_FULL,
+            WORKFLOW_SCOPE_KEYPOINTS,
+            WORKFLOW_SCOPE_DOWNSTREAM,
+        }:
             pose = resolve_pose_model_binding(
                 registry_path=registry_path,
                 recording_id=target.recording_id,
@@ -1902,7 +2062,45 @@ def build_plan(
     )
     pose_binding = (
         _assert_same_binding("pose", pose_bindings)
-        if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+        if scope in {
+            WORKFLOW_SCOPE_FULL,
+            WORKFLOW_SCOPE_KEYPOINTS,
+            WORKFLOW_SCOPE_DOWNSTREAM,
+        }
+        else None
+    )
+    pose_schema_binding = (
+        _resolve_pose_schema_binding_document(
+            registry_path=registry_path,
+            binding=pose_binding,
+        )
+        if pose_binding is not None
+        else None
+    )
+    model_input_contract: PoseModelInputContractBinding | None = None
+    model_input_runtime: PoseModelInputRuntimePlan | None = None
+    if scope == WORKFLOW_SCOPE_KEYPOINTS:
+        assert pose_binding is not None
+        assert pose_model_input_contract_path is not None
+        model_input_contract = load_pose_model_input_contract(
+            pose_model_input_contract_path.expanduser().resolve(),
+            model_path=pose_binding.path,
+            expected_set_id=pose_binding.set_id,
+            expected_run_id=pose_binding.run_id,
+            expected_model_sha256=pose_binding.sha256,
+        )
+        model_input_runtime = model_input_contract.plan_for_native_shape(
+            model_input_contract.training_source_shape_hw
+        )
+        model_input_runtime = replace(
+            model_input_runtime,
+            contract_path=(
+                run_root / "contracts" / "pose_model_input_contract.json"
+            ),
+        )
+    keypoint_preprocessing = (
+        _strict_clipped_keypoint_preprocessing_manifest(model_input_runtime)
+        if model_input_runtime is not None
         else None
     )
     subject_binding = (
@@ -2104,12 +2302,30 @@ def build_plan(
                             ".flat_roi_cache.rows.parquet"
                         )
                     ),
-                    "proxy_crop_run": f"crop_proxy_{target_label}_{clip}",
-                    "alias_manifest": str(alias),
+                    "proxy_crop_run": (
+                        f"crop_proxy_{target_label}_{clip}"
+                        if scope == WORKFLOW_SCOPE_FULL
+                        else None
+                    ),
+                    "alias_manifest": (
+                        str(alias) if scope == WORKFLOW_SCOPE_FULL else None
+                    ),
                     "keypoint_shard_run": f"keypoint_shard_{target_label}_{clip}",
-                    "subject_mask_shard_run": f"subject_mask_shard_{target_label}_{clip}",
-                    "refined_mask_package_run": f"refined_subject_masks_{target_label}_{clip}",
-                    "package_path": str(package_dir / f"{clip}.tar.gz"),
+                    "subject_mask_shard_run": (
+                        f"subject_mask_shard_{target_label}_{clip}"
+                        if scope == WORKFLOW_SCOPE_FULL
+                        else None
+                    ),
+                    "refined_mask_package_run": (
+                        f"refined_subject_masks_{target_label}_{clip}"
+                        if scope == WORKFLOW_SCOPE_FULL
+                        else None
+                    ),
+                    "package_path": (
+                        str(package_dir / f"{clip}.tar.gz")
+                        if scope == WORKFLOW_SCOPE_FULL
+                        else None
+                    ),
                 }
             )
             if scope == WORKFLOW_SCOPE_DOWNSTREAM:
@@ -2152,6 +2368,11 @@ def build_plan(
             "canonical_refined_run_id": canonical_refined_run,
             "planned_registered_gate_group_path": planned_gate_group_path,
             "strict_storage_bundle_root": str(strict_storage_bundle),
+            "canonical_crop_run": (
+                f"crop_v2_{target_label}"
+                if scope == WORKFLOW_SCOPE_KEYPOINTS
+                else None
+            ),
             "collection_id": collection_id,
             "detect_quality_source_run": detect_quality_source_run,
             "detect_quality_source_group_path": (
@@ -2161,8 +2382,14 @@ def build_plan(
             "detect_quality_group_path": f"detect_quality_runs/{detect_quality_run}",
             "cache_dir": str(cache_dir),
             "package_dir": str(package_dir),
-            "global_mask_grid_manifest": str(global_mask_grid_manifest),
-            "merged_proxy_crop_run": merged_proxy,
+            "global_mask_grid_manifest": (
+                str(global_mask_grid_manifest)
+                if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+                else None
+            ),
+            "merged_proxy_crop_run": (
+                merged_proxy if scope == WORKFLOW_SCOPE_FULL else None
+            ),
             "hybrid_crop_run": (
                 hybrid_crop_run if scope == WORKFLOW_SCOPE_DOWNSTREAM else None
             ),
@@ -2185,18 +2412,66 @@ def build_plan(
                 if scope == WORKFLOW_SCOPE_DOWNSTREAM
                 else None
             ),
-            "keypoint_run": keypoint_run,
-            "keypoint_finalization_mapping_mode": "identity_rebase",
-            "refined_keypoint_run": refined_keypoint_run,
-            "assignment_keypoint_group": "keypoints_runs",
-            "assignment_keypoints_run": keypoint_run,
-            "keypoint_refinement_mode": "canonical_passthrough_v1",
-            "subject_mask_run": subject_mask_run,
-            "refined_subject_mask_run": refined_subject_mask_run,
-            "refined_subject_mask_draft_run": refined_subject_mask_draft_run,
-            "subject_mask_quality_run": subject_mask_quality_run,
-            "subject_mask_cache_run": subject_mask_cache_run,
-            "subject_mask_bundle_id": subject_mask_bundle_id,
+            "keypoint_run": (
+                keypoint_run
+                if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+                else None
+            ),
+            "keypoint_finalization_mapping_mode": (
+                "identity_rebase"
+                if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+                else None
+            ),
+            "refined_keypoint_run": (
+                refined_keypoint_run
+                if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+                else None
+            ),
+            "assignment_keypoint_group": (
+                "keypoints_runs"
+                if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+                else None
+            ),
+            "assignment_keypoints_run": (
+                keypoint_run
+                if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+                else None
+            ),
+            "keypoint_refinement_mode": (
+                "canonical_passthrough_v1"
+                if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+                else None
+            ),
+            "subject_mask_run": (
+                subject_mask_run
+                if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+                else None
+            ),
+            "refined_subject_mask_run": (
+                refined_subject_mask_run
+                if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+                else None
+            ),
+            "refined_subject_mask_draft_run": (
+                refined_subject_mask_draft_run
+                if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+                else None
+            ),
+            "subject_mask_quality_run": (
+                subject_mask_quality_run
+                if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+                else None
+            ),
+            "subject_mask_cache_run": (
+                subject_mask_cache_run
+                if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+                else None
+            ),
+            "subject_mask_bundle_id": (
+                subject_mask_bundle_id
+                if scope in {WORKFLOW_SCOPE_FULL, WORKFLOW_SCOPE_DOWNSTREAM}
+                else None
+            ),
             "clips": clips,
             "registered_dish_geometry": {
                 "gate_requirement": gate_requirement,
@@ -2543,9 +2818,10 @@ def build_plan(
             continue
 
         assert pose_binding is not None
-        assert subject_binding is not None
+        if scope == WORKFLOW_SCOPE_FULL:
+            assert subject_binding is not None
         storage_modules = None
-        if not modern_registered_pipeline:
+        if not canonical_recording_pipeline:
             strict_clip_inputs = tuple(
                 StrictClipRefinedDetectionInput(
                     clip_index=int(clip["clip_index"]),
@@ -2645,33 +2921,65 @@ def build_plan(
             downstream_detection_authority = storage_modules.storage.outputs.to_json()
         else:
             target_payload["strict_detection_storage"] = None
+            if scope == WORKFLOW_SCOPE_FULL:
+                assert canonical_refined_run is not None
+                crop_snapshot = build_crop_snapshot_fragment(
+                    CropSnapshotFragmentInputs(
+                        workflow_id=workflow_id,
+                        family=FAMILY,
+                        target_id=target.target_id,
+                        analysis_zarr=target.analysis_zarr,
+                        repo=repo,
+                        run_root=run_root,
+                        run_id=geometry_crop_run,
+                        purpose="keypoints_subject_masks",
+                        roi_width=512,
+                        roi_height=512,
+                        camera_id=authority.camera_serial,
+                        source_refined_run=canonical_refined_run,
+                        registered_gate_requirement="from_source",
+                        upstream_job_keys=(downstream_detection_terminal,),
+                        required_artifacts=(downstream_detection_artifact,),
+                    )
+                )
+                jobs.extend(crop_snapshot.fragment.jobs)
+                fragments.append(crop_snapshot.fragment)
+                geometry_crop_terminal = crop_snapshot.outputs.terminal_job_key
+                geometry_crop_artifact = crop_snapshot.outputs.artifact_key
+        if storage_modules is not None:
+            geometry_crop_terminal = storage_modules.storage.outputs.terminal_job_key
+            geometry_crop_artifact = storage_modules.storage.outputs.crop_artifact_key
+
+        keypoint_crop_module = None
+        if scope == WORKFLOW_SCOPE_KEYPOINTS:
             assert canonical_refined_run is not None
-            crop_snapshot = build_crop_snapshot_fragment(
-                CropSnapshotFragmentInputs(
+            assert model_input_runtime is not None
+            native_height, native_width = model_input_runtime.transform.native_shape
+            keypoint_crop_module = build_recording_crop_v2_finalization_fragment(
+                RecordingCropV2FinalizationInputs(
                     workflow_id=workflow_id,
                     family=FAMILY,
                     target_id=target.target_id,
                     analysis_zarr=target.analysis_zarr,
+                    refined_run_id=canonical_refined_run,
+                    crop_run_id=f"crop_v2_{target_label}",
+                    crop_purpose="keypoints_subject_masks",
+                    roi_width=native_width,
+                    roi_height=native_height,
+                    camera_id=authority.camera_serial,
+                    registered_gate_requirement=gate_requirement,
+                    registered_gate_run=target_gate_run,
                     repo=repo,
                     run_root=run_root,
-                    run_id=geometry_crop_run,
-                    purpose="keypoints_subject_masks",
-                    roi_width=512,
-                    roi_height=512,
-                    camera_id=authority.camera_serial,
-                    source_refined_run=canonical_refined_run,
-                    registered_gate_requirement="from_source",
-                    upstream_job_keys=(downstream_detection_terminal,),
-                    required_artifacts=(downstream_detection_artifact,),
+                    upstream_job_keys=(detection_outputs.terminal_job_key,),
+                    required_artifacts=(detection_outputs.artifact_key,),
                 )
             )
-            jobs.extend(crop_snapshot.fragment.jobs)
-            fragments.append(crop_snapshot.fragment)
-            geometry_crop_terminal = crop_snapshot.outputs.terminal_job_key
-            geometry_crop_artifact = crop_snapshot.outputs.artifact_key
-        if storage_modules is not None:
-            geometry_crop_terminal = storage_modules.storage.outputs.terminal_job_key
-            geometry_crop_artifact = storage_modules.storage.outputs.crop_artifact_key
+            jobs.extend(keypoint_crop_module.fragment.jobs)
+            fragments.append(keypoint_crop_module.fragment)
+            target_payload["canonical_crop_geometry"] = (
+                keypoint_crop_module.outputs.to_json()
+            )
         cache_array_key = f"cache_array:{target_safe}"
         cache_tasks: list[LsfExecutionTask] = []
         for bundle_index, start in enumerate(range(0, len(clips), cache_bundle_size)):
@@ -2701,6 +3009,15 @@ def build_plan(
                 "--run-direct",
                 "--sha256",
             ]
+            if scope == WORKFLOW_SCOPE_KEYPOINTS:
+                assert model_input_runtime is not None
+                cache_command.extend(
+                    (
+                        "--roi-size",
+                        str(model_input_runtime.transform.native_height),
+                        str(model_input_runtime.transform.native_width),
+                    )
+                )
             for clip in bundle_clips:
                 cache_command.extend(["--clip-id", str(clip["clip_id"])])
             cache_tasks.append(
@@ -2730,38 +3047,318 @@ def build_plan(
             )
         )
 
-        proxy_key = f"proxy:{target_safe}"
-        proxy_commands: list[list[str]] = []
-        for clip in clips:
-            proxy_commands.append(
-                [
-                    "scripts/py",
-                    "-m",
-                    "fisheye.utils.create_clipped_collection_proxy_crop_run",
-                    str(target.analysis_zarr),
-                    str(clip["cache_manifest"]),
-                    "--proxy-run",
-                    str(clip["proxy_crop_run"]),
-                    "--alias-manifest",
-                    str(clip["alias_manifest"]),
-                    "--json",
-                ]
+        proxy_key: str | None = None
+        if scope == WORKFLOW_SCOPE_FULL:
+            proxy_key = f"proxy:{target_safe}"
+            proxy_commands: list[list[str]] = []
+            for clip in clips:
+                proxy_commands.append(
+                    [
+                        "scripts/py",
+                        "-m",
+                        "fisheye.utils.create_clipped_collection_proxy_crop_run",
+                        str(target.analysis_zarr),
+                        str(clip["cache_manifest"]),
+                        "--proxy-run",
+                        str(clip["proxy_crop_run"]),
+                        "--alias-manifest",
+                        str(clip["alias_manifest"]),
+                        "--json",
+                    ]
+                )
+            jobs.append(
+                _job(
+                    workflow_id=workflow_id,
+                    repo=repo,
+                    run_root=run_root,
+                    job_key=proxy_key,
+                    stage="proxy_crop",
+                    command=_chain(proxy_commands),
+                    resources=cpu,
+                    upstream=(cache_array_key,),
+                    expected_outputs=tuple(
+                        Path(str(clip["alias_manifest"])) for clip in clips
+                    ),
+                )
             )
-        jobs.append(
-            _job(
-                workflow_id=workflow_id,
-                repo=repo,
-                run_root=run_root,
-                job_key=proxy_key,
-                stage="proxy_crop",
-                command=_chain(proxy_commands),
-                resources=cpu,
-                upstream=(cache_array_key,),
-                expected_outputs=tuple(
-                    Path(str(clip["alias_manifest"])) for clip in clips
-                ),
+
+        if scope == WORKFLOW_SCOPE_KEYPOINTS:
+            assert keypoint_crop_module is not None
+            assert pose_schema_binding is not None
+            assert keypoint_preprocessing is not None
+            assert model_input_runtime is not None
+            pose_binding_path = (
+                run_root / "contracts" / "keypoint_pose_schema_binding.json"
             )
-        )
+            preprocessing_path = (
+                run_root / "contracts" / "keypoint_preprocessing.json"
+            )
+            package_array_key = f"keypoint_pixel_packages:{target_safe}"
+            package_tasks: list[LsfExecutionTask] = []
+            for clip in clips:
+                clip_id = str(clip["clip_id"])
+                package_manifest = (
+                    package_dir / "keypoint_pixel_packages" / f"{clip_id}.json"
+                )
+                clip["keypoint_pixel_package_manifest"] = str(package_manifest)
+                package_tasks.append(
+                    _execution_task(
+                        run_root=run_root,
+                        task_key=f"keypoint_pixel_package:{target_safe}:{clip_id}",
+                        stage="keypoint_pixel_package",
+                        command=(
+                            "scripts/py",
+                            "-m",
+                            "fisheye.utils.build_crop_pixel_work_package",
+                            str(target.analysis_zarr),
+                            "--crop-run",
+                            keypoint_crop_module.outputs.crop_run_id,
+                            "--manifest",
+                            str(package_manifest),
+                            "--batch-rows",
+                            "256",
+                            "--roi-cache-manifest",
+                            str(clip["cache_manifest"]),
+                            "--bind-clipped-cache-to-crop-geometry",
+                            "--source-clip-id",
+                            clip_id,
+                            "--source-clip-index",
+                            str(clip["clip_index"]),
+                            "--frame-start",
+                            str(clip["frame_start"]),
+                            "--frame-stop",
+                            str(clip["frame_stop"]),
+                            "--apply",
+                        ),
+                        expected_outputs=(package_manifest,),
+                        array_indexed=True,
+                    )
+                )
+            jobs.append(
+                _task_group_job(
+                    workflow_id=workflow_id,
+                    repo=repo,
+                    run_root=run_root,
+                    job_key=package_array_key,
+                    stage="keypoint_pixel_package",
+                    tasks=package_tasks,
+                    mode=LsfExecutionMode.ARRAY,
+                    max_concurrent=cache_array_concurrency,
+                    resources=final_cpu,
+                    upstream=(
+                        cache_array_key,
+                        keypoint_crop_module.outputs.terminal_job_key,
+                    ),
+                )
+            )
+
+            keypoint_array_key = f"keypoints_array:{target_safe}"
+            keypoint_tasks: list[LsfExecutionTask] = []
+            for clip in clips:
+                clip_id = str(clip["clip_id"])
+                keypoint_tasks.append(
+                    _execution_task(
+                        run_root=run_root,
+                        task_key=f"keypoints:{target_safe}:{clip_id}",
+                        stage="keypoints_terminal_compute",
+                        command=(
+                            "scripts/py",
+                            "-m",
+                            "fisheye.utils.run_keypoints_with_registry_model",
+                            "--recording-dir",
+                            str(target.recording_dir),
+                            "--output",
+                            str(target.analysis_zarr),
+                            "--registry",
+                            str(registry_path),
+                            "--set-id",
+                            pose_binding.set_id,
+                            "--model-run-id",
+                            pose_binding.run_id,
+                            "--require-unique",
+                            "--run-name",
+                            str(clip["keypoint_shard_run"]),
+                            "--output-parent",
+                            "keypoint_shard_runs",
+                            "--crop-run",
+                            keypoint_crop_module.outputs.crop_run_id,
+                            "--pose-schema",
+                            "traditional_v2",
+                            "--batch-size",
+                            "256",
+                            "--device",
+                            "0",
+                            "--imgsz",
+                            str(model_input_runtime.network_imgsz),
+                            "--model-input-size",
+                            str(model_input_runtime.transform.model_height),
+                            "--expected-model-stride",
+                            str(model_input_runtime.model_stride),
+                            "--roi-cache-policy",
+                            "never",
+                            "--roi-work-package-manifest",
+                            str(clip["keypoint_pixel_package_manifest"]),
+                            "--input-mode",
+                            model_input_runtime.input_mode,
+                            "--model-input-transform",
+                            model_input_runtime.transform.name,
+                            "--coordinate-contract-mode",
+                            "legacy_noncanonical",
+                            "--keypoint-roi-shard-rows",
+                            "131072",
+                            "--keypoint-frame-shard-rows",
+                            "131072",
+                            "--progress-jsonl",
+                            str(
+                                run_root
+                                / "progress"
+                                / f"keypoints_{target_safe}_{clip_id}.jsonl"
+                            ),
+                        ),
+                        expected_outputs=(
+                            target.analysis_zarr
+                            / "keypoint_shard_runs"
+                            / str(clip["keypoint_shard_run"])
+                            / "zarr.json",
+                        ),
+                        array_indexed=True,
+                    )
+                )
+            jobs.append(
+                _task_group_job(
+                    workflow_id=workflow_id,
+                    repo=repo,
+                    run_root=run_root,
+                    job_key=keypoint_array_key,
+                    stage="keypoints_terminal_compute",
+                    tasks=keypoint_tasks,
+                    mode=LsfExecutionMode.ARRAY,
+                    max_concurrent=gpu_array_concurrency,
+                    resources=gpu,
+                    upstream=(package_array_key,),
+                )
+            )
+
+            refined_lineage_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"palette:refined-lineage:{target.recording_id}",
+                )
+            )
+            refined_snapshot_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    "palette:refined-snapshot:"
+                    f"{target.recording_id}:{canonical_refined_run}",
+                )
+            )
+            keypoint_v2_module = build_clipped_keypoint_v2_finalization_fragment(
+                ClippedKeypointV2FinalizationInputs(
+                    workflow_id=workflow_id,
+                    family=FAMILY,
+                    target_id=target.target_id,
+                    analysis_zarr=target.analysis_zarr,
+                    crop_run_id=keypoint_crop_module.outputs.crop_run_id,
+                    clips=tuple(
+                        ClipKeypointV2FinalizationInput(
+                            clip_id=str(clip["clip_id"]),
+                            clip_index=int(clip["clip_index"]),
+                            source_group_path=(
+                                "keypoint_shard_runs/"
+                                f"{clip['keypoint_shard_run']}"
+                            ),
+                            input_package_manifest_path=Path(
+                                str(clip["keypoint_pixel_package_manifest"])
+                            ),
+                        )
+                        for clip in clips
+                    ),
+                    pose_binding_path=pose_binding_path,
+                    preprocessing_path=preprocessing_path,
+                    bundle_root=strict_storage_bundle / "keypoint_v2",
+                    raw_run_id=f"keypoints_v2_{target_label}",
+                    quality_run_id=f"keypoint_quality_v2_{target_label}",
+                    refined_run_id=f"refined_keypoints_v2_{target_label}",
+                    body_frame_run_id=f"body_frame_v2_{target_label}",
+                    recording_identity=target.recording_id,
+                    refined_lineage_id=refined_lineage_id,
+                    refined_snapshot_id=refined_snapshot_id,
+                    repo=repo,
+                    run_root=run_root,
+                    upstream_job_keys=(keypoint_array_key,),
+                    required_artifacts=(
+                        keypoint_crop_module.outputs.crop_artifact_key,
+                        f"keypoint_terminal_shards:{target_safe}",
+                    ),
+                    receipt_array_concurrency=detect_refine_bundle_concurrency,
+                )
+            )
+            jobs.extend(keypoint_v2_module.fragment.jobs)
+            fragments.extend(
+                (
+                    LsfWorkflowFragment(
+                        fragment_id=f"crop_roi_cache:{target_safe}",
+                        jobs=tuple(
+                            job
+                            for job in jobs
+                            if job.job_key == cache_array_key
+                        ),
+                        requires=(detection_outputs.artifact_key,),
+                        provides=(f"crop_roi_cache:{target_safe}",),
+                        metadata={
+                            "module": "crop_roi_cache",
+                            "target_id": target.target_id,
+                            "pixel_provider_role": "clip_local_authenticated_cache",
+                            "geometry_authority": (
+                                keypoint_crop_module.outputs.to_json()
+                            ),
+                            "terminal_job_key": cache_array_key,
+                        },
+                    ),
+                    LsfWorkflowFragment(
+                        fragment_id=f"keypoint_pixel_packages:{target_safe}",
+                        jobs=(
+                            next(job for job in jobs if job.job_key == package_array_key),
+                        ),
+                        requires=(
+                            f"crop_roi_cache:{target_safe}",
+                            keypoint_crop_module.outputs.crop_artifact_key,
+                        ),
+                        provides=(f"keypoint_pixel_packages:{target_safe}",),
+                        metadata={
+                            "module": "keypoint_pixel_packages",
+                            "target_id": target.target_id,
+                            "geometry_authority": (
+                                keypoint_crop_module.outputs.crop_artifact_key
+                            ),
+                            "pixel_authority": "authenticated_clip_work_packages",
+                            "terminal_job_key": package_array_key,
+                        },
+                    ),
+                    LsfWorkflowFragment(
+                        fragment_id=f"keypoint_terminal_compute:{target_safe}",
+                        jobs=(
+                            next(job for job in jobs if job.job_key == keypoint_array_key),
+                        ),
+                        requires=(f"keypoint_pixel_packages:{target_safe}",),
+                        provides=(f"keypoint_terminal_shards:{target_safe}",),
+                        metadata={
+                            "module": "keypoint_terminal_compute",
+                            "target_id": target.target_id,
+                            "coordinate_contract_mode": "legacy_noncanonical",
+                            "canonical_publication": False,
+                            "terminal_job_key": keypoint_array_key,
+                        },
+                    ),
+                    keypoint_v2_module.fragment,
+                )
+            )
+            target_payload["canonical_keypoint_v2"] = (
+                keypoint_v2_module.outputs.to_json()
+            )
+            target_terminal_keys.append(keypoint_v2_module.outputs.terminal_job_key)
+            target_terminal_artifacts.append(keypoint_v2_module.outputs.artifact_key)
+            continue
 
         keypoint_array_key = f"keypoints_array:{target_safe}"
         subject_mask_array_key = f"subject_masks_array:{target_safe}"
@@ -2970,6 +3567,8 @@ def build_plan(
             merged_proxy,
             "--output-run",
             keypoint_run,
+            "--publication-profile",
+            resolved_keypoint_profile,
             "--json",
         ]
         for clip in clips:
@@ -3338,6 +3937,8 @@ def build_plan(
                     provides=(canonical_keypoints_artifact,),
                     metadata={
                         "module": "keypoints",
+                        "publication_profile": resolved_keypoint_profile,
+                        "canonical_dependency_eligible": False,
                         "target_id": target.target_id,
                         "recording_layout": "clipped_collection",
                         "terminal_job_key": keypoint_finalize_key,
@@ -3440,6 +4041,12 @@ def build_plan(
             resume_existing_detections=False,
             encoded_mask_packages=encoded_mask_packages,
             subject_mask_publication_profile=subject_mask_publication_profile,
+            keypoint_publication_profile=resolved_keypoint_profile,
+            keypoint_pose_schema_binding=pose_schema_binding,
+            keypoint_preprocessing_manifest=None,
+            keypoint_model_input_contract=None,
+            keypoint_model_input_runtime=None,
+            keypoint_model_input_contract_document=None,
             detect_array_concurrency=int(detect_array_concurrency),
             gpu_array_concurrency=int(gpu_array_concurrency),
             cache_array_concurrency=int(cache_array_concurrency),
@@ -3489,6 +4096,82 @@ def build_plan(
             resume_existing_detections=resume_existing_detections,
             encoded_mask_packages=False,
             subject_mask_publication_profile=subject_mask_publication_profile,
+            keypoint_publication_profile=resolved_keypoint_profile,
+            keypoint_pose_schema_binding=None,
+            keypoint_preprocessing_manifest=None,
+            keypoint_model_input_contract=None,
+            keypoint_model_input_runtime=None,
+            keypoint_model_input_contract_document=None,
+            detect_array_concurrency=int(detect_array_concurrency),
+            gpu_array_concurrency=int(gpu_array_concurrency),
+            cache_array_concurrency=int(cache_array_concurrency),
+            mask_package_array_concurrency=int(mask_package_array_concurrency),
+            detect_refine_bundle_concurrency=int(detect_refine_bundle_concurrency),
+            registered_gate_requirement=gate_requirement,
+            registered_gate_run=gate_run,
+            selection_policy_id=policy_id,
+            lsf_workflow=workflow,
+        )
+
+    if scope == WORKFLOW_SCOPE_KEYPOINTS:
+        assert pose_binding is not None
+        assert pose_schema_binding is not None
+        assert keypoint_preprocessing is not None
+        assert model_input_contract is not None
+        assert model_input_runtime is not None
+        scope_jobs = tuple(job for fragment in fragments for job in fragment.jobs)
+        workflow = compose_lsf_workflow(
+            workflow_id=workflow_id,
+            family=FAMILY,
+            fragments=tuple(fragments),
+            metadata={
+                "workflow_scope": "canonical_keypoints",
+                "target_count": len(targets),
+                "clip_count": sum(len(target["clips"]) for target in target_payloads),
+                "keypoint_publication_profile": resolved_keypoint_profile,
+                "publication_partition": "complete_recording_snapshot",
+                "selector_activation": "none_direct_path_only",
+                "ordinary_shard_finalizer_permitted": False,
+                "scheduler_submission_count": len(scope_jobs),
+                "execution_task_count": sum(
+                    len(job.execution_group.tasks) if job.execution_group else 1
+                    for job in scope_jobs
+                ),
+                "array_submission_count": sum(
+                    1 for job in scope_jobs if job.execution_group is not None
+                ),
+            },
+        )
+        return ClippedInferencePlan(
+            run_label=label,
+            workflow_id=workflow_id,
+            workflow_scope=scope,
+            repo=repo,
+            palette_commit=repo_commit,
+            registry=registry_path,
+            run_root=run_root,
+            targets=tuple(targets),
+            target_plans=tuple(target_payloads),
+            model_bindings={
+                "detection": detection_binding,
+                "pose": pose_binding,
+            },
+            max_active_targets=max_active_targets,
+            cleanup_nrs_after_success=False,
+            resume_existing_detections=resume_existing_detections,
+            encoded_mask_packages=False,
+            subject_mask_publication_profile=subject_mask_publication_profile,
+            keypoint_publication_profile=resolved_keypoint_profile,
+            keypoint_pose_schema_binding=pose_schema_binding,
+            keypoint_preprocessing_manifest=keypoint_preprocessing,
+            keypoint_model_input_contract={
+                **model_input_contract.to_json(),
+                "snapshot_path": str(
+                    run_root / "contracts" / "pose_model_input_contract.json"
+                ),
+            },
+            keypoint_model_input_runtime=model_input_runtime.to_json(),
+            keypoint_model_input_contract_document=model_input_contract.document,
             detect_array_concurrency=int(detect_array_concurrency),
             gpu_array_concurrency=int(gpu_array_concurrency),
             cache_array_concurrency=int(cache_array_concurrency),
@@ -3640,6 +4323,24 @@ def build_plan(
         resume_existing_detections=resume_existing_detections,
         encoded_mask_packages=encoded_mask_packages,
         subject_mask_publication_profile=subject_mask_publication_profile,
+        keypoint_publication_profile=resolved_keypoint_profile,
+        keypoint_pose_schema_binding=pose_schema_binding,
+        keypoint_preprocessing_manifest=keypoint_preprocessing,
+        keypoint_model_input_contract=(
+            model_input_contract.to_json()
+            if model_input_contract is not None
+            else None
+        ),
+        keypoint_model_input_runtime=(
+            model_input_runtime.to_json()
+            if model_input_runtime is not None
+            else None
+        ),
+        keypoint_model_input_contract_document=(
+            model_input_contract.document
+            if model_input_contract is not None
+            else None
+        ),
         detect_array_concurrency=int(detect_array_concurrency),
         gpu_array_concurrency=int(gpu_array_concurrency),
         cache_array_concurrency=int(cache_array_concurrency),
@@ -3656,6 +4357,24 @@ def materialize_plan_bundle(plan: ClippedInferencePlan) -> dict[str, Any]:
     payload = plan.to_json()
     plan_path = plan.run_root / "plan.json"
     lsf_path = plan.run_root / "lsf_plan.json"
+    contract_documents: tuple[tuple[Path, Mapping[str, Any]], ...] = tuple(
+        item
+        for item in (
+            (
+                plan.run_root / "contracts" / "keypoint_pose_schema_binding.json",
+                plan.keypoint_pose_schema_binding,
+            ),
+            (
+                plan.run_root / "contracts" / "keypoint_preprocessing.json",
+                plan.keypoint_preprocessing_manifest,
+            ),
+            (
+                plan.run_root / "contracts" / "pose_model_input_contract.json",
+                plan.keypoint_model_input_contract_document,
+            ),
+        )
+        if item[1] is not None
+    )
     if plan_path.exists():
         existing = json.loads(plan_path.read_text(encoding="utf-8"))
         if existing != payload:
@@ -3676,6 +4395,16 @@ def materialize_plan_bundle(plan: ClippedInferencePlan) -> dict[str, Any]:
                 raise FileExistsError(
                     f"Run root is missing immutable detection-plan evidence: {detection_plan_path}"
                 )
+        for contract_path, contract_document in contract_documents:
+            if (
+                not contract_path.is_file()
+                or json.loads(contract_path.read_text(encoding="utf-8"))
+                != dict(contract_document)
+            ):
+                raise FileExistsError(
+                    "Run root has missing or mismatched immutable keypoint contract "
+                    f"evidence: {contract_path}"
+                )
         return existing
     for name in (
         "logs",
@@ -3689,8 +4418,11 @@ def materialize_plan_bundle(plan: ClippedInferencePlan) -> dict[str, Any]:
         "validation",
         "registry",
         "cleanup",
+        "contracts",
     ):
         (plan.run_root / name).mkdir(parents=True, exist_ok=True)
+    for contract_path, contract_document in contract_documents:
+        write_json_snapshot(contract_path, dict(contract_document))
     for target_payload in plan.target_plans:
         target_safe = safe_component(
             str(target_payload["target_id"]), default="target", max_length=56
@@ -3789,9 +4521,10 @@ def _parser() -> argparse.ArgumentParser:
         choices=WORKFLOW_SCOPES,
         default=WORKFLOW_SCOPE_FULL,
         help=(
-            "Compose the full analysis DAG (default), stop after canonical "
-            "recording-level refined detections, or start downstream analysis "
-            "from an exact finalized refined-detection run."
+            "Compose the full analysis DAG (default), the canonical clipped "
+            "keypoint publication chain, stop after canonical recording-level "
+            "refined detections, or start downstream analysis from an exact "
+            "finalized refined-detection run."
         ),
     )
     parser.add_argument("--manifest", required=True, type=Path)
@@ -3800,18 +4533,28 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo", type=Path, default=DEFAULT_REPO)
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument(
+        "--pose-model-input-contract",
+        type=Path,
+        help=(
+            "Required for --workflow-scope keypoints. The verified model-input "
+            "contract determines crop, submitted, network, and stride extents."
+        ),
+    )
+    parser.add_argument(
         "--detection-set-id",
-        help="Required for full and detection workflow scopes.",
+        help="Required for full, keypoints, and detection workflow scopes.",
     )
     parser.add_argument(
         "--detection-run-id",
-        help="Required for full and detection workflow scopes.",
+        help="Required for full, keypoints, and detection workflow scopes.",
     )
     parser.add_argument(
-        "--pose-set-id", help="Required for full and downstream workflow scopes."
+        "--pose-set-id",
+        help="Required for full, keypoints, and downstream workflow scopes.",
     )
     parser.add_argument(
-        "--pose-run-id", help="Required for full and downstream workflow scopes."
+        "--pose-run-id",
+        help="Required for full, keypoints, and downstream workflow scopes.",
     )
     parser.add_argument(
         "--subject-mask-set-id",
@@ -3908,6 +4651,16 @@ def _parser() -> argparse.ArgumentParser:
             "retains the former serial validation/publication path."
         ),
     )
+    parser.add_argument(
+        "--keypoint-publication-profile",
+        choices=KEYPOINT_PUBLICATION_PROFILES,
+        default=STRICT_V2_KEYPOINT_PUBLICATION_PROFILE,
+        help=(
+            "Strict-v2 is the fail-closed default. The compatibility profile "
+            "explicitly permits the ordinary shard aggregator and is not a "
+            "canonical keypoint publication."
+        ),
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
@@ -3929,6 +4682,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         workflow_scope=args.workflow_scope,
         pose_set_id=args.pose_set_id,
         pose_run_id=args.pose_run_id,
+        pose_model_input_contract_path=args.pose_model_input_contract,
         subject_mask_set_id=args.subject_mask_set_id,
         subject_mask_run_id=args.subject_mask_run_id,
         subject_mask_coverage_class=args.subject_mask_coverage_class,
@@ -3942,6 +4696,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         resume_existing_detections=args.resume_existing_detections,
         encoded_mask_packages=args.encoded_mask_packages,
         subject_mask_publication_profile=args.subject_mask_publication_profile,
+        keypoint_publication_profile=args.keypoint_publication_profile,
         detect_array_concurrency=args.detect_array_concurrency,
         gpu_array_concurrency=args.gpu_array_concurrency,
         cache_array_concurrency=args.cache_array_concurrency,

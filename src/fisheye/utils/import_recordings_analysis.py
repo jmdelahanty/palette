@@ -27,7 +27,7 @@ from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
-from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.registry.db import RegistryPaths
 from fisheye.utils.import_recording_analysis import (
     RecordingImportOptions,
     RecordingAnalysisPlan as SingleRecordingPlan,
@@ -497,9 +497,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.close()
         return 0
 
-    registry: Optional[Registry] = None
     if args.register:
-        registry = Registry(registry_path)
         print(f"Registry: {registry_path}")
 
     pipeline_opts = RecordingPipelineOptions(
@@ -582,7 +580,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 zarr_path=plan.zarr_path,
             ),
             pipeline_opts,
-            registry=registry,
             logger=(logger.log if logger is not None else None),
         )
         if not result.ok:
@@ -609,9 +606,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 zarr_path=str(plan.zarr_path),
                 dataset_id=result.dataset_id,
             )
-
-    if registry is not None:
-        registry.close()
 
     print("Summary:")
     print(f"  ok: {ok}")

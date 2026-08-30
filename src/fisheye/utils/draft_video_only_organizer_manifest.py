@@ -16,13 +16,21 @@ import re
 import sys
 from typing import Any, Iterable, Optional
 
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+    SourceRecordingIdentity,
+)
+
 
 VIDEO_ONLY_ORGANIZER_MANIFEST_FIELDS = (
     "source_video",
     "source_camera_metadata_csv",
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
     "camera_id",
     "session_uuid",
     "recording_id",
+    "organizer_recording_id",
     "recording_name",
     "session_start_iso8601_utc",
     "recording_type",
@@ -98,6 +106,11 @@ def _snapshot_recording_id(snapshot: dict[str, Any], source_root: Path) -> str:
     return _slugify(source_root.name)
 
 
+def _snapshot_session_uuid(snapshot: dict[str, Any]) -> Optional[str]:
+    value = snapshot.get("session_uuid")
+    return value if type(value) is str and value else None
+
+
 def _discover_videos(source_root: Path, *, pattern: str, recursive: bool) -> list[Path]:
     iterator: Iterable[Path] = source_root.rglob(pattern) if recursive else source_root.glob(pattern)
     videos = sorted(path for path in iterator if path.is_file())
@@ -125,14 +138,22 @@ def _find_camera_metadata_csv(video_path: Path, camera_id: Optional[str]) -> Opt
     return None
 
 
-def _format_template(template: str, *, base_recording_id: str, camera_id: str, video_path: Path) -> str:
-    return _slugify(
-        template.format(
-            recording_id=base_recording_id,
-            camera_id=camera_id,
-            video_stem=video_path.stem,
-        )
+def _format_template(
+    template: str,
+    *,
+    base_recording_id: str,
+    session_uuid: str,
+    camera_id: str,
+    video_path: Path,
+    sanitize: bool = True,
+) -> str:
+    rendered = template.format(
+        recording_id=base_recording_id,
+        session_uuid=session_uuid,
+        camera_id=camera_id,
+        video_stem=video_path.stem,
     )
+    return _slugify(rendered) if sanitize else rendered
 
 
 def _prompt_for_defaults(defaults: dict[str, str]) -> dict[str, str]:
@@ -151,7 +172,14 @@ def _prompt_for_defaults(defaults: dict[str, str]) -> dict[str, str]:
 def _build_rows(args: argparse.Namespace) -> list[dict[str, str]]:
     source_root = args.source_root.expanduser().resolve()
     snapshot = _load_snapshot(source_root)
-    base_recording_id = _slugify(args.recording_id or _snapshot_recording_id(snapshot, source_root))
+    organizer_recording_id = _slugify(
+        args.recording_id or _snapshot_recording_id(snapshot, source_root)
+    )
+    shared_session_uuid = (
+        args.session_uuid
+        if args.session_uuid is not None
+        else _snapshot_session_uuid(snapshot) or organizer_recording_id
+    )
     session_start = args.session_start_utc or _snapshot_session_start(snapshot)
 
     defaults = {
@@ -181,31 +209,44 @@ def _build_rows(args: argparse.Namespace) -> list[dict[str, str]]:
 
     rows: list[dict[str, str]] = []
     for video_path in videos:
-        camera_id = args.camera_id or _derive_camera_id(video_path) or ""
+        camera_id = args.camera_id or _derive_camera_id(video_path)
+        if not camera_id:
+            raise ValueError(
+                f"Cannot derive canonical camera_id from {video_path}; use --camera-id."
+            )
         metadata_csv = _find_camera_metadata_csv(video_path, camera_id)
         if args.require_camera_metadata_csv and metadata_csv is None:
             raise FileNotFoundError(f"No camera metadata CSV found for {video_path}")
 
-        template_context_camera = camera_id or _slugify(video_path.stem)
         session_uuid = (
             _format_template(
                 args.session_uuid_template,
-                base_recording_id=base_recording_id,
-                camera_id=template_context_camera,
+                base_recording_id=organizer_recording_id,
+                session_uuid=shared_session_uuid,
+                camera_id=camera_id,
                 video_path=video_path,
+                sanitize=False,
             )
             if args.session_uuid_template
-            else f"{base_recording_id}_cam{template_context_camera}"
+            else shared_session_uuid
+        )
+        recording_id = _format_template(
+            args.recording_id_template,
+            base_recording_id=organizer_recording_id,
+            session_uuid=session_uuid,
+            camera_id=camera_id,
+            video_path=video_path,
         )
         recording_name = (
             _format_template(
                 args.recording_name_template,
-                base_recording_id=base_recording_id,
-                camera_id=template_context_camera,
+                base_recording_id=organizer_recording_id,
+                session_uuid=session_uuid,
+                camera_id=camera_id,
                 video_path=video_path,
             )
             if args.recording_name_template
-            else session_uuid
+            else recording_id
         )
 
         row = {field: "" for field in VIDEO_ONLY_ORGANIZER_MANIFEST_FIELDS}
@@ -223,10 +264,23 @@ def _build_rows(args: argparse.Namespace) -> list[dict[str, str]]:
             )
         row["camera_id"] = camera_id
         row["session_uuid"] = session_uuid
-        row["recording_id"] = base_recording_id
+        row["recording_id"] = recording_id
+        row["organizer_recording_id"] = organizer_recording_id
+        row[SOURCE_RECORDING_IDENTITY_PROFILE_ATTR] = (
+            SOURCE_RECORDING_IDENTITY_PROFILE
+        )
         row["recording_name"] = recording_name
         row["session_start_iso8601_utc"] = session_start
+        SourceRecordingIdentity.from_mapping(row)
         rows.append(row)
+    session_uuids = {row["session_uuid"] for row in rows}
+    if len(session_uuids) != 1:
+        raise ValueError(
+            "One drafted acquisition must use one shared session_uuid across cameras."
+        )
+    recording_ids = [row["recording_id"] for row in rows]
+    if len(recording_ids) != len(set(recording_ids)):
+        raise ValueError("Each camera row must have a distinct recording_id.")
     return rows
 
 
@@ -271,16 +325,39 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Interactively prompt for optional shared metadata not provided by flags.",
     )
-    parser.add_argument("--recording-id", help="Base recording ID. Defaults to recording_snapshot.json or source folder.")
+    parser.add_argument(
+        "--recording-id",
+        help=(
+            "Organizer/source-family ID retained as non-authoritative context. "
+            "Defaults to recording_snapshot.json or the source folder."
+        ),
+    )
+    parser.add_argument(
+        "--session-uuid",
+        help="Shared acquisition/session UUID. Defaults to the organizer/source-family ID.",
+    )
     parser.add_argument(
         "--session-uuid-template",
-        default="{recording_id}_cam{camera_id}",
-        help="Template for per-row session_uuid. Variables: recording_id, camera_id, video_stem.",
+        help=(
+            "Deprecated session template. If supplied, it must resolve to one "
+            "shared value across every camera row."
+        ),
+    )
+    parser.add_argument(
+        "--recording-id-template",
+        default="{session_uuid}_cam{camera_id}",
+        help=(
+            "Template for per-camera recording_id. Variables: recording_id "
+            "(source-family context), session_uuid, camera_id, video_stem."
+        ),
     )
     parser.add_argument(
         "--recording-name-template",
-        default="{recording_id}_cam{camera_id}",
-        help="Template for per-row recording_name. Variables: recording_id, camera_id, video_stem.",
+        default="{session_uuid}_cam{camera_id}",
+        help=(
+            "Template for per-row recording_name. Variables: recording_id "
+            "(source-family context), session_uuid, camera_id, video_stem."
+        ),
     )
     parser.add_argument("--session-start-utc", help="ISO 8601 UTC start time. Defaults to recording_snapshot.json when present.")
     parser.add_argument("--recording-type", default="behavior")

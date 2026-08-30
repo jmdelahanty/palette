@@ -7,6 +7,10 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+)
 from fisheye.utils import backfill_video_only_sidecars as mod
 
 
@@ -17,6 +21,7 @@ def _write_manifest_csv(path: Path, *, source_root: Path) -> None:
             fieldnames=[
                 "source_video",
                 "source_camera_metadata_csv",
+                SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
                 "camera_id",
                 "session_uuid",
                 "recording_id",
@@ -29,6 +34,9 @@ def _write_manifest_csv(path: Path, *, source_root: Path) -> None:
             {
                 "source_video": "Cam2010093.mp4",
                 "source_camera_metadata_csv": "Cam2010093_meta.csv",
+                SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: (
+                    SOURCE_RECORDING_IDENTITY_PROFILE
+                ),
                 "camera_id": "2010093",
                 "session_uuid": "sleepyfish_2026_05_05_17_45_30_cam2010093",
                 "recording_id": "2026_05_05_17_45_30",
@@ -152,3 +160,33 @@ def test_backfill_video_only_sidecars_dry_run_does_not_mutate(tmp_path: Path) ->
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["files"]["cams"] == []
     assert manifest["files"]["derived"] == []
+
+
+def test_backfill_video_only_sidecars_rejects_unmarked_identity(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "staging"
+    source_root.mkdir()
+    sidecar = source_root / "Cam2010093_keyframe.json"
+    sidecar.write_text("{}", encoding="utf-8")
+    metadata_csv = tmp_path / "unmarked_video_only_manifest.csv"
+    metadata_csv.write_text(
+        "source_video,camera_id,session_uuid,recording_id,recording_name\n"
+        "Cam2010093.mp4,2010093,session,recording,recording\n",
+        encoding="utf-8",
+    )
+
+    rc = mod.main(
+        [
+            str(source_root),
+            "--metadata-csv",
+            str(metadata_csv),
+            "--dest-root",
+            str(tmp_path / "recordings"),
+            "--dry-run",
+        ]
+    )
+
+    assert rc == 1
+    assert sidecar.exists()
+    assert not (tmp_path / "recordings").exists()

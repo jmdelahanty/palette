@@ -3,6 +3,9 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
+from fisheye.registry import dedupe as dedupe_module
 from fisheye.registry.dedupe import apply_registry_dataset_dedupe, plan_registry_dataset_dedupe
 
 
@@ -85,6 +88,17 @@ def _insert_dataset(
         VALUES (?, ?, ?, ?, ?, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', ?);
         """,
         (dataset_id, session_uuid, zarr_path, zarr_use, path_hash, status),
+    )
+
+
+def _install_identity_binding_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE dataset_recording_identity_current (
+            dataset_id TEXT PRIMARY KEY,
+            FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE RESTRICT
+        );
+        """
     )
 
 
@@ -333,5 +347,181 @@ def test_apply_registry_dataset_dedupe_removes_lineage_self_edges(tmp_path: Path
             "FROM dataset_lineage ORDER BY relationship_type;"
         ).fetchall() == [("rec_a:zhash", "parent", "source")]
         assert conn.execute("PRAGMA foreign_key_check;").fetchall() == []
+    finally:
+        conn.close()
+
+
+def test_registry_dataset_dedupe_refuses_authority_bound_group(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.sqlite"
+    conn = _init_test_registry(registry)
+    try:
+        _insert_dataset(
+            conn,
+            "rec_a",
+            session_uuid="rec_a",
+            zarr_path="/data/rec_a_training.zarr",
+            path_hash="hash-a",
+        )
+        _insert_dataset(
+            conn,
+            "rec_a:zhash",
+            session_uuid="rec_a",
+            zarr_path="/data/rec_a_training.zarr",
+            path_hash="hash-a",
+        )
+        _install_identity_binding_table(conn)
+        conn.execute(
+            "INSERT INTO dataset_recording_identity_current(dataset_id) VALUES ('rec_a');"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = plan_registry_dataset_dedupe(registry)
+    assert plan["status"] == "authority_bound_review"
+    assert plan["authority_bound_group_count"] == 1
+    assert plan["groups"][0]["authority_bound_dataset_ids"] == ["rec_a"]
+    assert plan["groups"][0]["safe_to_auto_apply"] is False
+    assert all(
+        ref["table"] != "dataset_recording_identity_current"
+        for ref in plan["reference_columns"]
+    )
+
+    with pytest.raises(RuntimeError, match="dedicated transition"):
+        apply_registry_dataset_dedupe(registry)
+
+    conn = sqlite3.connect(str(registry))
+    try:
+        assert conn.execute(
+            "SELECT dataset_id FROM datasets ORDER BY dataset_id;"
+        ).fetchall() == [("rec_a",), ("rec_a:zhash",)]
+        assert conn.execute(
+            "SELECT dataset_id FROM dataset_recording_identity_current;"
+        ).fetchall() == [("rec_a",)]
+    finally:
+        conn.close()
+
+
+def test_registry_dataset_dedupe_rechecks_authority_binding_under_write_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = tmp_path / "registry.sqlite"
+    conn = _init_test_registry(registry)
+    try:
+        _insert_dataset(
+            conn,
+            "rec_a",
+            session_uuid="rec_a",
+            zarr_path="/data/rec_a_training.zarr",
+            path_hash="hash-a",
+        )
+        _insert_dataset(
+            conn,
+            "rec_a:zhash",
+            session_uuid="rec_a",
+            zarr_path="/data/rec_a_training.zarr",
+            path_hash="hash-a",
+        )
+        _install_identity_binding_table(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    original_plan = dedupe_module.plan_registry_dataset_dedupe
+
+    def plan_then_bind(*args: object, **kwargs: object) -> dict[str, object]:
+        plan = original_plan(*args, **kwargs)
+        with sqlite3.connect(str(registry)) as race_conn:
+            race_conn.execute(
+                "INSERT INTO dataset_recording_identity_current(dataset_id) "
+                "VALUES ('rec_a');"
+            )
+        return plan
+
+    monkeypatch.setattr(
+        dedupe_module,
+        "plan_registry_dataset_dedupe",
+        plan_then_bind,
+    )
+
+    with pytest.raises(RuntimeError, match="dedicated transition"):
+        dedupe_module.apply_registry_dataset_dedupe(registry)
+
+    conn = sqlite3.connect(str(registry))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM datasets;").fetchone()[0] == 2
+        assert conn.execute(
+            "SELECT dataset_id FROM dataset_recording_identity_current;"
+        ).fetchall() == [("rec_a",)]
+    finally:
+        conn.close()
+
+
+def test_registry_dataset_dedupe_protects_import_receipt_bindings(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "registry.sqlite"
+    conn = _init_test_registry(registry)
+    try:
+        _insert_dataset(
+            conn,
+            "rec_a",
+            session_uuid="rec_a",
+            zarr_path="/data/rec_a_training.zarr",
+            path_hash="hash-a",
+        )
+        _insert_dataset(
+            conn,
+            "rec_a:zhash",
+            session_uuid="rec_a",
+            zarr_path="/data/rec_a_training.zarr",
+            path_hash="hash-a",
+        )
+        conn.execute(
+            """
+            CREATE TABLE recording_import_receipt_bindings (
+                receipt_sha256 TEXT PRIMARY KEY,
+                dataset_id TEXT NOT NULL,
+                identity_scope_id TEXT NOT NULL,
+                identity_snapshot_id TEXT NOT NULL,
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id)
+                    ON DELETE RESTRICT
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO recording_import_receipt_bindings(
+                receipt_sha256, dataset_id, identity_scope_id,
+                identity_snapshot_id
+            ) VALUES ('a' || printf('%063d', 0), 'rec_a', 'scope', 'snapshot');
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = dedupe_module._connect(registry)
+    try:
+        refs = dedupe_module.discover_dataset_refs(conn)
+        assert "recording_import_receipt_bindings" in (
+            dedupe_module.PROTECTED_DATASET_REF_TABLES
+        )
+        assert all(ref.table != "recording_import_receipt_bindings" for ref in refs)
+    finally:
+        conn.close()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        apply_registry_dataset_dedupe(registry)
+
+    conn = sqlite3.connect(str(registry))
+    try:
+        assert conn.execute(
+            "SELECT dataset_id FROM datasets ORDER BY dataset_id;"
+        ).fetchall() == [("rec_a",), ("rec_a:zhash",)]
+        assert conn.execute(
+            "SELECT dataset_id FROM recording_import_receipt_bindings;"
+        ).fetchall() == [("rec_a",)]
     finally:
         conn.close()

@@ -177,6 +177,32 @@ def test_prepare_detect_training_persists_invocation_metadata(monkeypatch, tmp_p
     assert query_filter.get("set_name") == "smoke_set"
 
 
+def test_current_profile_training_input_requires_verified_registry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "current.zarr"
+    _create_minimal_detect_zarr(zarr_path)
+    base_config_path = tmp_path / "detect_config.yaml"
+    _write_base_detect_config(base_config_path)
+    monkeypatch.setattr(
+        prepare_detect_training,
+        "load_source_recording_identity_profile",
+        lambda _path: prepare_detect_training.SOURCE_RECORDING_IDENTITY_PROFILE,
+    )
+
+    with pytest.raises(ValueError, match="receipt-bound identity"):
+        prepare_detect_training.main(
+            [
+                str(zarr_path),
+                "--base-config",
+                str(base_config_path),
+                "--out-config",
+                str(tmp_path / "detect.yaml"),
+            ]
+        )
+
+
 def test_prepare_detect_training_preserves_set_id_with_explicit_out_config(monkeypatch, tmp_path: Path) -> None:
     zarr_path = tmp_path / "sample.zarr"
     _create_minimal_detect_zarr(zarr_path)

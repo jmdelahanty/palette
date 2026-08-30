@@ -3593,9 +3593,9 @@
             "schema-required-4ffa745261ed84a9",
             "schema-required-8876e7840c0532c8",
             "schema-required-9bac30f3fd9b5940",
+            "schema-required-b80ac9d75f8cca0c",
             "schema-required-bea06e39b110f7da",
             "schema-required-e394324e26ed4b7e",
-            "schema-required-f45a129fbcf21c22",
             "schema-writer-251a0ca610e787bc"
           ],
           "shape": "<unresolved>"
@@ -4412,8 +4412,8 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-required-0d2bdaebdb8a4956",
             "schema-required-180a61c34a238b38",
+            "schema-required-902e3c4fd42c4192",
             "schema-required-e016a5aa27658a7a",
             "schema-required-e8201986480eeb5a"
           ],
@@ -6896,8 +6896,8 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-required-218deb2fe3dc4ebd",
-            "schema-required-31bb9a6076046e24"
+            "schema-required-31bb9a6076046e24",
+            "schema-required-580c7258ac93c8fc"
           ],
           "shape": "<unresolved>"
         },
@@ -8079,7 +8079,7 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-required-f0a57870cfb5ddb7",
-            "schema-required-f906f13ecf56c26f"
+            "schema-required-fc7b391deee1a697"
           ],
           "shape": "<unresolved>"
         },
@@ -71137,8 +71137,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/finalize_keypoint_shards.py",
-      "line": 88,
-      "occurrence_id": "schema-required-f45a129fbcf21c22",
+      "line": 92,
+      "occurrence_id": "schema-required-b80ac9d75f8cca0c",
       "path_pattern": "crop_runs/<run>/frame_indices",
       "required": true,
       "shape_expression": null,
@@ -71170,8 +71170,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/finalize_keypoint_shards.py",
-      "line": 88,
-      "occurrence_id": "schema-required-0d2bdaebdb8a4956",
+      "line": 92,
+      "occurrence_id": "schema-required-902e3c4fd42c4192",
       "path_pattern": "crop_runs/<run>/instance_key",
       "required": true,
       "shape_expression": null,
@@ -71203,8 +71203,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/finalize_keypoint_shards.py",
-      "line": 88,
-      "occurrence_id": "schema-required-218deb2fe3dc4ebd",
+      "line": 92,
+      "occurrence_id": "schema-required-580c7258ac93c8fc",
       "path_pattern": "crop_runs/<run>/roi_coordinates_full",
       "required": true,
       "shape_expression": null,
@@ -71236,8 +71236,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/finalize_keypoint_shards.py",
-      "line": 88,
-      "occurrence_id": "schema-required-f906f13ecf56c26f",
+      "line": 92,
+      "occurrence_id": "schema-required-fc7b391deee1a697",
       "path_pattern": "crop_runs/<run>/source_refined_row_ids",
       "required": true,
       "shape_expression": null,
@@ -75092,7 +75092,7 @@
     "parsed_writer_candidate_module_count": 232,
     "reader_required_array_declaration_count": 106,
     "resolved_writer_leaf_name_count": 630,
-    "scanned_python_module_count": 1616,
+    "scanned_python_module_count": 1622,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,

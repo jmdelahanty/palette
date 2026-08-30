@@ -46,6 +46,10 @@ from fisheye.shared.subject_metadata import (
     resolve_subject_metadata,
     subject_metadata_sha256,
 )
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    load_source_recording_identity_profile,
+)
 
 REPORT_SCHEMA_ID = "palette.count_only_subject_context_migration.v1"
 MANUAL_AUTHORITY_SOURCE = "manual_operator_assertion"
@@ -450,6 +454,20 @@ def plan_target(
     with closing(_connect_read_only(registry_path)) as conn:
         siblings = _sibling_datasets(conn, target.recording_id)
         row["source_datasets"] = siblings
+        try:
+            if any(
+                load_source_recording_identity_profile(Path(item["zarr_path"]))
+                == SOURCE_RECORDING_IDENTITY_PROFILE
+                for item in siblings
+            ):
+                row.update(reason="current_source_profile_unsupported")
+                return row
+        except Exception as exc:
+            row.update(
+                reason="source_profile_unreadable",
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+            return row
 
         evidence: list[dict[str, Any]] = []
         evidence_contexts: list[dict[str, Any]] = []
@@ -899,6 +917,11 @@ def apply_plan(registry_path: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
                     reviewer=reviewer,
                     reason=reason,
                 )
+                if fresh.get("disposition") != "eligible":
+                    raise ValueError(
+                        "Apply-time target is no longer eligible: "
+                        f"{fresh.get('reason') or fresh.get('disposition')}"
+                    )
                 for key in ("desired", "cleanup", "source_datasets"):
                     if fresh.get(key) != row.get(key):
                         raise ValueError(
@@ -916,6 +939,22 @@ def apply_plan(registry_path: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
                     }
                     for item in row.get("evidence", [])
                 ]
+                mutation_paths = {
+                    target.zarr_path,
+                    *(
+                        Path(item["zarr_path"])
+                        for item in row.get("source_datasets", [])
+                    ),
+                }
+                if any(
+                    load_source_recording_identity_profile(path)
+                    == SOURCE_RECORDING_IDENTITY_PROFILE
+                    for path in mutation_paths
+                ):
+                    raise ValueError(
+                        "historical placeholder migration does not mutate "
+                        "current-profile source recordings"
+                    )
                 root = _open_root(target.zarr_path, mode="r+")
                 subject = publish_subject_metadata(
                     root,
@@ -947,10 +986,7 @@ def apply_plan(registry_path: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
 
                 for sibling in row.get("source_datasets", []):
                     sibling_path = Path(sibling["zarr_path"])
-                    sibling_root = _open_root(sibling_path, mode="r")
-                    refreshed_id = registry.register_from_root(
-                        sibling_root, sibling_path
-                    )
+                    refreshed_id = registry.scan_zarr(sibling_path)
                     if refreshed_id != sibling["dataset_id"]:
                         raise ValueError(
                             "Registry refresh changed dataset identity: "

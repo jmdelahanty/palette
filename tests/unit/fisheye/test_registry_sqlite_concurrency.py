@@ -1,5 +1,6 @@
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import zarr
@@ -50,6 +51,40 @@ def test_dedupe_connection_sets_busy_timeout_and_keeps_rollback_journal(tmp_path
         journal_mode = str(conn.execute("PRAGMA journal_mode;").fetchone()[0]).lower()
         assert timeout_ms == SQLITE_BUSY_TIMEOUT_MS
         assert journal_mode != "wal"
+    finally:
+        conn.close()
+
+
+def test_migration_version_is_rechecked_after_write_lock() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE schema_version(version INTEGER PRIMARY KEY, name TEXT, applied_utc TEXT);"
+    )
+    conn.execute(
+        "INSERT INTO schema_version VALUES (72, 'already_applied', '2026-08-25T12:00:00Z');"
+    )
+    conn.commit()
+    observed_versions = iter((71, 72))
+    migration_called = False
+
+    def stale_then_locked_version() -> int:
+        return next(observed_versions)
+
+    def should_not_replay() -> None:
+        nonlocal migration_called
+        migration_called = True
+
+    fixture = SimpleNamespace(
+        conn=conn,
+        _schema_migrations=lambda: [(72, "fixture", should_not_replay)],
+        _current_schema_version=stale_then_locked_version,
+        _has_legacy_schema=lambda: False,
+    )
+    try:
+        Registry._apply_schema_migrations(fixture)  # type: ignore[arg-type]
+        assert migration_called is False
+        assert conn.in_transaction is False
     finally:
         conn.close()
 

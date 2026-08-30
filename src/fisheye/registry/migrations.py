@@ -287,6 +287,11 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
         "stimulus_protocol_semantic_identity",
         "_migration_072_stimulus_protocol_semantic_identity",
     ),
+    (
+        73,
+        "recording_identity_authority",
+        "_migration_073_recording_identity_authority",
+    ),
 )
 
 

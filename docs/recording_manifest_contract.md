@@ -1,9 +1,9 @@
 # Recording Manifest Contract
 <!-- contract-meta
-version: 1
+version: 2
 status: active
 implementation: implemented
-last_verified: 2026-06-16
+last_verified: 2026-08-25
 -->
 
 This document defines the minimum metadata contract for `recording_manifest.json`
@@ -49,6 +49,42 @@ Recommended additional keys (already used by backfill when present):
 - `camera_id`
 - `canvas_name`
 - `protocol_name_from_definition`
+
+## Current Source-Recording Identity Profile
+
+Newly organized source recordings use the exact profile marker
+`source_recording_identity_profile="palette.source_recording_identity.v2"`.
+Under this profile:
+
+- `recording_id` identifies one concrete camera recording. A four-camera
+  acquisition has four distinct recording IDs.
+- `session_uuid` identifies the acquisition session and may be shared by all
+  camera recordings from that session.
+- `camera_id` identifies the camera for the recording.
+- `organizer_recording_id`, Orange session labels, `recording_name`, and folder
+  names are context. They never substitute for `recording_id` or
+  `session_uuid`.
+- When an H5 or external-IPC producer does not supply an independent canonical
+  per-camera ID, the organizer derives it only through the versioned mapping
+  `recording_id_mapping_profile="palette.source_recording_id.session_camera_sha256.v1"`.
+  That mapping hashes the exact `session_uuid` and `camera_id`; filenames and
+  destination directories are not identity inputs. Explicit video-only
+  `recording_id` values are preserved and do not claim this mapping profile.
+- All three identity fields are non-empty exact strings. Producers reject
+  coercion, surrounding whitespace, control characters, duplicate JSON keys,
+  and non-finite JSON values.
+
+The current organizer writes these facts before an analysis archive exists.
+The analysis importer copies the same facts without precedence or path-based
+inference and stamps the root as
+`artifact_schema_id="recording_analysis_v1"`,
+`artifact_kind="source_recording"`, `zarr_origin="source"`,
+`zarr_use="analysis"`, and `zarr_purpose="analysis"`. A disagreement between
+the marked manifest and root fails closed.
+
+Historical manifests without this marker remain explicit compatibility input.
+They are not silently upgraded, inferred, or accepted as current identity
+authority.
 
 ## Optional Preflight Section
 
