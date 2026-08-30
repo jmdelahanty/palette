@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -13,6 +13,10 @@ from fisheye.utils.plot_chaser_detailed_successors import (
     detailed_plot_parameters,
     render_detailed_bundle,
     verify_detailed_plot_inputs,
+)
+from fisheye.visualization.chaser_appearance import (
+    ChaserAppearance,
+    ChaserAppearanceProjection,
 )
 
 
@@ -298,13 +302,54 @@ def _inputs() -> tuple[
     )
 
 
+def _appearance() -> ChaserAppearanceProjection:
+    appearances = []
+    for identity_code, chaser_index, role_code, role, marker in (
+        (1, 0, 1, "aggressive", "*"),
+        (2, 1, 2, "inert", "o"),
+    ):
+        appearances.append(
+            ChaserAppearance(
+                identity_code=identity_code,
+                chaser_index=chaser_index,
+                identity=f"stimulus-v1:chaser_index:{chaser_index}",
+                behavior_role_code=role_code,
+                behavior_role=role,
+                experimental_color_rgba=(0.0, 0.0, 1.0, 1.0),
+                experimental_color_hex="#0000ff",
+                experimental_color_css="rgba(0,0,255,1)",
+                plotly_role_symbol="star" if role == "aggressive" else "circle",
+                matplotlib_role_marker=marker,
+                contrast_outline_hex="#ffffff",
+            )
+        )
+    return ChaserAppearanceProjection(
+        recording_id="recording-1",
+        source_stimulus_run_path="analysis/stimulus_runs/stimulus-v1",
+        source_protocol_sha256="a" * 64,
+        occurrence_binding_sha256="b" * 64,
+        appearances=tuple(appearances),
+        projection_sha256="c" * 64,
+    )
+
+
 def test_render_detailed_bundle_writes_eighteen_files(tmp_path: Path) -> None:
     inputs = _inputs()
+    appearance = _appearance()
     outputs = render_detailed_bundle(
-        *inputs, output_dir=tmp_path, bundle_name="detailed"
+        *inputs,
+        output_dir=tmp_path,
+        bundle_name="detailed",
+        chaser_appearance=appearance,
     )
     parameters = detailed_plot_parameters(
-        inputs[0], inputs[1], inputs[2], inputs[3], inputs[5], inputs[6]
+        inputs[0],
+        inputs[1],
+        inputs[2],
+        inputs[3],
+        inputs[5],
+        inputs[6],
+        chaser_appearance=appearance,
     )
 
     assert len(outputs) == 18
@@ -322,6 +367,13 @@ def test_render_detailed_bundle_writes_eighteen_files(tmp_path: Path) -> None:
     assert parameters["rendering"]["provider_epoch_distance_traces"][
         "subplot_grid"
     ] == [4, 2]
+    trajectory = parameters["rendering"]["provider_epoch_trajectory_overlays"]
+    assert trajectory["chaser_color_source"] == "sealed_protocol_rgba"
+    assert trajectory["chaser_role_encoding"] == (
+        "independent_bounded_exact_row_marker_shape_and_legend_text"
+    )
+    assert trajectory["index_or_role_color_fallback"] == "prohibited"
+    assert trajectory["appearance_projection"]["projection_sha256"] == "c" * 64
     assert parameters["output_families"][-2:] == [
         "keypoint_body_bearing_distance_point_cloud",
         "keypoint_body_bearing_distance_density",
@@ -357,6 +409,21 @@ def test_detailed_bundle_rejects_duplicate_position_provider() -> None:
 
     with pytest.raises(ChaserDetailedPlotError, match="distinct"):
         verify_detailed_plot_inputs(*inputs)
+
+
+def test_detailed_bundle_rejects_mismatched_appearance_projection(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs()
+    appearance = replace(_appearance(), recording_id="recording-2")
+
+    with pytest.raises(ChaserDetailedPlotError, match="another recording"):
+        render_detailed_bundle(
+            *inputs,
+            output_dir=tmp_path,
+            bundle_name="detailed",
+            chaser_appearance=appearance,
+        )
 
 
 def test_detailed_bundle_rejects_relative_frame_mismatch() -> None:

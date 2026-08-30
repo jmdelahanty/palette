@@ -564,9 +564,49 @@ route.
       both experimentally black chasers remained black; aggressive rendered as
       a star and inert as a circle; the spatial figure contained 12 pre/post
       marker layers and the trajectory figure contained 12 chaser traces.
-- [ ] Extend the same shared appearance projection to the receipt-sealed static
+- [x] Extend the same shared appearance projection to the receipt-sealed static
       trajectory publication so static and interactive location renderers no
       longer retain different color recipes.
+- [x] Preserve every valid exact chaser row as the dense protocol-color path;
+      add role glyphs as a bounded, source-order-uniform layer of exact rows
+      including endpoints, with no interpolation or scientific subsampling.
+- [x] Advance the detailed static receipt/recipe to v5 and the non-colliding
+      cohort detailed bundle/recipe names to v5/v7. Seal the appearance digest,
+      protocol and occurrence bindings, role-glyph sampling limit, and
+      prohibited color fallbacks.
+- [x] Resolve the static appearance projection once per publication and pass
+      that same validated object to rendering and receipt construction; reject
+      supplied projections whose recording, cardinality, identity, or role
+      differs from the plotted relative-frame columns.
+
+### Occupancy range and aligned display addendum — 2026-08-30
+
+- [x] Keep persisted 2 mm counts, density, candidate fraction, edges, mask, and
+      denominators as the only canonical occupancy evidence.
+- [x] Make the default color limit the shared p98 of strictly positive density
+      bins across both providers and all epochs. Retain exact hover values and
+      an explicit selectable full-range reference.
+- [x] Record quantile, method, robust/full limits, positive-bin count, and
+      bins above the robust limit in figure provenance; state that saturation
+      changes color only.
+- [x] Add an aligned 4 mm display by exact 2 by 2 integer-count summation.
+      Prove per-provider/per-epoch count conservation and recompute both
+      normalized surfaces only with the persisted denominators.
+- [x] Expose four explicit modes: 2 mm robust, 2 mm full range, 4 mm robust,
+      and 4 mm full range. Keep 2 mm robust as the default and prohibit
+      interpolation or promotion of the 4 mm surface to scientific authority.
+- [x] Add deterministic unit coverage for conservation, denominator mismatch,
+      robust/full scale provenance, empty-difference fallback, exact hover
+      counts, and all four Plotly controls.
+- [x] Run the complete affected exact-chaser/static/cohort test surface outside
+      the sandbox: 107 passed; run Marimo check successfully.
+- [x] Run a receipt-bound live occupancy smoke: 42 by 42 canonical bins became
+      21 by 21 aligned display bins, all six provider/epoch totals matched, and
+      the four controls exposed 2/4 mm robust/full modes. Protocol-black
+      aggressive/star and inert/circle overlays remained independent.
+- [x] Run a receipt-bound static trajectory smoke and inspect its non-empty PNG
+      and PDF. The exact protocol appearance projection bound successfully and
+      the independent role glyph layer was visible on both provider rows.
 - [ ] Run required CI before merge or release. The live smoke is experimental
       read-only evidence and does not make the branch merge-ready.
 

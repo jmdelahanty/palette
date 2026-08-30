@@ -42,6 +42,11 @@ from fisheye.analysis_workflows.composable_chaser_successor_publication import (
 )
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.visualization.chaser_appearance import (
+    ChaserAppearanceProjection,
+    ChaserAppearanceProjectionError,
+    load_chaser_appearance_projection,
+)
 from fisheye.visualization.chaser_body_bearing_distance import (
     BEARING_BIN_WIDTH_DEG,
     DENSITY_COLOR_CMAX_QUANTILE,
@@ -59,10 +64,11 @@ from fisheye.visualization.chaser_body_bearing_distance import (
 
 
 RECEIPT_SCHEMA_ID = "palette.analysis.chaser_detailed_plot_bundle.receipt"
-RECEIPT_SCHEMA_VERSION = 4
-PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v4"
+RECEIPT_SCHEMA_VERSION = 5
+PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v5"
 PLOT_DPI = 180
 DENSE_DISPLAY_ALGORITHM = "all_exact_source_rows_rasterized_no_interpolation_v1"
+STATIC_TRAJECTORY_ROLE_MARKER_MAX_PER_PANEL_CHASER = 64
 _RUN_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _CHAIN_KINDS = (
     "controller_chase_trials",
@@ -112,6 +118,88 @@ def _plain(value: Any) -> Any:
     if isinstance(value, np.generic):
         return value.item()
     return value
+
+
+def _load_exact_chaser_appearance(
+    relative_keypoint: Any,
+) -> ChaserAppearanceProjection:
+    """Bind static display semantics to the same exact protocol as Marimo."""
+
+    try:
+        archive = relative_keypoint.analysis_zarr_path
+        manifest = relative_keypoint.run_manifest
+        recording_id = relative_keypoint.recording_id
+    except AttributeError:
+        _fail(
+            "Static chaser appearance requires an exact relative-frame handle "
+            "with archive and run-manifest identity."
+        )
+    identity = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_identity_code"),
+        dtype=np.int64,
+    )
+    role = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_behavior_role_code"),
+        dtype=np.int64,
+    )
+    expected_shape = (relative_keypoint.n_frames, relative_keypoint.n_chasers)
+    if (
+        identity.shape != expected_shape
+        or role.shape != expected_shape
+        or not np.all(identity == identity[:1])
+        or not np.all(role == role[:1])
+    ):
+        _fail("Static chaser appearance has unstable identity or behavior roles.")
+    try:
+        projection = load_chaser_appearance_projection(
+            archive,
+            relative_manifest=manifest,
+            identity_code_by_column=identity[0],
+            behavior_role_code_by_column=role[0],
+            expected_recording_id=recording_id,
+        )
+    except ChaserAppearanceProjectionError as exc:
+        _fail(f"Static chaser appearance binding failed: {exc}")
+    return _validated_exact_chaser_appearance(relative_keypoint, projection)
+
+
+def _validated_exact_chaser_appearance(
+    relative_keypoint: Any,
+    projection: ChaserAppearanceProjection,
+) -> ChaserAppearanceProjection:
+    """Require a supplied appearance projection to match the plotted columns."""
+
+    if projection.recording_id != relative_keypoint.recording_id:
+        _fail("Static chaser appearance belongs to another recording.")
+    identity = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_identity_code"),
+        dtype=np.int64,
+    )
+    role = np.asarray(
+        relative_keypoint.base_frame_chaser("chaser_behavior_role_code"),
+        dtype=np.int64,
+    )
+    expected_shape = (relative_keypoint.n_frames, relative_keypoint.n_chasers)
+    if (
+        identity.shape != expected_shape
+        or role.shape != expected_shape
+        or not np.all(identity == identity[:1])
+        or not np.all(role == role[:1])
+    ):
+        _fail("Static chaser appearance has unstable identity or behavior roles.")
+    by_identity = projection.by_identity_code()
+    if (
+        len(projection.appearances) != relative_keypoint.n_chasers
+        or len(by_identity) != relative_keypoint.n_chasers
+    ):
+        _fail("Static chaser appearance cardinality differs from the plotted axis.")
+    for column in range(relative_keypoint.n_chasers):
+        appearance = by_identity.get(int(identity[0, column]))
+        if appearance is None or appearance.behavior_role_code != int(role[0, column]):
+            _fail(
+                "Static chaser appearance identity/role differs from the plotted axis."
+            )
+    return projection
 
 
 def _save_figure(figure: Any, output_stem: Path) -> tuple[Path, Path]:
@@ -930,6 +1018,7 @@ def render_provider_epoch_trajectory_overlays(
     relative_keypoint: Any,
     relative_detection: Any,
     radial_keypoint: ComposableChaserSuccessorSourceHandle,
+    chaser_appearance: ChaserAppearanceProjection,
     *,
     output_stem: Path,
 ) -> tuple[Path, Path]:
@@ -974,8 +1063,10 @@ def render_provider_epoch_trajectory_overlays(
         _fail("Trajectory chaser positions do not preserve frame/chaser/source-xy shape.")
     if not (np.all(roles == roles[:1]) and np.all(identities == identities[:1])):
         _fail("Trajectory overlay has unstable chaser identity or behavior roles.")
-    behavior_registry = _registry(radial_keypoint.scientific_manifest, "behavior_role")
-    chaser_colors = plt.get_cmap("tab10")
+    appearance_projection = _validated_exact_chaser_appearance(
+        relative_keypoint, chaser_appearance
+    )
+    appearance_by_identity = appearance_projection.by_identity_code()
 
     figure, axes = plt.subplots(
         len(relatives),
@@ -1016,18 +1107,42 @@ def render_provider_epoch_trajectory_overlays(
                     chaser_valid[epoch_rows, chaser_column]
                     & occurrence[epoch_rows, chaser_column]
                 )
-                role_code = int(roles[0, chaser_column])
-                role = behavior_registry.get(str(role_code), f"role {role_code}")
                 identity = int(identities[0, chaser_column])
+                role_code = int(roles[0, chaser_column])
+                appearance = appearance_by_identity.get(identity)
+                if appearance is None or appearance.behavior_role_code != role_code:
+                    _fail(
+                        "Trajectory identity/role columns differ from the sealed "
+                        "appearance projection."
+                    )
                 ax.scatter(
                     local_chaser[local_valid, 0],
                     local_chaser[local_valid, 1],
-                    color=chaser_colors(chaser_column % 10),
+                    color=appearance.experimental_color_hex,
                     s=1.2,
                     alpha=0.55,
                     edgecolors="none",
                     rasterized=True,
-                    label=f"{role} · chaser {identity}",
+                    label="_nolegend_",
+                )
+                role_marker_rows = uniformly_sample_indices(
+                    np.flatnonzero(local_valid),
+                    maximum=STATIC_TRAJECTORY_ROLE_MARKER_MAX_PER_PANEL_CHASER,
+                )
+                ax.scatter(
+                    local_chaser[role_marker_rows, 0],
+                    local_chaser[role_marker_rows, 1],
+                    color=appearance.experimental_color_hex,
+                    marker=appearance.matplotlib_role_marker,
+                    s=26.0,
+                    alpha=0.85,
+                    edgecolors=appearance.contrast_outline_hex,
+                    linewidths=0.45,
+                    rasterized=True,
+                    label=(
+                        f"{appearance.behavior_role} · protocol chaser "
+                        f"{appearance.chaser_index}"
+                    ),
                 )
             ax.add_patch(
                 Circle(
@@ -1051,8 +1166,8 @@ def render_provider_epoch_trajectory_overlays(
     figure.suptitle(
         f"Exact-epoch fish position samples with logged chaser overlays · "
         f"{radial_keypoint.recording_id}\n"
-        "reviewed circular-arena context · direct source-camera positions · "
-        "all valid exact rows rasterized",
+        "reviewed circular-arena context · protocol color + independent role "
+        "glyphs · all valid exact rows retained",
         fontsize=13,
     )
     return _save_figure(figure, output_stem)
@@ -1523,6 +1638,8 @@ def detailed_plot_parameters(
     relative_keypoint: Any,
     radial_keypoint: ComposableChaserSuccessorSourceHandle,
     radial_detection: ComposableChaserSuccessorSourceHandle,
+    *,
+    chaser_appearance: ChaserAppearanceProjection | None = None,
 ) -> dict[str, Any]:
     """Return every numerical coordinate and rendering choice in the bundle."""
 
@@ -1589,6 +1706,10 @@ def detailed_plot_parameters(
         _fail("Provider trajectory plot arena evidence is absent.")
     bearing_distance = _body_bearing_distance_plot_data(
         relative_keypoint, radial_keypoint
+    )
+    appearance_projection = _validated_exact_chaser_appearance(
+        relative_keypoint,
+        chaser_appearance or _load_exact_chaser_appearance(relative_keypoint),
     )
     return {
         "scientific_coordinates": {
@@ -1725,6 +1846,19 @@ def detailed_plot_parameters(
                 "all_valid_source_rows_retained": True,
                 "fish_marker_size_points_squared": 0.35,
                 "chaser_marker_size_points_squared": 1.2,
+                "chaser_color_source": "sealed_protocol_rgba",
+                "chaser_role_encoding": (
+                    "independent_bounded_exact_row_marker_shape_and_legend_text"
+                ),
+                "chaser_role_marker_max_per_panel_chaser": (
+                    STATIC_TRAJECTORY_ROLE_MARKER_MAX_PER_PANEL_CHASER
+                ),
+                "chaser_role_marker_sampling": (
+                    "source_order_uniform_including_endpoints"
+                ),
+                "chaser_role_marker_size_points_squared": 26.0,
+                "appearance_projection": appearance_projection.provenance_record(),
+                "index_or_role_color_fallback": "prohibited",
                 "pdf_dense_points_rasterized": True,
                 "position_samples_connected_by_lines": False,
                 "quantitative_occupancy_inference": False,
@@ -1788,6 +1922,7 @@ def render_detailed_bundle(
     *,
     output_dir: Path,
     bundle_name: str,
+    chaser_appearance: ChaserAppearanceProjection | None = None,
 ) -> tuple[Path, ...]:
     """Validate all sources and render the nine detailed figure families."""
 
@@ -1799,6 +1934,10 @@ def render_detailed_bundle(
         relative_detection,
         radial_keypoint,
         radial_detection,
+    )
+    appearance_projection = _validated_exact_chaser_appearance(
+        relative_keypoint,
+        chaser_appearance or _load_exact_chaser_appearance(relative_keypoint),
     )
     outputs = []
     for renderer, suffix, args in (
@@ -1823,7 +1962,12 @@ def render_detailed_bundle(
         (
             render_provider_epoch_trajectory_overlays,
             "provider_epoch_trajectory_overlays",
-            (relative_keypoint, relative_detection, radial_keypoint),
+            (
+                relative_keypoint,
+                relative_detection,
+                radial_keypoint,
+                appearance_projection,
+            ),
         ),
         (
             render_keypoint_body_bearing_distance_point_cloud,
@@ -1985,6 +2129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         deep_audit=True,
         direct_validation_receipt=args.detection_radial_validation_receipt,
     )
+    chaser_appearance = _load_exact_chaser_appearance(relative_keypoint)
     outputs = render_detailed_bundle(
         controller,
         bout,
@@ -1995,6 +2140,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         radial_detection,
         output_dir=output_dir,
         bundle_name=bundle_name,
+        chaser_appearance=chaser_appearance,
     )
     plot_parameters = detailed_plot_parameters(
         controller,
@@ -2003,6 +2149,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         relative_keypoint,
         radial_keypoint,
         radial_detection,
+        chaser_appearance=chaser_appearance,
     )
     source_bindings = {
         "controller_chase_trials": {

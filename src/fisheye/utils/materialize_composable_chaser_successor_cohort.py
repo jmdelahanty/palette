@@ -71,7 +71,7 @@ SPATIAL_OCCUPANCY_RUN = (
     "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260827_"
     "body_frame_projection_v3"
 )
-DETAILED_BUNDLE_NAME = "goodbatbadbat_chaser_detailed_body_frame_v4"
+DETAILED_BUNDLE_NAME = "goodbatbadbat_chaser_detailed_body_frame_v5"
 SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN = (
     "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260827_"
     "body_frame_projection_receipt_bound_v4"
@@ -84,9 +84,9 @@ DASHBOARD_RECIPE_BUNDLE_NAME = (
     "goodbatbadbat_chaser_dashboard_body_frame_recipe_v3"
 )
 DETAILED_RECIPE_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_detailed_body_frame_recipe_v6"
+    "goodbatbadbat_chaser_detailed_body_frame_recipe_v7"
 )
-DETAILED_PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v4"
+DETAILED_PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v5"
 RELATIVE_FRAME_VALIDATION_MODE = "reusable_direct_subtree_receipt_v1"
 
 MOTION_BOUT_PAIRS = (

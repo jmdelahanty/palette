@@ -684,10 +684,52 @@ objects are experimentally black, while their roles are aggressive and inert.
 Both views render black fills with star/circle glyphs. The complete exact-chaser
 Marimo unit surface passed 82 tests, including an adversarial two-blue-chaser
 case, and `marimo check` passed outside the sandbox. Required CI remains a
-release gate. The receipt-sealed
-static trajectory plot still uses its earlier column palette and is explicitly
-deferred for migration to this shared appearance projection; it must not be
-described as color-parity complete yet.
+release gate.
+
+### Occupancy display range and static appearance parity — 2026-08-30
+
+The canonical spatial-occupancy evidence remains the persisted 2 mm count,
+density, candidate-fraction, edge, mask, and denominator arrays. The viewer now
+defaults to one shared p98 color limit computed over strictly positive bins
+across both providers and all three epochs. This is a display transform only:
+bins above the limit are color-saturated, while their exact persisted density
+and count remain available in hover. A full-range reference is selectable from
+the same figure, and both robust and full limits, quantile method, positive-bin
+count, and saturated-bin count are sealed in figure metadata.
+
+The same menu offers an aligned 4 mm display. It sums complete 2 by 2 blocks of
+the canonical 2 mm integer counts, proves count conservation independently for
+every provider/epoch, and normalizes with the original persisted in-arena and
+candidate denominators. It does not interpolate, alter the source Zarr, or
+become a scientific authority. The four explicit modes are 2 mm robust, 2 mm
+full range, 4 mm robust, and 4 mm full range; the 2 mm robust view is the
+default.
+
+The receipt-sealed static trajectory publication now uses the same fail-closed
+appearance projection as the interactive viewer. Every valid exact row remains
+in the dense path and uses protocol RGBA. An independent, bounded set of exact
+source-order rows carries the behavior-role glyph, including endpoints; it is
+display sampling, not scientific downsampling. The detailed receipt advances
+to schema/recipe v5 and records the appearance projection, glyph limit and
+sampling policy, color source, and prohibited fallbacks. Cohort output names
+advance to detailed bundle v5 / recipe v7 so existing immutable publications
+are never overwritten. The publisher resolves and validates this appearance
+projection once, then supplies that same object to both the trajectory renderer
+and receipt-parameter builder so the receipt cannot describe a separately
+reloaded appearance snapshot.
+
+The receipt-bound live smoke selected the exact v4 occupancy child from two
+discoverable bundles. Its canonical 42 by 42 grid became a 21 by 21 aligned
+display, with all six provider/epoch count totals conserved exactly. The 2 mm
+density scale was 0.636491%/bin at p98 versus a 59.106231% full maximum; 53 of
+2,621 positive bins exceeded the robust limit. The 4 mm scale was 1.715864%
+versus 59.466676%; 20 of 964 positive bins exceeded the robust limit. Both
+chasers remained protocol black and rendered as aggressive/star versus
+inert/circle. A separate receipt-bound static smoke produced non-empty PNG and
+PDF trajectory files using appearance projection
+`966103d63f0b1081b43c97ea1068cb9adc2ea7e1f05cbc6c1d3b4156453b45e6`.
+The 107-test affected surface and Marimo check passed outside the sandbox.
+Required CI remains the release gate.
 
 ## Persisted but not yet mounted in this capability
 

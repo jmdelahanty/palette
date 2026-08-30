@@ -38,8 +38,8 @@ class _SpatialHandle:
             "occupancy_count": counts,
             "occupancy_density_valid_in_arena": counts / 2.0,
             "occupancy_fraction_candidate_epoch": counts / 4.0,
-            "x_bin_edges_mm": np.asarray([-1.0, 0.0, 1.0]),
-            "y_bin_edges_mm": np.asarray([-1.0, 0.0, 1.0]),
+            "x_bin_edges_mm": np.asarray([-2.0, 0.0, 2.0]),
+            "y_bin_edges_mm": np.asarray([-2.0, 0.0, 2.0]),
             "arena_bin_center_mask": np.asarray(
                 [[True, False], [True, True]], dtype=bool
             ),
@@ -70,15 +70,15 @@ class _SpatialHandle:
             "arena": {
                 "center_x_px": 100.0,
                 "center_y_px": 100.0,
-                "radius_mm": 1.0,
-                "mm_per_pixel": 0.01,
+                "radius_mm": 2.0,
+                "mm_per_pixel": 0.02,
             },
             "grid": {
                 "coordinate_orientation": "+x_right_+y_down",
                 "normalization_policy_id": (
                     "valid_in_arena_and_candidate_epoch_denominators_v1"
                 ),
-                "bin_width_mm": 1.0,
+                "bin_width_mm": 2.0,
             },
         }
 
@@ -205,13 +205,41 @@ def test_spatial_heatmap_uses_persisted_density_and_provider_difference() -> Non
     assert keypoint_pre[0, 1] == 50.0
     assert detection_pre[0, 1] == 100.0
     assert difference_pre[0, 1] == 50.0
-    assert not bool(np.asarray(figure.data[0].customdata)[0, 1])
+    customdata = np.asarray(figure.data[0].customdata)
+    assert customdata[0, 1, 0] == 1
+    assert not bool(customdata[0, 1, 1])
+    assert customdata[0, 1, 2] == 2.0
     assert np.isfinite(keypoint_pre[0, 1])
     display = figure.layout.meta["spatial_occupancy_display"]
     assert display["recipe_id"] == SPATIAL_OCCUPANCY_DISPLAY_RECIPE
     assert display["source_array"] == "occupancy_density_valid_in_arena"
     assert display["scientific_recomputation"] is False
     assert display["interpolation"] == "prohibited"
+    assert display["default_display_mode"] == "2_mm_robust_p98"
+    assert display["available_display_modes"] == [
+        "2_mm_robust_p98",
+        "2_mm_full_range",
+        "4_mm_robust_p98",
+        "4_mm_full_range",
+    ]
+    assert display["display_surfaces"]["2mm"]["count_aggregation"] == "none"
+    assert display["display_surfaces"]["4mm"]["count_aggregation"] == "exact_2x2_sum"
+    assert display["display_surfaces"]["4mm"]["grid_shape"] == [1, 1]
+    density_scale = display["display_surfaces"]["2mm"][
+        "density_color_scale_percent_per_bin"
+    ]
+    assert figure.layout.coloraxis.cmax == density_scale["robust_limit"]
+    assert density_scale["full_range_reference_available"] is True
+    buttons = figure.layout.updatemenus[0].buttons
+    assert [button.label for button in buttons] == [
+        "2 mm · robust p98",
+        "2 mm · full range",
+        "4 mm · robust p98",
+        "4 mm · full range",
+    ]
+    coarse_trace_z = buttons[2].args[0]["z"]
+    assert np.asarray(coarse_trace_z[0]).shape == (1, 1)
+    assert np.asarray(coarse_trace_z[0])[0, 0] == 100.0
     overlay = display["chaser_location_overlay"]
     assert overlay["color_source"] == "sealed_protocol_rgba"
     assert overlay["role_encoding"] == "independent_marker_symbol_and_legend_text"

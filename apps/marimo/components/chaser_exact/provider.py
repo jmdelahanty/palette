@@ -120,7 +120,7 @@ _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
         ),
         "spatial_occupancy": ExactChaserAnalysisRoute(
             analysis_id="spatial_occupancy",
-            display_parameter_version="exact-spatial-occupancy-display-v2",
+            display_parameter_version="exact-spatial-occupancy-display-v3",
             load_relative=True,
             load_chaser_appearance=True,
             renderer=build_exact_spatial_occupancy_output,
