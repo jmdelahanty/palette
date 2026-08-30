@@ -2,14 +2,22 @@
 
 <!-- contract-meta
 version: 1
-status: active
-last_verified: 2026-08-10
+status: superseded
+last_verified: 2026-08-25
 implementation: partial
 -->
 
+**Queue disposition (2026-08-25):** this document remains historical and
+scientific-design evidence. Overlapping authority, enforcement, resolver, and
+source-of-truth implementation status is absorbed into
+[`authority_consolidation_work_queue_2026-08-25.md`](authority_consolidation_work_queue_2026-08-25.md).
+Unrelated scientific/cohort findings remain scoped evidence here and must be
+re-verified before implementation.
+
 Source: five parallel read-only design reviews (architecture, provenance, auditability,
 scientific rigor, data contracts) at `386e4278`, plus an empirical import-enforcement
-pass on 2026-08-09. This document is the implementation queue. Findings marked
+pass on 2026-08-09. This document was the implementation queue at that snapshot.
+Findings marked
 **[VERIFIED]** were confirmed by executing tools this session (lint-imports, grimp,
 gh CLI, live-registry reads); everything else is from code reading by review agents —
 **implementing agents must re-verify a finding against current code before changing it.**
