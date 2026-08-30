@@ -33166,7 +33166,7 @@
       "enclosing_symbol": "fisheye.analysis_workflows.composable_chaser_successor_publication:_write_local_run",
       "file": "src/fisheye/analysis_workflows/composable_chaser_successor_publication.py",
       "filters_expression": null,
-      "line": 453,
+      "line": 468,
       "parent_path_pattern": "<zarr-root:str(local_path)>",
       "path_pattern": "<zarr-root:str(local_path)>/<name>",
       "receiver_expression": "run",
@@ -33174,7 +33174,7 @@
       "shape_expression": "shape(values)",
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-edaf044200f47363",
+      "site_id": "writer-c4e026bf69ee4ea7",
       "status": "current",
       "status_basis": "module name identifies publication/finalization",
       "surface_class": "publication",
@@ -69663,7 +69663,7 @@
     "parsed_writer_candidate_module_count": 232,
     "reader_required_array_declaration_count": 106,
     "resolved_writer_leaf_name_count": 630,
-    "scanned_python_module_count": 1614,
+    "scanned_python_module_count": 1616,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
@@ -69699,7 +69699,7 @@
     "writer_wrapper_call_site_count": 984
   },
   "wrapper_analysis": {
-    "function_definition_count": 6123,
+    "function_definition_count": 6125,
     "writer_function_count": 242,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",
