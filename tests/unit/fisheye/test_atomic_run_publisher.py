@@ -238,7 +238,7 @@ def test_atomic_rollback_retains_failed_public_tombstone_and_restores_owned_sele
 ) -> None:
     source, target, spec, owner, validate, prepare = _publication_fixture(tmp_path)
 
-    def fail_after_selector_write(open_root, _run):
+    def fail_after_selector_write(open_root, _run, _physical_copy):
         parent = open_root["analysis/runs"]
         parent.attrs[SELECTOR_OWNER_ATTR] = {
             "owner_uuid": owner,
@@ -356,7 +356,7 @@ def test_unleased_parent_state_is_never_reconstructed_during_failure(
         owned_parent_attr_names=(),
     )
 
-    def fail_after_unowned_pointer_write(open_root, _run):
+    def fail_after_unowned_pointer_write(open_root, _run, _physical_copy):
         open_root["analysis/runs"].attrs["latest"] = "candidate"
         raise RuntimeError("injected unleased callback failure")
 
@@ -384,6 +384,10 @@ def test_atomic_activation_callback_is_absolute_final_metadata_commit(
 ) -> None:
     source, target, spec, _owner, validate, prepare = _publication_fixture(tmp_path)
     events: list[str] = []
+    verified_copies: list[dict[str, object]] = []
+
+    def after_rename(_root, _run, physical_copy):
+        verified_copies.append(dict(physical_copy))
 
     def complete(_root, parent, run_group):
         events.append("complete")
@@ -411,6 +415,7 @@ def test_atomic_activation_callback_is_absolute_final_metadata_commit(
         copy_backend="python",
         validate_run=validate,
         prepare_parents=prepare,
+        after_rename=after_rename,
         complete_run=complete,
         verify_pointers=verify,
         activate_run=activate,
@@ -420,6 +425,7 @@ def test_atomic_activation_callback_is_absolute_final_metadata_commit(
     assert result["final_validation"]["valid"] is True
     assert result["physical_copy"]["verification"] == "sha256_all_physical_files"
     assert result["physical_copy"]["content_sha256"]
+    assert verified_copies == [result["physical_copy"]]
     telemetry = result["runtime_telemetry"]
     assert telemetry["identity_policy"] == (
         "report_only_excluded_from_scientific_identity_and_payload_digests"
@@ -632,7 +638,9 @@ def test_atomic_publishers_share_one_archive_lock_and_consolidate_both_runs(
         run_group.attrs["palette_run_completion_status"] = "complete"
         run_group.attrs["stage_selector_eligible"] = False
 
-    def first_after_rename(_root, _run):  # type: ignore[no-untyped-def]
+    def first_after_rename(  # type: ignore[no-untyped-def]
+        _root, _run, _physical_copy
+    ):
         first_holds_lock.set()
         assert release_first.wait(timeout=5)
 

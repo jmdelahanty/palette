@@ -718,7 +718,11 @@ def run_detection_local_publish(
                 ),
             )
 
-        def after_rename(root: zarr.Group, run: zarr.Group) -> dict[str, Any]:
+        def after_rename(
+            root: zarr.Group,
+            run: zarr.Group,
+            _physical_copy: Mapping[str, Any],
+        ) -> dict[str, Any]:
             proof = _load_persisted_detection_observation_geometry(
                 root,
                 f"detect_runs/{name}",

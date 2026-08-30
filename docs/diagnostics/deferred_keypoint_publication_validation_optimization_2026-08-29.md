@@ -3,6 +3,11 @@
 Status: **deferred until the active subject-mask/subject-shape writer and
 publication optimization is complete and accepted**.
 
+The shared lifecycle decision governing this optimization is
+[`publication_receipt_hashing_lifecycle_2026-08-29.md`](publication_receipt_hashing_lifecycle_2026-08-29.md).
+Keypoints retain their own receipt profile while using that common
+write-time-receipt and receipt-backed-publication protocol.
+
 Audited Palette commit: `98b8223f92a747ac81c269f554c2def7760c71ec`.
 
 ## Finding

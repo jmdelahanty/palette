@@ -573,7 +573,7 @@ def publish_arena_geometry_selection(
             prepare_parents=prepare,
             complete_run=complete,
             verify_pointers=verify,
-            after_rename=lambda _root, _run: {
+            after_rename=lambda _root, _run, _physical_copy: {
                 "source_revision_audit": _revalidate_selection_source(plan)
             },
             activate_run=activate,

@@ -1545,7 +1545,11 @@ def publish_eye_angle_run(
             for name, expected in publication_pointer_snapshot.items()
         )
 
-    def after_rename(_root: zarr.Group, run_group: zarr.Group) -> dict[str, Any]:
+    def after_rename(
+        _root: zarr.Group,
+        run_group: zarr.Group,
+        _physical_copy: Mapping[str, Any],
+    ) -> dict[str, Any]:
         source_revision = audit_eye_angle_source_revision(plan)
         if source_revision["status"] != "current":
             raise RuntimeError(

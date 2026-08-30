@@ -22,12 +22,15 @@ import zarr
 
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.subject_position_keypoint_source import (
+    load_keypoint_coordinate_successor_admission,
     load_keypoint_coordinate_successor_source,
 )
 from fisheye.shared.zarr.benchmark_runtime import utc_now
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.subject_mask_bundle_coordinate_authority import (
+    BoundRecordingSubjectMaskCoordinateAuthority,
     load_recording_subject_mask_coordinate_authority,
+    require_bound_recording_subject_mask_coordinate_authority,
 )
 from fisheye.shared.zarr_helpers import (
     archive_metadata_publication_lock,
@@ -44,10 +47,7 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_started,
 )
 
-
-ASSIGNMENT_KEYPOINT_REBINDING_FAMILY = (
-    "subject_mask_assignment_keypoint_rebinding_runs"
-)
+ASSIGNMENT_KEYPOINT_REBINDING_FAMILY = "subject_mask_assignment_keypoint_rebinding_runs"
 ASSIGNMENT_KEYPOINT_REBINDING_MANIFEST_ATTR = "run_manifest"
 ASSIGNMENT_KEYPOINT_REBINDING_SCHEMA_ID = (
     "palette.subject_mask.assignment_keypoint_rebinding_manifest"
@@ -111,8 +111,7 @@ def _assignment_collection_source_run(collection: Mapping[str, Any]) -> str:
         != "palette.subject_mask.assignment_keypoint_collection"
         or collection.get("schema_version") != 1
         or collection.get("mode") != "exact_worker_partition"
-        or collection.get("row_policy")
-        != "ordered_contiguous_recording_crop_rows_v1"
+        or collection.get("row_policy") != "ordered_contiguous_recording_crop_rows_v1"
     ):
         _fail("Subject-mask assignment collection profile is unsupported.")
     n_rois = collection.get("n_rois")
@@ -122,7 +121,9 @@ def _assignment_collection_source_run(collection: Mapping[str, Any]) -> str:
     cursor = 0
     run_ids: set[str] = set()
     for worker in workers:
-        interval = worker.get("global_row_interval") if isinstance(worker, Mapping) else None
+        interval = (
+            worker.get("global_row_interval") if isinstance(worker, Mapping) else None
+        )
         assignment = worker.get("assignment") if isinstance(worker, Mapping) else None
         if (
             not isinstance(interval, Mapping)
@@ -178,9 +179,7 @@ def _chunked_equivalence(
             right,
             equal_nan=True,
         ):
-            _fail(
-                f"Assignment values differ in rows [{start}, {stop})."
-            )
+            _fail(f"Assignment values differ in rows [{start}, {stop}).")
         historical_digest.update(left.tobytes(order="C"))
         canonical_digest.update(right.tobytes(order="C"))
     left_sha = historical_digest.hexdigest()
@@ -269,26 +268,21 @@ def inspect_assignment_keypoint_rebinding(
         declaration = canonical_arrays.get(name)
         if (
             not isinstance(declaration, Mapping)
-            or declaration.get("digest_algorithm")
-            != "sha256_c_contiguous_bytes_v1"
+            or declaration.get("digest_algorithm") != "sha256_c_contiguous_bytes_v1"
             or declaration.get("sha256") != bundle_identity.get(name)
         ):
-            _fail(
-                f"Canonical keypoint {name} digest differs from the mask bundle."
-            )
+            _fail(f"Canonical keypoint {name} digest differs from the mask bundle.")
 
-    pose_schema = canonical_manifest["payload"].get("pose_model_schema_binding", {}).get(
-        "pose_schema"
+    pose_schema = (
+        canonical_manifest["payload"]
+        .get("pose_model_schema_binding", {})
+        .get("pose_schema")
     )
     labels_value = (
         pose_schema.get("keypoint_labels") if isinstance(pose_schema, Mapping) else None
     )
     historical_labels_value = historical_run.attrs.get("keypoint_labels")
-    labels = (
-        list(labels_value)
-        if isinstance(labels_value, (list, tuple))
-        else None
-    )
+    labels = list(labels_value) if isinstance(labels_value, (list, tuple)) else None
     historical_labels = (
         list(historical_labels_value)
         if isinstance(historical_labels_value, (list, tuple))
@@ -315,17 +309,13 @@ def inspect_assignment_keypoint_rebinding(
             block_rows=block_rows,
         )
         if evidence["shape"][0] != bundle.n_rois:
-            _fail(
-                f"Assignment equivalence row count differs for {canonical_name}."
-            )
+            _fail(f"Assignment equivalence row count differs for {canonical_name}.")
         declaration = canonical_arrays.get(canonical_name)
         if (
             not isinstance(declaration, Mapping)
             or declaration.get("sha256") != evidence["normalized_sha256"]
         ):
-            _fail(
-                f"Canonical {canonical_name} values differ from its manifest."
-            )
+            _fail(f"Canonical {canonical_name} values differ from its manifest.")
         equivalence[f"{historical_name}_to_{canonical_name}"] = evidence
 
     payload = json_attr_safe(
@@ -353,9 +343,7 @@ def inspect_assignment_keypoint_rebinding(
                 "run_path": canonical_path,
                 "run_manifest_payload_digest": canonical_manifest["payload_digest"],
                 "run_manifest_document_digest": canonical_source.manifest_digest,
-                "keypoint_bundle_authority_generation": active_authority[
-                    "generation"
-                ],
+                "keypoint_bundle_authority_generation": active_authority["generation"],
                 "keypoint_bundle_authority_digest": (
                     canonical_source.active_keypoint_bundle_authority_digest
                 ),
@@ -510,8 +498,7 @@ def validate_assignment_keypoint_rebinding_manifest(
         labels = keypoints.get("keypoint_labels")
         indices = keypoints.get("eye_keypoint_indices")
         if (
-            keypoints.get("authority_profile")
-            != ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE
+            keypoints.get("authority_profile") != ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE
             or not isinstance(run_path, str)
             or not run_path.startswith("keypoints_runs/")
             or run_path.count("/") != 1
@@ -551,10 +538,7 @@ def validate_assignment_keypoint_rebinding_manifest(
         f"{historical}_to_{canonical}"
         for historical, canonical, _dtype in _EQUIVALENCE_PAIRS
     }
-    if (
-        not isinstance(equivalence, Mapping)
-        or set(equivalence) != expected_equivalence
-    ):
+    if not isinstance(equivalence, Mapping) or set(equivalence) != expected_equivalence:
         errors.append("assignment equivalence inventory is not exact")
     else:
         evidence_fields = {
@@ -580,11 +564,8 @@ def validate_assignment_keypoint_rebinding_manifest(
                 not isinstance(shape, list)
                 or not shape
                 or any(type(value) is not int or value < 0 for value in shape)
-                or evidence.get("digest_algorithm")
-                != "sha256_c_contiguous_bytes_v1"
-                or _SHA256.fullmatch(
-                    str(evidence.get("normalized_sha256") or "")
-                )
+                or evidence.get("digest_algorithm") != "sha256_c_contiguous_bytes_v1"
+                or _SHA256.fullmatch(str(evidence.get("normalized_sha256") or ""))
                 is None
                 or str(historical_dtype) != evidence.get("historical_dtype")
                 or str(canonical_dtype) != evidence.get("canonical_dtype")
@@ -598,6 +579,7 @@ def load_assignment_keypoint_rebinding_manifest(
     analysis_zarr: Path,
     *,
     rebinding_run_id: str,
+    subject_mask_authority: BoundRecordingSubjectMaskCoordinateAuthority | None = None,
 ) -> dict[str, Any]:
     """Load one complete rebinding and revalidate both live authorities."""
 
@@ -624,8 +606,7 @@ def load_assignment_keypoint_rebinding_manifest(
         )
         if (
             errors
-            or run.attrs.get(RUN_COMPLETION_CONTRACT_ATTR)
-            != RUN_COMPLETION_CONTRACT
+            or run.attrs.get(RUN_COMPLETION_CONTRACT_ATTR) != RUN_COMPLETION_CONTRACT
             or run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
             or run.attrs.get("stage_selector_eligible") is not False
             or run.attrs.get("production_candidate") is not True
@@ -641,29 +622,33 @@ def load_assignment_keypoint_rebinding_manifest(
     payload = manifest["payload"]
 
     subject = payload["subject_mask_source"]
-    bundle = load_recording_subject_mask_coordinate_authority(
-        archive,
-        bundle_id=str(subject["bundle_id"]),
-        allow_inactive=True,
-    )
+    if subject_mask_authority is None:
+        bundle = load_recording_subject_mask_coordinate_authority(
+            archive,
+            bundle_id=str(subject["bundle_id"]),
+            allow_inactive=True,
+        )
+    else:
+        bundle = require_bound_recording_subject_mask_coordinate_authority(
+            subject_mask_authority
+        )
+        if bundle.archive_path != archive:
+            _fail("Provided subject-mask authority belongs to another archive.")
     if (
         bundle.recording_identity != payload["recording_identity"]
         or bundle.camera_identity != payload["camera_identity"]
         or bundle.n_rois != payload["row_count"]
         or bundle.bundle_manifest.get("payload_digest")
         != subject.get("bundle_manifest_payload_digest")
-        or bundle.authority_digest
-        != subject.get("bundle_coordinate_authority_digest")
+        or bundle.authority_digest != subject.get("bundle_coordinate_authority_digest")
         or bundle.refined_run_path != subject.get("refined_run_path")
-        or canonical_json_sha256(
-            json_attr_safe(bundle.assignment_keypoint_collection)
-        )
+        or canonical_json_sha256(json_attr_safe(bundle.assignment_keypoint_collection))
         != subject.get("assignment_collection_digest")
     ):
         _fail("Subject-mask authority changed after assignment rebinding.")
 
     keypoints = payload["canonical_keypoint_source"]
-    source = load_keypoint_coordinate_successor_source(
+    source = load_keypoint_coordinate_successor_admission(
         archive,
         run_path=str(keypoints["run_path"]),
     )
@@ -680,8 +665,7 @@ def load_assignment_keypoint_rebinding_manifest(
         or not isinstance(raw_manifest, Mapping)
         or raw_manifest.get("payload_digest")
         != keypoints.get("run_manifest_payload_digest")
-        or source.manifest_digest
-        != keypoints.get("run_manifest_document_digest")
+        or source.manifest_digest != keypoints.get("run_manifest_document_digest")
     ):
         _fail("Canonical keypoint authority changed after assignment rebinding.")
     return manifest
@@ -719,13 +703,13 @@ def publish_assignment_keypoint_rebinding(
         root = open_zarr_root(archive, mode="a")
         parent = root.require_group(ASSIGNMENT_KEYPOINT_REBINDING_FAMILY)
         if run_id in parent:
-            raise FileExistsError(
-                f"Immutable assignment rebinding exists: {run_id}"
-            )
+            raise FileExistsError(f"Immutable assignment rebinding exists: {run_id}")
         run = parent.create_group(run_id)
         owner = uuid4().hex
         try:
-            mark_run_started(run, run_name=run_id, stage="assignment_keypoint_rebinding")
+            mark_run_started(
+                run, run_name=run_id, stage="assignment_keypoint_rebinding"
+            )
             run.attrs.update(
                 {
                     "status": RUN_STATUS_COMPLETE,
@@ -742,18 +726,14 @@ def publish_assignment_keypoint_rebinding(
                 str(archive), mode="r", zarr_format=3, use_consolidated=True
             )
             for view in (direct, consolidated):
-                persisted = view[
-                    f"{ASSIGNMENT_KEYPOINT_REBINDING_FAMILY}/{run_id}"
-                ]
+                persisted = view[f"{ASSIGNMENT_KEYPOINT_REBINDING_FAMILY}/{run_id}"]
                 if (
                     persisted.attrs.get(RUN_COMPLETION_CONTRACT_ATTR)
                     != RUN_COMPLETION_CONTRACT
                     or persisted.attrs.get(RUN_COMPLETION_STATUS_ATTR)
                     != RUN_STATUS_COMPLETE
                     or persisted.attrs.get("stage_selector_eligible") is not False
-                    or persisted.attrs.get(
-                        ASSIGNMENT_KEYPOINT_REBINDING_MANIFEST_ATTR
-                    )
+                    or persisted.attrs.get(ASSIGNMENT_KEYPOINT_REBINDING_MANIFEST_ATTR)
                     != initial
                 ):
                     _fail("Published assignment rebinding did not persist exactly.")

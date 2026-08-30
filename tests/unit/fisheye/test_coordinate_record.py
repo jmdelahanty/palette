@@ -6,6 +6,7 @@ import numpy as np
 
 import pytest
 
+import fisheye.shared.coordinate_record as coordinate_record_module
 from fisheye.shared.coordinate_record import (
     BoundCoordinateRecord,
     CoordinateRecordError,
@@ -13,6 +14,7 @@ from fisheye.shared.coordinate_record import (
     stamp_and_bind_persisted_coordinate_record,
     verify_bound_coordinate_record,
 )
+from fisheye.shared.proof_verification import proof_verification_scope
 
 
 class _Node:
@@ -59,6 +61,130 @@ def test_stamp_bind_and_reverify_exact_persisted_record() -> None:
         attr_name="coordinate_import_lineage",
     ).record_sha256 == bound.record_sha256
     assert verify_bound_coordinate_record(bound) is bound
+
+
+def test_verification_reuses_one_exact_proof_and_rechecks_at_scope_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node = _Node(path="analysis/run")
+    bound = stamp_and_bind_persisted_coordinate_record(
+        node,
+        {"schema_id": "evidence", "schema_version": 1},
+        attr_name="coordinate_lineage",
+    )
+    original = coordinate_record_module.bind_persisted_coordinate_record
+    reloads = 0
+
+    def counting_bind(*args, **kwargs):
+        nonlocal reloads
+        reloads += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        coordinate_record_module,
+        "bind_persisted_coordinate_record",
+        counting_bind,
+    )
+    with proof_verification_scope():
+        assert verify_bound_coordinate_record(bound) is bound
+        assert verify_bound_coordinate_record(bound) is bound
+        assert verify_bound_coordinate_record(bound) is bound
+
+    # One initial persisted proof plus one fresh fail-closed closing proof.
+    assert reloads == 2
+
+
+def test_verification_scope_closing_recheck_detects_persisted_drift() -> None:
+    node = _Node(path="analysis/run")
+    bound = stamp_and_bind_persisted_coordinate_record(
+        node,
+        {"schema_id": "evidence", "schema_version": 1},
+        attr_name="coordinate_lineage",
+    )
+
+    with pytest.raises(CoordinateRecordError, match="missing, malformed, or stale"):
+        with proof_verification_scope():
+            assert verify_bound_coordinate_record(bound) is bound
+            node.attrs["coordinate_lineage"] = {
+                "schema_id": "evidence",
+                "schema_version": 2,
+            }
+
+
+def test_zarr_record_stamp_uses_one_whole_metadata_write(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zarr
+    from zarr.core.attributes import Attributes
+
+    root = zarr.open_group(
+        str(tmp_path / "authority-stamp.zarr"),
+        mode="w",
+        zarr_format=3,
+    )
+    node = root.create_group("analysis/run")
+    node.attrs["keep"] = 1
+    original_put = Attributes.put
+    writes = 0
+
+    def counting_put(self, values):
+        nonlocal writes
+        writes += 1
+        return original_put(self, values)
+
+    monkeypatch.setattr(Attributes, "put", counting_put)
+    stamp_and_bind_persisted_coordinate_record(
+        node,
+        {"schema_id": "evidence", "schema_version": 1},
+        attr_name="coordinate_lineage",
+    )
+
+    assert writes == 1
+    assert node.attrs["keep"] == 1
+
+
+def test_zarr_record_stamp_rolls_back_with_one_whole_metadata_write(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zarr
+    from zarr.core.attributes import Attributes
+
+    root = zarr.open_group(
+        str(tmp_path / "authority-rollback.zarr"),
+        mode="w",
+        zarr_format=3,
+    )
+    node = root.create_group("analysis/run")
+    node.attrs["keep"] = {"nested": [1, 2]}
+    before = copy.deepcopy(dict(node.attrs))
+    original_put = Attributes.put
+    writes = 0
+
+    def counting_put(self, values):
+        nonlocal writes
+        writes += 1
+        return original_put(self, values)
+
+    def fail_reload(*args, **kwargs):
+        raise CoordinateRecordError("injected post-write reload failure")
+
+    monkeypatch.setattr(Attributes, "put", counting_put)
+    monkeypatch.setattr(
+        coordinate_record_module,
+        "bind_persisted_coordinate_record",
+        fail_reload,
+    )
+    with pytest.raises(CoordinateRecordError, match="injected post-write"):
+        stamp_and_bind_persisted_coordinate_record(
+            node,
+            {"schema_id": "evidence", "schema_version": 1},
+            attr_name="coordinate_lineage",
+        )
+
+    assert writes == 2
+    assert dict(node.attrs) == before
 
 
 def test_forged_or_stale_bindings_fail_closed() -> None:

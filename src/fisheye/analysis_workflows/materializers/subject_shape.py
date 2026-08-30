@@ -36,6 +36,7 @@ from ...analysis.subject_shape_runs import (
     complete_bound_subject_shape_candidate_run,
     complete_bound_subject_shape_run_for_deferred_activation,
     refresh_unbound_subject_shape_manifest_after_storage_materialization,
+    validate_deferred_unbound_subject_shape_run,
     write_subject_shape_run_group,
 )
 from ...analysis.subject_shape_storage import (
@@ -53,13 +54,13 @@ from ...analysis.subject_shape_storage import (
 )
 from ...shared.json_safety import json_attr_safe
 from ...shared.subject_shape_coordinate_publication import (
-    SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE,
     SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR,
     SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
     commit_deferred_subject_shape_coordinate_activation,
     load_completed_ineligible_subject_shape_coordinate_publication,
     load_persisted_subject_shape_coordinate_publication,
     rollback_deferred_subject_shape_coordinate_activation,
+    is_supported_subject_shape_payload_receipt_profile,
     validate_sealed_subject_shape_publication_metadata,
 )
 from ...shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
@@ -345,6 +346,7 @@ def build_subject_shape_materialization_plan(
             "bundle_manifest_payload_digest": (
                 bundle_source.authority.bundle_manifest["payload_digest"]
             ),
+            "bundle_admission_receipt": dict(bundle_source.authority.admission_receipt),
             "refined_manifest_payload_digest": (
                 bundle_source.authority.refined_manifest["payload_digest"]
             ),
@@ -600,6 +602,7 @@ def publish_subject_shape_run(
     storage_access_aware = is_subject_shape_access_aware_storage(storage_profile_id)
     storage_candidate = is_subject_shape_storage_candidate(storage_profile_id)
     unbound_array_content_sha256: Mapping[str, str] | None = None
+    staged_decoded_copy_report: Mapping[str, Any] | None = None
     if storage_access_aware:
         raw_digests = materialization_payload.get("node_local_sharding", {}).get(
             "array_content_sha256"
@@ -612,6 +615,15 @@ def publish_subject_shape_run(
         unbound_array_content_sha256 = {
             str(path): str(digest) for path, digest in raw_digests.items()
         }
+        raw_copy_report = materialization_payload.get("node_local_sharding", {}).get(
+            "decoded_copy_report"
+        )
+        if not isinstance(raw_copy_report, Mapping):
+            raise ValueError(
+                "Access-aware subject-shape publication requires the storage "
+                "transform's decoded copy receipt."
+            )
+        staged_decoded_copy_report = raw_copy_report
     transaction = {
         "binding_complete": False,
         "completion_published": False,
@@ -651,9 +663,8 @@ def publish_subject_shape_run(
                 )
                 run_path = f"analysis/subject_shape_runs/{plan.run_name}"
                 run = root[run_path]
-                if (
+                if is_supported_subject_shape_payload_receipt_profile(
                     run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
-                    == SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE
                 ):
                     proof = validate_sealed_subject_shape_publication_metadata(
                         root,
@@ -711,6 +722,7 @@ def publish_subject_shape_run(
     def after_rename(
         root: zarr.Group,
         run_group: zarr.Group,
+        physical_copy: Mapping[str, Any],
     ) -> dict[str, Any]:
         if transaction["binding_complete"] or transaction["completion_published"]:
             raise RuntimeError("Subject-shape publication state is inconsistent.")
@@ -747,6 +759,8 @@ def publish_subject_shape_run(
             payload_run_path=plan.target_run_path,
             payload_hash_workers=max(1, int(getattr(plan, "shard_copy_workers", 4))),
             unbound_array_content_sha256=unbound_array_content_sha256,
+            staged_decoded_copy_report=staged_decoded_copy_report,
+            verified_physical_copy=(physical_copy if storage_access_aware else None),
         )
         if binding.get("valid") is not True:
             raise RuntimeError(f"Final-path subject-shape binding failed: {binding!r}")
@@ -1092,6 +1106,9 @@ def materialize_subject_shape(
         return result
 
     succeeded = False
+    storage_access_aware = is_subject_shape_access_aware_storage(
+        plan.storage_profile_id
+    )
     with telemetry.phase("scratch_setup"):
         if plan.scratch_root.exists():
             raise FileExistsError(f"Refusing existing scratch root: {plan.scratch_root}")
@@ -1142,24 +1159,41 @@ def materialize_subject_shape(
                 payload_scan_workers=plan.shard_copy_workers,
                 payload_scan_block_rows=plan.block_rows,
                 _unbound_coordinate_stage=True,
+                _deferred_storage_profile_id=(
+                    plan.storage_profile_id if storage_access_aware else None
+                ),
             )
         with telemetry.phase("compute_validation"):
-            compute_validation = _validate_subject_shape_run(
-                plan.compute_run_path,
-                row_count=plan.row_count,
-                require_sharded=False,
-                expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
-                require_complete=True,
-                expected_selector_eligible=False,
-            )
+            if storage_access_aware:
+                compute_run = compute_root[
+                    f"analysis/subject_shape_runs/{plan.run_name}"
+                ]
+                compute_validation = validate_deferred_unbound_subject_shape_run(
+                    source_root,
+                    compute_run,
+                    expected_refined_run=plan.refined_run,
+                    expected_run_name=plan.run_name,
+                    storage_profile_id=plan.storage_profile_id,
+                    expected_subject_mask_bundle_id=getattr(
+                        plan,
+                        "subject_mask_bundle_id",
+                        None,
+                    ),
+                )
+            else:
+                compute_validation = _validate_subject_shape_run(
+                    plan.compute_run_path,
+                    row_count=plan.row_count,
+                    require_sharded=False,
+                    expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+                    require_complete=True,
+                    expected_selector_eligible=False,
+                )
             if not compute_validation["valid"]:
                 raise RuntimeError(
                     f"Node-local compute validation failed: {compute_validation}"
                 )
         with telemetry.phase("storage_conversion"):
-            storage_access_aware = is_subject_shape_access_aware_storage(
-                plan.storage_profile_id
-            )
             if storage_access_aware:
                 compute_run = compute_root[
                     f"analysis/subject_shape_runs/{plan.run_name}"

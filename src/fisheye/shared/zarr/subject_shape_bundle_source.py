@@ -23,6 +23,7 @@ from fisheye.shared.pixel_frame_authority import (
     load_persisted_acquisition_camera_authority,
     load_source_camera_pixel_frame_authority,
 )
+from fisheye.shared.proof_verification import verify_persisted_proof
 
 SUBJECT_SHAPE_BUNDLE_SOURCE_SCHEMA_ID = (
     "palette.subject_shape.recording_mask_bundle_source"
@@ -36,9 +37,7 @@ SUBJECT_SHAPE_REQUIRED_MASK_COMPONENTS = (
     "eye_left",
     "eye_right",
 )
-_ASSIGNMENT_REBINDING_PREFIX = (
-    "subject_mask_assignment_keypoint_rebinding_runs/"
-)
+_ASSIGNMENT_REBINDING_PREFIX = "subject_mask_assignment_keypoint_rebinding_runs/"
 
 
 class SubjectShapeBundleSourceError(ValueError):
@@ -142,13 +141,11 @@ def _source_record(
     edge_frame: BoundPixelFrameAuthority,
     assignment_keypoint_rebinding: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
-    components = authority.refined_manifest["payload"]["logical_schema"][
-        "components"
-    ]
+    components = authority.refined_manifest["payload"]["logical_schema"]["components"]
     labels = tuple(str(value) for value in components.get("labels") or ())
-    if len(labels) != len(SUBJECT_SHAPE_REQUIRED_MASK_COMPONENTS) or set(
-        labels
-    ) != set(SUBJECT_SHAPE_REQUIRED_MASK_COMPONENTS):
+    if len(labels) != len(SUBJECT_SHAPE_REQUIRED_MASK_COMPONENTS) or set(labels) != set(
+        SUBJECT_SHAPE_REQUIRED_MASK_COMPONENTS
+    ):
         raise SubjectShapeBundleSourceError(
             "Subject-shape bundle source requires each maintained component exactly once."
         )
@@ -203,26 +200,22 @@ def _source_record(
             ],
             "bundle_coordinate_authority_digest": authority.authority_digest,
             "crop_run_path": authority.crop_run_path,
-            "crop_manifest_payload_digest": authority.crop_manifest[
-                "payload_digest"
-            ],
+            "crop_manifest_payload_digest": authority.crop_manifest["payload_digest"],
             "raw_run_path": authority.raw_run_path,
-            "raw_manifest_payload_digest": authority.raw_manifest[
-                "payload_digest"
-            ],
+            "raw_manifest_payload_digest": authority.raw_manifest["payload_digest"],
             "refined_run_path": authority.refined_run_path,
             "refined_manifest_payload_digest": authority.refined_manifest[
                 "payload_digest"
             ],
         },
         "assignment_keypoints": historical_assignment,
-        "assignment_keypoints_digest": canonical_json_sha256(
-            historical_assignment
-        ),
+        "assignment_keypoints_digest": canonical_json_sha256(historical_assignment),
     }
     if assignment_keypoint_rebinding is not None:
         payload = assignment_keypoint_rebinding.get("payload")
-        subject = payload.get("subject_mask_source") if isinstance(payload, Mapping) else None
+        subject = (
+            payload.get("subject_mask_source") if isinstance(payload, Mapping) else None
+        )
         if (
             not isinstance(payload, Mapping)
             or not isinstance(subject, Mapping)
@@ -251,17 +244,13 @@ def _source_record(
             "rebinding_manifest_payload_digest": assignment_keypoint_rebinding[
                 "payload_digest"
             ],
-            "canonical_keypoint_source": dict(
-                payload["canonical_keypoint_source"]
-            ),
+            "canonical_keypoint_source": dict(payload["canonical_keypoint_source"]),
             "equivalence": dict(payload["equivalence"]),
             "selection_policy": payload["selection_policy"],
         }
         source_record.update(
             {
-                "schema_version": (
-                    SUBJECT_SHAPE_BUNDLE_REBOUND_SOURCE_SCHEMA_VERSION
-                ),
+                "schema_version": (SUBJECT_SHAPE_BUNDLE_REBOUND_SOURCE_SCHEMA_VERSION),
                 "historical_assignment_keypoints": historical_assignment,
                 "historical_assignment_keypoints_digest": canonical_json_sha256(
                     historical_assignment
@@ -359,23 +348,34 @@ class BoundSubjectShapeBundleSource:
             )
         offsets = self.translation_offsets()
         return (
-            boxes.astype(np.float64).reshape(self.row_count, 2, 2)
-            + offsets[:, None, :]
+            boxes.astype(np.float64).reshape(self.row_count, 2, 2) + offsets[:, None, :]
         ).reshape(self.row_count, 4)
 
     def assert_verified(self) -> None:
-        current = load_subject_shape_bundle_source(
-            self.archive_path,
-            bundle_id=self.bundle_id,
-            allow_inactive=True,
-            assignment_keypoint_rebinding_run_id=(
-                self.assignment_keypoint_rebinding_run_id
-            ),
-        )
-        if current.source_digest != self.source_digest:
-            raise SubjectShapeBundleSourceError(
-                "Subject-shape bundle source changed after binding."
+        def verify() -> None:
+            current = load_subject_shape_bundle_source(
+                self.archive_path,
+                bundle_id=self.bundle_id,
+                allow_inactive=True,
+                assignment_keypoint_rebinding_run_id=(
+                    self.assignment_keypoint_rebinding_run_id
+                ),
             )
+            if current.source_digest != self.source_digest:
+                raise SubjectShapeBundleSourceError(
+                    "Subject-shape bundle source changed after binding."
+                )
+
+        verify_persisted_proof(
+            (
+                "palette.bound_subject_shape_bundle_source.v1",
+                str(self.archive_path.expanduser().resolve()),
+                self.bundle_id,
+                self.source_digest,
+                self.assignment_keypoint_rebinding_run_id,
+            ),
+            verify,
+        )
 
 
 def load_subject_shape_bundle_source(
@@ -395,6 +395,7 @@ def load_subject_shape_bundle_source(
         load_assignment_keypoint_rebinding_manifest(
             analysis_zarr,
             rebinding_run_id=assignment_keypoint_rebinding_run_id,
+            subject_mask_authority=authority,
         )
         if assignment_keypoint_rebinding_run_id is not None
         else None

@@ -1162,15 +1162,16 @@ def validate_subject_mask_quality_run_manifest(
     return tuple(errors)
 
 
-def validate_subject_mask_quality_publication(
+def _validate_subject_mask_quality_publication(
     manifest: Mapping[str, Any],
     *,
     direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
     consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
     arrays: Mapping[str, Any],
     source_manifest: Mapping[str, Any],
+    recompute_decoded_content: bool,
 ) -> tuple[str, ...]:
-    """Recompute decoded, source, metadata, and physical evidence."""
+    """Validate one publication with an explicit payload-validation policy."""
 
     errors = list(validate_subject_mask_quality_run_manifest(manifest))
     (
@@ -1191,20 +1192,23 @@ def validate_subject_mask_quality_publication(
     else:
         if source_manifest_digest != source.manifest_digest:
             errors.append("subject-mask quality source manifest digest mismatch")
-    try:
-        content = subject_mask_quality_logical_content_document(
-            arrays,
-            dimensions=dimensions,
-            components=components,
-            profile=profile,
-            source=source,
-            validate_logical_arrays=False,
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        errors.append(f"subject-mask quality array digest failed: {exc}")
-    else:
-        if content != payload["logical_content"]["document"]:
-            errors.append("subject-mask quality content differs from decoded arrays")
+    if recompute_decoded_content:
+        try:
+            content = subject_mask_quality_logical_content_document(
+                arrays,
+                dimensions=dimensions,
+                components=components,
+                profile=profile,
+                source=source,
+                validate_logical_arrays=False,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            errors.append(f"subject-mask quality array digest failed: {exc}")
+        else:
+            if content != payload["logical_content"]["document"]:
+                errors.append(
+                    "subject-mask quality content differs from decoded arrays"
+                )
     try:
         metadata_digest = subject_mask_quality_metadata_declarations_digest(
             direct_metadata_declarations,
@@ -1253,6 +1257,56 @@ def validate_subject_mask_quality_publication(
     return tuple(errors)
 
 
+def validate_subject_mask_quality_publication(
+    manifest: Mapping[str, Any],
+    *,
+    direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    arrays: Mapping[str, Any],
+    source_manifest: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Recompute decoded, source, metadata, and physical evidence."""
+
+    return _validate_subject_mask_quality_publication(
+        manifest,
+        direct_metadata_declarations=direct_metadata_declarations,
+        consolidated_metadata_declarations=consolidated_metadata_declarations,
+        arrays=arrays,
+        source_manifest=source_manifest,
+        recompute_decoded_content=True,
+    )
+
+
+def validate_receipt_bound_subject_mask_quality_publication(
+    manifest: Mapping[str, Any],
+    *,
+    expected_manifest_payload_digest: str,
+    direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    arrays: Mapping[str, Any],
+    source_manifest: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Validate an immutable outer-manifest-bound member without payload reads.
+
+    The caller must supply the quality manifest digest sealed by the enclosing
+    recording bundle.  The ordinary publication validator remains the explicit
+    decoded-audit surface; this admission gate verifies the sealed logical
+    receipt, live array metadata, source binding, and direct/consolidated
+    physical declarations without recomputing every scientific array hash.
+    """
+
+    if manifest.get("payload_digest") != expected_manifest_payload_digest:
+        return ("subject-mask quality manifest differs from bundle receipt",)
+    return _validate_subject_mask_quality_publication(
+        manifest,
+        direct_metadata_declarations=direct_metadata_declarations,
+        consolidated_metadata_declarations=consolidated_metadata_declarations,
+        arrays=arrays,
+        source_manifest=source_manifest,
+        recompute_decoded_content=False,
+    )
+
+
 __all__ = [
     "SUBJECT_MASK_QUALITY_ARRAY_DIGEST_ALGORITHM",
     "SUBJECT_MASK_QUALITY_LOGICAL_CONTENT_SCHEMA_ID",
@@ -1271,6 +1325,7 @@ __all__ = [
     "subject_mask_quality_logical_content_document",
     "subject_mask_quality_metadata_declarations_digest",
     "subject_mask_quality_output_write_units",
+    "validate_receipt_bound_subject_mask_quality_publication",
     "validate_subject_mask_quality_publication",
     "validate_subject_mask_quality_run_manifest",
 ]

@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import dask
 from dask import delayed
@@ -51,6 +51,7 @@ from ..shared.proof_verification import (
 )
 from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
+from ..shared.runtime_telemetry import PhaseTelemetry
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr_run_completion import (
     mark_run_complete,
@@ -91,6 +92,7 @@ from ..shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_COORDINATE_CONTRACT,
     SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR,
     SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
+    SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR,
     SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
     SUBJECT_SHAPE_NUMERIC_PROJECTION_ATTR,
     SUBJECT_SHAPE_NUMERIC_PROJECTION_DIGEST_ATTR,
@@ -123,6 +125,8 @@ from ..shared.subject_shape_coordinate_publication import (
 )
 from ..shared.subject_shape_storage import (
     build_subject_shape_unbound_payload_scan_receipt,
+    load_subject_shape_deferred_storage_receipt,
+    stamp_subject_shape_deferred_storage_receipt,
 )
 from ..shared.zarr.subject_shape_bundle_source import (
     BoundSubjectShapeBundleSource,
@@ -3161,6 +3165,10 @@ def refresh_unbound_subject_shape_manifest_after_storage_materialization(
             "Storage rematerialization requires one complete, unbound, "
             "selector-ineligible subject-shape stage."
         )
+    if SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR in run_group.attrs:
+        raise ValueError(
+            "Storage rematerialization cannot consume an unclosed deferred receipt."
+        )
     source_link = bind_persisted_coordinate_record(
         run_group,
         attr_name=SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR,
@@ -3232,6 +3240,7 @@ def _validate_unbound_subject_shape_payload(
     require_complete: bool,
     expected_subject_mask_bundle_id: str | None = None,
     array_content_sha256: Mapping[str, str] | None = None,
+    deferred_storage_profile_id: str | None = None,
 ) -> dict[str, object]:
     expected_path = f"analysis/subject_shape_runs/{expected_run_name}"
     if str(run_group.path) != expected_path:
@@ -3405,16 +3414,39 @@ def _validate_unbound_subject_shape_payload(
         node = run_group.get(path)
         if node is None or tuple(int(value) for value in node.shape) != shape:
             raise ValueError(f"Unbound subject-shape array {path!r} has wrong shape.")
-    manifest = _load_unbound_numeric_manifest(
-        run_group,
-        array_content_sha256=array_content_sha256,
-    )
+    if deferred_storage_profile_id is None:
+        if SUBJECT_SHAPE_DEFERRED_STORAGE_RECEIPT_ATTR in run_group.attrs:
+            raise ValueError(
+                "Manifest-bound subject-shape validation rejects a leftover "
+                "deferred storage receipt."
+            )
+        manifest = _load_unbound_numeric_manifest(
+            run_group,
+            array_content_sha256=array_content_sha256,
+        )
+        receipt_fields = {
+            "unbound_manifest_sha256": manifest.record_sha256,
+        }
+    else:
+        if array_content_sha256 is not None:
+            raise ValueError(
+                "Deferred subject-shape validation cannot accept predicted payload "
+                "digests."
+            )
+        receipt = load_subject_shape_deferred_storage_receipt(
+            run_group,
+            expected_storage_profile_id=deferred_storage_profile_id,
+        )
+        receipt_fields = {
+            "deferred_storage_receipt_sha256": receipt["record_sha256"],
+            "deferred_storage_profile_id": deferred_storage_profile_id,
+        }
     return {
         "valid": True,
         "status": expected_binding_status,
         "run_name": expected_run_name,
         "row_count": row_count,
-        "unbound_manifest_sha256": manifest.record_sha256,
+        **receipt_fields,
     }
 
 
@@ -3443,6 +3475,29 @@ def validate_unbound_subject_shape_run(
     )
 
 
+def validate_deferred_unbound_subject_shape_run(
+    authoritative_root: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    expected_refined_run: str,
+    expected_run_name: str,
+    storage_profile_id: str,
+    expected_subject_mask_bundle_id: str | None = None,
+) -> dict[str, object]:
+    """Validate a scratch writer handoff without inventing payload digests."""
+
+    return _validate_unbound_subject_shape_payload(
+        authoritative_root,
+        run_group,
+        expected_refined_run=expected_refined_run,
+        expected_run_name=expected_run_name,
+        expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+        require_complete=True,
+        expected_subject_mask_bundle_id=expected_subject_mask_bundle_id,
+        deferred_storage_profile_id=storage_profile_id,
+    )
+
+
 @proof_verification_operation
 def bind_staged_subject_shape_run(
     authoritative_root: zarr.Group,
@@ -3454,98 +3509,124 @@ def bind_staged_subject_shape_run(
     payload_run_path: str | Path | None = None,
     payload_hash_workers: int = 4,
     unbound_array_content_sha256: Mapping[str, str] | None = None,
+    staged_decoded_copy_report: Mapping[str, Any] | None = None,
+    verified_physical_copy: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     """Bind and transform an unbound stage only at its authoritative path."""
 
-    if archive_identity(authoritative_root) != archive_identity(final_run_group):
-        raise ValueError(
-            "Final subject-shape run is not inside the authoritative archive."
-        )
-    validation = _validate_unbound_subject_shape_payload(
-        authoritative_root,
-        final_run_group,
-        expected_refined_run=expected_refined_run,
-        expected_run_name=expected_run_name,
-        expected_binding_status=SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
-        require_complete=False,
-        expected_subject_mask_bundle_id=expected_subject_mask_bundle_id,
-        array_content_sha256=unbound_array_content_sha256,
+    binding_telemetry = PhaseTelemetry(
+        materializer="subject_shape_final_path_binding",
+        context={
+            "run_name": expected_run_name,
+            "refined_run": expected_refined_run,
+            "receipt_mode": (
+                "staged_transfer_receipt_v2"
+                if staged_decoded_copy_report is not None
+                else "legacy_post_binding_scan_v1"
+            ),
+        },
     )
-    source_revision_audit = audit_subject_shape_source_revisions_group(
-        authoritative_root,
-        shape_run=expected_run_name,
-        refined_run=expected_refined_run,
-    )
-    if source_revision_audit.get("status") != "current":
-        raise ValueError(
-            "Refined subject-mask revisions changed before final-path binding: "
-            f"{source_revision_audit!r}."
+    with binding_telemetry.phase("admission_revalidation"):
+        if archive_identity(authoritative_root) != archive_identity(final_run_group):
+            raise ValueError(
+                "Final subject-shape run is not inside the authoritative archive."
+            )
+        validation = _validate_unbound_subject_shape_payload(
+            authoritative_root,
+            final_run_group,
+            expected_refined_run=expected_refined_run,
+            expected_run_name=expected_run_name,
+            expected_binding_status=SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
+            require_complete=False,
+            expected_subject_mask_bundle_id=expected_subject_mask_bundle_id,
+            array_content_sha256=unbound_array_content_sha256,
         )
-    source = load_exact_subject_shape_source(authoritative_root, final_run_group)
-    unbound_manifest = _load_unbound_numeric_manifest(
-        final_run_group,
-        array_content_sha256=unbound_array_content_sha256,
-    )
-    manifest_sha256 = str(validation["unbound_manifest_sha256"])
-    if unbound_manifest.record_sha256 != manifest_sha256:
-        raise ValueError(
-            "Subject-shape unbound receipt changed between validation and consumption."
+        source_revision_audit = audit_subject_shape_source_revisions_group(
+            authoritative_root,
+            shape_run=expected_run_name,
+            refined_run=expected_refined_run,
         )
+        if source_revision_audit.get("status") != "current":
+            raise ValueError(
+                "Refined subject-mask revisions changed before final-path binding: "
+                f"{source_revision_audit!r}."
+            )
+        source = load_exact_subject_shape_source(authoritative_root, final_run_group)
+        unbound_manifest = _load_unbound_numeric_manifest(
+            final_run_group,
+            array_content_sha256=unbound_array_content_sha256,
+        )
+        manifest_sha256 = str(validation["unbound_manifest_sha256"])
+        if unbound_manifest.record_sha256 != manifest_sha256:
+            raise ValueError(
+                "Subject-shape unbound receipt changed between validation and "
+                "consumption."
+            )
 
     # Close the producer-sealed numeric proof before final-path authority
     # stamping. Legacy v1 stages are transformed after this boundary; projected
     # v2 stages have already written source-camera numerics and are admitted by
     # their freshly revalidated private projection receipt. In both cases, the
     # bound publication starts a distinct proof phase.
-    finish_proof_verification()
-    restart_proof_verification()
+    with binding_telemetry.phase("proof_phase_transition"):
+        finish_proof_verification()
+        restart_proof_verification()
 
-    records = final_run_group.require_group("coordinate_records")
-    consumed_node = records.require_group("consumed_unbound_stage")
-    consumed = stamp_and_bind_persisted_coordinate_record(
-        consumed_node,
-        unbound_manifest.record,
-        attr_name=SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
-    )
-    if consumed.record_sha256 != manifest_sha256:
-        raise ValueError(
-            "Retained subject-shape unbound receipt differs from its validated digest."
+    with binding_telemetry.phase("unbound_receipt_consumption"):
+        records = final_run_group.require_group("coordinate_records")
+        consumed_node = records.require_group("consumed_unbound_stage")
+        consumed = stamp_and_bind_persisted_coordinate_record(
+            consumed_node,
+            unbound_manifest.record,
+            attr_name=SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
         )
-    del final_run_group.attrs[SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR]
-    del final_run_group.attrs[f"{SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR}_sha256"]
-    final_run_group.attrs["unbound_numeric_stage_manifest_sha256_consumed"] = (
-        manifest_sha256
-    )
-    component_names = tuple(
-        str(value) for value in final_run_group.attrs["component_names"]
-    )
-    identity, component_schema = prepare_subject_shape_identity_and_schema(
-        final_run_group,
-        source,
-        component_names=component_names,
-    )
-    publication = publish_subject_shape_coordinate_surfaces(
-        authoritative_root,
-        final_run_group,
-        source,
-        component_names=component_names,
-        identity=identity,
-        component_schema=component_schema,
-        payload_run_path=payload_run_path,
-        payload_hash_workers=payload_hash_workers,
-    )
-    final_run_group.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
-        SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
-    )
-    if (
-        publication.run_path
-        != f"analysis/subject_shape_runs/{expected_run_name}"
-        or publication.publication_owner
-        != final_run_group.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
-        or final_run_group.attrs.get("coordinate_contract")
-        != SUBJECT_SHAPE_COORDINATE_CONTRACT
-    ):
-        raise ValueError("Final-path subject-shape binding did not persist exactly.")
+        if consumed.record_sha256 != manifest_sha256:
+            raise ValueError(
+                "Retained subject-shape unbound receipt differs from its validated "
+                "digest."
+            )
+        del final_run_group.attrs[SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR]
+        del final_run_group.attrs[f"{SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR}_sha256"]
+        final_run_group.attrs["unbound_numeric_stage_manifest_sha256_consumed"] = (
+            manifest_sha256
+        )
+        component_names = tuple(
+            str(value) for value in final_run_group.attrs["component_names"]
+        )
+    with binding_telemetry.phase("identity_array_append"):
+        identity, component_schema = prepare_subject_shape_identity_and_schema(
+            final_run_group,
+            source,
+            component_names=component_names,
+        )
+    with binding_telemetry.phase("coordinate_publication"):
+        publication = publish_subject_shape_coordinate_surfaces(
+            authoritative_root,
+            final_run_group,
+            source,
+            component_names=component_names,
+            identity=identity,
+            component_schema=component_schema,
+            payload_run_path=payload_run_path,
+            payload_hash_workers=payload_hash_workers,
+            staged_decoded_copy_report=staged_decoded_copy_report,
+            staged_array_content_sha256=unbound_array_content_sha256,
+            verified_physical_copy=verified_physical_copy,
+            runtime_telemetry=binding_telemetry,
+        )
+    with binding_telemetry.phase("binding_status_finalize"):
+        final_run_group.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
+            SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
+        )
+        if (
+            publication.run_path
+            != f"analysis/subject_shape_runs/{expected_run_name}"
+            or publication.publication_owner
+            != final_run_group.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
+            or final_run_group.attrs.get("coordinate_contract")
+            != SUBJECT_SHAPE_COORDINATE_CONTRACT
+        ):
+            raise ValueError("Final-path subject-shape binding did not persist exactly.")
     return {
         "valid": True,
         "status": SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
@@ -3554,6 +3635,7 @@ def bind_staged_subject_shape_run(
         "publication_manifest_sha256": publication.manifest.record_sha256,
         "unbound_manifest_sha256": manifest_sha256,
         "source_revision_audit": source_revision_audit,
+        "runtime_telemetry": binding_telemetry.to_json(),
     }
 
 
@@ -3757,6 +3839,7 @@ def write_subject_shape_run_group(
     payload_scan_workers: int = 1,
     payload_scan_block_rows: int | None = None,
     _unbound_coordinate_stage: bool = False,
+    _deferred_storage_profile_id: str | None = None,
 ) -> dict[str, object]:
     """Write one row-aligned subject-shape analysis run."""
 
@@ -3785,6 +3868,10 @@ def write_subject_shape_run_group(
         type(payload_scan_block_rows) is not int or payload_scan_block_rows <= 0
     ):
         raise ValueError("payload_scan_block_rows must be a positive integer.")
+    if _deferred_storage_profile_id is not None and not _unbound_coordinate_stage:
+        raise ValueError(
+            "Deferred subject-shape storage receipts require an unbound scratch stage."
+        )
     if subject_mask_bundle_id is not None and not _unbound_coordinate_stage:
         raise ValueError(
             "Recording-bundle subject-shape v5 must be finalized through the "
@@ -4051,42 +4138,55 @@ def write_subject_shape_run_group(
                 fallback_command="subject_shape_runs_unbound_stage",
             ),
         )
-        payload_scan = build_subject_shape_unbound_payload_scan_receipt(
-            run_group,
-            workers=payload_scan_workers,
-            block_rows=(
-                payload_scan_block_rows
-                if payload_scan_block_rows is not None
-                else worker_chunk_size
-            ),
-        )
-        payload_hashes = dict(payload_scan["array_content_sha256"])
-        _stamp_unbound_numeric_manifest(
-            run_group,
-            array_content_sha256=payload_hashes,
-        )
-        validation = _validate_unbound_subject_shape_payload(
-            root,
-            run_group,
-            expected_refined_run=refined_run_name,
-            expected_run_name=target_run,
-            expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
-            require_complete=True,
-            expected_subject_mask_bundle_id=(
-                bundle_source.bundle_id if bundle_source is not None else None
-            ),
-            array_content_sha256=payload_hashes,
-        )
-        decoded_payload = dict(payload_scan["decoded_payload"])
-        summary.update(
-            {
-                "status": SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
-                "coordinate_binding_status": SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
-                "unbound_validation": validation,
-                "duration_seconds": duration_seconds,
-                "rows_per_second": rows_per_second,
-                "rows_with_component": rows_with_component,
-                "chunk_timing_count": len(chunk_timings),
+        if _deferred_storage_profile_id is not None:
+            deferred_receipt = stamp_subject_shape_deferred_storage_receipt(
+                run_group,
+                storage_profile_id=_deferred_storage_profile_id,
+            )
+            validation = _validate_unbound_subject_shape_payload(
+                root,
+                run_group,
+                expected_refined_run=refined_run_name,
+                expected_run_name=target_run,
+                expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+                require_complete=True,
+                expected_subject_mask_bundle_id=(
+                    bundle_source.bundle_id if bundle_source is not None else None
+                ),
+                deferred_storage_profile_id=_deferred_storage_profile_id,
+            )
+            producer_receipt = {
+                "producer_payload_receipt_deferred": deferred_receipt,
+            }
+        else:
+            payload_scan = build_subject_shape_unbound_payload_scan_receipt(
+                run_group,
+                workers=payload_scan_workers,
+                block_rows=(
+                    payload_scan_block_rows
+                    if payload_scan_block_rows is not None
+                    else worker_chunk_size
+                ),
+            )
+            payload_hashes = dict(payload_scan["array_content_sha256"])
+            _stamp_unbound_numeric_manifest(
+                run_group,
+                array_content_sha256=payload_hashes,
+            )
+            validation = _validate_unbound_subject_shape_payload(
+                root,
+                run_group,
+                expected_refined_run=refined_run_name,
+                expected_run_name=target_run,
+                expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+                require_complete=True,
+                expected_subject_mask_bundle_id=(
+                    bundle_source.bundle_id if bundle_source is not None else None
+                ),
+                array_content_sha256=payload_hashes,
+            )
+            decoded_payload = dict(payload_scan["decoded_payload"])
+            producer_receipt = {
                 "producer_payload_scan_receipt": {
                     "schema_id": payload_scan["schema_id"],
                     "schema_version": payload_scan["schema_version"],
@@ -4105,7 +4205,18 @@ def write_subject_shape_run_group(
                     "array_count": decoded_payload["array_count"],
                     "decoded_bytes": decoded_payload["decoded_bytes"],
                     "decoded_payload_root_sha256": decoded_payload["root_sha256"],
-                },
+                }
+            }
+        summary.update(
+            {
+                "status": SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+                "coordinate_binding_status": SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+                "unbound_validation": validation,
+                "duration_seconds": duration_seconds,
+                "rows_per_second": rows_per_second,
+                "rows_with_component": rows_with_component,
+                "chunk_timing_count": len(chunk_timings),
+                **producer_receipt,
             }
         )
         if include_chunk_timings:
