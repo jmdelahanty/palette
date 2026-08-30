@@ -136,7 +136,7 @@ def _make_registry_with_identity_rows(tmp_path: Path) -> Registry:
     return registry
 
 
-def test_migration_72_creates_empty_receipt_binding_table(tmp_path: Path) -> None:
+def test_migration_73_creates_empty_receipt_binding_table(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     try:
         columns = {
