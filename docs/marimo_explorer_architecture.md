@@ -84,6 +84,106 @@ The top-level notebook should discover capabilities, choose a provider, and
 route to the registered component. It should not hard-code protocol-specific
 Zarr paths except through the selected component.
 
+## Modular Recording-Explorer Composition
+
+The supported recording explorer is one Marimo entrypoint with modular Python
+components, not one notebook per analysis and not one growing notebook that
+implements every analysis inline. `apps/marimo/palette_explorer.py` owns only
+application-level reactive concerns:
+
+- launch arguments and the selected recording workspace;
+- provider, source, and analysis selection;
+- generic loading/error state and stale-selection protection;
+- invocation of the selected provider adapter; and
+- final layout of controls, output, and provenance.
+
+Scientific source validation, projection loading, display parameters, and plot
+construction belong to ordinary Python modules below
+`apps/marimo/components/`. Those modules remain directly unit-testable without
+executing the whole Marimo notebook. Adding an analysis must not require a new
+analysis-specific import, load cell, and render branch in the top-level app.
+
+Each modular provider adapter should expose one stable routing boundary:
+
+```text
+provider identity and catalog declarations
+        -> available analysis IDs for one exact source
+        -> load selected read-only projection
+        -> construct optional controls
+        -> render selected analysis or typed failure
+```
+
+The adapter dispatches by exact analysis ID through closed maps. It must reject
+unknown IDs, and a component failure must not fall through to a legacy or
+candidate provider. Provider adapters may share pure validation and projection
+primitives under `src/fisheye/`, but Marimo objects and reactive state do not
+belong under `src/`.
+
+### Exact chaser package direction
+
+The exact-successor component is the first provider to adopt this boundary as
+new visualization families are mounted. Its target organization is:
+
+```text
+apps/marimo/palette_explorer.py                 # thin recording-app shell
+apps/marimo/components/analysis_catalog.py      # provider/analysis declarations
+apps/marimo/components/chaser_exact_successors.py
+                                                  # compatibility facade only
+apps/marimo/components/chaser_exact_escape_freeze_contract.py
+                                                  # shared closed admission grammar
+apps/marimo/components/chaser_exact_escape_freeze_discovery.py
+                                                  # consolidated metadata-only join
+apps/marimo/components/chaser_exact/
+    provider.py                                  # closed load/render dispatch
+    projection.py                                # shared verified bundle projection
+    radial_near_field.py                         # persisted radial/near-field view
+    distance_traces.py                           # exact-time distance view
+    trajectory_overlays.py                       # reviewed-arena trajectories
+    spatial_occupancy.py                         # persisted occupancy grids
+    controller_trials.py                         # logged active trial members
+    bout_response.py                             # persisted segmented-bout response
+    escape_freeze.py                             # persisted event classifications
+    escape_freeze_projection.py                  # exact binding and deep loader
+    full_profile.py                              # exact cross-module composition
+    provenance.py                                # readable sealed identities
+```
+
+The existing `chaser_exact_successors.py` import path remains as a facade while
+the package is extracted, so callers and tests do not require a flag-day
+rewrite. A mechanical extraction should be a distinct commit from the first
+new spatial-occupancy implementation even when both are reviewed in one pull
+request. The facade is removed only after all supported callers use the
+provider adapter and focused modules.
+
+The legacy `goodcopbadcop_chaser.py` surface remains isolated compatibility
+code. New exact-successor analyses must not be added to it, and its size or
+branching structure is not a template for modern components. Legacy migration
+can proceed provider by provider after the exact-chaser adapter proves the
+interface; it is not a prerequisite for publishing the missing exact views.
+
+### Modular acceptance rules
+
+- One analysis module owns its required persisted arrays, validation,
+  display-only parameters, plot construction, and focused tests.
+- Shared bundle validation runs once at the provider projection boundary; a
+  module may request additional arrays but cannot weaken or bypass that proof.
+- Expensive arrays load only for the selected analysis. Importing or listing a
+  provider performs no scientific array read.
+- Render dispatch is closed and deterministic. The notebook does not infer a
+  builder from a run name or renderer substring.
+- Controls and caches are keyed by exact archive/run/manifest identity plus the
+  renderer and display-parameter versions. Late results cannot render under a
+  different selection.
+- Display projections remain read-only and cannot become inputs to scientific
+  metrics, exports, selectors, or authority decisions.
+- Focused component tests and a top-level routing test are both required.
+  `marimo check` and real-artifact smokes remain release gates.
+
+The incremental implementation now includes the mechanical package split,
+spatial occupancy, controller trials, generalized bout response, and
+escape/freeze. Each plugged into the same closed adapter without adding a
+top-level app branch. Full-profile composition remains the next planned module.
+
 ## Current Renderer Registry and Providers
 
 The recording explorer currently registers:

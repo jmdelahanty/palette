@@ -1,9 +1,9 @@
 # Body Frame Contract
 <!-- contract-meta
-version: 3
+version: 4
 status: active
 implementation: implemented
-last_verified: 2026-07-29
+last_verified: 2026-08-27
 -->
 
 Purpose: define a shared fish-relative coordinate-frame contract that can be
@@ -231,6 +231,29 @@ need to be embedded in `keypoints_runs` or `refined_keypoints_runs`.
 `support/body_frame/` remain valid estimator-local outputs and compatibility
 surfaces. A reusable publisher may normalize either into a dedicated
 body-frame run without changing the source authority.
+
+## Downstream Sufficiency And Upstream Lineage
+
+A validated body-frame supplier is the complete authority for consumers whose
+declared inputs are anatomical origin, forward/left axes, heading, and validity.
+The supplier must bind its exact source snapshot, labeled schema or component
+registry, controlled estimator, row identity, coordinates, validity, and output
+content. Once that contract passes, a body-relative consumer does not separately
+resolve the source keypoint or subject-mask authority.
+
+The upstream source remains sealed lineage. A consumer that needs landmark
+coordinates, component pixels, editing state, or training eligibility must
+resolve the corresponding keypoint or subject-mask authority directly; a body
+frame cannot supply those surfaces. Conversely, `keypoint_authority=false` on a
+dedicated body-frame run means only that the derived cache is not canonical
+keypoint data. It does not negate the run's body-frame authority.
+
+Human review is not implied by the source modality, `keypoint_authority=false`,
+selector ineligibility, or candidate terminology. It is required only when the
+consumer or promotion contract defines the reviewed claim, receipt schema, and
+validator. Representative axis visualization may be required by a separate
+promotion or publication-quality protocol without becoming a prerequisite for
+selector-ineligible body-frame computation.
 
 ## Recommended Materialized Layout
 

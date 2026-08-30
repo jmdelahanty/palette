@@ -1,10 +1,10 @@
 # Current Palette Pipeline Contract
 
 <!-- contract-meta
-version: 2
+version: 3
 status: active
 implementation: implemented
-last_verified: 2026-07-20
+last_verified: 2026-08-27
 -->
 
 Purpose: define the current operator-facing source-of-truth contract for Palette
@@ -29,8 +29,9 @@ Palette should keep these artifact roles distinct:
 
 - Raw provenance snapshots: append-only inference or materialization outputs.
   They record what a model or method produced for a row-aligned source.
-- Refined authority artifacts: curated or editable surfaces that operators and
-  exports should trust for reviewed state.
+- Refined curation artifacts: curated or editable surfaces that carry review
+  state and may become accepted authority after the applicable use-scoped gate.
+  Refined placement alone is not proof of review or acceptance.
 - Compatibility surfaces: historical or adapter layouts kept readable for older
   archives, old viewers, and migration tooling. They are not competing
   canonical authorities.
@@ -43,10 +44,61 @@ Palette should keep these artifact roles distinct:
 The default rule is:
 
 - raw stages preserve provenance
-- refined stages carry reviewed/editable authority
+- refined stages carry editable and review state and may be activated as
+  accepted authority
 - registry and operator summaries should prefer the current authority and label
   compatibility state explicitly
 - stale state is separate from review state
+
+## Canonicality, Authority, Acceptance, And Lifecycle
+
+These are independent claims:
+
+- **Canonical** means that an artifact conforms to the maintained schema,
+  coordinate, identity, lineage, and content-integrity contract for its role.
+- **Complete** means that its writer reached the declared technical completion
+  boundary. **Selector eligible** means that normal selection is permitted.
+  Neither claim implies scientific acceptance.
+- **Authoritative** means that an exact artifact or bundle is selected as the
+  source for a declared semantic fact or consumer scope.
+- **Accepted** means that an explicit use-scoped decision binds the selected
+  artifact, intended use, evaluation method or policy, actor, evidence,
+  exceptions, and exact content or manifest digest.
+- **Reviewed authority** is accepted authority whose declared method includes
+  the required scientific or operator review. It is stronger than technical
+  publication authority.
+- **Stale** means that current source lineage no longer matches. Staleness
+  remains independent of completion, review, and acceptance.
+
+The selection mechanism is product-specific and must not be inferred from one
+universal attribute:
+
+| Product role | Technical selection mechanism | Review implication |
+| --- | --- | --- |
+| Canonical raw detections | matching `latest` / `latest_complete`, canonical-detection contract and digest, completion, and eligibility | validated model observation; no human review implied |
+| Legacy family-scoped refined products | optional `authoritative_run` plus activation provenance | pointer proves selection, not stage-specific review |
+| Keypoint v2 bundle | root `keypoint_bundle_authority` envelope | exact technical bundle authority; no acceptance implied |
+| Subject-mask bundle | root `subject_mask_authority` envelope | exact technical bundle authority; no acceptance implied |
+| Derived analysis component | exact manifest, authority envelope, or loader-minted dependency handle | requires only the authorities and acceptance claims declared by its consumer contract |
+
+`set_authoritative_run()` and generic `palette approve` are technical
+family-selection primitives. Their presence alone must never be reported as a
+validated `keypoint_review_status`, `detect_review_status`, component-mask
+approval, or scientific acceptance receipt. Conversely, a review-status or
+`*_review_status_latest` pointer is review/task evidence and is not by itself a
+scientific selector.
+
+Raw model-output authority remains legitimate for consumers whose contract
+asks what the exact model produced. A training export, accepted label set, or
+biological interpretation may require stronger use-scoped acceptance. That
+requirement belongs at the source/consumer boundary; it must not be propagated
+as an invented manual-review gate through every derived supplier. For example,
+a validated body-frame supplier is sufficient for an analysis that consumes
+only its exact axes and validity, while a consumer of landmark coordinates or
+mask pixels may require the corresponding accepted label authority.
+
+The convergence work is specified in
+[`diagnostics/authority_acceptance_implementation_checklist_2026-08-27.md`](diagnostics/authority_acceptance_implementation_checklist_2026-08-27.md).
 
 Recording-only archives follow the same artifact-role rules. They may lack
 experiment/stimulus context, but they can still accumulate the full

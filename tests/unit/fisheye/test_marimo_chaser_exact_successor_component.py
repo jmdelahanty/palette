@@ -1,17 +1,31 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+import pytest
 
 from apps.marimo.components.analysis_catalog import group_specs_by_provider
 from apps.marimo.components.chaser_exact_successors import (
+    _verify_bundle_children,
     _trace_display_projection,
     _trajectory_display_indices,
+)
+from apps.marimo.components.chaser_exact.provenance import freeze
+from apps.marimo.components.chaser_exact_bout_response_contract import (
+    validate_scientific_manifest,
 )
 from apps.marimo.components.registry import (
     CHASER_EXACT_SUCCESSOR_RENDERER,
     discover_exact_chaser_successor_options,
+)
+from fisheye.analysis_workflows.exact_relative_frame_binding import (
+    ExactRelativeFrameBindingError,
+    MINIMAL_EXACT_CHILD_PROFILE,
+    RECEIPT_BOUND_PROFILE,
+    require_same_exact_relative_frame_child,
+    validate_exact_relative_frame_binding,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
@@ -30,6 +44,7 @@ def _relative(path: str, provider_id: str, provider_digest: str) -> _Group:
         "recording_id": "recording-1",
         "selector_eligible": False,
         "selection": "none",
+        "dimensions": {"n_frames": 10, "n_chasers": 2, "n_rows": 20},
         "source_authorities": {
             "fish_position": {
                 "provider_id": provider_id,
@@ -56,6 +71,8 @@ def _successor(
     kind: str,
     scientific: dict[str, Any],
 ) -> _Group:
+    scientific = dict(scientific)
+    scientific["payload_digest"] = canonical_json_sha256(scientific)
     manifest = {
         "successor_kind": kind,
         "run_path": path,
@@ -63,6 +80,7 @@ def _successor(
         "selector_eligible": False,
         "selection": "none",
         "scientific_manifest": scientific,
+        "scientific_payload_sha256": scientific["payload_digest"],
     }
     digest = canonical_json_sha256(manifest)
     return _Group(
@@ -84,6 +102,10 @@ def _archive() -> _Group:
         ("detection", "detection.v1", "b" * 64),
     )
     root = _Group()
+    semantic = {
+        "run_path": ("analysis/protocol_semantic_chaser_selection_runs/semantic-v1"),
+        "manifest_sha256": "c" * 64,
+    }
     records = []
     for role, provider_id, provider_digest in providers:
         relative_path = f"analysis/chaser_relative_frame_runs/{role}-relative"
@@ -92,6 +114,11 @@ def _archive() -> _Group:
         relative_binding = {
             "run_path": relative_path,
             "manifest_sha256": relative.attrs["chaser_relative_frame_manifest_sha256"],
+        }
+        receipt_bound_relative_binding = {
+            **relative_binding,
+            "validation_receipt_sha256": "f" * 64,
+            "verification_mode": "receipt_bound_targeted_array_rehash_v1",
         }
         radial = _successor(
             radial_path,
@@ -112,7 +139,7 @@ def _archive() -> _Group:
                 "provider_role": role,
                 "provider_id": provider_id,
                 "provider_digest": provider_digest,
-                "relative_frame": relative_binding,
+                "relative_frame": receipt_bound_relative_binding,
                 "radial_near_field": {
                     "run_path": radial_path,
                     "manifest_sha256": radial.attrs[
@@ -126,12 +153,232 @@ def _archive() -> _Group:
     spatial = _successor(
         spatial_path,
         "chaser_spatial_occupancy",
-        {"sources": {"position_providers": records}},
+        {
+            "sources": {
+                "position_providers": records,
+                "protocol_semantic_selection": semantic,
+            }
+        },
     )
     parent = _Group({spatial_name: spatial})
     root["analysis/chaser_spatial_occupancy_runs"] = parent
     root[spatial_path] = spatial
+    controller_name = "controller-v1"
+    controller_path = f"analysis/controller_chase_trial_runs/{controller_name}"
+    controller = _successor(
+        controller_path,
+        "controller_chase_trials",
+        {
+            "scientific_schema": {
+                "schema_id": "palette.analysis.controller_chase_trials",
+                "schema_version": 1,
+                "method_id": "exact_logged_trial_id_active_membership_v1",
+            },
+            "source_relative_frame": {
+                key: records[0]["relative_frame"][key]
+                for key in ("run_path", "manifest_sha256")
+            },
+            "semantic_selection": semantic,
+            "dimensions": {
+                "n_frames": 10,
+                "n_chasers": 2,
+                "n_source_rows": 20,
+                "n_trials": 2,
+            },
+            "policy": {
+                "fallback": "prohibited_fail_closed",
+                "legacy_contiguous_interval_reconstruction": "rejected",
+            },
+        },
+    )
+    controller_parent = _Group({controller_name: controller})
+    root["analysis/controller_chase_trial_runs"] = controller_parent
+    root[controller_path] = controller
+    bout_name = "bout-v1"
+    bout_path = f"analysis/generalized_chaser_bout_response_runs/{bout_name}"
+    controller_payload = controller.attrs["composable_chaser_successor_manifest"][
+        "scientific_manifest"
+    ]["payload_digest"]
+    bout = _successor(
+        bout_path,
+        "generalized_chaser_bout_response",
+        {
+            "scientific_schema": {
+                "schema_id": "palette.analysis.generalized_chaser_bout_response",
+                "schema_version": 1,
+                "method_id": (
+                    "exact_signal_bout_x_chaser_distance_motion_with_body_extension_v1"
+                ),
+                "row_unit": "selected_swim_bout_x_chaser",
+                "summary_unit": "semantic_role_x_chaser_x_distance_band",
+                "body_extension_present": True,
+            },
+            "sources": {
+                "relative_frame": {
+                    key: records[0]["relative_frame"][key]
+                    for key in ("run_path", "manifest_sha256")
+                },
+                "motion": {
+                    "run_path": ("analysis/track_kinematics_runs/provider/motion-v1"),
+                    "manifest_sha256": "1" * 64,
+                    "relative_frame_projection": {
+                        "schema_id": (
+                            "palette.provider_motion.relative_frame_projection"
+                        ),
+                        "schema_version": 1,
+                        "join_key": "exact_acquisition_frame_id",
+                        "join_policy": (
+                            "left_join_missing_provider_rows_invalid_no_interpolation"
+                        ),
+                        "provider_frame_count": 10,
+                        "relative_frame_count": 10,
+                        "matched_relative_frame_count": 10,
+                        "missing_relative_frame_count": 0,
+                        "provider_only_frame_count": 0,
+                        "provider_frame_ids_sha256": "2" * 64,
+                        "relative_frame_ids_sha256": "3" * 64,
+                        "provider_row_index_by_relative_frame_sha256": "4" * 64,
+                        "provider_frame_present_sha256": "5" * 64,
+                        "fallback": "prohibited",
+                    },
+                },
+                "swim_bouts": {
+                    "run_path": "analysis/swim_bout_runs/bouts-v1",
+                    "lineage_sha256": "6" * 64,
+                    "signal_id": 4,
+                    "signal_level": "speed_exponential",
+                },
+                "semantic_selection_manifest_sha256": semantic["manifest_sha256"],
+                "controller_trial_payload_sha256": controller_payload,
+            },
+            "dimensions": {
+                "n_frames": 10,
+                "n_chasers": 2,
+                "n_bouts": 3,
+                "n_bout_chaser_rows": 6,
+                "n_summary_rows": 30,
+            },
+            "distance_bin_edges_mm": [0.0, 8.0, 16.0, 30.0, 50.0, None],
+            "policy": {
+                "bout_signal": "one_explicit_default_signal_only",
+                "bout_attachment": "exact_acquisition_frame_identity",
+                "trial_attachment": "onset_row_exact_controller_trial_membership",
+                "trial_envelope": (
+                    "retained_for_visualization_and_censoring_not_event_membership"
+                ),
+                "rate_denominator": "valid_transition_time_in_distance_band",
+                "directed_metrics": (
+                    "optional_body_frame_extension_no_motion_heading_fallback"
+                ),
+                "unattached_bouts": "retained_with_reason_code",
+            },
+            "identity_registries": {
+                "semantic_role": {
+                    "1": "chaser_pre",
+                    "2": "chaser_training",
+                    "3": "chaser_post",
+                },
+                "attachment_reason": {
+                    "0": "valid_or_trial_optional",
+                    "1": "frame_unavailable",
+                    "2": "outside_semantic_selection",
+                    "3": "controller_trial_unavailable_at_onset",
+                },
+            },
+        },
+    )
+    bout_parent = _Group({bout_name: bout})
+    root["analysis/generalized_chaser_bout_response_runs"] = bout_parent
+    root[bout_path] = bout
+    escape_name = "escape-v1"
+    escape_path = f"analysis/chaser_escape_freeze_runs/{escape_name}"
+    bout_manifest = bout.attrs["composable_chaser_successor_manifest"]
+    bout_scientific = bout_manifest["scientific_manifest"]
+    escape = _successor(
+        escape_path,
+        "chaser_escape_freeze",
+        {
+            "scientific_schema": {
+                "schema_id": "palette.analysis.chaser_escape_freeze",
+                "schema_version": 2,
+                "method_id": ("exact_trial_speed_escape_optional_high_turn_freeze_v1"),
+                "event_unit": "speed_thresholded_exact_swim_bout_x_chaser",
+                "trial_unit": "exact_logged_controller_trial",
+            },
+            "sources": {
+                "motion": {
+                    **bout_scientific["sources"]["motion"],
+                    "speed_level": "filtered",
+                },
+                "controller_trial_payload_sha256": controller_payload,
+                "bout_response_payload_sha256": bout_manifest[
+                    "scientific_payload_sha256"
+                ],
+            },
+            "parameters": {
+                "escape_speed_threshold_mm_s": 20.0,
+                "high_turn_threshold_deg": 45.0,
+                "freeze_speed_threshold_mm_s": 2.0,
+                "freeze_window_s": 1.0,
+                "freeze_fraction_threshold": 0.8,
+                "minimum_freeze_valid_fraction": 0.5,
+                "threshold_sweep_mm_s": [10.0, 20.0, 30.0],
+            },
+            "dimensions": {"n_trials": 2, "n_events": 1, "n_sweep_rows": 6},
+            "policy": {
+                "speed_escape": "bout_peak_speed_greater_equal_threshold",
+                "high_turn_tier": (
+                    "optional_directed_annotation_separate_from_speed_class"
+                ),
+                "freeze": ("no_speed_escape_and_low_speed_fraction_with_coverage_gate"),
+                "trial_attachment": ("exactly_one_controller_trial_row_at_bout_onset"),
+                "event_counts": ("retained_even_when_recapture_trace_unusable"),
+                "recapture": (
+                    "first_post_event_exact_trial_member_at_or_below_onset_distance"
+                ),
+                "fallback_trial_segmentation": "prohibited",
+                "trial_gaps": (
+                    "excluded_from_membership_time_and_event_attachment;"
+                    "retained_as_coverage_evidence"
+                ),
+            },
+            "identity_registries": {
+                "response_class": {
+                    "0": "insufficient_valid_freeze_window",
+                    "1": "speed_escape",
+                    "2": "freeze_candidate",
+                    "3": "other_response",
+                },
+                "trace_exclusion_reason": {
+                    "0": "valid",
+                    "1": "no_post_event_valid_distance_in_trial",
+                    "2": "event_frame_unavailable",
+                },
+            },
+            "selector_eligible": False,
+            "selection": "none",
+            "production_authority": False,
+            "registry_update": False,
+        },
+    )
+    escape_parent = _Group({escape_name: escape})
+    root["analysis/chaser_escape_freeze_runs"] = escape_parent
+    root[escape_path] = escape
     return root
+
+
+def _redigest_spatial(root: _Group) -> None:
+    spatial = root["analysis/chaser_spatial_occupancy_runs/paired-spatial-v1"]
+    spatial.attrs["composable_chaser_successor_manifest_sha256"] = (
+        canonical_json_sha256(spatial.attrs["composable_chaser_successor_manifest"])
+    )
+
+
+def _provider_records(root: _Group) -> list[dict[str, Any]]:
+    spatial = root["analysis/chaser_spatial_occupancy_runs/paired-spatial-v1"]
+    return spatial.attrs["composable_chaser_successor_manifest"]["scientific_manifest"][
+        "sources"
+    ]["position_providers"]
 
 
 def test_exact_successor_discovery_uses_spatial_bundle_and_exact_children(
@@ -148,10 +395,571 @@ def test_exact_successor_discovery_uses_spatial_bundle_and_exact_children(
     assert len(options) == 1
     assert options[0].renderer == CHASER_EXACT_SUCCESSOR_RENDERER
     assert options[0].spec["bundle_status"] == "exact_selector_ineligible"
+    assert options[0].spec["schema_version"] == 6
     assert options[0].spec["provider_ids"] == ["keypoint.v1", "detection.v1"]
+    spatial_parameters = options[0].spec["display_parameters"]["spatial_occupancy"]
+    assert spatial_parameters["source_array"] == "occupancy_density_valid_in_arena"
+    assert spatial_parameters["density_multiplier_to_percent"] == 100.0
+    assert (
+        spatial_parameters["provider_difference"]
+        == "detection_minus_keypoint_percentage_points_per_bin"
+    )
+    controller_parameters = options[0].spec["display_parameters"]["controller_trials"]
+    assert controller_parameters["max_points_per_trace"] == 6000
+    assert controller_parameters["max_trial_panels"] == 32
+    assert controller_parameters["max_gap_markers_per_panel"] == 2000
+    proofs = options[0].spec["relative_frame_binding_proofs"]
+    assert len(proofs) == 2
+    assert proofs[0]["spatial_binding_profile"] == RECEIPT_BOUND_PROFILE
+    assert proofs[0]["radial_binding_profile"] == MINIMAL_EXACT_CHILD_PROFILE
+    assert proofs[0]["validation_receipt_sha256"] == "f" * 64
+    assert proofs[0]["verification_mode"] == ("receipt_bound_targeted_array_rehash_v1")
+    controller = options[0].spec["analysis_bindings"]["controller_trials"]
+    assert controller["run_path"] == (
+        "analysis/controller_chase_trial_runs/controller-v1"
+    )
+    assert controller["source_relative_frame"] == {
+        key: _provider_records(root)[0]["relative_frame"][key]
+        for key in ("run_path", "manifest_sha256")
+    }
+    bout = options[0].spec["analysis_bindings"]["generalized_bout_response"]
+    assert bout["run_path"] == (
+        "analysis/generalized_chaser_bout_response_runs/bout-v1"
+    )
+    assert (
+        bout["controller_trial_payload_sha256"]
+        == controller["scientific_payload_sha256"]
+    )
+    assert bout["body_extension_present"] is True
+    bout_parameters = options[0].spec["display_parameters"]["generalized_bout_response"]
+    assert bout_parameters["distance_band_edges"] == "persisted_no_rebinning"
+    assert bout_parameters["bout_resegmentation"] == "prohibited"
+    escape = options[0].spec["analysis_bindings"]["escape_freeze"]
+    assert escape["run_path"] == "analysis/chaser_escape_freeze_runs/escape-v1"
+    assert (
+        escape["controller_trial_payload_sha256"]
+        == controller["scientific_payload_sha256"]
+    )
+    assert escape["bout_response_payload_sha256"] == bout["scientific_payload_sha256"]
+    assert escape["classifier_parameters"]["freeze_window_s"] == 1.0
+    escape_parameters = options[0].spec["display_parameters"]["escape_freeze"]
+    assert escape_parameters["response_classes"] == (
+        "persisted_no_viewer_reclassification"
+    )
+    assert escape_parameters["event_trace_samples"] == (
+        "not_persisted_no_viewer_reconstruction"
+    )
     assert group_specs_by_provider(options) == {
         "stimulus_chaser_exact_successors": options
     }
+
+
+def test_bout_response_contract_hashes_frozen_loader_metadata() -> None:
+    root = _archive()
+    bout = root["analysis/generalized_chaser_bout_response_runs/bout-v1"]
+    scientific = bout.attrs["composable_chaser_successor_manifest"][
+        "scientific_manifest"
+    ]
+
+    verified = validate_scientific_manifest(
+        freeze(scientific),
+        expected_scientific_payload_sha256=scientific["payload_digest"],
+        expected_n_frames=10,
+        expected_n_chasers=2,
+        expected_relative_binding=_provider_records(root)[0]["relative_frame"],
+        expected_semantic_manifest_sha256="c" * 64,
+        expected_controller_payload_sha256=scientific["sources"][
+            "controller_trial_payload_sha256"
+        ],
+    )
+
+    assert verified["n_bouts"] == 3
+    assert verified["body_extension_present"] is True
+
+
+def test_controller_trial_capability_is_hidden_when_exact_join_is_ambiguous(
+    monkeypatch,
+) -> None:
+    root = _archive()
+    parent = root["analysis/controller_chase_trial_runs"]
+    original = parent["controller-v1"]
+    scientific = dict(
+        original.attrs["composable_chaser_successor_manifest"]["scientific_manifest"]
+    )
+    scientific.pop("payload_digest")
+    duplicate_path = "analysis/controller_chase_trial_runs/controller-v2"
+    duplicate = _successor(
+        duplicate_path,
+        "controller_chase_trials",
+        scientific,
+    )
+    parent["controller-v2"] = duplicate
+    root[duplicate_path] = duplicate
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    assert options[0].spec["analysis_bindings"] == {}
+
+
+def test_bout_response_capability_is_hidden_when_exact_join_is_ambiguous(
+    monkeypatch,
+) -> None:
+    root = _archive()
+    parent = root["analysis/generalized_chaser_bout_response_runs"]
+    original = parent["bout-v1"]
+    scientific = dict(
+        original.attrs["composable_chaser_successor_manifest"]["scientific_manifest"]
+    )
+    scientific.pop("payload_digest")
+    duplicate_path = "analysis/generalized_chaser_bout_response_runs/bout-v2"
+    duplicate = _successor(
+        duplicate_path,
+        "generalized_chaser_bout_response",
+        scientific,
+    )
+    parent["bout-v2"] = duplicate
+    root[duplicate_path] = duplicate
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    bindings = options[0].spec["analysis_bindings"]
+    assert "controller_trials" in bindings
+    assert "generalized_bout_response" not in bindings
+    assert "escape_freeze" not in bindings
+
+
+def test_escape_freeze_capability_is_hidden_when_exact_join_is_ambiguous(
+    monkeypatch,
+) -> None:
+    root = _archive()
+    parent = root["analysis/chaser_escape_freeze_runs"]
+    original = parent["escape-v1"]
+    scientific = dict(
+        original.attrs["composable_chaser_successor_manifest"]["scientific_manifest"]
+    )
+    scientific.pop("payload_digest")
+    duplicate_path = "analysis/chaser_escape_freeze_runs/escape-v2"
+    duplicate = _successor(duplicate_path, "chaser_escape_freeze", scientific)
+    parent["escape-v2"] = duplicate
+    root[duplicate_path] = duplicate
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    bindings = options[0].spec["analysis_bindings"]
+    assert "generalized_bout_response" in bindings
+    assert "escape_freeze" not in bindings
+
+
+def test_escape_freeze_capability_is_hidden_for_wrong_bout_payload(
+    monkeypatch,
+) -> None:
+    root = _archive()
+    escape = root["analysis/chaser_escape_freeze_runs/escape-v1"]
+    manifest = escape.attrs["composable_chaser_successor_manifest"]
+    scientific = manifest["scientific_manifest"]
+    scientific["sources"]["bout_response_payload_sha256"] = "9" * 64
+    scientific["payload_digest"] = canonical_json_sha256(
+        {key: value for key, value in scientific.items() if key != "payload_digest"}
+    )
+    manifest["scientific_payload_sha256"] = scientific["payload_digest"]
+    escape.attrs["composable_chaser_successor_manifest_sha256"] = canonical_json_sha256(
+        manifest
+    )
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    bindings = options[0].spec["analysis_bindings"]
+    assert "generalized_bout_response" in bindings
+    assert "escape_freeze" not in bindings
+
+
+def test_bout_response_capability_is_hidden_for_wrong_controller_payload(
+    monkeypatch,
+) -> None:
+    root = _archive()
+    bout = root["analysis/generalized_chaser_bout_response_runs/bout-v1"]
+    manifest = bout.attrs["composable_chaser_successor_manifest"]
+    scientific = manifest["scientific_manifest"]
+    scientific["sources"]["controller_trial_payload_sha256"] = "9" * 64
+    scientific["payload_digest"] = canonical_json_sha256(
+        {key: value for key, value in scientific.items() if key != "payload_digest"}
+    )
+    manifest["scientific_payload_sha256"] = scientific["payload_digest"]
+    bout.attrs["composable_chaser_successor_manifest_sha256"] = canonical_json_sha256(
+        manifest
+    )
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    bindings = options[0].spec["analysis_bindings"]
+    assert "controller_trials" in bindings
+    assert "generalized_bout_response" not in bindings
+
+
+def test_bout_response_capability_is_hidden_for_stale_scientific_payload(
+    monkeypatch,
+) -> None:
+    root = _archive()
+    bout = root["analysis/generalized_chaser_bout_response_runs/bout-v1"]
+    manifest = bout.attrs["composable_chaser_successor_manifest"]
+    manifest["scientific_manifest"]["tampered_after_publication"] = True
+    bout.attrs["composable_chaser_successor_manifest_sha256"] = canonical_json_sha256(
+        manifest
+    )
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    bindings = options[0].spec["analysis_bindings"]
+    assert "controller_trials" in bindings
+    assert "generalized_bout_response" not in bindings
+
+
+def test_controller_trial_capability_is_hidden_for_wrong_relative_source(
+    monkeypatch,
+) -> None:
+    root = _archive()
+    controller = root["analysis/controller_chase_trial_runs/controller-v1"]
+    manifest = controller.attrs["composable_chaser_successor_manifest"]
+    manifest["scientific_manifest"]["source_relative_frame"]["manifest_sha256"] = (
+        "e" * 64
+    )
+    manifest["scientific_payload_sha256"] = manifest["scientific_manifest"][
+        "payload_digest"
+    ]
+    controller.attrs["composable_chaser_successor_manifest_sha256"] = (
+        canonical_json_sha256(manifest)
+    )
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    assert options[0].spec["analysis_bindings"] == {}
+
+
+def test_controller_trial_capability_is_hidden_above_panel_bound(monkeypatch) -> None:
+    root = _archive()
+    controller = root["analysis/controller_chase_trial_runs/controller-v1"]
+    manifest = controller.attrs["composable_chaser_successor_manifest"]
+    scientific = manifest["scientific_manifest"]
+    scientific["dimensions"]["n_trials"] = 33
+    scientific["payload_digest"] = canonical_json_sha256(
+        {key: value for key, value in scientific.items() if key != "payload_digest"}
+    )
+    manifest["scientific_payload_sha256"] = scientific["payload_digest"]
+    controller.attrs["composable_chaser_successor_manifest_sha256"] = (
+        canonical_json_sha256(manifest)
+    )
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    assert options[0].spec["analysis_bindings"] == {}
+
+
+def test_production_binding_shapes_are_not_whole_object_equal() -> None:
+    root = _archive()
+    spatial_binding = _provider_records(root)[0]["relative_frame"]
+    radial = root["analysis/chaser_radial_near_field_runs/keypoint-radial"]
+    radial_binding = radial.attrs["composable_chaser_successor_manifest"][
+        "scientific_manifest"
+    ]["sources"]["relative_frame"]
+
+    assert spatial_binding != radial_binding
+    proof = require_same_exact_relative_frame_child(spatial_binding, radial_binding)
+
+    assert dict(proof.normalized_identity) == {
+        "run_path": spatial_binding["run_path"],
+        "manifest_sha256": spatial_binding["manifest_sha256"],
+    }
+    assert proof.expected.profile_id == RECEIPT_BOUND_PROFILE
+    assert proof.observed.profile_id == MINIMAL_EXACT_CHILD_PROFILE
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("validation_receipt_sha256", "not-a-digest", "lowercase SHA-256"),
+        ("verification_mode", "deep_audit", "unsupported"),
+    ],
+)
+def test_receipt_bound_binding_rejects_invalid_evidence(
+    field: str,
+    value: str,
+    match: str,
+) -> None:
+    binding = dict(_provider_records(_archive())[0]["relative_frame"])
+    binding[field] = value
+
+    with pytest.raises(ExactRelativeFrameBindingError, match=match):
+        validate_exact_relative_frame_binding(binding)
+
+
+def test_relative_binding_rejects_unrecognized_field_set() -> None:
+    binding = dict(_provider_records(_archive())[0]["relative_frame"])
+    binding["receipt_path"] = "/not/an/admitted/field"
+
+    with pytest.raises(ExactRelativeFrameBindingError, match="unrecognized"):
+        validate_exact_relative_frame_binding(binding)
+
+
+@pytest.mark.parametrize(
+    "run_name",
+    ["latest", "latest_complete", "authoritative_run", "selected", "current_run"],
+)
+def test_relative_binding_rejects_selector_like_child_names(run_name: str) -> None:
+    binding = dict(_provider_records(_archive())[0]["relative_frame"])
+    binding["run_path"] = f"analysis/chaser_relative_frame_runs/{run_name}"
+
+    with pytest.raises(ExactRelativeFrameBindingError, match="exact child"):
+        validate_exact_relative_frame_binding(binding)
+
+
+@pytest.mark.parametrize("field", ["run_path", "manifest_sha256"])
+def test_relative_binding_equivalence_rejects_different_child_identity(
+    field: str,
+) -> None:
+    root = _archive()
+    spatial_binding = dict(_provider_records(root)[0]["relative_frame"])
+    radial = root["analysis/chaser_radial_near_field_runs/keypoint-radial"]
+    radial_binding = dict(
+        radial.attrs["composable_chaser_successor_manifest"]["scientific_manifest"][
+            "sources"
+        ]["relative_frame"]
+    )
+    radial_binding[field] = (
+        "analysis/chaser_relative_frame_runs/another-exact-run"
+        if field == "run_path"
+        else "e" * 64
+    )
+
+    with pytest.raises(ExactRelativeFrameBindingError, match="different exact"):
+        require_same_exact_relative_frame_child(spatial_binding, radial_binding)
+
+
+def test_loader_bundle_validation_accepts_enriched_spatial_and_minimal_radial() -> None:
+    root = _archive()
+    records = _provider_records(root)
+    semantic = {"run_path": "analysis/protocol_semantic/run", "sha256": "1" * 64}
+    geometry = {"authority_id": "reviewed-arena", "sha256": "2" * 64}
+    epochs = [{"epoch_id": "pre", "start_frame": 0, "end_frame": 10}]
+    arena = {"radius_mm": 10.0}
+    radials = []
+    for record in records:
+        role = record["provider_role"]
+        radial_group = root[f"analysis/chaser_radial_near_field_runs/{role}-radial"]
+        radial_manifest = radial_group.attrs["composable_chaser_successor_manifest"]
+        scientific = dict(radial_manifest["scientific_manifest"])
+        scientific["sources"] = {
+            **scientific["sources"],
+            "protocol_semantic_selection": semantic,
+            "arena_geometry_and_scale": geometry,
+        }
+        scientific["epoch_records"] = epochs
+        scientific["arena"] = arena
+        radials.append(
+            SimpleNamespace(
+                run_path=record["radial_near_field"]["run_path"],
+                manifest_sha256=record["radial_near_field"]["manifest_sha256"],
+                scientific_manifest=scientific,
+            )
+        )
+    spatial = SimpleNamespace(
+        scientific_manifest={
+            "sources": {
+                "position_providers": records,
+                "protocol_semantic_selection": semantic,
+                "arena_geometry_and_scale": geometry,
+            },
+            "epoch_records": epochs,
+        }
+    )
+
+    provider_ids, proofs = _verify_bundle_children(
+        spatial,
+        radials,
+        tuple(record["relative_frame"] for record in records),
+    )
+
+    assert provider_ids == ("keypoint.v1", "detection.v1")
+    assert tuple(proof.expected.profile_id for proof in proofs) == (
+        RECEIPT_BOUND_PROFILE,
+        RECEIPT_BOUND_PROFILE,
+    )
+    assert tuple(proof.observed.profile_id for proof in proofs) == (
+        MINIMAL_EXACT_CHILD_PROFILE,
+        MINIMAL_EXACT_CHILD_PROFILE,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("validation_receipt_sha256", "invalid"),
+        ("verification_mode", "unsupported"),
+    ],
+)
+def test_discovery_hides_invalid_receipt_binding(
+    monkeypatch,
+    field: str,
+    value: str,
+) -> None:
+    root = _archive()
+    _provider_records(root)[0]["relative_frame"][field] = value
+    _redigest_spatial(root)
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    assert discover_exact_chaser_successor_options("recording.zarr") == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (
+            "run_path",
+            "analysis/chaser_relative_frame_runs/another-exact-relative-run",
+        ),
+        ("manifest_sha256", "e" * 64),
+    ],
+)
+def test_discovery_hides_wrong_relative_child_identity(
+    monkeypatch,
+    field: str,
+    value: str,
+) -> None:
+    root = _archive()
+    _provider_records(root)[0]["relative_frame"][field] = value
+    _redigest_spatial(root)
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    assert discover_exact_chaser_successor_options("recording.zarr") == []
+
+
+def test_discovery_hides_relative_child_from_another_recording(monkeypatch) -> None:
+    root = _archive()
+    relative = root["analysis/chaser_relative_frame_runs/keypoint-relative"]
+    manifest = relative.attrs["chaser_relative_frame_manifest"]
+    manifest["recording_id"] = "recording-2"
+    digest = canonical_json_sha256(manifest)
+    relative.attrs["chaser_relative_frame_manifest_sha256"] = digest
+    _provider_records(root)[0]["relative_frame"]["manifest_sha256"] = digest
+    _redigest_spatial(root)
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    assert discover_exact_chaser_successor_options("recording.zarr") == []
+
+
+def test_discovery_hides_incomplete_relative_child(monkeypatch) -> None:
+    root = _archive()
+    relative = root["analysis/chaser_relative_frame_runs/keypoint-relative"]
+    relative.attrs["palette_run_completion_status"] = "writing"
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    assert discover_exact_chaser_successor_options("recording.zarr") == []
+
+
+def test_discovery_hides_reversed_provider_roles(monkeypatch) -> None:
+    root = _archive()
+    _provider_records(root).reverse()
+    _redigest_spatial(root)
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    assert discover_exact_chaser_successor_options("recording.zarr") == []
+
+
+@pytest.mark.parametrize("selector", ["latest", "latest_pending", "current_run"])
+def test_discovery_hides_forbidden_parent_selector(monkeypatch, selector: str) -> None:
+    root = _archive()
+    root["analysis/chaser_spatial_occupancy_runs"].attrs[selector] = "paired-spatial-v1"
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    assert discover_exact_chaser_successor_options("recording.zarr") == []
+
+
+def test_discovery_hides_controller_capability_with_parent_selector(
+    monkeypatch,
+) -> None:
+    root = _archive()
+    root["analysis/controller_chase_trial_runs"].attrs[
+        "authoritative_run"
+    ] = "controller-v1"
+    monkeypatch.setattr(
+        "apps.marimo.components.registry.open_zarr_root",
+        lambda *args, **kwargs: root,
+    )
+
+    options = discover_exact_chaser_successor_options("recording.zarr")
+
+    assert len(options) == 1
+    assert options[0].spec["analysis_bindings"] == {}
+
+
+def test_discovery_does_not_retry_unconsolidated_metadata(monkeypatch) -> None:
+    calls = []
+
+    def fail_open(*args, **kwargs):
+        calls.append(kwargs)
+        raise ValueError("missing consolidated generation")
+
+    monkeypatch.setattr("apps.marimo.components.registry.open_zarr_root", fail_open)
+
+    assert discover_exact_chaser_successor_options("recording.zarr") == []
+    assert calls == [{"mode": "r", "use_consolidated": True}]
 
 
 def test_exact_successor_discovery_hides_stale_child_provider_binding(

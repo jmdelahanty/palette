@@ -208,6 +208,39 @@ CHASER_EXACT_SUCCESSOR_PROVIDER = ProviderDefinition(
             "Fish positions with exact logged chaser positions in the reviewed arena.",
         ),
         AnalysisDefinition(
+            "spatial_occupancy",
+            "Exact-epoch occupancy heatmaps",
+            (
+                "Persisted paired-provider occupancy and detection-minus-keypoint "
+                "display on the sealed reviewed-arena physical grid."
+            ),
+        ),
+        AnalysisDefinition(
+            "controller_trials",
+            "Exact controller trials",
+            (
+                "Full-session and trigger-aligned distance from producer-logged "
+                "active trial membership, with retained nonmember gaps."
+            ),
+        ),
+        AnalysisDefinition(
+            "generalized_bout_response",
+            "Generalized bout response",
+            (
+                "Persisted bout rate, kinematics, separation response, and "
+                "optional body-frame turning by exact onset distance."
+            ),
+        ),
+        AnalysisDefinition(
+            "escape_freeze",
+            "Exact escape/freeze outcomes",
+            (
+                "Persisted speed-defined escape events, separately annotated "
+                "high turns, exact-trial freeze candidates, recapture outcomes, "
+                "validity reasons, and threshold sensitivity."
+            ),
+        ),
+        AnalysisDefinition(
             "provenance",
             "Provenance",
             "Exact bundle, child-run identities, display projection, and authorities.",

@@ -818,3 +818,63 @@ This branch is not complete, not merge-ready, and not production-eligible.
 Before integration it requires completed implementation, focused local tests,
 review of immutable-backfill/successor behavior for existing recordings, and
 all repository-required CI checks passing.
+
+## Authority and scalable acceptance addendum — 2026-08-27
+
+The body-frame successor discussion exposed a cross-cutting vocabulary and
+enforcement divergence that is broader than chaser analysis. Palette currently
+has four independent gates:
+
+1. writer completion;
+2. canonical schema, identity, lineage, and content validation;
+3. use-scoped scientific acceptance; and
+4. selector or authority activation.
+
+The repository does not yet enforce those gates through one shared acceptance
+contract. Raw canonical detections use matching `latest` / `latest_complete`
+selectors plus a manifest contract and digest. Legacy refined families may use
+`authoritative_run`. Keypoint v2 and modern subject masks use atomic root
+`keypoint_bundle_authority` and `subject_mask_authority` envelopes. Chaser
+components bind exact dependency handles and immutable component manifests.
+Those are valid product-specific technical selectors; they should not be
+replaced by one universal `authoritative_run` pointer.
+
+Review evidence also differs. Detection and keypoint review are primarily
+run-level. Refined subject-mask review is component-level and aggregates to a
+run decision. The corresponding interactive review workflows normally couple
+an approved decision to authority activation, but the generic authority
+primitive validates completion and eligibility rather than the stage-specific
+review payload. The modern keypoint and subject-mask bundle activators prove
+technical bundle coherence but do not currently prove scientific acceptance.
+Therefore no consumer may infer `reviewed` merely from an authority pointer or
+root bundle envelope.
+
+The accepted design direction is a separate immutable, digest-bound,
+use-scoped scientific acceptance receipt. It will bind the exact selected run
+or bundle, manifest and logical-content digests, intended use, decision,
+evaluation method and policy, reviewer or evaluator, coverage or sampling,
+exceptions, source freshness, and receipt digest. Technical model-output
+authority remains available without manual review when that is the consumer's
+declared input. Reviewed-label consumers will use a stricter resolver that
+requires a matching receipt. Existing review-status attrs remain compatibility
+and operator evidence; historical acceptance must never be invented.
+
+For dozens of recordings, acceptance should use deterministic validation and
+automated QC on every recording, a reproducible stratified human sample, human
+review of every exception, and one collection receipt binding all accepted,
+excluded, and quarantined members. Row- and component-level review remains
+appropriate for corrections, training labels, and exceptions rather than as a
+universal prerequisite for every analysis.
+
+This does not add a keypoint-review gate to the current body-frame chaser
+successors. They consume validated body-frame axes and validity, not landmark
+coordinates. The already frozen selector-ineligible GoodBatBadBat task may be
+used to collect cohort evidence without moving selectors, updating the
+registry, or claiming production acceptance. A production or accepted cohort
+release will require the future collection acceptance receipt. The four
+recordings whose semantic steps overlap remain blocked; no legacy fallback or
+inferred interval ordering is authorized.
+
+Exact implementation locations, migration states, tests, and cohort gates are
+tracked in
+[`authority_acceptance_implementation_checklist_2026-08-27.md`](authority_acceptance_implementation_checklist_2026-08-27.md).
