@@ -1,0 +1,45 @@
+{
+  "schema_id": "palette.subject_mask.component_area_support_profile",
+  "schema_version": 1,
+  "profile_id": "cedar_shadow_omnifin0_subject_v1_union_component_area_support_v1",
+  "derivation_method": "minimum_positive_normalized_area_from_approved_training_masks_v1",
+  "model_binding": {
+    "registry_set_id": "subject_mask_cedar_shadow_omnifin0_gray_subject_v1_union_c6ff03ae_v001",
+    "registry_run_id": "subject_masks_union_all_components_v001",
+    "artifact_sha256": "217da20cd6ed780f5efe2c16add7cb932f40f08aac2f6e44795c0c381283839c",
+    "label_schema_id": "subject_v1_union"
+  },
+  "training_evidence": {
+    "training_manifest_sha256": "1b7b5c7ed69bc52f9120dbad47d704f32f67099b2ec29f10c9c4df83ee074d01",
+    "approved_source_run": "refined_subject_masks_all_components_training_20260425",
+    "approved_source_label_schema_id": "subject_v1_lr",
+    "approved_source_count": 15,
+    "approved_row_count": 3153,
+    "reference_mask_shape_hw": [512, 512],
+    "metadata_read_mode": "unconsolidated_explicit",
+    "area_source": "metrics/area_px from the approved source runs used by the sealed training export"
+  },
+  "component_families": [
+    {
+      "family": "subject_body",
+      "applies_to": ["subject_body"],
+      "minimum_area_px_reference": 1945,
+      "positive_label_count": 3153,
+      "observed_minimum_by_source_label": {"subject_body": 1945}
+    },
+    {
+      "family": "eye",
+      "applies_to": ["eyes_union", "eye_left", "eye_right"],
+      "minimum_area_px_reference": 92,
+      "positive_label_count": 6306,
+      "observed_minimum_by_source_label": {"eye_left": 92, "eye_right": 100}
+    },
+    {
+      "family": "swim_bladder",
+      "applies_to": ["swim_bladder"],
+      "minimum_area_px_reference": 167,
+      "positive_label_count": 3153,
+      "observed_minimum_by_source_label": {"swim_bladder": 167}
+    }
+  ]
+}

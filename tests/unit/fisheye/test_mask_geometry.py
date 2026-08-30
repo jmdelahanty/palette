@@ -6,6 +6,7 @@ import pytest
 from scipy.ndimage import binary_fill_holes
 
 from fisheye.shared.mask_geometry import (
+    DEFAULT_MIN_ELLIPSE_FOREGROUND_PIXELS,
     fill_holes,
     hole_stats,
     mask_pixel_centroid,
@@ -80,7 +81,7 @@ def test_mask_pixel_centroid_returns_xy_or_nan() -> None:
     assert np.all(np.isnan(mask_pixel_centroid(np.zeros((4, 4), dtype=np.uint8))))
 
 
-def test_measure_mask_ellipse_rejects_subpixel_degenerate_fit() -> None:
+def test_measure_mask_ellipse_rejects_insufficient_foreground_support() -> None:
     mask = np.zeros((512, 512), dtype=np.uint8)
     mask[275, 248] = 1
     mask[276:281, 247] = 1
@@ -89,11 +90,41 @@ def test_measure_mask_ellipse_rejects_subpixel_degenerate_fit() -> None:
     success, ellipse, centroid, contour, failure = measure_mask_ellipse(mask)
 
     assert success is False
-    assert failure == "ellipse_invalid_params"
+    assert failure == "ellipse_insufficient_foreground_support"
     assert np.all(np.isnan(ellipse))
     np.testing.assert_allclose(centroid, mask_pixel_centroid(mask))
     assert contour is not None
     assert contour.shape == (10, 2)
+
+
+@pytest.mark.parametrize("foreground_pixels", range(4, 13))
+def test_measure_mask_ellipse_rejects_tiny_masks_before_opencv_and_repeats_exactly(
+    foreground_pixels: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mask = np.zeros((32, 32), dtype=np.uint8)
+    for offset in range(foreground_pixels):
+        mask[12 + offset // 4, 12 + offset % 4] = 1
+
+    def forbidden_fit(_contour: np.ndarray):
+        raise AssertionError("cv2.fitEllipse must not see an under-supported mask")
+
+    monkeypatch.setattr(cv2, "fitEllipse", forbidden_fit)
+    results = [measure_mask_ellipse(mask) for _ in range(5)]
+
+    for success, ellipse, centroid, contour, failure in results:
+        assert success is False
+        assert failure == "ellipse_insufficient_foreground_support"
+        assert np.all(np.isnan(ellipse))
+        np.testing.assert_array_equal(centroid, mask_pixel_centroid(mask))
+        assert contour is not None
+    assert foreground_pixels < DEFAULT_MIN_ELLIPSE_FOREGROUND_PIXELS
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, True])
+def test_measure_mask_ellipse_rejects_invalid_foreground_threshold(value: object) -> None:
+    with pytest.raises(ValueError, match="min_foreground_pixels"):
+        measure_mask_ellipse(np.ones((8, 8), dtype=np.uint8), min_foreground_pixels=value)  # type: ignore[arg-type]
 
 
 def test_measure_mask_ellipse_accepts_resolved_pixel_scale_ellipse() -> None:

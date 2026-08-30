@@ -229,10 +229,12 @@ def test_analyze_root_auto_selects_eye_capable_subject_run_over_component_scoped
 def test_analyze_root_uses_union_component_when_lr_components_are_not_available(tmp_path: Path) -> None:
     root, _kp = _keypoint_root()
     masks = np.zeros((3, 3, 8, 8), dtype=np.uint8)
-    masks[0, 1, 1:4, 1:4] = 1
-    masks[0, 1, 1:4, 4:7] = 1
-    masks[1, 1, 1:4, 1:4] = 1
-    masks[1, 1, 1:4, 4:7] = 1
+    # Keep each split eye above the deterministic 13-pixel geometry floor so
+    # this fixture isolates union assignment rather than support rejection.
+    masks[0, 1, 1:5, 0:4] = 1
+    masks[0, 1, 1:5, 4:8] = 1
+    masks[1, 1, 1:5, 0:4] = 1
+    masks[1, 1, 1:5, 4:8] = 1
     _add_refined_subject_run(
         root,
         masks_roi=masks,
@@ -306,8 +308,10 @@ def test_analyze_root_reads_compact_refined_subject_masks_without_dense_masks_ro
     )
     run.create_array("available_channels", data=np.asarray([False, True, False], dtype=bool))
     masks = np.zeros((3, 3, 8, 8), dtype=np.uint8)
-    masks[:, 1, 1:4, 1:4] = 1
-    masks[:, 1, 1:4, 4:7] = 1
+    # Keep each split eye above the deterministic 13-pixel geometry floor so
+    # this fixture isolates compact-store reads rather than support rejection.
+    masks[:, 1, 1:5, 0:4] = 1
+    masks[:, 1, 1:5, 4:8] = 1
     write_component_rle_mask_store_from_dense(
         run,
         masks,
@@ -386,10 +390,12 @@ def test_analyze_root_reports_union_assignment_not_ready_for_unsplittable_union(
 def test_analyze_root_uses_assignment_keypoint_lineage_for_union_audit(tmp_path: Path) -> None:
     root, _kp = _keypoint_root()
     masks = np.zeros((3, 3, 8, 8), dtype=np.uint8)
-    masks[0, 1, 1:4, 1:4] = 1
-    masks[0, 1, 1:4, 4:7] = 1
-    masks[1, 1, 1:4, 1:4] = 1
-    masks[1, 1, 1:4, 4:7] = 1
+    # Keep each split eye above the deterministic 13-pixel geometry floor so
+    # this fixture isolates assignment-keypoint lineage resolution.
+    masks[0, 1, 1:5, 0:4] = 1
+    masks[0, 1, 1:5, 4:8] = 1
+    masks[1, 1, 1:5, 0:4] = 1
+    masks[1, 1, 1:5, 4:8] = 1
     run = _add_subject_run(
         root,
         run_name="subject_masks_union_canary_001",

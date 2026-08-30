@@ -181,10 +181,12 @@ def _build_assembly_root() -> zarr.Group:
     )
 
     eye_masks = np.zeros((2, 2, 8, 8), dtype=np.uint8)
-    eye_masks[0, 0, 1:4, 1:4] = 1
-    eye_masks[0, 1, 1:4, 4:7] = 1
-    eye_masks[1, 0, 3:6, 1:4] = 1
-    eye_masks[1, 1, 3:6, 4:7] = 1
+    # Each synthetic eye has 16 pixels, above the deterministic 13-pixel
+    # geometry floor, so assembly fixtures model usable source components.
+    eye_masks[0, 0, 1:5, 0:4] = 1
+    eye_masks[0, 1, 1:5, 4:8] = 1
+    eye_masks[1, 0, 2:6, 0:4] = 1
+    eye_masks[1, 1, 2:6, 4:8] = 1
     _create_subject_run(
         root,
         run_name="eye_run_001",
@@ -501,10 +503,10 @@ def test_assemble_refined_subject_run_copies_all_canonical_components_from_subje
     masks = np.zeros((2, 4, 8, 8), dtype=np.uint8)
     masks[0, 0, 1:7, 1:7] = 1
     masks[1, 0, 2:6, 2:6] = 1
-    masks[0, 1, 1:4, 1:4] = 1
-    masks[1, 1, 3:6, 1:4] = 1
-    masks[0, 2, 1:4, 4:7] = 1
-    masks[1, 2, 3:6, 4:7] = 1
+    masks[0, 1, 1:5, 0:4] = 1
+    masks[1, 1, 2:6, 0:4] = 1
+    masks[0, 2, 1:5, 4:8] = 1
+    masks[1, 2, 2:6, 4:8] = 1
     masks[0, 3, 4:6, 4:6] = 1
     masks[1, 3, 3:5, 3:5] = 1
     _create_subject_run(
@@ -616,10 +618,10 @@ def test_assemble_refined_subject_run_assigns_subject_run_eye_union_with_keypoin
     masks = np.zeros((2, 3, 8, 8), dtype=np.uint8)
     masks[0, 0, 1:7, 1:7] = 1
     masks[1, 0, 2:6, 2:6] = 1
-    masks[0, 1, 1:4, 1:4] = 1
-    masks[0, 1, 1:4, 4:7] = 1
-    masks[1, 1, 3:6, 1:4] = 1
-    masks[1, 1, 3:6, 4:7] = 1
+    masks[0, 1, 1:5, 0:4] = 1
+    masks[0, 1, 1:5, 4:8] = 1
+    masks[1, 1, 2:6, 0:4] = 1
+    masks[1, 1, 2:6, 4:8] = 1
     masks[0, 2, 4:6, 4:6] = 1
     masks[1, 2, 3:5, 3:5] = 1
     _create_subject_run(
@@ -652,11 +654,11 @@ def test_assemble_refined_subject_run_assigns_subject_run_eye_union_with_keypoin
     assert run.attrs["assignment_keypoint_contract"] == "subject_eyes_union_assignment_keypoints_v1"
     assert run.attrs["assignment_keypoint_selection"] == "source_keypoint_lineage"
     expected_left = np.zeros((2, 8, 8), dtype=np.uint8)
-    expected_left[0, 1:4, 1:4] = 1
-    expected_left[1, 3:6, 1:4] = 1
+    expected_left[0, 1:5, 0:4] = 1
+    expected_left[1, 2:6, 0:4] = 1
     expected_right = np.zeros((2, 8, 8), dtype=np.uint8)
-    expected_right[0, 1:4, 4:7] = 1
-    expected_right[1, 3:6, 4:7] = 1
+    expected_right[0, 1:5, 4:8] = 1
+    expected_right[1, 2:6, 4:8] = 1
     np.testing.assert_array_equal(np.asarray(run["masks_roi"][:, 1], dtype=np.uint8), expected_left)
     np.testing.assert_array_equal(np.asarray(run["masks_roi"][:, 2], dtype=np.uint8), expected_right)
     np.testing.assert_array_equal(
@@ -706,10 +708,10 @@ def test_assemble_refined_subject_run_rejects_eye_union_keypoint_row_identity_mi
     _create_keypoint_run(root, source_crop_row_ids=np.asarray([1, 0], dtype=np.int64))
     masks = np.zeros((2, 3, 8, 8), dtype=np.uint8)
     masks[:, 0, 1:7, 1:7] = 1
-    masks[0, 1, 1:4, 1:4] = 1
-    masks[0, 1, 1:4, 4:7] = 1
-    masks[1, 1, 3:6, 1:4] = 1
-    masks[1, 1, 3:6, 4:7] = 1
+    masks[0, 1, 1:5, 0:4] = 1
+    masks[0, 1, 1:5, 4:8] = 1
+    masks[1, 1, 2:6, 0:4] = 1
+    masks[1, 1, 2:6, 4:8] = 1
     masks[:, 2, 4:6, 4:6] = 1
     _create_subject_run(
         root,
@@ -737,10 +739,10 @@ def test_assemble_refined_subject_run_eye_union_allows_legacy_missing_row_identi
     _create_keypoint_run(root, write_source_crop_row_ids=False)
     masks = np.zeros((2, 3, 8, 8), dtype=np.uint8)
     masks[:, 0, 1:7, 1:7] = 1
-    masks[0, 1, 1:4, 1:4] = 1
-    masks[0, 1, 1:4, 4:7] = 1
-    masks[1, 1, 3:6, 1:4] = 1
-    masks[1, 1, 3:6, 4:7] = 1
+    masks[0, 1, 1:5, 0:4] = 1
+    masks[0, 1, 1:5, 4:8] = 1
+    masks[1, 1, 2:6, 0:4] = 1
+    masks[1, 1, 2:6, 4:8] = 1
     masks[:, 2, 4:6, 4:6] = 1
     _create_subject_run(
         root,
@@ -766,10 +768,10 @@ def test_assemble_refined_subject_run_prefers_assignment_keypoint_attrs(monkeypa
     _create_keypoint_run(root, run_name="assignment_kp_001")
     masks = np.zeros((2, 3, 8, 8), dtype=np.uint8)
     masks[:, 0, 1:7, 1:7] = 1
-    masks[0, 1, 1:4, 1:4] = 1
-    masks[0, 1, 1:4, 4:7] = 1
-    masks[1, 1, 3:6, 1:4] = 1
-    masks[1, 1, 3:6, 4:7] = 1
+    masks[0, 1, 1:5, 0:4] = 1
+    masks[0, 1, 1:5, 4:8] = 1
+    masks[1, 1, 2:6, 0:4] = 1
+    masks[1, 1, 2:6, 4:8] = 1
     masks[:, 2, 4:6, 4:6] = 1
     run = _create_subject_run(
         root,
