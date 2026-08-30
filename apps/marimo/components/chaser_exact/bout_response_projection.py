@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Collection, Mapping
 
 from fisheye.analysis_workflows.composable_chaser_successor_publication import (
     load_composable_chaser_successor_source_handle,
@@ -114,8 +114,10 @@ def load_exact_bout_response(
     expected_relative_binding: Mapping[str, Any],
     relative: Any,
     controller_trials: Any,
+    direct_validation_receipt: str | Path | None = None,
+    required_array_names: Collection[str] | None = None,
 ) -> Any:
-    """Deep-audit one bout-response successor and verify every exact source join."""
+    """Load one verified bout-response successor and check every source join."""
 
     binding = option_bout_response_binding(option)
     try:
@@ -152,13 +154,13 @@ def load_exact_bout_response(
         )
     if (
         controller_trials.successor_kind != "controller_chase_trials"
-        or controller_trials.deep_audited is not True
         or binding["controller_trial_payload_sha256"]
         != controller_trials.scientific_payload_sha256
     ):
         raise ExactBoutResponseProjectionError(
             "Bout-response option uses another controller-trial payload."
         )
+    controller_trials.require_verified_authority()
     try:
         run_path, run_name = exact_child_path(
             binding["run_path"],
@@ -172,7 +174,9 @@ def load_exact_bout_response(
         successor_kind="generalized_chaser_bout_response",
         run_name=run_name,
         expected_recording_id=spatial.recording_id,
-        deep_audit=True,
+        deep_audit=direct_validation_receipt is None,
+        direct_validation_receipt=direct_validation_receipt,
+        required_array_names=required_array_names,
     )
     if (
         handle.run_path != run_path

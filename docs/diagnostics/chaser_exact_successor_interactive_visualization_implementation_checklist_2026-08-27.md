@@ -2,8 +2,8 @@
 
 <!-- contract-meta
 status: implementation-in-progress
-implementation: reader-through-generalized-merged-escape-freeze-locally-validated-ci-pending
-last_verified: 2026-08-29
+implementation: all-declared-exact-views-merged-receipt-bound-reader-locally-validated-ci-pending
+last_verified: 2026-08-30
 -->
 
 ## Purpose
@@ -72,7 +72,16 @@ current zero-option defect.
       read-only live v4 smoke: four trials, five events, twenty persisted
       threshold-sweep rows, one escape trial, three freeze candidates, and five
       trace-usable events.
-- [ ] Required CI for the escape/freeze branch has not run. Local and
+- [x] The escape/freeze view passed all 23 required checks and merged through
+      PR 75 as merge commit
+      `8c6b2d7d1a1b1491098b1f82680c2fd1596edddd`.
+- [x] A strict projection receipt now composes seven exact-child receipts and
+      two relative-frame receipts without replacing their independent lineage
+      records or becoming a selector/cache authority.
+- [x] Receipt-bound interactive loads revalidate direct child metadata and
+      rehash only arrays consumed by the selected renderer. Exhaustive deep
+      audit remains the explicit path when no projection receipt is supplied.
+- [ ] Required CI for the receipt-bound reader branch has not run. Local and
       real-artifact validation do not make that branch merge-ready.
 
 ## Safety invariants
@@ -370,13 +379,13 @@ This is a design gate, not a prerequisite for the reader compatibility fix.
 
 ## Phase 7 — Performance and interactive safety
 
-- [ ] Keep discovery metadata-only and consolidated.
-- [ ] Deep-audit small successor tables before rendering.
-- [ ] For frame-scale arrays, hash only the exact arrays required by the chosen
+- [x] Keep discovery metadata-only and consolidated.
+- [x] Retain exhaustive deep audit as the explicit no-receipt reader path.
+- [x] For receipt-bound views, hash only the exact arrays required by the chosen
       view and record which declarations were checked.
-- [ ] Preserve missing-data breaks during trace reduction.
-- [ ] Preserve source order and coordinate extrema during trajectory reduction.
-- [ ] Put hard, recorded display limits on points, traces, panels, and memory.
+- [x] Preserve missing-data breaks during trace reduction.
+- [x] Preserve source order and coordinate extrema during trajectory reduction.
+- [x] Put hard, recorded display limits on points, traces, and panels.
 - [ ] Cancel stale Marimo loads when a recording/analysis selection changes;
       never let a late result render under another selection.
 - [ ] Cache only by exact archive identity, run path, manifest digest, renderer
@@ -386,6 +395,31 @@ This is a design gate, not a prerequisite for the reader compatibility fix.
 - [ ] Keep viewer failures explicit and typed. A hidden capability is safer
       than a legacy fallback, but the UI should explain the rejected proof when
       requested by an operator.
+
+Receipt-bound implementation evidence on the live target
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat`:
+
+- the projection receipt validates seven exact immutable children and two
+  relative-frame children by exact path and receipt digest;
+- the escape/freeze load fell from the 12.971-second exhaustive audit to 4.151
+  seconds;
+- it loaded and rehashed exactly 53 escape/freeze arrays, loaded zero arrays
+  from spatial, radial, controller, bout, or relative children, and then
+  completed renderer-level scientific validation in 0.001 seconds;
+- its selection and figure provenance retain the projection-receipt digest,
+  each consumed child receipt digest, verification mode, and verified array
+  roster; and
+- this is read-only experimental evidence. The temporary `/tmp` composition
+  receipt is not a durable cohort publication and does not make this branch
+  merge-ready before required CI.
+
+One warm-cache all-route acceptance sweep then passed with these bounded loads:
+radial 1.721 s (15+15 arrays), distance 3.153 s (13+13 relative arrays),
+trajectory 2.900 s (13+13 relative arrays), spatial 1.327 s (14 arrays),
+controller 3.511 s (25 controller plus 13+13 relative arrays), generalized
+bout response 2.803 s (38 bout arrays), and escape/freeze 3.275 s (53 escape
+arrays). Metadata-only dependencies loaded zero arrays in every applicable
+route.
 
 ## Phase 8 — Documentation, CI, and release evidence
 

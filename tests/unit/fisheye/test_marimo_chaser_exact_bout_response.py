@@ -59,6 +59,10 @@ def _projection(
         manifest_sha256="a" * 64,
         scientific_payload_sha256=prepared.payload_digest,
         array=lambda name: payload[name],
+        verification_mode="deep_audit",
+        receipt_digest=None,
+        verified_array_names=tuple(payload),
+        require_verified_arrays=lambda names: set(names).issubset(payload),
     )
     spatial = SimpleNamespace(
         recording_id="recording-1",

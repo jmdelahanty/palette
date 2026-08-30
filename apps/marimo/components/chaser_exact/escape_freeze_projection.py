@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Collection, Mapping
 
 from fisheye.analysis_workflows.composable_chaser_successor_publication import (
     load_composable_chaser_successor_source_handle,
@@ -128,28 +128,30 @@ def load_exact_escape_freeze(
     spatial: Any,
     controller_trials: Any,
     generalized_bout_response: Any,
+    direct_validation_receipt: str | Path | None = None,
+    required_array_names: Collection[str] | None = None,
 ) -> Any:
-    """Deep-audit one escape/freeze successor and every exact payload join."""
+    """Load one verified escape/freeze successor and check exact payload joins."""
 
     binding = option_escape_freeze_binding(option)
     if (
         controller_trials.successor_kind != "controller_chase_trials"
-        or controller_trials.deep_audited is not True
         or controller_trials.scientific_payload_sha256
         != binding["controller_trial_payload_sha256"]
     ):
         raise ExactEscapeFreezeProjectionError(
             "Escape/freeze option uses another controller-trial payload."
         )
+    controller_trials.require_verified_authority()
     if (
         generalized_bout_response.successor_kind != "generalized_chaser_bout_response"
-        or generalized_bout_response.deep_audited is not True
         or generalized_bout_response.scientific_payload_sha256
         != binding["bout_response_payload_sha256"]
     ):
         raise ExactEscapeFreezeProjectionError(
             "Escape/freeze option uses another generalized bout-response payload."
         )
+    generalized_bout_response.require_verified_authority()
     try:
         bout_sources = require_mapping(
             generalized_bout_response.scientific_manifest.get("sources"),
@@ -173,7 +175,9 @@ def load_exact_escape_freeze(
         successor_kind="chaser_escape_freeze",
         run_name=run_name,
         expected_recording_id=spatial.recording_id,
-        deep_audit=True,
+        deep_audit=direct_validation_receipt is None,
+        direct_validation_receipt=direct_validation_receipt,
+        required_array_names=required_array_names,
     )
     if (
         handle.run_path != run_path

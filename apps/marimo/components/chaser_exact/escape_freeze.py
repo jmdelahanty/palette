@@ -7,6 +7,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from ..chaser_exact_escape_freeze_contract import EXPECTED_REGISTRIES
+from .array_requirements import ESCAPE_FREEZE_ARRAYS
 from .projection import ExactChaserSuccessorProjection, identity_registry
 from .provenance import freeze, plain
 
@@ -66,8 +67,7 @@ def _escape_freeze_values(
         )
     if handle.successor_kind != "chaser_escape_freeze":
         raise ValueError("Escape/freeze projection names another successor kind.")
-    if handle.deep_audited is not True:
-        raise ValueError("Escape/freeze display requires a deep content audit.")
+    handle.require_verified_arrays(ESCAPE_FREEZE_ARRAYS)
     scientific = _mapping(handle.scientific_manifest, label="scientific manifest")
     dimensions = _mapping(scientific.get("dimensions"), label="dimensions")
     parameters = _mapping(scientific.get("parameters"), label="parameters")
@@ -397,6 +397,9 @@ def _display_meta(
             "scientific_payload_sha256": handle.scientific_payload_sha256,
             "sources": plain(handle.scientific_manifest.get("sources")),
             "deep_audited": handle.deep_audited,
+            "verification_mode": handle.verification_mode,
+            "receipt_digest": handle.receipt_digest,
+            "verified_array_names": list(handle.verified_array_names),
         },
         "escape_freeze_display": {
             "recipe_id": ESCAPE_FREEZE_DISPLAY_RECIPE,

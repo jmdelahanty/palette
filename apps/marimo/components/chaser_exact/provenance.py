@@ -13,6 +13,19 @@ TRAJECTORY_DISPLAY_ALGORITHM = "source_order_uniform_plus_coordinate_extrema_v1"
 TRAJECTORY_MAX_POINTS = 15_000
 
 
+def _verification(handle: Any) -> Mapping[str, Any]:
+    """Return explicit loader authority, tolerating older deep-audit fixtures."""
+
+    deep = getattr(handle, "deep_audited", False) is True
+    return {
+        "verification_mode": getattr(
+            handle, "verification_mode", "deep_audit" if deep else "unverified"
+        ),
+        "receipt_digest": getattr(handle, "receipt_digest", None),
+        "verified_array_names": list(getattr(handle, "verified_array_names", ())),
+    }
+
+
 def plain(value: Any) -> Any:
     """Return JSON-compatible display provenance without mutating the source."""
 
@@ -44,6 +57,9 @@ def build_projection_provenance(
     controller_trials: Any | None = None,
     generalized_bout_response: Any | None = None,
     escape_freeze: Any | None = None,
+    relatives: Sequence[Any] | None = None,
+    projection_verification_mode: str = "deep_audit",
+    projection_receipt_sha256: str | None = None,
 ) -> Mapping[str, Any]:
     """Build the readable, immutable identity record shared by exact views."""
 
@@ -52,8 +68,26 @@ def build_projection_provenance(
             "recording_id": spatial.recording_id,
             "bundle_run_path": spatial.run_path,
             "bundle_manifest_sha256": spatial.manifest_sha256,
+            "projection_verification": {
+                "verification_mode": projection_verification_mode,
+                "projection_receipt_sha256": projection_receipt_sha256,
+                "displayed_array_policy": (
+                    "manifest_declared_content_sha256_per_consumed_array"
+                ),
+            },
+            "spatial_verification": _verification(spatial),
             "radial_run_paths": [radial.run_path for radial in radials],
             "radial_manifest_sha256": [radial.manifest_sha256 for radial in radials],
+            "radial_verification": [_verification(radial) for radial in radials],
+            "relative_verification": [
+                {
+                    "run_path": relative.run_path,
+                    "verification_mode": relative.verification_mode,
+                    "receipt_digest": relative.receipt_digest,
+                    "verified_array_names": list(relative.verified_array_names),
+                }
+                for relative in (relatives or ())
+            ],
             "relative_bindings": [plain(value) for value in relative_bindings],
             "relative_binding_proofs": [
                 plain(proof.provenance_record()) for proof in relative_binding_proofs
@@ -74,6 +108,7 @@ def build_projection_provenance(
                         controller_trials.scientific_manifest.get("semantic_selection")
                     ),
                     "deep_audited": controller_trials.deep_audited,
+                    **_verification(controller_trials),
                 }
                 if controller_trials is not None
                 else None
@@ -90,10 +125,9 @@ def build_projection_provenance(
                     ),
                     "body_extension_present": generalized_bout_response.scientific_manifest.get(
                         "scientific_schema", {}
-                    ).get(
-                        "body_extension_present"
-                    ),
+                    ).get("body_extension_present"),
                     "deep_audited": generalized_bout_response.deep_audited,
+                    **_verification(generalized_bout_response),
                 }
                 if generalized_bout_response is not None
                 else None
@@ -113,6 +147,7 @@ def build_projection_provenance(
                         "scientific_schema", {}
                     ).get("method_id"),
                     "deep_audited": escape_freeze.deep_audited,
+                    **_verification(escape_freeze),
                 }
                 if escape_freeze is not None
                 else None

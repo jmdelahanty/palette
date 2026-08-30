@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from .array_requirements import SPATIAL_OCCUPANCY_ARRAYS
 from .projection import ExactChaserSuccessorProjection, identity_registry
 from .provenance import freeze, plain
 
@@ -40,8 +41,7 @@ def _spatial_values(
     handle = projection.spatial
     if handle.successor_kind != "chaser_spatial_occupancy":
         raise ValueError("Projection anchor is not spatial occupancy.")
-    if handle.deep_audited is not True:
-        raise ValueError("Spatial occupancy display requires a deep content audit.")
+    handle.require_verified_arrays(SPATIAL_OCCUPANCY_ARRAYS)
     scientific = handle.scientific_manifest
     dimensions = _mapping(scientific.get("dimensions"), label="dimensions")
     expected = (
@@ -328,7 +328,7 @@ def build_exact_spatial_occupancy_output(
     figure_meta["spatial_occupancy_display"] = display_parameters
     figure.update_layout(
         title=(
-            "Exact protocol-semantic spatial occupancy · " f"{projection.recording_id}"
+            f"Exact protocol-semantic spatial occupancy · {projection.recording_id}"
         ),
         height=1_150,
         coloraxis={

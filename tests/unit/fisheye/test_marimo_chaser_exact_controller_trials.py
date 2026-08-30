@@ -84,6 +84,7 @@ def _projection(
         manifest_sha256="b" * 64,
         scientific_payload_sha256=prepared.payload_digest,
         array=lambda name: payload[name],
+        require_verified_arrays=lambda names: set(names).issubset(payload),
     )
     spatial = SimpleNamespace(
         recording_id="recording-1",

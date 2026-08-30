@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from .array_requirements import CONTROLLER_TRIAL_ARRAYS
 from .distance_traces import _trace_display_projection
 from .projection import ExactChaserSuccessorProjection, identity_registry
 from .provenance import TRACE_MAX_POINTS, freeze, plain
@@ -54,8 +55,7 @@ def _controller_trial_values(
         )
     if handle.successor_kind != "controller_chase_trials":
         raise ValueError("Controller-trial projection names another successor kind.")
-    if handle.deep_audited is not True:
-        raise ValueError("Controller-trial display requires a deep content audit.")
+    handle.require_verified_arrays(CONTROLLER_TRIAL_ARRAYS)
     scientific = _mapping(handle.scientific_manifest, label="scientific manifest")
     dimensions = _mapping(scientific.get("dimensions"), label="dimensions")
     n_frames = int(dimensions.get("n_frames", 0))

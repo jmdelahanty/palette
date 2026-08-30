@@ -63,6 +63,7 @@ class ExactChaserAnalysisRoute:
     display_parameter_version: str
     load_relative: bool
     renderer: Renderer | None
+    load_relative_arrays: bool = True
     load_controller_trials: bool = False
     load_generalized_bout_response: bool = False
     load_escape_freeze: bool = False
@@ -105,6 +106,7 @@ _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
             analysis_id="generalized_bout_response",
             display_parameter_version="exact-generalized-bout-response-display-v1",
             load_relative=True,
+            load_relative_arrays=False,
             renderer=build_exact_bout_response_output,
             load_controller_trials=True,
             load_generalized_bout_response=True,
@@ -113,6 +115,7 @@ _ROUTES: Mapping[str, ExactChaserAnalysisRoute] = MappingProxyType(
             analysis_id="escape_freeze",
             display_parameter_version="exact-escape-freeze-display-v1",
             load_relative=True,
+            load_relative_arrays=False,
             renderer=build_exact_escape_freeze_output,
             load_controller_trials=True,
             load_generalized_bout_response=True,
@@ -203,6 +206,7 @@ class ExactChaserProviderAdapter:
         option: InteractiveSpecOption,
         *,
         analysis_id: str,
+        projection_receipt_path: str | Path | None = None,
     ) -> ExactChaserSelectionIdentity:
         route = self.route(analysis_id)
         return build_exact_chaser_selection_identity(
@@ -210,6 +214,7 @@ class ExactChaserProviderAdapter:
             option,
             analysis_id=analysis_id,
             display_parameter_version=route.display_parameter_version,
+            projection_receipt_path=projection_receipt_path,
         )
 
     def load_projection(
@@ -218,14 +223,21 @@ class ExactChaserProviderAdapter:
         option: InteractiveSpecOption,
         *,
         analysis_id: str,
+        projection_receipt_path: str | Path | None = None,
     ) -> ExactChaserSuccessorProjection:
         route = self.route(analysis_id)
-        identity = self.selection_identity(zarr_path, option, analysis_id=analysis_id)
+        identity = self.selection_identity(
+            zarr_path,
+            option,
+            analysis_id=analysis_id,
+            projection_receipt_path=projection_receipt_path,
+        )
         return load_exact_chaser_projection(
             zarr_path,
             option,
             selection_identity=identity,
             load_relative=route.load_relative,
+            load_relative_arrays=route.load_relative_arrays,
             load_controller_trials=route.load_controller_trials,
             load_generalized_bout_response=(route.load_generalized_bout_response),
             load_escape_freeze=route.load_escape_freeze,
@@ -238,8 +250,14 @@ class ExactChaserProviderAdapter:
         zarr_path: Path | str,
         option: InteractiveSpecOption,
         analysis_id: str,
+        projection_receipt_path: str | Path | None = None,
     ) -> None:
-        expected = self.selection_identity(zarr_path, option, analysis_id=analysis_id)
+        expected = self.selection_identity(
+            zarr_path,
+            option,
+            analysis_id=analysis_id,
+            projection_receipt_path=projection_receipt_path,
+        )
         if (
             projection.analysis_id != analysis_id
             or projection.selection_identity != expected
@@ -258,6 +276,7 @@ class ExactChaserProviderAdapter:
         zarr_path: Path | str,
         option: InteractiveSpecOption,
         analysis_id: str,
+        projection_receipt_path: str | Path | None = None,
     ) -> Any:
         route = self.route(analysis_id)
         if route.renderer is None:
@@ -270,6 +289,7 @@ class ExactChaserProviderAdapter:
             zarr_path=zarr_path,
             option=option,
             analysis_id=analysis_id,
+            projection_receipt_path=projection_receipt_path,
         )
         return route.renderer(mo, go, projection)
 
@@ -291,11 +311,15 @@ def load_exact_chaser_successor_projection(
     option: InteractiveSpecOption,
     *,
     analysis_id: str,
+    projection_receipt_path: str | Path | None = None,
 ) -> ExactChaserSuccessorProjection:
     """Compatibility function for the pre-package component API."""
 
     return EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
-        zarr_path, option, analysis_id=analysis_id
+        zarr_path,
+        option,
+        analysis_id=analysis_id,
+        projection_receipt_path=projection_receipt_path,
     )
 
 

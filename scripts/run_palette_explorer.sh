@@ -26,6 +26,8 @@ Options:
   --renderer ID      Initial renderer filter passed to the explorer.
   --run-path PATH    Initial run path filter passed to the explorer.
   --artifact NAME    Initial artifact filter passed to the explorer.
+  --exact-chaser-receipt PATH
+                    Closed projection receipt for targeted exact-chaser reads.
   --token            Enable marimo token authentication.
   --no-token         Disable marimo token authentication. (default)
   --watch            Ask marimo to reload when the notebook changes.
@@ -67,7 +69,7 @@ while [[ $# -gt 0 ]]; do
       HOST="$2"
       shift 2
       ;;
-    --renderer|--run-path|--artifact|--recordings-root|--recording-name-contains|--registry)
+    --renderer|--run-path|--artifact|--recordings-root|--recording-name-contains|--registry|--exact-chaser-receipt)
       APP_ARGS+=("$1" "$2")
       shift 2
       ;;

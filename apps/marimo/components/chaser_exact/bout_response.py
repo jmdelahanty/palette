@@ -7,6 +7,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from ..chaser_exact_bout_response_contract import EXPECTED_REGISTRIES
+from .array_requirements import BOUT_RESPONSE_ARRAYS
 from .projection import ExactChaserSuccessorProjection, identity_registry
 from .provenance import freeze, plain
 
@@ -84,8 +85,7 @@ def _bout_response_values(
         )
     if handle.successor_kind != "generalized_chaser_bout_response":
         raise ValueError("Bout-response projection names another successor kind.")
-    if handle.deep_audited is not True:
-        raise ValueError("Bout-response display requires a deep content audit.")
+    handle.require_verified_arrays(BOUT_RESPONSE_ARRAYS)
     scientific = _mapping(handle.scientific_manifest, label="scientific manifest")
     schema = _mapping(scientific.get("scientific_schema"), label="scientific schema")
     dimensions = _mapping(scientific.get("dimensions"), label="dimensions")
@@ -365,6 +365,9 @@ def _display_meta(
             "scientific_payload_sha256": handle.scientific_payload_sha256,
             "sources": plain(handle.scientific_manifest.get("sources")),
             "deep_audited": handle.deep_audited,
+            "verification_mode": handle.verification_mode,
+            "receipt_digest": handle.receipt_digest,
+            "verified_array_names": list(handle.verified_array_names),
         },
         "bout_response_display": {
             "recipe_id": BOUT_RESPONSE_DISPLAY_RECIPE,
