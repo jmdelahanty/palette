@@ -4,6 +4,7 @@ from ..chaser_exact_gaze_arrays import GAZE_TRACKING_ARRAYS
 
 RADIAL_NEAR_FIELD_ARRAYS = (
     "metric_epoch_role_code",
+    "metric_epoch_window_id",
     "metric_behavior_role_code",
     "metric_chaser_identity_code",
     "metric_distance_p25_mm",
@@ -13,11 +14,56 @@ RADIAL_NEAR_FIELD_ARRAYS = (
     "metric_near_zone_dwell_s",
     "metric_near_zone_entry_rate_per_min_valid_time",
     "radial_epoch_role_code",
+    "radial_epoch_window_id",
     "radial_behavior_role_code",
     "radial_chaser_identity_code",
     "radial_bin_start_mm",
     "radial_bin_end_mm",
     "radial_selection_index_geometric",
+)
+
+DISTANCE_DISTRIBUTION_ARRAYS = (
+    "metric_epoch_role_code",
+    "metric_epoch_window_id",
+    "metric_behavior_role_code",
+    "metric_chaser_identity_code",
+    "metric_candidate_frame_count",
+    "metric_valid_distance_frame_count",
+    "metric_wall_excluded_valid_frame_count",
+    "cdf_epoch_role_code",
+    "cdf_epoch_window_id",
+    "cdf_behavior_role_code",
+    "cdf_chaser_identity_code",
+    "cdf_threshold_mm",
+    "cdf_fraction_at_or_below",
+    "radial_epoch_role_code",
+    "radial_epoch_window_id",
+    "radial_behavior_role_code",
+    "radial_chaser_identity_code",
+    "radial_bin_start_mm",
+    "radial_bin_end_mm",
+    "radial_observed_count",
+    "radial_observed_fraction",
+    "radial_expected_available_area_mm2_frames",
+    "radial_expected_fraction_geometric",
+    "radial_selection_index_geometric",
+    "radial_wall_excluded_observed_count",
+    "radial_wall_excluded_observed_fraction",
+    "radial_wall_excluded_expected_available_area_mm2_frames",
+    "radial_wall_excluded_expected_fraction_geometric",
+    "radial_wall_excluded_selection_index_geometric",
+)
+
+SAME_QUADRANT_ARRAYS = (
+    "metric_epoch_role_code",
+    "metric_epoch_window_id",
+    "metric_behavior_role_code",
+    "metric_chaser_identity_code",
+    "metric_candidate_frame_count",
+    "metric_valid_distance_frame_count",
+    "metric_same_quadrant_valid_frame_count",
+    "metric_same_quadrant_fraction_valid",
+    "metric_same_quadrant_fraction_candidate",
 )
 
 SPATIAL_OCCUPANCY_ARRAYS = (
@@ -166,8 +212,10 @@ ESCAPE_FREEZE_ARRAYS = (
 __all__ = [
     "BOUT_RESPONSE_ARRAYS",
     "CONTROLLER_TRIAL_ARRAYS",
+    "DISTANCE_DISTRIBUTION_ARRAYS",
     "ESCAPE_FREEZE_ARRAYS",
     "GAZE_TRACKING_ARRAYS",
     "RADIAL_NEAR_FIELD_ARRAYS",
+    "SAME_QUADRANT_ARRAYS",
     "SPATIAL_OCCUPANCY_ARRAYS",
 ]

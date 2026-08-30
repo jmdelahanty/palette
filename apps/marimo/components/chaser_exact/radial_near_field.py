@@ -11,8 +11,9 @@ from .projection import ExactChaserSuccessorProjection, identity_registry
 from .provenance import plain
 
 
-def _metric_rows(handle: Any) -> dict[tuple[int, int, int], dict[str, float]]:
+def _metric_rows(handle: Any) -> dict[tuple[int, int, int, int], dict[str, float]]:
     epoch = np.asarray(handle.array("metric_epoch_role_code"), dtype=np.int64)
+    window = np.asarray(handle.array("metric_epoch_window_id"), dtype=np.int64)
     behavior = np.asarray(handle.array("metric_behavior_role_code"), dtype=np.int64)
     chaser = np.asarray(handle.array("metric_chaser_identity_code"), dtype=np.int64)
     names = (
@@ -28,23 +29,32 @@ def _metric_rows(handle: Any) -> dict[tuple[int, int, int], dict[str, float]]:
         for name in names
     }
     if any(
-        values.size != epoch.size for values in (*columns.values(), behavior, chaser)
+        values.size != epoch.size
+        for values in (*columns.values(), window, behavior, chaser)
     ):
         raise ValueError("Radial metric columns have inconsistent lengths.")
-    return {
-        (int(epoch[index]), int(behavior[index]), int(chaser[index])): {
-            name: float(values[index]) for name, values in columns.items()
-        }
-        for index in range(epoch.size)
-    }
+    rows: dict[tuple[int, int, int, int], dict[str, float]] = {}
+    for index in range(epoch.size):
+        key = (
+            int(epoch[index]),
+            int(window[index]),
+            int(behavior[index]),
+            int(chaser[index]),
+        )
+        if key in rows:
+            raise ValueError("Radial metric strata are duplicated.")
+        rows[key] = {name: float(values[index]) for name, values in columns.items()}
+    return rows
 
 
-def _stratum_label(handle: Any, key: tuple[int, int, int]) -> str:
+def _stratum_label(handle: Any, key: tuple[int, int, int, int]) -> str:
     epochs = identity_registry(handle.scientific_manifest, "epoch_role")
     behaviors = identity_registry(handle.scientific_manifest, "behavior_role")
+    chasers = identity_registry(handle.scientific_manifest, "chaser")
     return (
-        f"{epochs.get(str(key[0]), f'epoch {key[0]}')} · "
-        f"{behaviors.get(str(key[1]), f'role {key[1]}')} · chaser {key[2]}"
+        f"{epochs.get(str(key[0]), f'epoch {key[0]}')} · window {key[1]} · "
+        f"{behaviors.get(str(key[2]), f'role {key[2]}')} · "
+        f"{chasers.get(str(key[3]), f'chaser {key[3]}')}"
     )
 
 
@@ -121,6 +131,7 @@ def build_exact_radial_near_field_output(
             )
         )
         epoch = np.asarray(handle.array("radial_epoch_role_code"), dtype=np.int64)
+        window = np.asarray(handle.array("radial_epoch_window_id"), dtype=np.int64)
         behavior = np.asarray(handle.array("radial_behavior_role_code"), dtype=np.int64)
         chaser = np.asarray(handle.array("radial_chaser_identity_code"), dtype=np.int64)
         start = np.asarray(handle.array("radial_bin_start_mm"), dtype=np.float64)
@@ -129,7 +140,12 @@ def build_exact_radial_near_field_output(
             handle.array("radial_selection_index_geometric"), dtype=np.float64
         )
         for key, label in zip(keys, labels, strict=True):
-            mask = (epoch == key[0]) & (behavior == key[1]) & (chaser == key[2])
+            mask = (
+                (epoch == key[0])
+                & (window == key[1])
+                & (behavior == key[2])
+                & (chaser == key[3])
+            )
             order = np.argsort(start[mask])
             radial.add_trace(
                 go.Scatter(

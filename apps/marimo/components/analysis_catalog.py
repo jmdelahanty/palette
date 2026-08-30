@@ -198,6 +198,22 @@ CHASER_EXACT_SUCCESSOR_PROVIDER = ProviderDefinition(
             "Paired-provider persisted radial and exact-time near-field summaries.",
         ),
         AnalysisDefinition(
+            "distance_distributions",
+            "Distance distributions and controls",
+            (
+                "Persisted empirical CDFs, observed versus moving-reference "
+                "geometric radial mass, and configured wall-excluded twins."
+            ),
+        ),
+        AnalysisDefinition(
+            "same_quadrant_occupancy",
+            "Same-quadrant occupancy",
+            (
+                "Persisted scalar fish/chaser same-quadrant fractions with "
+                "valid-row and all-candidate denominators shown separately."
+            ),
+        ),
+        AnalysisDefinition(
             "distance_traces",
             "Full and exact-epoch distance",
             "Full-session and exact protocol-epoch fish–chaser distance traces.",
@@ -216,6 +232,14 @@ CHASER_EXACT_SUCCESSOR_PROVIDER = ProviderDefinition(
             (
                 "Exact anatomical-bearing point clouds and joint polar densities "
                 "using receipt-bound keypoint distance and body-axis evidence."
+            ),
+        ),
+        AnalysisDefinition(
+            "fish_heading",
+            "Anatomical fish heading",
+            (
+                "Whole-circle fish-heading distributions from the accepted "
+                "keypoint body-axis supplier, collapsed once per acquisition frame."
             ),
         ),
         AnalysisDefinition(

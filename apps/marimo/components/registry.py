@@ -79,6 +79,11 @@ from .chaser_exact_escape_freeze_discovery import (
 from .chaser_exact_body_bearing_contract import (
     compatible_body_bearing_binding,
 )
+from .chaser_exact_body_heading_contract import (
+    BODY_HEADING_ARRAY_PATHS,
+    BODY_HEADING_FRAME_COLLAPSE_POLICY,
+    compatible_body_heading_binding,
+)
 from .chaser_exact_gaze_discovery import compatible_gaze_tracking_binding
 
 TRACK_KINEMATICS_PLOT_RENDERER = "palette-track-kinematics-summary-v1"
@@ -1024,6 +1029,10 @@ def discover_exact_chaser_successor_options(
             relative_manifests[0],
             expected_relative_binding=providers[0]["relative_frame"],
         )
+        body_heading_binding = compatible_body_heading_binding(
+            relative_manifests[0],
+            expected_relative_binding=providers[0]["relative_frame"],
+        )
         gaze_tracking_binding = compatible_gaze_tracking_binding(
             root,
             recording_id=recording_id,
@@ -1034,6 +1043,8 @@ def discover_exact_chaser_successor_options(
         analysis_bindings = {}
         if body_bearing_binding is not None:
             analysis_bindings["body_bearing"] = dict(body_bearing_binding)
+        if body_heading_binding is not None:
+            analysis_bindings["body_heading"] = dict(body_heading_binding)
         if controller_trial_binding is not None:
             analysis_bindings["controller_trials"] = dict(controller_trial_binding)
         if bout_response_binding is not None:
@@ -1045,7 +1056,7 @@ def discover_exact_chaser_successor_options(
         title = f"Exact paired-provider chaser successors: {run_name}"
         spec = {
             "schema_id": "palette.chaser_exact_successor_explorer_spec",
-            "schema_version": 7,
+            "schema_version": 8,
             "renderer": CHASER_EXACT_SUCCESSOR_RENDERER,
             "title": title,
             "run_name": run_name,
@@ -1084,23 +1095,61 @@ def discover_exact_chaser_successor_options(
             "display_parameters": {
                 "spatial_occupancy": {
                     "recipe_id": (
-                        "paired_provider_exact_epoch_spatial_occupancy_heatmap_v2"
+                        "paired_provider_exact_epoch_spatial_occupancy_heatmap_v4"
                     ),
-                    "source_array": "occupancy_density_valid_in_arena",
+                    "source_arrays": [
+                        "occupancy_density_valid_in_arena",
+                        "occupancy_fraction_candidate_epoch",
+                    ],
+                    "default_normalization": "valid_in_arena",
+                    "available_normalizations": [
+                        "valid_in_arena",
+                        "candidate_epoch",
+                    ],
                     "density_multiplier_to_percent": 100.0,
                     "density_color_normalization": (
-                        "shared_max_across_persisted_provider_epoch_arrays"
+                        "shared_robust_p98_default_full_range_available"
                     ),
                     "provider_difference": (
                         "detection_minus_keypoint_percentage_points_per_bin"
                     ),
-                    "difference_color_normalization": "symmetric_persisted_max_abs",
+                    "difference_color_normalization": (
+                        "symmetric_shared_robust_p98_default_full_range_available"
+                    ),
+                    "display_bin_widths_mm": [2.0, 4.0],
+                    "coarsening": ("aligned_exact_2x2_count_sum_no_interpolation"),
                     "coverage_annotation_array": (
                         "in_arena_coverage_fraction_candidate"
                     ),
                     "arena_bin_center_mask_role": (
                         "hover_evidence_only_bins_not_discarded_boundary_bins_may_straddle_circle"
                     ),
+                },
+                "distance_distributions": {
+                    "recipe_id": (
+                        "paired_provider_persisted_distance_cdf_and_geometric_mass_v1"
+                    ),
+                    "cdf_thresholds": "persisted_exact_no_interpolation",
+                    "radial_bin_edges": "persisted_exact_no_rebinning",
+                    "ordinary_denominator": "metric_valid_distance_frame_count",
+                    "wall_excluded_denominator": (
+                        "metric_wall_excluded_valid_frame_count"
+                    ),
+                    "wall_exclusion_policy": (
+                        "persisted_perimeter_band_mm_from_scientific_manifest"
+                    ),
+                    "interpolation": "prohibited",
+                    "rebinning": "prohibited",
+                },
+                "same_quadrant_occupancy": {
+                    "recipe_id": (
+                        "paired_provider_persisted_same_quadrant_denominators_v1"
+                    ),
+                    "numerator": "metric_same_quadrant_valid_frame_count",
+                    "valid_denominator": "metric_valid_distance_frame_count",
+                    "candidate_denominator": "metric_candidate_frame_count",
+                    "full_joint_quadrant_matrix": "not_persisted_separate_successor",
+                    "viewer_inference": "prohibited",
                 },
                 "distance_traces": {
                     "algorithm": (
@@ -1145,6 +1194,18 @@ def discover_exact_chaser_successor_options(
                     ),
                     "interpolation": "prohibited",
                     "body_axis_fallback": "prohibited",
+                    "detection_position_substitution": "prohibited",
+                },
+                "fish_heading": {
+                    "recipe_id": ("accepted_body_axis_fish_heading_polar_histogram_v1"),
+                    "source_arrays": list(BODY_HEADING_ARRAY_PATHS),
+                    "frame_collapse_policy": BODY_HEADING_FRAME_COLLAPSE_POLICY,
+                    "bin_width_deg": 10.0,
+                    "normalization": (
+                        "probability_within_semantic_panel_one_row_per_frame"
+                    ),
+                    "body_axis_fallback": "prohibited",
+                    "motion_heading_fallback": "prohibited",
                     "detection_position_substitution": "prohibited",
                 },
                 "trajectory_overlays": {
