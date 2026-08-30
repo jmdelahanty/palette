@@ -26,25 +26,23 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 TASK_SCHEMA_ID = "palette.composable_chaser_successor_cohort_task"
-TASK_SCHEMA_VERSION = 3
+TASK_SCHEMA_VERSION = 5
 RECEIPT_SCHEMA_ID = "palette.composable_chaser_successor_cohort_receipt"
 RECEIPT_SCHEMA_VERSION = 1
 
-SEMANTIC_STIMULUS_RUN = (
-    "stimulus_semantic_goodbatbadbat_historical_20260825_v2"
+SEMANTIC_STIMULUS_RUN = "stimulus_semantic_goodbatbadbat_historical_20260825_v2"
+SEMANTIC_EPOCH_V1_RUN = "stimulus_epochs_semantic_goodbatbadbat_20260825_r2_v1"
+SEMANTIC_EPOCH_V2_RUN = "stimulus_epochs_semantic_goodbatbadbat_20260825_r2_v2"
+SEMANTIC_SELECTION_RUN = "protocol_semantic_chaser_goodbatbadbat_historical_20260825_v2"
+EPOCH_BEHAVIOR_RUN = "epoch_behavior_goodbatbadbat_keypoint_triad_semantic_20260830_v2"
+BODY_ALIGNMENT_RUN = (
+    "goodbatbadbat_chaser_body_alignment_by_distance_keypoint_semantic_20260830_v1"
 )
-SEMANTIC_EPOCH_V1_RUN = (
-    "stimulus_epochs_semantic_goodbatbadbat_20260825_r2_v1"
+BODY_ALIGNMENT_RECIPE_BUNDLE_NAME = (
+    "goodbatbadbat_chaser_body_alignment_by_distance_keypoint_semantic_20260830_"
+    "recipe_v1"
 )
-SEMANTIC_EPOCH_V2_RUN = (
-    "stimulus_epochs_semantic_goodbatbadbat_20260825_r2_v2"
-)
-SEMANTIC_SELECTION_RUN = (
-    "protocol_semantic_chaser_goodbatbadbat_historical_20260825_v2"
-)
-KEYPOINT_PROXY_RUN = (
-    "chaser_input_provenance_proxy_keypoint_triad_cohort_20260821_v2"
-)
+KEYPOINT_PROXY_RUN = "chaser_input_provenance_proxy_keypoint_triad_cohort_20260821_v2"
 DETECTION_PROXY_RUN = (
     "chaser_input_provenance_proxy_detection_bbox_centroid_cohort_20260821_v2"
 )
@@ -56,12 +54,9 @@ DETECTION_RELATIVE_RUN = (
     "chaser_relative_frame_detection_bbox_centroid_cohort_20260825_"
     "exact_trials_session_time_activity_orthogonal_v3"
 )
-SUCCESSOR_RUN = (
-    "goodbatbadbat_chaser_successors_20260827_body_frame_projection_v4"
-)
+SUCCESSOR_RUN = "goodbatbadbat_chaser_successors_20260827_body_frame_projection_v4"
 KEYPOINT_RADIAL_RUN = (
-    "goodbatbadbat_chaser_radial_near_field_20260827_"
-    "body_frame_projection_v3"
+    "goodbatbadbat_chaser_radial_near_field_20260827_body_frame_projection_v3"
 )
 DETECTION_RADIAL_RUN = (
     "goodbatbadbat_chaser_radial_near_field_detection_bbox_centroid_20260825_"
@@ -80,14 +75,14 @@ SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME = (
     "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260827_"
     "body_frame_projection_recipe_v3"
 )
-DASHBOARD_RECIPE_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_dashboard_body_frame_recipe_v3"
-)
-DETAILED_RECIPE_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_detailed_body_frame_recipe_v7"
-)
+DASHBOARD_RECIPE_BUNDLE_NAME = "goodbatbadbat_chaser_dashboard_body_frame_recipe_v3"
+DETAILED_RECIPE_BUNDLE_NAME = "goodbatbadbat_chaser_detailed_body_frame_recipe_v7"
 DETAILED_PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v5"
+BODY_ALIGNMENT_PLOT_RECIPE_ID = "persisted_anatomical_alignment_distance_bins_static_v1"
 RELATIVE_FRAME_VALIDATION_MODE = "reusable_direct_subtree_receipt_v1"
+EPOCH_ALIGNMENT_PROJECTION_RECEIPT_NAME = (
+    "exact_chaser.epoch_alignment.projection_receipt.v7.json"
+)
 
 MOTION_BOUT_PAIRS = (
     (
@@ -224,10 +219,14 @@ def _recording_identity(root_attrs: Mapping[str, Any], archive: Path) -> str:
     return recording_id
 
 
-def _raw_h5_binding(root_attrs: Mapping[str, Any], *, recording_id: str) -> dict[str, Any]:
-    raw_h5 = Path(
-        _text(root_attrs.get("source_h5_path"), field="source raw-H5 path")
-    ).expanduser().resolve()
+def _raw_h5_binding(
+    root_attrs: Mapping[str, Any], *, recording_id: str
+) -> dict[str, Any]:
+    raw_h5 = (
+        Path(_text(root_attrs.get("source_h5_path"), field="source raw-H5 path"))
+        .expanduser()
+        .resolve()
+    )
     if not raw_h5.is_file():
         _fail(f"Raw H5 is absent for {recording_id!r}: {raw_h5}")
     stat = raw_h5.stat()
@@ -353,7 +352,9 @@ def _resolve_motion_bouts(archive: Path, *, recording_id: str) -> dict[str, Any]
         canonical_json_sha256(payload) != motion_manifest_sha
         or persisted_motion_manifest_sha != motion_manifest_sha
     ):
-        _fail(f"Provider motion manifest persisted digest is stale for {recording_id!r}.")
+        _fail(
+            f"Provider motion manifest persisted digest is stale for {recording_id!r}."
+        )
     authority_envelope = _mapping(
         payload.get("source_authority"), field="provider motion source authority"
     )
@@ -398,9 +399,7 @@ def _resolve_motion_bouts(archive: Path, *, recording_id: str) -> dict[str, Any]
     if canonical_json_sha256(body_payload) != observed_body_manifest_sha:
         _fail(f"Body-frame run manifest digest is stale for {recording_id!r}.")
     if observed_body_manifest_sha != body_manifest_sha:
-        _fail(
-            f"Provider motion and body-frame run disagree for {recording_id!r}."
-        )
+        _fail(f"Provider motion and body-frame run disagree for {recording_id!r}.")
     publication = _mapping(
         body_payload.get("publication"), field="body-frame publication disposition"
     )
@@ -429,6 +428,8 @@ def _output_groups() -> tuple[str, ...]:
         f"analysis/stimulus_epoch_runs/{SEMANTIC_EPOCH_V1_RUN}",
         f"analysis/stimulus_epoch_runs/{SEMANTIC_EPOCH_V2_RUN}",
         f"analysis/protocol_semantic_chaser_selection_runs/{SEMANTIC_SELECTION_RUN}",
+        f"analysis/stimulus_epoch_behavior_summary_runs/{EPOCH_BEHAVIOR_RUN}",
+        f"analysis/chaser_body_alignment_by_distance_runs/{BODY_ALIGNMENT_RUN}",
         f"analysis/chaser_relative_frame_runs/{KEYPOINT_RELATIVE_RUN}",
         f"analysis/chaser_relative_frame_runs/{DETECTION_RELATIVE_RUN}",
         f"analysis/controller_chase_trial_runs/{SUCCESSOR_RUN}",
@@ -543,6 +544,11 @@ def _plan_entry(
         / "spatial_occupancy"
         / f"{SPATIAL_OCCUPANCY_RUN}_spatial_occupancy_plot_receipt.json"
     )
+    alignment_receipt = (
+        plot_dir
+        / "body_alignment_by_distance"
+        / f"{BODY_ALIGNMENT_RECIPE_BUNDLE_NAME}_body_alignment_plot_receipt.json"
+    )
     if len(existing_outputs) == len(output_groups):
         status = (
             "complete"
@@ -550,6 +556,7 @@ def _plan_entry(
                 detailed_receipt.is_file()
                 and dashboard_receipt.is_file()
                 and spatial_receipt.is_file()
+                and alignment_receipt.is_file()
             )
             else "plot_only"
         )
@@ -587,6 +594,9 @@ def _plan_entry(
                 "semantic_epoch_v1": SEMANTIC_EPOCH_V1_RUN,
                 "semantic_epoch_v2": SEMANTIC_EPOCH_V2_RUN,
                 "semantic_selection": SEMANTIC_SELECTION_RUN,
+                "epoch_behavior": EPOCH_BEHAVIOR_RUN,
+                "body_alignment_by_distance": BODY_ALIGNMENT_RUN,
+                "body_alignment_plot_bundle": BODY_ALIGNMENT_RECIPE_BUNDLE_NAME,
                 "keypoint_relative": KEYPOINT_RELATIVE_RUN,
                 "detection_relative": DETECTION_RELATIVE_RUN,
                 "successors": SUCCESSOR_RUN,
@@ -626,9 +636,7 @@ def _build_cohort_task(
         status = str(entry["status"])
         status_counts[status] = status_counts.get(status, 0) + 1
     runnable_indices = [
-        int(entry["task_index"])
-        for entry in entries
-        if entry["status"] != "complete"
+        int(entry["task_index"]) for entry in entries if entry["status"] != "complete"
     ]
     selection_policy: dict[str, Any] = {
         "protocol_name": "goodbatbadbat",
@@ -675,9 +683,7 @@ def plan_cohort_task(
     rows = json.loads(source_bytes)
     if not isinstance(rows, list) or not rows:
         _fail("Registry snapshot must be a non-empty JSON row list.")
-    normalized_rows = [
-        _mapping(row, field="registry snapshot row") for row in rows
-    ]
+    normalized_rows = [_mapping(row, field="registry snapshot row") for row in rows]
     return _build_cohort_task(
         normalized_rows,
         operations_root=operations_root,
@@ -740,6 +746,8 @@ def load_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
     if task.get("schema_id") != TASK_SCHEMA_ID or task.get("schema_version") not in {
         1,
         2,
+        3,
+        4,
         TASK_SCHEMA_VERSION,
     }:
         _fail("Cohort task schema is unsupported.")
@@ -813,11 +821,13 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
         output_names = dict(
             _mapping(entry["output_run_names"], field="output run names")
         )
+        output_names["epoch_behavior"] = EPOCH_BEHAVIOR_RUN
+        output_names["body_alignment_by_distance"] = BODY_ALIGNMENT_RUN
+        output_names["body_alignment_plot_bundle"] = BODY_ALIGNMENT_RECIPE_BUNDLE_NAME
         archive = Path(_text(entry["analysis_zarr"], field="analysis Zarr"))
         recording_id = _text(entry["recording_id"], field="recording identity")
         existing_spatial_path = (
-            "analysis/chaser_spatial_occupancy_runs/"
-            f"{SPATIAL_OCCUPANCY_RUN}"
+            f"analysis/chaser_spatial_occupancy_runs/{SPATIAL_OCCUPANCY_RUN}"
         )
         if _existing_complete_output(
             archive,
@@ -837,32 +847,34 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
                 "detailed_bundle": DETAILED_RECIPE_BUNDLE_NAME,
             }
         )
-        spatial_path = (
-            "analysis/chaser_spatial_occupancy_runs/"
-            f"{spatial_occupancy_run}"
-        )
+        spatial_path = f"analysis/chaser_spatial_occupancy_runs/{spatial_occupancy_run}"
         output_paths = [
             str(path)
             for path in entry.get("output_group_paths", [])
             if not str(path).startswith("analysis/chaser_spatial_occupancy_runs/")
         ]
         output_paths.append(spatial_path)
+        alignment_path = (
+            f"analysis/chaser_body_alignment_by_distance_runs/{BODY_ALIGNMENT_RUN}"
+        )
+        if alignment_path not in output_paths:
+            output_paths.append(alignment_path)
         existing_paths = [
             path for path in output_paths if (archive / path / "zarr.json").is_file()
         ]
         plot_dir = Path(_text(entry["plot_output_dir"], field="plot output dir"))
         expected_plot_receipts = (
-            plot_dir
-            / f"{DASHBOARD_RECIPE_BUNDLE_NAME}_plot_receipt.json",
-            plot_dir
-            / "detailed"
-            / f"{DETAILED_RECIPE_BUNDLE_NAME}_receipt.json",
+            plot_dir / f"{DASHBOARD_RECIPE_BUNDLE_NAME}_plot_receipt.json",
+            plot_dir / "detailed" / f"{DETAILED_RECIPE_BUNDLE_NAME}_receipt.json",
             plot_dir
             / "spatial_occupancy"
             / (
                 f"{SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME}_"
                 "spatial_occupancy_plot_receipt.json"
             ),
+            plot_dir
+            / "body_alignment_by_distance"
+            / (f"{BODY_ALIGNMENT_RECIPE_BUNDLE_NAME}_body_alignment_plot_receipt.json"),
         )
         if len(existing_paths) == len(output_paths):
             status = (
@@ -919,7 +931,7 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
                 **dict(previous["selection_policy"]),
                 "successor_of_task_sha256": previous_digest,
                 "relative_frame_validation": RELATIVE_FRAME_VALIDATION_MODE,
-                "plot_recipe_provenance": "self_contained_exact_parameters_v4",
+                "plot_recipe_provenance": "self_contained_exact_parameters_v5",
             },
             "status_counts": status_counts,
             "runnable_task_indices": [
@@ -934,7 +946,9 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
     return task
 
 
-def _existing_complete_output(archive: Path, group_path: str, recording_id: str) -> bool:
+def _existing_complete_output(
+    archive: Path, group_path: str, recording_id: str
+) -> bool:
     target = archive / group_path
     if not target.exists():
         return False
@@ -967,9 +981,7 @@ def _existing_complete_output(archive: Path, group_path: str, recording_id: str)
             _fail(f"Existing output manifest run mismatch: {group_path}")
         digest_key = f"{key}_sha256"
         if digest_key in attrs:
-            persisted = _digest(
-                attrs[digest_key], field=f"existing {key} digest"
-            )
+            persisted = _digest(attrs[digest_key], field=f"existing {key} digest")
             if canonical_json_sha256(value) != persisted:
                 _fail(f"Existing output manifest digest is stale: {group_path}")
     return True
@@ -987,14 +999,14 @@ def _validated_plot_receipt(
     if not path.is_file():
         _fail(f"Plot receipt is not a file: {path}")
     try:
-        receipt = dict(
-            _mapping(json.loads(path.read_bytes()), field="plot receipt")
-        )
+        receipt = dict(_mapping(json.loads(path.read_bytes()), field="plot receipt"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ComposableChaserCohortError(
             f"Plot receipt cannot be read: {path}"
         ) from exc
-    persisted = _digest(receipt.pop("payload_sha256", None), field="plot receipt digest")
+    persisted = _digest(
+        receipt.pop("payload_sha256", None), field="plot receipt digest"
+    )
     if canonical_json_sha256(receipt) != persisted:
         _fail(f"Plot receipt digest is stale: {path}")
     if receipt.get("recording_id") != recording_id:
@@ -1038,9 +1050,8 @@ def _validated_plot_receipt(
 def _repo_commit(repo: Path, expected_commit: str) -> str:
     if not repo.is_dir() or not (repo / "scripts" / "py").is_file():
         _fail(f"Palette repository is invalid: {repo}")
-    if (
-        len(expected_commit) != 40
-        or any(character not in "0123456789abcdef" for character in expected_commit)
+    if len(expected_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in expected_commit
     ):
         _fail("Expected Palette commit must be one full lowercase Git SHA.")
     observed = subprocess.run(
@@ -1140,10 +1151,12 @@ def run_one(
     plot_dir = Path(str(entry["plot_output_dir"]))
     detailed_dir = plot_dir / "detailed"
     spatial_plot_dir = plot_dir / "spatial_occupancy"
+    alignment_plot_dir = plot_dir / "body_alignment_by_distance"
     if apply:
         plot_dir.mkdir(parents=True, exist_ok=True)
         detailed_dir.mkdir(parents=True, exist_ok=True)
         spatial_plot_dir.mkdir(parents=True, exist_ok=True)
+        alignment_plot_dir.mkdir(parents=True, exist_ok=True)
 
     outputs = _mapping(entry["output_run_names"], field="output run names")
     spatial_occupancy_run = _exact_name(
@@ -1157,6 +1170,13 @@ def run_one(
     dashboard_bundle = _exact_name(
         outputs.get("dashboard_bundle", outputs["successors"]),
         field="dashboard bundle",
+    )
+    alignment_plot_bundle = _exact_name(
+        outputs.get(
+            "body_alignment_plot_bundle",
+            outputs.get("body_alignment_by_distance", BODY_ALIGNMENT_RUN),
+        ),
+        field="body-alignment plot bundle",
     )
     relative_validation_raw = entry.get("relative_frame_validation")
     if relative_validation_raw is None:
@@ -1180,14 +1200,10 @@ def run_one(
     geometry = _mapping(entry["geometry"], field="geometry binding")
     keypoint_proxy = _mapping(entry["keypoint_proxy"], field="keypoint proxy")
     detection_proxy = _mapping(entry["detection_proxy"], field="detection proxy")
-    motion_bouts = _mapping(
-        entry["motion_and_bouts"], field="motion and bout binding"
-    )
+    motion_bouts = _mapping(entry["motion_and_bouts"], field="motion and bout binding")
     stages: list[dict[str, Any]] = []
 
-    def execute_if_missing(
-        stage: str, group_path: str, command: Sequence[str]
-    ) -> None:
+    def execute_if_missing(stage: str, group_path: str, command: Sequence[str]) -> None:
         if _existing_complete_output(archive, group_path, recording_id):
             stages.append({"stage": stage, "mode": "reused_exact_complete_output"})
             return
@@ -1302,6 +1318,43 @@ def run_one(
             "--apply",
         ),
     )
+
+    if "epoch_behavior" in outputs:
+        execute_if_missing(
+            "epoch_behavior",
+            (
+                "analysis/stimulus_epoch_behavior_summary_runs/"
+                f"{outputs['epoch_behavior']}"
+            ),
+            _stage_command(
+                py,
+                (
+                    "fisheye.analysis_workflows.materializers."
+                    "provider_epoch_behavior_summary"
+                ),
+                archive,
+                "--run-name",
+                outputs["epoch_behavior"],
+                "--epoch-run",
+                outputs["semantic_epoch_v2"],
+                "--protocol-semantic-selection-run",
+                outputs["semantic_selection"],
+                "--motion-run",
+                motion_bouts["motion_run_path"],
+                "--swim-bout-run",
+                motion_bouts["swim_bout_run"],
+                "--track-id",
+                0,
+                "--speed-level",
+                "filtered",
+                "--scratch-root",
+                scratch / "epoch_behavior",
+                "--copy-backend",
+                copy_backend,
+                "--apply",
+                "--json",
+            ),
+        )
 
     for provider, proxy, relative_key in (
         ("keypoint", keypoint_proxy, "keypoint_relative"),
@@ -1472,7 +1525,7 @@ def run_one(
     exact_child_receipts: dict[str, Path] = {}
     if receipt_bound_relative:
         assert relative_receipt_dir is not None
-        exact_child_specs = (
+        exact_child_specs = [
             (
                 "semantic_selection",
                 (
@@ -1515,11 +1568,23 @@ def run_one(
                 "composable_chaser_successor_manifest",
                 "composable_chaser_successor_manifest_sha256",
             ),
-        )
+        ]
+        if "epoch_behavior" in outputs:
+            exact_child_specs.insert(
+                1,
+                (
+                    "epoch_behavior",
+                    (
+                        "analysis/stimulus_epoch_behavior_summary_runs/"
+                        f"{outputs['epoch_behavior']}"
+                    ),
+                    "provider_epoch_behavior_summary_manifest",
+                    "provider_epoch_behavior_summary_manifest_sha256",
+                ),
+            )
         for key, run_path, manifest_attr, manifest_digest_attr in exact_child_specs:
             receipt_path = (
-                relative_receipt_dir
-                / f"{key}.exact_child_validation_receipt.json"
+                relative_receipt_dir / f"{key}.exact_child_validation_receipt.json"
             )
             exact_child_receipts[key] = receipt_path
             stages.append(
@@ -1539,6 +1604,82 @@ def run_one(
                         commit,
                         "--output-json",
                         receipt_path,
+                        "--expected-recording-id",
+                        recording_id,
+                    ),
+                    log_dir=receipt_dir,
+                    apply=apply,
+                )
+            )
+
+    if "body_alignment_by_distance" in outputs:
+        alignment_receipt_flags: tuple[object, ...] = ()
+        if receipt_bound_relative:
+            alignment_receipt_flags = (
+                "--relative-frame-receipt",
+                relative_receipts["keypoint"],
+                "--semantic-selection-receipt",
+                exact_child_receipts["semantic_selection"],
+            )
+        execute_if_missing(
+            "body_alignment_by_distance",
+            (
+                "analysis/chaser_body_alignment_by_distance_runs/"
+                f"{outputs['body_alignment_by_distance']}"
+            ),
+            _stage_command(
+                py,
+                (
+                    "fisheye.utils."
+                    "materialize_chaser_body_alignment_by_distance_successor"
+                ),
+                "--analysis-zarr",
+                archive,
+                "--run-name",
+                outputs["body_alignment_by_distance"],
+                "--relative-frame-run",
+                outputs["keypoint_relative"],
+                "--semantic-selection-run",
+                outputs["semantic_selection"],
+                "--expected-recording-id",
+                recording_id,
+                *alignment_receipt_flags,
+                "--distance-bin-width-mm",
+                5.0,
+                "--scratch-root",
+                scratch / "body_alignment_by_distance",
+                "--copy-backend",
+                copy_backend,
+                "--apply",
+            ),
+        )
+        if receipt_bound_relative:
+            assert relative_receipt_dir is not None
+            alignment_receipt = (
+                relative_receipt_dir
+                / "body_alignment_by_distance.exact_child_validation_receipt.json"
+            )
+            exact_child_receipts["body_alignment_by_distance"] = alignment_receipt
+            stages.append(
+                _invoke(
+                    stage=("body_alignment_by_distance_exact_child_validation_receipt"),
+                    command=_stage_command(
+                        py,
+                        ("fisheye.utils.seal_exact_immutable_child_validation_receipt"),
+                        archive,
+                        "--run-path",
+                        (
+                            "analysis/chaser_body_alignment_by_distance_runs/"
+                            f"{outputs['body_alignment_by_distance']}"
+                        ),
+                        "--manifest-attr",
+                        "composable_chaser_successor_manifest",
+                        "--manifest-digest-attr",
+                        "composable_chaser_successor_manifest_sha256",
+                        "--palette-commit",
+                        commit,
+                        "--output-json",
+                        alignment_receipt,
                         "--expected-recording-id",
                         recording_id,
                     ),
@@ -1601,7 +1742,8 @@ def run_one(
     if receipt_bound_relative:
         assert relative_receipt_dir is not None
         spatial_source_receipt = (
-            relative_receipt_dir / "spatial_occupancy.exact_child_validation_receipt.json"
+            relative_receipt_dir
+            / "spatial_occupancy.exact_child_validation_receipt.json"
         )
         exact_child_receipts["spatial_occupancy"] = spatial_source_receipt
         stages.append(
@@ -1612,10 +1754,7 @@ def run_one(
                     "fisheye.utils.seal_exact_immutable_child_validation_receipt",
                     archive,
                     "--run-path",
-                    (
-                        "analysis/chaser_spatial_occupancy_runs/"
-                        f"{spatial_occupancy_run}"
-                    ),
+                    (f"analysis/chaser_spatial_occupancy_runs/{spatial_occupancy_run}"),
                     "--manifest-attr",
                     "composable_chaser_successor_manifest",
                     "--manifest-digest-attr",
@@ -1632,7 +1771,7 @@ def run_one(
             )
         )
         projection_receipt = (
-            relative_receipt_dir / "exact_chaser.projection_receipt.json"
+            relative_receipt_dir / EPOCH_ALIGNMENT_PROJECTION_RECEIPT_NAME
         )
         stages.append(
             _invoke(
@@ -1662,6 +1801,22 @@ def run_one(
                     exact_child_receipts["escape"],
                     "--spatial-occupancy-receipt",
                     exact_child_receipts["spatial_occupancy"],
+                    *(
+                        (
+                            "--epoch-behavior-receipt",
+                            exact_child_receipts["epoch_behavior"],
+                        )
+                        if "epoch_behavior" in exact_child_receipts
+                        else ()
+                    ),
+                    *(
+                        (
+                            "--body-alignment-by-distance-receipt",
+                            exact_child_receipts["body_alignment_by_distance"],
+                        )
+                        if "body_alignment_by_distance" in exact_child_receipts
+                        else ()
+                    ),
                     "--keypoint-relative-frame-receipt",
                     relative_receipts["keypoint"],
                     "--detection-relative-frame-receipt",
@@ -1672,9 +1827,58 @@ def run_one(
             )
         )
 
+    if "body_alignment_by_distance" in outputs:
+        alignment_plot_receipt = (
+            alignment_plot_dir
+            / f"{alignment_plot_bundle}_body_alignment_plot_receipt.json"
+        )
+        if _validated_plot_receipt(
+            alignment_plot_receipt,
+            recording_id=recording_id,
+            require_self_contained_recipe=receipt_bound_relative,
+            expected_plot_recipe_id=BODY_ALIGNMENT_PLOT_RECIPE_ID,
+        ):
+            stages.append(
+                {
+                    "stage": "body_alignment_by_distance_plots",
+                    "mode": "reused_exact_receipt",
+                }
+            )
+        else:
+            stages.append(
+                _invoke(
+                    stage="body_alignment_by_distance_plots",
+                    command=_stage_command(
+                        py,
+                        (
+                            "fisheye.utils."
+                            "plot_chaser_body_alignment_by_distance_successor"
+                        ),
+                        archive,
+                        "--run-name",
+                        outputs["body_alignment_by_distance"],
+                        "--bundle-name",
+                        alignment_plot_bundle,
+                        "--expected-recording-id",
+                        recording_id,
+                        "--output-dir",
+                        alignment_plot_dir,
+                        *(
+                            (
+                                "--source-validation-receipt",
+                                exact_child_receipts["body_alignment_by_distance"],
+                            )
+                            if receipt_bound_relative
+                            else ()
+                        ),
+                    ),
+                    log_dir=receipt_dir,
+                    apply=apply,
+                )
+            )
+
     spatial_receipt = (
-        spatial_plot_dir
-        / f"{spatial_plot_bundle}_spatial_occupancy_plot_receipt.json"
+        spatial_plot_dir / f"{spatial_plot_bundle}_spatial_occupancy_plot_receipt.json"
     )
     if _validated_plot_receipt(
         spatial_receipt,
@@ -1862,7 +2066,9 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--palette-commit", required=True)
     run_parser.add_argument("--scratch-root", type=Path, required=True)
     run_parser.add_argument("--receipt-root", type=Path, required=True)
-    run_parser.add_argument("--copy-backend", choices=("python", "rsync"), default="rsync")
+    run_parser.add_argument(
+        "--copy-backend", choices=("python", "rsync"), default="rsync"
+    )
     run_parser.add_argument("--apply", action="store_true")
     return parser
 

@@ -58,6 +58,8 @@ def build_projection_provenance(
     generalized_bout_response: Any | None = None,
     escape_freeze: Any | None = None,
     gaze_tracking: Any | None = None,
+    epoch_behavior: Any | None = None,
+    body_alignment_by_distance: Any | None = None,
     relatives: Sequence[Any] | None = None,
     chaser_appearance: Any | None = None,
     projection_verification_mode: str = "deep_audit",
@@ -132,9 +134,7 @@ def build_projection_provenance(
                     ),
                     "body_extension_present": generalized_bout_response.scientific_manifest.get(
                         "scientific_schema", {}
-                    ).get(
-                        "body_extension_present"
-                    ),
+                    ).get("body_extension_present"),
                     "deep_audited": generalized_bout_response.deep_audited,
                     **_verification(generalized_bout_response),
                 }
@@ -179,6 +179,40 @@ def build_projection_provenance(
                     **_verification(gaze_tracking),
                 }
                 if gaze_tracking is not None
+                else None
+            ),
+            "epoch_behavior_binding": (
+                {
+                    "run_path": epoch_behavior.run_path,
+                    "manifest_sha256": epoch_behavior.manifest_sha256,
+                    "payload_digest": epoch_behavior.payload_digest,
+                    "sources": plain(epoch_behavior.manifest.get("sources")),
+                    "parameters": plain(epoch_behavior.manifest.get("parameters")),
+                    "deep_audited": epoch_behavior.deep_audited,
+                    **_verification(epoch_behavior),
+                }
+                if epoch_behavior is not None
+                else None
+            ),
+            "body_alignment_by_distance_binding": (
+                {
+                    "run_path": body_alignment_by_distance.run_path,
+                    "manifest_sha256": body_alignment_by_distance.manifest_sha256,
+                    "scientific_payload_sha256": (
+                        body_alignment_by_distance.scientific_payload_sha256
+                    ),
+                    "sources": plain(
+                        body_alignment_by_distance.scientific_manifest.get("sources")
+                    ),
+                    "distance_bin_recipe": plain(
+                        body_alignment_by_distance.scientific_manifest.get(
+                            "distance_bin_recipe"
+                        )
+                    ),
+                    "deep_audited": body_alignment_by_distance.deep_audited,
+                    **_verification(body_alignment_by_distance),
+                }
+                if body_alignment_by_distance is not None
                 else None
             ),
             "adapter_semantics": (

@@ -85,6 +85,12 @@ from .chaser_exact_body_heading_contract import (
     compatible_body_heading_binding,
 )
 from .chaser_exact_gaze_discovery import compatible_gaze_tracking_binding
+from .chaser_exact_epoch_behavior_discovery import (
+    compatible_epoch_behavior_binding,
+)
+from .chaser_exact_body_alignment_discovery import (
+    compatible_body_alignment_binding,
+)
 
 TRACK_KINEMATICS_PLOT_RENDERER = "palette-track-kinematics-summary-v1"
 TRACK_KINEMATICS_INTERACTIVE_ARTIFACT = "track_kinematics_summary_track_0_interactive"
@@ -1040,6 +1046,18 @@ def discover_exact_chaser_successor_options(
             keypoint_relative_manifest=relative_manifests[0],
             keypoint_radial_manifest=radial_manifests[0],
         )
+        epoch_behavior_binding = compatible_epoch_behavior_binding(
+            root,
+            recording_id=recording_id,
+            spatial_sources=sources,
+        )
+        body_alignment_binding = compatible_body_alignment_binding(
+            root,
+            recording_id=recording_id,
+            spatial_sources=sources,
+            spatial_epoch_records=scientific.get("epoch_records"),
+            keypoint_relative_manifest=relative_manifests[0],
+        )
         analysis_bindings = {}
         if body_bearing_binding is not None:
             analysis_bindings["body_bearing"] = dict(body_bearing_binding)
@@ -1053,10 +1071,16 @@ def discover_exact_chaser_successor_options(
             analysis_bindings["escape_freeze"] = dict(escape_freeze_binding)
         if gaze_tracking_binding is not None:
             analysis_bindings["gaze_tracking"] = dict(gaze_tracking_binding)
+        if epoch_behavior_binding is not None:
+            analysis_bindings["epoch_behavior"] = dict(epoch_behavior_binding)
+        if body_alignment_binding is not None:
+            analysis_bindings["body_alignment_by_distance"] = dict(
+                body_alignment_binding
+            )
         title = f"Exact paired-provider chaser successors: {run_name}"
         spec = {
             "schema_id": "palette.chaser_exact_successor_explorer_spec",
-            "schema_version": 8,
+            "schema_version": 10,
             "renderer": CHASER_EXACT_SUCCESSOR_RENDERER,
             "title": title,
             "run_name": run_name,
@@ -1085,6 +1109,16 @@ def discover_exact_chaser_successor_options(
                 **(
                     {"gaze_tracking": gaze_tracking_binding["run_path"]}
                     if gaze_tracking_binding is not None
+                    else {}
+                ),
+                **(
+                    {"epoch_behavior": epoch_behavior_binding["run_path"]}
+                    if epoch_behavior_binding is not None
+                    else {}
+                ),
+                **(
+                    {"body_alignment_by_distance": body_alignment_binding["run_path"]}
+                    if body_alignment_binding is not None
                     else {}
                 ),
             },
@@ -1208,6 +1242,22 @@ def discover_exact_chaser_successor_options(
                     "motion_heading_fallback": "prohibited",
                     "detection_position_substitution": "prohibited",
                 },
+                "body_alignment_by_distance": {
+                    "recipe_id": "persisted_anatomical_alignment_distance_bins_v1",
+                    "distance_bin_recipe": (
+                        dict(body_alignment_binding["distance_bin_recipe"])
+                        if body_alignment_binding is not None
+                        else None
+                    ),
+                    "distance_surface": "base/relative_distance_physical",
+                    "alignment_definition": "cos(body_bearing_deg)",
+                    "lateral_definition": "sin(body_bearing_deg)",
+                    "viewer_rebinning": "prohibited",
+                    "viewer_scientific_groupby": "prohibited",
+                    "body_axis_fallback": "prohibited",
+                    "motion_heading_fallback": "prohibited",
+                    "detection_position_substitution": "prohibited",
+                },
                 "trajectory_overlays": {
                     "algorithm": ("source_order_uniform_plus_coordinate_extrema_v1"),
                     "max_points_per_series_per_epoch": 15000,
@@ -1283,6 +1333,26 @@ def discover_exact_chaser_successor_options(
                     ),
                     "world_frame_gaze": "prohibited",
                     "body_axis_fallback": "prohibited",
+                    "viewer_scientific_recomputation": False,
+                },
+                "epoch_behavior": {
+                    "recipe_id": "persisted_semantic_v2_epoch_motion_bouts_v1",
+                    "summary_source": "persisted_per_epoch_fish",
+                    "bout_distribution_source": ("persisted_per_epoch_bout_histograms"),
+                    "ibi_distribution_source": (
+                        "persisted_per_epoch_inter_bout_interval_histograms"
+                    ),
+                    "speed_level": (
+                        epoch_behavior_binding["parameters"]["physical_speed_level"]
+                        if epoch_behavior_binding is not None
+                        else None
+                    ),
+                    "rate_denominator": "valid_tracked_duration_s",
+                    "spatial_metrics": (
+                        "omitted_requires_separately_selected_position_provider"
+                    ),
+                    "viewer_epoch_recomputation": "prohibited",
+                    "viewer_rebinning": "prohibited",
                     "viewer_scientific_recomputation": False,
                 },
                 "scientific_recomputation": False,

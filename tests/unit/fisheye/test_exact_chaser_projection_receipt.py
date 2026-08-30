@@ -180,3 +180,70 @@ def test_projection_receipt_v1_remains_closed_without_gaze(
 
     assert receipt["schema_version"] == 1
     assert "gaze" not in receipt["exact_children"]
+
+
+@pytest.mark.parametrize(
+    ("keys", "schema_version", "expected_optional"),
+    (
+        (subject.EXACT_CHILD_KEYS_V3, 3, {"epoch_behavior"}),
+        (subject.EXACT_CHILD_KEYS_V4, 4, {"gaze", "epoch_behavior"}),
+        (
+            subject.EXACT_CHILD_KEYS_V5,
+            5,
+            {"body_alignment_by_distance"},
+        ),
+        (
+            subject.EXACT_CHILD_KEYS_V6,
+            6,
+            {"gaze", "body_alignment_by_distance"},
+        ),
+        (
+            subject.EXACT_CHILD_KEYS_V7,
+            7,
+            {"epoch_behavior", "body_alignment_by_distance"},
+        ),
+        (
+            subject.EXACT_CHILD_KEYS_V8,
+            8,
+            {"gaze", "epoch_behavior", "body_alignment_by_distance"},
+        ),
+    ),
+)
+def test_projection_receipt_closes_epoch_and_combined_rosters(
+    tmp_path,
+    monkeypatch,
+    keys,
+    schema_version,
+    expected_optional,
+) -> None:
+    archive = tmp_path / "analysis.zarr"
+    archive.mkdir()
+    exact = _paths(tmp_path, keys)
+    relative = _paths(tmp_path, subject.RELATIVE_CHILD_KEYS)
+    monkeypatch.setattr(
+        subject,
+        "read_exact_immutable_child_validation_receipt",
+        lambda path, **_expected: _child(path),
+    )
+    monkeypatch.setattr(
+        subject,
+        "read_chaser_relative_frame_validation_receipt",
+        lambda path, **_expected: _child(path, relative=True),
+    )
+
+    receipt = subject.build_exact_chaser_projection_receipt(
+        archive,
+        exact_child_receipts=exact,
+        relative_frame_receipts=relative,
+        palette_commit="e" * 40,
+        expected_recording_id="recording-1",
+    )
+    validated = subject.validate_exact_chaser_projection_receipt(
+        receipt,
+        expected_analysis_zarr=archive,
+        expected_recording_id="recording-1",
+    )
+
+    assert validated["schema_version"] == schema_version
+    assert set(validated["exact_children"]) == set(keys)
+    assert expected_optional.issubset(validated["exact_children"])

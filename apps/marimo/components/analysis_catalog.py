@@ -289,6 +289,24 @@ CHASER_EXACT_SUCCESSOR_PROVIDER = ProviderDefinition(
             ),
         ),
         AnalysisDefinition(
+            "epoch_behavior",
+            "Protocol-semantic epoch behavior",
+            (
+                "Persisted physical speed, path, tracking coverage, swim-bout "
+                "summaries, bout-kinematics distributions, and inter-bout "
+                "interval distributions for exact pre/training/post epochs."
+            ),
+        ),
+        AnalysisDefinition(
+            "body_alignment_by_distance",
+            "Fish alignment by chaser distance",
+            (
+                "Persisted anatomical alignment, absolute and circular bearing, "
+                "and explicit validity/support by exact semantic epoch, chaser, "
+                "and physical-distance bin."
+            ),
+        ),
+        AnalysisDefinition(
             "provenance",
             "Provenance",
             "Exact bundle, child-run identities, display projection, and authorities.",

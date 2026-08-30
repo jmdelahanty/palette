@@ -1,6 +1,11 @@
 """Closed persisted-array rosters consumed by exact-chaser renderers."""
 
 from ..chaser_exact_gaze_arrays import GAZE_TRACKING_ARRAYS
+from fisheye.analysis_workflows.chaser_body_alignment_by_distance_successor import (
+    SUMMARY_VIEW_ARRAY_NAMES,
+)
+
+BODY_ALIGNMENT_BY_DISTANCE_ARRAYS = SUMMARY_VIEW_ARRAY_NAMES
 
 RADIAL_NEAR_FIELD_ARRAYS = (
     "metric_epoch_role_code",
@@ -81,6 +86,94 @@ SPATIAL_OCCUPANCY_ARRAYS = (
     "out_of_arena_position_frame_count",
     "in_arena_coverage_fraction_candidate",
     "in_arena_fraction_finite_valid",
+)
+
+EPOCH_BEHAVIOR_ARRAYS = tuple(
+    f"per_epoch_fish/{name}"
+    for name in (
+        "track_id",
+        "window_id",
+        "window_index",
+        "window_label",
+        "start_frame",
+        "end_frame",
+        "start_time_s",
+        "end_time_s",
+        "duration_s",
+        "total_span_frames",
+        "provider_sample_count",
+        "valid_tracked_frame_count",
+        "missing_frame_count",
+        "tracking_dropout_fraction",
+        "valid_tracked_duration_s",
+        "motion_valid_sample_count",
+        "speed_sample_count",
+        "mean_speed_mm_s",
+        "median_speed_mm_s",
+        "p05_speed_mm_s",
+        "p95_speed_mm_s",
+        "max_speed_mm_s",
+        "total_path_mm",
+        "bout_count",
+        "bout_rate_per_min",
+        "median_bout_duration_s",
+        "mean_bout_duration_s",
+        "median_bout_path_length_mm",
+        "mean_bout_path_length_mm",
+        "bout_heading_sample_count",
+        "mean_bout_net_heading_change_deg",
+        "median_bout_net_heading_change_deg",
+        "mean_abs_bout_net_heading_change_deg",
+        "median_abs_bout_net_heading_change_deg",
+        "mean_bout_heading_path_deg",
+        "median_bout_heading_path_deg",
+        "inter_bout_interval_count",
+        "mean_inter_bout_interval_s",
+        "median_inter_bout_interval_s",
+        "p05_inter_bout_interval_s",
+        "p95_inter_bout_interval_s",
+        "inter_bout_interval_rate_per_min",
+        "rate_denominator",
+        "motion_validity_rule",
+        "analysis_role",
+        "source_interval_sha256",
+        "protocol_semantic_hash",
+        "protocol_semantic_step_index",
+        "protocol_semantic_step_ref",
+    )
+) + tuple(
+    f"{table}/{name}"
+    for table in (
+        "per_epoch_bout_histograms",
+        "per_epoch_inter_bout_interval_histograms",
+    )
+    for name in (
+        "metric_name",
+        "units",
+        "window_id",
+        "window_index",
+        "window_label",
+        "start_frame",
+        "end_frame",
+        "start_time_s",
+        "end_time_s",
+        "duration_s",
+        "bin_index",
+        "bin_left",
+        "bin_right",
+        "bin_center",
+        "bin_width",
+        "hist_count",
+        "hist_fraction",
+        "source_sample_count",
+        "finite_sample_count",
+        "bin_policy",
+        "analysis_role",
+        "source_interval_sha256",
+        "protocol_semantic_hash",
+        "protocol_semantic_step_index",
+        "protocol_semantic_step_ref",
+    )
 )
 
 CONTROLLER_TRIAL_ARRAYS = (
@@ -213,6 +306,7 @@ __all__ = [
     "BOUT_RESPONSE_ARRAYS",
     "CONTROLLER_TRIAL_ARRAYS",
     "DISTANCE_DISTRIBUTION_ARRAYS",
+    "EPOCH_BEHAVIOR_ARRAYS",
     "ESCAPE_FREEZE_ARRAYS",
     "GAZE_TRACKING_ARRAYS",
     "RADIAL_NEAR_FIELD_ARRAYS",

@@ -50,8 +50,10 @@ from ..chaser_exact_body_heading_contract import BODY_HEADING_ARRAY_PATHS
 from .bout_response_projection import load_exact_bout_response
 from .array_requirements import (
     BOUT_RESPONSE_ARRAYS,
+    BODY_ALIGNMENT_BY_DISTANCE_ARRAYS,
     CONTROLLER_TRIAL_ARRAYS,
     DISTANCE_DISTRIBUTION_ARRAYS,
+    EPOCH_BEHAVIOR_ARRAYS,
     ESCAPE_FREEZE_ARRAYS,
     GAZE_TRACKING_ARRAYS,
     RADIAL_NEAR_FIELD_ARRAYS,
@@ -60,7 +62,9 @@ from .array_requirements import (
 )
 from .controller_trial_projection import load_exact_controller_trials
 from .escape_freeze_projection import load_exact_escape_freeze
+from .epoch_behavior_projection import load_exact_epoch_behavior
 from .gaze_tracking_projection import load_exact_gaze_tracking
+from .body_alignment_projection import load_exact_body_alignment
 from .provenance import build_projection_provenance, freeze, plain
 
 PROVIDER_ROLES = ("keypoint", "detection")
@@ -290,6 +294,8 @@ class ExactChaserSuccessorProjection:
     generalized_bout_response: Any | None
     escape_freeze: Any | None
     gaze_tracking: Any | None
+    epoch_behavior: Any | None
+    body_alignment_by_distance: Any | None
     provider_ids: tuple[str, str]
     epoch_records: tuple[Mapping[str, Any], ...]
     provenance: Mapping[str, Any]
@@ -648,6 +654,8 @@ def load_exact_chaser_projection(
     load_generalized_bout_response: bool = False,
     load_escape_freeze: bool = False,
     load_gaze_tracking: bool = False,
+    load_epoch_behavior: bool = False,
+    load_body_alignment_by_distance: bool = False,
 ) -> ExactChaserSuccessorProjection:
     """Load one exact, selector-free visualization projection."""
 
@@ -942,8 +950,8 @@ def load_exact_chaser_projection(
         gaze_receipt = exact_receipt("gaze")
         if receipt_mode and gaze_receipt is None:
             raise ExactChaserProjectionError(
-                "Projection receipt schema v1 does not authorize the gaze child; "
-                "seal a schema-v2 composition with --gaze-receipt."
+                "This projection receipt does not authorize the gaze child; seal "
+                "a schema-v2/v4/v6/v8 composition with --gaze-receipt."
             )
         gaze_tracking = load_exact_gaze_tracking(
             archive,
@@ -954,6 +962,45 @@ def load_exact_chaser_projection(
             relative=relatives[0],
             direct_validation_receipt=gaze_receipt,
             required_array_names=(GAZE_TRACKING_ARRAYS if receipt_mode else None),
+        )
+    epoch_behavior = None
+    if load_epoch_behavior:
+        epoch_receipt = exact_receipt("epoch_behavior")
+        if receipt_mode and epoch_receipt is None:
+            raise ExactChaserProjectionError(
+                "This projection receipt does not authorize the epoch-behavior "
+                "child; seal a schema-v3/v4/v7/v8 composition with "
+                "--epoch-behavior-receipt."
+            )
+        epoch_behavior = load_exact_epoch_behavior(
+            archive,
+            option,
+            spatial=spatial,
+            direct_validation_receipt=epoch_receipt,
+            required_array_paths=(EPOCH_BEHAVIOR_ARRAYS if receipt_mode else None),
+        )
+    body_alignment_by_distance = None
+    if load_body_alignment_by_distance:
+        if relatives is None:
+            raise ExactChaserProjectionError(
+                "Alignment-by-distance views require exact keypoint relative metadata."
+            )
+        alignment_receipt = exact_receipt("body_alignment_by_distance")
+        if receipt_mode and alignment_receipt is None:
+            raise ExactChaserProjectionError(
+                "This projection receipt does not authorize the body-alignment "
+                "child; seal a composition that includes its exact child receipt."
+            )
+        body_alignment_by_distance = load_exact_body_alignment(
+            archive,
+            option,
+            spatial=spatial,
+            expected_relative_binding=relative_bindings[0],
+            relative=relatives[0],
+            direct_validation_receipt=alignment_receipt,
+            required_array_names=(
+                BODY_ALIGNMENT_BY_DISTANCE_ARRAYS if receipt_mode else None
+            ),
         )
     epoch_records = spatial.scientific_manifest.get("epoch_records")
     if not isinstance(epoch_records, (list, tuple)) or not epoch_records:
@@ -969,6 +1016,8 @@ def load_exact_chaser_projection(
         generalized_bout_response=generalized_bout_response,
         escape_freeze=escape_freeze,
         gaze_tracking=gaze_tracking,
+        epoch_behavior=epoch_behavior,
+        body_alignment_by_distance=body_alignment_by_distance,
         provider_ids=provider_ids,
         epoch_records=tuple(freeze(record) for record in epoch_records),
         provenance=build_projection_provenance(
@@ -980,6 +1029,8 @@ def load_exact_chaser_projection(
             generalized_bout_response=generalized_bout_response,
             escape_freeze=escape_freeze,
             gaze_tracking=gaze_tracking,
+            epoch_behavior=epoch_behavior,
+            body_alignment_by_distance=body_alignment_by_distance,
             relatives=relatives,
             chaser_appearance=chaser_appearance,
             projection_verification_mode=selection_identity.verification_mode,
