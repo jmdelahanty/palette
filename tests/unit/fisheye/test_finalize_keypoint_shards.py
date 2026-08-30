@@ -8,6 +8,10 @@ import pytest
 import zarr
 
 import fisheye.utils.finalize_keypoint_shards as finalizer_mod
+from fisheye.shared.keypoint_publication_profile import (
+    COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
+    STRICT_V2_KEYPOINT_PUBLICATION_PROFILE,
+)
 from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
 )
@@ -235,6 +239,7 @@ def test_finalize_keypoint_shards_writes_canonical_keypoint_run(tmp_path: Path) 
     result = finalize_keypoint_shards(
         zarr_path=zarr_path,
         shard_runs=["shard_b", "shard_a"],
+        publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
         output_run="keypoints_collection_test",
     )
 
@@ -328,6 +333,7 @@ def test_finalize_keypoint_shards_rolls_back_selectors_when_consolidation_fails(
         finalize_keypoint_shards(
             zarr_path=zarr_path,
             shard_runs=["shard_a"],
+            publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
             output_run="new_keypoints",
         )
 
@@ -358,6 +364,7 @@ def test_finalize_keypoint_shards_preserves_direct_rows_for_exact_target_crop(
     result = finalize_keypoint_shards(
         zarr_path=zarr_path,
         shard_runs=["shard_b", "shard_a"],
+        publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
         output_run="keypoints_collection_test",
         target_crop_run="crop_proxy",
     )
@@ -430,6 +437,7 @@ def test_finalize_keypoint_shards_rejects_duplicate_source_crop_rows(tmp_path: P
         finalize_keypoint_shards(
             zarr_path=zarr_path,
             shard_runs=["shard_a", "shard_b"],
+            publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
             output_run="keypoints_collection_test",
         )
 
@@ -449,6 +457,7 @@ def test_finalize_keypoint_shards_rejects_instance_key_mismatch_before_publicati
         finalize_keypoint_shards(
             zarr_path=zarr_path,
             shard_runs=["shard_a"],
+            publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
             output_run="keypoints_collection_test",
         )
 
@@ -468,6 +477,7 @@ def test_finalize_keypoint_shards_rejects_duplicate_instance_keys_before_publica
         finalize_keypoint_shards(
             zarr_path=zarr_path,
             shard_runs=["shard_a"],
+            publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
             output_run="keypoints_collection_test",
         )
 
@@ -487,6 +497,7 @@ def test_finalize_keypoint_shards_rejects_keyless_crop_as_legacy_positional(
         finalize_keypoint_shards(
             zarr_path=zarr_path,
             shard_runs=["shard_a"],
+            publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
             output_run="keypoints_collection_test",
         )
 
@@ -506,6 +517,7 @@ def test_finalize_keypoint_shards_rejects_keyless_shard_as_legacy_positional(
         finalize_keypoint_shards(
             zarr_path=zarr_path,
             shard_runs=["shard_a"],
+            publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
             output_run="keypoints_collection_test",
         )
 
@@ -526,6 +538,7 @@ def test_finalize_keypoint_shards_rejects_mixed_source_crop_runs(tmp_path: Path)
         finalize_keypoint_shards(
             zarr_path=zarr_path,
             shard_runs=["shard_a", "shard_b"],
+            publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
             output_run="keypoints_collection_test",
         )
 
@@ -551,6 +564,7 @@ def test_finalize_keypoint_shards_rebases_mixed_proxy_crop_runs_to_target(tmp_pa
     result = finalize_keypoint_shards(
         zarr_path=zarr_path,
         shard_runs=["shard_b", "shard_a"],
+        publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
         output_run="keypoints_collection_test",
         target_crop_run="crop_proxy_collection",
     )
@@ -619,6 +633,7 @@ def test_real_geometry_crop_profile_accepts_split_pixel_keypoint_shards(
     result = finalize_keypoint_shards(
         zarr_path=source.archive_path,
         shard_runs=["shard_pixels"],
+        publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
         output_run="keypoints_geometry",
         target_crop_run="crop_geometry",
         dry_run=True,
@@ -658,6 +673,7 @@ def test_keypoint_rebase_rejects_matching_keys_with_geometry_disagreement(
         finalize_keypoint_shards(
             zarr_path=zarr_path,
             shard_runs=["shard_b", "shard_a"],
+            publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
             output_run="keypoints_collection_test",
             target_crop_run="crop_proxy_collection",
         )
@@ -690,9 +706,22 @@ def test_finalize_keypoint_shards_rebase_rejects_target_instance_key_mismatch(
         finalize_keypoint_shards(
             zarr_path=zarr_path,
             shard_runs=["shard_b", "shard_a"],
+            publication_profile=COMPATIBILITY_KEYPOINT_SHARD_AGGREGATE_PROFILE,
             output_run="keypoints_collection_test",
             target_crop_run="crop_proxy_collection",
         )
 
     root_after = zarr.open_group(store=zarr_path, mode="r")
     assert "keypoints_runs" not in root_after
+
+
+def test_finalize_keypoint_shards_rejects_strict_v2_before_zarr_access(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="compatibility-only producer"):
+        finalize_keypoint_shards(
+            zarr_path=tmp_path / "does_not_exist.zarr",
+            shard_runs=["shard_a"],
+            publication_profile=STRICT_V2_KEYPOINT_PUBLICATION_PROFILE,
+            output_run="must_not_publish",
+        )
