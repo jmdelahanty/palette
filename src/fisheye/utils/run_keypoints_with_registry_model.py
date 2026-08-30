@@ -563,6 +563,7 @@ def run_keypoints_with_registry_model(
     roi_cache_dir: Optional[Path] = None,
     roi_cache_manifest: Optional[Path] = None,
     roi_cache_expected_archive_path: Optional[Path] = None,
+    roi_work_package_manifest: Optional[Path] = None,
     source_crop_row_start: Optional[int] = None,
     source_crop_row_stop: Optional[int] = None,
     stage_roi_cache_to_scratch: bool = False,
@@ -613,6 +614,7 @@ def run_keypoints_with_registry_model(
         roi_cache_dir=roi_cache_dir,
         roi_cache_manifest=roi_cache_manifest,
         roi_cache_expected_archive_path=roi_cache_expected_archive_path,
+        roi_work_package_manifest=roi_work_package_manifest,
         source_crop_row_start=source_crop_row_start,
         source_crop_row_stop=source_crop_row_stop,
         stage_roi_cache_to_scratch=bool(stage_roi_cache_to_scratch),
@@ -832,6 +834,7 @@ def run_keypoints_with_registry_model(
             roi_cache_dir=roi_cache_dir,
             roi_cache_manifest=effective_roi_cache_manifest,
             roi_cache_expected_archive_path=roi_cache_expected_archive_path,
+            roi_work_package_manifest=roi_work_package_manifest,
             source_crop_row_start=source_crop_row_start,
             source_crop_row_stop=source_crop_row_stop,
             roi_cache_source_tier=roi_cache_staging_details.get("effective_source_tier"),
@@ -1016,6 +1019,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--source-crop-row-start", type=int, default=None)
     parser.add_argument("--source-crop-row-stop", type=int, default=None)
     parser.add_argument(
+        "--roi-work-package-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Optional crop-pixel work package for noncanonical terminal shard "
+            "inference. Mutually exclusive with --roi-cache-manifest."
+        ),
+    )
+    parser.add_argument(
         "--stage-roi-cache-to-scratch",
         action="store_true",
         help="Copy --roi-cache-manifest and payload to node-local scratch before inference.",
@@ -1104,6 +1116,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         roi_cache_dir=args.roi_cache_dir,
         roi_cache_manifest=args.roi_cache_manifest,
         roi_cache_expected_archive_path=args.roi_cache_expected_archive_path,
+        roi_work_package_manifest=args.roi_work_package_manifest,
         source_crop_row_start=args.source_crop_row_start,
         source_crop_row_stop=args.source_crop_row_stop,
         stage_roi_cache_to_scratch=bool(args.stage_roi_cache_to_scratch),
