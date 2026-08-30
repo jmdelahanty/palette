@@ -2,8 +2,8 @@
 
 <!-- contract-meta
 status: active
-implementation: reader-through-generalized-merged-escape-freeze-locally-validated-ci-pending
-last_verified: 2026-08-29
+implementation: receipt-bound-reader-merged-first-class-gaze-and-distribution-design-in-progress
+last_verified: 2026-08-30
 -->
 
 ## Purpose
@@ -416,6 +416,137 @@ child receipt digests, verification modes, and exact verified array rosters.
 The smoke composition resides only under `/tmp`; no recording, registry,
 selector, existing receipt, or shared checkout was modified. Required CI for
 this new branch is pending, so it is not merge-ready or deployed.
+
+The receipt-bound reader subsequently passed required CI and merged through
+PR 76 as merge commit `e0521c6bcf39859634c8d52bc4a8bc98f73cf721`.
+The temporary smoke receipt remains non-durable and no selector or shared
+checkout was changed by that merge.
+
+## Gaze, bearing, distance-distribution, and heatmap audit — 2026-08-30
+
+### Gaze was not lost by the explorer
+
+The frozen 84-entry body-frame cohort task never requested
+`chaser_gaze_tracking_v2`, never selected an exact eye-angle child, and never
+supplied the required gaze-convention review receipt. A direct metadata-file
+census of those 84 archive paths found zero `analysis/eye_angle_runs`, zero
+`analysis/subject_shape_runs`, and zero modern subject/refined-subject mask
+families. The audited smoke archive consequently contains no
+`analysis/chaser_gaze_tracking_runs` child.
+
+The absence occurs at three separate boundaries:
+
+1. the cohort producer requested controller, generalized bout-response, and
+   escape/freeze successors but not gaze;
+2. no modern reviewed eye-orientation source was available to that frozen
+   cohort; and
+3. exact projection-receipt schema v1 and the exact Marimo provider contain no
+   gaze child or gaze route.
+
+This is an upstream production and composition gap, not a hidden panel and not
+authorization to use the legacy `analysis/chaser_distance_runs/.../gaze_tracking`
+component. The modern successor already fails closed on an exact compact-v7
+eye-angle payload, its exact biological-direction convention receipt, the
+protocol-semantic selection, and the anatomical body-bearing relative-frame
+extension. It prohibits world-frame gaze, nasal-positive eye-angle
+substitution, motion-heading substitution, and selector resolution.
+
+### Lock fraction and sustained lock events
+
+The modern successor defines one row per acquisition frame x eye x chaser. A
+row is valid only when it has a nonzero semantic role, valid reviewed eye gaze,
+valid anatomical chaser bearing, valid physical distance, and distance no
+greater than the configured 50 mm default. Each eye's accessible bearing range
+is the configured empirical gaze interval; the current successor default is
+the 2.5th through 97.5th percentiles of that eye's valid gaze values.
+
+For a semantic role x eye x chaser stratum:
+
+```text
+lock_fraction = count(valid and accessible and abs(wrapped_gaze_error) <= 10 deg)
+                / count(valid and accessible)
+```
+
+The 10-degree threshold, 50 mm distance limit, empirical quantiles, numerator,
+and denominator are successor provenance. A lock fraction is descriptive
+alignment occupancy; it is not alone evidence that the eye actively followed
+the chaser.
+
+A lock event is one contiguous run of lock rows for the same semantic role,
+eye, and chaser whose timestamp span is at least the configured 0.10 seconds.
+The successor persists start/end acquisition-frame identities, timestamp-derived
+duration, sample count, and median absolute gaze error. Invalid or non-lock
+rows split events; the current contract does not bridge gaps.
+
+### Rotated spatial null controls are missing from the modern successor
+
+The legacy gaze component constructed virtual references by rotating each real
+chaser trajectory around the reviewed arena center by 60, 120, 180, 240, and
+300 degrees. This preserves the reference trajectory's arena radius, motion,
+and wall proximity while moving it to an unoccupied location. A virtual
+reference was rejected when it came within 8 mm of a real chaser for more than
+5 percent of finite samples. The legacy recording summary compared the real
+chaser with the mean of its retained virtual twins for lock fraction, static
+tracking gain, zero/best-lag dynamic gain, and median absolute gaze error.
+
+This is a spatial arena/wall-geometry null, not a temporal shuffle. The modern
+`palette.analysis.chaser_gaze_tracking` schema version 2 persists gaze error,
+lock occupancy, static regression, and sustained events but does not persist
+the rotated controls or dynamic-lag summaries. The older catalog description
+still promises rotated controls, so the catalog and modern payload currently
+diverge. First-class gaze publication must close that divergence in a new
+successor schema before the cohort is materialized; Marimo must not recreate a
+null from displayed rows.
+
+### First-class exact gaze and bearing boundary
+
+"First-class gaze" means a conditional analysis capability of the exact chaser
+provider with its own immutable successor lineage, source bindings, validation
+receipt, composition-receipt child, discovery proof, projection loader, array
+roster, renderer, and explicit unavailable state. It is not a third position
+provider. Keypoint anatomical-triad and detection bbox-centroid remain paired
+first-class position providers. Detection can support position, distance,
+radial, and spatial analytics, but it cannot provide anatomical bearing without
+an independently bound body axis.
+
+The anatomical keypoint relative-frame child already persists body-frame
+chaser bearing. A keypoint-only polar bearing view can therefore be added now,
+independently of eye-angle cohort readiness. It must display the provider/body-
+frame asymmetry explicitly rather than invent detection bearing. The gaze view
+then compares reviewed left/right eye direction with that same sealed
+anatomical bearing and adds error, tracking, lock, event, and rotated-control
+panels.
+
+Existing projection-receipt schema v1 remains valid for the seven exact
+children it closes. A gaze-capable composition must use a new closed receipt
+schema/version that requires an exact gaze child; a supplied v1 receipt cannot
+silently deep-audit or discover gaze. No-receipt diagnostic mode may retain its
+explicit exhaustive-audit behavior.
+
+### Distance distributions and exact spatial heatmaps
+
+Both radial successors already persist exact epoch x behavior x chaser CDFs,
+observed radial probability mass, moving-reference geometric expected mass,
+selection indices, and 5 mm wall-excluded twins. The current exact Marimo
+radial roster loads only medians/interquartile ranges, near-field summaries,
+and selection indices. The missing per-epoch distributions are therefore a
+reader parity gap, not a scientific-publication gap.
+
+The safe interactive addition is a receipt-bound `distance_distributions`
+route that reads those persisted arrays without framewise reconstruction or
+rebinning. It should display paired-provider CDFs, observed versus geometrically
+expected radial probability mass, and explicitly separate wall-excluded twins.
+Every exact bin edge and denominator remains successor evidence and every
+display parameter remains in figure metadata.
+
+The current exact spatial heatmap is already on the latest scientific surface:
+the sealed 2 mm reviewed-arena grid, pre/training/post epochs, paired providers,
+valid-in-arena conditional density, candidate-epoch fraction, complete coverage
+denominators, shared provider scale, and no interpolation. Static and Marimo
+renderers duplicate their validation and display-parameter derivation. They
+should share one scientific display projection. Conditional valid-in-arena
+occupancy remains primary; the already-persisted candidate-epoch-normalized
+surface should be available as an explicitly coverage-sensitive companion.
 
 ## Persisted but not yet mounted in this capability
 

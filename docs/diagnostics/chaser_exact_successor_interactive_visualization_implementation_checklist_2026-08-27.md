@@ -2,7 +2,7 @@
 
 <!-- contract-meta
 status: implementation-in-progress
-implementation: all-declared-exact-views-merged-receipt-bound-reader-locally-validated-ci-pending
+implementation: receipt-bound-reader-merged-first-class-gaze-and-distribution-work-in-progress
 last_verified: 2026-08-30
 -->
 
@@ -81,8 +81,18 @@ current zero-option defect.
 - [x] Receipt-bound interactive loads revalidate direct child metadata and
       rehash only arrays consumed by the selected renderer. Exhaustive deep
       audit remains the explicit path when no projection receipt is supplied.
-- [ ] Required CI for the receipt-bound reader branch has not run. Local and
-      real-artifact validation do not make that branch merge-ready.
+- [x] The receipt-bound reader passed required CI and merged through PR 76 as
+      merge commit `e0521c6bcf39859634c8d52bc4a8bc98f73cf721`.
+- [x] An 84-entry direct metadata-file census found no eye-angle, subject-shape,
+      or modern subject-mask source family in the frozen body-frame cohort.
+- [x] The frozen cohort invocation did not request `chaser_gaze_tracking_v2`
+      and supplied no eye run or gaze-convention review receipt.
+- [x] The modern gaze successor retains exact body-frame gaze/bearing rows,
+      summaries, and sustained lock events but does not retain the legacy
+      rotated spatial controls or dynamic-lag summaries.
+- [x] The paired radial successors already seal the missing CDF and observed /
+      geometric-expected distribution arrays; no successor migration is needed
+      for the distance-distribution reader.
 
 ## Safety invariants
 
@@ -293,6 +303,31 @@ not derive a new scientific product in the UI.
       missing-row policy, color normalization, and coverage annotations.
 - [x] Treat color scale and point/texture resolution as display parameters;
       never renormalize scientific occupancy in Marimo.
+- [ ] Extract one shared scientific display projection used by the static and
+      Marimo heatmap renderers so validation, bin coordinates, denominators,
+      normalization, and scale derivation cannot drift.
+- [ ] Keep conditional valid-in-arena occupancy primary and expose the already
+      persisted candidate-epoch-normalized surface as an explicitly
+      coverage-sensitive companion; do not derive either surface in Marimo.
+
+### 5A.1 — Exact per-epoch distance distributions
+
+- [ ] Add a closed `distance_distributions` exact analysis route rather than
+      reviving legacy `hist_density` or candidate-provider viewers.
+- [ ] Add a receipt-bound targeted roster for the exact `cdf_*` arrays and
+      radial observed/expected probability-mass arrays from both provider
+      successors.
+- [ ] Render paired-provider CDFs by exact epoch x behavior x chaser stratum.
+- [ ] Render persisted observed radial probability mass against the persisted
+      moving-reference geometric expected fraction on exact stored bin edges.
+- [ ] Expose the 5 mm wall-excluded observed/expected twins explicitly and
+      preserve their distinct denominators.
+- [ ] Share the scientific projection/parameter builder with the current static
+      detailed CDF recipe; do not recompute a histogram from relative-frame
+      rows or permit interactive rebinning.
+- [ ] Record child receipt digests, consumed array rosters, exact bin edges,
+      denominators, provider identities, and display-only choices in figure
+      provenance.
 
 ### 5B — Controller-trial and trigger-aligned views
 
@@ -333,15 +368,55 @@ not derive a new scientific product in the UI.
       aligned distance samples, so the current viewer explicitly does not
       reconstruct a trace.
 
-### 5E — Full profile and optional gaze
+### 5E — First-class exact bearing and gaze
+
+- [ ] Add a keypoint-only anatomical body-bearing polar view from the persisted
+      relative-frame body extension. State explicitly that detection bbox
+      centroid remains first-class for position/distance but supplies no body
+      axis or anatomical bearing.
+- [ ] Define first-class gaze as a conditional capability of the exact chaser
+      provider, not as a third position provider and not as a legacy fallback.
+- [ ] Version the modern gaze successor before cohort materialization to seal
+      the rotated spatial null controls and required real-minus-virtual
+      recording summaries. Preserve the exact reviewed arena geometry,
+      rotation list, collision exclusion, distance/accessibility gates, and
+      null denominators in provenance.
+- [ ] Decide and persist the required dynamic tracking surface. The legacy
+      component includes zero-lag and causal best-lag gain; the current modern
+      successor does not. Do not leave the catalog promising a metric absent
+      from the payload.
+- [ ] Keep lock occupancy descriptive: persist and display its exact valid,
+      accessible, and locked counts alongside the fraction.
+- [ ] Keep sustained lock events as contiguous exact-frame intervals with
+      timestamp-derived duration, explicit 0.10-second default, sample count,
+      and median absolute error. Do not bridge invalid gaps in the viewer.
+- [ ] Add a closed gaze array roster, exact discovery proof, projection loader,
+      renderer, and typed unavailable state. Require the exact recording,
+      keypoint relative-frame/body extension, semantic selection, reviewed eye
+      run logical digest, and gaze-convention receipt digest.
+- [ ] Add exact gaze-child validation receipts and a versioned projection
+      composition schema that requires gaze for a gaze-capable receipt. A
+      supplied v1 composition receipt must not silently fall back to a deep
+      audit for gaze.
+- [ ] Add body-bearing polar, gaze-versus-bearing, gaze-error, tracking,
+      lock-fraction, lock-event, and real-versus-rotated-control panels from
+      persisted arrays only.
+- [ ] Add cohort planning fields for an explicit eye-angle run and exact
+      convention receipt per recording; never resolve an eye selector or infer
+      biological direction.
+- [ ] Materialize gaze only after modern subject-mask -> subject-shape ->
+      compact-v7 eye-angle prerequisites and their review/authority decisions
+      exist for the cohort.
+
+### 5F — Full profile
 
 - [ ] Define an exact full-profile bundle or readiness envelope that binds the
       controller, bout-response, escape/freeze, radial, spatial, and relative
       children required by the composed dashboard.
 - [ ] Do not infer cross-module compatibility from a shared run-name string.
-- [ ] Add gaze/controller-trial views only when one complete gaze successor is
-      explicitly bound to the same recording, trial axis, and coordinate/time
-      authorities.
+- [ ] Include gaze only when one complete gaze successor is explicitly bound to
+      the same recording and coordinate/time authorities; retain a truthful
+      partial profile when gaze is unavailable.
 - [ ] Represent unavailable modules explicitly rather than substituting a
       legacy view.
 
@@ -452,6 +527,9 @@ route.
 | Distance traces | targeted relative-array hashes, exact session time, missing-break preservation | panel unavailable; no interpolation |
 | Trajectories | targeted position/chaser hashes, reviewed arena, exact epochs | panel unavailable; no alternate provider |
 | Spatial heatmaps | persisted density, denominators, bin edges/mask, fixed grid/orientation | panel unavailable; no viewer recomputation |
+| Distance distributions | paired persisted CDF and observed/geometric expected arrays on exact bins | panel unavailable; no framewise histogram |
+| Body bearing | exact keypoint body extension and anatomical sign convention | keypoint panel unavailable; no detection substitution |
+| Gaze | exact eye payload/review, body bearing, semantic selection, rotated-control successor and receipt child | capability unavailable; no legacy or deep-audit fallback under a supplied v1 receipt |
 | Trial/bout/escape | exact module manifest and source bindings; persisted membership/classification | module explicitly unavailable |
 | Full profile | exact cross-module digest bundle/readiness envelope | partial modules labeled; no run-name inference |
 | Static artifacts | canonical plot receipt and file SHA-256 | static file rejected independently of Marimo |
