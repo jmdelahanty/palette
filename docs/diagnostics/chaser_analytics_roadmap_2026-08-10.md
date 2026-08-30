@@ -484,3 +484,172 @@ maintaining distance, and does the setpoint/gain move with experience? B3–B5
 go through the component lifecycle recipe (contract doc, twins, DAG,
 MetricSpec) rather than as scratch scripts; the gap audit showed scratch
 analyses become orphans.
+
+## Stimulus-geometry hypothesis and the `sesh3` "woah" session (added 2026-08-30)
+
+Status: hypothesis record, specified-only. Source: discussion 2026-08-30 plus a
+read-only inspection of `/nvme1/sesh3` and one current-configuration
+recording. Nothing here has been re-analyzed under current guardrails.
+
+### The hypothesis as stated
+
+An older dish configuration — projection surface *at* the dish base, no gap
+between the rendered dot and the fish — produced visually striking spatial
+avoidance (`~/woah.png`, "Fish 1"). The current configuration interposes a
+gap, so a dot rendered at the same physical size is farther from the fish.
+Hypothesis: effective stimulus distance is a contributing factor to the
+disappearance of spatial avoidance.
+
+### What the geometry actually predicts
+
+For eye-to-surface gap `g`, horizontal distance `d`, and dot area `A`, the
+dot's solid angle at the eye is approximately `Ω ≈ A·g / (d² + g²)^{3/2}`.
+
+- Near field (`d ≪ g`, where chases happen): `Ω ≈ A/g²`. Halving the gap
+  quadruples apparent size. The intuition holds here.
+- Far field (`d ≫ g`): `Ω ≈ A·g/d³` — a *larger* gap makes a distant dot
+  slightly bigger, because a near-zero gap shows the dot edge-on. "Same size,
+  farther away" is not a uniform shrink.
+- Elevation `atan(g/d)`: with no gap the dot lives near the fish's horizontal
+  plane (lateral/horizon field, where agents live); with a gap it is always in
+  the lower field (where substrate lives). Regionally specialized retina makes
+  this a different stimulus at matched angular size. Strongest candidate
+  mechanism.
+- Retinal velocity and looming rate scale as `1/distance`: same physical chase
+  speed → shallower approach signal through a gap. Fewer escapes, more
+  freezing is a natural prediction.
+- Swim depth adds to `g` in the current configuration and is untracked — an
+  unmeasured within-session covariate of stimulus strength.
+
+### What `sesh3` actually is (read-only inspection, 2026-08-30)
+
+`/nvme1/sesh3/2025-09-23T22-11-11Z_arena_4_chaser_arena4.h5` (+ `_analysis.h5`,
+`Cam2010096.mp4` 4512×4512 @ 60 fps, 45,753 frames, and a partial-pipeline
+zarr with detect/refined/keypoints/id_assignment and old-schema
+`analysis/{speed_runs,swim_bout_runs,chaser_fish_metrics,eye_angle_runs}`).
+Not in the canonical registry. Protocol `chaser_arena4`, dish `alpine`,
+rig `omnifin0`, 1 fish.
+
+| parameter | `sesh3` (2025-09-23) | current GoodCopBadCop (e.g. 2026-06-14, dish `palm2`) |
+|---|---|---|
+| `z_eff_mm` (effective eye-to-stimulus height) | **8.68** | **14.94** in protocol; `calculated_z_eff_mm` 16.73 (dish base 5 mm + projector base 4.76 mm + water 5 mm, eye height 8 mm) |
+| chaser radius | **3.0 mm** | 2.0 mm |
+| `loom_mode` | **3 — looming expansion during chase** (`l_over_v_ms` 30, `max_angle_deg` 70; `CHASER_LOOM_START` events logged) | 0 — no loom |
+| `initial_distance_mm` (chase starts this far from fish) | **4 mm** | 20 mm |
+| chase speed | 25 mm/s | 40 mm/s |
+| chase duration / retreat after chase | 3 s / yes (40 mm retreat) | 5 s / no |
+| training | 150 s, 12 chase sequences (~1 per 12 s) | 180 s, 12 chase sequences |
+| pre / post period | 300 s / 300 s | 600 s / 600 s |
+| chasers | 1 (aggressive) | 2 (aggressive + inert) |
+| random jump interval | 0.5 s | 2.0 s |
+| pre / post park position | top_left / top_right | top_left / bottom_right |
+
+Back-of-envelope near-field apparent size (`A/g²`, radius² / z_eff²):
+`sesh3` 9/8.68² ≈ 0.119 vs current 4/16.7² ≈ 0.014 — roughly **8× smaller**
+apparent dot in the current configuration when the chaser is close. So the gap
+effect is real in magnitude. But:
+
+### The confound that dominates
+
+`sesh3` was a **looming** chaser that began each chase **4 mm** from the fish
+and retreated afterward. Looming is the canonical zebrafish escape stimulus.
+The current protocol has no loom, starts chases at 20 mm, and does not
+retreat. Any of loom, start distance, dot size, or gap could account for a
+stronger response in `sesh3`; they changed together. The gap hypothesis is not
+separable from the loom hypothesis on existing data.
+
+### `woah.png` — why it is striking and why it is not yet evidence
+
+Fish 1, pre (0–5 min) / training (5–7.5) / post (7.5–12.5) occupancy with
+chaser occupancy beneath. Pre: fish everywhere, heavy wall occupancy, hottest
+spot adjacent to the parked chaser. Post: a single compact blob at
+centre-left, far from the (now bottom-right) chaser, off the wall.
+
+Caveats, in order of weight:
+
+1. **A compact hot blob in a time-occupancy map is either place preference or
+   parking.** Freezing after a chase produces exactly this picture; that is the
+   retracted immobility result in its original visual form. Occupancy cannot
+   distinguish the two.
+2. During training the fish's hot spot sits within ~600 px of the chaser's
+   home — the "chaser recaptures a frozen fish" signature.
+3. Post-training **thigmotaxis decreased**. Anxiety-like avoidance predicts
+   more wall time, not a mid-dish parking spot.
+4. Frozen fish are the ones the tracker loses; dropout would concentrate the
+   blob further.
+5. n = 1, analyzed before every current guardrail (raw speed, nominal
+   geometry, no twins, no clustering). Note the pre-period hot spot *next to*
+   the parked chaser: if the post blob is avoidance, the pre blob is approach,
+   and both need the same scrutiny.
+
+None of this makes the freeze reading correct; it makes the figure
+non-diagnostic.
+
+### Discriminating tests, in order
+
+1. **Lightweight re-analysis of `sesh3` from its existing zarr** — do NOT force
+   it into the registry (old schema, old protocol; the recording is a
+   hypothesis generator, not cohort data). Read refined keypoints/detections →
+   centroid track → `speed_smoothed_mm` over post: (a) immobile fraction and
+   longest immobile stretch, (b) bout count and distinct visits to the blob
+   zone vs pre, (c) occupancy sampled at bout onset, (d) distance-to-chaser vs
+   rotated-twin nulls, (e) valid-tracked fraction. Scratch script,
+   `--exploratory-only` watermark, results out of repo. If (a) says parked, the
+   striking figure is freezing and the gap hypothesis loses its motivating
+   observation. Also: how many fish in that old cohort look like Fish 1?
+2. **Metadata.** `dish_design` is already a registry column (`palm1`/`palm2`
+   across the 40 GoodCopBadCop recordings) and the H5 arena config carries
+   `dish_config` + `z_eff_*_mm`. Add `z_eff_current_mm` and `loom_mode` to the
+   registry stimulus-run rows so configuration comparisons are queries, not
+   archaeology.
+3. **Loom on/off arm first**, same dish, same batch, schedule v2 — it is the
+   cheaper and larger candidate. If loom restores the response, the gap
+   question is moot for the next experiment.
+4. **Parametric gap** (spacers, 2–3 values, counterbalanced) with a
+   **size-compensated arm** (dot scaled so near-field angular size matches the
+   no-gap condition). Size compensation restores angular size but not
+   elevation, so that arm separates the "smaller" mechanism from the
+   "different retinal region" mechanism. Readouts: escape rate, freeze
+   probability during chase, B1 setpoint/gain — not occupancy.
+
+Retinal-region story predicts a step-like elevation effect; looming-rate story
+predicts a smooth `1/distance` effect. Steps 3–4 together discriminate.
+
+Note on `sesh3` events: the H5 logs `CHASER_TARGET_VISIBLE` / `_HIDDEN` and
+`show_target_dot: true`, but per the experimenter (2026-08-30) no target marker
+was projected in real time in that recording — treat those event names as
+stale protocol bookkeeping, not a stimulus change between pre and post.
+
+### Preliminary recovery cohort (decision 2026-08-30: worth collecting)
+
+Goal: recover the `sesh3` effect under current guardrails and attribute it.
+The minimum design that attributes rather than merely recovers is **2 × 2**:
+dish {old no-gap config, current `palm` config} × loom {off, on}, with
+everything else held at the *current* protocol (2 mm dot, 20 mm start, no
+retreat, schedule v2 timing, aggressive + inert chasers). Priority order if
+arms must be dropped:
+
+1. **old dish + loom off** — the clean gap test (current stimulus, old
+   geometry). This arm alone answers "is it the gap?"
+2. **current dish + loom on** — the clean loom test. Cheapest, no hardware
+   change.
+3. old dish + loom on — the `sesh3`-like arm; recovers the picture, attributes
+   nothing on its own, but with 1–2 closes the interaction.
+4. current dish + loom off — is the existing 40-recording cohort; no new
+   collection needed.
+
+Sizing: continuous per-fish readouts (B1 setpoint/gain, escape rate over
+valid-tracked time, freeze probability during chase) rather than occupancy, so
+~8 fish per new arm across ≥2 sessions each is enough for a go/no-go, not a
+paper. Counterbalance session order across arms; same batch/age.
+
+Lock before the first session: `dish_design` (new name for the no-gap dish —
+do not reuse `alpine` unless it is physically the same dish), `z_eff_current_mm`
+and `loom_mode` recorded in the H5 arena/protocol snapshot (already are) and
+promoted to registry columns; a protocol hash per arm under the schedule-mode
+contract; swim depth is still untracked — note it as a known covariate.
+
+Pre-registered predictions: gap mechanism → arm 1 recovers escape rate and
+B1 gain; loom mechanism → arm 2 recovers them; both → arm 3 ≫ either. If arm 1
+shows a shift in freeze probability without a shift in wander-phase avoidance,
+that is the strategy-switch hypothesis from the B-series, not spatial learning.
