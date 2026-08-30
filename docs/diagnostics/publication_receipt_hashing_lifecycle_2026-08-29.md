@@ -119,11 +119,12 @@ composable identity.
 ## Subject-shape v2 implementation checkpoint
 
 Status: **implemented and locally validated in
-`agent/palette/subject-shape-plan-receipts-20260829` at `e35714b0`; pushed to
-draft PR #73. Required CI passed at that runtime commit and the
-selector-ineligible performance canary completed successfully. The canary also
-exposed a separate pre-existing nondeterministic ellipse-fit edge case, so the
-canary remains ineligible and the branch is not merged or production-active**.
+`agent/palette/subject-shape-plan-receipts-20260829` through `6d3d3c0d`; pushed
+to draft PR #73. All 23 required CI checks passed at that runtime commit and
+the selector-ineligible receipt and authority-proof performance canaries
+completed successfully. The canaries also exposed a separate pre-existing
+nondeterministic ellipse-fit edge case, so they remain ineligible and the
+branch is not merged or production-active**.
 
 The projected access-aware subject-shape path now implements the first durable
 receipt profile:
@@ -268,8 +269,56 @@ only 2.912 seconds and delivered 1.441 GB. The authority interval wrote only
 second numeric transformation. Admission revalidation (113.308 seconds),
 coordinate-source binding/projection (111.018 seconds), and identity-array
 append (69.914 seconds) are the other material subphases. Reducing repeated
-authority-metadata serialization is the next publication optimization; it is
-not evidence for removing the receipt checks.
+authority-metadata serialization was therefore the next publication
+optimization; the follow-up below removes the repeated source rebuilds without
+removing receipt checks.
+
+### Completed authority-proof follow-up
+
+The first measured follow-up, commit `c94426a7` and LSF job `153771730`, made
+canonical descriptor attributes use one fail-closed whole-map Zarr attribute
+replacement and instrumented each authority subphase. It completed in
+2,788.240 seconds, statistically neutral against the receipt-v2 canary. That
+negative result was useful: `authority_coordinate_descriptors` still took
+680.203 seconds while writing only 143,899 characters, proving that the
+dominant work occurred before attribute mutation.
+
+The root cause was repeated bundle-source verification. Each descriptor called
+`require_bound_subject_shape_bundle_source()`, whose bound source reopened and
+rebuilt the full sealed subject-mask bundle authority on every invocation.
+Commit `6d3d3c0d` routes that existing `assert_verified()` implementation
+through the shared operation-scoped persisted-proof interface. The first call
+per operation runs the full verifier, all intermediate calls reuse the sealed
+result, and scope close runs one fresh full verifier for time-of-check/time-of-
+use protection. No source digest, receipt, authority, or selector rule was
+removed.
+
+LSF job `153771776` ran `6d3d3c0d` against the same Cam2010094 inputs, on the
+same `h07u20` host and 32-slot request as `153771730`. It completed with exit
+code zero in 1,837.461 seconds (30m37s): 15m51s faster than the whole-map
+control and a 34.1% end-to-end reduction.
+
+| Phase | `c94426a7` | `6d3d3c0d` | Speedup |
+|---|---:|---:|---:|
+| scientific compute | 983.161 s | 977.537 s | matched |
+| access-aware storage conversion | 347.284 s | 350.810 s | matched |
+| atomic publication | 1,310.150 s | 359.120 s | 3.65x |
+| authority stamping | 913.267 s | 117.417 s | 7.78x |
+| coordinate descriptors | 680.203 s | 0.369 s | 1,845x |
+| total job | 2,788.240 s | 1,837.461 s | 1.52x |
+
+Authority-stamping delivered reads fell from 45.319 GB to 3.877 GB. Whole-job
+delivered reads fell from 480.002 GB to 431.796 GB, and 32-slot CPU efficiency
+rose from 30.583% to 44.974%. The optimized output is complete,
+`bound_canonical_v2`, selector-ineligible, registry-inactive, and carries the
+same source-binding, row-identity, placement-array, numeric-projection, bundle,
+and storage-profile identities. Run-local record digests differ because sealed
+record references include the new output run path.
+
+The remaining authority cost is now visible rather than obscured:
+`authority_body_frame` takes 103.234 of the 117.417 seconds. The physical
+payload hash remains 2.937 seconds. Any later body-frame optimization must
+preserve its complete scientific and coordinate validation.
 
 ### Scientific parity finding
 

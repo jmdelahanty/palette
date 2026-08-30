@@ -1,16 +1,20 @@
 # Subject-shape planning admission optimization — 2026-08-29
 
-Status: **implemented through `e35714b0`, locally validated, pushed to draft
-PR #73, and exercised by a completed selector-ineligible production-scale
-canary. Required CI passed at the runtime commit. A separate pre-existing
-ellipse-fit nondeterminism finding still requires scientific hardening; not
-merged or production-active**.
+Status: **implemented through `6d3d3c0d`, locally validated, pushed to draft
+PR #73, and exercised by completed selector-ineligible production-scale
+canaries. All 23 required CI checks passed at the runtime commit. A separate
+pre-existing ellipse-fit nondeterminism finding still requires scientific
+hardening; not merged or production-active**.
 
 Worktree branch: `agent/palette/subject-shape-plan-receipts-20260829`
 
 Legacy baseline canary commit: `bf058521`
 
 Optimized canary commit: `e35714b0`
+
+Whole-map authority-stamping canary commit: `c94426a7`
+
+Operation-scoped authority-proof canary commit: `6d3d3c0d`
 
 This optimization follows the shared receipt lifecycle decision in
 [`publication_receipt_hashing_lifecycle_2026-08-29.md`](publication_receipt_hashing_lifecycle_2026-08-29.md).
@@ -78,6 +82,35 @@ and scientific consumption share one authority grammar; the optimization does
 not introduce a second resolver or a weaker mode. Rebinding publication and
 equivalence inspection still use the full loader. Only later dependency
 admission uses the metadata-only result.
+
+### Operation-scoped subject-mask authority proof
+
+The first authority-stamping pass replaced repeated per-field Zarr attribute
+writes with one fail-closed whole-map replacement and added nested authority
+phase telemetry. Its matched `c94426a7` canary was intentionally retained even
+though total runtime was neutral: the telemetry proved that attribute writes
+were not the dominant cost. `authority_coordinate_descriptors` spent 680.203
+seconds before writing only about 144 KB.
+
+The actual amplification was in
+`BoundSubjectShapeBundleSource.assert_verified()`. Every one of 32 coordinate
+descriptors, plus several other authority helpers, independently reopened and
+rebuilt the same subject-mask bundle source. The shared persisted-proof
+mechanism now gives that bound source operation-scoped verification:
+
+1. first use performs the complete bundle-source validation and seals its
+   source digest in the operation scope;
+2. intermediate consumers reuse that exact proof; and
+3. scope close performs one fresh complete validation to retain fail-closed
+   time-of-check/time-of-use protection.
+
+This is two authority-bundle validations per publication operation, not two
+decoded subject-mask payload scans. A real writer-to-publisher regression calls
+the bound source three times inside one proof scope and asserts exactly two
+loader invocations: initial and closing validation. The closing validation
+still fails if the source digest changes. Activation state is deliberately not
+part of scientific source identity, preserving the existing rule that an
+already-bound immutable source remains valid after a later selector change.
 
 ## Measured production-scale result
 
@@ -149,6 +182,42 @@ closes exactly. A deterministic degenerate-mask rejection contract and explicit
 failure reason are required before either set of unstable ellipse values can be
 treated as canonical.
 
+## Completed authority-proof canary
+
+LSF job `153771776` ran commit `6d3d3c0d` against the same Cam2010094 bundle,
+rebinding, host (`h07u20`), 32-slot allocation, worker count, chunking, storage
+profile, and registry-disabled selector-ineligible policy as the matched
+`c94426a7` authority-stamping control (job `153771730`). Both runs completed
+successfully.
+
+| Measurement | Whole-map control `c94426a7` | Proof reuse `6d3d3c0d` | Change |
+|---|---:|---:|---:|
+| total wall time | 2,788.240 s | 1,837.461 s | 1.52x; -15m51s |
+| plan | 23.758 s | 24.281 s | neutral |
+| scientific compute | 983.161 s | 977.537 s | neutral |
+| storage conversion | 347.284 s | 350.810 s | neutral |
+| atomic publication | 1,310.150 s | 359.120 s | 3.65x |
+| post-rename binding | 1,231.648 s | 281.297 s | 4.38x |
+| authority stamping | 913.267 s | 117.417 s | 7.78x |
+| coordinate descriptors | 680.203 s | 0.369 s | 1,845x |
+| delivered read characters | 480.002 GB | 431.796 GB | -48.206 GB |
+| average effective CPU cores | 9.786 | 14.392 | +47.1% |
+| 32-slot CPU efficiency | 30.583% | 44.974% | +14.392 points |
+
+The end-to-end reduction is 34.1%. It is entirely localized to atomic
+publication: planning, scientific computation, and the required access-aware
+storage transform remain matched. Within authority stamping, delivered read
+characters fell from 45.319 GB to 3.877 GB. Descriptor stamping itself now
+takes less than half a second; the largest remaining authority subphase is the
+legitimate body-frame publication at 103.234 seconds.
+
+The new output is complete, `bound_canonical_v2`, selector-ineligible, and
+registry-inactive. It retains the exact source-binding digest, row-identity
+digest, placement-array digest, storage profile, bundle identity, and numeric
+projection digest of the control. Run-local temporal and derivation record
+digests differ as designed because their sealed record references contain the
+new output run ID.
+
 ## Validation completed
 
 - `62 passed` in the complete affected atomic-publisher and subject-shape
@@ -162,6 +231,13 @@ treated as canonical.
 - The strengthened receipt-v2 regression passed in 189.94 seconds and checks
   every declared final array digest against the live final array.
 - `py_compile` and `git diff --check` passed for the modified boundary.
+- The real writer-to-publisher boundary passed in 125.76 seconds and asserts
+  exactly two bundle-source reloads per proof scope.
+- The 21 focused coordinate-publication and access-aware candidate tests passed
+  in 356.80 seconds.
+- `py_compile`, Ruff, and `git diff --check` passed for the authority-proof
+  change.
+- All 23 required CI checks passed for runtime commit `6d3d3c0d`.
 
 ## Guards and deferred work
 
@@ -180,10 +256,10 @@ treated as canonical.
   selector-ineligible optimized canary started only after the baseline ended
   and completed in 2,786.824 seconds, so the two runs did not contend for
   storage or CPU resources.
-- `authority_stamping` still takes 912.950 seconds and performs about 43.008 GB
-  of delivered metadata reads. The physical payload hash takes only 2.912
-  seconds. A later pass should eliminate repeated large-metadata
-  read/modify/write serialization without weakening authority validation.
+- Operation-scoped authority proof reuse reduced `authority_stamping` to
+  117.417 seconds. The remaining 103.234-second body-frame authority step is
+  now the next measured publication target; it must not be optimized by
+  dropping its scientific or coordinate checks.
 - The canary's degenerate-mask ellipse nondeterminism must be hardened and
   covered by repeated-run identity tests before scientific activation.
 - Required CI for any new documentation or scientific-hardening head remains a
