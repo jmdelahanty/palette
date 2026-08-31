@@ -1081,8 +1081,23 @@ def test_eye_angle_canonical_resolution_uses_subject_shape_sealed_base_run(
     assert context.frame_indices_path.endswith("/source_acquisition_frame_index")
 
 
+@pytest.mark.parametrize(
+    ("historical_keypoint_path", "success_equivalence_key"),
+    (
+        (
+            "keypoints_runs/historical",
+            "detection_success_to_pose_success",
+        ),
+        (
+            "refined_keypoints_runs/historical",
+            "usable_keypoints_to_pose_success",
+        ),
+    ),
+)
 def test_eye_angle_bundle_assignment_rebinding_uses_shared_successor_resolver(
     monkeypatch,
+    historical_keypoint_path,
+    success_equivalence_key,
 ) -> None:
     import zarr
 
@@ -1104,6 +1119,9 @@ def test_eye_angle_bundle_assignment_rebinding_uses_shared_successor_resolver(
     success_sha = eye_angle_analysis.array_values_sha256(base["pose_success"])
     payload = {
         "assignment_state": "used",
+        "subject_mask_source": {
+            "historical_keypoint_run_path": historical_keypoint_path,
+        },
         "canonical_keypoint_source": {
             "authority_profile": (
                 eye_angle_analysis.ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE
@@ -1118,7 +1136,7 @@ def test_eye_angle_bundle_assignment_rebinding_uses_shared_successor_resolver(
             "keypoints_roi_to_keypoints_roi": {
                 "normalized_sha256": keypoint_sha,
             },
-            "detection_success_to_pose_success": {
+            success_equivalence_key: {
                 "normalized_sha256": success_sha,
             },
         },

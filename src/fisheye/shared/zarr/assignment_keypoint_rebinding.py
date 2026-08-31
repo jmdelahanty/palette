@@ -27,6 +27,10 @@ from fisheye.shared.subject_position_keypoint_source import (
 )
 from fisheye.shared.zarr.benchmark_runtime import utc_now
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr.refined_keypoint_manifest import (
+    refined_keypoint_source_bindings_from_manifest,
+    validate_refined_keypoint_run_manifest,
+)
 from fisheye.shared.zarr.subject_mask_bundle_coordinate_authority import (
     BoundRecordingSubjectMaskCoordinateAuthority,
     load_recording_subject_mask_coordinate_authority,
@@ -65,7 +69,7 @@ _IDENTITY_NAMES = (
     "instance_key",
     "source_acquisition_frame_index",
 )
-_EQUIVALENCE_PAIRS = (
+_BASE_EQUIVALENCE_PAIRS = (
     ("source_crop_row_ids", "source_crop_row_ids", None),
     ("instance_key", "instance_key", None),
     (
@@ -74,8 +78,11 @@ _EQUIVALENCE_PAIRS = (
         None,
     ),
     ("keypoints_roi", "keypoints_roi", np.dtype("float32")),
-    ("detection_success", "pose_success", None),
 )
+_ASSIGNMENT_SOURCE_PROFILES = {
+    ("keypoints_runs", "detection_success"): "raw_keypoints",
+    ("refined_keypoints_runs", "usable_keypoints"): "refined_keypoints",
+}
 
 
 class AssignmentKeypointRebindingError(ValueError):
@@ -105,7 +112,9 @@ def _manifest_arrays(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
     return arrays
 
 
-def _assignment_collection_source_run(collection: Mapping[str, Any]) -> str:
+def _assignment_collection_source(
+    collection: Mapping[str, Any],
+) -> tuple[str, str, str]:
     if (
         collection.get("schema_id")
         != "palette.subject_mask.assignment_keypoint_collection"
@@ -119,12 +128,22 @@ def _assignment_collection_source_run(collection: Mapping[str, Any]) -> str:
     if type(n_rois) is not int or n_rois < 0 or not isinstance(workers, list):
         _fail("Subject-mask assignment collection dimensions are invalid.")
     cursor = 0
-    run_ids: set[str] = set()
+    sources: set[tuple[str, str, str]] = set()
     for worker in workers:
         interval = (
             worker.get("global_row_interval") if isinstance(worker, Mapping) else None
         )
         assignment = worker.get("assignment") if isinstance(worker, Mapping) else None
+        group = (
+            assignment.get("assignment_keypoint_group")
+            if isinstance(assignment, Mapping)
+            else None
+        )
+        success_dataset = (
+            assignment.get("assignment_keypoint_success_dataset")
+            if isinstance(assignment, Mapping)
+            else None
+        )
         if (
             not isinstance(interval, Mapping)
             or set(interval) != {"start_row", "stop_row"}
@@ -133,24 +152,134 @@ def _assignment_collection_source_run(collection: Mapping[str, Any]) -> str:
             or interval["stop_row"] <= cursor
             or interval["stop_row"] > n_rois
             or not isinstance(assignment, Mapping)
-            or assignment.get("assignment_keypoint_group") != "keypoints_runs"
-            or assignment.get("assignment_keypoint_success_dataset")
-            != "detection_success"
+            or (group, success_dataset) not in _ASSIGNMENT_SOURCE_PROFILES
         ):
             _fail("Subject-mask assignment worker partition is not exact.")
-        run_ids.add(
-            _run_id(
-                assignment.get("assignment_keypoints_run"),
-                label="assignment keypoint source",
+        sources.add(
+            (
+                str(group),
+                _run_id(
+                    assignment.get("assignment_keypoints_run"),
+                    label="assignment keypoint source",
+                ),
+                str(success_dataset),
             )
         )
         cursor = int(interval["stop_row"])
-    if cursor != n_rois or len(run_ids) != 1:
+    if cursor != n_rois or len(sources) != 1:
         _fail(
             "Subject-mask assignment collection must cover every row with one "
             "recording-wide keypoint run."
         )
-    return next(iter(run_ids))
+    return next(iter(sources))
+
+
+def _assignment_collection_source_run(collection: Mapping[str, Any]) -> str:
+    """Return the exact historical run ID retained for compatibility callers."""
+
+    return _assignment_collection_source(collection)[1]
+
+
+def _equivalence_pairs(
+    historical_success_dataset: str,
+) -> tuple[tuple[str, str, np.dtype[Any] | None], ...]:
+    if historical_success_dataset not in {"detection_success", "usable_keypoints"}:
+        _fail("Historical assignment success dataset is unsupported.")
+    return (
+        *_BASE_EQUIVALENCE_PAIRS,
+        (historical_success_dataset, "pose_success", None),
+    )
+
+
+def assignment_success_equivalence_key(historical_run_path: str) -> str:
+    """Return the closed success-equivalence field for one historical profile."""
+
+    path = str(historical_run_path)
+    if path.startswith("keypoints_runs/") and path.count("/") == 1:
+        return "detection_success_to_pose_success"
+    if path.startswith("refined_keypoints_runs/") and path.count("/") == 1:
+        return "usable_keypoints_to_pose_success"
+    _fail("Historical assignment keypoint path is unsupported.")
+
+
+def _active_keypoint_member(
+    authority: Mapping[str, Any],
+    *,
+    role: str,
+    run_path: str,
+) -> Mapping[str, Any]:
+    members = authority.get("members")
+    member = members.get(role) if isinstance(members, Mapping) else None
+    if not isinstance(member, Mapping) or member.get("run_path") != run_path:
+        _fail(
+            f"Historical assignment {role.replace('_', ' ')} is not the exact "
+            "active keypoint-bundle member."
+        )
+    return member
+
+
+def _refined_historical_labels(
+    historical_run: Any,
+    *,
+    historical_path: str,
+    active_authority: Mapping[str, Any],
+    recording_identity: str,
+) -> list[str]:
+    member = _active_keypoint_member(
+        active_authority,
+        role="refined_keypoints",
+        run_path=historical_path,
+    )
+    manifest = historical_run.attrs.get("run_manifest")
+    if not isinstance(manifest, Mapping):
+        _fail("Historical refined-keypoint run manifest is absent.")
+    manifest_errors = validate_refined_keypoint_run_manifest(manifest)
+    if manifest_errors:
+        _fail(
+            "Historical refined-keypoint run manifest is invalid: "
+            + "; ".join(manifest_errors)
+        )
+    payload = manifest.get("payload")
+    logical = payload.get("logical_content") if isinstance(payload, Mapping) else None
+    source_value = (
+        payload.get("source_bindings") if isinstance(payload, Mapping) else None
+    )
+    persisted_source = historical_run.attrs.get("source_bindings")
+    if (
+        manifest.get("payload_digest") != member.get("manifest_payload_digest")
+        or canonical_json_sha256(manifest) != member.get("manifest_document_digest")
+        or not isinstance(logical, Mapping)
+        or logical.get("digest") != member.get("logical_content_digest")
+        or not isinstance(source_value, Mapping)
+        or persisted_source != source_value
+    ):
+        _fail(
+            "Historical refined-keypoint publication differs from its active "
+            "keypoint-bundle member."
+        )
+    try:
+        source = refined_keypoint_source_bindings_from_manifest(source_value)
+    except (TypeError, ValueError) as exc:
+        raise AssignmentKeypointRebindingError(
+            f"Historical refined-keypoint source bindings are invalid: {exc}"
+        ) from exc
+    raw_member = _active_keypoint_member(
+        active_authority,
+        role="raw_keypoints",
+        run_path=f"keypoints_runs/{source.raw_run_id}",
+    )
+    if (
+        source.recording_identity != recording_identity
+        or source.raw_manifest_digest != raw_member.get("manifest_document_digest")
+        or source.raw_logical_content_digest
+        != raw_member.get("logical_content_digest")
+    ):
+        _fail(
+            "Historical refined-keypoint source does not bind the active raw "
+            "keypoint member."
+        )
+    labels_value = source.skeleton_semantics.get("keypoint_labels")
+    return list(labels_value) if isinstance(labels_value, (list, tuple)) else []
 
 
 def _chunked_equivalence(
@@ -228,7 +357,9 @@ def inspect_assignment_keypoint_rebinding(
         allow_inactive=True,
     )
     collection = bundle.assignment_keypoint_collection
-    historical_id = _assignment_collection_source_run(collection)
+    historical_group, historical_id, historical_success_dataset = (
+        _assignment_collection_source(collection)
+    )
     canonical_source = load_keypoint_coordinate_successor_source(
         archive,
         run_path=f"keypoints_runs/{requested_keypoints}",
@@ -247,18 +378,34 @@ def inspect_assignment_keypoint_rebinding(
     ):
         _fail("Canonical keypoints and subject masks bind different crop authority.")
 
-    historical_path = f"keypoints_runs/{historical_id}"
+    historical_path = f"{historical_group}/{historical_id}"
     try:
         historical_run = root[historical_path]
     except Exception as exc:
         raise AssignmentKeypointRebindingError(
             "Historical assignment keypoint rowset is absent."
         ) from exc
-    if (
-        historical_run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
-        or historical_run.attrs.get("stage_selector_eligible") is not True
-    ):
-        _fail("Historical assignment keypoint rowset is not complete and selected.")
+    selector_eligible = historical_run.attrs.get("stage_selector_eligible")
+    if historical_run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE:
+        _fail("Historical assignment keypoint rowset is not complete.")
+    if historical_group == "keypoints_runs":
+        if selector_eligible is not True:
+            _fail("Historical raw assignment keypoint rowset is not selected.")
+        historical_labels_value = historical_run.attrs.get("keypoint_labels")
+        historical_labels = (
+            list(historical_labels_value)
+            if isinstance(historical_labels_value, (list, tuple))
+            else []
+        )
+    else:
+        if type(selector_eligible) is not bool:
+            _fail("Historical refined assignment lacks an explicit selector state.")
+        historical_labels = _refined_historical_labels(
+            historical_run,
+            historical_path=historical_path,
+            active_authority=active_authority,
+            recording_identity=bundle.recording_identity,
+        )
 
     canonical_arrays = _manifest_arrays(canonical_manifest)
     bundle_identity = bundle.bundle_manifest["payload"]["cross_binding"][
@@ -281,13 +428,7 @@ def inspect_assignment_keypoint_rebinding(
     labels_value = (
         pose_schema.get("keypoint_labels") if isinstance(pose_schema, Mapping) else None
     )
-    historical_labels_value = historical_run.attrs.get("keypoint_labels")
     labels = list(labels_value) if isinstance(labels_value, (list, tuple)) else None
-    historical_labels = (
-        list(historical_labels_value)
-        if isinstance(historical_labels_value, (list, tuple))
-        else None
-    )
     if (
         not isinstance(labels, list)
         or labels != historical_labels
@@ -299,7 +440,9 @@ def inspect_assignment_keypoint_rebinding(
         _fail("Historical and canonical keypoint label authorities differ.")
 
     equivalence: dict[str, Any] = {}
-    for historical_name, canonical_name, normalized_dtype in _EQUIVALENCE_PAIRS:
+    for historical_name, canonical_name, normalized_dtype in _equivalence_pairs(
+        historical_success_dataset
+    ):
         if historical_name not in historical_run or canonical_name not in canonical_run:
             _fail("Assignment equivalence input array is absent.")
         evidence = _chunked_equivalence(
@@ -465,14 +608,17 @@ def validate_assignment_keypoint_rebinding_manifest(
         ):
             if _SHA256.fullmatch(str(subject.get(name) or "")) is None:
                 errors.append(f"subject-mask {name} is invalid")
-        for name, prefix in (
-            ("refined_run_path", "refined_subject_masks_runs/"),
-            ("historical_keypoint_run_path", "keypoints_runs/"),
+        for name, prefixes in (
+            ("refined_run_path", ("refined_subject_masks_runs/",)),
+            (
+                "historical_keypoint_run_path",
+                ("keypoints_runs/", "refined_keypoints_runs/"),
+            ),
         ):
             path = subject.get(name)
             if (
                 not isinstance(path, str)
-                or not path.startswith(prefix)
+                or not path.startswith(prefixes)
                 or path.count("/") != 1
             ):
                 errors.append(f"subject-mask {name} is invalid")
@@ -534,10 +680,23 @@ def validate_assignment_keypoint_rebinding_manifest(
             errors.append("canonical keypoint label authority is invalid")
 
     equivalence = payload.get("equivalence")
+    historical_path = (
+        subject.get("historical_keypoint_run_path")
+        if isinstance(subject, Mapping)
+        else None
+    )
+    try:
+        success_equivalence_key = assignment_success_equivalence_key(
+            str(historical_path or "")
+        )
+    except AssignmentKeypointRebindingError:
+        success_equivalence_key = None
     expected_equivalence = {
         f"{historical}_to_{canonical}"
-        for historical, canonical, _dtype in _EQUIVALENCE_PAIRS
+        for historical, canonical, _dtype in _BASE_EQUIVALENCE_PAIRS
     }
+    if success_equivalence_key is not None:
+        expected_equivalence.add(success_equivalence_key)
     if not isinstance(equivalence, Mapping) or set(equivalence) != expected_equivalence:
         errors.append("assignment equivalence inventory is not exact")
     else:
@@ -763,6 +922,7 @@ __all__ = [
     "ASSIGNMENT_KEYPOINT_REBINDING_SCHEMA_VERSION",
     "ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE",
     "AssignmentKeypointRebindingError",
+    "assignment_success_equivalence_key",
     "inspect_assignment_keypoint_rebinding",
     "load_assignment_keypoint_rebinding_manifest",
     "publish_assignment_keypoint_rebinding",

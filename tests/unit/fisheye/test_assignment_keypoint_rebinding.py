@@ -14,8 +14,10 @@ from fisheye.shared.zarr.assignment_keypoint_rebinding import (
     ASSIGNMENT_KEYPOINT_REBINDING_POLICY,
     ASSIGNMENT_KEYPOINT_REBINDING_SCHEMA_ID,
     ASSIGNMENT_KEYPOINT_REBINDING_SCHEMA_VERSION,
+    _assignment_collection_source,
     _assignment_collection_source_run,
     _chunked_equivalence,
+    _refined_historical_labels,
     inspect_assignment_keypoint_rebinding,
     load_assignment_keypoint_rebinding_manifest,
     validate_assignment_keypoint_rebinding_manifest,
@@ -121,6 +123,18 @@ def _manifest() -> dict[str, object]:
 def test_assignment_collection_requires_one_gapless_recording_run() -> None:
     assert _assignment_collection_source_run(_collection()) == "historical"
 
+    refined = _collection()
+    for worker in refined["workers"]:
+        worker["assignment"]["assignment_keypoint_group"] = "refined_keypoints_runs"
+        worker["assignment"]["assignment_keypoint_success_dataset"] = (
+            "usable_keypoints"
+        )
+    assert _assignment_collection_source(refined) == (
+        "refined_keypoints_runs",
+        "historical",
+        "usable_keypoints",
+    )
+
     gap = _collection()
     gap["workers"][1]["global_row_interval"]["start_row"] = 3
     try:
@@ -138,6 +152,74 @@ def test_assignment_collection_requires_one_gapless_recording_run() -> None:
         assert "one recording-wide" in str(exc)
     else:  # pragma: no cover - assertion aid
         raise AssertionError("mixed assignment collection was accepted")
+
+
+def test_refined_assignment_labels_require_exact_active_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    labels = ["swim_bladder", "eye_left", "eye_right"]
+    source_bindings = {"schema_id": "fixture.refined.source"}
+    manifest = {
+        "payload_digest": "1" * 64,
+        "payload": {
+            "logical_content": {"digest": "2" * 64},
+            "source_bindings": source_bindings,
+        },
+    }
+    historical = SimpleNamespace(
+        attrs={"run_manifest": manifest, "source_bindings": source_bindings}
+    )
+    source = SimpleNamespace(
+        recording_identity="recording",
+        raw_run_id="raw",
+        raw_manifest_digest="3" * 64,
+        raw_logical_content_digest="4" * 64,
+        skeleton_semantics={"keypoint_labels": labels},
+    )
+    authority = {
+        "members": {
+            "refined_keypoints": {
+                "run_path": "refined_keypoints_runs/historical",
+                "manifest_payload_digest": manifest["payload_digest"],
+                "manifest_document_digest": canonical_json_sha256(manifest),
+                "logical_content_digest": "2" * 64,
+            },
+            "raw_keypoints": {
+                "run_path": "keypoints_runs/raw",
+                "manifest_document_digest": "3" * 64,
+                "logical_content_digest": "4" * 64,
+            },
+        }
+    }
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding."
+        "validate_refined_keypoint_run_manifest",
+        lambda _manifest: (),
+    )
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding."
+        "refined_keypoint_source_bindings_from_manifest",
+        lambda _bindings: source,
+    )
+
+    assert _refined_historical_labels(
+        historical,
+        historical_path="refined_keypoints_runs/historical",
+        active_authority=authority,
+        recording_identity="recording",
+    ) == labels
+
+    changed = copy.deepcopy(authority)
+    changed["members"]["refined_keypoints"]["run_path"] = (
+        "refined_keypoints_runs/other"
+    )
+    with pytest.raises(ValueError, match="exact active"):
+        _refined_historical_labels(
+            historical,
+            historical_path="refined_keypoints_runs/historical",
+            active_authority=changed,
+            recording_identity="recording",
+        )
 
 
 def test_chunked_equivalence_seals_declared_float32_normalization() -> None:
@@ -174,6 +256,17 @@ def test_chunked_equivalence_seals_declared_float32_normalization() -> None:
 def test_rebinding_manifest_is_closed_and_digest_sealed() -> None:
     manifest = _manifest()
     assert validate_assignment_keypoint_rebinding_manifest(manifest) == ()
+
+    refined = copy.deepcopy(manifest)
+    refined["payload"]["subject_mask_source"]["historical_keypoint_run_path"] = (
+        "refined_keypoints_runs/historical"
+    )
+    success = refined["payload"]["equivalence"].pop(
+        "detection_success_to_pose_success"
+    )
+    refined["payload"]["equivalence"]["usable_keypoints_to_pose_success"] = success
+    refined["payload_digest"] = canonical_json_sha256(refined["payload"])
+    assert validate_assignment_keypoint_rebinding_manifest(refined) == ()
 
     tampered = copy.deepcopy(manifest)
     tampered["payload"]["row_count"] = 6
@@ -271,9 +364,19 @@ def test_rebinding_loader_reuses_provided_bound_mask_authority(
     assert loaded == manifest
 
 
+@pytest.mark.parametrize(
+    ("historical_group", "historical_success_dataset", "selector_eligible"),
+    (
+        ("keypoints_runs", "detection_success", True),
+        ("refined_keypoints_runs", "usable_keypoints", False),
+    ),
+)
 def test_inspection_uses_resolver_digests_for_immutable_documents(
-    monkeypatch: object,
-    tmp_path: object,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    historical_group: str,
+    historical_success_dataset: str,
+    selector_eligible: bool,
 ) -> None:
     archive = tmp_path / "analysis.zarr"
     archive.mkdir()
@@ -304,7 +407,7 @@ def test_inspection_uses_resolver_digests_for_immutable_documents(
     historical_arrays = {
         **identity,
         "keypoints_roi": keypoints.astype(np.float64),
-        "detection_success": pose_success,
+        historical_success_dataset: pose_success,
     }
 
     class Group(dict[str, object]):
@@ -322,10 +425,10 @@ def test_inspection_uses_resolver_digests_for_immutable_documents(
     labels = ["swim_bladder", "eye_left", "eye_right"]
     historical = Group(
         historical_arrays,
-        path="keypoints_runs/historical",
+        path=f"{historical_group}/historical",
         attrs={
             "palette_run_completion_status": "complete",
-            "stage_selector_eligible": True,
+            "stage_selector_eligible": selector_eligible,
             "keypoint_labels": labels,
         },
     )
@@ -386,9 +489,11 @@ def test_inspection_uses_resolver_digests_for_immutable_documents(
                 {
                     "global_row_interval": {"start_row": 0, "stop_row": 2},
                     "assignment": {
-                        "assignment_keypoint_group": "keypoints_runs",
+                        "assignment_keypoint_group": historical_group,
                         "assignment_keypoints_run": "historical",
-                        "assignment_keypoint_success_dataset": "detection_success",
+                        "assignment_keypoint_success_dataset": (
+                            historical_success_dataset
+                        ),
                     },
                 }
             ],
@@ -427,7 +532,14 @@ def test_inspection_uses_resolver_digests_for_immutable_documents(
     )
     monkeypatch.setattr(
         "fisheye.shared.zarr.assignment_keypoint_rebinding.open_zarr_root",
-        lambda *_args, **_kwargs: {"keypoints_runs/historical": historical},
+        lambda *_args, **_kwargs: {
+            f"{historical_group}/historical": historical
+        },
+    )
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding."
+        "_refined_historical_labels",
+        lambda *_args, **_kwargs: labels,
     )
 
     result = inspect_assignment_keypoint_rebinding(
@@ -442,4 +554,12 @@ def test_inspection_uses_resolver_digests_for_immutable_documents(
     assert keypoint_source["run_manifest_document_digest"] == manifest_digest
     assert keypoint_source["keypoint_bundle_authority_digest"] == authority_digest
     assert keypoint_source["coordinate_successor_authority_digest"] == successor_digest
+    subject_source = result["payload"]["subject_mask_source"]
+    assert subject_source["historical_keypoint_run_path"] == (
+        f"{historical_group}/historical"
+    )
+    assert (
+        f"{historical_success_dataset}_to_pose_success"
+        in result["payload"]["equivalence"]
+    )
     json.dumps(result, allow_nan=False)

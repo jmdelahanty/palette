@@ -149,3 +149,94 @@ def test_eye_run_resolution_uses_canonical_eye_angle_reader(
     assert calls == [
         (root, "analysis/eye_angle_runs/eye_current", False)
     ]
+
+
+def test_eye_run_resolution_accepts_only_exact_storage_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_group = SimpleNamespace(attrs={"stage_selector_eligible": False})
+    parent = {"eye_candidate": run_group}
+    root = {"analysis/eye_angle_runs": parent}
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        validation_module,
+        "is_run_complete_in_parent",
+        lambda observed_parent, observed_run, *, legacy_default: (
+            observed_parent is parent
+            and observed_run is run_group
+            and legacy_default is False
+        ),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "validate_eye_angle_compact_run",
+        lambda observed: calls.append(("compact", observed)) or (),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "eye_angle_dimensions_from_run_attrs",
+        lambda attrs: calls.append(("dimensions", attrs)) or "dimensions",
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "validate_eye_angle_candidate_storage",
+        lambda observed, *, dimensions: (
+            calls.append(("storage", (observed, dimensions))) or ()
+        ),
+    )
+
+    resolved, group = _resolve_eye_run(
+        root,
+        "analysis/eye_angle_runs/eye_candidate",
+        allow_ineligible_candidate=True,
+    )
+
+    assert resolved == "eye_candidate"
+    assert group is run_group
+    assert [name for name, _value in calls] == ["compact", "dimensions", "storage"]
+
+    with pytest.raises(ValueError, match="explicit run name"):
+        _resolve_eye_run(root, None, allow_ineligible_candidate=True)
+    with pytest.raises(ValueError, match="exact child name"):
+        _resolve_eye_run(root, "latest", allow_ineligible_candidate=True)
+
+
+def test_eye_run_resolution_rejects_non_candidate_ineligible_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_group = SimpleNamespace(attrs={"stage_selector_eligible": False})
+    root = {"analysis/eye_angle_runs": {"eye_candidate": run_group}}
+    monkeypatch.setattr(
+        validation_module,
+        "is_run_complete_in_parent",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "validate_eye_angle_compact_run",
+        lambda _run: (),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "eye_angle_dimensions_from_run_attrs",
+        lambda _attrs: "dimensions",
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "validate_eye_angle_candidate_storage",
+        lambda *_args, **_kwargs: (
+            SimpleNamespace(
+                code="candidate_profile",
+                path="analysis/eye_angle_runs/eye_candidate",
+                message="not a candidate",
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="candidate storage is invalid"):
+        _resolve_eye_run(
+            root,
+            "eye_candidate",
+            allow_ineligible_candidate=True,
+        )

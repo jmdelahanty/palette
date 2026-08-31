@@ -69,6 +69,7 @@ from fisheye.shared.subject_position_keypoint_source import (
 )
 from fisheye.shared.zarr.assignment_keypoint_rebinding import (
     ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE,
+    assignment_success_equivalence_key,
 )
 from fisheye.pose.body_frame import (
     BODY_FRAME_COORDINATE_SPACE_ROI,
@@ -3343,8 +3344,14 @@ def _resolve_canonical_eye_keypoints(
         group = resolved.run_group
         success = group.get("pose_success")
         keypoint_equivalence = equivalence.get("keypoints_roi_to_keypoints_roi")
+        subject_source = payload.get("subject_mask_source")
+        historical_keypoint_path = (
+            subject_source.get("historical_keypoint_run_path")
+            if isinstance(subject_source, Mapping)
+            else None
+        )
         success_equivalence = equivalence.get(
-            "detection_success_to_pose_success"
+            assignment_success_equivalence_key(str(historical_keypoint_path or ""))
         )
         if (
             success is None

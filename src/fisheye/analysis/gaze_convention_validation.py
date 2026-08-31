@@ -29,6 +29,13 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.eye_angle_io import resolve_eye_angle_run  # noqa: E402
+from fisheye.analysis.eye_angle_schema import (  # noqa: E402
+    eye_angle_dimensions_from_run_attrs,
+    validate_eye_angle_compact_run,
+)
+from fisheye.analysis.eye_angle_storage import (  # noqa: E402
+    validate_eye_angle_candidate_storage,
+)
 from fisheye.shared.eye_geometry_source import (  # noqa: E402
     EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
     EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
@@ -36,7 +43,13 @@ from fisheye.shared.eye_geometry_source import (  # noqa: E402
 )
 from fisheye.shared.json_safety import decode_null_terminated_text  # noqa: E402
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run  # noqa: E402
+from fisheye.shared.zarr.metadata_equivalence import (  # noqa: E402
+    validate_direct_consolidated_subtree,
+)
 from fisheye.shared.zarr_io import open_zarr_root  # noqa: E402
+from fisheye.shared.zarr_run_completion import (  # noqa: E402
+    is_run_complete_in_parent,
+)
 
 
 SCHEMA_ID = "palette.gaze_convention_validation.v1"
@@ -387,7 +400,59 @@ def _resolve_eye_run(
     run_name: Optional[str],
     *,
     legacy_compatibility: bool = False,
+    allow_ineligible_candidate: bool = False,
 ) -> tuple[str, zarr.Group]:
+    if allow_ineligible_candidate:
+        if type(run_name) is not str or not run_name.strip():
+            raise ValueError(
+                "Selector-ineligible eye-angle review requires one explicit run name."
+            )
+        normalized = run_name.strip().strip("/")
+        prefix = "analysis/eye_angle_runs/"
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+        if (
+            not normalized
+            or "/" in normalized
+            or normalized
+            in {"latest", "latest_complete", "selected", "current", ".", ".."}
+        ):
+            raise ValueError(
+                "Selector-ineligible eye-angle review requires one exact child name."
+            )
+        parent = root.get("analysis/eye_angle_runs")
+        if parent is None or normalized not in parent:
+            raise ValueError(f"Explicit eye-angle candidate {normalized!r} is absent.")
+        run_group = parent[normalized]
+        if not is_run_complete_in_parent(parent, run_group, legacy_default=False):
+            raise ValueError("Explicit eye-angle candidate is not complete.")
+        if run_group.attrs.get("stage_selector_eligible") is not False:
+            raise ValueError(
+                "Explicit candidate review requires stage_selector_eligible=false."
+            )
+        compact_issues = validate_eye_angle_compact_run(run_group)
+        if compact_issues:
+            raise ValueError(
+                "Explicit eye-angle candidate is not exact compact-v7: "
+                + "; ".join(
+                    f"{issue.code}:{issue.path}:{issue.message}"
+                    for issue in compact_issues
+                )
+            )
+        dimensions = eye_angle_dimensions_from_run_attrs(_group_attrs(run_group))
+        storage_issues = validate_eye_angle_candidate_storage(
+            run_group,
+            dimensions=dimensions,
+        )
+        if storage_issues:
+            raise ValueError(
+                "Explicit eye-angle candidate storage is invalid: "
+                + "; ".join(
+                    f"{issue.code}:{issue.path}:{issue.message}"
+                    for issue in storage_issues
+                )
+            )
+        return normalized, run_group
     run_group, resolved, _run_path = resolve_eye_angle_run(
         root,
         run_name,
@@ -717,6 +782,7 @@ def validate_eye_angle_run(
     review_png: Optional[Path] = None,
     review_panels: int = 12,
     legacy_compatibility: bool = False,
+    allow_ineligible_candidate: bool = False,
 ) -> dict[str, object]:
     """Validate one persisted eye-angle run without modifying its Zarr."""
 
@@ -725,7 +791,14 @@ def validate_eye_angle_run(
         root,
         eye_angle_run,
         legacy_compatibility=legacy_compatibility,
+        allow_ineligible_candidate=allow_ineligible_candidate,
     )
+    metadata_equivalence = None
+    if allow_ineligible_candidate:
+        metadata_equivalence = validate_direct_consolidated_subtree(
+            zarr_path,
+            subtree_path=f"analysis/eye_angle_runs/{resolved_run}",
+        ).to_json()
     attrs = _group_attrs(run_group)
     sample = _load_compact_sample(run_group, windows=windows, rows_per_window=rows_per_window)
     valid = np.asarray(sample["valid_frame"], dtype=bool) & np.asarray(sample["valid"], dtype=bool)
@@ -782,6 +855,12 @@ def validate_eye_angle_run(
         "zarr_path": str(zarr_path),
         "eye_angle_run": resolved_run,
         "eye_angle_run_path": f"analysis/eye_angle_runs/{resolved_run}",
+        "eye_angle_admission": (
+            "explicit_complete_selector_ineligible_storage_candidate_v1"
+            if allow_ineligible_candidate
+            else "canonical_selector_eligible_eye_angle_reader_v1"
+        ),
+        "direct_consolidated_metadata_equivalence": metadata_equivalence,
         "read_only": True,
         "sampling": {
             "row_axis": "keypoint_detection_rows",
@@ -820,6 +899,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Permit statusless historical eye-angle runs; never permits selector-ineligible runs.",
     )
+    parser.add_argument(
+        "--allow-ineligible-candidate",
+        action="store_true",
+        help=(
+            "Review one explicitly named complete access-aware storage candidate. "
+            "The exact candidate contract and direct/consolidated metadata are "
+            "validated; no selector alias or arbitrary ineligible run is accepted."
+        ),
+    )
     parser.add_argument("--windows", type=int, default=DEFAULT_WINDOWS, help="Bounded sample windows across the run.")
     parser.add_argument(
         "--rows-per-window",
@@ -844,6 +932,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         review_png=args.review_png,
         review_panels=args.review_panels,
         legacy_compatibility=bool(args.legacy_eye_angle_compatibility),
+        allow_ineligible_candidate=bool(args.allow_ineligible_candidate),
     )
     rendered = json.dumps(report, indent=2, sort_keys=True)
     if args.json_output is not None:

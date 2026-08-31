@@ -594,6 +594,74 @@ receipt permits targeted rehash of exactly `body/body_bearing_deg` and
 chasers across the full recording and three exact semantic epochs. The same
 recording truthfully omits gaze because it has no schema-v3 gaze successor.
 
+### Historical refined-keypoint rebinding and cohort execution addendum — 2026-08-31
+
+The earlier census statement that these archives had no modern subject-mask or
+keypoint families was incorrect: that check searched below `analysis/`, while
+`subject_mask_bundle_runs`, `refined_subject_masks_runs`, `keypoints_runs`, and
+`refined_keypoints_runs` are root-level families. The scientific conclusion
+that the frozen cohort has no subject-shape, eye-angle, or schema-v3 gaze
+successor remains correct.
+
+The remaining source mismatch is narrower. Each historical subject-mask bundle
+records the refined-keypoint rows that were actually used during assignment,
+while the current coordinate authority is a later immutable
+`keypoints_runs` coordinate successor. That relationship must not be inferred
+from matching dimensions or labels. The rebinding contract now admits exactly
+two historical assignment profiles: raw `keypoints_runs/detection_success` and
+refined `refined_keypoints_runs/usable_keypoints`. The refined profile must be
+the exact active refined-keypoint bundle member, retain its valid manifest and
+source bindings to the active raw member, match recording and skeleton
+semantics, and compare row-for-row with the selected canonical coordinate
+successor. Coordinates, crop-row identity, instance identity, acquisition-frame
+identity, and the profile-specific success flag are hashed and compared without
+interpolation or row dropping.
+
+For `2026-08-10T17-20-55Z_arena_1_goodbatbadbat`, the exhaustive read-only
+preflight compared all 151,478 assignment rows and passed every identity,
+coordinate, and `usable_keypoints`-to-`pose_success` equivalence. Its proposed
+rebinding manifest payload digest is
+`54679865067e150f46ad7dac958d07833f227c75861fb801ce28ba2180c5b5ec`.
+Nothing was written to the recording by that preflight.
+
+A metadata-only census of the frozen 84-recording chaser cohort found all 84
+ready for the same exhaustive proof: each has exactly one compatible inactive
+coordinate-bound subject-mask bundle, exactly one canonical coordinate
+successor bound to the active keypoint authority, and no pre-existing target
+rebinding, subject-shape, or eye-angle run. The frozen prerequisite task is
+`palette.eye_gaze_prerequisite_cohort_task` version 1 with task digest
+`e919319073170d30c33ba0cae06f551f173c43b4f179c28feed327b345ec6178`.
+It seals every relevant metadata and validation-receipt file digest, exact
+source and output identities, and a one-writer-per-recording policy.
+
+Execution is deliberately split into two gates. First, one read-only LSF worker
+per recording reruns the exhaustive comparison and writes an exclusive proof
+receipt bound to the frozen task entry and full clean Palette commit. Second,
+materialization revalidates the frozen inputs, reruns the proof, and requires
+the exact receipt before publishing the immutable selector-ineligible rebinding,
+an access-aware subject-shape candidate, an access-aware compact-v7 eye-angle
+candidate, numeric convention validation, and a bounded review PNG. It changes
+no selector, registry row, production authority, or human review decision.
+Materialization begins with one recording; indices 2 through 84 are eligible
+only after that smoke succeeds. Any partial write requires new immutable run
+names rather than an in-place retry.
+
+The numeric candidate validator now has one explicit admission path for a
+complete `stage_selector_eligible=false` access-aware eye-angle child. It
+requires an exact child name, validates compact-v7 payload and candidate storage
+contracts, and proves direct/consolidated subtree equivalence. Normal canonical
+eye-angle resolution is unchanged. Numeric validation is not biological
+direction acceptance: a reviewer must still accept the convention before a
+convention receipt, gaze successor, or gaze-capable composition receipt can be
+created.
+
+This repair is historical, not a new-ingestion requirement. Future subject-mask
+assignment publications should bind the canonical coordinate source they use;
+when that identity is already exact, no rebinding successor is needed. At the
+time of this addendum, the implementation and frozen cohort task are locally
+validated, but no cohort Zarr writes or LSF submissions have occurred and
+required CI remains pending.
+
 ### Exact body-bearing × distance parity addendum — 2026-08-30
 
 The earlier GoodCopBadCop viewer retained two related products that had not
