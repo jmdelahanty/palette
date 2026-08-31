@@ -292,8 +292,12 @@ def _print_video_report(label: str, path: Path, check: Dict[str, Any], summary: 
     err = summary["seek_error_frames"]
     print(f"\n[{label}] {path}")
     print(
-        "  keyframe_flags: "
-        f"codec={check.get('codec')} has_stss={check.get('has_stss')} needs_fix={check.get('needs_fix')}"
+        "  sync_samples: "
+        f"codec={check.get('codec')} "
+        f"semantics={check.get('sync_sample_semantics')} "
+        f"proof={check.get('sync_sample_proof')} "
+        f"inspection={check.get('container_inspection_status')} "
+        f"has_stss={check.get('has_stss')} needs_fix={check.get('needs_fix')}"
     )
     print(f"  keyframe_msg: {check.get('message')}")
     print(
@@ -357,7 +361,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-keyframe-check",
         action="store_true",
-        help="Skip container stss check output.",
+        help="Skip MP4 sync-sample semantics check output.",
     )
     return parser.parse_args(list(argv) if argv is not None else None)
 

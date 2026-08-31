@@ -457,7 +457,7 @@ def test_external_ipc_apply_writes_nested_sidecars_and_manifest(
     monkeypatch.setattr(
         organize_recordings,
         "check_hevc_keyframe_flags",
-        lambda _: {
+        lambda _, **__: {
             "codec": "hevc",
             "has_stss": True,
             "needs_fix": False,
