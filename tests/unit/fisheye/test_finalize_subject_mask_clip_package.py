@@ -13,6 +13,7 @@ from fisheye.shared.refined_subject_mask_encoded_chunks import (
     ENCODED_PACKAGE_SCHEMA_ID,
     prepare_global_mask_chunk_grid,
 )
+from fisheye.shared.runtime_telemetry import PhaseTelemetry, require_runtime_telemetry
 from fisheye.utils import finalize_subject_mask_clip_package as mod
 
 
@@ -67,6 +68,13 @@ def test_finalize_subject_mask_clip_package_writes_tar_and_cleans_staging(
     )
 
     assert result["status"] == "ok"
+    require_runtime_telemetry(result["runtime_telemetry"], require_current=True)
+    assert [phase["name"] for phase in result["runtime_telemetry"]["phases"]] == [
+        "staging",
+        "finalization",
+        "package_write",
+        "cleanup",
+    ]
     assert package_path.is_file()
     assert not staging_root.exists()
     with tarfile.open(package_path, "r:gz") as tar:
@@ -78,6 +86,7 @@ def test_finalize_subject_mask_clip_package_writes_tar_and_cleans_staging(
         package = json.loads(package_member.read().decode("utf-8"))
     assert package["schema_id"] == mod.PACKAGE_SCHEMA_ID
     assert package["run_group_path"] == "refined_subject_masks_runs/refined_clip"
+    assert "runtime_telemetry" not in package
 
 
 def test_finalize_subject_mask_clip_package_can_emit_encoded_v2(
@@ -328,6 +337,7 @@ def test_publication_evidence_binds_real_worker_receipts_and_values(
     )
     root = zarr.open_group(str(draft), mode="r", use_consolidated=False)
 
+    telemetry = PhaseTelemetry(materializer="test_clip_publication_evidence")
     evidence = mod._build_publication_evidence(  # noqa: SLF001
         root=root,
         staged_zarr=draft,
@@ -343,6 +353,7 @@ def test_publication_evidence_binds_real_worker_receipts_and_values(
         global_frame_start=0,
         global_frame_stop=1,
         quality_compute_workers=1,
+        telemetry=telemetry,
     )
 
     assert evidence["global_row_interval"] == {"start_row": 0, "stop_row": 2}
@@ -350,3 +361,10 @@ def test_publication_evidence_binds_real_worker_receipts_and_values(
     assert (tmp_path / "evidence/refined_final_layout_unit/receipt.json").is_file()
     assert (tmp_path / "evidence/sampled_contour_receipt.json").is_file()
     assert (tmp_path / "evidence/quality_partition/receipt.json").is_file()
+    phase_names = [phase["name"] for phase in telemetry.to_json()["phases"]]
+    assert phase_names == [
+        "raw_final_layout",
+        "refined_final_layout",
+        "sampled_contour_receipt",
+        "quality_partition",
+    ]

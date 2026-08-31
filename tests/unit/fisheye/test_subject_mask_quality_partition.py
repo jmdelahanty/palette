@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.shared.zarr import subject_mask_quality_partition as quality_mod
 from fisheye.shared.zarr.benchmark_runtime import sha256_array
 from fisheye.shared.zarr.manifest_digest import (
     CANONICAL_JSON_DIGEST_ALGORITHM,
@@ -56,6 +57,20 @@ def _masks(rows: int = 4) -> np.ndarray:
     if rows > 1:
         masks[1, 1, 0, 0] = 1
     return masks
+
+
+def test_quality_compute_blocks_align_to_dense_physical_row_chunks() -> None:
+    class _ChunkedDense:
+        shape = (1000, 4, 384, 384)
+        chunks = (128, 1, 384, 384)
+
+    assert (
+        quality_mod._effective_block_rows(  # noqa: SLF001
+            {"masks_roi": _ChunkedDense()},
+            64 * 1024 * 1024,
+        )
+        == 128
+    )
 
 
 def _worker_receipt(run_path: str, masks: np.ndarray) -> dict[str, object]:

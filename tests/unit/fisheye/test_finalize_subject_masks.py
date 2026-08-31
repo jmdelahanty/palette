@@ -2475,9 +2475,11 @@ def test_finalize_subject_mask_run_can_materialize_bitpacked_mask_store(
         "status": "passed",
         "rows_checked": 2,
         "channels_checked": 4,
-        "chunks_checked": 2,
-        "row_chunk_size": 1,
+        "chunks_checked": 1,
+        "row_chunk_size": 2,
     }
+    assert summary["mask_bitpacked_summary"]["requested_encode_row_chunk_size"] == 1
+    assert summary["mask_bitpacked_summary"]["encode_row_chunk_size"] == 2
     assert "write_bitpacked_mask_store" in summary["timing_summary"]["phase_seconds"]
 
     run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_bitpacked"]
@@ -3932,6 +3934,15 @@ def test_worker_chunk_size_aligns_to_dense_mask_row_chunk() -> None:
         )
         == 512
     )
+
+
+def test_subject_mask_process_worker_caps_opencv_threads(monkeypatch) -> None:
+    observed: list[int] = []
+    monkeypatch.setattr(mod.cv2, "setNumThreads", observed.append)
+
+    mod._initialize_subject_mask_cpu_worker()  # noqa: SLF001
+
+    assert observed == [1]
 
 
 def test_finalize_subject_masks_records_dense_mask_row_chunk(
