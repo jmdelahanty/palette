@@ -15,6 +15,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
 import numpy as np
 
 from fisheye.analysis_workflows.chaser_body_alignment_by_distance_successor import (
@@ -33,9 +34,11 @@ from fisheye.visualization.chaser_body_alignment_by_distance import (
 
 RECEIPT_SCHEMA_ID = "palette.analysis.chaser_body_alignment_by_distance.plot_receipt"
 RECEIPT_SCHEMA_VERSION = 1
-PLOT_RECIPE_ID = "persisted_anatomical_alignment_distance_bins_static_v1"
+PLOT_RECIPE_ID = "persisted_anatomical_alignment_distance_bins_static_v2"
 PLOT_DPI = 180
 PLOT_FIGURE_SIZE_INCHES = (16.0, 15.0)
+PLOT_SAVEFIG_BBOX_INCHES = "tight"
+PLOT_SAVEFIG_PAD_INCHES = 0.12
 _RUN_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _EPOCH_COLORS = {
     1: "#4c78a8",
@@ -76,19 +79,57 @@ def _registry(manifest: Mapping[str, Any], name: str) -> dict[str, str]:
     return {str(key): str(value) for key, value in registry.items()}
 
 
-def _label(
-    *,
-    epoch: int,
-    chaser: int,
-    behavior_role: int,
-    epoch_registry: Mapping[str, str],
-    chaser_registry: Mapping[str, str],
-    behavior_registry: Mapping[str, str],
-) -> str:
-    epoch_label = epoch_registry.get(str(epoch), f"epoch {epoch}")
-    chaser_label = chaser_registry.get(str(chaser), f"chaser {chaser}")
-    role_label = behavior_registry.get(str(behavior_role), f"role {behavior_role}")
-    return f"{epoch_label} · {role_label} · {chaser_label}"
+def _factorized_legend_entries(
+    values: Mapping[str, Any],
+    scientific: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return compact visible labels while retaining canonical identities."""
+
+    epoch_registry = {
+        **_EPOCH_FALLBACK,
+        **_registry(scientific, "epoch_role"),
+    }
+    chaser_registry = _registry(scientific, "chaser")
+    behavior_registry = _registry(scientific, "behavior_role")
+    identities = tuple(int(value) for value in values["identities"])
+    summary_identity = np.asarray(
+        values["summary_chaser_identity_code"], dtype=np.int64
+    )
+    summary_role = np.asarray(
+        values["summary_chaser_behavior_role_code"], dtype=np.int64
+    )
+
+    epoch_entries = [
+        {
+            "epoch_role_code": epoch,
+            "visible_label": epoch_registry.get(str(epoch), f"epoch {epoch}"),
+            "color": _EPOCH_COLORS[epoch],
+        }
+        for epoch in (1, 2, 3)
+    ]
+    chaser_entries: list[dict[str, Any]] = []
+    for position, identity in enumerate(identities):
+        role_codes = sorted(
+            int(value) for value in np.unique(summary_role[summary_identity == identity])
+        )
+        if not role_codes:
+            _fail(f"Chaser identity code {identity} has no persisted behavior role.")
+        role_labels = [
+            behavior_registry.get(str(code), f"role {code}") for code in role_codes
+        ]
+        chaser_entries.append(
+            {
+                "chaser_identity_code": identity,
+                "canonical_identity": chaser_registry.get(
+                    str(identity), f"chaser {identity}"
+                ),
+                "behavior_role_codes": role_codes,
+                "behavior_role_labels": role_labels,
+                "visible_label": f"chaser {identity} · {'/'.join(role_labels)}",
+                "linestyle": _LINESTYLES[position % len(_LINESTYLES)],
+            }
+        )
+    return epoch_entries, chaser_entries
 
 
 def body_alignment_plot_parameters(
@@ -116,6 +157,10 @@ def body_alignment_plot_parameters(
     }
     chaser_registry = _registry(scientific, "chaser")
     behavior_registry = _registry(scientific, "behavior_role")
+    epoch_legend_entries, chaser_legend_entries = _factorized_legend_entries(
+        values, scientific
+    )
+    legend_entry_count = len(epoch_legend_entries) + len(chaser_legend_entries)
     return json_attr_safe(
         {
             "scientific_coordinates": {
@@ -183,6 +228,23 @@ def body_alignment_plot_parameters(
                 ),
                 "interquartile_band_alpha": 0.12,
                 "constrained_layout": True,
+                "legend": {
+                    "factorization_policy": (
+                        "epoch_color_plus_chaser_identity_line_style_and_"
+                        "behavior_role_text_v1"
+                    ),
+                    "title": "epoch color · chaser style and behavior role",
+                    "epoch_entries": epoch_legend_entries,
+                    "chaser_entries": chaser_legend_entries,
+                    "location": "lower_center_outside_axes",
+                    "bbox_to_anchor": [0.5, -0.055],
+                    "ncols": min(5, max(1, legend_entry_count)),
+                    "fontsize_points": 8,
+                },
+                "savefig": {
+                    "bbox_inches": PLOT_SAVEFIG_BBOX_INCHES,
+                    "pad_inches": PLOT_SAVEFIG_PAD_INCHES,
+                },
             },
             "viewer_policy": {
                 "rebinning": "prohibited",
@@ -205,14 +267,6 @@ def render_body_alignment_by_distance(
 
     values = validate_persisted_body_alignment_summary(handle)
     parameters = body_alignment_plot_parameters(handle)
-    scientific = handle.scientific_manifest
-    epoch_registry = {
-        **_EPOCH_FALLBACK,
-        **_registry(scientific, "epoch_role"),
-    }
-    chaser_registry = _registry(scientific, "chaser")
-    behavior_registry = _registry(scientific, "behavior_role")
-
     role_code = np.asarray(values["summary_epoch_role_code"], dtype=np.int64)
     identity = np.asarray(values["summary_chaser_identity_code"], dtype=np.int64)
     bin_index = np.asarray(values["summary_distance_bin_index"], dtype=np.int64)
@@ -226,25 +280,12 @@ def render_body_alignment_by_distance(
         figsize=PLOT_FIGURE_SIZE_INCHES,
         constrained_layout=True,
     )
-    legend_handles = []
-    legend_labels = []
     for epoch in (1, 2, 3):
         for chaser_position, chaser in enumerate(values["identities"]):
             member = (role_code == epoch) & (identity == int(chaser))
             indices = np.flatnonzero(member)[
                 np.argsort(bin_index[member], kind="stable")
             ]
-            behavior_role = int(
-                np.asarray(values["summary_chaser_behavior_role_code"])[indices[0]]
-            )
-            label = _label(
-                epoch=epoch,
-                chaser=int(chaser),
-                behavior_role=behavior_role,
-                epoch_registry=epoch_registry,
-                chaser_registry=chaser_registry,
-                behavior_registry=behavior_registry,
-            )
             color = _EPOCH_COLORS[epoch]
             linestyle = _LINESTYLES[chaser_position % len(_LINESTYLES)]
             line_kwargs = {
@@ -258,9 +299,7 @@ def render_body_alignment_by_distance(
             alignment = np.asarray(
                 values["summary_mean_alignment_cos"], dtype=np.float64
             )[indices]
-            (line,) = axes[0, 0].plot(x, alignment, label=label, **line_kwargs)
-            legend_handles.append(line)
-            legend_labels.append(label)
+            axes[0, 0].plot(x, alignment, **line_kwargs)
             axes[0, 0].fill_between(
                 x,
                 np.asarray(values["summary_alignment_cos_p25"], dtype=np.float64)[
@@ -345,13 +384,35 @@ def render_body_alignment_by_distance(
     for ax in axes.reshape(-1):
         ax.set_xlabel("fish–chaser distance (mm; persisted bins)")
         ax.grid(alpha=0.2)
+    legend_parameters = parameters["rendering"]["legend"]
+    epoch_entries = legend_parameters["epoch_entries"]
+    chaser_entries = legend_parameters["chaser_entries"]
+    legend_handles = [
+        Line2D([], [], color=entry["color"], linewidth=2.0)
+        for entry in epoch_entries
+    ] + [
+        Line2D(
+            [],
+            [],
+            color="#444444",
+            linestyle=entry["linestyle"],
+            linewidth=1.7,
+            marker="o",
+            markersize=3.5,
+        )
+        for entry in chaser_entries
+    ]
+    legend_labels = [entry["visible_label"] for entry in epoch_entries] + [
+        entry["visible_label"] for entry in chaser_entries
+    ]
     figure.legend(
         legend_handles,
         legend_labels,
         loc="lower center",
-        bbox_to_anchor=(0.5, -0.015),
-        ncols=min(3, max(1, len(legend_labels))),
-        fontsize=8,
+        bbox_to_anchor=tuple(legend_parameters["bbox_to_anchor"]),
+        ncols=int(legend_parameters["ncols"]),
+        fontsize=float(legend_parameters["fontsize_points"]),
+        title=legend_parameters["title"],
     )
     figure.suptitle(
         f"Exact anatomical body alignment by chaser distance · {handle.recording_id}\n"
@@ -369,8 +430,20 @@ def render_body_alignment_by_distance(
     temporary_png = png.with_name(f".{png.name}.tmp")
     temporary_pdf = pdf.with_name(f".{pdf.name}.tmp")
     try:
-        figure.savefig(temporary_png, dpi=PLOT_DPI, format="png")
-        figure.savefig(temporary_pdf, format="pdf")
+        savefig_parameters = parameters["rendering"]["savefig"]
+        figure.savefig(
+            temporary_png,
+            dpi=PLOT_DPI,
+            format="png",
+            bbox_inches=savefig_parameters["bbox_inches"],
+            pad_inches=float(savefig_parameters["pad_inches"]),
+        )
+        figure.savefig(
+            temporary_pdf,
+            format="pdf",
+            bbox_inches=savefig_parameters["bbox_inches"],
+            pad_inches=float(savefig_parameters["pad_inches"]),
+        )
         os.replace(temporary_png, png)
         os.replace(temporary_pdf, pdf)
     finally:

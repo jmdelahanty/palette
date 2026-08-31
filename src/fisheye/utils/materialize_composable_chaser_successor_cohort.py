@@ -40,7 +40,7 @@ BODY_ALIGNMENT_RUN = (
 )
 BODY_ALIGNMENT_RECIPE_BUNDLE_NAME = (
     "goodbatbadbat_chaser_body_alignment_by_distance_keypoint_semantic_20260830_"
-    "recipe_v1"
+    "recipe_v2"
 )
 KEYPOINT_PROXY_RUN = "chaser_input_provenance_proxy_keypoint_triad_cohort_20260821_v2"
 DETECTION_PROXY_RUN = (
@@ -78,7 +78,7 @@ SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME = (
 DASHBOARD_RECIPE_BUNDLE_NAME = "goodbatbadbat_chaser_dashboard_body_frame_recipe_v3"
 DETAILED_RECIPE_BUNDLE_NAME = "goodbatbadbat_chaser_detailed_body_frame_recipe_v7"
 DETAILED_PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v5"
-BODY_ALIGNMENT_PLOT_RECIPE_ID = "persisted_anatomical_alignment_distance_bins_static_v1"
+BODY_ALIGNMENT_PLOT_RECIPE_ID = "persisted_anatomical_alignment_distance_bins_static_v2"
 RELATIVE_FRAME_VALIDATION_MODE = "reusable_direct_subtree_receipt_v1"
 EPOCH_ALIGNMENT_PROJECTION_RECEIPT_NAME = (
     "exact_chaser.epoch_alignment.projection_receipt.v7.json"

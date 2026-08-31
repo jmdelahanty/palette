@@ -293,6 +293,31 @@ def test_publication_round_trip_preserves_persisted_bins(tmp_path: Path) -> None
     assert parameters["viewer_policy"]["rebinning"] == "prohibited"
     assert parameters["rendering"]["chaser_line_style_by_identity_code"] == {"1": "-"}
     assert "no style is inferred" in parameters["rendering"]["role_style_policy"]
+    legend = parameters["rendering"]["legend"]
+    assert legend["factorization_policy"] == (
+        "epoch_color_plus_chaser_identity_line_style_and_behavior_role_text_v1"
+    )
+    assert legend["location"] == "lower_center_outside_axes"
+    assert legend["bbox_to_anchor"] == [0.5, -0.055]
+    assert [entry["visible_label"] for entry in legend["epoch_entries"]] == [
+        "chaser_pre",
+        "chaser_training",
+        "chaser_post",
+    ]
+    assert legend["chaser_entries"] == [
+        {
+            "behavior_role_codes": [2],
+            "behavior_role_labels": ["aggressive"],
+            "canonical_identity": "blue-dot",
+            "chaser_identity_code": 1,
+            "linestyle": "-",
+            "visible_label": "chaser 1 · aggressive",
+        }
+    ]
+    assert parameters["rendering"]["savefig"] == {
+        "bbox_inches": "tight",
+        "pad_inches": 0.12,
+    }
 
 
 def test_receipt_bound_static_plot_rehashes_only_closed_summary_roster(
@@ -330,7 +355,7 @@ def test_receipt_bound_static_plot_rehashes_only_closed_summary_roster(
                 "--run-name",
                 "alignment-v1",
                 "--bundle-name",
-                "alignment-recipe-v1",
+                "alignment-recipe-v2",
                 "--expected-recording-id",
                 "recording",
                 "--output-dir",
@@ -342,10 +367,11 @@ def test_receipt_bound_static_plot_rehashes_only_closed_summary_roster(
         == 0
     )
     plot_receipt_path = (
-        output_dir / "alignment-recipe-v1_body_alignment_plot_receipt.json"
+        output_dir / "alignment-recipe-v2_body_alignment_plot_receipt.json"
     )
     receipt = json.loads(plot_receipt_path.read_text(encoding="utf-8"))
     assert receipt["plot_recipe_id"] == PLOT_RECIPE_ID
+    assert receipt["plot_recipe_id"].endswith("_v2")
     assert receipt["source_binding"]["verification_mode"] == (
         "receipt_bound_targeted_array_rehash_v1"
     )
