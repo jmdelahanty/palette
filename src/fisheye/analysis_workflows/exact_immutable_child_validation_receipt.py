@@ -10,11 +10,14 @@ Consumers still rehash the arrays they load through their typed source loader.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
 from types import MappingProxyType
 from typing import Any, Mapping
+
+import numpy as np
 
 from fisheye.analysis_workflows.chaser_relative_frame_validation_receipt import (
     STREAMING_HASH_BLOCK_BYTES,
@@ -81,6 +84,9 @@ _SELECTOR_PARTS = {
     "active",
     "default",
 }
+_COLUMNAR_FIXED_BYTES_MAX_WIDTH = 512
+_COLUMNAR_STORAGE_SCHEMA_ID = "palette.columnar_zarr_storage.v1"
+_COLUMNAR_STORAGE_WRITER = "fisheye.shared.zarr.columnar.store_array"
 
 
 class ExactImmutableChildValidationReceiptError(ValueError):
@@ -156,6 +162,105 @@ def _array_paths(group: Any, *, prefix: str = "") -> set[str]:
     return paths
 
 
+def _streaming_columnar_fixed_bytes_sha256(
+    node: Any,
+    *,
+    expected_dtype: np.dtype[Any],
+    expected_shape: list[int],
+) -> str:
+    """Reconstruct one logical fixed-byte column from its bounded uint8 store."""
+
+    logical_shape = tuple(expected_shape)
+    physical_dtype = np.dtype(node.dtype)
+    physical_shape = tuple(int(value) for value in node.shape)
+    logical_width = int(expected_dtype.itemsize)
+    if (
+        expected_dtype.kind != "S"
+        or expected_dtype.hasobject
+        or logical_width <= 0
+        or logical_width > _COLUMNAR_FIXED_BYTES_MAX_WIDTH
+        or len(logical_shape) != 1
+        or physical_dtype != np.dtype(np.uint8)
+        or len(physical_shape) != 2
+        or physical_shape[0] != logical_shape[0]
+    ):
+        _fail("Declared fixed-byte column shape or dtype changed.")
+    physical_width = physical_shape[1]
+    if (
+        physical_width <= 0
+        or physical_width > _COLUMNAR_FIXED_BYTES_MAX_WIDTH
+        or physical_width & (physical_width - 1)
+    ):
+        _fail("Declared fixed-byte column width is not a bounded power of two.")
+    attrs = getattr(node, "attrs", None)
+    if (
+        attrs is None
+        or attrs.get("palette_storage_schema_id") != _COLUMNAR_STORAGE_SCHEMA_ID
+        or attrs.get("palette_storage_writer") != _COLUMNAR_STORAGE_WRITER
+    ):
+        _fail("Declared fixed-byte column lacks its exact storage authority.")
+
+    header = {
+        "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        "dtype": np.lib.format.dtype_to_descr(expected_dtype),
+        "shape": list(logical_shape),
+    }
+    digest = hashlib.sha256()
+    digest.update(
+        json.dumps(
+            header,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    digest.update(b"\x00")
+    bytes_per_row = max(logical_width, physical_width)
+    rows_per_block = max(1, STREAMING_HASH_BLOCK_BYTES // bytes_per_row)
+    for start in range(0, logical_shape[0], rows_per_block):
+        stop = min(logical_shape[0], start + rows_per_block)
+        block = np.ascontiguousarray(np.asarray(node[start:stop, ...]))
+        if block.dtype != np.dtype(np.uint8) or block.shape != (
+            stop - start,
+            physical_width,
+        ):
+            _fail("Fixed-byte column changed during its streaming content audit.")
+        if physical_width > logical_width and np.any(block[:, logical_width:]):
+            _fail("Fixed-byte column contains nonzero data outside its logical width.")
+        logical = np.zeros((stop - start, logical_width), dtype=np.uint8)
+        copied_width = min(logical_width, physical_width)
+        logical[:, :copied_width] = block[:, :copied_width]
+        digest.update(logical.tobytes(order="C"))
+        del block, logical
+    return digest.hexdigest()
+
+
+def _streaming_declared_array_values_sha256(
+    node: Any,
+    *,
+    expected_dtype: str,
+    expected_shape: list[int],
+) -> str:
+    try:
+        logical_dtype = np.dtype(expected_dtype)
+    except TypeError as exc:
+        raise ExactImmutableChildValidationReceiptError(
+            "Manifest array dtype is invalid."
+        ) from exc
+    if logical_dtype.kind == "S":
+        return _streaming_columnar_fixed_bytes_sha256(
+            node,
+            expected_dtype=logical_dtype,
+            expected_shape=expected_shape,
+        )
+    return _streaming_array_values_sha256(
+        node,
+        expected_dtype=expected_dtype,
+        expected_shape=expected_shape,
+    )
+
+
 def _streaming_manifest_array_audit(
     run_directory: Path,
     *,
@@ -184,7 +289,7 @@ def _streaming_manifest_array_audit(
             type(value) is not int or value < 0 for value in shape
         ):
             _fail(f"Manifest array {path!r} shape is invalid.")
-        observed = _streaming_array_values_sha256(
+        observed = _streaming_declared_array_values_sha256(
             run[path],
             expected_dtype=_text(
                 declaration.get("dtype"),
