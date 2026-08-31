@@ -58,6 +58,7 @@ from fisheye.shared.eye_geometry_source import (
     EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
     EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_MODE,
     resolve_eye_geometry_source,
+    resolve_subject_shape_assignment_keypoint_authority_pointer,
 )
 from fisheye.shared.keypoint_coordinate_publication import (
     KEYPOINT_LABEL_AUTHORITY_ATTR,
@@ -3333,20 +3334,6 @@ def _resolve_canonical_eye_keypoints(
         if success is None:
             raise ValueError("Canonical assignment keypoint success array is absent.")
         if assignment_source.evidence_profile == (
-            ASSIGNMENT_KEYPOINT_SOURCE_DIRECT_PROFILE
-        ):
-            assignment_pointer = publication.source_binding
-            source_record = getattr(publication_source, "source_record", None)
-            if (
-                assignment_pointer is None
-                or not isinstance(source_record, Mapping)
-                or assignment_pointer.record != source_record
-            ):
-                raise ValueError(
-                    "Direct assignment authority is not sealed by the exact "
-                    "subject-shape source-binding record."
-                )
-        elif assignment_source.evidence_profile == (
             ASSIGNMENT_KEYPOINT_SOURCE_REBINDING_PROFILE
         ):
             resolved_rebinding = assignment_source.rebinding_manifest
@@ -3356,15 +3343,28 @@ def _resolve_canonical_eye_keypoints(
                 str,
             ):
                 raise ValueError("Resolved assignment rebinding evidence is incomplete.")
-            assignment_pointer = {
-                "record_ref": (
-                    "/subject_mask_assignment_keypoint_rebinding_runs/"
-                    f"{resolved_rebinding_id}@run_manifest"
-                ),
-                "record_sha256": _canonical_json_sha256(resolved_rebinding),
-            }
-        else:
+            if (
+                resolved_rebinding_id != rebinding_run_id
+                or resolved_rebinding != rebinding
+            ):
+                raise ValueError(
+                    "Resolved assignment rebinding differs from the subject-shape "
+                    "publication."
+                )
+        elif assignment_source.evidence_profile != (
+            ASSIGNMENT_KEYPOINT_SOURCE_DIRECT_PROFILE
+        ):
             raise ValueError("Resolved assignment-keypoint profile is unsupported.")
+        assignment_pointer = (
+            resolve_subject_shape_assignment_keypoint_authority_pointer(
+                publication,
+                evidence_profile=assignment_source.evidence_profile,
+            )
+        )
+        if assignment_pointer is None:
+            raise ValueError(
+                "Resolved assignment-keypoint profile lacks one authority pointer."
+            )
         alignment = _require_ordered_eye_row_alignment(
             publication.row_identity,
             surfaces.context.row_identity,

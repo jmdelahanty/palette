@@ -32,6 +32,7 @@ from .subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_MANIFEST_ATTR,
     SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
     SUBJECT_SHAPE_SCALAR_SURFACE_ATTR,
+    SUBJECT_SHAPE_SOURCE_BINDING_ATTR,
     SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR,
     SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR,
     BoundSubjectShapeCoordinatePublication,
@@ -46,6 +47,10 @@ from .subject_shape_storage import (
 from .zarr.metadata_equivalence import (
     METADATA_EQUIVALENCE_SCHEMA_ID,
     METADATA_EQUIVALENCE_SCHEMA_VERSION,
+)
+from .zarr.assignment_keypoint_rebinding import (
+    ASSIGNMENT_KEYPOINT_SOURCE_DIRECT_PROFILE,
+    ASSIGNMENT_KEYPOINT_SOURCE_REBINDING_PROFILE,
 )
 from .zarr_run_completion import resolve_authoritative_run_name
 
@@ -524,6 +529,157 @@ def _publication_supports_eye_authority(publication: Any) -> bool:
     )
 
 
+def _assignment_authority_pointer(
+    authority: Any,
+    *,
+    label: str,
+) -> dict[str, str]:
+    record_ref = getattr(authority, "record_ref", None)
+    record_sha256 = getattr(authority, "record_sha256", None)
+    if (
+        not isinstance(record_ref, str)
+        or not record_ref.startswith("/")
+        or not _is_sha256(record_sha256)
+    ):
+        raise ValueError(f"{label} is malformed.")
+    return {
+        "record_ref": record_ref,
+        "record_sha256": record_sha256,
+    }
+
+
+def resolve_subject_shape_assignment_keypoint_authority_pointer(
+    publication: BoundSubjectShapeCoordinatePublication,
+    *,
+    evidence_profile: Optional[str] = None,
+) -> Optional[dict[str, str]]:
+    """Resolve one assignment-keypoint pointer for live and staged consumers.
+
+    Bundle-backed subject shapes use either their exact direct source-binding
+    record or an immutable rebinding manifest.  Historical refined-mask-backed
+    subject shapes retain their persisted assignment authority.  Callers may
+    supply the profile selected by the shared assignment resolver; disagreement
+    with the publication is blocking.
+    """
+
+    supported_profiles = {
+        ASSIGNMENT_KEYPOINT_SOURCE_DIRECT_PROFILE,
+        ASSIGNMENT_KEYPOINT_SOURCE_REBINDING_PROFILE,
+    }
+    if evidence_profile is not None and evidence_profile not in supported_profiles:
+        raise ValueError(
+            f"Unsupported assignment-keypoint evidence profile {evidence_profile!r}."
+        )
+
+    publication_source = getattr(publication, "source", None)
+    source_context = getattr(publication_source, "context", None)
+    historical_authority = getattr(
+        source_context,
+        "assignment_keypoint_authority",
+        None,
+    )
+    bundle_authority = getattr(publication_source, "authority", None)
+    rebinding = getattr(
+        publication_source,
+        "assignment_keypoint_rebinding_manifest",
+        None,
+    )
+    rebinding_run_id = getattr(
+        publication_source,
+        "assignment_keypoint_rebinding_run_id",
+        None,
+    )
+    rebinding_present = isinstance(rebinding, Mapping)
+    rebinding_id_present = isinstance(rebinding_run_id, str)
+
+    if bundle_authority is not None:
+        if historical_authority is not None:
+            raise ValueError(
+                "Bundle subject-shape source also exposes a historical assignment "
+                "authority."
+            )
+        if rebinding_present != rebinding_id_present:
+            raise ValueError(
+                "Subject-shape assignment rebinding ID and manifest must be present "
+                "or absent together."
+            )
+        inferred_profile = (
+            ASSIGNMENT_KEYPOINT_SOURCE_REBINDING_PROFILE
+            if rebinding_present
+            else ASSIGNMENT_KEYPOINT_SOURCE_DIRECT_PROFILE
+        )
+        if evidence_profile is not None and evidence_profile != inferred_profile:
+            raise ValueError(
+                "Resolved assignment-keypoint profile differs from the exact "
+                "subject-shape publication."
+            )
+        if rebinding_present:
+            if (
+                not isinstance(rebinding, Mapping)
+                or not isinstance(rebinding_run_id, str)
+                or not rebinding_run_id
+                or "/" in rebinding_run_id
+            ):
+                raise ValueError(
+                    "Subject-shape assignment rebinding run ID is invalid."
+                )
+            return {
+                "record_ref": (
+                    "/subject_mask_assignment_keypoint_rebinding_runs/"
+                    f"{rebinding_run_id}@run_manifest"
+                ),
+                "record_sha256": _canonical_sha256(rebinding),
+            }
+
+        source_binding = getattr(publication, "source_binding", None)
+        source_record = getattr(publication_source, "source_record", None)
+        if (
+            source_binding is None
+            or not isinstance(source_record, Mapping)
+            or getattr(source_binding, "record", None) != source_record
+        ):
+            raise ValueError(
+                "Direct assignment authority is not sealed by the exact "
+                "subject-shape source-binding record."
+            )
+        pointer = _assignment_authority_pointer(
+            source_binding,
+            label="Canonical subject-shape direct assignment authority",
+        )
+        if (
+            pointer["record_ref"]
+            != (
+                f"/{publication.run_path}/coordinate_records/source_binding"
+                f"@{SUBJECT_SHAPE_SOURCE_BINDING_ATTR}"
+            )
+            or pointer["record_sha256"] != _canonical_sha256(source_record)
+        ):
+            raise ValueError(
+                "Direct assignment authority pointer differs from the exact "
+                "subject-shape source-binding record."
+            )
+        return pointer
+
+    if evidence_profile is not None:
+        raise ValueError(
+            "Resolved bundle assignment-keypoint profile has no bundle authority."
+        )
+    if rebinding_present or rebinding_id_present:
+        raise ValueError(
+            "Subject-shape assignment rebinding lacks its bundle authority."
+        )
+    if getattr(publication, "source_binding", None) is not None:
+        raise ValueError(
+            "Subject-shape source binding lacks its bundle authority."
+        )
+    if historical_authority is None:
+        return None
+    return _assignment_authority_pointer(
+        historical_authority,
+        label="Canonical subject-shape assignment keypoint authority",
+    )
+
+
 def _build_staged_subject_shape_authority(
     group: Any,
     *,
@@ -610,48 +766,9 @@ def _build_staged_subject_shape_authority(
             "Canonical eye-separation scalar semantics bind another array."
         )
 
-    publication_source = getattr(publication, "source", None)
-    source_context = getattr(publication_source, "context", None)
-    assignment_authority = getattr(
-        source_context,
-        "assignment_keypoint_authority",
-        None,
+    assignment_pointer = (
+        resolve_subject_shape_assignment_keypoint_authority_pointer(publication)
     )
-    assignment_pointer = None
-    if assignment_authority is not None:
-        assignment_ref = getattr(assignment_authority, "record_ref", None)
-        assignment_sha256 = getattr(assignment_authority, "record_sha256", None)
-        if (
-            not isinstance(assignment_ref, str)
-            or not assignment_ref.startswith("/")
-            or not _is_sha256(assignment_sha256)
-        ):
-            raise ValueError(
-                "Canonical subject-shape assignment keypoint authority is malformed."
-            )
-        assignment_pointer = {
-            "record_ref": assignment_ref,
-            "record_sha256": assignment_sha256,
-        }
-    else:
-        rebinding = getattr(
-            publication_source,
-            "assignment_keypoint_rebinding_manifest",
-            None,
-        )
-        rebinding_run_id = getattr(
-            publication_source,
-            "assignment_keypoint_rebinding_run_id",
-            None,
-        )
-        if isinstance(rebinding, Mapping) and isinstance(rebinding_run_id, str):
-            assignment_pointer = {
-                "record_ref": (
-                    "/subject_mask_assignment_keypoint_rebinding_runs/"
-                    f"{rebinding_run_id}@run_manifest"
-                ),
-                "record_sha256": _canonical_sha256(rebinding),
-            }
 
     record = {
         "schema_id": EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_ID,
@@ -1703,4 +1820,5 @@ __all__ = [
     "build_completed_ineligible_subject_shape_candidate_admission",
     "resolve_eye_geometry_source",
     "resolve_source_keypoints_run_for_eye_geometry",
+    "resolve_subject_shape_assignment_keypoint_authority_pointer",
 ]

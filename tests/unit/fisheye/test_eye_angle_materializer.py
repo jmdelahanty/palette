@@ -49,6 +49,9 @@ from fisheye.shared.subject_shape_coordinate_publication import (
 from fisheye.shared.subject_shape_storage import (
     SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
 )
+from fisheye.shared.zarr.assignment_keypoint_rebinding import (
+    ASSIGNMENT_KEYPOINT_SOURCE_DIRECT_PROFILE,
+)
 
 
 _REAL_SUBJECT_SHAPE_PUBLICATION_LOADER = (
@@ -627,6 +630,119 @@ def _accept_synthetic_subject_shape_publication(
     )
 
 
+def _direct_bundle_coordinate_publication(
+    root: zarr.Group,
+    path: str,
+    *,
+    stamp_metadata: bool = False,
+) -> tuple[SimpleNamespace, dict[str, str]]:
+    publication = _fake_coordinate_publication(
+        root,
+        root[path],
+        path,
+        stamp_metadata=stamp_metadata,
+    )
+    source_record = {
+        "schema_id": "palette.subject_shape.recording_mask_bundle_source",
+        "schema_version": 1,
+        "assignment_keypoints": {
+            "status": "used",
+            "keypoint_run_path": _KEYPOINT_RUN_PATH,
+        },
+    }
+    source_binding = SimpleNamespace(
+        record=source_record,
+        record_ref=(
+            f"/{path}/coordinate_records/source_binding"
+            "@subject_shape_source_binding"
+        ),
+        record_sha256=coordinate_record_sha256(source_record),
+    )
+    publication.source_binding = source_binding
+    publication.source = SimpleNamespace(
+        archive_path=Path("/unused/synthetic-direct-bundle.zarr"),
+        authority=object(),
+        source_record=source_record,
+        assignment_keypoint_rebinding_run_id=None,
+        assignment_keypoint_rebinding_manifest=None,
+    )
+    return publication, {
+        "record_ref": source_binding.record_ref,
+        "record_sha256": source_binding.record_sha256,
+    }
+
+
+def _accept_synthetic_direct_bundle_subject_shape_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    source: Path,
+) -> dict[str, str]:
+    root = zarr.open_group(str(source), mode="a", use_consolidated=False)
+    publication, expected_pointer = _direct_bundle_coordinate_publication(
+        root,
+        _SHAPE_RUN_PATH,
+        stamp_metadata=True,
+    )
+    raw = root[_KEYPOINT_RUN_PATH]
+    raw.create_array(
+        "pose_success",
+        data=np.asarray(raw["detection_success"][:], dtype=bool),
+        chunks=raw["detection_success"].chunks,
+    )
+    del raw["detection_success"]
+
+    def _load(_root: zarr.Group, path: str) -> object:
+        assert path == _SHAPE_RUN_PATH
+        return publication
+
+    def _load_assignment_source(
+        _archive: Path,
+        *,
+        subject_mask_authority: object,
+        rebinding_run_id: str | None,
+        expected_rebinding_manifest: object,
+    ) -> object:
+        assert subject_mask_authority is not None
+        assert rebinding_run_id is None
+        assert expected_rebinding_manifest is None
+        current_root = zarr.open_group(
+            str(source),
+            mode="r",
+            use_consolidated=False,
+        )
+        group = current_root[_KEYPOINT_RUN_PATH]
+        surfaces = _fake_keypoint_coordinate_surfaces(
+            current_root,
+            _KEYPOINT_RUN_PATH,
+        )
+        return SimpleNamespace(
+            evidence_profile=ASSIGNMENT_KEYPOINT_SOURCE_DIRECT_PROFILE,
+            keypoint_run_path=_KEYPOINT_RUN_PATH,
+            keypoint_run_id="kp_raw_1",
+            keypoints_dataset="keypoints_roi",
+            success_dataset="pose_success",
+            keypoint_labels=surfaces.context.keypoint_labels,
+            coordinate_source=SimpleNamespace(
+                run_path=_KEYPOINT_RUN_PATH,
+                run_group=group,
+                surfaces=surfaces,
+            ),
+            rebinding_run_id=None,
+            rebinding_manifest=None,
+        )
+
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "load_persisted_subject_shape_coordinate_publication",
+        _load,
+    )
+    monkeypatch.setattr(
+        mod.eye_writer,
+        "load_assignment_keypoint_source",
+        _load_assignment_source,
+    )
+    return expected_pointer
+
+
 def _accept_synthetic_completed_ineligible_subject_shape_candidate(
     monkeypatch: pytest.MonkeyPatch,
     source: Path,
@@ -819,6 +935,55 @@ def test_plan_rejects_unsealed_subject_shape_before_scratch_creation(
     assert not scratch.exists()
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)
     assert "eye_angle_runs" not in root["analysis"]
+
+
+def test_direct_bundle_plan_to_staging_preserves_source_binding_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    expected_pointer = (
+        _accept_synthetic_direct_bundle_subject_shape_publication(
+            monkeypatch,
+            source,
+        )
+    )
+
+    plan = mod.build_eye_angle_materialization_plan(
+        source,
+        scratch_root=scratch,
+        subject_shape_run="shape_1",
+        keypoint_run="kp_raw_1",
+        run_name="eye_1",
+        chunk_rows=2,
+        fps=100.0,
+    )
+    receipt = plan.staged_input_integrity_receipt
+    subject_pointer = receipt["subject_shape_authority"][
+        "canonical_publication"
+    ]["assignment_keypoint_authority"]
+    keypoint_pointer = receipt["canonical_keypoint_authority"][
+        "assignment_authority"
+    ]
+    assert subject_pointer == expected_pointer
+    assert keypoint_pointer == expected_pointer
+    assert not scratch.exists()
+
+    staging = mod.stage_eye_angle_sources(
+        plan,
+        copy_backend="python",
+        check_capacity=False,
+    )
+    assert staging["status"] == "complete"
+    staged = _resolve_staged_context_from_receipt(plan, receipt)
+    assert staged.keypoint_source_mode == (
+        mod.eye_writer.EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL
+    )
+    assert staged.canonical_keypoint_authority[
+        "assignment_authority"
+    ] == expected_pointer
 
 
 def test_plan_admits_only_exact_owner_bound_completed_ineligible_candidate(
