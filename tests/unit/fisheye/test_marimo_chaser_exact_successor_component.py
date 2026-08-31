@@ -993,6 +993,34 @@ def test_production_binding_shapes_are_not_whole_object_equal() -> None:
     assert proof.observed.profile_id == MINIMAL_EXACT_CHILD_PROFILE
 
 
+def test_same_child_accepts_and_retains_independent_receipt_evidence() -> None:
+    expected = {
+        "run_path": "analysis/chaser_relative_frame_runs/exact-run",
+        "manifest_sha256": "a" * 64,
+        "validation_receipt_sha256": "b" * 64,
+        "verification_mode": "receipt_bound_targeted_array_rehash_v1",
+    }
+    observed = {
+        **expected,
+        "validation_receipt_sha256": "c" * 64,
+    }
+
+    proof = require_same_exact_relative_frame_child(expected, observed)
+    provenance = dict(proof.provenance_record())
+
+    assert dict(proof.normalized_identity) == {
+        "run_path": expected["run_path"],
+        "manifest_sha256": expected["manifest_sha256"],
+    }
+    assert provenance["expected_validation_receipt_sha256"] == "b" * 64
+    assert provenance["observed_validation_receipt_sha256"] == "c" * 64
+    assert provenance["validation_receipt_sha256"] is None
+    assert provenance["validation_receipt_sha256s"] == ("b" * 64, "c" * 64)
+    assert provenance["receipt_evidence_relationship"] == (
+        "independent_receipts_same_exact_child"
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value", "match"),
     [

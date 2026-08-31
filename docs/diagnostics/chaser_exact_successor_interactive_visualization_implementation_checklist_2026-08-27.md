@@ -610,6 +610,28 @@ route.
 - [ ] Run required CI before merge or release. The live smoke is experimental
       read-only evidence and does not make the branch merge-ready.
 
+### Independent relative-child receipt equivalence addendum — 2026-08-30
+
+- [x] Audit all 80 eligible cohort recordings: spatial and body-alignment
+      publications bind identical relative-frame run paths and manifest
+      digests while retaining distinct producer-specific validation receipts.
+- [x] Compare exact scientific child identity independently from validation
+      receipt lineage. Do not require separate producer invocations to share
+      one receipt digest.
+- [x] Continue validating each closed receipt-bound profile, verification mode,
+      exact child path, and manifest digest before comparing identities.
+- [x] Retain both receipt digests and their
+      `independent_receipts_same_exact_child` relationship in proof provenance;
+      do not collapse one producer's lineage into the other.
+- [x] Keep different child paths or manifest digests fail-closed and cover that
+      boundary alongside malformed evidence in unit tests.
+- [x] Add a producer-shaped body-alignment discovery regression with two valid,
+      distinct receipt digests for the same immutable relative child.
+- [x] Run a receipt-bound live discovery/load/render smoke against the completed
+      cohort. `body_alignment_by_distance` is available and renders four
+      persisted-summary figures without Zarr or receipt mutation.
+- [ ] Run required CI before merge or release.
+
 ## Phase 8 — Documentation, CI, and release evidence
 
 - [ ] Update the status note from `implementation: partial` only after the live
