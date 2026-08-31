@@ -538,3 +538,92 @@ candidate. Its run never becomes complete, is never copied into an authority,
 and cannot change a selector. The validated clip inputs remain intact, so the
 publication can be retried. Phase B narrows that retry from the whole finalizer
 to the failed physical unit.
+
+## Publisher CPU/I/O optimization tranche — 2026-08-31
+
+Status: **implemented on
+`agent/palette/subject-mask-cpu-optimization-20260831`; local validation and
+required CI are gates before merge or production use**.
+
+The receipt-composed writer had already removed the former full dense-mask
+finalizer scan and could adopt encoded final-layout units. Profiling and code
+review nevertheless found substantial serial orchestration and redundant
+movement around that fast path:
+
+- clip-package extraction was serialized across all independent packages;
+- receipt-bound quality partitions were copied into scratch memmaps and then
+  copied again into the published Zarr;
+- manifest construction reread logical quality arrays whose exact values were
+  already in memory during the physical-unit write;
+- the bundle ran a complete decoded member gate both immediately after import
+  and again before completion;
+- crop placement arrays and crop frame indices were normalized repeatedly;
+- concatenated clip-row slices linearly inspected every source clip; and
+- encoded-unit copy futures were not bounded like ordinary physical-unit write
+  futures.
+
+The 2026-08-31 implementation changes those boundaries without changing which
+scientific arrays are published:
+
+- package archives are extracted and validated with a bounded four-thread
+  pool; each worker owns a separate directory, while mutation of the shared
+  assembly tree remains serial and deterministic;
+- receipt-bound quality partitions stream directly from immutable partition
+  views to complete output physical units, with no intermediate `.npy`
+  memmaps;
+- exact quality-array logical digests are accumulated from the same in-memory
+  physical blocks used for writes and sealed in write-receipt v5;
+- the first bundle-member gate validates exact persisted manifest receipts and
+  the consolidated metadata generation, while one full decoded member audit
+  remains before completion;
+- one redundant bundle consolidation is removed; successful publication now
+  performs three rather than four bundle-root consolidations;
+- recording crop placement and frame arrays are loaded once and shared across
+  raw, refined, coordinate, and cache construction;
+- concatenated row access binary-searches the first and last intersecting clip
+  instead of probing every clip; and
+- encoded-unit futures are drained through the same bounded queue as ordinary
+  writes.
+
+Both the ordinary clipped planner and keypoint-recovery planner call one helper
+that records the production execution profile explicitly:
+
+- `--package-extract-workers 4`;
+- `--core-physical-unit-workers 4`; and
+- `--copy-backend python`.
+
+The job retains its existing eight-core allocation for this first canary. The
+receipt records requested/effective worker counts and phase timings, so a later
+resource-right-sizing decision can use measured package extraction, core
+publication, member import, decoded audit, hashing, consolidation, and cleanup
+durations rather than aggregate slot efficiency alone.
+
+### Validation and safety boundary
+
+The direct quality stream still owns whole, non-overlapping physical row units.
+Package workers never mutate shared Zarr metadata. Manifest installation,
+completion, consolidation, and atomic bundle import remain serial. Immutable
+partition evidence and exact topology are validated before writing, and the
+destination still receives the final decoded member audit before completion.
+Historical quality write receipts v1-v4 remain readable; only the new direct
+partition stream emits v5.
+
+The generic atomic-copy source-hash/copy/destination-hash sequence is not fused
+in this tranche. A logical artifact receipt does not by itself prove the exact
+encoded file bytes consumed throughout a cross-directory copy. Removing that
+source traversal safely requires a versioned physical transfer receipt (or an
+equivalent exclusive immutable-source contract) plus destination verification.
+That is a separately reviewed follow-up, not an implicit fast-path fallback.
+
+### Required acceptance evidence
+
+- [x] 150 affected unit and real-Zarr integration tests passed outside the
+  sandbox (129 publisher/planner/canary tests plus 21 adjacent quality,
+  producer, cluster, and benchmark tests);
+- [ ] required CI passes for the final commit;
+- [ ] a commit-pinned selector-ineligible canary records phase telemetry and
+  exact receipt/manifest validation;
+- [ ] canary output is scientifically equivalent to its input worker evidence;
+- [ ] peak RSS remains within the publication job budget; and
+- [ ] resource right-sizing is based on phase timings and CPU telemetry from
+  the optimized canary.

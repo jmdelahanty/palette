@@ -1277,6 +1277,7 @@ def publish_subject_mask_bundle_candidate(
     """
 
     started = time.perf_counter()
+    phase_seconds: dict[str, float] = {}
     archive = analysis_zarr.expanduser().resolve()
     if not archive.is_dir():
         raise FileNotFoundError(f"Analysis Zarr not found: {archive}")
@@ -1391,8 +1392,10 @@ def publish_subject_mask_bundle_candidate(
     )
 
     import_receipts: dict[str, dict[str, Any]] = {}
+    member_import_seconds: dict[str, float] = {}
     for role in member_specs:
         family, kind = member_specs[role]
+        phase_started = time.perf_counter()
         import_receipts[role] = _atomic_import_member(
             archive=archive,
             local_run_path=local_paths[role],
@@ -1402,7 +1405,11 @@ def publish_subject_mask_bundle_candidate(
             kind=kind,
             copy_backend=copy_backend,
         )
+        member_import_seconds[role] = time.perf_counter() - phase_started
+    phase_started = time.perf_counter()
     consolidate_metadata_capture_expected_warnings(archive)
+    phase_seconds["post_import_consolidation"] = time.perf_counter() - phase_started
+    post_import_root_metadata = _strict_json(archive / "zarr.json")
     root = open_zarr_root(archive, mode="a")
     manifests = _persisted_manifests(
         root,
@@ -1419,13 +1426,23 @@ def publish_subject_mask_bundle_candidate(
         cache_manifest=manifests.get("presentation_cache"),
         schema_version=bundle_schema_version,
     )
-    _validate_persisted_members(
+    member_manifest_payload_digests = {
+        role: str(manifest["payload_digest"]) for role, manifest in manifests.items()
+    }
+    phase_started = time.perf_counter()
+    _validate_receipt_bound_persisted_members(
         archive,
         raw_run_id=ids["raw"],
         refined_run_id=ids["refined"],
         quality_run_id=ids["quality"],
         refined_manifest=manifests["refined"],
+        quality_manifest_payload_digest=member_manifest_payload_digests["quality"],
+        member_manifest_payload_digests=member_manifest_payload_digests,
         cache_run_id=ids.get("presentation_cache"),
+        archive_root_metadata=post_import_root_metadata,
+    )
+    phase_seconds["post_import_receipt_bound_member_gate"] = (
+        time.perf_counter() - phase_started
     )
 
     family = root.require_group(SUBJECT_MASK_BUNDLE_FAMILY)
@@ -1453,8 +1470,18 @@ def publish_subject_mask_bundle_candidate(
         }
     )
     try:
+        phase_started = time.perf_counter()
         consolidate_metadata_capture_expected_warnings(archive)
-        metadata_digest = _bundle_metadata_digest(archive, bundle_id=resolved_bundle)
+        phase_seconds["running_bundle_consolidation"] = (
+            time.perf_counter() - phase_started
+        )
+        running_root_metadata = _strict_json(archive / "zarr.json")
+        phase_started = time.perf_counter()
+        metadata_digest = _bundle_metadata_digest(
+            archive,
+            bundle_id=resolved_bundle,
+            archive_root_metadata=running_root_metadata,
+        )
         members = {
             role: _member_reference(
                 role=role,
@@ -1481,14 +1508,21 @@ def publish_subject_mask_bundle_candidate(
         if manifest_errors:
             raise RuntimeError("; ".join(manifest_errors))
         bundle.attrs[SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE] = manifest
-        consolidate_metadata_capture_expected_warnings(archive)
         if (
-            _bundle_metadata_digest(archive, bundle_id=resolved_bundle)
+            _bundle_metadata_digest(
+                archive,
+                bundle_id=resolved_bundle,
+                archive_root_metadata=running_root_metadata,
+            )
             != metadata_digest
         ):
             raise RuntimeError(
                 "Bundle metadata digest changed after manifest insertion."
             )
+        phase_seconds["bundle_manifest_and_metadata_gate"] = (
+            time.perf_counter() - phase_started
+        )
+        phase_started = time.perf_counter()
         _validate_persisted_members(
             archive,
             raw_run_id=ids["raw"],
@@ -1496,7 +1530,9 @@ def publish_subject_mask_bundle_candidate(
             quality_run_id=ids["quality"],
             refined_manifest=manifests["refined"],
             cache_run_id=ids.get("presentation_cache"),
+            archive_root_metadata=running_root_metadata,
         )
+        phase_seconds["final_decoded_member_gate"] = time.perf_counter() - phase_started
         writable = zarr.open_group(
             str(archive / SUBJECT_MASK_BUNDLE_FAMILY / resolved_bundle),
             mode="a",
@@ -1504,7 +1540,10 @@ def publish_subject_mask_bundle_candidate(
         )
         writable.attrs["status"] = "complete"
         mark_run_complete(writable, run_name=resolved_bundle)
+        phase_started = time.perf_counter()
         consolidate_metadata_capture_expected_warnings(archive)
+        phase_seconds["completion_consolidation"] = time.perf_counter() - phase_started
+        phase_started = time.perf_counter()
         if (
             _bundle_metadata_digest(archive, bundle_id=resolved_bundle)
             != metadata_digest
@@ -1523,6 +1562,9 @@ def publish_subject_mask_bundle_candidate(
             or reopened.attrs.get(SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE) != manifest
         ):
             raise RuntimeError("Completed subject-mask bundle did not reopen exactly.")
+        phase_seconds["completion_metadata_and_reopen_gate"] = (
+            time.perf_counter() - phase_started
+        )
     except BaseException as exc:
         failed = zarr.open_group(
             str(archive / SUBJECT_MASK_BUNDLE_FAMILY / resolved_bundle),
@@ -1547,6 +1589,8 @@ def publish_subject_mask_bundle_candidate(
         "members": members,
         "import_receipt_digests": import_digests,
         "import_receipts": import_receipts,
+        "publication_phase_seconds": phase_seconds,
+        "member_import_seconds": member_import_seconds,
         "selector_eligible": False,
         "activation_state": "deferred",
         "elapsed_seconds": float(time.perf_counter() - started),

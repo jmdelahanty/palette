@@ -191,9 +191,22 @@ class _DenseWorkerValueVerifier:
 
 
 def _effective_block_rows(run: Any, budget_bytes: int) -> int:
-    shape = tuple(int(value) for value in run["masks_roi"].shape)
+    masks = run["masks_roi"]
+    shape = tuple(int(value) for value in masks.shape)
     row_bytes = int(np.prod(shape[1:], dtype=np.int64))
-    return max(1, int(budget_bytes) // max(1, row_bytes))
+    budget_rows = max(1, int(budget_bytes) // max(1, row_bytes))
+    chunks = getattr(masks, "chunks", None)
+    if not isinstance(chunks, (tuple, list)) or not chunks:
+        return budget_rows
+    physical_row_chunk = int(chunks[0])
+    if physical_row_chunk <= 0:
+        return budget_rows
+    if budget_rows < physical_row_chunk:
+        return min(int(shape[0]), physical_row_chunk)
+    return max(
+        physical_row_chunk,
+        (budget_rows // physical_row_chunk) * physical_row_chunk,
+    )
 
 
 def _write_arrays(directory: Path, arrays: Mapping[str, np.ndarray]) -> None:

@@ -14,7 +14,7 @@ import shutil
 import socket
 import tarfile
 import time
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import zarr
@@ -31,6 +31,7 @@ from fisheye.shared.refined_subject_mask_encoded_chunks import (
     ENCODED_PACKAGE_SCHEMA_ID,
     build_global_encoded_mask_payload,
 )
+from fisheye.shared.runtime_telemetry import PhaseTelemetry
 from fisheye.shared.run_provenance import json_ready
 from fisheye.shared.subject_mask_attempt import (
     validate_subject_mask_attempt,
@@ -113,6 +114,22 @@ def _remove_path(path: Path) -> None:
         path.unlink()
     elif path.exists():
         shutil.rmtree(path)
+
+
+def _telemetry_call(
+    telemetry: PhaseTelemetry | None,
+    name: str,
+    function: Callable[..., Any],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Measure one report-only call without changing artifact identity."""
+
+    if telemetry is None:
+        return function(*args, **kwargs)
+    with telemetry.phase(name):
+        return function(*args, **kwargs)
 
 
 def _refined_worker_proof(staged_zarr: Path, run: zarr.Group) -> dict[str, Any]:
@@ -206,6 +223,7 @@ def _build_publication_evidence(
     global_frame_start: int,
     global_frame_stop: int,
     quality_compute_workers: int,
+    telemetry: PhaseTelemetry | None = None,
 ) -> dict[str, Any]:
     """Seal all immutable inputs needed by receipt-composed publication."""
 
@@ -250,7 +268,10 @@ def _build_publication_evidence(
         roi_width=int(refined_values.shape[3]),
     )
     destination.mkdir(parents=True, exist_ok=False)
-    raw_package = build_subject_mask_final_layout_unit_package(
+    raw_package = _telemetry_call(
+        telemetry,
+        "raw_final_layout",
+        build_subject_mask_final_layout_unit_package,
         source_array=raw_values,
         source_crop_row_ids=raw_run["source_crop_row_ids"],
         destination=destination / "raw_final_layout_unit",
@@ -264,7 +285,10 @@ def _build_publication_evidence(
             "mask_probs_roi"
         ],
     )
-    refined_package = build_subject_mask_final_layout_unit_package(
+    refined_package = _telemetry_call(
+        telemetry,
+        "refined_final_layout",
+        build_subject_mask_final_layout_unit_package,
         source_array=refined_values,
         source_crop_row_ids=refined_run["source_crop_row_ids"],
         destination=destination / "refined_final_layout_unit",
@@ -278,7 +302,10 @@ def _build_publication_evidence(
             "masks_roi"
         ],
     )
-    contour_receipt = write_subject_mask_sampled_contour_worker_receipt(
+    contour_receipt = _telemetry_call(
+        telemetry,
+        "sampled_contour_receipt",
+        write_subject_mask_sampled_contour_worker_receipt,
         refined_run,
         destination=destination / "sampled_contour_receipt.json",
         global_start_row=global_start_row,
@@ -299,7 +326,10 @@ def _build_publication_evidence(
     )
     quality_run.path = refined_run.path  # type: ignore[attr-defined]
     quality_run.attrs = refined_run.attrs  # type: ignore[attr-defined]
-    quality = compute_subject_mask_quality_partition(
+    quality = _telemetry_call(
+        telemetry,
+        "quality_partition",
+        compute_subject_mask_quality_partition,
         quality_run,
         source_acquisition_frame_index=source_frames,
         global_start_row=global_start_row,
@@ -473,6 +503,16 @@ def finalize_subject_mask_clip_package(
 ) -> dict[str, Any]:
     source_zarr = source_zarr.expanduser().resolve()
     publication_evidence_requested = publication_evidence_producer_commit is not None
+    telemetry = PhaseTelemetry(
+        materializer="finalize_subject_mask_clip_package",
+        context={
+            "refined_run": refined_run,
+            "mask_storage": mask_storage,
+            "execution_backend": execution_backend,
+            "num_workers_requested": num_workers,
+            "quality_compute_workers_requested": quality_compute_workers,
+        },
+    )
     effective_mask_validation_mode = _resolve_mask_validation_mode(
         mask_storage=mask_storage,
         requested_mode=mask_rle_validation_mode,
@@ -508,7 +548,10 @@ def finalize_subject_mask_clip_package(
         )
         or "refined"
     )
-    staged_zarr = _stage_zarr_with_local_refined_parent(
+    staged_zarr = _telemetry_call(
+        telemetry,
+        "staging",
+        _stage_zarr_with_local_refined_parent,
         source_zarr=source_zarr,
         staging_root=staging_root,
         staging_name=safe_run,
@@ -517,7 +560,10 @@ def finalize_subject_mask_clip_package(
     started = time.perf_counter()
     try:
         root = zarr.open_group(str(staged_zarr), mode="a", use_consolidated=False)
-        summary = finalize_subject_mask_run(
+        summary = _telemetry_call(
+            telemetry,
+            "finalization",
+            finalize_subject_mask_run,
             root,
             zarr_path=staged_zarr,
             subject_shard_runs=[subject_shard_run],
@@ -550,7 +596,13 @@ def finalize_subject_mask_clip_package(
                 raise RuntimeError(
                     "Refined clip package output must be selector-ineligible."
                 )
-            worker_proof = _refined_worker_proof(staged_zarr, run)
+            worker_proof = _telemetry_call(
+                telemetry,
+                "production_proof",
+                _refined_worker_proof,
+                staged_zarr,
+                run,
+            )
         run.attrs["clip_package_source_zarr_path"] = str(source_zarr)
         run.attrs["clip_package_staged_zarr_path"] = str(staged_zarr)
         run.attrs["clip_package_subject_shard_run"] = str(subject_shard_run)
@@ -577,7 +629,10 @@ def finalize_subject_mask_clip_package(
         package_schema_id = PACKAGE_SCHEMA_ID
         if global_mask_grid_manifest is not None:
             encoded_payload_path = staged_zarr / ENCODED_MASK_PAYLOAD_NAME
-            encoded_payload_summary = build_global_encoded_mask_payload(
+            encoded_payload_summary = _telemetry_call(
+                telemetry,
+                "encoded_payload",
+                build_global_encoded_mask_payload,
                 run_path=staged_zarr / "refined_subject_masks_runs" / refined_run,
                 grid_manifest_path=global_mask_grid_manifest,
                 payload_path=encoded_payload_path,
@@ -589,7 +644,10 @@ def finalize_subject_mask_clip_package(
             )
         if publication_evidence_producer_commit is not None:
             publication_evidence_path = staged_zarr / "publication_evidence"
-            publication_evidence_summary = _build_publication_evidence(
+            publication_evidence_summary = _telemetry_call(
+                telemetry,
+                "publication_evidence",
+                _build_publication_evidence,
                 root=root,
                 staged_zarr=staged_zarr,
                 raw_run=root["subject_mask_shard_runs"][subject_shard_run],
@@ -604,11 +662,15 @@ def finalize_subject_mask_clip_package(
                 global_frame_start=int(global_frame_start),
                 global_frame_stop=int(global_frame_stop),
                 quality_compute_workers=int(quality_compute_workers),
+                telemetry=telemetry,
             )
             run.attrs["clip_publication_evidence"] = dict(
                 json_ready(publication_evidence_summary)
             )
-        package = _write_package(
+        package = _telemetry_call(
+            telemetry,
+            "package_write",
+            _write_package,
             staged_zarr=staged_zarr,
             refined_run=refined_run,
             package_path=package_path,
@@ -638,7 +700,7 @@ def finalize_subject_mask_clip_package(
         )
         run.attrs["cluster_run_package"] = dict(package)
         duration_seconds = float(time.perf_counter() - started)
-        return {
+        result = {
             "schema_id": package_schema_id,
             "status": "ok",
             "source_zarr_path": str(source_zarr),
@@ -662,11 +724,14 @@ def finalize_subject_mask_clip_package(
         }
     finally:
         if cleanup:
-            _remove_path(staged_zarr)
-            try:
-                staging_root.rmdir()
-            except OSError:
-                pass
+            with telemetry.phase("cleanup"):
+                _remove_path(staged_zarr)
+                try:
+                    staging_root.rmdir()
+                except OSError:
+                    pass
+    result["runtime_telemetry"] = telemetry.to_json()
+    return result
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

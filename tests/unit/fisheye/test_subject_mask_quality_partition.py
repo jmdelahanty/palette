@@ -7,6 +7,10 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.shared.zarr import (
+    subject_mask_quality_publication as quality_publication_mod,
+)
+from fisheye.shared.zarr import subject_mask_quality_partition as quality_mod
 from fisheye.shared.zarr.benchmark_runtime import sha256_array
 from fisheye.shared.zarr.manifest_digest import (
     CANONICAL_JSON_DIGEST_ALGORITHM,
@@ -56,6 +60,20 @@ def _masks(rows: int = 4) -> np.ndarray:
     if rows > 1:
         masks[1, 1, 0, 0] = 1
     return masks
+
+
+def test_quality_compute_blocks_align_to_dense_physical_row_chunks() -> None:
+    class _ChunkedDense:
+        shape = (1000, 4, 384, 384)
+        chunks = (128, 1, 384, 384)
+
+    assert (
+        quality_mod._effective_block_rows(  # noqa: SLF001
+            {"masks_roi": _ChunkedDense()},
+            64 * 1024 * 1024,
+        )
+        == 128
+    )
 
 
 def _worker_receipt(run_path: str, masks: np.ndarray) -> dict[str, object]:
@@ -220,6 +238,7 @@ def test_quality_partition_rejects_masks_that_differ_from_worker_receipt(
 
 def test_recording_publication_adopts_receipt_bound_quality_partition(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     arrays, source_manifest, source = _source_fixture()
     run_path = "refined_subject_masks_runs/refined_worker_000"
@@ -255,6 +274,13 @@ def test_recording_publication_adopts_receipt_bound_quality_partition(
     )
     precomputed = load_subject_mask_quality_partition_arrays(partition)
     shadow_root = tmp_path / "quality"
+
+    def reject_scratch(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("Receipt-bound quality adoption created scratch arrays.")
+
+    monkeypatch.setattr(
+        quality_publication_mod, "_create_scratch_arrays", reject_scratch
+    )
     publication = publish_selector_ineligible_subject_mask_quality_snapshot(
         arrays,
         n_frames=4,

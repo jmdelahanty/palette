@@ -81,7 +81,7 @@ SUBJECT_MASK_QUALITY_SHADOW_SCHEMA_VERSION = 1
 SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_ID = (
     "palette.subject_mask_quality.write_receipt"
 )
-SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION = 4
+SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION = 5
 DEFAULT_SUBJECT_MASK_QUALITY_SHADOW_ROOT = Path(
     "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/"
     "subject_mask_quality"
@@ -382,7 +382,7 @@ def _write_by_physical_units(
     values: Any,
     *,
     plan: StoragePlan,
-) -> int:
+) -> tuple[int, str]:
     unit_shape = plan.shard_shape or plan.chunk_shape
     if unit_shape is None:
         raise ValueError("Subject-mask quality does not support scalar arrays.")
@@ -390,12 +390,15 @@ def _write_by_physical_units(
     shape, _dtype = _shape_dtype(values, name=plan.array_name)
     trailing = (slice(None),) * (len(shape) - 1)
     writes = 0
+    logical_digest = hashlib.sha256()
     for start in range(0, shape[0], unit_rows):
         stop = min(start + unit_rows, shape[0])
         selection = (slice(start, stop), *trailing)
-        destination[selection] = np.asarray(values[selection])
+        block = np.ascontiguousarray(np.asarray(values[selection]))
+        logical_digest.update(block.view(np.uint8))
+        destination[selection] = block
         writes += 1
-    return writes
+    return writes, logical_digest.hexdigest()
 
 
 def _read_strict_json(path: Path) -> dict[str, Any]:
@@ -559,7 +562,7 @@ def _write_receipt(
         "schema_id": SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_ID,
         "schema_version": (
             SUBJECT_MASK_QUALITY_WRITE_RECEIPT_SCHEMA_VERSION
-            if receipt_bound_composable
+            if source_mode == "receipt_bound_quality_partitions"
             else 3
         ),
         "source_compute_block_rows": int(block_rows),
@@ -586,7 +589,11 @@ def _write_receipt(
         ),
         "output_write_unit": "complete_outer_shard_or_unsharded_chunk",
         "output_array_write_units": subject_mask_quality_output_write_units(plans),
-        "scratch_surface": "node_local_npy_memmap_deleted_after_publication",
+        "scratch_surface": (
+            "not_used_receipt_bound_direct_physical_unit_stream_v1"
+            if source_mode == "receipt_bound_quality_partitions"
+            else "node_local_npy_memmap_deleted_after_publication"
+        ),
         "parallel_write_policy": (
             "single_writer_v1_future_workers_require_disjoint_whole_shards"
         ),
@@ -777,7 +784,12 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         prefix="palette_subject_mask_quality_", dir=str(resolved_scratch_root)
     ) as temporary:
         scratch_path = Path(temporary)
-        scratch_arrays = _create_scratch_arrays(scratch_path, plans)
+        # Receipt-bound partitions are already immutable, schema-typed sources.
+        # Stream them directly into the destination physical units; scratch
+        # memmaps remain necessary only for newly computed quality payloads.
+        scratch_arrays = (
+            {} if adopting_partitions else _create_scratch_arrays(scratch_path, plans)
+        )
         source_digest = hashlib.sha256()
         composable_mask_verifier = (
             _ComposableMaskIdentityVerifier(
@@ -911,6 +923,9 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
             for path in identity_digests:
                 values = np.ascontiguousarray(source_mask_arrays[path][...])
                 identity_digests[path].update(values.view(np.uint8))
+        source_frame_row_offsets = np.ascontiguousarray(
+            source_mask_arrays["frame_row_offsets"][...]
+        )
         observed_source_digests = {
             **(
                 {}
@@ -919,9 +934,7 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
             ),
             **{path: digest.hexdigest() for path, digest in identity_digests.items()},
             "frame_row_offsets": hashlib.sha256(
-                np.ascontiguousarray(source_mask_arrays["frame_row_offsets"][...]).view(
-                    np.uint8
-                )
+                source_frame_row_offsets.view(np.uint8)
             ).hexdigest(),
             "available_channels": hashlib.sha256(
                 np.ascontiguousarray(available).view(np.uint8)
@@ -998,13 +1011,13 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         if adopting_partitions:
             assert precomputed_arrays is not None
             phase_started = time.perf_counter()
+            plan_by_path = {entry.rule.path: entry.plan for entry in plans.entries}
             for path in sorted(precomputed_arrays):
                 source_value = precomputed_arrays[path]
-                destination_value = scratch_arrays[path]
                 source_shape, source_dtype = _shape_dtype(source_value, name=path)
-                destination_shape, destination_dtype = _shape_dtype(
-                    destination_value, name=path
-                )
+                plan = plan_by_path[path]
+                destination_shape = tuple(int(value) for value in plan.logical_shape)
+                destination_dtype = np.dtype(plan.logical_dtype)
                 if (
                     source_shape != destination_shape
                     or source_dtype != destination_dtype
@@ -1012,14 +1025,35 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
                     raise ValueError(
                         f"Precomputed quality partition array differs at {path}."
                     )
-                destination_value[...] = np.asarray(source_value[...])
             phase_seconds["receipt_bound_partition_adoption"] = (
                 time.perf_counter() - phase_started
             )
-        frames = scratch_arrays["source_acquisition_frame_index"]
-        scratch_arrays["frame_row_offsets"][...] = (
-            derive_subject_mask_frame_row_offsets(frames, n_frames=dimensions.n_frames)
-        )
+            publication_arrays: Mapping[str, Any] = {
+                **precomputed_arrays,
+                "frame_row_offsets": np.asarray(source_frame_row_offsets),
+            }
+            source_evidence = {
+                "instance_key": source_mask_arrays["instance_key"],
+                "source_acquisition_frame_index": source_mask_arrays[
+                    "source_acquisition_frame_index"
+                ],
+                "available_channels": available,
+            }
+        else:
+            frames = scratch_arrays["source_acquisition_frame_index"]
+            scratch_arrays["frame_row_offsets"][...] = (
+                derive_subject_mask_frame_row_offsets(
+                    frames, n_frames=dimensions.n_frames
+                )
+            )
+            publication_arrays = scratch_arrays
+            source_evidence = {
+                "instance_key": scratch_arrays["instance_key"],
+                "source_acquisition_frame_index": scratch_arrays[
+                    "source_acquisition_frame_index"
+                ],
+                "available_channels": available,
+            }
         phase_seconds["bounded_compute_to_scratch"] = (
             source_verification_seconds
             + phase_seconds.get("receipt_bound_partition_adoption", 0.0)
@@ -1027,15 +1061,8 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
             else time.perf_counter() - phase_started
         )
 
-        source_evidence = {
-            "instance_key": scratch_arrays["instance_key"],
-            "source_acquisition_frame_index": scratch_arrays[
-                "source_acquisition_frame_index"
-            ],
-            "available_channels": available,
-        }
         SUBJECT_MASK_QUALITY_SCHEMA_V1.require(
-            scratch_arrays,
+            publication_arrays,
             dimensions=dimensions,
             components=components,
             profile=profile,
@@ -1098,6 +1125,7 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         }
         phase_started = time.perf_counter()
         physical_write_counts: dict[str, int] = {}
+        physical_write_logical_digests: dict[str, str] = {}
         for entry in plans.entries:
             path = entry.rule.path
             binding = bindings[path]
@@ -1116,11 +1144,13 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
                     "artifact_class": "observation_local_quality_diagnostics",
                 },
             )
-            physical_write_counts[path] = _write_by_physical_units(
+            write_count, logical_digest = _write_by_physical_units(
                 destination_array,
-                scratch_arrays[path],
+                publication_arrays[path],
                 plan=entry.plan,
             )
+            physical_write_counts[path] = write_count
+            physical_write_logical_digests[path] = logical_digest
             destination_arrays[path] = destination_array
         phase_seconds["physical_unit_publication"] = time.perf_counter() - phase_started
         run.attrs["physical_write_counts"] = physical_write_counts
@@ -1144,11 +1174,16 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
             source=resolved_source,
             source_manifest=source_manifest,
             storage_plan=plans,
-            arrays=scratch_arrays,
+            arrays=publication_arrays,
             source_arrays=source_evidence,
             direct_metadata_declarations=direct,
             consolidated_metadata_declarations=consolidated,
             write_receipt=receipt,
+            array_values_sha256=physical_write_logical_digests,
+            # The same immutable publication_arrays mapping passed the complete
+            # schema gate immediately above. The manifest still records every
+            # exact write-time logical digest without another array traversal.
+            validate_logical_arrays=False,
         )
         run.attrs[SUBJECT_MASK_QUALITY_RUN_MANIFEST_ATTRIBUTE] = manifest
         phase_seconds["build_manifest"] = time.perf_counter() - phase_started

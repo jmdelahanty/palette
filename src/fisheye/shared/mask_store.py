@@ -680,7 +680,7 @@ def write_bitpacked_mask_store_from_dense(
         if progress_callback is not None:
             progress_callback(str(event), **payload)
 
-    row_chunk = max(1, int(encode_row_chunk_size))
+    requested_row_chunk = max(1, int(encode_row_chunk_size))
     packed_width = packed_width_bytes(int(width))
     bitpacked_group = run_group.create_group("mask_bitpacked")
     bitpacked_group.attrs.update(
@@ -707,6 +707,12 @@ def write_bitpacked_mask_store_from_dense(
         row_chunk=storage_row_chunk_size,
         channel_chunk=storage_channel_chunk_size,
     )
+    physical_row_chunk = int(packed_chunks[0])
+    row_chunk = max(
+        physical_row_chunk,
+        ((requested_row_chunk + physical_row_chunk - 1) // physical_row_chunk)
+        * physical_row_chunk,
+    )
     packed_array = bitpacked_group.create_array(
         "masks_packed",
         shape=(int(n_rows), int(n_channels), int(height), int(packed_width)),
@@ -722,18 +728,45 @@ def write_bitpacked_mask_store_from_dense(
         channels=int(n_channels),
         height=int(height),
         width=int(width),
+        requested_encode_row_chunk_size=int(requested_row_chunk),
         encode_row_chunk_size=int(row_chunk),
+        storage_row_chunk_size=int(physical_row_chunk),
     )
-    encode_started = time.perf_counter()
+    encode_write_seconds = 0.0
+    roundtrip_validation_seconds = 0.0
     rows_written = 0
+    rows_checked = 0
+    chunks_checked = 0
     for start in range(0, int(n_rows), row_chunk):
         stop = min(int(n_rows), start + row_chunk)
+        encode_started = time.perf_counter()
         dense_chunk = np.asarray(dense_masks[start:stop], dtype=np.uint8)
         if dense_chunk.ndim == 3:
             dense_chunk = dense_chunk[:, None, :, :]
-        packed_array[start:stop] = pack_binary_mask_stack(dense_chunk)
+        dense_binary = (dense_chunk > 0).astype(np.uint8, copy=False)
+        packed_array[start:stop] = pack_binary_mask_stack(dense_binary)
+        encode_write_seconds += float(time.perf_counter() - encode_started)
         rows_written += int(stop - start)
-    phase_seconds["encode_write"] = float(time.perf_counter() - encode_started)
+        if validation_mode == "full":
+            validation_started = time.perf_counter()
+            persisted = np.asarray(packed_array[start:stop], dtype=np.uint8)
+            decoded = unpack_binary_mask_stack(
+                persisted,
+                logical_width=int(width),
+            )
+            if not np.array_equal(decoded, dense_binary):
+                mismatch = np.argwhere(decoded != dense_binary)
+                first = mismatch[0].tolist() if mismatch.size else []
+                raise MaskStoreError(
+                    "Bitpacked round-trip validation failed for "
+                    f"rows {start}:{stop}; first mismatch at local index {first}."
+                )
+            roundtrip_validation_seconds += float(
+                time.perf_counter() - validation_started
+            )
+            rows_checked += int(stop - start)
+            chunks_checked += 1
+    phase_seconds["encode_write"] = float(encode_write_seconds)
     logical_bytes = _mask_bitpacked_logical_bytes(bitpacked_group)
     emit(
         "bitpacked_encode_end",
@@ -767,6 +800,7 @@ def write_bitpacked_mask_store_from_dense(
         "encoded_shape": [int(n_rows), int(n_channels), int(height), int(packed_width)],
         "component_names": list(names),
         "logical_bytes": int(logical_bytes or 0),
+        "requested_encode_row_chunk_size": int(requested_row_chunk),
         "encode_row_chunk_size": int(row_chunk),
         "storage_chunks": [int(value) for value in packed_chunks],
         "validation_mode": str(validation_mode),
@@ -774,16 +808,31 @@ def write_bitpacked_mask_store_from_dense(
     }
     if validation_mode == "full":
         validation_started = time.perf_counter()
-        validation = validate_bitpacked_mask_store_against_dense(
+        validate_bitpacked_mask_store_invariants(
             run_group,
-            dense_masks,
-            row_chunk_size=row_chunk,
+            expected_shape=(int(n_rows), int(n_channels), int(height), int(width)),
+            component_names=names,
             source_path=str(extra_attrs.get("source_path", "")) if extra_attrs else "",
         )
-        phase_seconds["roundtrip_validation"] = float(time.perf_counter() - validation_started)
+        roundtrip_validation_seconds += float(
+            time.perf_counter() - validation_started
+        )
+        phase_seconds["roundtrip_validation"] = float(
+            roundtrip_validation_seconds
+        )
+        validation = {
+            "status": "passed",
+            "rows_checked": int(rows_checked),
+            "channels_checked": int(n_channels),
+            "chunks_checked": int(chunks_checked),
+            "row_chunk_size": int(row_chunk),
+        }
         summary["phase_seconds"] = dict(phase_seconds)
         summary["mask_bitpacked_validation"] = {"mode": "full", **validation}
         summary["roundtrip_validation"] = validation
+        summary["roundtrip_validation_strategy"] = (
+            "write_readback_against_resident_dense_v1"
+        )
         clear_mask_bitpacked_stale_attrs(run_group)
     elif validation_mode == "invariants":
         validation_started = time.perf_counter()

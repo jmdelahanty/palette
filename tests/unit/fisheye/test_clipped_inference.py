@@ -943,6 +943,15 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     )
     assert publish_job.command.count("--refined-package") == len(target["clips"])
     assert "--producer-commit" in publish_job.command
+    assert publish_job.command[
+        publish_job.command.index("--package-extract-workers") + 1
+    ] == str(workflow.SUBJECT_MASK_PACKAGE_EXTRACT_WORKERS)
+    assert publish_job.command[
+        publish_job.command.index("--core-physical-unit-workers") + 1
+    ] == str(workflow.SUBJECT_MASK_CORE_PHYSICAL_UNIT_WORKERS)
+    assert publish_job.command[publish_job.command.index("--copy-backend") + 1] == (
+        workflow.SUBJECT_MASK_BUNDLE_COPY_BACKEND
+    )
     assert "--cache-run" in publish_job.command
     publish_crop_index = publish_job.command.index("--crop-run") + 1
     assert publish_job.command[publish_crop_index] == target["geometry_crop_run"]
@@ -2153,6 +2162,16 @@ def test_keypoint_recovery_republishes_receipt_composed_mask_packages(
     assert jobs[publish_key].dependency.upstream_job_keys == (package_key,)
     assert "fisheye.cluster.subject_masks.publish_receipt_composed_bundle" in (
         jobs[publish_key].command
+    )
+    assert jobs[publish_key].command[
+        jobs[publish_key].command.index("--package-extract-workers") + 1
+    ] == str(workflow.SUBJECT_MASK_PACKAGE_EXTRACT_WORKERS)
+    assert jobs[publish_key].command[
+        jobs[publish_key].command.index("--core-physical-unit-workers") + 1
+    ] == str(workflow.SUBJECT_MASK_CORE_PHYSICAL_UNIT_WORKERS)
+    assert (
+        jobs[publish_key].command[jobs[publish_key].command.index("--copy-backend") + 1]
+        == workflow.SUBJECT_MASK_BUNDLE_COPY_BACKEND
     )
     assert jobs[f"validate:{target_safe}"].dependency.upstream_job_keys == (
         publish_key,
