@@ -14,14 +14,29 @@ def build_remediation(report: VideoDiagnosticsReport) -> list[Remediation]:
     stem = video_path.stem
     codec = (report.stream_info.codec or report.container.codec or "").lower()
 
-    if codec == "hevc" and bool(report.container.needs_fix):
+    if (
+        codec == "hevc"
+        and report.container.sync_sample_proof
+        == "orange_idr_sidecar_contradiction"
+    ):
         actions.append(
             Remediation(
-                issue="Missing HEVC sync samples",
-                description="Re-encode the HEVC file with an explicit GOP so MP4 sync-sample entries are rebuilt.",
-                command=(
-                    f"ffmpeg -i {video_path} -c:v hevc_nvenc -preset p4 -rc vbr -cq 23 "
-                    f"-g 60 -bf 0 {stem}_hevc_fixed.mp4"
+                issue="Contradictory Orange sync-sample evidence",
+                description=(
+                    "Do not rewrite the recording. Inspect the Orange recorder summary, "
+                    "keyframe sidecar, and container finalization evidence; regenerate only "
+                    "a derived output after identifying the producer defect."
+                ),
+            )
+        )
+
+    if codec == "hevc" and report.container.sync_sample_semantics == "unreadable":
+        actions.append(
+            Remediation(
+                issue="Unreadable MP4 sample table",
+                description=(
+                    "Inspect the moov atom and MP4 atom layout. Absence of stss in a "
+                    "readable video track is valid and is not itself a remediation target."
                 ),
             )
         )

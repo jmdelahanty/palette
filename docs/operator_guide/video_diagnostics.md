@@ -113,8 +113,35 @@ Tooling errors do not downgrade the default media verdict.
 ### Container
 
 - codec normalization for HEVC/H.264 variants
-- MP4 `moov` scan for `stss` sync-sample entries
-- HEVC seek-risk warning when `stss` is missing
+- structural MP4 video-track sample-table inspection
+- explicit MP4 sync-sample semantics:
+  - `indexed_sync_samples`: the video track contains `stss`, whose entries name
+    the sync samples
+  - `all_samples_sync`: the video track omits `stss`, which ISO BMFF defines as
+    every sample in that track being a sync sample
+  - `unreadable`: `moov`, the video sample table, or the atom layout could not
+    be inspected
+- independent Orange crop proof, when the declared crop summary and keyframe
+  sidecar are available:
+  - `container_declared`
+  - `orange_idr_sidecar_verified`
+  - `orange_idr_sidecar_unavailable`
+  - `orange_idr_sidecar_contradiction`
+
+An absent `stss` box is not a missing-table defect and does not by itself
+justify re-encoding. In particular, Orange lossless HEVC crop streams with
+`resolved_gop_length=1` are expected to contain only IDR/keyframes, so FFmpeg
+may omit the redundant table. Palette validates the producer proof by requiring
+the summary frame count and sidecar `total_frames` to agree and by streaming the
+sidecar indices to prove exact coverage of `0..N-1`. This validation does not
+load a million-frame keyframe list into memory.
+
+If an Orange inter-frame stream omits `stss`, or if its GOP=1 summary and
+keyframe sidecar disagree, diagnostics report
+`video.orange_sync_evidence_contradiction`. Operators should investigate the
+producer evidence rather than rewrite the immutable recording. Missing or
+malformed `moov`/sample-table structure remains
+`video.container_inspection_error`.
 
 ### Stream
 
@@ -177,7 +204,13 @@ pipeline decode work has moved toward PyNvVideoCodec, and a Decord failure
 should not block current recording imports unless an operator explicitly asks
 to validate that backend.
 
-The organizer and `backfill_hevc_keyframe_flags.py` now reuse the same shared container-check logic as the unified video diagnostics.
+The organizer and `backfill_hevc_keyframe_flags.py` reuse the same shared
+container-check logic as the unified video diagnostics. Organizer manifests
+retain the compatibility observation `has_stss`, but consumers should use
+`sync_sample_semantics`, `sync_sample_proof`, and
+`container_inspection_status` for decisions. Historical inputs without Orange
+summaries remain inspectable from their MP4 declaration; Palette does not
+invent producer evidence for them.
 
 ## Quick vs full scan
 
