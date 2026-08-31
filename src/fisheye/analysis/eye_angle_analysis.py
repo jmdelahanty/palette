@@ -65,14 +65,10 @@ from fisheye.shared.keypoint_coordinate_publication import (
     KEYPOINT_LABEL_AUTHORITY_SCHEMA_VERSION,
     load_persisted_keypoint_coordinate_surfaces,
 )
-from fisheye.shared.subject_position_keypoint_source import (
-    load_keypoint_coordinate_successor_source,
-)
 from fisheye.shared.zarr.assignment_keypoint_rebinding import (
-    ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE,
-    ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM,
-    assignment_equivalence_array_sha256,
-    assignment_success_equivalence_key,
+    ASSIGNMENT_KEYPOINT_SOURCE_DIRECT_PROFILE,
+    ASSIGNMENT_KEYPOINT_SOURCE_REBINDING_PROFILE,
+    load_assignment_keypoint_source,
 )
 from fisheye.pose.body_frame import (
     BODY_FRAME_COORDINATE_SPACE_ROI,
@@ -3287,6 +3283,7 @@ def _resolve_canonical_eye_keypoints(
             "diagnostic source."
         )
     publication_source = publication.source
+    bundle_authority = getattr(publication_source, "authority", None)
     rebinding = getattr(
         publication_source,
         "assignment_keypoint_rebinding_manifest",
@@ -3297,88 +3294,77 @@ def _resolve_canonical_eye_keypoints(
         "assignment_keypoint_rebinding_run_id",
         None,
     )
-    if isinstance(rebinding, Mapping) and isinstance(rebinding_run_id, str):
-        payload = rebinding.get("payload")
-        keypoint_source = (
-            payload.get("canonical_keypoint_source")
-            if isinstance(payload, Mapping)
-            else None
+    if bundle_authority is not None:
+        if isinstance(rebinding, Mapping) != isinstance(rebinding_run_id, str):
+            raise ValueError(
+                "Subject-shape assignment rebinding ID and manifest must be present "
+                "or absent together."
+            )
+        assignment_source = load_assignment_keypoint_source(
+            publication_source.archive_path,
+            subject_mask_authority=bundle_authority,
+            rebinding_run_id=(
+                rebinding_run_id if isinstance(rebinding_run_id, str) else None
+            ),
+            expected_rebinding_manifest=(
+                rebinding if isinstance(rebinding, Mapping) else None
+            ),
         )
-        equivalence = payload.get("equivalence") if isinstance(payload, Mapping) else None
-        if (
-            not isinstance(keypoint_source, Mapping)
-            or not isinstance(equivalence, Mapping)
-            or payload.get("assignment_state") != "used"
-            or keypoint_source.get("authority_profile")
-            != ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE
-        ):
-            raise ValueError(
-                "Subject-shape assignment rebinding profile is missing or invalid."
-            )
-        path = str(keypoint_source.get("run_path") or "")
-        if not path.startswith("keypoints_runs/") or path.count("/") != 1:
-            raise ValueError(
-                "Subject-shape assignment rebinding names a noncanonical keypoint path."
-            )
-        run_name = path.split("/", 1)[1]
+        path = assignment_source.keypoint_run_path
+        run_name = assignment_source.keypoint_run_id
         if expected_keypoint_run is not None and expected_keypoint_run != run_name:
             raise ValueError(
-                "--keypoint-run differs from the exact rebinding sealed by "
+                "--keypoint-run differs from the exact assignment authority sealed by "
                 "the selected subject-shape publication."
             )
-        resolved = load_keypoint_coordinate_successor_source(
-            publication_source.archive_path,
-            run_path=path,
-        )
-        if (
-            resolved.manifest_digest
-            != keypoint_source.get("run_manifest_document_digest")
-            or resolved.manifest.get("payload_digest")
-            != keypoint_source.get("run_manifest_payload_digest")
-            or resolved.successor_authority_digest
-            != keypoint_source.get("coordinate_successor_authority_digest")
-            or resolved.active_keypoint_bundle_authority_digest
-            != keypoint_source.get("keypoint_bundle_authority_digest")
-        ):
-            raise ValueError(
-                "Live keypoint coordinate successor differs from the assignment rebinding."
-            )
+        resolved = assignment_source.coordinate_source
         surfaces = resolved.surfaces
         group = resolved.run_group
-        success = group.get("pose_success")
-        keypoint_equivalence = equivalence.get("keypoints_roi_to_keypoints_roi")
-        subject_source = payload.get("subject_mask_source")
-        historical_keypoint_path = (
-            subject_source.get("historical_keypoint_run_path")
-            if isinstance(subject_source, Mapping)
-            else None
-        )
-        success_equivalence = equivalence.get(
-            assignment_success_equivalence_key(str(historical_keypoint_path or ""))
-        )
         if (
-            success is None
-            or not isinstance(keypoint_equivalence, Mapping)
-            or not isinstance(success_equivalence, Mapping)
-            or keypoint_equivalence.get("digest_algorithm")
-            != ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM
-            or success_equivalence.get("digest_algorithm")
-            != ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM
-            or assignment_equivalence_array_sha256(group["keypoints_roi"])
-            != keypoint_equivalence.get("normalized_sha256")
-            or assignment_equivalence_array_sha256(success)
-            != success_equivalence.get("normalized_sha256")
+            assignment_source.keypoints_dataset != "keypoints_roi"
+            or assignment_source.success_dataset != "pose_success"
+            or tuple(surfaces.context.keypoint_labels)
+            != tuple(assignment_source.keypoint_labels)
         ):
             raise ValueError(
-                "Canonical eye keypoint values differ from the assignment rebinding."
+                "Resolved assignment keypoint interface is not the canonical eye profile."
             )
-        assignment_pointer = {
-            "record_ref": (
-                "/subject_mask_assignment_keypoint_rebinding_runs/"
-                f"{rebinding_run_id}@run_manifest"
-            ),
-            "record_sha256": _canonical_json_sha256(rebinding),
-        }
+        success = group.get(assignment_source.success_dataset)
+        if success is None:
+            raise ValueError("Canonical assignment keypoint success array is absent.")
+        if assignment_source.evidence_profile == (
+            ASSIGNMENT_KEYPOINT_SOURCE_DIRECT_PROFILE
+        ):
+            assignment_pointer = publication.source_binding
+            source_record = getattr(publication_source, "source_record", None)
+            if (
+                assignment_pointer is None
+                or not isinstance(source_record, Mapping)
+                or assignment_pointer.record != source_record
+            ):
+                raise ValueError(
+                    "Direct assignment authority is not sealed by the exact "
+                    "subject-shape source-binding record."
+                )
+        elif assignment_source.evidence_profile == (
+            ASSIGNMENT_KEYPOINT_SOURCE_REBINDING_PROFILE
+        ):
+            resolved_rebinding = assignment_source.rebinding_manifest
+            resolved_rebinding_id = assignment_source.rebinding_run_id
+            if not isinstance(resolved_rebinding, Mapping) or not isinstance(
+                resolved_rebinding_id,
+                str,
+            ):
+                raise ValueError("Resolved assignment rebinding evidence is incomplete.")
+            assignment_pointer = {
+                "record_ref": (
+                    "/subject_mask_assignment_keypoint_rebinding_runs/"
+                    f"{resolved_rebinding_id}@run_manifest"
+                ),
+                "record_sha256": _canonical_json_sha256(resolved_rebinding),
+            }
+        else:
+            raise ValueError("Resolved assignment-keypoint profile is unsupported.")
         alignment = _require_ordered_eye_row_alignment(
             publication.row_identity,
             surfaces.context.row_identity,
@@ -3390,7 +3376,7 @@ def _resolve_canonical_eye_keypoints(
             surfaces=surfaces,
             assignment_authority=assignment_pointer,
             alignment=alignment,
-            success_dataset="pose_success",
+            success_dataset=assignment_source.success_dataset,
         )
         authority_arrays = authority["arrays"]
         if (
@@ -3404,7 +3390,7 @@ def _resolve_canonical_eye_keypoints(
             != alignment["shared_frame_index_content_sha256"]
         ):
             raise ValueError(
-                "Canonical rebinding payload changed while its detached authority "
+                "Canonical assignment payload changed while its detached authority "
                 "was being sealed."
             )
         return (

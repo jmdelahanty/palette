@@ -1,16 +1,19 @@
-"""Immutable rebinding from mask-assignment evidence to active keypoint v2.
+"""Resolve mask-assignment evidence to one canonical keypoint interface.
 
-The recording subject-mask bundle seals which historical keypoint rowset was
-used to split the eye mask.  A later strict-v2 keypoint publication may be
-used by downstream eye analysis only after this publisher proves that the two
-rowsets and the assignment-relevant scientific values are identical under the
-declared float64-to-float32 normalization.  The resulting artifact is small:
-it stores evidence only and never copies mask or keypoint payloads.
+The recording subject-mask bundle may seal the canonical coordinate successor
+directly or retain a historical keypoint rowset used to split the eye mask.  A
+direct source is admitted from the bundle evidence itself.  A historical
+source is admitted only after an immutable rebinding proves that it and a
+strict-v2 publication have identical rows and assignment-relevant scientific
+values under the declared normalization.  Consumers receive one sealed source
+interface in either case.  Rebinding artifacts store evidence only and never
+copy mask or keypoint payloads.
 """
 
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass, field
 import hashlib
 from pathlib import Path
 import re
@@ -22,6 +25,7 @@ import zarr
 
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.subject_position_keypoint_source import (
+    BoundKeypointCoordinateSuccessorSource,
     load_keypoint_coordinate_successor_admission,
     load_keypoint_coordinate_successor_source,
 )
@@ -62,6 +66,12 @@ ASSIGNMENT_KEYPOINT_REBINDING_POLICY = (
 )
 ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE = "keypoint_coordinate_successor_v1"
 ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM = "sha256_c_contiguous_bytes_v1"
+ASSIGNMENT_KEYPOINT_SOURCE_DIRECT_PROFILE = (
+    "direct_bundle_coordinate_successor_v1"
+)
+ASSIGNMENT_KEYPOINT_SOURCE_REBINDING_PROFILE = (
+    "immutable_rebinding_coordinate_successor_v1"
+)
 
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -82,8 +92,10 @@ _BASE_EQUIVALENCE_PAIRS = (
 )
 _ASSIGNMENT_SOURCE_PROFILES = {
     ("keypoints_runs", "detection_success"): "raw_keypoints",
+    ("keypoints_runs", "pose_success"): "coordinate_successor",
     ("refined_keypoints_runs", "usable_keypoints"): "refined_keypoints",
 }
+_BOUND_ASSIGNMENT_KEYPOINT_SOURCE_SEAL = object()
 
 
 class AssignmentKeypointRebindingError(ValueError):
@@ -92,6 +104,55 @@ class AssignmentKeypointRebindingError(ValueError):
 
 def _fail(message: str) -> None:
     raise AssignmentKeypointRebindingError(message)
+
+
+@dataclass(frozen=True, init=False)
+class BoundAssignmentKeypointSource:
+    """One fully admitted assignment-to-canonical-keypoint dependency.
+
+    The evidence may be direct (the bundle workers used the immutable
+    coordinate successor itself) or indirect (an immutable rebinding proved a
+    historical assignment rowset equivalent to that successor).  Consumers
+    receive the same coordinate-source interface for both profiles.
+    """
+
+    archive_path: Path
+    evidence_profile: str
+    subject_mask_bundle_id: str
+    subject_mask_authority_digest: str
+    assignment_collection_digest: str
+    keypoint_run_path: str
+    keypoint_run_id: str
+    keypoints_dataset: str
+    success_dataset: str
+    keypoint_labels: tuple[str, ...]
+    eye_keypoint_indices: Mapping[str, int]
+    coordinate_source: BoundKeypointCoordinateSuccessorSource = field(
+        repr=False,
+        compare=False,
+    )
+    rebinding_run_id: str | None
+    rebinding_manifest: Mapping[str, Any] | None = field(
+        repr=False,
+        compare=False,
+    )
+    equivalence: Mapping[str, Any] = field(repr=False, compare=False)
+    _seal: object = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        *,
+        _verification_seal: object | None = None,
+        **values: Any,
+    ) -> None:
+        if _verification_seal is not _BOUND_ASSIGNMENT_KEYPOINT_SOURCE_SEAL:
+            _fail(
+                "Assignment-keypoint sources must be produced by the shared "
+                "resolver."
+            )
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "_seal", _verification_seal)
 
 
 def _run_id(value: object, *, label: str) -> str:
@@ -179,6 +240,288 @@ def _assignment_collection_source_run(collection: Mapping[str, Any]) -> str:
     """Return the exact historical run ID retained for compatibility callers."""
 
     return _assignment_collection_source(collection)[1]
+
+
+def _canonical_coordinate_successor_binding(
+    bundle: BoundRecordingSubjectMaskCoordinateAuthority,
+    source: Any,
+    *,
+    expected_run_path: str,
+) -> tuple[tuple[str, ...], dict[str, int], Mapping[str, Any]]:
+    """Require one successor to close over the exact mask-bundle authority."""
+
+    run = source.run_group
+    manifest = source.manifest
+    surfaces = source.surfaces
+    context = surfaces.context
+    if (
+        source.run_path != expected_run_path
+        or getattr(run, "path", None) != expected_run_path
+        or context.run_path != expected_run_path
+    ):
+        _fail("Assignment keypoint successor path differs across its authorities.")
+    payload = manifest.get("payload") if isinstance(manifest, Mapping) else None
+    source_crop = (
+        payload.get("source_crop_snapshot") if isinstance(payload, Mapping) else None
+    )
+    if (
+        not isinstance(source_crop, Mapping)
+        or source_crop.get("run_path") != bundle.crop_run_path
+        or getattr(context.source, "crop_path", None) != bundle.crop_run_path
+    ):
+        _fail("Assignment keypoints and subject masks bind different crop authority.")
+
+    arrays = _manifest_arrays(manifest)
+    try:
+        identity = bundle.bundle_manifest["payload"]["cross_binding"][
+            "raw_refined_identity_array_values_sha256"
+        ]
+    except (KeyError, TypeError) as exc:
+        raise AssignmentKeypointRebindingError(
+            "Subject-mask bundle lacks its exact row-identity digest binding."
+        ) from exc
+    if not isinstance(identity, Mapping):
+        _fail("Subject-mask bundle row-identity digest binding is malformed.")
+    for name in _IDENTITY_NAMES:
+        declaration = arrays.get(name)
+        if (
+            not isinstance(declaration, Mapping)
+            or declaration.get("digest_algorithm")
+            != ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM
+            or declaration.get("sha256") != identity.get(name)
+            or declaration.get("shape") != [bundle.n_rois]
+        ):
+            _fail(
+                f"Canonical assignment keypoint {name} differs from the mask bundle."
+            )
+
+    for name in ("keypoints_roi", "pose_success"):
+        declaration = arrays.get(name)
+        node = run.get(name)
+        if (
+            not isinstance(declaration, Mapping)
+            or declaration.get("digest_algorithm")
+            != ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM
+            or not isinstance(declaration.get("shape"), list)
+            or not declaration["shape"]
+            or declaration["shape"][0] != bundle.n_rois
+            or _SHA256.fullmatch(str(declaration.get("sha256") or "")) is None
+            or node is None
+            or [int(value) for value in node.shape] != declaration["shape"]
+            or str(np.dtype(node.dtype)) != declaration.get("dtype")
+        ):
+            _fail(f"Canonical assignment keypoint {name} declaration is invalid.")
+    if np.dtype(run["pose_success"].dtype) != np.dtype("bool"):
+        _fail("Canonical assignment keypoint pose_success must be exact bool.")
+
+    pose_schema = (
+        payload.get("pose_model_schema_binding", {}).get("pose_schema")
+        if isinstance(payload, Mapping)
+        and isinstance(payload.get("pose_model_schema_binding"), Mapping)
+        else None
+    )
+    labels_value = (
+        pose_schema.get("keypoint_labels") if isinstance(pose_schema, Mapping) else None
+    )
+    labels = (
+        tuple(str(label) for label in labels_value)
+        if isinstance(labels_value, (list, tuple))
+        else ()
+    )
+    if (
+        not labels
+        or len(labels) != len(set(labels))
+        or tuple(context.keypoint_labels) != labels
+        or "eye_left" not in labels
+        or "eye_right" not in labels
+    ):
+        _fail("Canonical assignment keypoint label authority is invalid.")
+    indices = {
+        "eye_left": labels.index("eye_left"),
+        "eye_right": labels.index("eye_right"),
+    }
+    temporal = context.temporal_authority.record
+    if (
+        context.row_identity.leading_dimension != bundle.n_rois
+        or temporal.source_total_frames != bundle.source_total_frames
+        or temporal.recording_id != bundle.recording_identity
+        or temporal.camera_id != bundle.camera_identity
+    ):
+        _fail(
+            "Canonical assignment keypoint row or temporal authority differs "
+            "from the mask bundle."
+        )
+    return labels, indices, arrays
+
+
+def load_assignment_keypoint_source(
+    analysis_zarr: str | Path,
+    *,
+    subject_mask_authority: BoundRecordingSubjectMaskCoordinateAuthority,
+    rebinding_run_id: str | None = None,
+    expected_rebinding_manifest: Mapping[str, Any] | None = None,
+) -> BoundAssignmentKeypointSource:
+    """Resolve direct and rebound assignment evidence through one interface.
+
+    Direct evidence is admitted only when every bundle worker names one
+    gapless recording-wide ``keypoints_runs`` coordinate successor and its
+    exact ``pose_success`` leaf.  Historical raw/refined assignments require
+    an immutable rebinding publication.  A profile failure never falls back to
+    the other profile.
+    """
+
+    archive = Path(analysis_zarr).expanduser().resolve()
+    bundle = require_bound_recording_subject_mask_coordinate_authority(
+        subject_mask_authority
+    )
+    if bundle.archive_path != archive:
+        _fail("Provided subject-mask authority belongs to another archive.")
+    collection = bundle.assignment_keypoint_collection
+    group, assignment_run_id, assignment_success = _assignment_collection_source(
+        collection
+    )
+    if collection.get("n_rois") != bundle.n_rois:
+        _fail("Assignment collection row count differs from its mask bundle.")
+    collection_digest = canonical_json_sha256(json_attr_safe(collection))
+    has_rebinding_id = rebinding_run_id is not None
+    has_rebinding_manifest = expected_rebinding_manifest is not None
+    if has_rebinding_manifest and not has_rebinding_id:
+        _fail("Assignment rebinding manifest was provided without its run ID.")
+
+    direct = group == "keypoints_runs" and assignment_success == "pose_success"
+    if direct:
+        if has_rebinding_id or has_rebinding_manifest:
+            _fail(
+                "Direct assignment evidence cannot also select a rebinding profile."
+            )
+        keypoint_run_path = f"keypoints_runs/{assignment_run_id}"
+        coordinate_source = load_keypoint_coordinate_successor_source(
+            archive,
+            run_path=keypoint_run_path,
+        )
+        labels, eye_indices, arrays = _canonical_coordinate_successor_binding(
+            bundle,
+            coordinate_source,
+            expected_run_path=keypoint_run_path,
+        )
+        if (
+            assignment_equivalence_array_sha256(
+                coordinate_source.run_group["pose_success"]
+            )
+            != arrays["pose_success"]["sha256"]
+        ):
+            _fail("Canonical assignment pose_success differs from its manifest.")
+        return BoundAssignmentKeypointSource(
+            archive_path=archive,
+            evidence_profile=ASSIGNMENT_KEYPOINT_SOURCE_DIRECT_PROFILE,
+            subject_mask_bundle_id=bundle.bundle_id,
+            subject_mask_authority_digest=bundle.authority_digest,
+            assignment_collection_digest=collection_digest,
+            keypoint_run_path=keypoint_run_path,
+            keypoint_run_id=assignment_run_id,
+            keypoints_dataset="keypoints_roi",
+            success_dataset="pose_success",
+            keypoint_labels=labels,
+            eye_keypoint_indices=dict(eye_indices),
+            coordinate_source=coordinate_source,
+            rebinding_run_id=None,
+            rebinding_manifest=None,
+            equivalence={},
+            _verification_seal=_BOUND_ASSIGNMENT_KEYPOINT_SOURCE_SEAL,
+        )
+
+    if not has_rebinding_id:
+        _fail(
+            "Historical assignment evidence requires one explicit immutable "
+            "rebinding publication."
+        )
+    normalized_rebinding_id = _run_id(
+        rebinding_run_id,
+        label="rebinding_run_id",
+    )
+    rebinding = load_assignment_keypoint_rebinding_manifest(
+        archive,
+        rebinding_run_id=normalized_rebinding_id,
+        subject_mask_authority=bundle,
+    )
+    if expected_rebinding_manifest is not None and rebinding != dict(
+        expected_rebinding_manifest
+    ):
+        _fail("Attached assignment rebinding differs from its persisted publication.")
+    payload = rebinding["payload"]
+    subject = payload["subject_mask_source"]
+    historical_path = f"{group}/{assignment_run_id}"
+    if subject.get("historical_keypoint_run_path") != historical_path:
+        _fail("Assignment rebinding names a different historical keypoint source.")
+    keypoint_source = payload["canonical_keypoint_source"]
+    keypoint_run_path = str(keypoint_source["run_path"])
+    coordinate_source = load_keypoint_coordinate_successor_source(
+        archive,
+        run_path=keypoint_run_path,
+    )
+    labels, eye_indices, arrays = _canonical_coordinate_successor_binding(
+        bundle,
+        coordinate_source,
+        expected_run_path=keypoint_run_path,
+    )
+    if (
+        keypoint_source.get("authority_profile")
+        != ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE
+        or coordinate_source.manifest_digest
+        != keypoint_source.get("run_manifest_document_digest")
+        or coordinate_source.manifest.get("payload_digest")
+        != keypoint_source.get("run_manifest_payload_digest")
+        or coordinate_source.successor_authority_digest
+        != keypoint_source.get("coordinate_successor_authority_digest")
+        or coordinate_source.active_keypoint_bundle_authority_digest
+        != keypoint_source.get("keypoint_bundle_authority_digest")
+        or keypoint_source.get("keypoints_dataset") != "keypoints_roi"
+        or keypoint_source.get("success_dataset") != "pose_success"
+        or tuple(keypoint_source.get("keypoint_labels") or ()) != labels
+        or dict(keypoint_source.get("eye_keypoint_indices") or {}) != eye_indices
+    ):
+        _fail("Canonical keypoint authority differs from its assignment rebinding.")
+
+    equivalence = payload["equivalence"]
+    keypoint_equivalence = equivalence.get("keypoints_roi_to_keypoints_roi")
+    success_equivalence = equivalence.get(
+        assignment_success_equivalence_key(historical_path)
+    )
+    for name, evidence, dataset in (
+        ("keypoints_roi", keypoint_equivalence, "keypoints_roi"),
+        ("pose_success", success_equivalence, "pose_success"),
+    ):
+        if (
+            not isinstance(evidence, Mapping)
+            or evidence.get("digest_algorithm")
+            != ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM
+            or evidence.get("normalized_sha256") != arrays[dataset]["sha256"]
+            or assignment_equivalence_array_sha256(
+                coordinate_source.run_group[dataset]
+            )
+            != evidence.get("normalized_sha256")
+        ):
+            _fail(
+                f"Canonical assignment {name} differs from its rebinding evidence."
+            )
+    return BoundAssignmentKeypointSource(
+        archive_path=archive,
+        evidence_profile=ASSIGNMENT_KEYPOINT_SOURCE_REBINDING_PROFILE,
+        subject_mask_bundle_id=bundle.bundle_id,
+        subject_mask_authority_digest=bundle.authority_digest,
+        assignment_collection_digest=collection_digest,
+        keypoint_run_path=keypoint_run_path,
+        keypoint_run_id=keypoint_run_path.split("/", 1)[1],
+        keypoints_dataset="keypoints_roi",
+        success_dataset="pose_success",
+        keypoint_labels=labels,
+        eye_keypoint_indices=dict(eye_indices),
+        coordinate_source=coordinate_source,
+        rebinding_run_id=normalized_rebinding_id,
+        rebinding_manifest=copy.deepcopy(rebinding),
+        equivalence=copy.deepcopy(dict(equivalence)),
+        _verification_seal=_BOUND_ASSIGNMENT_KEYPOINT_SOURCE_SEAL,
+    )
 
 
 def _equivalence_pairs(
@@ -949,10 +1292,14 @@ __all__ = [
     "ASSIGNMENT_KEYPOINT_REBINDING_SCHEMA_VERSION",
     "ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE",
     "ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM",
+    "ASSIGNMENT_KEYPOINT_SOURCE_DIRECT_PROFILE",
+    "ASSIGNMENT_KEYPOINT_SOURCE_REBINDING_PROFILE",
     "AssignmentKeypointRebindingError",
+    "BoundAssignmentKeypointSource",
     "assignment_equivalence_array_sha256",
     "assignment_success_equivalence_key",
     "inspect_assignment_keypoint_rebinding",
+    "load_assignment_keypoint_source",
     "load_assignment_keypoint_rebinding_manifest",
     "publish_assignment_keypoint_rebinding",
     "validate_assignment_keypoint_rebinding_manifest",

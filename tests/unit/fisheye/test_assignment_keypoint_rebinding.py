@@ -14,11 +14,14 @@ from fisheye.shared.zarr.assignment_keypoint_rebinding import (
     ASSIGNMENT_KEYPOINT_REBINDING_POLICY,
     ASSIGNMENT_KEYPOINT_REBINDING_SCHEMA_ID,
     ASSIGNMENT_KEYPOINT_REBINDING_SCHEMA_VERSION,
+    ASSIGNMENT_KEYPOINT_SOURCE_DIRECT_PROFILE,
+    ASSIGNMENT_KEYPOINT_SOURCE_REBINDING_PROFILE,
     _assignment_collection_source,
     _assignment_collection_source_run,
     _chunked_equivalence,
     _refined_historical_labels,
     inspect_assignment_keypoint_rebinding,
+    load_assignment_keypoint_source,
     load_assignment_keypoint_rebinding_manifest,
     validate_assignment_keypoint_rebinding_manifest,
 )
@@ -135,6 +138,15 @@ def test_assignment_collection_requires_one_gapless_recording_run() -> None:
         "usable_keypoints",
     )
 
+    direct = _collection()
+    for worker in direct["workers"]:
+        worker["assignment"]["assignment_keypoint_success_dataset"] = "pose_success"
+    assert _assignment_collection_source(direct) == (
+        "keypoints_runs",
+        "historical",
+        "pose_success",
+    )
+
     gap = _collection()
     gap["workers"][1]["global_row_interval"]["start_row"] = 3
     try:
@@ -152,6 +164,13 @@ def test_assignment_collection_requires_one_gapless_recording_run() -> None:
         assert "one recording-wide" in str(exc)
     else:  # pragma: no cover - assertion aid
         raise AssertionError("mixed assignment collection was accepted")
+
+    mixed_success = direct
+    mixed_success["workers"][1]["assignment"][
+        "assignment_keypoint_success_dataset"
+    ] = "detection_success"
+    with pytest.raises(ValueError, match="one recording-wide"):
+        _assignment_collection_source(mixed_success)
 
 
 def test_refined_assignment_labels_require_exact_active_lineage(
@@ -362,6 +381,288 @@ def test_rebinding_loader_reuses_provided_bound_mask_authority(
     )
 
     assert loaded == manifest
+
+
+def test_direct_assignment_source_resolves_one_canonical_successor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive = (tmp_path / "analysis.zarr").resolve()
+    archive.mkdir()
+
+    def digest(values: np.ndarray) -> str:
+        return hashlib.sha256(
+            np.ascontiguousarray(values).tobytes(order="C")
+        ).hexdigest()
+
+    identity = {
+        "source_crop_row_ids": np.asarray([0, 1], dtype=np.int64),
+        "instance_key": np.asarray([10, 11], dtype=np.uint64),
+        "source_acquisition_frame_index": np.asarray([20, 21], dtype=np.int64),
+    }
+    keypoints = np.asarray(
+        [
+            [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+            [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]],
+        ],
+        dtype=np.float32,
+    )
+    pose_success = np.asarray([True, False], dtype=np.bool_)
+
+    class Group(dict[str, object]):
+        def __init__(self, values: dict[str, object], *, path: str) -> None:
+            super().__init__(values)
+            self.path = path
+
+    run_path = "keypoints_runs/canonical"
+    run = Group(
+        {**identity, "keypoints_roi": keypoints, "pose_success": pose_success},
+        path=run_path,
+    )
+    labels = ("swim_bladder", "eye_left", "eye_right")
+    declarations = {
+        name: {
+            "shape": [int(value) for value in values.shape],
+            "dtype": str(values.dtype),
+            "digest_algorithm": "sha256_c_contiguous_bytes_v1",
+            "sha256": digest(values),
+        }
+        for name, values in run.items()
+    }
+    manifest = {
+        "payload_digest": "1" * 64,
+        "payload": {
+            "source_crop_snapshot": {"run_path": "crop_runs/canonical"},
+            "logical_content": {"document": {"arrays": declarations}},
+            "pose_model_schema_binding": {
+                "pose_schema": {"keypoint_labels": list(labels)}
+            },
+        },
+    }
+    context = SimpleNamespace(
+        run_path=run_path,
+        source=SimpleNamespace(crop_path="crop_runs/canonical"),
+        row_identity=SimpleNamespace(leading_dimension=2),
+        temporal_authority=SimpleNamespace(
+            record=SimpleNamespace(
+                source_total_frames=30,
+                recording_id="recording",
+                camera_id="camera",
+            )
+        ),
+        keypoint_labels=labels,
+    )
+    source = SimpleNamespace(
+        run_path=run_path,
+        run_group=run,
+        manifest=manifest,
+        surfaces=SimpleNamespace(context=context),
+    )
+    collection = {
+        "schema_id": "palette.subject_mask.assignment_keypoint_collection",
+        "schema_version": 1,
+        "mode": "exact_worker_partition",
+        "row_policy": "ordered_contiguous_recording_crop_rows_v1",
+        "n_rois": 2,
+        "workers": [
+            {
+                "global_row_interval": {"start_row": start, "stop_row": stop},
+                "assignment": {
+                    "assignment_keypoint_group": "keypoints_runs",
+                    "assignment_keypoints_run": "canonical",
+                    "assignment_keypoint_success_dataset": "pose_success",
+                },
+            }
+            for start, stop in ((0, 1), (1, 2))
+        ],
+    }
+    bundle = SimpleNamespace(
+        archive_path=archive,
+        bundle_id="bundle",
+        authority_digest="2" * 64,
+        assignment_keypoint_collection=collection,
+        crop_run_path="crop_runs/canonical",
+        n_rois=2,
+        source_total_frames=30,
+        recording_identity="recording",
+        camera_identity="camera",
+        bundle_manifest={
+            "payload": {
+                "cross_binding": {
+                    "raw_refined_identity_array_values_sha256": {
+                        name: digest(values) for name, values in identity.items()
+                    }
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding."
+        "require_bound_recording_subject_mask_coordinate_authority",
+        lambda value: value,
+    )
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding."
+        "load_keypoint_coordinate_successor_source",
+        lambda _archive, *, run_path: (
+            source
+            if run_path == "keypoints_runs/canonical"
+            else pytest.fail(f"unexpected keypoint path: {run_path}")
+        ),
+    )
+
+    resolved = load_assignment_keypoint_source(
+        archive,
+        subject_mask_authority=bundle,
+    )
+
+    assert resolved.evidence_profile == ASSIGNMENT_KEYPOINT_SOURCE_DIRECT_PROFILE
+    assert resolved.coordinate_source is source
+    assert resolved.keypoint_run_path == "keypoints_runs/canonical"
+    assert resolved.success_dataset == "pose_success"
+    assert resolved.eye_keypoint_indices == {"eye_left": 1, "eye_right": 2}
+
+    with pytest.raises(ValueError, match="cannot also select a rebinding"):
+        load_assignment_keypoint_source(
+            archive,
+            subject_mask_authority=bundle,
+            rebinding_run_id="ambiguous",
+        )
+
+    bundle.bundle_manifest["payload"]["cross_binding"][
+        "raw_refined_identity_array_values_sha256"
+    ]["instance_key"] = "0" * 64
+    with pytest.raises(ValueError, match="instance_key differs"):
+        load_assignment_keypoint_source(
+            archive,
+            subject_mask_authority=bundle,
+        )
+
+
+def test_historical_assignment_source_resolves_only_through_exact_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive = (tmp_path / "analysis.zarr").resolve()
+    archive.mkdir()
+    keypoints = np.asarray([[[1.0, 2.0]]], dtype=np.float32)
+    pose_success = np.asarray([True], dtype=np.bool_)
+
+    def digest(values: np.ndarray) -> str:
+        return hashlib.sha256(
+            np.ascontiguousarray(values).tobytes(order="C")
+        ).hexdigest()
+
+    run_path = "keypoints_runs/canonical"
+    run = {"keypoints_roi": keypoints, "pose_success": pose_success}
+    source = SimpleNamespace(
+        run_path=run_path,
+        run_group=run,
+        manifest={"payload_digest": "1" * 64},
+        manifest_digest="2" * 64,
+        successor_authority_digest="3" * 64,
+        active_keypoint_bundle_authority_digest="4" * 64,
+    )
+    collection = {
+        "schema_id": "palette.subject_mask.assignment_keypoint_collection",
+        "schema_version": 1,
+        "mode": "exact_worker_partition",
+        "row_policy": "ordered_contiguous_recording_crop_rows_v1",
+        "n_rois": 1,
+        "workers": [
+            {
+                "global_row_interval": {"start_row": 0, "stop_row": 1},
+                "assignment": {
+                    "assignment_keypoint_group": "keypoints_runs",
+                    "assignment_keypoints_run": "historical",
+                    "assignment_keypoint_success_dataset": "detection_success",
+                },
+            }
+        ],
+    }
+    bundle = SimpleNamespace(
+        archive_path=archive,
+        bundle_id="bundle",
+        authority_digest="5" * 64,
+        assignment_keypoint_collection=collection,
+        n_rois=1,
+    )
+    labels = ("swim_bladder", "eye_left", "eye_right")
+    arrays = {
+        "keypoints_roi": {"sha256": digest(keypoints)},
+        "pose_success": {"sha256": digest(pose_success)},
+    }
+    payload = {
+        "subject_mask_source": {
+            "historical_keypoint_run_path": "keypoints_runs/historical"
+        },
+        "canonical_keypoint_source": {
+            "authority_profile": ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE,
+            "run_path": run_path,
+            "run_manifest_payload_digest": "1" * 64,
+            "run_manifest_document_digest": "2" * 64,
+            "coordinate_successor_authority_digest": "3" * 64,
+            "keypoint_bundle_authority_digest": "4" * 64,
+            "keypoints_dataset": "keypoints_roi",
+            "success_dataset": "pose_success",
+            "keypoint_labels": list(labels),
+            "eye_keypoint_indices": {"eye_left": 1, "eye_right": 2},
+        },
+        "equivalence": {
+            "keypoints_roi_to_keypoints_roi": {
+                "digest_algorithm": "sha256_c_contiguous_bytes_v1",
+                "normalized_sha256": digest(keypoints),
+            },
+            "detection_success_to_pose_success": {
+                "digest_algorithm": "sha256_c_contiguous_bytes_v1",
+                "normalized_sha256": digest(pose_success),
+            },
+        },
+    }
+    rebinding = {"payload": payload}
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding."
+        "require_bound_recording_subject_mask_coordinate_authority",
+        lambda value: value,
+    )
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding."
+        "load_assignment_keypoint_rebinding_manifest",
+        lambda *_args, **_kwargs: rebinding,
+    )
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding."
+        "load_keypoint_coordinate_successor_source",
+        lambda *_args, **_kwargs: source,
+    )
+    monkeypatch.setattr(
+        "fisheye.shared.zarr.assignment_keypoint_rebinding."
+        "_canonical_coordinate_successor_binding",
+        lambda *_args, **_kwargs: (
+            labels,
+            {"eye_left": 1, "eye_right": 2},
+            arrays,
+        ),
+    )
+
+    resolved = load_assignment_keypoint_source(
+        archive,
+        subject_mask_authority=bundle,
+        rebinding_run_id="rebind",
+        expected_rebinding_manifest=rebinding,
+    )
+
+    assert resolved.evidence_profile == ASSIGNMENT_KEYPOINT_SOURCE_REBINDING_PROFILE
+    assert resolved.coordinate_source is source
+    assert resolved.rebinding_run_id == "rebind"
+
+    with pytest.raises(ValueError, match="Attached assignment rebinding differs"):
+        load_assignment_keypoint_source(
+            archive,
+            subject_mask_authority=bundle,
+            rebinding_run_id="rebind",
+            expected_rebinding_manifest={"payload": {"changed": True}},
+        )
 
 
 @pytest.mark.parametrize(
