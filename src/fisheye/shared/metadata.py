@@ -5,11 +5,20 @@ These lightweight utilities help read metadata fields consistently across
 the pipeline, following the unified metadata specification.
 """
 
+import math
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Mapping, Optional
 import zarr
 
+from fisheye.shared.clipped_video_collection import (
+    SOURCE_VIDEO_COLLECTION_LAYOUT,
+    SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID,
+)
 from fisheye.shared.source_video_metadata import (
+    SOURCE_VIDEO_LAYOUT_SINGLE,
+    SOURCE_VIDEO_METADATA_SCHEMA_ID,
+    SourceVideoMetadataConflictError,
+    SourceVideoMetadataError,
     SourceVideoMetadataMissingError,
     resolve_source_video,
 )
@@ -185,7 +194,12 @@ def get_frame_source(
 
 def get_fps(root: zarr.Group) -> Optional[float]:
     """
-    Get video frame rate following unified spec.
+    Get the authoritative nominal video frame rate following the unified spec.
+
+    Supported versioned ``source_video_metadata`` profiles take precedence over
+    the legacy root ``fps`` mirror.  When both are populated they must agree.
+    Malformed or unsupported versioned metadata fails closed rather than
+    silently falling back to a compatibility value.
     
     Args:
         root: Zarr root group
@@ -199,8 +213,98 @@ def get_fps(root: zarr.Group) -> Optional[float]:
         >>> if fps:
         ...     duration = num_frames / fps
     """
-    fps = root.attrs.get('fps')
-    return float(fps) if fps is not None else None
+    def _positive_finite_fps(value: object, *, field_name: str) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise SourceVideoMetadataError(
+                f"{field_name} must be one positive finite number."
+            )
+        resolved = float(value)
+        if not math.isfinite(resolved) or resolved <= 0:
+            raise SourceVideoMetadataError(
+                f"{field_name} must be one positive finite number."
+            )
+        return resolved
+
+    attrs = root.attrs
+    metadata_value = attrs.get("source_video_metadata")
+    canonical_fps: float | None = None
+    if isinstance(metadata_value, Mapping):
+        schema_id = metadata_value.get("schema_id")
+        if schema_id == SOURCE_VIDEO_METADATA_SCHEMA_ID:
+            if metadata_value.get("layout") != SOURCE_VIDEO_LAYOUT_SINGLE:
+                raise SourceVideoMetadataError(
+                    f"{SOURCE_VIDEO_METADATA_SCHEMA_ID} requires layout="
+                    f"{SOURCE_VIDEO_LAYOUT_SINGLE!r}."
+                )
+            canonical_fps = _positive_finite_fps(
+                metadata_value.get("fps"),
+                field_name="source_video_metadata.fps",
+            )
+        elif schema_id == SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID:
+            if metadata_value.get("layout") != SOURCE_VIDEO_COLLECTION_LAYOUT:
+                raise SourceVideoMetadataError(
+                    f"{SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID} requires "
+                    f"layout={SOURCE_VIDEO_COLLECTION_LAYOUT!r}."
+                )
+            canonical_fps = _positive_finite_fps(
+                metadata_value.get("fps"),
+                field_name="source_video_metadata.fps",
+            )
+            collection = metadata_value.get("collection")
+            members = (
+                collection.get("members")
+                if isinstance(collection, Mapping)
+                else None
+            )
+            if not isinstance(members, list) or not members:
+                raise SourceVideoMetadataError(
+                    "Canonical clipped source-video metadata requires collection members."
+                )
+            for member_index, member in enumerate(members):
+                if not isinstance(member, Mapping):
+                    raise SourceVideoMetadataError(
+                        "Canonical clipped source-video collection members must be objects."
+                    )
+                member_fps = _positive_finite_fps(
+                    member.get("fps"),
+                    field_name=f"source_video_metadata.collection.members[{member_index}].fps",
+                )
+                if not math.isclose(
+                    canonical_fps,
+                    member_fps,
+                    rel_tol=0.0,
+                    abs_tol=1e-6,
+                ):
+                    raise SourceVideoMetadataConflictError(
+                        "Clipped source-video member FPS differs from the canonical "
+                        f"collection FPS: {member_fps!r} != {canonical_fps!r}."
+                    )
+        elif schema_id is not None:
+            raise SourceVideoMetadataError(
+                f"Unsupported source-video metadata schema: {schema_id!r}"
+            )
+    elif metadata_value is not None:
+        raise SourceVideoMetadataError("source_video_metadata must be an object.")
+
+    legacy_value = attrs.get("fps")
+    legacy_fps = (
+        _positive_finite_fps(legacy_value, field_name="root.fps")
+        if legacy_value is not None
+        else None
+    )
+    if canonical_fps is None:
+        return legacy_fps
+    if legacy_fps is not None and not math.isclose(
+        canonical_fps,
+        legacy_fps,
+        rel_tol=0.0,
+        abs_tol=1e-6,
+    ):
+        raise SourceVideoMetadataConflictError(
+            "root.fps differs from canonical source_video_metadata.fps: "
+            f"{legacy_fps!r} != {canonical_fps!r}."
+        )
+    return canonical_fps
 
 
 def get_pipeline_type(root: zarr.Group) -> str:

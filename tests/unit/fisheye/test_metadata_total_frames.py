@@ -5,8 +5,11 @@ from typing import Any
 import numpy as np
 import pytest
 
-from fisheye.shared.metadata import get_total_frames, get_video_source_path
-from fisheye.shared.source_video_metadata import SourceVideoMetadataConflictError
+from fisheye.shared.metadata import get_fps, get_total_frames, get_video_source_path
+from fisheye.shared.source_video_metadata import (
+    SourceVideoMetadataConflictError,
+    SourceVideoMetadataError,
+)
 
 
 class _Array:
@@ -103,3 +106,122 @@ def test_get_video_source_path_fails_closed_on_v2_mirror_conflict(tmp_path) -> N
 
     with pytest.raises(SourceVideoMetadataConflictError):
         get_video_source_path(root)
+
+
+@pytest.mark.parametrize(
+    ("schema_id", "layout"),
+    (
+        ("palette.source_video_metadata.v2", "single_video"),
+        (
+            "palette.source_video_collection_metadata.v1",
+            "clipped_video_collection",
+        ),
+    ),
+)
+def test_get_fps_reads_supported_canonical_source_metadata(
+    schema_id: str,
+    layout: str,
+) -> None:
+    metadata = {
+        "schema_id": schema_id,
+        "layout": layout,
+        "fps": 30.0,
+    }
+    if layout == "clipped_video_collection":
+        metadata["collection"] = {"members": [{"fps": 30.0}, {"fps": 30.0}]}
+    root = _Group(
+        attrs={
+            "source_video_metadata": metadata,
+        }
+    )
+
+    assert get_fps(root) == 30.0
+
+
+def test_get_fps_accepts_matching_legacy_mirror() -> None:
+    root = _Group(
+        attrs={
+            "fps": 30,
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_collection_metadata.v1",
+                "layout": "clipped_video_collection",
+                "fps": 30.0,
+                "collection": {"members": [{"fps": 30.0}]},
+            },
+        }
+    )
+
+    assert get_fps(root) == 30.0
+
+
+def test_get_fps_fails_closed_on_canonical_legacy_conflict() -> None:
+    root = _Group(
+        attrs={
+            "fps": 29.0,
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_collection_metadata.v1",
+                "layout": "clipped_video_collection",
+                "fps": 30.0,
+                "collection": {"members": [{"fps": 30.0}]},
+            },
+        }
+    )
+
+    with pytest.raises(SourceVideoMetadataConflictError, match="root.fps differs"):
+        get_fps(root)
+
+
+@pytest.mark.parametrize("fps", (None, True, 0, -1, float("nan"), float("inf"), "30"))
+def test_get_fps_rejects_invalid_canonical_values(fps: object) -> None:
+    root = _Group(
+        attrs={
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_collection_metadata.v1",
+                "layout": "clipped_video_collection",
+                "fps": fps,
+                "collection": {"members": [{"fps": fps}]},
+            }
+        }
+    )
+
+    with pytest.raises(SourceVideoMetadataError, match="positive finite number"):
+        get_fps(root)
+
+
+def test_get_fps_rejects_unsupported_versioned_metadata() -> None:
+    root = _Group(
+        attrs={
+            "fps": 30.0,
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_metadata.v999",
+                "layout": "single_video",
+                "fps": 30.0,
+            },
+        }
+    )
+
+    with pytest.raises(SourceVideoMetadataError, match="Unsupported"):
+        get_fps(root)
+
+
+def test_get_fps_fails_closed_on_clipped_member_conflict() -> None:
+    root = _Group(
+        attrs={
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_collection_metadata.v1",
+                "layout": "clipped_video_collection",
+                "fps": 30.0,
+                "collection": {
+                    "members": [{"fps": 30.0}, {"fps": 60.0}],
+                },
+            }
+        }
+    )
+
+    with pytest.raises(SourceVideoMetadataConflictError, match="member FPS differs"):
+        get_fps(root)
+
+
+def test_get_fps_preserves_legacy_root_fallback_and_missing_value() -> None:
+    assert get_fps(_Group(attrs={"fps": 24.0})) == 24.0
+    assert get_fps(_Group()) is None

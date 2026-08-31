@@ -659,8 +659,13 @@ def build_eye_angle_materialization_plan(
             "The byte-planned eye-angle candidate requires serial_driver so "
             "one writer owns every complete physical shard."
         )
-    if fps is not None and float(fps) <= 0:
-        raise ValueError("fps must be positive when supplied.")
+    if fps is not None and (
+        isinstance(fps, bool)
+        or not isinstance(fps, (int, float))
+        or not math.isfinite(float(fps))
+        or float(fps) <= 0
+    ):
+        raise ValueError("fps must be one positive finite number when supplied.")
     if smoothing_window is not None and int(smoothing_window) <= 0:
         raise ValueError("smoothing_window must be positive when supplied.")
 
@@ -706,6 +711,11 @@ def build_eye_angle_materialization_plan(
     resolved_fps = float(fps) if fps is not None else (
         float(metadata_fps) if metadata_fps is not None and float(metadata_fps) > 0 else None
     )
+    if resolved_fps is None or not math.isfinite(resolved_fps) or resolved_fps <= 0:
+        raise ValueError(
+            "Production eye-angle planning requires a positive finite FPS from "
+            "canonical recording metadata or an explicit override."
+        )
     resolved_fps_source = (
         "cli_override"
         if fps is not None
