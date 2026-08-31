@@ -81,6 +81,7 @@ from ..shared.mask_store import (
     write_bitpacked_mask_store_from_dense,
     write_component_rle_mask_store_from_dense,
 )
+from ..shared.mask_fingerprint import mask_row_fingerprint
 from ..shared.subject_mask_chunks import (
     refined_subject_mask_bitpacked_chunks,
     refined_subject_mask_metric_row_chunk,
@@ -417,6 +418,7 @@ class _FinalizedComponentBatch:
     component_name: str
     masks: np.ndarray
     source_masks: np.ndarray
+    source_row_fingerprint: np.ndarray
     reason_labels: np.ndarray
     quality_code: np.ndarray
     quality_score: np.ndarray
@@ -1765,6 +1767,12 @@ class _TimingRecorder:
         }
 
 
+def _initialize_subject_mask_cpu_worker() -> None:
+    """Keep each process worker from creating its own OpenCV thread pool."""
+
+    cv2.setNumThreads(1)
+
+
 @contextmanager
 def _timed_chunk_phase(
     timing: Optional[_TimingRecorder],
@@ -2139,6 +2147,7 @@ def _finalize_source_component_rows(
     total_rows = int(surfaces.shape[0])
     masks = np.zeros(surfaces.shape, dtype=np.uint8)
     source_masks = np.zeros(surfaces.shape, dtype=np.uint8)
+    source_row_fingerprint = np.zeros((total_rows,), dtype=np.uint64)
     reason_labels = np.full((total_rows,), "clean", dtype=object)
     quality_code = np.zeros((total_rows,), dtype=np.int16)
     quality_score = np.zeros((total_rows,), dtype=np.float32)
@@ -2153,7 +2162,9 @@ def _finalize_source_component_rows(
             surface_is_probability=is_probability,
         )
         masks[row_idx] = np.asarray(result.mask, dtype=np.uint8)
-        source_masks[row_idx] = np.asarray(result.source_mask, dtype=np.uint8)
+        source_mask = np.asarray(result.source_mask, dtype=np.uint8)
+        source_masks[row_idx] = source_mask
+        source_row_fingerprint[row_idx] = mask_row_fingerprint(source_mask)
         reason_labels[row_idx] = _join_reason_tags(
             result.reason_tags,
             probability_source=bool(is_probability),
@@ -2172,6 +2183,7 @@ def _finalize_source_component_rows(
         component_name=component_name,
         masks=masks,
         source_masks=source_masks,
+        source_row_fingerprint=source_row_fingerprint,
         reason_labels=reason_labels,
         quality_code=quality_code,
         quality_score=quality_score,
@@ -4094,6 +4106,7 @@ def _write_canonical_component_chunk(
     row_slice: slice,
     masks: np.ndarray,
     source_masks: np.ndarray,
+    source_row_fingerprint: np.ndarray | None = None,
     metric_level: str,
     precomputed_component_metrics: Optional[Mapping[str, np.ndarray]] = None,
     write_metric_attrs: bool = True,
@@ -4127,10 +4140,19 @@ def _write_canonical_component_chunk(
             timing, chunk_timing, f"write_source_seed_masks_{component_name}"
         ):
             component_group["source_seed_masks_roi"][row_slice] = source_u8
-    with _timed_chunk_phase(
-        timing, chunk_timing, f"compute_source_row_fingerprint_{component_name}"
-    ):
-        source_row_fingerprint = _compute_mask_row_fingerprints(source_u8)
+    if source_row_fingerprint is None:
+        with _timed_chunk_phase(
+            timing, chunk_timing, f"compute_source_row_fingerprint_{component_name}"
+        ):
+            source_fingerprints = _compute_mask_row_fingerprints(source_u8)
+    else:
+        source_fingerprints = np.asarray(source_row_fingerprint, dtype=np.uint64)
+        if source_fingerprints.shape != (int(source_u8.shape[0]),):
+            raise ValueError(
+                f"Precomputed source-row fingerprints for {component_name!r} "
+                f"have shape {source_fingerprints.shape}, expected "
+                f"{(int(source_u8.shape[0]),)}."
+            )
     metric_payload = _compute_mask_local_metric_payload(
         component_name=component_name,
         masks=masks_u8,
@@ -4143,9 +4165,7 @@ def _write_canonical_component_chunk(
         with _timed_chunk_phase(
             timing, chunk_timing, f"write_source_row_fingerprint_{component_name}"
         ):
-            component_group["source_row_fingerprint"][
-                row_slice
-            ] = source_row_fingerprint
+            component_group["source_row_fingerprint"][row_slice] = source_fingerprints
         write_result = _write_mask_local_metric_payload(
             run_group,
             component_name=component_name,
@@ -4175,7 +4195,7 @@ def _write_canonical_component_chunk(
             str(name): np.asarray(values)
             for name, values in metric_payload.component_metrics.items()
         },
-        source_row_fingerprint=np.asarray(source_row_fingerprint, dtype=np.uint64),
+        source_row_fingerprint=np.asarray(source_fingerprints, dtype=np.uint64),
     )
 
 
@@ -4901,7 +4921,10 @@ def _run_sharded_refined_subject_postcompute(
             for start, stop in ranges
         ]
     else:
-        with ProcessPoolExecutor(max_workers=worker_count) as pool:
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            initializer=_initialize_subject_mask_cpu_worker,
+        ) as pool:
             futures = [
                 pool.submit(
                     _compute_refined_subject_postcompute_shard,
@@ -6145,6 +6168,7 @@ def _process_and_write_finalizer_chunk_open(
             row_slice=row_slice,
             masks=batch.masks,
             source_masks=batch.source_masks,
+            source_row_fingerprint=batch.source_row_fingerprint,
             metric_level=metric_level,
             precomputed_component_metrics=_component_metrics_from_finalization_batch(
                 batch,
@@ -6440,7 +6464,10 @@ def _compute_finalizer_process_shards(
         collection_worker_plan=_collection_worker_plan_summary(collection_worker_plan),
     )
     results: list[dict[str, object]] = []
-    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+    with ProcessPoolExecutor(
+        max_workers=worker_count,
+        initializer=_initialize_subject_mask_cpu_worker,
+    ) as executor:
         future_to_shard = {}
         for shard_index, shard in enumerate(shards):
             first_chunk = shard[0]
@@ -7285,6 +7312,7 @@ def finalize_subject_mask_run(
                     row_slice=row_slice,
                     masks=batch.masks,
                     source_masks=batch.source_masks,
+                    source_row_fingerprint=batch.source_row_fingerprint,
                     metric_level=metric_level,
                     precomputed_component_metrics=_component_metrics_from_finalization_batch(
                         batch,
