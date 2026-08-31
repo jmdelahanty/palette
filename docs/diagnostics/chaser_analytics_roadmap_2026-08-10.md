@@ -332,3 +332,44 @@ accepted, the full protocol step changes from 1380 to 1500 s (+8.7% recording
 duration). New protocol identity/hash is required under the schedule-mode
 contract. Palette stimulus epochs must always obtain the observed step duration
 from imported metadata; neither duration is an analysis constant.
+
+### `sesh3` re-analysis verdict (2026-08-30, exploratory only, n=1)
+
+Scratch re-analysis under current guardrails (refined keypoints from the
+existing zarr, 1 s smoothed speed, rotated-twin nulls, bout-onset sampling;
+script and figures in the session scratchpad, deliberately out of repo and out
+of registry). Two conclusions:
+
+1. **`sesh3` is not the recording behind `woah.png`.** Occupancy rebuilt
+   independently from refined keypoints and from the realtime H5 bounding
+   boxes agree with each other and show post-period occupancy along the wall
+   — no compact centre blob. Chaser park positions match the figure; fish
+   occupancy does not. Locate the actual source session before that figure
+   anchors anything.
+2. **The `sesh3` fish was not parked, and shows twin-corrected avoidance.**
+   Bout rate unchanged pre→post (69 vs 66 bouts/valid-min); post immobile
+   fraction 0.09, longest immobile stretch 4.5 s; the post hot zone was
+   entered 6 times with 22% of bouts starting inside it. Within 20 mm of the
+   parked chaser: 2.1% observed vs 16.9% rotated-twin expectation (pre: 19%
+   vs 24%), with thigmotaxis 0.47 → 0.72 absorbed by the twins. Escapes on
+   most of the 12 chases (peaks 16–84 mm/s, chaser reached 2–4 mm), no
+   post-chase freezing; tracking lost after chases 3–4.
+
+Under current guardrails this old-configuration, looming-protocol fish shows
+the *opposite* of the current cohort's freeze-dominant pattern: sustained
+bouting, escapes, and distance-keeping. Consistent with the loom/gap
+hypothesis; n=1 on a different protocol, so it motivates the recovery cohort
+and proves nothing.
+
+Bonus finding: the B9 axial-bearing shift appears in this fish (lateral
+fraction at bout onset 0.58 → 0.68) and is **entirely geometric** — rotated
+twins shift 0.56 → 0.66, cos 2θ excess ≈ 0 in every epoch. The twin null is
+load-bearing for B9, not optional.
+
+Data-quality notes for anyone reusing `sesh3`: refined-keypoint heading is
+stored in degrees, y-up, kp0 → midpoint(kp1, kp2) (verified 0.66 agreement
+with track velocity); the old `chaser_fish_metrics` group used
+`texture_to_camera_scale` 11.976 while the stimulus run records 12.603 (~5%
+chaser-position disagreement inside the old pipeline); raw median speed sits
+at the 1.0–1.4 mm/s noise floor, so nothing here thresholds raw speed; dish
+centre/radius were nominal texture values, not a fitted mask.
