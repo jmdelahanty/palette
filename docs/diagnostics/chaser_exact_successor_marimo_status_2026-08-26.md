@@ -800,6 +800,71 @@ that gate, v3 still requires a new commit-pinned deployment, 84/84 read-only
 proof closure, one-recording materialization and receipt smoke, and only then
 indices 2 through 84.
 
+#### Explicit cohort gaze-convention review boundary — 2026-08-31
+
+The v3 materializer deliberately records
+`human_gaze_direction_acceptance=false`. Numeric consistency and a rendered
+review panel cannot accept the biological interpretation of a directionless
+ellipse axis. The downstream gaze cohort requires one accepted convention
+receipt bound to each exact compact-v7 eye payload, so an ad hoc Python snippet
+or a shared family-level boolean is not an acceptable bridge.
+
+`fisheye.utils.review_eye_gaze_prerequisite_cohort` provides the missing
+operator boundary without changing any Zarr, selector, registry row, or
+production authority:
+
+1. `plan` requires the complete frozen prerequisite task and exactly one final
+   materialization receipt per recording across one or more receipt roots. It
+   rehashes the materialization receipt, subject-shape result, eye-angle result,
+   numeric validation, and review PNG; requires every numeric check to pass;
+   and emits an immutable all-pending review task.
+2. `template` emits one decision row per exact recording and exact review-PNG
+   digest. Every row begins as `pending`; Palette supplies neither reviewer nor
+   acceptance.
+3. After the reviewer has inspected the bounded panels, `accept` requires an
+   exact `accepted` or `rejected` decision for every row. Any pending, missing,
+   mismatched, or rejected member produces no accepted bundle. An all-accepted
+   set is rehashed again and published under a new exclusive root, with the
+   completion manifest moved last.
+4. The accepted root contains one source-payload-bound convention receipt per
+   recording and the exact `eye_gaze_bindings.json` row list consumed by cohort
+   task schema v6. `validate` reopens the full closed set, including the review
+   sources, reviewer identity, receipt roster, and binding-file digest.
+
+This utility does not make a decision on the reviewer's behalf. It makes the
+human decision explicit, per recording, reproducible, and mechanically usable
+by the already merged gaze-successor planner.
+
+The operator sequence is:
+
+```bash
+scripts/py -m fisheye.utils.review_eye_gaze_prerequisite_cohort plan \
+  --task /absolute/path/to/prerequisite_task.json \
+  --receipt-root /absolute/path/to/smoke/receipts \
+  --receipt-root /absolute/path/to/bulk/receipts \
+  --output /new/path/gaze_convention_review_task.json
+
+scripts/py -m fisheye.utils.review_eye_gaze_prerequisite_cohort template \
+  /new/path/gaze_convention_review_task.json \
+  --output /new/path/gaze_convention_decisions.json
+
+# A human reviews every bound PNG and edits reviewer, reviewed_at_utc, and each
+# exact pending decision. Palette never performs that edit automatically.
+scripts/py -m fisheye.utils.review_eye_gaze_prerequisite_cohort accept \
+  /new/path/gaze_convention_review_task.json \
+  --decisions /new/path/gaze_convention_decisions.json \
+  --output-root /new/path/accepted_gaze_conventions
+
+scripts/py -m fisheye.utils.review_eye_gaze_prerequisite_cohort validate \
+  /new/path/gaze_convention_review_task.json \
+  --acceptance-root /new/path/accepted_gaze_conventions
+```
+
+The accepted child
+`accepted_gaze_conventions/eye_gaze_bindings.json` is then the explicit input
+to `materialize_composable_chaser_successor_cohort successor
+--eye-gaze-bindings`; it is not a selector or review authority by itself.
+
 ### Exact body-bearing × distance parity addendum — 2026-08-30
 
 The earlier GoodCopBadCop viewer retained two related products that had not
