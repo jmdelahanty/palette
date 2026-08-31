@@ -149,6 +149,38 @@ def _accepted_decisions(review_task: dict[str, object]) -> dict[str, object]:
     return decisions
 
 
+def _rewrite_acceptance_manifest(output: Path, manifest: dict[str, object]) -> None:
+    body = dict(manifest)
+    body.pop("acceptance_sha256", None)
+    _write_json(
+        output / "acceptance_manifest.json",
+        {**body, "acceptance_sha256": canonical_json_sha256(body)},
+    )
+
+
+def _rewrite_accepted_receipt(
+    output: Path,
+    manifest: dict[str, object],
+    *,
+    entry_index: int,
+    receipt: dict[str, object],
+) -> None:
+    receipt_body = dict(receipt)
+    receipt_body.pop("receipt_sha256", None)
+    rewritten = {
+        **receipt_body,
+        "receipt_sha256": canonical_json_sha256(receipt_body),
+    }
+    accepted_entry = manifest["entries"][entry_index]
+    receipt_path = Path(accepted_entry["convention_receipt"])
+    _write_json(receipt_path, rewritten)
+    accepted_entry["convention_receipt_file_sha256"] = review_mod._sha256_file(
+        receipt_path
+    )
+    accepted_entry["convention_receipt_sha256"] = rewritten["receipt_sha256"]
+    _rewrite_acceptance_manifest(output, manifest)
+
+
 def test_review_task_and_template_remain_pending(closed_cohort) -> None:
     review_task = _review_task(closed_cohort)
 
@@ -179,7 +211,7 @@ def test_review_task_loader_validates_subject_shape_binding(closed_cohort) -> No
 
     with pytest.raises(
         review_mod.EyeGazeCohortReviewError,
-        match="Review evidence paths must be absolute",
+        match="canonical and absolute",
     ):
         review_mod.load_review_task(review_task)
 
@@ -340,6 +372,82 @@ def test_acceptance_validation_rejects_modified_bindings(
     with pytest.raises(
         review_mod.EyeGazeCohortReviewError, match="bindings file changed"
     ):
+        review_mod.validate_acceptance_bundle(review_task, acceptance_root=output)
+
+
+def test_acceptance_validation_rejects_cross_bound_numeric_validation(
+    closed_cohort, tmp_path: Path
+) -> None:
+    review_task = _review_task(closed_cohort)
+    output = tmp_path / "accepted"
+    manifest = review_mod.accept_reviewed_cohort(
+        review_task,
+        decisions=_accepted_decisions(review_task),
+        output_root=output,
+    )
+    receipt_path = Path(manifest["entries"][0]["convention_receipt"])
+    receipt = json.loads(receipt_path.read_text())
+    receipt["numeric_validation"]["checks"].append(
+        {"name": "forged-extra-pass", "passed": True}
+    )
+    receipt["numeric_validation_sha256"] = canonical_json_sha256(
+        receipt["numeric_validation"]
+    )
+    _rewrite_accepted_receipt(
+        output,
+        manifest,
+        entry_index=0,
+        receipt=receipt,
+    )
+
+    with pytest.raises(
+        review_mod.EyeGazeCohortReviewError,
+        match="frozen numeric validation",
+    ):
+        review_mod.validate_acceptance_bundle(review_task, acceptance_root=output)
+
+
+def test_acceptance_validation_rejects_cross_bound_review_png(
+    closed_cohort, tmp_path: Path
+) -> None:
+    review_task = _review_task(closed_cohort)
+    output = tmp_path / "accepted"
+    manifest = review_mod.accept_reviewed_cohort(
+        review_task,
+        decisions=_accepted_decisions(review_task),
+        output_root=output,
+    )
+    receipt_path = Path(manifest["entries"][0]["convention_receipt"])
+    receipt = json.loads(receipt_path.read_text())
+    receipt["biological_direction_review"]["review_artifact_sha256"] = HEX_A
+    _rewrite_accepted_receipt(
+        output,
+        manifest,
+        entry_index=0,
+        receipt=receipt,
+    )
+
+    with pytest.raises(
+        review_mod.EyeGazeCohortReviewError,
+        match="frozen review PNG evidence",
+    ):
+        review_mod.validate_acceptance_bundle(review_task, acceptance_root=output)
+
+
+def test_acceptance_validation_rejects_non_utc_manifest_time(
+    closed_cohort, tmp_path: Path
+) -> None:
+    review_task = _review_task(closed_cohort)
+    output = tmp_path / "accepted"
+    manifest = review_mod.accept_reviewed_cohort(
+        review_task,
+        decisions=_accepted_decisions(review_task),
+        output_root=output,
+    )
+    manifest["reviewed_at_utc"] = "2026-08-31T14:00:00-04:00"
+    _rewrite_acceptance_manifest(output, manifest)
+
+    with pytest.raises(review_mod.EyeGazeCohortReviewError, match="must use UTC"):
         review_mod.validate_acceptance_bundle(review_task, acceptance_root=output)
 
 

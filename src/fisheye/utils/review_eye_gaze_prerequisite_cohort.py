@@ -509,13 +509,22 @@ def load_review_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
     if (source_path is None) != (source_file_digest is None):
         _fail("Source prerequisite task path and file digest must be paired.")
     if source_path is not None:
-        _text(source_path, field="source prerequisite task path")
+        source_path = _text(source_path, field="source prerequisite task path")
+        if not Path(source_path).is_absolute() or source_path != str(
+            Path(source_path).resolve()
+        ):
+            _fail("Source prerequisite task path must be canonical and absolute.")
         _digest(source_file_digest, field="source prerequisite task file digest")
     roots = task.get("materialization_receipt_roots")
     if (
         not isinstance(roots, list)
         or not roots
-        or any(type(root) is not str or not Path(root).is_absolute() for root in roots)
+        or any(
+            type(root) is not str
+            or not Path(root).is_absolute()
+            or root != str(Path(root).resolve())
+            for root in roots
+        )
         or len(set(roots)) != len(roots)
     ):
         _fail("Review task materialization receipt roots are invalid or duplicated.")
@@ -555,8 +564,8 @@ def load_review_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
         if entry.get("review_status") != PENDING:
             _fail("Review task contains an inferred human decision.")
         archive = _text(entry.get("analysis_zarr"), field="analysis Zarr")
-        if not Path(archive).is_absolute():
-            _fail("Review task analysis Zarr path must be absolute.")
+        if not Path(archive).is_absolute() or archive != str(Path(archive).resolve()):
+            _fail("Review task analysis Zarr path must be canonical and absolute.")
         _digest(entry.get("source_eye_logical_sha256"), field="eye logical digest")
         _exact_run_name(entry.get("eye_angle_run"), field="eye-angle run")
         if (
@@ -588,8 +597,8 @@ def load_review_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
             png,
         ):
             path = _text(binding.get("path"), field="review evidence path")
-            if not Path(path).is_absolute():
-                _fail("Review evidence paths must be absolute.")
+            if not Path(path).is_absolute() or path != str(Path(path).resolve()):
+                _fail("Review evidence paths must be canonical and absolute.")
             _digest(binding.get("file_sha256"), field="review evidence file digest")
         _digest(receipt_binding.get("receipt_sha256"), field="receipt semantic digest")
         _digest(
@@ -679,11 +688,10 @@ def _load_decisions(
 ) -> tuple[dict[int, dict[str, Any]], str, str, str]:
     if isinstance(source, Mapping):
         decisions = dict(source)
-        source_sha256 = canonical_json_sha256(decisions)
     else:
         path = Path(source).expanduser().resolve()
         decisions = _read_object(path, field="gaze convention decisions")
-        source_sha256 = _sha256_file(path)
+    source_sha256 = canonical_json_sha256(decisions)
     expected = {
         "schema_id",
         "schema_version",
@@ -866,6 +874,11 @@ def validate_acceptance_bundle(
         or manifest.get("acceptance_sha256") != _acceptance_digest(manifest)
     ):
         _fail("Acceptance manifest is invalid, stale, or belongs elsewhere.")
+    _digest(manifest.get("decisions_sha256"), field="decisions semantic digest")
+    reviewer = _text(manifest.get("reviewer"), field="acceptance reviewer")
+    reviewed_at = _utc_timestamp(
+        manifest.get("reviewed_at_utc"), field="acceptance reviewed_at_utc"
+    )
     raw_entries = manifest.get("entries")
     if not isinstance(raw_entries, list) or len(raw_entries) != task["recording_count"]:
         _fail("Acceptance manifest does not cover the exact review cohort.")
@@ -921,16 +934,27 @@ def validate_acceptance_bundle(
         )
         if validated.get("receipt_sha256") != accepted.get("convention_receipt_sha256"):
             _fail("Convention receipt semantic identity changed.")
+        if (
+            validated.get("numeric_validation_sha256")
+            != entry["numeric_validation"]["document_sha256"]
+        ):
+            _fail("Convention receipt differs from the frozen numeric validation.")
         biological_review = _mapping(
             validated.get("biological_direction_review"),
             field="biological direction review",
         )
-        if biological_review.get("reviewer") != manifest.get(
-            "reviewer"
-        ) or biological_review.get("reviewed_at_utc") != manifest.get(
-            "reviewed_at_utc"
+        if (
+            biological_review.get("reviewer") != reviewer
+            or biological_review.get("reviewed_at_utc") != reviewed_at
         ):
             _fail("Convention receipt reviewer identity differs from its cohort.")
+        if (
+            biological_review.get("review_artifact_sha256")
+            != entry["review_png"]["file_sha256"]
+            or biological_review.get("review_row_indices")
+            != entry["review_png"]["review_row_indices"]
+        ):
+            _fail("Convention receipt differs from the frozen review PNG evidence.")
         expected_bindings.append(
             {
                 "recording_id": entry["recording_id"],
