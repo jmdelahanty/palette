@@ -426,12 +426,56 @@ not derive a new scientific product in the UI.
       deterministic point-sampling recipe between Marimo and static
       publication. Advance the detailed plot receipt/recipe identity instead
       of rewriting or reusing an earlier immutable plot bundle.
-- [ ] Add cohort planning fields for an explicit eye-angle run and exact
+- [x] Add cohort planning fields for an explicit eye-angle run and exact
       convention receipt per recording; never resolve an eye selector or infer
-      biological direction.
-- [ ] Materialize gaze only after modern subject-mask -> subject-shape ->
+      biological direction. Cohort task schema v6 consumes one explicit JSON
+      row per frozen recording and seals the exact archive, eye run/path,
+      channel variant, eye-run metadata generation, logical eye payload,
+      accepted convention-receipt identity, and receipt-file SHA-256.
+- [x] Materialize gaze only after modern subject-mask -> subject-shape ->
       compact-v7 eye-angle prerequisites and their review/authority decisions
-      exist for the cohort.
+      exist for the cohort. The planner requires complete binding coverage for
+      the frozen cohort. `run-one` revalidates every frozen binding, runs gaze
+      after the keypoint radial successor, seals its exact-child receipt, and
+      emits the existing gaze+epoch+alignment projection-receipt schema v8.
+      Missing review decisions remain a planning failure; there is no selector,
+      legacy source, inferred direction, or partial-coverage fallback.
+
+The binding input is deliberately operational rather than a new scientific
+authority. Its exact row shape is:
+
+```json
+[
+  {
+    "recording_id": "<exact recording id>",
+    "analysis_zarr": "/absolute/path/to/<recording>_analysis.zarr",
+    "eye_run_name": "<exact immutable compact-v7 run>",
+    "eye_channel_variant": "smoothed",
+    "eye_convention_receipt": "/absolute/path/to/accepted_receipt.json"
+  }
+]
+```
+
+The command is
+`materialize_composable_chaser_successor_cohort successor TASK --eye-gaze-bindings BINDINGS --output NEW_TASK`.
+The direct-bundle assignment-keypoint resolver remains an upstream eye-angle
+input-authority change. It must pass required CI and be integrated before the
+cohort eye-angle runs that depend on it are submitted; the cohort code does not
+duplicate or weaken that resolver.
+
+### 5E.1 — Receipt-aware static plotting
+
+- [x] Give the dashboard, detailed bundle, and spatial occupancy plotters
+      closed per-product array rosters.
+- [x] When exact-child receipts are supplied, validate the current direct
+      metadata generation and rehash only the arrays rendered by that plotter.
+      Record the verification mode, verified array names, and receipt digest in
+      the plot receipt.
+- [x] Retain exhaustive deep audit when no receipt is supplied. A missing,
+      stale, mismatched, or incomplete receipt set fails closed and never falls
+      back silently.
+- [x] Advance the plot-receipt schemas (dashboard v3, spatial v3, detailed v6)
+      without changing the scientific arrays or display recipes.
 
 ### 5F — Full profile
 

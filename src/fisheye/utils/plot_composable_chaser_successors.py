@@ -1,9 +1,10 @@
 """Plot exact selector-ineligible composable chaser successors.
 
 The command never resolves a selector and never writes to the analysis Zarr.
-It deep-audits three explicitly named immutable products, verifies their
-dependency payload digests, and writes one dashboard in PNG and PDF form plus
-an external content-hash receipt.
+It verifies three explicitly named immutable products, using receipt-bound
+targeted array rehashes when exact-child receipts are supplied and a full deep
+audit otherwise.  It then verifies dependency payload digests and writes one
+dashboard in PNG and PDF form plus an external content-hash receipt.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 RECEIPT_SCHEMA_ID = "palette.analysis.composable_chaser_successor.plot_receipt"
-RECEIPT_SCHEMA_VERSION = 2
+RECEIPT_SCHEMA_VERSION = 3
 PLOT_RECIPE_ID = "composable_chaser_dashboard_v2"
 PLOT_DPI = 180
 PLOT_FIGURE_SIZE_INCHES = (15.0, 10.0)
@@ -42,6 +43,31 @@ _KINDS = (
     "generalized_chaser_bout_response",
     "chaser_escape_freeze",
 )
+_PLOT_ARRAY_NAMES = {
+    "controller_chase_trials": (
+        "chaser_identity_code",
+        "end_acquisition_frame_id_inclusive",
+        "gap_fraction",
+        "logged_trial_id",
+        "start_acquisition_frame_id",
+        "trial_ordinal",
+    ),
+    "generalized_chaser_bout_response": (
+        "summary_bout_count",
+        "summary_bout_rate_per_min",
+        "summary_chaser_identity_code",
+        "summary_distance_bin_end_mm",
+        "summary_distance_bin_index",
+        "summary_distance_bin_start_mm",
+        "summary_role_code",
+    ),
+    "chaser_escape_freeze": (
+        "sweep_escape_event_rate_per_min",
+        "sweep_speed_threshold_mm_s",
+        "sweep_trial_row_id",
+        "trial_response_class_code",
+    ),
+}
 
 
 class ComposableChaserPlotError(ValueError):
@@ -77,8 +103,12 @@ def _verify_chain(
         _fail("Plot handles are missing, reordered, or have the wrong product kinds.")
     if len({handle.recording_id for handle in handles}) != 1:
         _fail("Plot products belong to different recordings.")
-    if not all(handle.deep_audited is True for handle in handles):
-        _fail("Plot products must be loaded through deep content audits.")
+    for handle in handles:
+        try:
+            handle.require_verified_authority()
+            handle.require_verified_arrays(_PLOT_ARRAY_NAMES[handle.successor_kind])
+        except (TypeError, ValueError) as exc:
+            _fail(f"Plot product lacks verified authority: {exc}")
     bout_sources = bout.scientific_manifest.get("sources")
     escape_sources = escape.scientific_manifest.get("sources")
     if not isinstance(bout_sources, Mapping) or not isinstance(
@@ -367,6 +397,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         value is not None for value in source_receipts
     ):
         _fail("All three exact-child source receipts must be supplied together.")
+    receipt_bound = all(value is not None for value in source_receipts)
     handles = tuple(
         load_composable_chaser_successor_source_handle(
             archive,
@@ -374,8 +405,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_name=args.run_name,
             expected_recording_id=args.expected_recording_id,
             use_consolidated=True,
-            deep_audit=True,
+            deep_audit=not receipt_bound,
             direct_validation_receipt=source_receipt,
+            required_array_names=(
+                _PLOT_ARRAY_NAMES[kind] if receipt_bound else None
+            ),
         )
         for kind, source_receipt in zip(_KINDS, source_receipts, strict=True)
     )
@@ -387,12 +421,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "run_path": handle.run_path,
             "manifest_sha256": handle.manifest_sha256,
             "scientific_payload_sha256": handle.scientific_payload_sha256,
-            "verification_mode": handle.metadata_equivalence.get(
-                "verification_mode", "direct_consolidated_equivalence"
-            ),
-            "validation_receipt_sha256": handle.metadata_equivalence.get(
-                "receipt_sha256"
-            ),
+            "verification_mode": handle.verification_mode,
+            "verified_array_names": list(handle.verified_array_names),
+            "validation_receipt_sha256": handle.receipt_digest,
         }
         for handle in handles
     }
@@ -418,7 +449,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "plot_parameters_sha256": canonical_json_sha256(plot_parameters),
         "plot_policy": {
             "source_selection": "explicit_run_names_only_no_selector_discovery",
-            "source_validation": "strict_loader_deep_array_content_audit",
+            "source_validation": (
+                "receipt_bound_targeted_array_rehash_v1"
+                if receipt_bound
+                else "deep_audit"
+            ),
             "dependency_validation": "exact_scientific_payload_digests",
             "missing_provider_frames": "invalid_no_interpolation",
             "scientific_authority": False,

@@ -27,11 +27,21 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 RECEIPT_SCHEMA_ID = "palette.analysis.chaser_spatial_occupancy.plot_receipt"
-RECEIPT_SCHEMA_VERSION = 2
+RECEIPT_SCHEMA_VERSION = 3
 PLOT_RECIPE_ID = "paired_provider_exact_epoch_spatial_occupancy_heatmap_v2"
 PLOT_DPI = 180
 PLOT_FIGURE_SIZE_INCHES = (15.0, 15.0)
 _RUN_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+SPATIAL_OCCUPANCY_PLOT_ARRAY_NAMES = (
+    "candidate_frame_count",
+    "in_arena_coverage_fraction_candidate",
+    "in_arena_position_frame_count",
+    "occupancy_count",
+    "occupancy_density_valid_in_arena",
+    "occupancy_fraction_candidate_epoch",
+    "x_bin_edges_mm",
+    "y_bin_edges_mm",
+)
 
 
 class ChaserSpatialOccupancyPlotError(ValueError):
@@ -73,8 +83,11 @@ def _validate_plot_arrays(
 ) -> dict[str, Any]:
     if handle.successor_kind != "chaser_spatial_occupancy":
         _fail("Plot source is not a chaser spatial-occupancy successor.")
-    if handle.deep_audited is not True:
-        _fail("Spatial occupancy plotting requires a deep content audit.")
+    try:
+        handle.require_verified_authority()
+        handle.require_verified_arrays(SPATIAL_OCCUPANCY_PLOT_ARRAY_NAMES)
+    except (TypeError, ValueError) as exc:
+        _fail(f"Spatial occupancy lacks verified plot authority: {exc}")
     scientific = handle.scientific_manifest
     dimensions = scientific.get("dimensions")
     if not isinstance(dimensions, Mapping):
@@ -377,14 +390,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     expected = (stem.with_suffix(".png"), stem.with_suffix(".pdf"), receipt_path)
     if not args.overwrite and any(path.exists() for path in expected):
         raise FileExistsError("Spatial occupancy plot output already exists.")
+    receipt_bound = args.source_validation_receipt is not None
     handle = load_composable_chaser_successor_source_handle(
         archive,
         successor_kind="chaser_spatial_occupancy",
         run_name=args.run_name,
         expected_recording_id=args.expected_recording_id,
         use_consolidated=True,
-        deep_audit=True,
+        deep_audit=not receipt_bound,
         direct_validation_receipt=args.source_validation_receipt,
+        required_array_names=(
+            SPATIAL_OCCUPANCY_PLOT_ARRAY_NAMES if receipt_bound else None
+        ),
     )
     png, pdf = render_spatial_occupancy_heatmaps(handle, output_stem=stem)
     plot_parameters = spatial_occupancy_plot_parameters(handle)
@@ -393,13 +410,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "run_path": handle.run_path,
         "manifest_sha256": handle.manifest_sha256,
         "scientific_payload_sha256": handle.scientific_payload_sha256,
-        "deep_content_audit": True,
-        "verification_mode": handle.metadata_equivalence.get(
-            "verification_mode", "direct_consolidated_equivalence"
-        ),
-        "validation_receipt_sha256": handle.metadata_equivalence.get(
-            "receipt_sha256"
-        ),
+        "deep_content_audit": handle.deep_audited,
+        "verification_mode": handle.verification_mode,
+        "verified_array_names": list(handle.verified_array_names),
+        "validation_receipt_sha256": handle.receipt_digest,
     }
     outputs = [
         {
@@ -423,7 +437,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "plot_parameters_sha256": canonical_json_sha256(plot_parameters),
         "plot_policy": {
             "source_selection": "explicit_exact_run_name_no_selector_discovery",
-            "source_validation": "deep_array_content_audit",
+            "source_validation": handle.verification_mode,
             "provider_comparison": "shared_physical_bins_and_shared_density_scale",
             "epoch_membership": "exact_protocol_semantic_half_open_intervals",
             "normalization": "conditional_valid_in_arena_density_with_coverage_annotation",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -8,6 +9,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from fisheye.utils import plot_chaser_detailed_successors as plot_module
 from fisheye.utils.plot_chaser_detailed_successors import (
     ChaserDetailedPlotError,
     detailed_plot_parameters,
@@ -30,9 +32,24 @@ class _Successor:
     run_path: str = "analysis/example/run"
     manifest_sha256: str = "f" * 64
     deep_audited: bool = True
+    verification_mode: str = "deep_audit"
+    verified_array_names: tuple[str, ...] = ()
+    receipt_digest: str | None = None
 
     def array(self, name: str) -> np.ndarray:
         return self.arrays[name]
+
+    def require_verified_authority(self) -> None:
+        if self.verification_mode not in {
+            "deep_audit",
+            "receipt_bound_targeted_array_rehash_v1",
+        }:
+            raise ValueError("unsupported verification mode")
+
+    def require_verified_arrays(self, names: tuple[str, ...]) -> None:
+        missing = set(names).difference(self.arrays)
+        if missing:
+            raise ValueError(f"missing arrays: {sorted(missing)!r}")
 
 
 @dataclass
@@ -503,3 +520,115 @@ def test_detailed_bundle_accepts_frozen_manifest_bindings() -> None:
         )
 
     verify_detailed_plot_inputs(*inputs)
+
+
+def test_main_uses_receipt_bound_successor_array_rosters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _inputs()
+    controller, bout, escape = inputs[:3]
+    relative_keypoint, relative_detection = inputs[3:5]
+    radial_keypoint, radial_detection = inputs[5:]
+    chain_by_kind = {
+        value.successor_kind: value for value in (controller, bout, escape)
+    }
+    calls: list[dict[str, Any]] = []
+
+    def load_successor(_archive: Path, **kwargs: Any) -> _Successor:
+        calls.append(kwargs)
+        if kwargs["successor_kind"] == "chaser_radial_near_field":
+            handle = (
+                radial_keypoint
+                if kwargs["run_name"] == "keypoint-radial-v1"
+                else radial_detection
+            )
+        else:
+            handle = chain_by_kind[kwargs["successor_kind"]]
+        handle.deep_audited = False
+        handle.verification_mode = "receipt_bound_targeted_array_rehash_v1"
+        handle.verified_array_names = tuple(sorted(kwargs["required_array_names"]))
+        handle.receipt_digest = "7" * 64
+        return handle
+
+    def load_relative(_receipt: str, **kwargs: Any) -> _Relative:
+        handle = (
+            relative_keypoint
+            if kwargs["expected_run_name"] == "keypoint-relative-v1"
+            else relative_detection
+        )
+        handle.verification_mode = "receipt_bound_targeted_array_rehash_v1"
+        handle.receipt_digest = "8" * 64
+        return handle
+
+    def render_stub(*_args: Any, output_dir: Path, bundle_name: str, **_kwargs: Any):
+        output = output_dir / f"{bundle_name}_stub.png"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"png")
+        return (output,)
+
+    monkeypatch.setattr(
+        plot_module, "load_composable_chaser_successor_source_handle", load_successor
+    )
+    monkeypatch.setattr(
+        plot_module, "load_chaser_relative_frame_targeted_source_handle", load_relative
+    )
+    monkeypatch.setattr(plot_module, "_load_exact_chaser_appearance", lambda _: _appearance())
+    monkeypatch.setattr(plot_module, "render_detailed_bundle", render_stub)
+    monkeypatch.setattr(plot_module, "detailed_plot_parameters", lambda *_a, **_k: {})
+
+    output_dir = tmp_path / "plots"
+    assert plot_module.main(
+        [
+            str(tmp_path / "analysis.zarr"),
+            "--run-name",
+            "successors-v1",
+            "--relative-frame-run",
+            "keypoint-relative-v1",
+            "--detection-relative-frame-run",
+            "detection-relative-v1",
+            "--keypoint-relative-frame-receipt",
+            str(tmp_path / "keypoint-relative.json"),
+            "--detection-relative-frame-receipt",
+            str(tmp_path / "detection-relative.json"),
+            "--controller-validation-receipt",
+            str(tmp_path / "controller.json"),
+            "--bout-validation-receipt",
+            str(tmp_path / "bout.json"),
+            "--escape-validation-receipt",
+            str(tmp_path / "escape.json"),
+            "--keypoint-radial-run",
+            "keypoint-radial-v1",
+            "--detection-radial-run",
+            "detection-radial-v1",
+            "--keypoint-radial-validation-receipt",
+            str(tmp_path / "keypoint-radial.json"),
+            "--detection-radial-validation-receipt",
+            str(tmp_path / "detection-radial.json"),
+            "--expected-recording-id",
+            "recording-1",
+            "--output-dir",
+            str(output_dir),
+            "--bundle-name",
+            "detailed-receipt-bound-v6",
+        ]
+    ) == 0
+
+    assert len(calls) == 5
+    for call in calls:
+        assert call["deep_audit"] is False
+        assert call["required_array_names"] == (
+            plot_module.DETAILED_SUCCESSOR_PLOT_ARRAY_NAMES[
+                call["successor_kind"]
+            ]
+        )
+    receipt = json.loads(
+        (output_dir / "detailed-receipt-bound-v6_receipt.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert receipt["schema_version"] == 6
+    assert receipt["plot_policy"]["source_validation"] == {
+        "successors": "receipt_bound_targeted_array_rehash_v1",
+        "relative_frames": "receipt_bound_targeted_array_rehash_v1",
+    }
