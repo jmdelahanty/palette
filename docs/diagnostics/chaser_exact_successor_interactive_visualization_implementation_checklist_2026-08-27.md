@@ -440,6 +440,12 @@ not derive a new scientific product in the UI.
       emits the existing gaze+epoch+alignment projection-receipt schema v8.
       Missing review decisions remain a planning failure; there is no selector,
       legacy source, inferred direction, or partial-coverage fallback.
+- [x] Add an operator-facing cohort review utility that freezes the exact
+      prerequisite receipts and review PNGs into an all-pending task, requires
+      one explicit digest-bound decision per recording, refuses partial or
+      rejected acceptance sets, and emits validated per-run convention receipts
+      plus the exact schema-v6 gaze-binding row list. Keep the accepted manifest
+      last, immutable, selector-ineligible, and separate from scientific Zarrs.
 
 The binding input is deliberately operational rather than a new scientific
 authority. Its exact row shape is:
