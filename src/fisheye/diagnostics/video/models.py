@@ -6,6 +6,17 @@ from typing import Any, Literal, Optional
 CheckStatus = Literal["pass", "warn", "fail", "error", "skip"]
 VideoSourceKind = Literal["cams", "raw", "other"]
 FindingKind = Literal["media", "tooling"]
+SyncSampleSemantics = Literal[
+    "indexed_sync_samples",
+    "all_samples_sync",
+    "unreadable",
+]
+SyncSampleProof = Literal[
+    "container_declared",
+    "orange_idr_sidecar_verified",
+    "orange_idr_sidecar_unavailable",
+    "orange_idr_sidecar_contradiction",
+]
 
 
 def _default_source_counts() -> dict[str, int]:
@@ -31,6 +42,10 @@ class ContainerInfo:
     status: CheckStatus = "skip"
     codec: Optional[str] = None
     has_stss: Optional[bool] = None
+    sync_sample_semantics: Optional[SyncSampleSemantics] = None
+    sync_sample_proof: Optional[SyncSampleProof] = None
+    container_inspection_status: Optional[str] = None
+    orange_evidence: Optional[dict[str, Any]] = None
     needs_fix: Optional[bool] = None
     message: Optional[str] = None
     scan_error: Optional[str] = None

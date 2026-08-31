@@ -60,13 +60,19 @@ from fisheye.shared.source_recording_identity import (
 )
 
 try:
-    from fisheye.diagnostics.video.container import check_hevc_keyframe_flags
+    from fisheye.diagnostics.video.container import (
+        OrangeCropSyncEvidence,
+        check_hevc_keyframe_flags,
+    )
 except ModuleNotFoundError:
     _THIS_DIR = Path(__file__).resolve().parent
     _SRC_DIR = _THIS_DIR.parent.parent
     if str(_SRC_DIR) not in sys.path:
         sys.path.insert(0, str(_SRC_DIR))
-    from fisheye.diagnostics.video.container import check_hevc_keyframe_flags
+    from fisheye.diagnostics.video.container import (
+        OrangeCropSyncEvidence,
+        check_hevc_keyframe_flags,
+    )
 
 
 _utc_now = utc_now
@@ -823,6 +829,7 @@ def _external_ipc_video_streams_payload(
             {
                 "role": "runtime_derived_acquisition_input",
                 "output_kind": "crop",
+                "stream_kind": _pick_stream_value(crop_output, "stream_kind"),
                 "source": "orange_external_ipc",
                 "camera_id": camera_id,
                 "stream_id": _pick_stream_value(crop_output, "stream_id"),
@@ -860,9 +867,11 @@ def _external_ipc_video_streams_payload(
                 "width": _pick_stream_value(crop_output, "width"),
                 "height": _pick_stream_value(crop_output, "height"),
                 "frame_count": _pick_stream_value(crop_output, "frame_count"),
+                "packet_count": _pick_stream_value(crop_output, "packet_count"),
                 "frame_rate": _pick_stream_value(crop_output, "frame_rate"),
                 "codec": _pick_stream_value(crop_output, "codec"),
                 "container": _pick_stream_value(crop_output, "container"),
+                "tuning": _pick_stream_value(crop_output, "tuning"),
                 "encoded_format": _pick_stream_value(crop_output, "encoded_format"),
                 "pixel_source_format": _pick_stream_value(
                     crop_output, "pixel_source_format"
@@ -1959,7 +1968,53 @@ def _apply_plan(
         logger: Optional[JsonLogger],
     ) -> None:
         rel_path = f"{folder_name}/{planned.dest_name}"
-        result: Dict[str, object] = dict(check_hevc_keyframe_flags(dest))
+        orange_evidence: Optional[OrangeCropSyncEvidence] = None
+        video_streams = plan.meta.get("video_streams")
+        if isinstance(video_streams, dict):
+            streams = video_streams.get("streams")
+            crop = streams.get("crop") if isinstance(streams, dict) else None
+            if isinstance(crop, dict) and crop.get("video") == rel_path:
+                summary_rel = crop.get("summary")
+                keyframes_rel = crop.get("keyframes")
+                orange_evidence = OrangeCropSyncEvidence(
+                    summary_path=(
+                        plan.dest_dir / str(summary_rel)
+                        if isinstance(summary_rel, str) and summary_rel
+                        else None
+                    ),
+                    keyframe_path=(
+                        plan.dest_dir / str(keyframes_rel)
+                        if isinstance(keyframes_rel, str) and keyframes_rel
+                        else None
+                    ),
+                    declared_output_kind=(
+                        str(crop["output_kind"])
+                        if crop.get("output_kind") is not None
+                        else None
+                    ),
+                    declared_stream_kind=(
+                        str(crop["stream_kind"])
+                        if crop.get("stream_kind") is not None
+                        else None
+                    ),
+                    declared_tuning=(
+                        str(crop["tuning"])
+                        if crop.get("tuning") is not None
+                        else None
+                    ),
+                    declared_frame_count=crop.get("frame_count"),
+                    declared_packet_count=crop.get("packet_count"),
+                )
+        result: Dict[str, object] = dict(
+            check_hevc_keyframe_flags(
+                dest,
+                **(
+                    {"orange_crop_evidence": orange_evidence}
+                    if orange_evidence is not None
+                    else {}
+                ),
+            )
+        )
         result["checked_at_utc"] = _utc_now()
         try:
             stat = dest.stat()
@@ -1983,6 +2038,7 @@ def _apply_plan(
         moved_count = 0
         session_uuid = plan.meta.get("session_uuid")
         plan.keyframe_checks = {}
+        pending_video_checks: List[Tuple[str, PlannedFile, Path]] = []
 
         def record_warning(message: str) -> None:
             warnings.append(message)
@@ -2104,23 +2160,38 @@ def _apply_plan(
                         action=planned.action,
                     )
                 if dest.suffix.lower() == ".mp4":
-                    record_video_keyframe_status(
-                        plan=plan,
-                        folder_name=folder_name,
-                        planned=planned,
-                        dest=dest,
-                        session_uuid=session_uuid,
-                        logger=logger,
-                    )
-                    check = plan.keyframe_checks.get(
-                        f"{folder_name}/{planned.dest_name}", {}
-                    )
-                    if bool(check.get("needs_fix", False)):
-                        check_message = str(check.get("message", "")).strip()
-                        record_warning(
-                            f"HEVC keyframe flags issue for {dest}: "
-                            f"{check_message or 'missing stss sync sample table'}"
-                        )
+                    pending_video_checks.append((folder_name, planned, dest))
+
+        # Orange crop proof sidecars are copied after the MP4 in the ordinary
+        # plan. Validate videos only after all planned artifacts are present so
+        # the check follows the exact declared summary/keyframe paths.
+        for folder_name, planned, dest in pending_video_checks:
+            record_video_keyframe_status(
+                plan=plan,
+                folder_name=folder_name,
+                planned=planned,
+                dest=dest,
+                session_uuid=session_uuid,
+                logger=logger,
+            )
+            check = plan.keyframe_checks.get(
+                f"{folder_name}/{planned.dest_name}", {}
+            )
+            if check.get("sync_sample_proof") == "orange_idr_sidecar_contradiction":
+                check_message = str(check.get("message", "")).strip()
+                record_warning(
+                    f"Orange sync-sample evidence contradiction for {dest}: "
+                    f"{check_message or 'producer evidence contradicts the MP4 declaration'}"
+                )
+            elif (
+                check.get("codec") == "hevc"
+                and check.get("sync_sample_semantics") == "unreadable"
+            ):
+                check_message = str(check.get("message", "")).strip()
+                record_warning(
+                    f"HEVC container inspection error for {dest}: "
+                    f"{check_message or 'MP4 sample table could not be inspected'}"
+                )
 
         if snapshot is not None:
             warning = _write_snapshot(plan, snapshot, snapshot_mode)
