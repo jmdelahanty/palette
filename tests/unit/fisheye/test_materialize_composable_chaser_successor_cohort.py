@@ -252,6 +252,9 @@ def test_plan_freezes_exact_recording_inputs(tmp_path: Path) -> None:
     assert entry["output_run_names"]["body_alignment_plot_bundle"] == (
         cohort.BODY_ALIGNMENT_RECIPE_BUNDLE_NAME
     )
+    assert entry["output_run_names"]["body_alignment_plot_bundle"].endswith(
+        "recipe_v2"
+    )
     assert len(entry["input_group_bindings"]) == 8
     assert entry["existing_output_group_paths"] == []
     assert task["safety"] == cohort.EXPECTED_SAFETY
