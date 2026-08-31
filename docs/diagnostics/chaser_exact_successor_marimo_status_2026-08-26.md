@@ -731,6 +731,41 @@ PDF trajectory files using appearance projection
 The 107-test affected surface and Marimo check passed outside the sandbox.
 Required CI remains the release gate.
 
+### Independent relative-child receipt admission — 2026-08-30
+
+The completed body-alignment cohort exposed one reader-only mismatch between
+scientific child identity and validation-receipt lineage. All 80 eligible
+recordings persist a complete anatomical alignment-by-distance successor, and
+each successor names the same exact keypoint relative-frame `run_path` and
+manifest SHA-256 as its spatial-occupancy anchor. In every recording, however,
+the spatial and alignment publications correctly bind different validation
+receipt digests because each producer invocation audited the immutable child
+for its own lineage.
+
+The shared exact-relative binding contract already states that receipt evidence
+does not create a different scientific child, but its comparator still rejected
+two receipt-bound records when their receipt digests differed. Metadata-only
+Marimo discovery therefore omitted `body_alignment_by_distance` for 80/80
+eligible recordings even though the scientific Zarrs and static receipt-bound
+plots were valid.
+
+The reader correction validates both closed binding profiles independently and
+compares only the immutable scientific identity `(run_path, manifest_sha256)`.
+It retains the expected and observed receipt digests, verification modes, and
+their `independent_receipts_same_exact_child` relationship in proof provenance.
+Different child paths or manifest digests still fail closed; malformed receipt
+digests, unsupported verification modes, selector-like paths, and unrecognized
+field sets remain rejected.
+
+A read-only live smoke against
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat` now discovers
+`body_alignment_by_distance` on the receipt-bound v4 exact bundle in 0.379
+seconds. Its v7 composition receipt target-rehashed the authorized arrays in
+21.610 seconds, and the renderer produced four interactive figures in 0.174
+seconds with 6, 6, 12, and 12 traces. No Zarr, scientific manifest, validation
+receipt, static plot, registry record, selector, or authority was rewritten.
+Required CI remains pending for this correction.
+
 ## Persisted but not yet mounted in this capability
 
 These products are safe candidates for later read-only panels, but were kept

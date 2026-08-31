@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -106,12 +107,17 @@ def _inputs() -> ChaserBodyAlignmentByDistanceInput:
     )
 
 
-def _publish(tmp_path: Path, *, run_name: str = "alignment-v1"):
+def _publish(
+    tmp_path: Path,
+    *,
+    run_name: str = "alignment-v1",
+    inputs: ChaserBodyAlignmentByDistanceInput | None = None,
+):
     archive = tmp_path / "analysis.zarr"
     if not archive.exists():
         root = open_zarr_root(archive, mode="w-")
         root.attrs["recording_id"] = "recording"
-    prepared = prepare_chaser_body_alignment_by_distance_successor(_inputs())
+    prepared = prepare_chaser_body_alignment_by_distance_successor(inputs or _inputs())
     plan = build_composable_chaser_successor_publication_plan(
         archive, run_name=run_name, prepared=prepared
     )
@@ -193,6 +199,47 @@ def test_discovery_and_renderer_use_one_persisted_bin_contract(tmp_path: Path) -
             == "prohibited"
         )
         figure.to_plotly_json()
+
+
+def test_discovery_accepts_independent_receipts_for_same_relative_child(
+    tmp_path: Path,
+) -> None:
+    alignment_receipt = "8" * 64
+    inputs = replace(
+        _inputs(),
+        relative_frame_verification_mode=(
+            "receipt_bound_targeted_array_rehash_v1"
+        ),
+        relative_frame_validation_receipt_sha256=alignment_receipt,
+    )
+    archive, prepared, _handle = _publish(tmp_path, inputs=inputs)
+    root = open_zarr_root(archive, mode="r", use_consolidated=True)
+    spatial_sources, relative_manifest = _discovery_sources(prepared)
+    spatial_receipt = "9" * 64
+    spatial_sources["position_providers"][0]["relative_frame"] = {
+        **spatial_sources["position_providers"][0]["relative_frame"],
+        "validation_receipt_sha256": spatial_receipt,
+    }
+
+    binding = compatible_body_alignment_binding(
+        root,
+        recording_id="recording",
+        spatial_sources=spatial_sources,
+        spatial_epoch_records=prepared.manifest["epoch_records"],
+        keypoint_relative_manifest=relative_manifest,
+    )
+
+    assert binding is not None
+    assert (
+        binding["source_relative_frame"]["validation_receipt_sha256"]
+        == alignment_receipt
+    )
+    assert (
+        spatial_sources["position_providers"][0]["relative_frame"][
+            "validation_receipt_sha256"
+        ]
+        == spatial_receipt
+    )
 
 
 def test_discovery_fails_closed_on_ambiguous_matching_children(tmp_path: Path) -> None:

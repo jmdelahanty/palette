@@ -133,29 +133,49 @@ class ExactRelativeFrameBindingProof:
         return self.expected.normalized_identity
 
     def provenance_record(self) -> Mapping[str, Any]:
-        receipt_binding = next(
-            (
-                binding
-                for binding in (self.expected, self.observed)
-                if binding.profile_id == RECEIPT_BOUND_PROFILE
-            ),
-            None,
+        receipt_bindings = tuple(
+            binding
+            for binding in (self.expected, self.observed)
+            if binding.profile_id == RECEIPT_BOUND_PROFILE
         )
+        receipt_digests = tuple(
+            dict.fromkeys(
+                binding.validation_receipt_sha256 for binding in receipt_bindings
+            )
+        )
+        verification_modes = tuple(
+            dict.fromkeys(binding.verification_mode for binding in receipt_bindings)
+        )
+        if not receipt_bindings:
+            receipt_evidence_relationship = "no_receipt_evidence"
+        elif len(receipt_bindings) == 1:
+            receipt_evidence_relationship = "one_receipt_bound_one_minimal"
+        elif len(receipt_digests) == 1:
+            receipt_evidence_relationship = "shared_receipt"
+        else:
+            receipt_evidence_relationship = "independent_receipts_same_exact_child"
         return MappingProxyType(
             {
                 "normalized_identity": self.normalized_identity,
                 "expected_binding_profile": self.expected.profile_id,
                 "observed_binding_profile": self.observed.profile_id,
+                "expected_validation_receipt_sha256": (
+                    self.expected.validation_receipt_sha256
+                ),
+                "observed_validation_receipt_sha256": (
+                    self.observed.validation_receipt_sha256
+                ),
+                "expected_verification_mode": self.expected.verification_mode,
+                "observed_verification_mode": self.observed.verification_mode,
                 "validation_receipt_sha256": (
-                    None
-                    if receipt_binding is None
-                    else receipt_binding.validation_receipt_sha256
+                    receipt_digests[0] if len(receipt_digests) == 1 else None
                 ),
                 "verification_mode": (
-                    None
-                    if receipt_binding is None
-                    else receipt_binding.verification_mode
+                    verification_modes[0] if len(verification_modes) == 1 else None
                 ),
+                "validation_receipt_sha256s": receipt_digests,
+                "verification_modes": verification_modes,
+                "receipt_evidence_relationship": receipt_evidence_relationship,
                 "validation_behavior": (
                     "binding_schema_and_identity_validated_receipt_digest_not_reopened"
                 ),
@@ -227,18 +247,6 @@ def require_same_exact_relative_frame_child(
     ):
         raise ExactRelativeFrameBindingError(
             "Relative-frame bindings name different exact scientific children."
-        )
-    if (
-        expected_binding.profile_id == RECEIPT_BOUND_PROFILE
-        and observed_binding.profile_id == RECEIPT_BOUND_PROFILE
-        and (
-            expected_binding.validation_receipt_sha256
-            != observed_binding.validation_receipt_sha256
-            or expected_binding.verification_mode != observed_binding.verification_mode
-        )
-    ):
-        raise ExactRelativeFrameBindingError(
-            "Receipt-bound relative-frame evidence disagrees for one child."
         )
     return ExactRelativeFrameBindingProof(
         expected=expected_binding,
