@@ -47,7 +47,15 @@ def _semantic_selection_and_binding() -> tuple[SimpleNamespace, dict[str, object
         for index, label in enumerate(source_labels)
     )
     selection = SimpleNamespace(
-        selection_record={"selection_sha256": "a" * 64},
+        selection_record={"selection_sha256": "8" * 64},
+        run_path="analysis/stimulus_epoch_runs/semantic-epoch-v2",
+        run_manifest_digest="1" * 64,
+        run_manifest_payload_digest="2" * 64,
+        source_epoch_logical_content_digest="3" * 64,
+        source_epoch_lineage_hash="4" * 64,
+        source_epoch_lineage_payload_digest="5" * 64,
+        source_timeline_digest="6" * 64,
+        selection_digest="8" * 64,
         fps=10.0,
         intervals=intervals,
     )
@@ -80,7 +88,22 @@ def _semantic_selection_and_binding() -> tuple[SimpleNamespace, dict[str, object
     binding: dict[str, object] = {
         "protocol_semantic_hash": f"sha256:{'b' * 64}",
         "roles": list(CHASER_WINDOW_ROLES),
-        "source_epoch_selection": selection.selection_record,
+        "source_epoch_selection": {
+            "source_epoch_run_path": selection.run_path,
+            "source_epoch_run_manifest_sha256": selection.run_manifest_digest,
+            "source_epoch_run_manifest_payload_sha256": (
+                selection.run_manifest_payload_digest
+            ),
+            "source_epoch_logical_content_sha256": (
+                selection.source_epoch_logical_content_digest
+            ),
+            "source_epoch_lineage_hash": selection.source_epoch_lineage_hash,
+            "source_epoch_lineage_payload_sha256": (
+                selection.source_epoch_lineage_payload_digest
+            ),
+            "source_timeline_digest": selection.source_timeline_digest,
+            "selection_sha256": selection.selection_digest,
+        },
         "selector_eligible": False,
         "production_authority": False,
         "position_suite_epochs": epochs,
@@ -113,6 +136,14 @@ def test_protocol_semantic_windows_reject_rehashed_source_mismatch() -> None:
     binding["position_suite_epochs_sha256"] = canonical_json_sha256(epochs)
 
     with pytest.raises(ProviderEpochBehaviorSummaryError, match="exact source"):
+        _windows_from_protocol_semantic_binding(selection, binding)
+
+
+def test_protocol_semantic_windows_reject_full_selection_record_as_identity() -> None:
+    selection, binding = _semantic_selection_and_binding()
+    binding["source_epoch_selection"] = selection.selection_record
+
+    with pytest.raises(ProviderEpochBehaviorSummaryError, match="exact sources"):
         _windows_from_protocol_semantic_binding(selection, binding)
 
 

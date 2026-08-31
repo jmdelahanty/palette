@@ -45,6 +45,9 @@ from fisheye.analysis_workflows.provider_analysis_bindings import (
     provider_motion_identity,
     temporal_selection_identity,
 )
+from fisheye.analysis_workflows.composable_epoch_selection_adapter import (
+    _selection_identity,
+)
 from fisheye.analysis_workflows.provider_analysis_offers import (
     ProviderRequirements,
     ScientificReadiness,
@@ -360,7 +363,7 @@ def _windows_from_protocol_semantic_binding(
 ) -> tuple[ChaserDistanceWindow, ...]:
     """Project the three strict semantic roles into motion/bout windows."""
 
-    if binding.get("source_epoch_selection") != selection.selection_record:
+    if binding.get("source_epoch_selection") != _selection_identity(selection):
         raise ProviderEpochBehaviorSummaryError(
             "Protocol-semantic selection and epoch authority identify different "
             "exact sources."
