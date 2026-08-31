@@ -56,6 +56,7 @@ from fisheye.shared.detect_reason_codec import REASON_BYTES_ENCODING, REASON_BYT
 from fisheye.shared.eye_geometry_source import (
     EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
     EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
+    EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_MODE,
     resolve_eye_geometry_source,
 )
 from fisheye.shared.keypoint_coordinate_publication import (
@@ -69,6 +70,8 @@ from fisheye.shared.subject_position_keypoint_source import (
 )
 from fisheye.shared.zarr.assignment_keypoint_rebinding import (
     ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE,
+    ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM,
+    assignment_equivalence_array_sha256,
     assignment_success_equivalence_key,
 )
 from fisheye.pose.body_frame import (
@@ -3357,9 +3360,13 @@ def _resolve_canonical_eye_keypoints(
             success is None
             or not isinstance(keypoint_equivalence, Mapping)
             or not isinstance(success_equivalence, Mapping)
-            or array_values_sha256(group["keypoints_roi"])
+            or keypoint_equivalence.get("digest_algorithm")
+            != ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM
+            or success_equivalence.get("digest_algorithm")
+            != ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM
+            or assignment_equivalence_array_sha256(group["keypoints_roi"])
             != keypoint_equivalence.get("normalized_sha256")
-            or array_values_sha256(success)
+            or assignment_equivalence_array_sha256(success)
             != success_equivalence.get("normalized_sha256")
         ):
             raise ValueError(
@@ -3388,9 +3395,9 @@ def _resolve_canonical_eye_keypoints(
         authority_arrays = authority["arrays"]
         if (
             authority_arrays["keypoints_roi"]["content_sha256"]
-            != keypoint_equivalence.get("normalized_sha256")
+            != array_values_sha256(group["keypoints_roi"])
             or authority_arrays["detection_success"]["content_sha256"]
-            != success_equivalence.get("normalized_sha256")
+            != array_values_sha256(success)
             or authority_arrays["instance_key"]["content_sha256"]
             != alignment["shared_instance_key_content_sha256"]
             or authority_arrays["source_acquisition_frame_index"]["content_sha256"]
@@ -3561,6 +3568,9 @@ def _resolve_eye_angle_inputs(
     diagnostic_refined_keypoint_run: Optional[str] = None,
     _staged_subject_shape_authority: Optional[Mapping[str, Any]] = None,
     _staged_keypoint_authority: Optional[Mapping[str, Any]] = None,
+    _completed_ineligible_subject_shape_candidate: Optional[
+        Mapping[str, Any]
+    ] = None,
     _verify_staged_payload: bool = True,
 ) -> EyeAngleInputContext:
     expected_keypoint_run = _exact_child_run_name(
@@ -3578,8 +3588,11 @@ def _resolve_eye_angle_inputs(
     if diagnostic_run is not None and (
         _staged_subject_shape_authority is not None
         or _staged_keypoint_authority is not None
+        or _completed_ineligible_subject_shape_candidate is not None
     ):
-        raise ValueError("Staged/materialized eye analysis cannot use refined diagnostics.")
+        raise ValueError(
+            "Staged/materialized eye analysis cannot use refined diagnostics."
+        )
     eye_geometry = resolve_eye_geometry_source(
         root,
         subject_shape_run=subject_shape_run,
@@ -3587,6 +3600,9 @@ def _resolve_eye_angle_inputs(
         prefer_subject_shape=True,
         prefer_subject=True,
         _staged_subject_shape_authority=_staged_subject_shape_authority,
+        _completed_ineligible_subject_shape_candidate=(
+            _completed_ineligible_subject_shape_candidate
+        ),
         _verify_staged_payload=_verify_staged_payload,
     )
     if diagnostic_run is None:
@@ -3939,7 +3955,7 @@ def _verify_receipt_geometry_payloads(
     allowed = authority.get("allowed_arrays") if isinstance(authority, Mapping) else None
     if not isinstance(allowed, Mapping):
         raise ValueError(
-            "Staged eye-angle integrity lacks canonical subject-shape payload authority."
+            "Staged eye-angle integrity lacks verified subject-shape payload authority."
         )
     relative_paths = {
         "left_params": "components/eye_left/ellipse_params",
@@ -3961,7 +3977,7 @@ def _verify_receipt_geometry_payloads(
         ):
             raise ValueError(
                 f"Staged eye-angle snapshot for {relative_path!r} differs from "
-                "canonical subject-shape payload authority."
+                "verified subject-shape payload authority."
             )
 
 
@@ -3991,13 +4007,18 @@ def _build_staged_eye_angle_input_integrity_receipt(
     authority = getattr(geometry, "source_authority", None)
     if (
         getattr(geometry, "source_authority_mode", None)
-        not in {"canonical_publication", "digest_bound_staged_subset"}
+        not in {
+            "canonical_publication",
+            "digest_bound_staged_subset",
+            EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_MODE,
+        }
         or not isinstance(authority, Mapping)
         or not _is_sha256(authority.get("record_sha256"))
     ):
         raise ValueError(
-            "Staged eye-angle input integrity requires canonical subject-shape "
-            "authority or its exact digest-bound staged subset."
+            "Staged eye-angle input integrity requires eligible canonical or "
+            "explicitly admitted selector-ineligible subject-shape authority, "
+            "or its exact digest-bound staged subset."
         )
     keypoint_authority = context.canonical_keypoint_authority
     if (
@@ -4423,7 +4444,11 @@ def _validate_staged_eye_angle_input_integrity_receipt(
     authority = getattr(geometry, "source_authority", None)
     if (
         getattr(geometry, "source_authority_mode", None)
-        not in {"canonical_publication", "digest_bound_staged_subset"}
+        not in {
+            "canonical_publication",
+            "digest_bound_staged_subset",
+            EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_MODE,
+        }
         or not isinstance(authority, Mapping)
         or _canonical_json_copy(authority) != canonical["subject_shape_authority"]
         or authority.get("record_sha256")

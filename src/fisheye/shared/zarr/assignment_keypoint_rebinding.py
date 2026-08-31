@@ -61,6 +61,7 @@ ASSIGNMENT_KEYPOINT_REBINDING_POLICY = (
     "exact_historical_assignment_to_active_keypoint_bundle_member_v1"
 )
 ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE = "keypoint_coordinate_successor_v1"
+ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM = "sha256_c_contiguous_bytes_v1"
 
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -202,6 +203,30 @@ def assignment_success_equivalence_key(historical_run_path: str) -> str:
     _fail("Historical assignment keypoint path is unsupported.")
 
 
+def assignment_equivalence_array_sha256(
+    values: Any,
+    *,
+    block_rows: int = 131_072,
+) -> str:
+    """Hash one row array with the rebinding evidence's declared byte grammar."""
+
+    if type(block_rows) is not int or block_rows <= 0:
+        _fail("Assignment equivalence block_rows must be one positive integer.")
+    shape = tuple(int(value) for value in getattr(values, "shape", ()))
+    dtype_value = getattr(values, "dtype", None)
+    dtype = np.dtype(dtype_value) if dtype_value is not None else np.asarray(values).dtype
+    if not shape:
+        _fail("Assignment equivalence arrays must have a row axis.")
+    if dtype.hasobject:
+        _fail("Assignment equivalence arrays cannot use object dtype.")
+    digest = hashlib.sha256()
+    for start in range(0, shape[0], block_rows):
+        stop = min(shape[0], start + block_rows)
+        block = np.ascontiguousarray(values[start:stop], dtype=dtype)
+        digest.update(block.tobytes(order="C"))
+    return digest.hexdigest()
+
+
 def _active_keypoint_member(
     authority: Mapping[str, Any],
     *,
@@ -324,7 +349,7 @@ def _chunked_equivalence(
             if normalized_dtype is None
             else f"numpy_astype_{target_dtype.name}_c_order_v1"
         ),
-        "digest_algorithm": "sha256_c_contiguous_bytes_v1",
+        "digest_algorithm": ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM,
         "normalized_sha256": right_sha,
     }
 
@@ -415,7 +440,8 @@ def inspect_assignment_keypoint_rebinding(
         declaration = canonical_arrays.get(name)
         if (
             not isinstance(declaration, Mapping)
-            or declaration.get("digest_algorithm") != "sha256_c_contiguous_bytes_v1"
+            or declaration.get("digest_algorithm")
+            != ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM
             or declaration.get("sha256") != bundle_identity.get(name)
         ):
             _fail(f"Canonical keypoint {name} digest differs from the mask bundle.")
@@ -723,7 +749,8 @@ def validate_assignment_keypoint_rebinding_manifest(
                 not isinstance(shape, list)
                 or not shape
                 or any(type(value) is not int or value < 0 for value in shape)
-                or evidence.get("digest_algorithm") != "sha256_c_contiguous_bytes_v1"
+                or evidence.get("digest_algorithm")
+                != ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM
                 or _SHA256.fullmatch(str(evidence.get("normalized_sha256") or ""))
                 is None
                 or str(historical_dtype) != evidence.get("historical_dtype")
@@ -921,7 +948,9 @@ __all__ = [
     "ASSIGNMENT_KEYPOINT_REBINDING_SCHEMA_ID",
     "ASSIGNMENT_KEYPOINT_REBINDING_SCHEMA_VERSION",
     "ASSIGNMENT_CANONICAL_KEYPOINT_PROFILE",
+    "ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM",
     "AssignmentKeypointRebindingError",
+    "assignment_equivalence_array_sha256",
     "assignment_success_equivalence_key",
     "inspect_assignment_keypoint_rebinding",
     "load_assignment_keypoint_rebinding_manifest",

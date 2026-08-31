@@ -662,6 +662,69 @@ time of this addendum, the implementation and frozen cohort task are locally
 validated, but no cohort Zarr writes or LSF submissions have occurred and
 required CI remains pending.
 
+#### Cohort execution and selector-ineligible handoff update — 2026-08-31
+
+The first execution gate subsequently completed on clean Palette commit
+`6c1c6f79afc4ea3d8f73220fac399cdc18213889`. LSF proof array `153801371`
+finished 84/84 tasks with no Zarr writes. The closed proof set is under
+`/groups/johnson/johnsonlab/jeremy/operations/eye_gaze_prerequisites_prove_goodbatbadbat84_6c1c6f79_20260831/proofs`.
+It contains every frozen task index exactly once, 84 unique receipt hashes, 84
+unique rebinding-manifest hashes, the exact task digest above, the exact Palette
+commit, revalidated frozen inputs, and `zarr_writes=false`.
+
+The one-recording materialization smoke, LSF job `153801405`, then failed closed
+after 619 seconds. It safely published the immutable v1 rebinding and a complete
+access-aware subject-shape candidate for
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat`, but wrote no eye-angle result or
+final cohort receipt. The subject-shape candidate is coordinate-bound, has
+151,478 rows, and is intentionally `stage_selector_eligible=false`. The normal
+eye-geometry resolver correctly rejected it because normal readers require a
+selector-eligible canonical publication. No other recording was materialized.
+
+The missing bridge is therefore not promotion. Eye-angle materialization needs
+one narrow admission for the exact completed, selector-ineligible subject-shape
+candidate that the immediately preceding stage produced. That admission now
+requires an explicit child name and exact publication-owner UUID, a valid
+candidate storage profile and unpromoted envelope, a fresh deep coordinate and
+payload reload, exact direct/consolidated subtree equivalence, and a sealed
+manifest identity. It records `normal_reader_authority=false` and
+`selector_activation=false`, and the staged eye-angle authority carries the
+admission and its digest. Normal readers and selectors remain unchanged and
+continue to reject this candidate.
+
+The partial v1 children are immutable evidence and must not be overwritten or
+resumed under their existing names. A new cohort attempt must use a newly
+frozen v2 task and fresh rebinding, subject-shape, and eye-angle run identities;
+it must rerun all 84 read-only proofs because those proofs bind the task and
+output identities. The sequence remains: required CI green on the exact new
+commit, commit-pinned deployment, 84/84 v2 proof closure, one-recording v2
+materialization smoke, receipt validation, then indices 2 through 84. At the
+time of this update, the admission implementation has 67 focused tests passing;
+the fresh 84-recording v2 task is locally frozen at
+`/tmp/goodbatbadbat_eye_gaze_prerequisite_task_20260831_v2.json` with task
+digest `d639ceef530bc2091c085cf7654ffbdc2021741d6f4ff00b09b0832efe7c141d`.
+Its physical JSON file SHA-256 is
+`45d08d8e0351b0af05fb8bc069b12eca2b33ad502d87f0e6b8e115b1ea1e07f3`.
+No v2 proof array or cohort write has yet been submitted.
+
+A read-only `apply=false` plan against the real partial v1 subject-shape
+candidate then exposed a separate consumer defect. The rebinding evidence uses
+its declared `sha256_c_contiguous_bytes_v1` grammar, while the eye-angle resolver
+had compared that digest to a dtype-and-shape-prefixed coordinate payload hash.
+For the live canonical keypoint successor, the raw C-contiguous hashes of both
+`keypoints_roi` and `pose_success` exactly equal the rebinding evidence; only
+the mismatched digest grammar differed. The consumer now names and applies the
+rebinding algorithm explicitly while retaining its separate coordinate payload
+hashes for staged authority and TOCTOU checks.
+
+The corrected live plan completed in 185.6 seconds without creating scratch or
+writing the archive. It resolved 151,478 observation rows over 152,035 source
+frames and sealed candidate-admission, subject-shape-authority, and
+keypoint-authority digests. The combined rebinding, geometry, lineage,
+materializer, cohort, and gaze-validation regression suite passes 121/121
+tests. This is planning evidence only; required CI and the fresh v2 proof and
+materialization gates remain mandatory.
+
 ### Exact body-bearing × distance parity addendum — 2026-08-30
 
 The earlier GoodCopBadCop viewer retained two related products that had not

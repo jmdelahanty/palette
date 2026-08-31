@@ -256,7 +256,11 @@ def test_materialization_wires_exact_ineligible_candidates_without_acceptance(
 
     def fake_shape(*args: object, **kwargs: object) -> dict[str, object]:
         calls["shape"] = {"args": args, **kwargs}
-        return {"status": "complete", "kind": "subject_shape"}
+        return {
+            "status": "complete",
+            "kind": "subject_shape",
+            "publish": {"publication_owner_uuid": "b" * 32},
+        }
 
     def fake_eye(*args: object, **kwargs: object) -> dict[str, object]:
         calls["eye"] = {"args": args, **kwargs}
@@ -302,6 +306,7 @@ def test_materialization_wires_exact_ineligible_candidates_without_acceptance(
     assert calls["shape"]["apply"] is True
     assert "stage_selector_eligible" not in calls["shape"]
     assert calls["eye"]["subject_shape_run"] == cohort.SUBJECT_SHAPE_RUN
+    assert calls["eye"]["subject_shape_candidate_owner"] == "b" * 32
     assert calls["eye"]["keypoint_run"] == "keypoints_coordinate_001"
     assert (
         calls["eye"]["storage_profile"]

@@ -48,9 +48,9 @@ PROOF_SCHEMA_VERSION = 1
 RECEIPT_SCHEMA_ID = "palette.eye_gaze_prerequisite_materialization_receipt"
 RECEIPT_SCHEMA_VERSION = 1
 
-REBINDING_RUN = "assignment_keypoint_rebinding_goodbatbadbat_gaze_20260831_v1"
-SUBJECT_SHAPE_RUN = "subject_shape_goodbatbadbat_gaze_20260831_v1"
-EYE_ANGLE_RUN = "eye_angles_goodbatbadbat_gaze_20260831_v1"
+REBINDING_RUN = "assignment_keypoint_rebinding_goodbatbadbat_gaze_20260831_v2"
+SUBJECT_SHAPE_RUN = "subject_shape_goodbatbadbat_gaze_20260831_v2"
+EYE_ANGLE_RUN = "eye_angles_goodbatbadbat_gaze_20260831_v2"
 
 EXPECTED_SAFETY = {
     "selector_eligible": False,
@@ -839,6 +839,14 @@ def materialize_one(
     )
     if not isinstance(shape, Mapping) or shape.get("status") != "complete":
         _fail("Subject-shape candidate did not complete exactly.")
+    shape_publish = _mapping(
+        shape.get("publish"),
+        field="subject-shape candidate publication result",
+    )
+    subject_shape_candidate_owner = _text(
+        shape_publish.get("publication_owner_uuid"),
+        field="subject-shape candidate publication owner",
+    )
     _write_exclusive(receipt_dir / "subject_shape_result.json", shape)
     eye = materialize_eye_angles(
         archive,
@@ -846,6 +854,7 @@ def materialize_one(
         subject_shape_run=str(outputs["subject_shape_run"]),
         keypoint_run=str(keypoints["run_name"]),
         run_name=str(outputs["eye_angle_run"]),
+        subject_shape_candidate_owner=subject_shape_candidate_owner,
         storage_profile=EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
         execution_backend="serial_driver",
         scheduler="single-threaded",

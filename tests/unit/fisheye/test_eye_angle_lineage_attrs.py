@@ -1115,8 +1115,18 @@ def test_eye_angle_bundle_assignment_rebinding_uses_shared_successor_resolver(
         data=np.asarray(base["detection_success"][:], dtype=bool),
     )
     del base["detection_success"]
-    keypoint_sha = eye_angle_analysis.array_values_sha256(base["keypoints_roi"])
-    success_sha = eye_angle_analysis.array_values_sha256(base["pose_success"])
+    keypoint_sha = eye_angle_analysis.assignment_equivalence_array_sha256(
+        base["keypoints_roi"]
+    )
+    success_sha = eye_angle_analysis.assignment_equivalence_array_sha256(
+        base["pose_success"]
+    )
+    assert keypoint_sha != eye_angle_analysis.array_values_sha256(
+        base["keypoints_roi"]
+    )
+    assert success_sha != eye_angle_analysis.array_values_sha256(
+        base["pose_success"]
+    )
     payload = {
         "assignment_state": "used",
         "subject_mask_source": {
@@ -1134,9 +1144,15 @@ def test_eye_angle_bundle_assignment_rebinding_uses_shared_successor_resolver(
         },
         "equivalence": {
             "keypoints_roi_to_keypoints_roi": {
+                "digest_algorithm": (
+                    eye_angle_analysis.ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM
+                ),
                 "normalized_sha256": keypoint_sha,
             },
             success_equivalence_key: {
+                "digest_algorithm": (
+                    eye_angle_analysis.ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM
+                ),
                 "normalized_sha256": success_sha,
             },
         },
