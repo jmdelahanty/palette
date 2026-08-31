@@ -30,10 +30,22 @@ from .refined_subject_mask_coordinate_publication import (
 from .refined_subject_eye_geometry import EYE_COMPONENTS
 from .subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_MANIFEST_ATTR,
+    SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
     SUBJECT_SHAPE_SCALAR_SURFACE_ATTR,
+    SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR,
+    SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR,
     BoundSubjectShapeCoordinatePublication,
     SubjectShapeCoordinatePublicationError,
+    load_completed_ineligible_subject_shape_coordinate_publication,
     load_persisted_subject_shape_coordinate_publication,
+)
+from .subject_shape_storage import (
+    SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+    validate_subject_shape_candidate_storage,
+)
+from .zarr.metadata_equivalence import (
+    METADATA_EQUIVALENCE_SCHEMA_ID,
+    METADATA_EQUIVALENCE_SCHEMA_VERSION,
 )
 from .zarr_run_completion import resolve_authoritative_run_name
 
@@ -47,6 +59,21 @@ EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_VERSION = 1
 EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCOPE = (
     "eye_geometry_exact_digest_bound_staged_subset_only"
 )
+EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCHEMA_VERSION = 2
+EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCOPE = (
+    "eye_geometry_exact_digest_bound_completed_ineligible_candidate_subset_only"
+)
+EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_ADMISSION_SCHEMA_ID = (
+    "palette.eye_geometry_completed_ineligible_subject_shape_admission"
+)
+EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_ADMISSION_SCHEMA_VERSION = 1
+EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_ADMISSION_SCOPE = (
+    "eye_angle_materializer_exact_completed_selector_ineligible_candidate_only"
+)
+EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_MODE = (
+    "completed_selector_ineligible_candidate_publication"
+)
+_PUBLICATION_OWNER_RE = re.compile(r"^[0-9a-f]{32}$")
 
 _SUBJECT_SHAPE_EYE_ARRAY_PATHS = (
     "components/eye_left/ellipse_params",
@@ -208,6 +235,266 @@ def _subject_shape_source_contract_attrs(group: Any) -> dict[str, Any]:
     )
 
 
+def _exact_subject_shape_candidate_run_name(value: object) -> str:
+    requested = _normalize_text(value)
+    if requested is None:
+        raise ValueError(
+            "Selector-ineligible subject-shape admission requires one explicit run name."
+        )
+    normalized = requested.strip("/")
+    prefix = f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/"
+    run_name = normalized[len(prefix) :] if normalized.startswith(prefix) else normalized
+    if (
+        not run_name
+        or "/" in run_name
+        or run_name.lower()
+        in {"latest", "latest_complete", "selected", "current", ".", ".."}
+    ):
+        raise ValueError(
+            "Selector-ineligible subject-shape admission requires one exact child name."
+        )
+    return run_name
+
+
+def _canonical_metadata_equivalence_receipt(
+    value: object,
+    *,
+    expected_subtree_path: str,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "Subject-shape candidate admission lacks direct/consolidated metadata evidence."
+        )
+    receipt = _canonical_json_copy(value)
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "subtree_path",
+        "node_count",
+        "group_count",
+        "array_count",
+        "declarations_sha256",
+    }
+    counts = tuple(receipt.get(name) for name in ("node_count", "group_count", "array_count"))
+    if (
+        set(receipt) != expected_fields
+        or receipt.get("schema_id") != METADATA_EQUIVALENCE_SCHEMA_ID
+        or receipt.get("schema_version") != METADATA_EQUIVALENCE_SCHEMA_VERSION
+        or receipt.get("subtree_path") != expected_subtree_path
+        or any(type(value) is not int or value < 0 for value in counts)
+        or counts[0] != counts[1] + counts[2]
+        or not _is_sha256(receipt.get("declarations_sha256"))
+    ):
+        raise ValueError(
+            "Subject-shape candidate direct/consolidated metadata receipt is invalid."
+        )
+    return receipt
+
+
+def _canonical_subject_shape_candidate_envelope(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("Subject-shape candidate storage envelope is absent.")
+    envelope = _canonical_json_copy(value)
+    if (
+        set(envelope)
+        != {
+            "schema_id",
+            "schema_version",
+            "profile_id",
+            "logical_profile_id",
+            "phase",
+            "selector_eligible",
+            "promotion_status",
+        }
+        or envelope.get("schema_id") != "palette.subject_shape_storage_candidate"
+        or envelope.get("schema_version") != 1
+        or envelope.get("profile_id")
+        != SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
+        or not isinstance(envelope.get("logical_profile_id"), str)
+        or not envelope["logical_profile_id"]
+        or envelope.get("phase") != "bound"
+        or envelope.get("selector_eligible") is not False
+        or envelope.get("promotion_status") != "unpromoted_candidate"
+    ):
+        raise ValueError("Subject-shape candidate storage envelope is not exact.")
+    return envelope
+
+
+def _canonical_subject_shape_candidate_admission(
+    value: object,
+    *,
+    expected_run_name: str,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("Subject-shape candidate admission must be one mapping.")
+    admission = _canonical_json_copy(value)
+    digest = admission.pop("record_sha256", None)
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "admission_scope",
+        "source_subject_shape_run",
+        "source_subject_shape_run_ref",
+        "expected_publication_owner",
+        "expected_publication_manifest_sha256",
+        "expected_storage_profile_id",
+        "candidate_envelope",
+        "direct_consolidated_metadata",
+        "source_stage_selector_eligible",
+        "normal_reader_authority",
+        "selector_activation",
+    }
+    run_path = f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{expected_run_name}"
+    if (
+        set(admission) != expected_fields
+        or admission.get("schema_id")
+        != EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_ADMISSION_SCHEMA_ID
+        or admission.get("schema_version")
+        != EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_ADMISSION_SCHEMA_VERSION
+        or admission.get("admission_scope")
+        != EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_ADMISSION_SCOPE
+        or admission.get("source_subject_shape_run") != expected_run_name
+        or admission.get("source_subject_shape_run_ref") != f"/{run_path}"
+        or not isinstance(admission.get("expected_publication_owner"), str)
+        or _PUBLICATION_OWNER_RE.fullmatch(
+            str(admission.get("expected_publication_owner"))
+        )
+        is None
+        or not _is_sha256(admission.get("expected_publication_manifest_sha256"))
+        or admission.get("expected_storage_profile_id")
+        != SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
+        or admission.get("source_stage_selector_eligible") is not False
+        or admission.get("normal_reader_authority") is not False
+        or admission.get("selector_activation") is not False
+        or not _is_sha256(digest)
+        or digest != _canonical_sha256(admission)
+    ):
+        raise ValueError(
+            "Subject-shape candidate admission fields, identity, or digest are invalid."
+        )
+    admission["candidate_envelope"] = _canonical_subject_shape_candidate_envelope(
+        admission.get("candidate_envelope")
+    )
+    admission["direct_consolidated_metadata"] = (
+        _canonical_metadata_equivalence_receipt(
+            admission.get("direct_consolidated_metadata"),
+            expected_subtree_path=run_path,
+        )
+    )
+    return {**admission, "record_sha256": str(digest)}
+
+
+def _validated_subject_shape_candidate_admission(
+    group: Any,
+    *,
+    run_name: str,
+    admission: Mapping[str, Any],
+    validate_storage: bool,
+) -> dict[str, Any]:
+    if type(validate_storage) is not bool:
+        raise ValueError("Subject-shape candidate storage-validation mode must be bool.")
+    canonical = _canonical_subject_shape_candidate_admission(
+        admission,
+        expected_run_name=run_name,
+    )
+    if (
+        group.attrs.get("palette_run_completion_status") != "complete"
+        or group.attrs.get("stage_selector_eligible") is not False
+        or group.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
+        != canonical["expected_publication_owner"]
+        or group.attrs.get("publication_manifest_sha256")
+        != canonical["expected_publication_manifest_sha256"]
+        or group.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR)
+        != canonical["expected_storage_profile_id"]
+        or _canonical_json_copy(
+            group.attrs.get(SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR)
+        )
+        != canonical["candidate_envelope"]
+    ):
+        raise ValueError(
+            "Subject-shape candidate state differs from its exact admission receipt."
+        )
+    if validate_storage:
+        storage_errors = validate_subject_shape_candidate_storage(
+            group,
+            phase="bound",
+        )
+        if storage_errors:
+            raise ValueError(
+                "Subject-shape candidate storage is invalid: "
+                + "; ".join(storage_errors)
+            )
+    return canonical
+
+
+def build_completed_ineligible_subject_shape_candidate_admission(
+    root: Any,
+    *,
+    run_name: str,
+    expected_publication_owner: str,
+    direct_consolidated_metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Seal metadata admission for a candidate that the resolver deeply reloads."""
+
+    selected = _exact_subject_shape_candidate_run_name(run_name)
+    if (
+        not isinstance(expected_publication_owner, str)
+        or _PUBLICATION_OWNER_RE.fullmatch(expected_publication_owner) is None
+    ):
+        raise ValueError(
+            "Subject-shape candidate admission requires the exact publication owner UUID."
+        )
+    run_path = f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{selected}"
+    group = _group_get(root, run_path)
+    if group is None:
+        raise ValueError(f"Subject-shape candidate {run_path!r} is absent.")
+    if (
+        group.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
+        != expected_publication_owner
+    ):
+        raise ValueError(
+            "Subject-shape publication owner changed before candidate admission."
+        )
+    manifest_sha256 = group.attrs.get("publication_manifest_sha256")
+    if not _is_sha256(manifest_sha256):
+        raise ValueError(
+            "Subject-shape candidate lacks an exact publication manifest digest."
+        )
+    metadata = _canonical_metadata_equivalence_receipt(
+        direct_consolidated_metadata,
+        expected_subtree_path=run_path,
+    )
+    envelope = _canonical_subject_shape_candidate_envelope(
+        group.attrs.get(SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR)
+    )
+    body = {
+        "schema_id": EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_ADMISSION_SCHEMA_ID,
+        "schema_version": (
+            EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_ADMISSION_SCHEMA_VERSION
+        ),
+        "admission_scope": EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_ADMISSION_SCOPE,
+        "source_subject_shape_run": selected,
+        "source_subject_shape_run_ref": f"/{run_path}",
+        "expected_publication_owner": expected_publication_owner,
+        "expected_publication_manifest_sha256": manifest_sha256,
+        "expected_storage_profile_id": (
+            SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
+        ),
+        "candidate_envelope": envelope,
+        "direct_consolidated_metadata": metadata,
+        "source_stage_selector_eligible": False,
+        "normal_reader_authority": False,
+        "selector_activation": False,
+    }
+    admission = {**body, "record_sha256": _canonical_sha256(body)}
+    return _validated_subject_shape_candidate_admission(
+        group,
+        run_name=selected,
+        admission=admission,
+        validate_storage=False,
+    )
+
+
 def _iter_descendant_array_paths(group: Any, prefix: str = ""):
     try:
         array_names = sorted(str(value) for value in group.array_keys())
@@ -242,6 +529,7 @@ def _build_staged_subject_shape_authority(
     *,
     run_name: str,
     publication: BoundSubjectShapeCoordinatePublication,
+    candidate_admission: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Build a detached receipt from one already verified canonical publication."""
 
@@ -249,6 +537,19 @@ def _build_staged_subject_shape_authority(
     if publication.run_path != run_path:
         raise ValueError(
             "Canonical subject-shape publication proof names a different source run."
+        )
+    canonical_candidate_admission = None
+    if candidate_admission is None:
+        if group.attrs.get("stage_selector_eligible") is not True:
+            raise ValueError(
+                "Canonical staged subject-shape authority requires selector eligibility."
+            )
+    else:
+        canonical_candidate_admission = _validated_subject_shape_candidate_admission(
+            group,
+            run_name=run_name,
+            admission=candidate_admission,
+            validate_storage=False,
         )
     row_count = int(publication.row_identity.leading_dimension)
     manifest_arrays = publication.manifest.record.get("arrays")
@@ -354,8 +655,16 @@ def _build_staged_subject_shape_authority(
 
     record = {
         "schema_id": EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_ID,
-        "schema_version": EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_VERSION,
-        "authority_scope": EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCOPE,
+        "schema_version": (
+            EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_VERSION
+            if canonical_candidate_admission is None
+            else EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCHEMA_VERSION
+        ),
+        "authority_scope": (
+            EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCOPE
+            if canonical_candidate_admission is None
+            else EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCOPE
+        ),
         "source_subject_shape_run": run_name,
         "source_subject_shape_run_ref": f"/{run_path}",
         "row_count": row_count,
@@ -376,6 +685,8 @@ def _build_staged_subject_shape_authority(
         "closed_array_inventory": True,
         "normal_reader_authority": False,
     }
+    if canonical_candidate_admission is not None:
+        record["candidate_admission"] = canonical_candidate_admission
     return {
         **record,
         "record_sha256": _canonical_sha256(record),
@@ -460,7 +771,7 @@ def _validated_staged_subject_shape_authority(
         raise ValueError("Staged payload verification flag must be an exact bool.")
     canonical = _canonical_json_copy(authority)
     digest = canonical.pop("record_sha256", None)
-    expected_fields = {
+    base_fields = {
         "schema_id",
         "schema_version",
         "authority_scope",
@@ -473,19 +784,33 @@ def _validated_staged_subject_shape_authority(
         "closed_array_inventory",
         "normal_reader_authority",
     }
+    schema_version = canonical.get("schema_version")
+    candidate_authority = (
+        schema_version
+        == EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCHEMA_VERSION
+    )
+    expected_fields = (
+        base_fields | {"candidate_admission"}
+        if candidate_authority
+        else base_fields
+    )
     if set(canonical) != expected_fields:
         raise ValueError("Staged subject-shape authority fields are not exact.")
     if not _is_sha256(digest) or digest != _canonical_sha256(canonical):
         raise ValueError("Staged subject-shape authority digest is missing or stale.")
     if canonical.get("schema_id") != EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_ID:
         raise ValueError("Unsupported staged subject-shape authority schema.")
-    if (
-        type(canonical.get("schema_version")) is not int
-        or canonical.get("schema_version")
-        != EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_VERSION
-    ):
+    if type(schema_version) is not int or schema_version not in {
+        EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_VERSION,
+        EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCHEMA_VERSION,
+    }:
         raise ValueError("Unsupported staged subject-shape authority schema version.")
-    if canonical.get("authority_scope") != EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCOPE:
+    expected_scope = (
+        EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCOPE
+        if candidate_authority
+        else EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCOPE
+    )
+    if canonical.get("authority_scope") != expected_scope:
         raise ValueError("Staged subject-shape authority has the wrong scope.")
     if canonical.get("normal_reader_authority") is not False:
         raise ValueError("Detached staging receipts cannot grant normal reader authority.")
@@ -501,6 +826,15 @@ def _validated_staged_subject_shape_authority(
     row_count = canonical.get("row_count")
     if type(row_count) is not int or row_count < 0:
         raise ValueError("Staged subject-shape authority has an invalid row count.")
+
+    candidate_admission = None
+    if candidate_authority:
+        candidate_admission = _validated_subject_shape_candidate_admission(
+            group,
+            run_name=run_name,
+            admission=canonical["candidate_admission"],
+            validate_storage=False,
+        )
 
     publication = canonical.get("canonical_publication")
     publication_fields = {
@@ -529,12 +863,13 @@ def _validated_staged_subject_shape_authority(
         )
 
     attrs = canonical.get("source_contract_attrs")
+    expected_selector_eligible = not candidate_authority
     if (
         not isinstance(attrs, Mapping)
         or set(attrs) != set(_SUBJECT_SHAPE_SOURCE_CONTRACT_ATTR_NAMES)
         or attrs != _subject_shape_source_contract_attrs(group)
         or attrs.get("palette_run_completion_status") != "complete"
-        or attrs.get("stage_selector_eligible") is not True
+        or attrs.get("stage_selector_eligible") is not expected_selector_eligible
         or attrs.get("coordinate_contract") != "canonical_v2"
         or attrs.get("coordinate_binding_status") != "bound_canonical_v2"
         or attrs.get("publication_manifest_sha256")
@@ -543,6 +878,15 @@ def _validated_staged_subject_shape_authority(
     ):
         raise ValueError(
             "Staged source contract attrs differ from the canonical receipt."
+        )
+    if candidate_admission is not None and (
+        attrs.get("subject_shape_publication_owner_uuid")
+        != candidate_admission["expected_publication_owner"]
+        or attrs.get("publication_manifest_sha256")
+        != candidate_admission["expected_publication_manifest_sha256"]
+    ):
+        raise ValueError(
+            "Staged candidate source attrs differ from its admission receipt."
         )
 
     ellipse_proofs = publication.get("ellipse_coordinate_descriptors")
@@ -986,6 +1330,58 @@ def _strict_subject_shape_eye_geometry(
     return selected, group, publication
 
 
+def _strict_completed_ineligible_subject_shape_eye_geometry(
+    root: zarr.Group,
+    run_name: Optional[str],
+    admission: Mapping[str, Any],
+) -> tuple[
+    str,
+    zarr.Group,
+    BoundSubjectShapeCoordinatePublication,
+    dict[str, Any],
+]:
+    selected = _exact_subject_shape_candidate_run_name(run_name)
+    parent = _group_get(root, EYE_GEOMETRY_STAGE_SUBJECT_SHAPE)
+    if parent is None or selected not in parent:
+        raise ValueError(
+            f"Explicit subject-shape candidate {selected!r} is absent."
+        )
+    path = f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{selected}"
+    group = parent[selected]
+    canonical_admission = _validated_subject_shape_candidate_admission(
+        group,
+        run_name=selected,
+        admission=admission,
+        validate_storage=True,
+    )
+    try:
+        publication = load_completed_ineligible_subject_shape_coordinate_publication(
+            root,
+            path,
+            expected_publication_owner=canonical_admission[
+                "expected_publication_owner"
+            ],
+        )
+    except (SubjectShapeCoordinatePublicationError, KeyError, ValueError) as exc:
+        raise ValueError(
+            f"Subject-shape eye candidate {path!r} is not an exact completed "
+            f"selector-ineligible coordinate publication: {exc}"
+        ) from exc
+    if (
+        publication.selector_eligible is not False
+        or publication.manifest.record_sha256
+        != canonical_admission["expected_publication_manifest_sha256"]
+        or publication.publication_owner
+        != canonical_admission["expected_publication_owner"]
+    ):
+        raise ValueError(
+            "Subject-shape candidate publication proof differs from its admission."
+        )
+    if not _has_subject_shape_eye_geometry(group):
+        raise ValueError(f"{path} is missing canonical subject-shape eye geometry.")
+    return selected, group, publication, canonical_admission
+
+
 def _strict_refined_subject_eye_geometry(
     root: zarr.Group,
     run_name: Optional[str],
@@ -1074,6 +1470,7 @@ def _build_subject_shape_source(
     publication: Any = None,
     source_authority: Optional[Mapping[str, Any]] = None,
     source_authority_mode: str = "canonical_publication",
+    candidate_admission: Optional[Mapping[str, Any]] = None,
 ) -> EyeGeometrySource:
     if not _has_subject_shape_eye_geometry(group):
         raise ValueError(f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{run_name} missing analysis eye geometry.")
@@ -1096,6 +1493,7 @@ def _build_subject_shape_source(
             group,
             run_name=run_name,
             publication=publication,
+            candidate_admission=candidate_admission,
         )
     return EyeGeometrySource(
         stage_group=EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
@@ -1125,6 +1523,9 @@ def resolve_eye_geometry_source(
     prefer_subject: bool = True,
     historical_refined_subject_compatibility: bool = False,
     _staged_subject_shape_authority: Optional[Mapping[str, Any]] = None,
+    _completed_ineligible_subject_shape_candidate: Optional[
+        Mapping[str, Any]
+    ] = None,
     _verify_staged_payload: bool = True,
 ) -> EyeGeometrySource:
     """Resolve the active eye geometry source.
@@ -1138,12 +1539,22 @@ def resolve_eye_geometry_source(
     exact named subject-shape run plus a closed digest-bound receipt previously
     derived from the fully verified canonical publication. The receipt cannot
     authorize normal readers.
+
+    The completed-ineligible private path is also materializer-only. It
+    requires one exact child, its publication-owner UUID, the full candidate
+    storage contract, and direct/consolidated metadata evidence. It never
+    grants selector or normal-reader authority.
     """
 
     if _staged_subject_shape_authority is not None:
-        if refined_subject_run is not None or historical_refined_subject_compatibility:
+        if (
+            refined_subject_run is not None
+            or historical_refined_subject_compatibility
+            or _completed_ineligible_subject_shape_candidate is not None
+        ):
             raise ValueError(
-                "Digest-bound staged eye geometry cannot resolve a refined-subject source."
+                "Digest-bound staged eye geometry cannot combine with another "
+                "subject-shape or refined-subject admission mode."
             )
         run_name = _exact_staged_subject_shape_run_name(subject_shape_run)
         path = f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{run_name}"
@@ -1171,6 +1582,32 @@ def resolve_eye_geometry_source(
     if _verify_staged_payload is not True:
         raise ValueError(
             "_verify_staged_payload is private to digest-bound staged resolution."
+        )
+
+    if _completed_ineligible_subject_shape_candidate is not None:
+        if refined_subject_run is not None or historical_refined_subject_compatibility:
+            raise ValueError(
+                "Selector-ineligible subject-shape admission cannot resolve a "
+                "refined-subject source."
+            )
+        (
+            run_name,
+            group,
+            publication,
+            candidate_admission,
+        ) = _strict_completed_ineligible_subject_shape_eye_geometry(
+            root,
+            subject_shape_run,
+            _completed_ineligible_subject_shape_candidate,
+        )
+        return _build_subject_shape_source(
+            run_name,
+            group,
+            publication=publication,
+            source_authority_mode=(
+                EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_MODE
+            ),
+            candidate_admission=candidate_admission,
         )
 
     if subject_shape_run:
@@ -1254,8 +1691,16 @@ __all__ = [
     "EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_ID",
     "EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_VERSION",
     "EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCOPE",
+    "EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCHEMA_VERSION",
+    "EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCOPE",
+    "EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_ADMISSION_SCHEMA_ID",
+    "EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_ADMISSION_SCHEMA_VERSION",
+    "EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_ADMISSION_SCOPE",
+    "EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_MODE",
     "EyeGeometrySource",
+    "MaskStoreChannelSelectionArray",
     "StackedComponentArray",
+    "build_completed_ineligible_subject_shape_candidate_admission",
     "resolve_eye_geometry_source",
     "resolve_source_keypoints_run_for_eye_geometry",
 ]

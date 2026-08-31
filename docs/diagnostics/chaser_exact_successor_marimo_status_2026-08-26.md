@@ -594,6 +594,212 @@ receipt permits targeted rehash of exactly `body/body_bearing_deg` and
 chasers across the full recording and three exact semantic epochs. The same
 recording truthfully omits gaze because it has no schema-v3 gaze successor.
 
+### Historical refined-keypoint rebinding and cohort execution addendum — 2026-08-31
+
+The earlier census statement that these archives had no modern subject-mask or
+keypoint families was incorrect: that check searched below `analysis/`, while
+`subject_mask_bundle_runs`, `refined_subject_masks_runs`, `keypoints_runs`, and
+`refined_keypoints_runs` are root-level families. The scientific conclusion
+that the frozen cohort has no subject-shape, eye-angle, or schema-v3 gaze
+successor remains correct.
+
+The remaining source mismatch is narrower. Each historical subject-mask bundle
+records the refined-keypoint rows that were actually used during assignment,
+while the current coordinate authority is a later immutable
+`keypoints_runs` coordinate successor. That relationship must not be inferred
+from matching dimensions or labels. The rebinding contract now admits exactly
+two historical assignment profiles: raw `keypoints_runs/detection_success` and
+refined `refined_keypoints_runs/usable_keypoints`. The refined profile must be
+the exact active refined-keypoint bundle member, retain its valid manifest and
+source bindings to the active raw member, match recording and skeleton
+semantics, and compare row-for-row with the selected canonical coordinate
+successor. Coordinates, crop-row identity, instance identity, acquisition-frame
+identity, and the profile-specific success flag are hashed and compared without
+interpolation or row dropping.
+
+For `2026-08-10T17-20-55Z_arena_1_goodbatbadbat`, the exhaustive read-only
+preflight compared all 151,478 assignment rows and passed every identity,
+coordinate, and `usable_keypoints`-to-`pose_success` equivalence. Its proposed
+rebinding manifest payload digest is
+`54679865067e150f46ad7dac958d07833f227c75861fb801ce28ba2180c5b5ec`.
+Nothing was written to the recording by that preflight.
+
+A metadata-only census of the frozen 84-recording chaser cohort found all 84
+ready for the same exhaustive proof: each has exactly one compatible inactive
+coordinate-bound subject-mask bundle, exactly one canonical coordinate
+successor bound to the active keypoint authority, and no pre-existing target
+rebinding, subject-shape, or eye-angle run. The frozen prerequisite task is
+`palette.eye_gaze_prerequisite_cohort_task` version 1 with task digest
+`e919319073170d30c33ba0cae06f551f173c43b4f179c28feed327b345ec6178`.
+It seals every relevant metadata and validation-receipt file digest, exact
+source and output identities, and a one-writer-per-recording policy.
+
+Execution is deliberately split into two gates. First, one read-only LSF worker
+per recording reruns the exhaustive comparison and writes an exclusive proof
+receipt bound to the frozen task entry and full clean Palette commit. Second,
+materialization revalidates the frozen inputs, reruns the proof, and requires
+the exact receipt before publishing the immutable selector-ineligible rebinding,
+an access-aware subject-shape candidate, an access-aware compact-v7 eye-angle
+candidate, numeric convention validation, and a bounded review PNG. It changes
+no selector, registry row, production authority, or human review decision.
+Materialization begins with one recording; indices 2 through 84 are eligible
+only after that smoke succeeds. Any partial write requires new immutable run
+names rather than an in-place retry.
+
+The numeric candidate validator now has one explicit admission path for a
+complete `stage_selector_eligible=false` access-aware eye-angle child. It
+requires an exact child name, validates compact-v7 payload and candidate storage
+contracts, and proves direct/consolidated subtree equivalence. Normal canonical
+eye-angle resolution is unchanged. Numeric validation is not biological
+direction acceptance: a reviewer must still accept the convention before a
+convention receipt, gaze successor, or gaze-capable composition receipt can be
+created.
+
+This repair is historical, not a new-ingestion requirement. Future subject-mask
+assignment publications should bind the canonical coordinate source they use;
+when that identity is already exact, no rebinding successor is needed. At the
+time of this addendum, the implementation and frozen cohort task are locally
+validated, but no cohort Zarr writes or LSF submissions have occurred and
+required CI remains pending.
+
+#### Cohort execution and selector-ineligible handoff update — 2026-08-31
+
+The first execution gate subsequently completed on clean Palette commit
+`6c1c6f79afc4ea3d8f73220fac399cdc18213889`. LSF proof array `153801371`
+finished 84/84 tasks with no Zarr writes. The closed proof set is under
+`/groups/johnson/johnsonlab/jeremy/operations/eye_gaze_prerequisites_prove_goodbatbadbat84_6c1c6f79_20260831/proofs`.
+It contains every frozen task index exactly once, 84 unique receipt hashes, 84
+unique rebinding-manifest hashes, the exact task digest above, the exact Palette
+commit, revalidated frozen inputs, and `zarr_writes=false`.
+
+The one-recording materialization smoke, LSF job `153801405`, then failed closed
+after 619 seconds. It safely published the immutable v1 rebinding and a complete
+access-aware subject-shape candidate for
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat`, but wrote no eye-angle result or
+final cohort receipt. The subject-shape candidate is coordinate-bound, has
+151,478 rows, and is intentionally `stage_selector_eligible=false`. The normal
+eye-geometry resolver correctly rejected it because normal readers require a
+selector-eligible canonical publication. No other recording was materialized.
+
+The missing bridge is therefore not promotion. Eye-angle materialization needs
+one narrow admission for the exact completed, selector-ineligible subject-shape
+candidate that the immediately preceding stage produced. That admission now
+requires an explicit child name and exact publication-owner UUID, a valid
+candidate storage profile and unpromoted envelope, a fresh deep coordinate and
+payload reload, exact direct/consolidated subtree equivalence, and a sealed
+manifest identity. It records `normal_reader_authority=false` and
+`selector_activation=false`, and the staged eye-angle authority carries the
+admission and its digest. Normal readers and selectors remain unchanged and
+continue to reject this candidate.
+
+The partial v1 children are immutable evidence and must not be overwritten or
+resumed under their existing names. A new cohort attempt must use a newly
+frozen v2 task and fresh rebinding, subject-shape, and eye-angle run identities;
+it must rerun all 84 read-only proofs because those proofs bind the task and
+output identities. The sequence remains: required CI green on the exact new
+commit, commit-pinned deployment, 84/84 v2 proof closure, one-recording v2
+materialization smoke, receipt validation, then indices 2 through 84. At the
+time of this update, the admission implementation has 67 focused tests passing;
+the fresh 84-recording v2 task is locally frozen at
+`/tmp/goodbatbadbat_eye_gaze_prerequisite_task_20260831_v2.json` with task
+digest `d639ceef530bc2091c085cf7654ffbdc2021741d6f4ff00b09b0832efe7c141d`.
+Its physical JSON file SHA-256 is
+`45d08d8e0351b0af05fb8bc069b12eca2b33ad502d87f0e6b8e115b1ea1e07f3`.
+No v2 proof array or cohort write has yet been submitted.
+
+A read-only `apply=false` plan against the real partial v1 subject-shape
+candidate then exposed a separate consumer defect. The rebinding evidence uses
+its declared `sha256_c_contiguous_bytes_v1` grammar, while the eye-angle resolver
+had compared that digest to a dtype-and-shape-prefixed coordinate payload hash.
+For the live canonical keypoint successor, the raw C-contiguous hashes of both
+`keypoints_roi` and `pose_success` exactly equal the rebinding evidence; only
+the mismatched digest grammar differed. The consumer now names and applies the
+rebinding algorithm explicitly while retaining its separate coordinate payload
+hashes for staged authority and TOCTOU checks.
+
+The corrected live plan completed in 185.6 seconds without creating scratch or
+writing the archive. It resolved 151,478 observation rows over 152,035 source
+frames and sealed candidate-admission, subject-shape-authority, and
+keypoint-authority digests. The combined rebinding, geometry, lineage,
+materializer, cohort, and gaze-validation regression suite passes 121/121
+tests. This is planning evidence only; required CI and the fresh v2 proof and
+materialization gates remain mandatory.
+
+#### V2 execution, failed-closed review repair, and v3 handoff — 2026-08-31
+
+Required CI for exact commit
+`7f31527551b5df5c7a6f4f7688219c7a587fde5d` completed green: all 16
+non-GPU test shards and every structural check passed. That commit was deployed
+without moving the shared checkout at
+`/groups/johnson/johnsonlab/jeremy/gitrepos/palette-worktrees/refined-assignment-rebinding-gaze-20260831-7f315275`.
+LSF proof array `153801503` then completed 84/84 v2 tasks with exit status zero
+under
+`/groups/johnson/johnsonlab/jeremy/operations/eye_gaze_prerequisites_prove_goodbatbadbat84_7f315275_20260831_v2`.
+Closed-set validation proved indices 1 through 84 exactly once, 84 unique proof
+receipt hashes, 84 unique proposed manifest hashes, exact task digest
+`d639ceef530bc2091c085cf7654ffbdc2021741d6f4ff00b09b0832efe7c141d`,
+the exact Palette commit, and `zarr_writes=false` for every proof.
+
+The v2 one-recording materialization smoke, LSF job `153801525`, ran for 1,013
+seconds with a 7,212 MB maximum and then failed closed during bounded review.
+It published fresh immutable v2 rebinding, subject-shape, and eye-angle
+candidates only for
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat`. It did not produce numeric
+validation evidence or a final cohort receipt, and no other recording was
+materialized. These partial v2 children remain immutable evidence and are not
+retry targets.
+
+The real smoke exposed three late-reader defects rather than a failed numeric
+gaze identity:
+
+1. bounded candidate review reopened the exact selector-ineligible
+   subject-shape source through the normal canonical-only reader;
+2. mask review fell back to treating the historical refined subject-mask member
+   as a modern canonical publication even though the subject-shape publication
+   already sealed its exact inactive bundle, refined member, manifest, source
+   validation receipt, dense-mask digest, and assignment rebinding; and
+3. the initial overlay drew source-camera subject-shape ellipse centers on
+   ROI-local masks. The exact translation-only placement must be subtracted from
+   those centers. Eye-angle body-frame origin support is independently declared
+   in ROI-local pixels and must not receive that translation; gaze and body-axis
+   vectors are translation invariant.
+
+The repaired candidate path admits only the exact nested subject-shape
+candidate record carried by the eye-angle run's self-digested staged authority.
+It requires exact schema, scope, source name and path, digest, and explicit
+`normal_reader_authority=false` and `selector_activation=false`. The mask path
+opens only the exact dense refined member sealed by the bound subject-shape
+bundle and selects semantic `eye_left` and `eye_right` channels. Normal readers
+and selectors remain canonical-only.
+
+A final read-only live probe against the immutable v2 eye-angle candidate now
+passes all numeric checks and direct/consolidated metadata equivalence over
+3,072 sampled rows, including 2,961 valid rows. Its 12-panel review uses the
+sealed dense mask source, aligns both ellipse centers to ROI coordinates, keeps
+the body-frame origin ROI-local, and visibly composes labeled eye masks, gaze
+vectors, fish-forward, and anatomical-left axes. The review PNG is 2,348 by
+1,859 pixels with SHA-256
+`2dad2ee258b64d4aee4032ef0420dec633f3005397b1eecafa8ff39de8643088`.
+This validates the review mechanism; it does not accept the biological gaze
+direction assumption on a reviewer's behalf.
+
+The next attempt uses fresh immutable v3 identities:
+`assignment_keypoint_rebinding_goodbatbadbat_gaze_20260831_v3`,
+`subject_shape_goodbatbadbat_gaze_20260831_v3`, and
+`eye_angles_goodbatbadbat_gaze_20260831_v3`. The frozen 84-recording task is
+`/tmp/goodbatbadbat_eye_gaze_prerequisite_task_20260831_v3.json`, with semantic
+task digest
+`f5eb7cf709b4fb7635086e25bc6bdff33ed183260dcff951718d3ed514f91511`
+and physical JSON SHA-256
+`0983771f7c13c8161858e10aff561535283a0de0c47002e1ad3bb6c8d9988635`.
+All 84 entries validate as `metadata_ready_for_exhaustive_proof` and all v3
+targets are fresh. The repaired implementation has 127/127 affected regression
+tests and all local structural ratchets passing, but it is not
+execution-authorized until required CI passes on the exact new commit. After
+that gate, v3 still requires a new commit-pinned deployment, 84/84 read-only
+proof closure, one-recording materialization and receipt smoke, and only then
+indices 2 through 84.
+
 ### Exact body-bearing × distance parity addendum — 2026-08-30
 
 The earlier GoodCopBadCop viewer retained two related products that had not

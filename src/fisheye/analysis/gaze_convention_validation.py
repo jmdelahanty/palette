@@ -29,14 +29,41 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.eye_angle_io import resolve_eye_angle_run  # noqa: E402
+from fisheye.analysis.eye_angle_schema import (  # noqa: E402
+    eye_angle_dimensions_from_run_attrs,
+    validate_eye_angle_compact_run,
+)
+from fisheye.analysis.eye_angle_storage import (  # noqa: E402
+    validate_eye_angle_candidate_storage,
+)
 from fisheye.shared.eye_geometry_source import (  # noqa: E402
     EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
     EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
+    EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_ID,
+    EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_VERSION,
+    EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCHEMA_VERSION,
+    EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCOPE,
+    MaskStoreChannelSelectionArray,
     resolve_eye_geometry_source,
 )
 from fisheye.shared.json_safety import decode_null_terminated_text  # noqa: E402
+from fisheye.shared.mask_store import open_mask_store  # noqa: E402
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run  # noqa: E402
+from fisheye.shared.subject_shape_coordinate_publication import (  # noqa: E402
+    require_translation_only_subject_shape_placement,
+)
+from fisheye.shared.zarr.subject_shape_bundle_source import (  # noqa: E402
+    BoundSubjectShapeBundleSource,
+    require_bound_subject_shape_bundle_source,
+)
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256  # noqa: E402
+from fisheye.shared.zarr.metadata_equivalence import (  # noqa: E402
+    validate_direct_consolidated_subtree,
+)
 from fisheye.shared.zarr_io import open_zarr_root  # noqa: E402
+from fisheye.shared.zarr_run_completion import (  # noqa: E402
+    is_run_complete_in_parent,
+)
 
 
 SCHEMA_ID = "palette.gaze_convention_validation.v1"
@@ -45,6 +72,22 @@ EXPECTED_BODY_FRAME_CONVENTION = "math_ccw_degrees_after_y_flip"
 EXPECTED_GAZE_SIGN_CONVENTION = "positive_anatomical_left"
 DEFAULT_WINDOWS = 12
 DEFAULT_ROWS_PER_WINDOW = 256
+_STAGED_SUBJECT_SHAPE_SOURCE_AUTHORITY_MODE = "digest_bound_staged_subset"
+_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_FIELDS = {
+    "schema_id",
+    "schema_version",
+    "authority_scope",
+    "source_subject_shape_run",
+    "source_subject_shape_run_ref",
+    "row_count",
+    "canonical_publication",
+    "source_contract_attrs",
+    "allowed_arrays",
+    "closed_array_inventory",
+    "normal_reader_authority",
+    "candidate_admission",
+    "record_sha256",
+}
 
 
 def wrap_degrees_signed(values: np.ndarray | float) -> np.ndarray:
@@ -387,7 +430,59 @@ def _resolve_eye_run(
     run_name: Optional[str],
     *,
     legacy_compatibility: bool = False,
+    allow_ineligible_candidate: bool = False,
 ) -> tuple[str, zarr.Group]:
+    if allow_ineligible_candidate:
+        if type(run_name) is not str or not run_name.strip():
+            raise ValueError(
+                "Selector-ineligible eye-angle review requires one explicit run name."
+            )
+        normalized = run_name.strip().strip("/")
+        prefix = "analysis/eye_angle_runs/"
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+        if (
+            not normalized
+            or "/" in normalized
+            or normalized
+            in {"latest", "latest_complete", "selected", "current", ".", ".."}
+        ):
+            raise ValueError(
+                "Selector-ineligible eye-angle review requires one exact child name."
+            )
+        parent = root.get("analysis/eye_angle_runs")
+        if parent is None or normalized not in parent:
+            raise ValueError(f"Explicit eye-angle candidate {normalized!r} is absent.")
+        run_group = parent[normalized]
+        if not is_run_complete_in_parent(parent, run_group, legacy_default=False):
+            raise ValueError("Explicit eye-angle candidate is not complete.")
+        if run_group.attrs.get("stage_selector_eligible") is not False:
+            raise ValueError(
+                "Explicit candidate review requires stage_selector_eligible=false."
+            )
+        compact_issues = validate_eye_angle_compact_run(run_group)
+        if compact_issues:
+            raise ValueError(
+                "Explicit eye-angle candidate is not exact compact-v7: "
+                + "; ".join(
+                    f"{issue.code}:{issue.path}:{issue.message}"
+                    for issue in compact_issues
+                )
+            )
+        dimensions = eye_angle_dimensions_from_run_attrs(_group_attrs(run_group))
+        storage_issues = validate_eye_angle_candidate_storage(
+            run_group,
+            dimensions=dimensions,
+        )
+        if storage_issues:
+            raise ValueError(
+                "Explicit eye-angle candidate storage is invalid: "
+                + "; ".join(
+                    f"{issue.code}:{issue.path}:{issue.message}"
+                    for issue in storage_issues
+                )
+            )
+        return normalized, run_group
     run_group, resolved, _run_path = resolve_eye_angle_run(
         root,
         run_name,
@@ -529,10 +624,101 @@ def _resolve_roi_images(root: zarr.Group, keypoint_group: zarr.Group) -> Any | N
     return None
 
 
-def _resolve_review_geometry(root: zarr.Group, run_attrs: Mapping[str, Any]):
+def _candidate_subject_shape_review_admission(
+    run_attrs: Mapping[str, Any],
+    *,
+    subject_shape_run: str,
+) -> Mapping[str, Any] | None:
+    """Return the exact embedded candidate admission or fail closed.
+
+    A selector-ineligible eye-angle candidate may have been computed from an
+    exact selector-ineligible subject-shape candidate.  The eye-angle source
+    contract carries the materializer's self-digested authority for that
+    source.  Candidate review may reuse only its exact nested admission; it
+    does not grant normal-reader or selector authority.
+    """
+
+    authority_mode = str(run_attrs.get("source_eye_geometry_authority_mode") or "")
+    if authority_mode != _STAGED_SUBJECT_SHAPE_SOURCE_AUTHORITY_MODE:
+        return None
+    contracts = run_attrs.get("eye_angle_source_contracts")
+    if not isinstance(contracts, Mapping):
+        raise ValueError(
+            "Selector-ineligible eye-angle review lacks sealed source contracts."
+        )
+    eye_geometry = contracts.get("eye_geometry")
+    if not isinstance(eye_geometry, Mapping):
+        raise ValueError(
+            "Selector-ineligible eye-angle review lacks an eye-geometry source contract."
+        )
+    authority = eye_geometry.get("source_authority")
+    if not isinstance(authority, Mapping):
+        raise ValueError(
+            "Selector-ineligible eye-angle review lacks source geometry authority."
+        )
+    schema_version = authority.get("schema_version")
+    if schema_version == EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_VERSION:
+        # A selector-ineligible eye-angle storage candidate can still derive
+        # from a normal canonical subject-shape publication.  The canonical
+        # resolver below remains the correct authority for that case.
+        return None
+    body = dict(authority)
+    persisted_digest = body.pop("record_sha256", None)
+    admission = authority.get("candidate_admission")
+    if (
+        set(authority) != _STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_FIELDS
+        or authority.get("schema_id")
+        != EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_ID
+        or schema_version
+        != EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCHEMA_VERSION
+        or authority.get("authority_scope")
+        != EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCOPE
+        or authority.get("source_subject_shape_run") != subject_shape_run
+        or authority.get("source_subject_shape_run_ref")
+        != f"/{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{subject_shape_run}"
+        or authority.get("normal_reader_authority") is not False
+        or type(persisted_digest) is not str
+        or persisted_digest != canonical_json_sha256(body)
+        or not isinstance(admission, Mapping)
+        or admission.get("source_subject_shape_run") != subject_shape_run
+        or admission.get("normal_reader_authority") is not False
+        or admission.get("selector_activation") is not False
+    ):
+        raise ValueError(
+            "Selector-ineligible eye-angle review source authority is invalid or stale."
+        )
+    if (
+        eye_geometry.get("stage_group") != EYE_GEOMETRY_STAGE_SUBJECT_SHAPE
+        or eye_geometry.get("run_name") != subject_shape_run
+    ):
+        raise ValueError(
+            "Selector-ineligible eye-angle review source contract names another run."
+        )
+    return admission
+
+
+def _resolve_review_geometry(
+    root: zarr.Group,
+    run_attrs: Mapping[str, Any],
+    *,
+    allow_ineligible_candidate: bool = False,
+):
+    if type(allow_ineligible_candidate) is not bool:
+        raise ValueError("Review candidate admission flag must be an exact bool.")
     stage = str(run_attrs.get("source_eye_geometry_stage") or "")
     run = str(run_attrs.get("source_eye_geometry_run") or "")
     if stage == EYE_GEOMETRY_STAGE_SUBJECT_SHAPE:
+        if allow_ineligible_candidate:
+            admission = _candidate_subject_shape_review_admission(
+                run_attrs,
+                subject_shape_run=run,
+            )
+            if admission is not None:
+                return resolve_eye_geometry_source(
+                    root,
+                    subject_shape_run=run,
+                    _completed_ineligible_subject_shape_candidate=admission,
+                )
         return resolve_eye_geometry_source(root, subject_shape_run=run)
     if stage == EYE_GEOMETRY_STAGE_REFINED_SUBJECT:
         return resolve_eye_geometry_source(root, refined_subject_run=run)
@@ -547,6 +733,28 @@ def _resolve_review_masks(root: zarr.Group, geometry: Any) -> tuple[Any, str]:
 
     masks = geometry.masks_roi
     mask_source_path = str(geometry.group_path)
+    if masks is None:
+        publication = getattr(
+            geometry,
+            "subject_shape_coordinate_publication",
+            None,
+        )
+        publication_source = getattr(publication, "source", None)
+        if isinstance(publication_source, BoundSubjectShapeBundleSource):
+            bundle_source = require_bound_subject_shape_bundle_source(
+                publication_source
+            )
+            mask_store = open_mask_store(
+                bundle_source.authority.refined_run,
+                source_path=bundle_source.authority.refined_run_path,
+                prefer="dense",
+            )
+            eye_channels = tuple(
+                mask_store.component_index(component)
+                for component in ("eye_left", "eye_right")
+            )
+            masks = MaskStoreChannelSelectionArray(mask_store, eye_channels)
+            mask_source_path = mask_store.storage_path
     if masks is None:
         refined_subject_run = str(geometry.source_refined_subject_run or "").strip()
         if not refined_subject_run:
@@ -581,6 +789,38 @@ def _resolve_review_masks(root: zarr.Group, geometry: Any) -> tuple[Any, str]:
             f"{geometry.group_path} has {ellipse_shape[0]}."
         )
     return masks, mask_source_path
+
+
+def _resolve_review_roi_offsets(geometry: Any) -> np.ndarray | None:
+    """Return exact ROI-to-source translations for source-frame geometry."""
+
+    if str(getattr(geometry, "stage_group", "")) != EYE_GEOMETRY_STAGE_SUBJECT_SHAPE:
+        return None
+    publication = getattr(
+        geometry,
+        "subject_shape_coordinate_publication",
+        None,
+    )
+    if publication is None:
+        raise ValueError(
+            "Subject-shape review geometry lacks its bound coordinate publication."
+        )
+    continuous, edge = require_translation_only_subject_shape_placement(
+        publication.source
+    )
+    offsets = np.asarray(continuous, dtype=np.float64)
+    edge_offsets = np.asarray(edge, dtype=np.float64)
+    ellipse_rows = int(getattr(geometry.ellipse_params, "shape", (0,))[0])
+    if (
+        offsets.shape != (ellipse_rows, 2)
+        or edge_offsets.shape != offsets.shape
+        or not np.isfinite(offsets).all()
+        or not np.array_equal(offsets, edge_offsets)
+    ):
+        raise ValueError(
+            "Subject-shape review masks lack exact row-aligned translation-only placement."
+        )
+    return offsets
 
 
 def _normalize_image(image: np.ndarray) -> np.ndarray:
@@ -618,14 +858,20 @@ def write_bounded_review_png(
     sample: Mapping[str, np.ndarray],
     output_path: Path,
     panel_count: int = 12,
+    allow_ineligible_candidate: bool = False,
 ) -> tuple[list[int], str]:
     """Write a bounded eye-identity/gaze-vector overlay review grid."""
 
     attrs = _group_attrs(run_group)
     _keypoint_name, keypoint_group = _resolve_keypoint_group(root, attrs)
     roi_images = _resolve_roi_images(root, keypoint_group)
-    geometry = _resolve_review_geometry(root, attrs)
+    geometry = _resolve_review_geometry(
+        root,
+        attrs,
+        allow_ineligible_candidate=allow_ineligible_candidate,
+    )
     masks, mask_source_path = _resolve_review_masks(root, geometry)
+    roi_offsets = _resolve_review_roi_offsets(geometry)
     ellipse_params = geometry.ellipse_params
     selected = _review_selection(sample, panel_count)
     if selected.size == 0:
@@ -663,7 +909,9 @@ def write_bounded_review_png(
         for eye_index, (color, vector) in enumerate(zip(colors, gaze_vectors)):
             if eye_index >= params.shape[0] or not np.all(np.isfinite(params[eye_index, :2])):
                 continue
-            center = params[eye_index, :2]
+            center = np.asarray(params[eye_index, :2], dtype=np.float64)
+            if roi_offsets is not None:
+                center = center - roi_offsets[row_index]
             if not np.all(np.isfinite(vector)):
                 continue
             ax.arrow(
@@ -677,6 +925,8 @@ def write_bounded_review_png(
                 length_includes_head=True,
             )
 
+        # Eye-angle body-frame support is already stored in ROI-local pixels;
+        # only subject-shape ellipse points require source-camera translation.
         origin = np.asarray(sample["origin_xy"])[sample_index]
         forward = np.asarray(sample["forward_axis_xy"])[sample_index]
         left = np.asarray(sample["left_axis_xy"])[sample_index]
@@ -694,6 +944,8 @@ def write_bounded_review_png(
             f"L gaze {left_gaze:+.1f}° · R gaze {right_gaze:+.1f}° · marginal={marginal}",
             fontsize=9,
         )
+        ax.set_xlim(-0.5, image.shape[1] - 0.5)
+        ax.set_ylim(image.shape[0] - 0.5, -0.5)
         ax.axis("off")
     for ax in axes.flat[selected.size :]:
         ax.axis("off")
@@ -717,6 +969,7 @@ def validate_eye_angle_run(
     review_png: Optional[Path] = None,
     review_panels: int = 12,
     legacy_compatibility: bool = False,
+    allow_ineligible_candidate: bool = False,
 ) -> dict[str, object]:
     """Validate one persisted eye-angle run without modifying its Zarr."""
 
@@ -725,7 +978,14 @@ def validate_eye_angle_run(
         root,
         eye_angle_run,
         legacy_compatibility=legacy_compatibility,
+        allow_ineligible_candidate=allow_ineligible_candidate,
     )
+    metadata_equivalence = None
+    if allow_ineligible_candidate:
+        metadata_equivalence = validate_direct_consolidated_subtree(
+            zarr_path,
+            subtree_path=f"analysis/eye_angle_runs/{resolved_run}",
+        ).to_json()
     attrs = _group_attrs(run_group)
     sample = _load_compact_sample(run_group, windows=windows, rows_per_window=rows_per_window)
     valid = np.asarray(sample["valid_frame"], dtype=bool) & np.asarray(sample["valid"], dtype=bool)
@@ -772,6 +1032,7 @@ def validate_eye_angle_run(
             sample=sample,
             output_path=review_png,
             panel_count=review_panels,
+            allow_ineligible_candidate=allow_ineligible_candidate,
         )
     passed = all(check.passed for check in checks)
     return {
@@ -782,6 +1043,12 @@ def validate_eye_angle_run(
         "zarr_path": str(zarr_path),
         "eye_angle_run": resolved_run,
         "eye_angle_run_path": f"analysis/eye_angle_runs/{resolved_run}",
+        "eye_angle_admission": (
+            "explicit_complete_selector_ineligible_storage_candidate_v1"
+            if allow_ineligible_candidate
+            else "canonical_selector_eligible_eye_angle_reader_v1"
+        ),
+        "direct_consolidated_metadata_equivalence": metadata_equivalence,
         "read_only": True,
         "sampling": {
             "row_axis": "keypoint_detection_rows",
@@ -820,6 +1087,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Permit statusless historical eye-angle runs; never permits selector-ineligible runs.",
     )
+    parser.add_argument(
+        "--allow-ineligible-candidate",
+        action="store_true",
+        help=(
+            "Review one explicitly named complete access-aware storage candidate. "
+            "The exact candidate contract and direct/consolidated metadata are "
+            "validated; no selector alias or arbitrary ineligible run is accepted."
+        ),
+    )
     parser.add_argument("--windows", type=int, default=DEFAULT_WINDOWS, help="Bounded sample windows across the run.")
     parser.add_argument(
         "--rows-per-window",
@@ -844,6 +1120,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         review_png=args.review_png,
         review_panels=args.review_panels,
         legacy_compatibility=bool(args.legacy_eye_angle_compatibility),
+        allow_ineligible_candidate=bool(args.allow_ineligible_candidate),
     )
     rendered = json.dumps(report, indent=2, sort_keys=True)
     if args.json_output is not None:

@@ -41,7 +41,13 @@ from fisheye.shared.keypoint_coordinate_publication import (
 )
 from fisheye.shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_MANIFEST_ATTR,
+    SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
     SUBJECT_SHAPE_SCALAR_SURFACE_ATTR,
+    SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR,
+    SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR,
+)
+from fisheye.shared.subject_shape_storage import (
+    SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
 )
 
 
@@ -466,6 +472,8 @@ def _fake_coordinate_publication(
     path: str,
     *,
     stamp_metadata: bool = False,
+    selector_eligible: bool = True,
+    publication_owner: str = "f" * 32,
 ):
     assert path == _SHAPE_RUN_PATH
     rows = int(shape["components/eye_left/ellipse_params"].shape[0])
@@ -547,10 +555,10 @@ def _fake_coordinate_publication(
     if stamp_metadata:
         shape.attrs.update(
             {
-                "stage_selector_eligible": True,
+                "stage_selector_eligible": selector_eligible,
                 "coordinate_contract": "canonical_v2",
                 "coordinate_binding_status": "bound_canonical_v2",
-                "subject_shape_publication_owner_uuid": "f" * 32,
+                "subject_shape_publication_owner_uuid": publication_owner,
                 "publication_manifest_sha256": manifest_sha256,
                 "component_names": ["eye_left", "eye_right"],
                 "relation_names": ["eye_pair"],
@@ -586,6 +594,8 @@ def _fake_coordinate_publication(
         row_identity=row_identity,
         temporal_authority=temporal_authority,
         descriptors=descriptors,
+        selector_eligible=selector_eligible,
+        publication_owner=publication_owner,
         require_scalar_surface=require_scalar_surface,
     )
 
@@ -615,6 +625,70 @@ def _accept_synthetic_subject_shape_publication(
         "load_persisted_keypoint_coordinate_surfaces",
         _fake_keypoint_coordinate_surfaces,
     )
+
+
+def _accept_synthetic_completed_ineligible_subject_shape_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    source: Path,
+    *,
+    publication_owner: str = "e" * 32,
+) -> str:
+    root = zarr.open_group(str(source), mode="a", use_consolidated=False)
+    shape = root[_SHAPE_RUN_PATH]
+    _fake_coordinate_publication(
+        root,
+        shape,
+        _SHAPE_RUN_PATH,
+        stamp_metadata=True,
+        selector_eligible=False,
+        publication_owner=publication_owner,
+    )
+    shape.attrs[SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR] = (
+        SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
+    )
+    shape.attrs[SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR] = {
+        "schema_id": "palette.subject_shape_storage_candidate",
+        "schema_version": 1,
+        "profile_id": SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+        "logical_profile_id": "fixture.logical.subject_shape.v1",
+        "phase": "bound",
+        "selector_eligible": False,
+        "promotion_status": "unpromoted_candidate",
+    }
+    zarr.consolidate_metadata(str(source))
+
+    def _load_candidate(
+        root: zarr.Group,
+        path: str,
+        *,
+        expected_publication_owner: str,
+    ) -> object:
+        if expected_publication_owner != publication_owner:
+            raise ValueError("Subject-shape publication owner changed.")
+        return _fake_coordinate_publication(
+            root,
+            root[path],
+            path,
+            selector_eligible=False,
+            publication_owner=publication_owner,
+        )
+
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "load_completed_ineligible_subject_shape_coordinate_publication",
+        _load_candidate,
+    )
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "validate_subject_shape_candidate_storage",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        mod.eye_writer,
+        "load_persisted_keypoint_coordinate_surfaces",
+        _fake_keypoint_coordinate_surfaces,
+    )
+    return publication_owner
 
 
 def _stage_synthetic_source(
@@ -745,6 +819,154 @@ def test_plan_rejects_unsealed_subject_shape_before_scratch_creation(
     assert not scratch.exists()
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)
     assert "eye_angle_runs" not in root["analysis"]
+
+
+def test_plan_admits_only_exact_owner_bound_completed_ineligible_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    owner = _accept_synthetic_completed_ineligible_subject_shape_candidate(
+        monkeypatch,
+        source,
+    )
+
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    with pytest.raises(ValueError, match="not a canonical publication"):
+        eye_geometry_source_mod.resolve_eye_geometry_source(
+            root,
+            subject_shape_run="shape_1",
+            prefer_subject_shape=True,
+        )
+
+    plan = mod.build_eye_angle_materialization_plan(
+        source,
+        scratch_root=scratch,
+        subject_shape_run="shape_1",
+        subject_shape_candidate_owner=owner,
+        keypoint_run="kp_raw_1",
+        run_name="eye_1",
+        chunk_rows=2,
+        fps=100.0,
+    )
+
+    admission = plan.subject_shape_candidate_admission
+    assert admission is not None
+    assert admission["expected_publication_owner"] == owner
+    assert admission["source_stage_selector_eligible"] is False
+    assert admission["normal_reader_authority"] is False
+    assert admission["selector_activation"] is False
+    assert admission["direct_consolidated_metadata"]["subtree_path"] == (
+        _SHAPE_RUN_PATH
+    )
+    authority = plan.staged_input_integrity_receipt[
+        "subject_shape_authority"
+    ]
+    assert authority["schema_version"] == (
+        eye_geometry_source_mod.
+        EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCHEMA_VERSION
+    )
+    assert authority["candidate_admission"] == admission
+    assert not scratch.exists()
+
+    mod.stage_eye_angle_sources(
+        plan,
+        copy_backend="python",
+        check_capacity=False,
+    )
+    staged = _resolve_staged_context_from_receipt(
+        plan,
+        plan.staged_input_integrity_receipt,
+    )
+    assert staged.eye_geometry.source_authority_mode == "digest_bound_staged_subset"
+    assert staged.eye_geometry.source_authority["candidate_admission"] == admission
+
+
+def test_candidate_admission_rejects_wrong_owner_before_scratch_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    _accept_synthetic_completed_ineligible_subject_shape_candidate(
+        monkeypatch,
+        source,
+    )
+
+    with pytest.raises(ValueError, match="publication owner changed"):
+        mod.build_eye_angle_materialization_plan(
+            source,
+            scratch_root=scratch,
+            subject_shape_run="shape_1",
+            subject_shape_candidate_owner="d" * 32,
+            keypoint_run="kp_raw_1",
+            run_name="eye_1",
+            fps=100.0,
+        )
+
+    assert not scratch.exists()
+
+
+def test_candidate_admission_rejects_stale_consolidated_metadata_before_scratch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    owner = _accept_synthetic_completed_ineligible_subject_shape_candidate(
+        monkeypatch,
+        source,
+    )
+    root = zarr.open_group(str(source), mode="a", use_consolidated=False)
+    root[_SHAPE_RUN_PATH].attrs["source_fingerprint"] = "changed-after-consolidation"
+
+    with pytest.raises(RuntimeError, match="Direct/consolidated declaration differs"):
+        mod.build_eye_angle_materialization_plan(
+            source,
+            scratch_root=scratch,
+            subject_shape_run="shape_1",
+            subject_shape_candidate_owner=owner,
+            keypoint_run="kp_raw_1",
+            run_name="eye_1",
+            fps=100.0,
+        )
+
+    assert not scratch.exists()
+
+
+def test_candidate_admission_rejects_wrong_storage_profile_before_scratch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    owner = _accept_synthetic_completed_ineligible_subject_shape_candidate(
+        monkeypatch,
+        source,
+    )
+    root = zarr.open_group(str(source), mode="a", use_consolidated=False)
+    root[_SHAPE_RUN_PATH].attrs[SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR] = (
+        "unsupported_profile"
+    )
+    zarr.consolidate_metadata(str(source))
+
+    with pytest.raises(ValueError, match="differs from its exact admission receipt"):
+        mod.build_eye_angle_materialization_plan(
+            source,
+            scratch_root=scratch,
+            subject_shape_run="shape_1",
+            subject_shape_candidate_owner=owner,
+            keypoint_run="kp_raw_1",
+            run_name="eye_1",
+            fps=100.0,
+        )
+
+    assert not scratch.exists()
 
 
 @pytest.mark.parametrize(

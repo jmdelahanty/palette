@@ -49,7 +49,11 @@ from ..eye_angle_candidate_execution import compute_eye_angle_logical_hashes
 from ...registry.derived_analysis_status import (
     emit_eye_angle_stage_completion,
 )
-from ...shared.eye_geometry_source import EYE_GEOMETRY_STAGE_SUBJECT_SHAPE
+from ...shared.eye_geometry_source import (
+    EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
+    EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_MODE,
+    build_completed_ineligible_subject_shape_candidate_admission,
+)
 from ...shared.json_safety import json_attr_safe
 from ...shared.metadata import get_fps
 from ...shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
@@ -139,6 +143,7 @@ class EyeAngleMaterializationPlan:
     staged_zarr: Path
     sharded_run: Path
     subject_shape_run: str
+    subject_shape_candidate_admission: dict[str, Any] | None
     keypoint_run: str
     source_keypoint_run: str | None
     run_name: str
@@ -207,6 +212,14 @@ class EyeAngleMaterializationPlan:
                 "local_run_path": str(self.local_run_path),
                 "target_run_path": str(self.target_run_path),
                 "subject_shape_run": self.subject_shape_run,
+                "subject_shape_candidate_admission": (
+                    self.subject_shape_candidate_admission
+                ),
+                "subject_shape_candidate_admission_sha256": (
+                    self.subject_shape_candidate_admission.get("record_sha256")
+                    if self.subject_shape_candidate_admission is not None
+                    else None
+                ),
                 "keypoint_run": self.keypoint_run,
                 "source_keypoint_run": self.source_keypoint_run,
                 "run_name": self.run_name,
@@ -246,8 +259,9 @@ class EyeAngleMaterializationPlan:
                 ),
                 "full_selected_scientific_input_content_hash": True,
                 "source_revision_assurance": (
-                    "canonical subject-shape authority plus a two-pass, exact, "
-                    "chunked content receipt for every staged worker input"
+                    "verified subject-shape coordinate authority (canonical or "
+                    "explicitly admitted candidate) plus a two-pass, exact, chunked "
+                    "content receipt for every staged worker input"
                 ),
             }
         )
@@ -261,6 +275,27 @@ def _validate_run_name(run_name: str) -> str:
     value = str(run_name).strip()
     if not value or value in {".", ".."} or "/" in value or "\\" in value:
         raise ValueError(f"Unsafe eye-angle run name: {run_name!r}.")
+    return value
+
+
+def _validate_subject_shape_candidate_run_name(run_name: str | None) -> str:
+    if not isinstance(run_name, str) or not run_name.strip():
+        raise ValueError(
+            "Subject-shape candidate admission requires one explicit run name."
+        )
+    normalized = run_name.strip().strip("/")
+    prefix = f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/"
+    value = normalized[len(prefix) :] if normalized.startswith(prefix) else normalized
+    if (
+        not value
+        or "/" in value
+        or "\\" in value
+        or value.lower()
+        in {"latest", "latest_complete", "selected", "current", ".", ".."}
+    ):
+        raise ValueError(
+            "Subject-shape candidate admission requires one exact child name."
+        )
     return value
 
 
@@ -396,11 +431,33 @@ def _require_complete_source(group: zarr.Group, *, label: str) -> None:
         raise ValueError(f"{label} must be a completed immutable input run.")
 
 
+def _build_subject_shape_candidate_admission(
+    source_zarr: Path,
+    *,
+    subject_shape_run: str | None,
+    expected_publication_owner: str,
+) -> dict[str, Any]:
+    run_name = _validate_subject_shape_candidate_run_name(subject_shape_run)
+    run_path = f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{run_name}"
+    metadata = validate_direct_consolidated_subtree(
+        source_zarr,
+        subtree_path=run_path,
+    ).to_json()
+    root = open_zarr_root(source_zarr, mode="r")
+    return build_completed_ineligible_subject_shape_candidate_admission(
+        root,
+        run_name=run_name,
+        expected_publication_owner=expected_publication_owner,
+        direct_consolidated_metadata=metadata,
+    )
+
+
 def _resolve_source_plan(
     source_zarr: Path,
     *,
     subject_shape_run: str | None,
     keypoint_run: str | None,
+    completed_ineligible_subject_shape_candidate: Mapping[str, Any] | None = None,
     staged_input_integrity_receipt: Mapping[str, Any] | None = None,
     staged_subject_shape_subset: bool = False,
     verify_staged_payload: bool = True,
@@ -412,6 +469,13 @@ def _resolve_source_plan(
     float | None,
     int,
 ]:
+    if (
+        staged_subject_shape_subset
+        and completed_ineligible_subject_shape_candidate is not None
+    ):
+        raise ValueError(
+            "A staged subject-shape subset cannot also use live candidate admission."
+        )
     root = open_zarr_root(source_zarr, mode="r")
     staged_subject_shape_authority = (
         eye_writer._staged_subject_shape_authority_from_input_receipt(
@@ -436,6 +500,9 @@ def _resolve_source_plan(
         keypoint_run=keypoint_run,
         _staged_subject_shape_authority=staged_subject_shape_authority,
         _staged_keypoint_authority=staged_keypoint_authority,
+        _completed_ineligible_subject_shape_candidate=(
+            completed_ineligible_subject_shape_candidate
+        ),
         _verify_staged_payload=verify_staged_payload,
     )
     if staged_input_integrity_receipt is not None:
@@ -520,6 +587,7 @@ def build_eye_angle_materialization_plan(
     subject_shape_run: str | None,
     keypoint_run: str | None,
     run_name: str,
+    subject_shape_candidate_owner: str | None = None,
     storage_profile: str = EYE_ANGLE_LEGACY_EXPLICIT_STORAGE,
     chunk_rows: int = DEFAULT_CHUNK_ROWS,
     angle_chunk_rows: int = DEFAULT_ANGLE_CHUNK_ROWS,
@@ -596,6 +664,14 @@ def build_eye_angle_materialization_plan(
     if smoothing_window is not None and int(smoothing_window) <= 0:
         raise ValueError("smoothing_window must be positive when supplied.")
 
+    subject_shape_candidate_admission = None
+    if subject_shape_candidate_owner is not None:
+        subject_shape_candidate_admission = _build_subject_shape_candidate_admission(
+            source,
+            subject_shape_run=subject_shape_run,
+            expected_publication_owner=subject_shape_candidate_owner,
+        )
+
     (
         context,
         contracts,
@@ -607,6 +683,9 @@ def build_eye_angle_materialization_plan(
         source,
         subject_shape_run=subject_shape_run,
         keypoint_run=keypoint_run,
+        completed_ineligible_subject_shape_candidate=(
+            subject_shape_candidate_admission
+        ),
     )
     resolved_name = _validate_run_name(run_name)
     source_root = open_zarr_root(source, mode="r")
@@ -636,14 +715,20 @@ def build_eye_angle_materialization_plan(
     )
     row_count = int(context.eye_geometry.ellipse_params.shape[0])
     staged_subject_shape_authority = context.eye_geometry.source_authority
+    expected_authority_mode = (
+        EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_MODE
+        if subject_shape_candidate_admission is not None
+        else "canonical_publication"
+    )
     if (
-        context.eye_geometry.source_authority_mode != "canonical_publication"
+        context.eye_geometry.source_authority_mode != expected_authority_mode
         or not isinstance(staged_subject_shape_authority, Mapping)
         or not isinstance(staged_subject_shape_authority.get("record_sha256"), str)
     ):
         raise ValueError(
             "The production eye-angle materializer requires one digest-bound "
-            "canonical subject-shape source authority."
+            "eligible canonical or explicitly admitted selector-ineligible "
+            "subject-shape source authority."
         )
     staged_input_integrity_receipt = dict(
         json_attr_safe(
@@ -691,6 +776,7 @@ def build_eye_angle_materialization_plan(
         staged_zarr=scratch / "eye-inputs-and-output.zarr",
         sharded_run=scratch / "eye-angle-sharded-run",
         subject_shape_run=context.eye_geometry.run_name,
+        subject_shape_candidate_admission=subject_shape_candidate_admission,
         keypoint_run=context.keypoint_run_name,
         source_keypoint_run=context.keypoint_run_name,
         run_name=resolved_name,
@@ -822,6 +908,9 @@ def audit_eye_angle_source_revision(plan: EyeAngleMaterializationPlan) -> dict[s
             plan.source_zarr,
             subject_shape_run=plan.subject_shape_run,
             keypoint_run=plan.keypoint_run,
+            completed_ineligible_subject_shape_candidate=(
+                plan.subject_shape_candidate_admission
+            ),
             staged_input_integrity_receipt=plan.staged_input_integrity_receipt,
             staged_subject_shape_subset=False,
             verify_staged_payload=True,
@@ -1862,6 +1951,7 @@ def materialize_eye_angles(
     subject_shape_run: str | None,
     keypoint_run: str | None,
     run_name: str,
+    subject_shape_candidate_owner: str | None = None,
     storage_profile: str = EYE_ANGLE_LEGACY_EXPLICIT_STORAGE,
     chunk_rows: int = DEFAULT_CHUNK_ROWS,
     angle_chunk_rows: int = DEFAULT_ANGLE_CHUNK_ROWS,
@@ -1891,6 +1981,9 @@ def materialize_eye_angles(
         context={
             "run_name": run_name,
             "subject_shape_run": subject_shape_run,
+            "subject_shape_candidate_admission_requested": (
+                subject_shape_candidate_owner is not None
+            ),
             "keypoint_run": keypoint_run,
             "storage_profile_id": storage_profile,
         },
@@ -1902,6 +1995,7 @@ def materialize_eye_angles(
             subject_shape_run=subject_shape_run,
             keypoint_run=keypoint_run,
             run_name=run_name,
+            subject_shape_candidate_owner=subject_shape_candidate_owner,
             storage_profile=storage_profile,
             chunk_rows=chunk_rows,
             angle_chunk_rows=angle_chunk_rows,
