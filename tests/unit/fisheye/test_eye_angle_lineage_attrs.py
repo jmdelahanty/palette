@@ -1332,7 +1332,7 @@ def test_eye_angle_bundle_direct_assignment_uses_shared_source_resolver(
             "/analysis/subject_shape_runs/shape_001/coordinate_records/"
             "source_binding@subject_shape_source_binding"
         ),
-        record_sha256="8" * 64,
+        record_sha256=eye_angle_analysis._canonical_json_sha256(source_record),
         record=source_record,
     )
     publication.source_binding = source_binding
