@@ -199,6 +199,71 @@ def test_bundle_candidate_is_complete_but_not_authoritative(tmp_path: Path) -> N
             assert root[family].attrs.get(selector) is None
 
 
+def test_bundle_candidate_uses_receipt_gate_then_one_deep_gate_and_three_consolidations(
+    tmp_path: Path, monkeypatch
+) -> None:
+    raw, refined, quality = _publish_members(tmp_path)
+    archive = _analysis_archive(tmp_path)
+    gate_order: list[str] = []
+    consolidation_count = 0
+    original_receipt_gate = bundle_publication._validate_receipt_bound_persisted_members
+    original_deep_gate = bundle_publication._validate_persisted_members
+    original_consolidate = (
+        bundle_publication.consolidate_metadata_capture_expected_warnings
+    )
+
+    def receipt_gate(*args, **kwargs):  # noqa: ANN002, ANN003
+        gate_order.append("receipt")
+        return original_receipt_gate(*args, **kwargs)
+
+    def deep_gate(*args, **kwargs):  # noqa: ANN002, ANN003
+        gate_order.append("deep")
+        return original_deep_gate(*args, **kwargs)
+
+    def consolidate(*args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal consolidation_count
+        consolidation_count += 1
+        return original_consolidate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        bundle_publication,
+        "_validate_receipt_bound_persisted_members",
+        receipt_gate,
+    )
+    monkeypatch.setattr(bundle_publication, "_validate_persisted_members", deep_gate)
+    monkeypatch.setattr(
+        bundle_publication,
+        "consolidate_metadata_capture_expected_warnings",
+        consolidate,
+    )
+
+    receipt = publish_subject_mask_bundle_candidate(
+        analysis_zarr=archive,
+        recording_identity="recording_001",
+        raw_snapshot_root=raw.output_path,
+        raw_run_id=raw.run_id,
+        refined_snapshot_root=refined.output_path,
+        refined_run_id=refined.run_id,
+        quality_snapshot_root=quality.output_path,
+        quality_run_id=quality.run_id,
+        bundle_id="bundle_receipt_first",
+    )
+
+    assert receipt["status"] == "complete"
+    assert gate_order == ["receipt", "deep"]
+    assert consolidation_count == 3
+    assert set(receipt["member_import_seconds"]) == {"raw", "refined", "quality"}
+    assert set(receipt["publication_phase_seconds"]) == {
+        "post_import_consolidation",
+        "post_import_receipt_bound_member_gate",
+        "running_bundle_consolidation",
+        "bundle_manifest_and_metadata_gate",
+        "final_decoded_member_gate",
+        "completion_consolidation",
+        "completion_metadata_and_reopen_gate",
+    }
+
+
 def test_bundle_v3_binds_independent_sampled_contour_cache(tmp_path: Path) -> None:
     raw, refined, quality = _publish_members(tmp_path)
     cache = publish_selector_ineligible_subject_mask_sampled_contours(

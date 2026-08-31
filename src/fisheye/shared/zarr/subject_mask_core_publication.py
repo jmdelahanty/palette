@@ -8,6 +8,7 @@ publishes a closed-world Zarr v3 store with consolidated metadata.
 
 from __future__ import annotations
 
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 import copy
 from dataclasses import dataclass
@@ -1281,7 +1282,7 @@ def _write_physical_units(
         if effective_workers > 1
         else None
     )
-    pending: list[Future[None]] = []
+    pending: deque[Future[None]] = deque()
     try:
         for index, start in enumerate(starts):
             stop = min(shape[0], start + max(1, int(unit[0])))
@@ -1363,6 +1364,8 @@ def _write_physical_units(
                         destination_array_path=destination_array_path,
                     )
                 )
+                if len(pending) >= effective_workers:
+                    pending.popleft().result()
             else:
                 assert values is not None
                 pending.append(
@@ -1374,7 +1377,7 @@ def _write_physical_units(
                     )
                 )
                 if len(pending) >= effective_workers:
-                    pending.pop(0).result()
+                    pending.popleft().result()
             if index == 0 or index == len(starts) - 1:
                 samples.append(
                     {

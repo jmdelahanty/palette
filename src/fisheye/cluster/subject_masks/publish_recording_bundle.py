@@ -135,8 +135,17 @@ class _ConcatenatedRows:
             if step != 1:
                 indices = np.arange(start, stop, step, dtype=np.int64)
                 return self[(indices, *trailing)]
+            if start >= stop:
+                return np.empty((0, *self.shape[1:]), dtype=self.dtype)[
+                    (slice(None), *trailing)
+                ]
+            first_source = int(np.searchsorted(self._offsets, start, side="right") - 1)
+            last_source = int(
+                np.searchsorted(self._offsets, stop - 1, side="right") - 1
+            )
             pieces: list[np.ndarray] = []
-            for source_index, source in enumerate(self._arrays):
+            for source_index in range(first_source, last_source + 1):
+                source = self._arrays[source_index]
                 source_start = int(self._offsets[source_index])
                 source_stop = int(self._offsets[source_index + 1])
                 left = max(start, source_start)
@@ -152,10 +161,6 @@ class _ConcatenatedRows:
                             ]
                         )
                     )
-            if not pieces:
-                return np.empty((0, *self.shape[1:]), dtype=self.dtype)[
-                    (slice(None), *trailing)
-                ]
             return pieces[0] if len(pieces) == 1 else np.concatenate(pieces, axis=0)
         indices = np.asarray(first, dtype=np.int64).reshape(-1)
         return np.stack([self[(int(index), *trailing)] for index in indices], axis=0)
@@ -204,7 +209,16 @@ def _require_complete_order(run: Any, crop: Any, *, role: str) -> np.ndarray:
     return rows
 
 
-def _raw_arrays(run: Any, crop: Any, *, n_frames: int) -> dict[str, Any]:
+def _raw_arrays(
+    run: Any,
+    crop: Any,
+    *,
+    n_frames: int,
+    source_crop_arrays: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    resolved_crop_arrays = (
+        _crop_arrays(crop) if source_crop_arrays is None else source_crop_arrays
+    )
     _require_complete_order(run, crop, role="Raw subject-mask")
     arrays = _paths(
         run,
@@ -227,11 +241,29 @@ def _raw_arrays(run: Any, crop: Any, *, n_frames: int) -> dict[str, Any]:
     arrays["frame_row_offsets"] = derive_subject_mask_frame_row_offsets(
         frames, n_frames=n_frames
     )
-    arrays["source_crop_xywh"] = _subject_mask_crop_placement(crop)
+    arrays["source_crop_xywh"] = resolved_crop_arrays["source_crop_xywh"]
     return arrays
 
 
-def _refined_arrays(run: Any, crop: Any, *, n_frames: int) -> dict[str, Any]:
+def _refined_arrays(
+    run: Any,
+    crop: Any,
+    *,
+    n_frames: int,
+    source_crop_arrays: Mapping[str, Any] | None = None,
+    crop_frames: np.ndarray | None = None,
+) -> dict[str, Any]:
+    resolved_crop_arrays = (
+        _crop_arrays(crop) if source_crop_arrays is None else source_crop_arrays
+    )
+    resolved_crop_frames = (
+        np.asarray(
+            resolved_crop_arrays["source_acquisition_frame_index"][:],
+            dtype=np.int64,
+        )
+        if crop_frames is None
+        else crop_frames
+    )
     rows = _require_complete_order(run, crop, role="Refined subject-mask")
     arrays = _paths(
         run,
@@ -247,15 +279,15 @@ def _refined_arrays(run: Any, crop: Any, *, n_frames: int) -> dict[str, Any]:
             "metrics/bbox_valid",
         ),
     )
-    frames = np.asarray(crop["source_acquisition_frame_index"][rows], dtype=np.int64)
+    frames = np.asarray(resolved_crop_frames[rows], dtype=np.int64)
     arrays.update(
         {
-            "instance_key": crop["instance_key"],
+            "instance_key": resolved_crop_arrays["instance_key"],
             "source_acquisition_frame_index": frames,
             "frame_row_offsets": derive_subject_mask_frame_row_offsets(
                 frames, n_frames=n_frames
             ),
-            "source_crop_xywh": _subject_mask_crop_placement(crop),
+            "source_crop_xywh": resolved_crop_arrays["source_crop_xywh"],
         }
     )
     return arrays
@@ -310,6 +342,8 @@ def _raw_shard_collection(
     *,
     n_frames: int,
     archive: Path,
+    source_crop_arrays: Mapping[str, Any],
+    crop_frames: np.ndarray,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Expose ordered raw shards as one exact recording array inventory."""
 
@@ -322,12 +356,20 @@ def _raw_shard_collection(
             raise ValueError(f"{run.path} crop rows are not one contiguous interval.")
         ordered.append((int(rows[0]), run, rows))
     ordered.sort(key=lambda item: item[0])
-    expected_rows = np.arange(int(crop["instance_key"].shape[0]), dtype=np.int64)
-    observed_rows = np.concatenate([item[2] for item in ordered])
-    if not np.array_equal(observed_rows, expected_rows):
+    row_count = int(crop["instance_key"].shape[0])
+    cursor = 0
+    for start, _run, rows in ordered:
+        if start != cursor or int(rows[-1]) != cursor + int(rows.size) - 1:
+            raise ValueError(
+                "Raw shard union must cover every canonical crop row exactly once "
+                "in order."
+            )
+        cursor += int(rows.size)
+    if cursor != row_count:
         raise ValueError(
             "Raw shard union must cover every canonical crop row exactly once in order."
         )
+    expected_rows = np.arange(row_count, dtype=np.int64)
     labels = tuple(str(value) for value in ordered[0][1].attrs["mask_labels"])
     threshold = float(ordered[0][1].attrs.get("mask_probability_threshold", 0.5))
     available = np.asarray(ordered[0][1]["available_channels"][:], dtype=bool)
@@ -357,13 +399,13 @@ def _raw_shard_collection(
     arrays.update(
         {
             "source_crop_row_ids": expected_rows,
-            "instance_key": crop["instance_key"],
-            "source_acquisition_frame_index": crop["source_acquisition_frame_index"],
+            "instance_key": source_crop_arrays["instance_key"],
+            "source_acquisition_frame_index": crop_frames,
             "frame_row_offsets": derive_subject_mask_frame_row_offsets(
-                np.asarray(crop["source_acquisition_frame_index"][:], dtype=np.int64),
+                crop_frames,
                 n_frames=n_frames,
             ),
-            "source_crop_xywh": _subject_mask_crop_placement(crop),
+            "source_crop_xywh": source_crop_arrays["source_crop_xywh"],
             "available_channels": available,
         }
     )
@@ -380,6 +422,8 @@ def _refined_shard_collection(
     *,
     n_frames: int,
     archive: Path,
+    source_crop_arrays: Mapping[str, Any],
+    crop_frames: np.ndarray,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Expose ordered refined clip outputs as one exact recording inventory."""
 
@@ -392,13 +436,21 @@ def _refined_shard_collection(
             raise ValueError(f"{run.path} crop rows are not one contiguous interval.")
         ordered.append((int(rows[0]), run, rows))
     ordered.sort(key=lambda item: item[0])
-    expected_rows = np.arange(int(crop["instance_key"].shape[0]), dtype=np.int64)
-    observed_rows = np.concatenate([item[2] for item in ordered])
-    if not np.array_equal(observed_rows, expected_rows):
+    row_count = int(crop["instance_key"].shape[0])
+    cursor = 0
+    for start, _run, rows in ordered:
+        if start != cursor or int(rows[-1]) != cursor + int(rows.size) - 1:
+            raise ValueError(
+                "Refined shard union must cover every canonical crop row exactly once "
+                "in order."
+            )
+        cursor += int(rows.size)
+    if cursor != row_count:
         raise ValueError(
             "Refined shard union must cover every canonical crop row exactly once "
             "in order."
         )
+    expected_rows = np.arange(row_count, dtype=np.int64)
     labels = tuple(str(value) for value in ordered[0][1].attrs["mask_labels"])
     available = np.asarray(ordered[0][1]["available_channels"][:], dtype=bool)
     for _start, run, _rows in ordered[1:]:
@@ -421,17 +473,17 @@ def _refined_shard_collection(
         path: _ConcatenatedRows([item[1][path] for item in ordered])
         for path in row_paths
     }
-    frames = np.asarray(crop["source_acquisition_frame_index"][:], dtype=np.int64)
+    frames = crop_frames
     arrays.update(
         {
             "source_crop_row_ids": expected_rows,
-            "instance_key": crop["instance_key"],
+            "instance_key": source_crop_arrays["instance_key"],
             "source_acquisition_frame_index": frames,
             "frame_row_offsets": derive_subject_mask_frame_row_offsets(
                 frames,
                 n_frames=n_frames,
             ),
-            "source_crop_xywh": _subject_mask_crop_placement(crop),
+            "source_crop_xywh": source_crop_arrays["source_crop_xywh"],
             "available_channels": available,
         }
     )
@@ -697,11 +749,14 @@ def publish_recording_subject_mask_bundle(
     coordinate_contract_policy: str = "require_crop_v2",
     allow_signed_hybrid_crop_rebase: bool = False,
     expected_work_units: Sequence[Mapping[str, Any]] | None = None,
+    copy_backend: str = "python",
 ) -> dict[str, object]:
     if type(core_physical_unit_workers) is not int or core_physical_unit_workers <= 0:
         raise ValueError("core_physical_unit_workers must be a positive integer.")
     if type(quality_compute_workers) is not int or quality_compute_workers <= 0:
         raise ValueError("quality_compute_workers must be a positive integer.")
+    if copy_backend not in {"python", "rsync"}:
+        raise ValueError("copy_backend must be 'python' or 'rsync'.")
     resolved_core_validation_mode = SubjectMaskCoreValidationMode(core_validation_mode)
     contour_receipt_paths = tuple(sampled_contour_worker_receipts or ())
     quality_roots = tuple(quality_partition_roots or ())
@@ -779,12 +834,24 @@ def publish_recording_subject_mask_bundle(
     ]
     refined_draft = refined_drafts[0]
     n_frames = int(crop["frame_row_offsets"].shape[0]) - 1
+    # Normalize the immutable crop placement once per recording operation.
+    # Raw/refined assembly and both coordinate/core publishers then consume the
+    # same in-memory view instead of rereading and renormalizing the full rowset.
+    source_crop_arrays = _crop_arrays(crop)
+    crop_frames = np.asarray(
+        source_crop_arrays["source_acquisition_frame_index"][:], dtype=np.int64
+    )
     raw_labels = tuple(str(value) for value in raw_draft.attrs["mask_labels"])
     refined_labels = tuple(str(value) for value in refined_draft.attrs["mask_labels"])
     raw_components = SubjectMaskComponentRegistry(raw_labels)
     refined_components = SubjectMaskComponentRegistry(refined_labels)
     if len(raw_drafts) == 1:
-        raw_arrays = _raw_arrays(raw_draft, crop, n_frames=n_frames)
+        raw_arrays = _raw_arrays(
+            raw_draft,
+            crop,
+            n_frames=n_frames,
+            source_crop_arrays=source_crop_arrays,
+        )
         raw_workers = [_worker_evidence(draft_path, raw_draft)]
         raw_source_path = f"{raw_draft_parent}/{raw_names[0]}"
     else:
@@ -795,10 +862,18 @@ def publish_recording_subject_mask_bundle(
             crop,
             n_frames=n_frames,
             archive=draft_path,
+            source_crop_arrays=source_crop_arrays,
+            crop_frames=crop_frames,
         )
         raw_source_path = f"subject_mask_shard_collections/{raw_run}"
     if len(refined_drafts) == 1:
-        refined_arrays = _refined_arrays(refined_draft, crop, n_frames=n_frames)
+        refined_arrays = _refined_arrays(
+            refined_draft,
+            crop,
+            n_frames=n_frames,
+            source_crop_arrays=source_crop_arrays,
+            crop_frames=crop_frames,
+        )
         refined_workers: list[dict[str, Any]] | None = None
         refined_source_path = f"refined_subject_masks_runs/{refined_names[0]}"
         refined_source_attrs = _strict_attrs(
@@ -820,6 +895,8 @@ def publish_recording_subject_mask_bundle(
             crop,
             n_frames=n_frames,
             archive=draft_path,
+            source_crop_arrays=source_crop_arrays,
+            crop_frames=crop_frames,
         )
         refined_source_path = f"refined_subject_mask_shard_collections/{refined_run}"
         refined_source_attrs = _consistent_refined_source_attrs(
@@ -877,7 +954,7 @@ def publish_recording_subject_mask_bundle(
             kind="raw_probability_uint8",
             crop_run_path=f"crop_runs/{crop_run}",
             crop_manifest=crop_manifest,
-            source_crop_arrays=_crop_arrays(crop),
+            source_crop_arrays=source_crop_arrays,
             source_run_path=raw_source_path,
             source_validation_receipt=raw_receipt,
             n_rois=raw_dimensions.n_rois,
@@ -889,7 +966,7 @@ def publish_recording_subject_mask_bundle(
     raw_store = output / "raw.zarr"
     raw_publication = publish_selector_ineligible_subject_mask_core_snapshot(
         raw_arrays,
-        source_crop_arrays=_crop_arrays(crop),
+        source_crop_arrays=source_crop_arrays,
         source_manifest=raw_source_manifest,
         n_frames=n_frames,
         components=raw_components,
@@ -964,7 +1041,7 @@ def publish_recording_subject_mask_bundle(
             kind="refined_dense_core",
             crop_run_path=f"crop_runs/{crop_run}",
             crop_manifest=crop_manifest,
-            source_crop_arrays=_crop_arrays(crop),
+            source_crop_arrays=source_crop_arrays,
             source_run_path=refined_source_path,
             source_validation_receipt=refined_receipt,
             n_rois=refined_dimensions.n_rois,
@@ -977,7 +1054,7 @@ def publish_recording_subject_mask_bundle(
     refined_store = output / "refined.zarr"
     refined_publication = publish_selector_ineligible_subject_mask_core_snapshot(
         refined_arrays,
-        source_crop_arrays=_crop_arrays(crop),
+        source_crop_arrays=source_crop_arrays,
         source_manifest=refined_source_manifest,
         n_frames=n_frames,
         components=refined_components,
@@ -1134,6 +1211,7 @@ def publish_recording_subject_mask_bundle(
         cache_run_id=(
             cache_publication.run_id if cache_publication is not None else None
         ),
+        copy_backend=copy_backend,
     )
     authority = (
         activate_subject_mask_bundle(analysis_zarr=target, bundle_id=bundle_id)
@@ -1160,6 +1238,7 @@ def publish_recording_subject_mask_bundle(
                 quality_publication.write_receipt["source_compute_workers_effective"]
             ),
             "core_validation_mode": resolved_core_validation_mode.value,
+            "bundle_copy_backend": str(copy_backend),
             "coordinate_worker_binding_mode": (
                 "signed_hybrid_provider_to_crop_v2_exact_rebase_v1"
                 if allow_signed_hybrid_crop_rebase
@@ -1357,6 +1436,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "placement, and provider signatures remain fail-closed."
         ),
     )
+    parser.add_argument(
+        "--copy-backend",
+        choices=("python", "rsync"),
+        default="python",
+        help="Atomic bundle-member transfer backend (default: python).",
+    )
     parser.add_argument("--activate", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser
@@ -1420,6 +1505,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         allow_signed_hybrid_crop_rebase=bool(args.allow_signed_hybrid_crop_rebase),
         activate=bool(args.activate),
         expected_work_units=expected_work_units,
+        copy_backend=args.copy_backend,
     )
     print(json.dumps(result, indent=None if args.json else 2, sort_keys=True))
     return 0

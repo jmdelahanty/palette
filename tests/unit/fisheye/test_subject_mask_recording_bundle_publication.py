@@ -30,7 +30,9 @@ from fisheye.analysis_workflows.materializers.subject_shape import (
 from fisheye.analysis_workflows.runtime_verification import (
     verify_persisted_stage_output,
 )
+from fisheye.cluster.subject_masks import publish_recording_bundle as recording_module
 from fisheye.cluster.subject_masks.publish_recording_bundle import (
+    _ConcatenatedRows,
     _refined_arrays,
     publish_recording_subject_mask_bundle,
 )
@@ -100,6 +102,9 @@ from fisheye.shared.zarr.subject_mask_final_layout_units import (
 )
 from fisheye.shared.zarr.subject_mask_quality_partition import (
     compute_subject_mask_quality_partition,
+)
+from fisheye.shared.zarr.subject_mask_quality_manifest import (
+    validate_subject_mask_quality_run_manifest,
 )
 from fisheye.shared.zarr.subject_mask_bundle_coordinate_authority import (
     SubjectMaskBundleCoordinateAuthorityError,
@@ -396,8 +401,34 @@ def test_recording_publisher_normalizes_signed_hybrid_crop_placement(
     np.testing.assert_array_equal(placement, source_crop_xywh)
 
 
+def test_concatenated_rows_reads_only_intersecting_sources() -> None:
+    class CountingArray:
+        def __init__(self, values: np.ndarray) -> None:
+            self.values = values
+            self.shape = values.shape
+            self.dtype = values.dtype
+            self.reads = 0
+
+        def __getitem__(self, key):  # noqa: ANN001
+            self.reads += 1
+            return self.values[key]
+
+    sources = [
+        CountingArray(np.arange(start, start + 3, dtype=np.int64))
+        for start in (0, 3, 6)
+    ]
+    concatenated = _ConcatenatedRows(sources)
+
+    np.testing.assert_array_equal(concatenated[4:5], np.asarray([4]))
+    assert [source.reads for source in sources] == [0, 1, 0]
+
+    np.testing.assert_array_equal(concatenated[2:7], np.arange(2, 7))
+    assert [source.reads for source in sources] == [1, 2, 1]
+
+
 def test_recording_bundle_publishes_normalized_signed_hybrid_placement(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     draft = _draft(tmp_path, raw_parent="subject_mask_shard_runs")
     draft_root = zarr.open_group(str(draft), mode="a", use_consolidated=False)
@@ -408,6 +439,17 @@ def test_recording_bundle_publishes_normalized_signed_hybrid_placement(
     analysis = tmp_path / "analysis_hybrid_placement.zarr"
     analysis_root = zarr.open_group(str(analysis), mode="w", zarr_format=3)
     analysis_root.attrs["recording_id"] = "recording_001"
+    original_placement = recording_module._subject_mask_crop_placement
+    placement_calls = 0
+
+    def observed_placement(crop):  # noqa: ANN001
+        nonlocal placement_calls
+        placement_calls += 1
+        return original_placement(crop)
+
+    monkeypatch.setattr(
+        recording_module, "_subject_mask_crop_placement", observed_placement
+    )
 
     result = publish_recording_subject_mask_bundle(
         analysis_zarr=analysis,
@@ -426,6 +468,7 @@ def test_recording_bundle_publishes_normalized_signed_hybrid_placement(
     )
 
     assert result["status"] == "complete"
+    assert placement_calls == 1
     published = zarr.open_group(str(analysis), mode="r", use_consolidated=False)
     assert published["subject_mask_runs/raw_hybrid/source_crop_xywh"].dtype == (
         np.dtype(np.float32)
@@ -1894,7 +1937,10 @@ def test_recording_bundle_composes_v5_dense_identity_through_coordinate_bundle(
         quality_source["dense_array_logical_identity_digest"]
     )
     assert quality_manifest["schema_version"] == 3
-    assert quality_manifest["payload"]["write_receipt"]["schema_version"] == 4
+    assert quality_manifest["payload"]["write_receipt"]["schema_version"] == 5
+    assert quality_manifest["payload"]["write_receipt"]["scratch_surface"] == (
+        "not_used_receipt_bound_direct_physical_unit_stream_v1"
+    )
     assert (
         quality_manifest["payload"]["write_receipt"]["source_compute_execution"]
         == "receipt_bound_partitions_with_verified_worker_units_v2"
@@ -1902,6 +1948,16 @@ def test_recording_bundle_composes_v5_dense_identity_through_coordinate_bundle(
     assert (
         quality_manifest["payload"]["write_receipt"]["source_compute_block_count"] == 0
     )
+    legacy_v4_quality_manifest = copy.deepcopy(quality_manifest)
+    legacy_v4_quality_receipt = legacy_v4_quality_manifest["payload"]["write_receipt"]
+    legacy_v4_quality_receipt["schema_version"] = 4
+    legacy_v4_quality_receipt["scratch_surface"] = (
+        "node_local_npy_memmap_deleted_after_publication"
+    )
+    legacy_v4_quality_manifest["payload_digest"] = canonical_json_sha256(
+        legacy_v4_quality_manifest["payload"]
+    )
+    assert validate_subject_mask_quality_run_manifest(legacy_v4_quality_manifest) == ()
     tampered_cache = copy.deepcopy(cache_manifest)
     tampered_cache["payload"]["source_refined_subject_mask_snapshot"][
         "worker_assembly_digest"

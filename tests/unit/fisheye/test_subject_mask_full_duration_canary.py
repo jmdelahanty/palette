@@ -463,7 +463,7 @@ def test_lsf_workflow_keeps_inference_refinement_and_publication_separate(
         "core_physical_unit_workers": 4,
         "quality_compute_workers": 4,
         "quality_manifest_schema_version": 3,
-        "quality_write_receipt_schema_version": 4,
+        "quality_write_receipt_schema_version": 5,
         "cache_manifest_schema_version": 3,
         "bundle_manifest_schema_version": 4,
         "ownership_policy": ("bounded_threaded_disjoint_whole_physical_row_bands_v1"),

@@ -156,6 +156,33 @@ SUBJECT_MASK_PUBLICATION_PROFILES = (
     SUBJECT_MASK_PUBLICATION_RECEIPT_COMPOSED,
     SUBJECT_MASK_PUBLICATION_STREAMING_ROLLBACK,
 )
+SUBJECT_MASK_PACKAGE_EXTRACT_WORKERS = 4
+SUBJECT_MASK_CORE_PHYSICAL_UNIT_WORKERS = 4
+SUBJECT_MASK_BUNDLE_COPY_BACKEND = "python"
+
+
+def _extend_receipt_composed_subject_mask_publish_command(
+    command: list[str],
+    *,
+    repo_commit: str,
+    clips: Sequence[Mapping[str, Any]],
+) -> None:
+    """Record one reproducible receipt-composed publisher execution profile."""
+
+    command.extend(
+        [
+            "--producer-commit",
+            repo_commit,
+            "--package-extract-workers",
+            str(SUBJECT_MASK_PACKAGE_EXTRACT_WORKERS),
+            "--core-physical-unit-workers",
+            str(SUBJECT_MASK_CORE_PHYSICAL_UNIT_WORKERS),
+            "--copy-backend",
+            SUBJECT_MASK_BUNDLE_COPY_BACKEND,
+        ]
+    )
+    for clip in clips:
+        command.extend(["--refined-package", str(clip["package_path"])])
 
 
 def assignment_keypoint_binding(target: Mapping[str, Any]) -> tuple[str, str]:
@@ -1526,11 +1553,11 @@ def _build_downstream_target_pipeline(
         "--json",
     ]
     if receipt_composed:
-        mask_publish_command.extend(["--producer-commit", repo_commit])
-        for clip in clips:
-            mask_publish_command.extend(
-                ["--refined-package", str(clip["package_path"])]
-            )
+        _extend_receipt_composed_subject_mask_publish_command(
+            mask_publish_command,
+            repo_commit=repo_commit,
+            clips=clips,
+        )
     else:
         mask_publish_command.extend(
             [
@@ -3832,9 +3859,11 @@ def build_plan(
             "--json",
         ]
         if receipt_composed:
-            mask_publish.extend(["--producer-commit", repo_commit])
-            for clip in clips:
-                mask_publish.extend(["--refined-package", str(clip["package_path"])])
+            _extend_receipt_composed_subject_mask_publish_command(
+                mask_publish,
+                repo_commit=repo_commit,
+                clips=clips,
+            )
         else:
             mask_publish.extend(
                 [

@@ -373,6 +373,7 @@ def subject_mask_quality_logical_content_document(
     source_arrays: Mapping[str, Any] | None = None,
     validate_logical_arrays: bool,
     digest_block_rows: int = 65_536,
+    array_values_sha256: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     if validate_logical_arrays:
         SUBJECT_MASK_QUALITY_SCHEMA_V1.require(
@@ -382,6 +383,20 @@ def subject_mask_quality_logical_content_document(
             profile=profile,
             source_mask_arrays=source_arrays,
         )
+    if array_values_sha256 is not None:
+        if set(array_values_sha256) != set(
+            SUBJECT_MASK_QUALITY_SCHEMA_V1.binding_paths
+        ):
+            raise ValueError("Subject-mask quality write digests are incomplete.")
+        for path, digest in array_values_sha256.items():
+            if (
+                type(digest) is not str
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise ValueError(
+                    f"Subject-mask quality write digest is invalid at {path!r}."
+                )
     declarations: dict[str, object] = {}
     for path in SUBJECT_MASK_QUALITY_SCHEMA_V1.binding_paths:
         shape, dtype = _array_shape_dtype(arrays[path])
@@ -389,8 +404,12 @@ def subject_mask_quality_logical_content_document(
             "shape": list(shape),
             "dtype": str(dtype),
             "digest_algorithm": SUBJECT_MASK_QUALITY_ARRAY_DIGEST_ALGORITHM,
-            "sha256": streaming_array_sha256(
-                arrays[path], row_block_rows=digest_block_rows
+            "sha256": (
+                array_values_sha256[path]
+                if array_values_sha256 is not None
+                else streaming_array_sha256(
+                    arrays[path], row_block_rows=digest_block_rows
+                )
             ),
         }
     document: dict[str, object] = {
@@ -515,6 +534,8 @@ def build_subject_mask_quality_run_manifest(
     direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
     consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
     write_receipt: Mapping[str, Any],
+    validate_logical_arrays: bool = True,
+    array_values_sha256: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Build the exact selector-ineligible persisted manifest envelope."""
 
@@ -534,7 +555,8 @@ def build_subject_mask_quality_run_manifest(
         profile=profile,
         source=source,
         source_arrays=source_arrays,
-        validate_logical_arrays=True,
+        validate_logical_arrays=bool(validate_logical_arrays),
+        array_values_sha256=array_values_sha256,
     )
     metadata_digest = subject_mask_quality_metadata_declarations_digest(
         direct_metadata_declarations,
@@ -990,24 +1012,31 @@ def validate_subject_mask_quality_run_manifest(
     )
     expected_receipt_fields = (
         partition_receipt_fields
-        if receipt_version in {3, 4}
+        if receipt_version in {3, 4, 5}
         else (current_receipt_fields if receipt_version == 2 else legacy_receipt_fields)
     )
     if not isinstance(receipt, Mapping) or set(receipt) != expected_receipt_fields:
         errors.append("subject-mask quality write_receipt is not exact")
     else:
+        expected_scratch_surface = (
+            "not_used_receipt_bound_direct_physical_unit_stream_v1"
+            if receipt_version == 5
+            else "node_local_npy_memmap_deleted_after_publication"
+        )
         if (
             receipt.get("schema_id") != "palette.subject_mask_quality.write_receipt"
-            or receipt.get("schema_version") not in {1, 2, 3, 4}
+            or receipt.get("schema_version") not in {1, 2, 3, 4, 5}
             or receipt.get("output_write_unit")
             != "complete_outer_shard_or_unsharded_chunk"
-            or receipt.get("scratch_surface")
-            != "node_local_npy_memmap_deleted_after_publication"
+            or receipt.get("scratch_surface") != expected_scratch_surface
             or receipt.get("parallel_write_policy")
             != "single_writer_v1_future_workers_require_disjoint_whole_shards"
         ):
             errors.append("subject-mask quality write_receipt identity mismatch")
-        if receipt.get("schema_version") in {2, 3}:
+        if receipt.get("schema_version") in {2, 3} or (
+            receipt.get("schema_version") == 5
+            and not isinstance(source, SubjectMaskQualityComposableSourceReference)
+        ):
             requested = receipt.get("source_compute_workers_requested")
             effective = receipt.get("source_compute_workers_effective")
             execution = receipt.get("source_compute_execution")
@@ -1035,7 +1064,7 @@ def validate_subject_mask_quality_run_manifest(
                 )
             ):
                 errors.append("subject-mask quality compute-worker receipt is invalid")
-        if receipt.get("schema_version") in {3, 4}:
+        if receipt.get("schema_version") in {3, 4, 5}:
             source_mode = receipt.get("source_mode")
             assembly = receipt.get("worker_assembly")
             if source_mode not in {
@@ -1043,6 +1072,11 @@ def validate_subject_mask_quality_run_manifest(
                 "receipt_bound_quality_partitions",
             }:
                 errors.append("subject-mask quality source mode is invalid")
+            if (
+                receipt.get("schema_version") == 5
+                and source_mode != "receipt_bound_quality_partitions"
+            ):
+                errors.append("subject-mask quality v5 requires partition streaming")
             if (source_mode == "receipt_bound_quality_partitions") != (
                 isinstance(assembly, Mapping)
             ):
@@ -1050,6 +1084,10 @@ def validate_subject_mask_quality_run_manifest(
             expected_partition_execution = (
                 "receipt_bound_partitions_with_verified_worker_units_v2"
                 if receipt.get("schema_version") == 4
+                or (
+                    receipt.get("schema_version") == 5
+                    and isinstance(source, SubjectMaskQualityComposableSourceReference)
+                )
                 else "receipt_bound_partitions_with_ordered_source_verification_v1"
             )
             if (
@@ -1076,10 +1114,14 @@ def validate_subject_mask_quality_run_manifest(
             "source_compute_block_bytes_budget",
             "source_compute_block_count",
         )
-        if receipt.get("schema_version") == 4:
+        zero_compute_receipt = receipt.get("schema_version") == 4 or (
+            receipt.get("schema_version") == 5
+            and isinstance(source, SubjectMaskQualityComposableSourceReference)
+        )
+        if zero_compute_receipt:
             if not isinstance(source, SubjectMaskQualityComposableSourceReference):
                 errors.append(
-                    "subject-mask quality v4 receipt requires composable source"
+                    "subject-mask quality zero-compute receipt requires composable source"
                 )
             if (
                 receipt.get("source_mode") != "receipt_bound_quality_partitions"
@@ -1087,7 +1129,9 @@ def validate_subject_mask_quality_run_manifest(
                 or receipt.get("source_compute_execution")
                 != "receipt_bound_partitions_with_verified_worker_units_v2"
             ):
-                errors.append("subject-mask quality v4 receipt mode is invalid")
+                errors.append(
+                    "subject-mask quality zero-compute receipt mode is invalid"
+                )
             zero_compute_fields = (
                 *compute_fields,
                 "source_compute_workers_requested",
@@ -1097,7 +1141,9 @@ def validate_subject_mask_quality_run_manifest(
                 type(receipt.get(name)) is not int or receipt.get(name) != 0
                 for name in zero_compute_fields
             ):
-                errors.append("subject-mask quality v4 finalizer compute must be zero")
+                errors.append(
+                    "subject-mask quality zero-compute finalizer fields must be zero"
+                )
         else:
             for name in compute_fields:
                 if type(receipt.get(name)) is not int or int(receipt[name]) <= 0:
@@ -1107,7 +1153,7 @@ def validate_subject_mask_quality_run_manifest(
         if dimensions is not None and all(
             type(receipt.get(name)) is int for name in compute_fields
         ):
-            if receipt.get("schema_version") == 4:
+            if zero_compute_receipt:
                 expected_rows = 0
                 expected_count = 0
             else:
@@ -1130,7 +1176,7 @@ def validate_subject_mask_quality_run_manifest(
                 errors.append("subject-mask quality compute block count mismatch")
             expected_effective_workers = (
                 0
-                if receipt.get("schema_version") == 4
+                if zero_compute_receipt
                 else (
                     1
                     if receipt.get("source_mode") == "receipt_bound_quality_partitions"
@@ -1140,7 +1186,7 @@ def validate_subject_mask_quality_run_manifest(
                 )
             )
             if (
-                receipt.get("schema_version") in {2, 3, 4}
+                receipt.get("schema_version") in {2, 3, 4, 5}
                 and receipt.get("source_compute_workers_effective")
                 != expected_effective_workers
             ):
