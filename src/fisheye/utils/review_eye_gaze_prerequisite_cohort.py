@@ -19,7 +19,7 @@ No command infers or supplies a human decision.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -157,6 +157,17 @@ def _digest(value: object, *, field: str) -> str:
     ):
         _fail(f"{field} must be one lowercase SHA-256 digest.")
     return value
+
+
+def _utc_timestamp(value: object, *, field: str) -> str:
+    text = _text(value, field=field)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise EyeGazeCohortReviewError(f"{field} must be ISO-8601 UTC.") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        _fail(f"{field} must use UTC.")
+    return text
 
 
 def _sha256_file(path: Path) -> str:
@@ -440,7 +451,7 @@ def build_review_task(
         {
             "schema_id": REVIEW_TASK_SCHEMA_ID,
             "schema_version": REVIEW_TASK_SCHEMA_VERSION,
-            "created_at_utc": datetime.now().astimezone().isoformat(),
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "source_prerequisite_task": {
                 "path": source_path,
                 "file_sha256": source_file_sha256,
@@ -486,6 +497,7 @@ def load_review_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
         or task.get("review_task_sha256") != _review_task_digest(task)
     ):
         _fail("Gaze convention review task envelope is invalid or stale.")
+    _utc_timestamp(task.get("created_at_utc"), field="created_at_utc")
     source_binding = _mapping(
         task.get("source_prerequisite_task"), field="source prerequisite task"
     )
@@ -688,13 +700,9 @@ def _load_decisions(
     ):
         _fail("Gaze convention decision envelope is invalid or belongs elsewhere.")
     reviewer = _text(decisions.get("reviewer"), field="reviewer")
-    reviewed_at = _text(decisions.get("reviewed_at_utc"), field="reviewed_at_utc")
-    try:
-        parsed = datetime.fromisoformat(reviewed_at.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise EyeGazeCohortReviewError("reviewed_at_utc is not ISO-8601.") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        _fail("reviewed_at_utc must include a timezone.")
+    reviewed_at = _utc_timestamp(
+        decisions.get("reviewed_at_utc"), field="reviewed_at_utc"
+    )
     rows = decisions.get("entries")
     if not isinstance(rows, list) or len(rows) != review_task["recording_count"]:
         _fail("Decision rows do not cover the exact review cohort.")

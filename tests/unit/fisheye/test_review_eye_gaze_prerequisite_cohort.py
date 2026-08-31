@@ -143,7 +143,7 @@ def _review_task(closed_cohort) -> dict[str, object]:
 def _accepted_decisions(review_task: dict[str, object]) -> dict[str, object]:
     decisions = review_mod.build_decision_template(review_task)
     decisions["reviewer"] = "reviewer@example.org"
-    decisions["reviewed_at_utc"] = "2026-08-31T14:00:00-04:00"
+    decisions["reviewed_at_utc"] = "2026-08-31T18:00:00+00:00"
     for row in decisions["entries"]:
         row["decision"] = "accepted"
     return decisions
@@ -182,6 +182,24 @@ def test_review_task_loader_validates_subject_shape_binding(closed_cohort) -> No
         match="Review evidence paths must be absolute",
     ):
         review_mod.load_review_task(review_task)
+
+
+def test_review_task_and_decisions_require_utc(closed_cohort, tmp_path: Path) -> None:
+    review_task = _review_task(closed_cohort)
+    review_task["created_at_utc"] = "2026-08-31T14:00:00-04:00"
+    review_task["review_task_sha256"] = review_mod._review_task_digest(review_task)
+    with pytest.raises(review_mod.EyeGazeCohortReviewError, match="must use UTC"):
+        review_mod.load_review_task(review_task)
+
+    review_task = _review_task(closed_cohort)
+    decisions = _accepted_decisions(review_task)
+    decisions["reviewed_at_utc"] = "2026-08-31T14:00:00-04:00"
+    with pytest.raises(review_mod.EyeGazeCohortReviewError, match="must use UTC"):
+        review_mod.accept_reviewed_cohort(
+            review_task,
+            decisions=decisions,
+            output_root=tmp_path / "accepted-non-utc",
+        )
 
 
 def test_review_plan_requires_complete_exact_receipt_set(
