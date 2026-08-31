@@ -1698,6 +1698,7 @@ __all__ = [
     "EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_ADMISSION_SCOPE",
     "EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_MODE",
     "EyeGeometrySource",
+    "MaskStoreChannelSelectionArray",
     "StackedComponentArray",
     "build_completed_ineligible_subject_shape_candidate_admission",
     "resolve_eye_geometry_source",

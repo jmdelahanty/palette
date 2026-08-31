@@ -725,6 +725,81 @@ materializer, cohort, and gaze-validation regression suite passes 121/121
 tests. This is planning evidence only; required CI and the fresh v2 proof and
 materialization gates remain mandatory.
 
+#### V2 execution, failed-closed review repair, and v3 handoff — 2026-08-31
+
+Required CI for exact commit
+`7f31527551b5df5c7a6f4f7688219c7a587fde5d` completed green: all 16
+non-GPU test shards and every structural check passed. That commit was deployed
+without moving the shared checkout at
+`/groups/johnson/johnsonlab/jeremy/gitrepos/palette-worktrees/refined-assignment-rebinding-gaze-20260831-7f315275`.
+LSF proof array `153801503` then completed 84/84 v2 tasks with exit status zero
+under
+`/groups/johnson/johnsonlab/jeremy/operations/eye_gaze_prerequisites_prove_goodbatbadbat84_7f315275_20260831_v2`.
+Closed-set validation proved indices 1 through 84 exactly once, 84 unique proof
+receipt hashes, 84 unique proposed manifest hashes, exact task digest
+`d639ceef530bc2091c085cf7654ffbdc2021741d6f4ff00b09b0832efe7c141d`,
+the exact Palette commit, and `zarr_writes=false` for every proof.
+
+The v2 one-recording materialization smoke, LSF job `153801525`, ran for 1,013
+seconds with a 7,212 MB maximum and then failed closed during bounded review.
+It published fresh immutable v2 rebinding, subject-shape, and eye-angle
+candidates only for
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat`. It did not produce numeric
+validation evidence or a final cohort receipt, and no other recording was
+materialized. These partial v2 children remain immutable evidence and are not
+retry targets.
+
+The real smoke exposed three late-reader defects rather than a failed numeric
+gaze identity:
+
+1. bounded candidate review reopened the exact selector-ineligible
+   subject-shape source through the normal canonical-only reader;
+2. mask review fell back to treating the historical refined subject-mask member
+   as a modern canonical publication even though the subject-shape publication
+   already sealed its exact inactive bundle, refined member, manifest, source
+   validation receipt, dense-mask digest, and assignment rebinding; and
+3. the initial overlay drew source-camera subject-shape ellipse centers on
+   ROI-local masks. The exact translation-only placement must be subtracted from
+   those centers. Eye-angle body-frame origin support is independently declared
+   in ROI-local pixels and must not receive that translation; gaze and body-axis
+   vectors are translation invariant.
+
+The repaired candidate path admits only the exact nested subject-shape
+candidate record carried by the eye-angle run's self-digested staged authority.
+It requires exact schema, scope, source name and path, digest, and explicit
+`normal_reader_authority=false` and `selector_activation=false`. The mask path
+opens only the exact dense refined member sealed by the bound subject-shape
+bundle and selects semantic `eye_left` and `eye_right` channels. Normal readers
+and selectors remain canonical-only.
+
+A final read-only live probe against the immutable v2 eye-angle candidate now
+passes all numeric checks and direct/consolidated metadata equivalence over
+3,072 sampled rows, including 2,961 valid rows. Its 12-panel review uses the
+sealed dense mask source, aligns both ellipse centers to ROI coordinates, keeps
+the body-frame origin ROI-local, and visibly composes labeled eye masks, gaze
+vectors, fish-forward, and anatomical-left axes. The review PNG is 2,348 by
+1,859 pixels with SHA-256
+`2dad2ee258b64d4aee4032ef0420dec633f3005397b1eecafa8ff39de8643088`.
+This validates the review mechanism; it does not accept the biological gaze
+direction assumption on a reviewer's behalf.
+
+The next attempt uses fresh immutable v3 identities:
+`assignment_keypoint_rebinding_goodbatbadbat_gaze_20260831_v3`,
+`subject_shape_goodbatbadbat_gaze_20260831_v3`, and
+`eye_angles_goodbatbadbat_gaze_20260831_v3`. The frozen 84-recording task is
+`/tmp/goodbatbadbat_eye_gaze_prerequisite_task_20260831_v3.json`, with semantic
+task digest
+`f5eb7cf709b4fb7635086e25bc6bdff33ed183260dcff951718d3ed514f91511`
+and physical JSON SHA-256
+`0983771f7c13c8161858e10aff561535283a0de0c47002e1ad3bb6c8d9988635`.
+All 84 entries validate as `metadata_ready_for_exhaustive_proof` and all v3
+targets are fresh. The repaired implementation has 127/127 affected regression
+tests and all local structural ratchets passing, but it is not
+execution-authorized until required CI passes on the exact new commit. After
+that gate, v3 still requires a new commit-pinned deployment, 84/84 read-only
+proof closure, one-recording materialization and receipt smoke, and only then
+indices 2 through 84.
+
 ### Exact body-bearing × distance parity addendum — 2026-08-30
 
 The earlier GoodCopBadCop viewer retained two related products that had not

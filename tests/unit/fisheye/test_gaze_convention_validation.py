@@ -8,11 +8,14 @@ import pytest
 import fisheye.analysis.gaze_convention_validation as validation_module
 from fisheye.analysis.gaze_convention_validation import (
     _resolve_eye_run,
+    _resolve_review_geometry,
     _resolve_review_masks,
+    _resolve_review_roi_offsets,
     body_frame_angles_from_vectors,
     validate_gaze_geometry_arrays,
     wrap_degrees_signed,
 )
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 def _synthetic_geometry() -> dict[str, np.ndarray]:
@@ -114,6 +117,76 @@ def test_review_masks_follow_subject_shape_refined_subject_lineage(
     assert calls == ["refined_subject_a"]
 
 
+def test_review_masks_follow_sealed_subject_shape_bundle_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dense = np.zeros((5, 4, 8, 8), dtype=np.uint8)
+    dense[:, 1, :, :4] = 1
+    dense[:, 2, :, 4:] = 1
+
+    class _FakeBundleSource:
+        authority = SimpleNamespace(
+            refined_run=object(),
+            refined_run_path="refined_subject_masks_runs/refined_subject_a",
+        )
+
+    class _FakeMaskStore:
+        shape = dense.shape
+        storage_path = "refined_subject_masks_runs/refined_subject_a/masks_roi"
+
+        @staticmethod
+        def component_index(component: str) -> int:
+            return {"subject_body": 0, "eye_left": 1, "eye_right": 2, "swim_bladder": 3}[
+                component
+            ]
+
+        @staticmethod
+        def read_dense(rows=None, channels=None):
+            row_indices = np.arange(dense.shape[0])[rows]
+            if np.isscalar(row_indices):
+                row_indices = np.asarray([row_indices])
+            channel_indices = np.asarray(channels, dtype=np.int64)
+            return dense[np.ix_(np.asarray(row_indices), channel_indices)]
+
+    bundle = _FakeBundleSource()
+    geometry = SimpleNamespace(
+        masks_roi=None,
+        ellipse_params=np.zeros((5, 2, 5), dtype=np.float32),
+        group_path="analysis/subject_shape_runs/shape_a",
+        source_refined_subject_run="refined_subject_a",
+        subject_shape_coordinate_publication=SimpleNamespace(source=bundle),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "BoundSubjectShapeBundleSource",
+        _FakeBundleSource,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "require_bound_subject_shape_bundle_source",
+        lambda source: source,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "open_mask_store",
+        lambda *_args, **_kwargs: _FakeMaskStore(),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "resolve_eye_geometry_source",
+        lambda *_args, **_kwargs: pytest.fail(
+            "sealed bundle masks fell through to the canonical refined-mask reader"
+        ),
+    )
+
+    resolved, source_path = _resolve_review_masks(object(), geometry)
+
+    assert source_path == "refined_subject_masks_runs/refined_subject_a/masks_roi"
+    assert resolved.shape == (5, 2, 8, 8)
+    np.testing.assert_array_equal(np.asarray(resolved[0, :, 0, 0]), [1, 0])
+    np.testing.assert_array_equal(np.asarray(resolved[0, :, 0, 7]), [0, 1])
+
+
 def test_review_masks_reject_row_mismatch() -> None:
     geometry = SimpleNamespace(
         masks_roi=np.zeros((4, 2, 8, 8), dtype=np.uint8),
@@ -124,6 +197,160 @@ def test_review_masks_reject_row_mismatch() -> None:
 
     with pytest.raises(ValueError, match="not row-aligned"):
         _resolve_review_masks(object(), geometry)
+
+
+def test_review_roi_offsets_use_exact_bound_translation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    continuous = np.asarray(
+        [[100.0, 200.0], [101.0, 201.0], [102.0, 202.0]],
+        dtype=np.float64,
+    )
+    geometry = SimpleNamespace(
+        stage_group=validation_module.EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
+        ellipse_params=np.zeros((3, 2, 5), dtype=np.float32),
+        subject_shape_coordinate_publication=SimpleNamespace(source=object()),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "require_translation_only_subject_shape_placement",
+        lambda _source: (continuous, continuous.copy()),
+    )
+
+    np.testing.assert_array_equal(
+        _resolve_review_roi_offsets(geometry),
+        continuous,
+    )
+
+
+def test_review_roi_offsets_reject_nonidentical_edge_placement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    continuous = np.zeros((3, 2), dtype=np.float64)
+    edge = continuous.copy()
+    edge[1, 0] = 0.5
+    geometry = SimpleNamespace(
+        stage_group=validation_module.EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
+        ellipse_params=np.zeros((3, 2, 5), dtype=np.float32),
+        subject_shape_coordinate_publication=SimpleNamespace(source=object()),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "require_translation_only_subject_shape_placement",
+        lambda _source: (continuous, edge),
+    )
+
+    with pytest.raises(ValueError, match="translation-only placement"):
+        _resolve_review_roi_offsets(geometry)
+
+
+def _candidate_review_attrs() -> tuple[dict[str, object], dict[str, object]]:
+    run_name = "shape_candidate"
+    admission: dict[str, object] = {
+        "source_subject_shape_run": run_name,
+        "normal_reader_authority": False,
+        "selector_activation": False,
+        "record_sha256": "a" * 64,
+    }
+    authority_body: dict[str, object] = {
+        "schema_id": validation_module.EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_ID,
+        "schema_version": validation_module.EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCHEMA_VERSION,
+        "authority_scope": validation_module.EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCOPE,
+        "source_subject_shape_run": run_name,
+        "source_subject_shape_run_ref": f"/analysis/subject_shape_runs/{run_name}",
+        "row_count": 5,
+        "canonical_publication": {},
+        "source_contract_attrs": {},
+        "allowed_arrays": {},
+        "closed_array_inventory": True,
+        "normal_reader_authority": False,
+        "candidate_admission": admission,
+    }
+    authority = {
+        **authority_body,
+        "record_sha256": canonical_json_sha256(authority_body),
+    }
+    return (
+        {
+            "source_eye_geometry_stage": "analysis/subject_shape_runs",
+            "source_eye_geometry_run": run_name,
+            "source_eye_geometry_authority_mode": "digest_bound_staged_subset",
+            "eye_angle_source_contracts": {
+                "eye_geometry": {
+                    "stage_group": "analysis/subject_shape_runs",
+                    "run_name": run_name,
+                    "source_authority": authority,
+                }
+            },
+        },
+        admission,
+    )
+
+
+def test_candidate_review_geometry_reuses_exact_sealed_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attrs, admission = _candidate_review_attrs()
+    resolved = object()
+    calls: list[dict[str, object]] = []
+
+    def _fake_resolve(_root: object, **kwargs: object):
+        calls.append(kwargs)
+        return resolved
+
+    monkeypatch.setattr(validation_module, "resolve_eye_geometry_source", _fake_resolve)
+
+    assert (
+        _resolve_review_geometry(
+            object(),
+            attrs,
+            allow_ineligible_candidate=True,
+        )
+        is resolved
+    )
+    assert calls == [
+        {
+            "subject_shape_run": "shape_candidate",
+            "_completed_ineligible_subject_shape_candidate": admission,
+        }
+    ]
+
+
+def test_candidate_review_geometry_rejects_stale_embedded_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attrs, _admission = _candidate_review_attrs()
+    authority = attrs["eye_angle_source_contracts"]["eye_geometry"]["source_authority"]
+    authority["record_sha256"] = "b" * 64
+    monkeypatch.setattr(
+        validation_module,
+        "resolve_eye_geometry_source",
+        lambda *_args, **_kwargs: pytest.fail("stale authority reached resolver"),
+    )
+
+    with pytest.raises(ValueError, match="invalid or stale"):
+        _resolve_review_geometry(
+            object(),
+            attrs,
+            allow_ineligible_candidate=True,
+        )
+
+
+def test_normal_review_geometry_does_not_admit_candidate_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attrs, _admission = _candidate_review_attrs()
+    resolved = object()
+    calls: list[dict[str, object]] = []
+
+    def _fake_resolve(_root: object, **kwargs: object):
+        calls.append(kwargs)
+        return resolved
+
+    monkeypatch.setattr(validation_module, "resolve_eye_geometry_source", _fake_resolve)
+
+    assert _resolve_review_geometry(object(), attrs) is resolved
+    assert calls == [{"subject_shape_run": "shape_candidate"}]
 
 
 def test_eye_run_resolution_uses_canonical_eye_angle_reader(

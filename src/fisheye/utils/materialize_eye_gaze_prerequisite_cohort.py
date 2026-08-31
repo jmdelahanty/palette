@@ -48,9 +48,9 @@ PROOF_SCHEMA_VERSION = 1
 RECEIPT_SCHEMA_ID = "palette.eye_gaze_prerequisite_materialization_receipt"
 RECEIPT_SCHEMA_VERSION = 1
 
-REBINDING_RUN = "assignment_keypoint_rebinding_goodbatbadbat_gaze_20260831_v2"
-SUBJECT_SHAPE_RUN = "subject_shape_goodbatbadbat_gaze_20260831_v2"
-EYE_ANGLE_RUN = "eye_angles_goodbatbadbat_gaze_20260831_v2"
+REBINDING_RUN = "assignment_keypoint_rebinding_goodbatbadbat_gaze_20260831_v3"
+SUBJECT_SHAPE_RUN = "subject_shape_goodbatbadbat_gaze_20260831_v3"
+EYE_ANGLE_RUN = "eye_angles_goodbatbadbat_gaze_20260831_v3"
 
 EXPECTED_SAFETY = {
     "selector_eligible": False,
