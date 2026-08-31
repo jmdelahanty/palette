@@ -439,6 +439,16 @@ def test_direct_assignment_source_resolves_one_canonical_successor(
             },
         },
     }
+
+    def freeze_manifest(value: object) -> object:
+        if isinstance(value, dict):
+            return MappingProxyType(
+                {key: freeze_manifest(child) for key, child in value.items()}
+            )
+        if isinstance(value, list):
+            return tuple(freeze_manifest(child) for child in value)
+        return value
+
     context = SimpleNamespace(
         run_path=run_path,
         source=SimpleNamespace(crop_path="crop_runs/canonical"),
@@ -455,7 +465,8 @@ def test_direct_assignment_source_resolves_one_canonical_successor(
     source = SimpleNamespace(
         run_path=run_path,
         run_group=run,
-        manifest=manifest,
+        # The real shared loader freezes JSON lists (including shapes) to tuples.
+        manifest=freeze_manifest(manifest),
         surfaces=SimpleNamespace(context=context),
     )
     collection = {

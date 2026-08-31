@@ -174,6 +174,16 @@ def _manifest_arrays(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
     return arrays
 
 
+def _manifest_shape(value: Any) -> tuple[int, ...] | None:
+    """Normalize validated JSON shapes after the shared loader freezes lists."""
+
+    if not isinstance(value, (list, tuple)) or any(
+        type(dimension) is not int or dimension < 0 for dimension in value
+    ):
+        return None
+    return tuple(value)
+
+
 def _assignment_collection_source(
     collection: Mapping[str, Any],
 ) -> tuple[str, str, str]:
@@ -284,12 +294,17 @@ def _canonical_coordinate_successor_binding(
         _fail("Subject-mask bundle row-identity digest binding is malformed.")
     for name in _IDENTITY_NAMES:
         declaration = arrays.get(name)
+        declared_shape = (
+            _manifest_shape(declaration.get("shape"))
+            if isinstance(declaration, Mapping)
+            else None
+        )
         if (
             not isinstance(declaration, Mapping)
             or declaration.get("digest_algorithm")
             != ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM
             or declaration.get("sha256") != identity.get(name)
-            or declaration.get("shape") != [bundle.n_rois]
+            or declared_shape != (bundle.n_rois,)
         ):
             _fail(
                 f"Canonical assignment keypoint {name} differs from the mask bundle."
@@ -298,16 +313,20 @@ def _canonical_coordinate_successor_binding(
     for name in ("keypoints_roi", "pose_success"):
         declaration = arrays.get(name)
         node = run.get(name)
+        declared_shape = (
+            _manifest_shape(declaration.get("shape"))
+            if isinstance(declaration, Mapping)
+            else None
+        )
         if (
             not isinstance(declaration, Mapping)
             or declaration.get("digest_algorithm")
             != ASSIGNMENT_EQUIVALENCE_DIGEST_ALGORITHM
-            or not isinstance(declaration.get("shape"), list)
-            or not declaration["shape"]
-            or declaration["shape"][0] != bundle.n_rois
+            or not declared_shape
+            or declared_shape[0] != bundle.n_rois
             or _SHA256.fullmatch(str(declaration.get("sha256") or "")) is None
             or node is None
-            or [int(value) for value in node.shape] != declaration["shape"]
+            or tuple(int(value) for value in node.shape) != declared_shape
             or str(np.dtype(node.dtype)) != declaration.get("dtype")
         ):
             _fail(f"Canonical assignment keypoint {name} declaration is invalid.")
