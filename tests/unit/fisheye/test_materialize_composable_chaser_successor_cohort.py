@@ -8,6 +8,9 @@ import subprocess
 
 import pytest
 
+from fisheye.analysis_workflows.eye_gaze_source_handle import (
+    build_gaze_convention_review_receipt,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.utils import materialize_composable_chaser_successor_cohort as cohort
 
@@ -223,6 +226,76 @@ def _clean_repo(tmp_path: Path) -> tuple[Path, str]:
     return repo, commit
 
 
+def _eye_gaze_bindings(
+    tmp_path: Path,
+    archive: Path,
+    *,
+    recording_id: str,
+) -> tuple[Path, Path]:
+    run_name = "eye-angle-reviewed-v7"
+    run_path = f"analysis/eye_angle_runs/{run_name}"
+    _write_group(archive / run_path, {"stage_selector_eligible": False})
+    numeric_validation = {
+        "schema_id": "palette.gaze_convention_validation.v1",
+        "schema_version": 1,
+        "created_at_utc": "2026-08-31T12:00:00+00:00",
+        "status": "pass",
+        "zarr_path": str(archive),
+        "eye_angle_run": run_name,
+        "eye_angle_run_path": run_path,
+        "read_only": True,
+        "sampling": {"sample_rows": 2},
+        "comparison_contract": {
+            "object_angle_field": "egocentric_bearing/per_chaser/bearing_deg",
+            "eye_angle_fields": [
+                "left_gaze_signed_deg",
+                "right_gaze_signed_deg",
+            ],
+            "coordinate_frame": "fish_body_frame",
+            "zero": "fish_forward",
+            "positive": "anatomical_left",
+            "explicitly_not_comparable_fields": [
+                "left_eye_angle_deg",
+                "right_eye_angle_deg",
+            ],
+        },
+        "checks": [{"name": "all_numeric_identities", "passed": True}],
+        "direction_assumption": {
+            "name": "ellipse_axis_direction_assumption",
+            "passed": None,
+            "review_required": True,
+        },
+        "review_png": str(tmp_path / "review.png"),
+        "review_mask_source_path": "analysis/refined_subject_masks_runs/masks",
+        "review_row_indices": [0, 1],
+    }
+    receipt = build_gaze_convention_review_receipt(
+        numeric_validation=numeric_validation,
+        source_eye_logical_sha256="b" * 64,
+        reviewer="reviewer@example.org",
+        reviewed_at_utc="2026-08-31T12:30:00+00:00",
+        review_artifact_sha256="a" * 64,
+    )
+    receipt_path = tmp_path / "gaze_convention_receipt.json"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    bindings_path = tmp_path / "eye_gaze_bindings.json"
+    bindings_path.write_text(
+        json.dumps(
+            [
+                {
+                    "recording_id": recording_id,
+                    "analysis_zarr": str(archive),
+                    "eye_run_name": run_name,
+                    "eye_channel_variant": "smoothed",
+                    "eye_convention_receipt": str(receipt_path),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return bindings_path, receipt_path
+
+
 def test_plan_freezes_exact_recording_inputs(tmp_path: Path) -> None:
     _archive, _raw_h5, snapshot = _fixture(tmp_path)
     task = cohort.plan_cohort_task(
@@ -373,6 +446,130 @@ def test_task_successor_reuses_existing_exact_spatial_science(tmp_path: Path) ->
         "exact_run_name": cohort.SPATIAL_OCCUPANCY_RUN,
         "plot_bundle": cohort.SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME,
     }
+
+
+def test_task_successor_freezes_reviewed_gaze_and_plans_exact_projection(
+    tmp_path: Path,
+) -> None:
+    archive, _raw_h5, snapshot = _fixture(tmp_path)
+    original = cohort.plan_cohort_task(
+        snapshot, operations_root=tmp_path / "operations"
+    )
+    recording_id = original["entries"][0]["recording_id"]
+    bindings, _receipt = _eye_gaze_bindings(
+        tmp_path,
+        archive,
+        recording_id=recording_id,
+    )
+    task = cohort.successor_cohort_task(
+        original,
+        eye_gaze_bindings=bindings,
+    )
+
+    entry = task["entries"][0]
+    assert entry["eye_gaze"]["run_name"] == "eye-angle-reviewed-v7"
+    assert entry["eye_gaze"]["channel_variant"] == "smoothed"
+    assert entry["output_run_names"]["gaze_tracking"] == cohort.SUCCESSOR_RUN
+    assert (
+        f"analysis/chaser_gaze_tracking_runs/{cohort.SUCCESSOR_RUN}"
+        in entry["output_group_paths"]
+    )
+    assert len(entry["input_group_bindings"]) == 9
+    assert task["selection_policy"]["eye_gaze_resolution"] == (
+        cohort.EYE_GAZE_BINDING_RESOLUTION
+    )
+    assert task["selection_policy"]["eye_gaze_binding_source"]["sha256"]
+    assert cohort.load_cohort_task(task)["task_sha256"] == task["task_sha256"]
+
+    repo, commit = _clean_repo(tmp_path)
+    result = cohort.run_one(
+        task,
+        task_index=1,
+        palette_repo=repo,
+        palette_commit=commit,
+        scratch_root=tmp_path / "scratch",
+        receipt_root=tmp_path / "receipts",
+        apply=False,
+    )
+    gaze = next(stage for stage in result["stages"] if stage["stage"] == "gaze_tracking")
+    assert gaze["command"][gaze["command"].index("--eye-run-name") + 1] == (
+        "eye-angle-reviewed-v7"
+    )
+    assert "--eye-convention-receipt" in gaze["command"]
+    assert "--radial-run-name" in gaze["command"]
+    assert "gaze_exact_child_validation_receipt" in {
+        stage["stage"] for stage in result["stages"]
+    }
+    projection = next(
+        stage
+        for stage in result["stages"]
+        if stage["stage"] == "exact_chaser_projection_receipt"
+    )
+    assert "--gaze-receipt" in projection["command"]
+    assert (
+        Path(
+            projection["command"][
+                projection["command"].index("--output-json") + 1
+            ]
+        ).name
+        == cohort.GAZE_EPOCH_ALIGNMENT_PROJECTION_RECEIPT_NAME
+    )
+
+
+def test_gaze_successor_rejects_changed_convention_receipt(tmp_path: Path) -> None:
+    archive, _raw_h5, snapshot = _fixture(tmp_path)
+    original = cohort.plan_cohort_task(
+        snapshot, operations_root=tmp_path / "operations"
+    )
+    recording_id = original["entries"][0]["recording_id"]
+    bindings, receipt = _eye_gaze_bindings(
+        tmp_path,
+        archive,
+        recording_id=recording_id,
+    )
+    task = cohort.successor_cohort_task(
+        original,
+        eye_gaze_bindings=bindings,
+    )
+    receipt.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(
+        cohort.ComposableChaserCohortError,
+        match="receipt file has changed",
+    ):
+        cohort.run_one(
+            task,
+            task_index=1,
+            palette_repo=tmp_path / "unused",
+            palette_commit="0" * 40,
+            scratch_root=tmp_path / "scratch",
+            receipt_root=tmp_path / "receipts",
+        )
+
+
+def test_gaze_task_rejects_missing_cohort_resolution_policy(tmp_path: Path) -> None:
+    archive, _raw_h5, snapshot = _fixture(tmp_path)
+    original = cohort.plan_cohort_task(
+        snapshot, operations_root=tmp_path / "operations"
+    )
+    recording_id = original["entries"][0]["recording_id"]
+    bindings, _receipt = _eye_gaze_bindings(
+        tmp_path,
+        archive,
+        recording_id=recording_id,
+    )
+    task = cohort.successor_cohort_task(
+        original,
+        eye_gaze_bindings=bindings,
+    )
+    task["selection_policy"].pop("eye_gaze_resolution")
+    task["task_sha256"] = cohort._task_digest(task)
+
+    with pytest.raises(
+        cohort.ComposableChaserCohortError,
+        match="without a resolution policy",
+    ):
+        cohort.load_cohort_task(task)
 
 
 def test_run_one_rejects_changed_frozen_input_metadata(tmp_path: Path) -> None:

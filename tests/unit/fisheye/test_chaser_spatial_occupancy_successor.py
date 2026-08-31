@@ -19,6 +19,9 @@ from fisheye.analysis_workflows.composable_chaser_successor_publication import (
     load_composable_chaser_successor_source_handle,
     publish_composable_chaser_successor_run,
 )
+from fisheye.analysis_workflows.exact_immutable_child_validation_receipt import (
+    ensure_exact_immutable_child_validation_receipt,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.utils.plot_chaser_spatial_occupancy_successor import (
     main as plot_main,
@@ -222,7 +225,7 @@ def test_publication_deep_audit_rehydrate_and_plot(tmp_path: Path) -> None:
     assert receipt.is_file()
     receipt_record = json.loads(receipt.read_text(encoding="utf-8"))
     parameters = receipt_record["plot_parameters"]
-    assert receipt_record["schema_version"] == 2
+    assert receipt_record["schema_version"] == 3
     assert receipt_record["run_name"] == "spatial-v1"
     assert receipt_record["bundle_name"] == "spatial-recipe-v2"
     assert parameters["scientific_coordinates"]["x_bin_widths_mm"] == [
@@ -233,3 +236,53 @@ def test_publication_deep_audit_rehydrate_and_plot(tmp_path: Path) -> None:
     ]
     assert parameters["normalization_and_scale"]["density_multiplier_to_percent"] == 100.0
     assert parameters["rendering"]["png_dpi"] == 180
+
+    validation_receipt = tmp_path / "spatial.exact_child_receipt.json"
+    ensure_exact_immutable_child_validation_receipt(
+        archive,
+        run_path="analysis/chaser_spatial_occupancy_runs/spatial-v1",
+        manifest_attr="composable_chaser_successor_manifest",
+        manifest_digest_attr="composable_chaser_successor_manifest_sha256",
+        palette_commit="a" * 40,
+        output_json=validation_receipt,
+        expected_recording_id="recording",
+    )
+    targeted_output_dir = tmp_path / "targeted-plots"
+    assert plot_main(
+        [
+            str(archive),
+            "--run-name",
+            "spatial-v1",
+            "--bundle-name",
+            "spatial-receipt-bound-v3",
+            "--expected-recording-id",
+            "recording",
+            "--output-dir",
+            str(targeted_output_dir),
+            "--source-validation-receipt",
+            str(validation_receipt),
+        ]
+    ) == 0
+    targeted_receipt = json.loads(
+        (
+            targeted_output_dir
+            / "spatial-receipt-bound-v3_spatial_occupancy_plot_receipt.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert targeted_receipt["schema_version"] == 3
+    assert targeted_receipt["source_binding"]["deep_content_audit"] is False
+    assert targeted_receipt["source_binding"]["verification_mode"] == (
+        "receipt_bound_targeted_array_rehash_v1"
+    )
+    assert targeted_receipt["source_binding"]["verified_array_names"] == sorted(
+        (
+            "candidate_frame_count",
+            "in_arena_coverage_fraction_candidate",
+            "in_arena_position_frame_count",
+            "occupancy_count",
+            "occupancy_density_valid_in_arena",
+            "occupancy_fraction_candidate_epoch",
+            "x_bin_edges_mm",
+            "y_bin_edges_mm",
+        )
+    )

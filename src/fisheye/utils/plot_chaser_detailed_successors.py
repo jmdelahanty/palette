@@ -1,11 +1,13 @@
 """Render detailed plots from exact immutable chaser successor products.
 
 The command resolves no selector and writes nothing to the analysis Zarr.  It
-deep-audits an explicitly named controller/bout/escape chain, its exact
+verifies an explicitly named controller/bout/escape chain, its exact
 relative-frame source, and explicit keypoint and detection radial successors.
-All panels are direct views or plotting-coordinate transforms of persisted
-arrays; no missing samples are interpolated and no scientific table is
-recomputed inside the plotter.
+Exact-child receipts authorize closed plot-array rosters that are rehashed at
+read time; without receipts the same sources are fully deep-audited.  All
+panels are direct views or plotting-coordinate transforms of persisted arrays;
+no missing samples are interpolated and no scientific table is recomputed
+inside the plotter.
 """
 
 from __future__ import annotations
@@ -64,7 +66,7 @@ from fisheye.visualization.chaser_body_bearing_distance import (
 
 
 RECEIPT_SCHEMA_ID = "palette.analysis.chaser_detailed_plot_bundle.receipt"
-RECEIPT_SCHEMA_VERSION = 5
+RECEIPT_SCHEMA_VERSION = 6
 PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v5"
 PLOT_DPI = 180
 DENSE_DISPLAY_ALGORITHM = "all_exact_source_rows_rasterized_no_interpolation_v1"
@@ -75,6 +77,71 @@ _CHAIN_KINDS = (
     "generalized_chaser_bout_response",
     "chaser_escape_freeze",
 )
+DETAILED_SUCCESSOR_PLOT_ARRAY_NAMES = {
+    "controller_chase_trials": (
+        "chaser_identity_code",
+        "end_source_frame_row_exclusive",
+        "logged_active_trial_member",
+        "logged_trial_id",
+        "start_source_frame_row",
+        "trial_ordinal",
+        "trigger_timestamp_ns",
+        "trigger_timestamp_valid",
+    ),
+    "generalized_chaser_bout_response": (
+        "summary_bout_rate_per_min",
+        "summary_chaser_identity_code",
+        "summary_distance_bin_end_mm",
+        "summary_distance_bin_index",
+        "summary_distance_bin_start_mm",
+        "summary_median_duration_s",
+        "summary_median_net_displacement_mm",
+        "summary_median_peak_speed_mm_s",
+        "summary_role_code",
+    ),
+    "chaser_escape_freeze": (
+        "event_controller_trial_row_id",
+        "event_distance_at_onset_mm",
+        "event_latency_from_trigger_s",
+        "event_peak_speed_mm_s",
+        "event_recaptured",
+        "sweep_speed_threshold_mm_s",
+        "trial_escape_event_count",
+        "trial_escape_event_rate_per_min",
+        "trial_first_escape_latency_s",
+        "trial_freeze_low_speed_fraction",
+        "trial_freeze_valid_fraction",
+        "trial_logged_id",
+        "trial_mean_separation_gain_mm",
+        "trial_ordinal",
+        "trial_recapture_fraction",
+        "trial_response_class_code",
+        "trial_trigger_distance_mm",
+    ),
+    "chaser_radial_near_field": (
+        "cdf_behavior_role_code",
+        "cdf_chaser_identity_code",
+        "cdf_epoch_role_code",
+        "cdf_fraction_at_or_below",
+        "cdf_threshold_mm",
+        "metric_behavior_role_code",
+        "metric_chaser_identity_code",
+        "metric_distance_p25_mm",
+        "metric_distance_p50_mm",
+        "metric_distance_p75_mm",
+        "metric_epoch_role_code",
+        "metric_near_zone_dwell_s",
+        "metric_near_zone_entry_rate_per_min_valid_time",
+        "metric_near_zone_fraction_valid",
+        "metric_valid_distance_frame_count",
+        "radial_behavior_role_code",
+        "radial_bin_end_mm",
+        "radial_bin_start_mm",
+        "radial_chaser_identity_code",
+        "radial_epoch_role_code",
+        "radial_selection_index_geometric",
+    ),
+}
 
 
 class ChaserDetailedPlotError(ValueError):
@@ -242,8 +309,14 @@ def verify_detailed_plot_inputs(
         | {relative_keypoint.recording_id, relative_detection.recording_id}
     ) != 1:
         _fail("Detailed plot inputs belong to different recordings.")
-    if not all(handle.deep_audited is True for handle in (*chain, *radial)):
-        _fail("Composable detailed plot inputs require deep array-content audits.")
+    for handle in (*chain, *radial):
+        try:
+            handle.require_verified_authority()
+            handle.require_verified_arrays(
+                DETAILED_SUCCESSOR_PLOT_ARRAY_NAMES[handle.successor_kind]
+            )
+        except (TypeError, ValueError) as exc:
+            _fail(f"Composable detailed plot input lacks verified authority: {exc}")
 
     bout_sources = bout.scientific_manifest.get("sources")
     escape_sources = escape.scientific_manifest.get("sources")
@@ -2058,6 +2131,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         value is not None for value in exact_child_receipts
     ):
         _fail("All five exact-child source receipts must be supplied together.")
+    receipt_bound_successors = all(
+        value is not None for value in exact_child_receipts
+    )
     controller, bout, escape = tuple(
         load_composable_chaser_successor_source_handle(
             archive,
@@ -2065,8 +2141,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_name=run_name,
             expected_recording_id=args.expected_recording_id,
             use_consolidated=True,
-            deep_audit=True,
+            deep_audit=not receipt_bound_successors,
             direct_validation_receipt=source_receipt,
+            required_array_names=(
+                DETAILED_SUCCESSOR_PLOT_ARRAY_NAMES[kind]
+                if receipt_bound_successors
+                else None
+            ),
         )
         for kind, source_receipt in zip(
             _CHAIN_KINDS, exact_child_receipts[:3], strict=True
@@ -2117,8 +2198,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_name=keypoint_run,
         expected_recording_id=args.expected_recording_id,
         use_consolidated=True,
-        deep_audit=True,
+        deep_audit=not receipt_bound_successors,
         direct_validation_receipt=args.keypoint_radial_validation_receipt,
+        required_array_names=(
+            DETAILED_SUCCESSOR_PLOT_ARRAY_NAMES["chaser_radial_near_field"]
+            if receipt_bound_successors
+            else None
+        ),
     )
     radial_detection = load_composable_chaser_successor_source_handle(
         archive,
@@ -2126,8 +2212,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_name=detection_run,
         expected_recording_id=args.expected_recording_id,
         use_consolidated=True,
-        deep_audit=True,
+        deep_audit=not receipt_bound_successors,
         direct_validation_receipt=args.detection_radial_validation_receipt,
+        required_array_names=(
+            DETAILED_SUCCESSOR_PLOT_ARRAY_NAMES["chaser_radial_near_field"]
+            if receipt_bound_successors
+            else None
+        ),
     )
     chaser_appearance = _load_exact_chaser_appearance(relative_keypoint)
     outputs = render_detailed_bundle(
@@ -2156,34 +2247,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             "run_path": controller.run_path,
             "manifest_sha256": controller.manifest_sha256,
             "scientific_payload_sha256": controller.scientific_payload_sha256,
-            "verification_mode": controller.metadata_equivalence.get(
-                "verification_mode", "direct_consolidated_equivalence"
-            ),
-            "validation_receipt_sha256": controller.metadata_equivalence.get(
-                "receipt_sha256"
-            ),
+            "verification_mode": controller.verification_mode,
+            "verified_array_names": list(controller.verified_array_names),
+            "validation_receipt_sha256": controller.receipt_digest,
         },
         "generalized_chaser_bout_response": {
             "run_path": bout.run_path,
             "manifest_sha256": bout.manifest_sha256,
             "scientific_payload_sha256": bout.scientific_payload_sha256,
-            "verification_mode": bout.metadata_equivalence.get(
-                "verification_mode", "direct_consolidated_equivalence"
-            ),
-            "validation_receipt_sha256": bout.metadata_equivalence.get(
-                "receipt_sha256"
-            ),
+            "verification_mode": bout.verification_mode,
+            "verified_array_names": list(bout.verified_array_names),
+            "validation_receipt_sha256": bout.receipt_digest,
         },
         "chaser_escape_freeze": {
             "run_path": escape.run_path,
             "manifest_sha256": escape.manifest_sha256,
             "scientific_payload_sha256": escape.scientific_payload_sha256,
-            "verification_mode": escape.metadata_equivalence.get(
-                "verification_mode", "direct_consolidated_equivalence"
-            ),
-            "validation_receipt_sha256": escape.metadata_equivalence.get(
-                "receipt_sha256"
-            ),
+            "verification_mode": escape.verification_mode,
+            "verified_array_names": list(escape.verified_array_names),
+            "validation_receipt_sha256": escape.receipt_digest,
         },
         "relative_frame_keypoint": {
             "run_path": relative_keypoint.run_path,
@@ -2213,23 +2295,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             "run_path": radial_keypoint.run_path,
             "manifest_sha256": radial_keypoint.manifest_sha256,
             "scientific_payload_sha256": radial_keypoint.scientific_payload_sha256,
-            "verification_mode": radial_keypoint.metadata_equivalence.get(
-                "verification_mode", "direct_consolidated_equivalence"
-            ),
-            "validation_receipt_sha256": radial_keypoint.metadata_equivalence.get(
-                "receipt_sha256"
-            ),
+            "verification_mode": radial_keypoint.verification_mode,
+            "verified_array_names": list(radial_keypoint.verified_array_names),
+            "validation_receipt_sha256": radial_keypoint.receipt_digest,
         },
         "radial_detection": {
             "run_path": radial_detection.run_path,
             "manifest_sha256": radial_detection.manifest_sha256,
             "scientific_payload_sha256": radial_detection.scientific_payload_sha256,
-            "verification_mode": radial_detection.metadata_equivalence.get(
-                "verification_mode", "direct_consolidated_equivalence"
-            ),
-            "validation_receipt_sha256": radial_detection.metadata_equivalence.get(
-                "receipt_sha256"
-            ),
+            "verification_mode": radial_detection.verification_mode,
+            "verified_array_names": list(radial_detection.verified_array_names),
+            "validation_receipt_sha256": radial_detection.receipt_digest,
         },
     }
     output_records = [
@@ -2249,11 +2325,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "plot_parameters_sha256": canonical_json_sha256(plot_parameters),
         "plot_policy": {
             "source_selection": "explicit_exact_run_names_only_no_selector_discovery",
-            "source_validation": (
-                "deep_successor_audits_plus_receipt_bound_targeted_relative_array_rehash"
-                if getattr(relative_keypoint, "receipt_digest", None) is not None
-                else "deep_array_content_audit"
-            ),
+            "source_validation": {
+                "successors": controller.verification_mode,
+                "relative_frames": relative_keypoint.verification_mode,
+            },
             "scientific_arrays": "persisted_arrays_only",
             "plot_transforms": (
                 "sorting_masking_exact_time_origin_subtraction_and_"

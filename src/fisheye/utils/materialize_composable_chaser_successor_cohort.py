@@ -21,12 +21,15 @@ from pathlib import Path
 import subprocess
 from typing import Any, Mapping, Sequence
 
+from fisheye.analysis_workflows.eye_gaze_source_handle import (
+    validate_gaze_convention_review_receipt,
+)
 from fisheye.shared.json_safety import json_attr_safe, write_json_atomic
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 TASK_SCHEMA_ID = "palette.composable_chaser_successor_cohort_task"
-TASK_SCHEMA_VERSION = 5
+TASK_SCHEMA_VERSION = 6
 RECEIPT_SCHEMA_ID = "palette.composable_chaser_successor_cohort_receipt"
 RECEIPT_SCHEMA_VERSION = 1
 
@@ -82,6 +85,12 @@ BODY_ALIGNMENT_PLOT_RECIPE_ID = "persisted_anatomical_alignment_distance_bins_st
 RELATIVE_FRAME_VALIDATION_MODE = "reusable_direct_subtree_receipt_v1"
 EPOCH_ALIGNMENT_PROJECTION_RECEIPT_NAME = (
     "exact_chaser.epoch_alignment.projection_receipt.v7.json"
+)
+GAZE_EPOCH_ALIGNMENT_PROJECTION_RECEIPT_NAME = (
+    "exact_chaser.gaze_epoch_alignment.projection_receipt.v8.json"
+)
+EYE_GAZE_BINDING_RESOLUTION = (
+    "exact_eye_run_and_reviewed_convention_receipt_no_selector_v1"
 )
 
 MOTION_BOUT_PAIRS = (
@@ -156,6 +165,111 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _load_eye_gaze_bindings(
+    source: str | Path,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Freeze explicit reviewed eye sources without resolving any selector."""
+
+    path = Path(source).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Eye-gaze binding file does not exist: {path}")
+    source_bytes = path.read_bytes()
+    try:
+        rows = json.loads(source_bytes)
+    except json.JSONDecodeError as exc:
+        raise ComposableChaserCohortError(
+            f"Eye-gaze binding file is not strict JSON: {path}"
+        ) from exc
+    if not isinstance(rows, list) or not rows:
+        _fail("Eye-gaze bindings must be one non-empty JSON row list.")
+    expected_keys = {
+        "recording_id",
+        "analysis_zarr",
+        "eye_run_name",
+        "eye_channel_variant",
+        "eye_convention_receipt",
+    }
+    frozen: dict[str, dict[str, Any]] = {}
+    for index, raw_row in enumerate(rows):
+        row = _mapping(raw_row, field=f"eye-gaze binding row {index}")
+        if set(row) != expected_keys:
+            _fail(
+                f"Eye-gaze binding row {index} has missing or unexpected fields."
+            )
+        recording_id = _text(
+            row.get("recording_id"), field=f"eye-gaze row {index} recording_id"
+        )
+        if recording_id in frozen:
+            _fail(f"Eye-gaze bindings duplicate recording {recording_id!r}.")
+        archive = Path(
+            _text(
+                row.get("analysis_zarr"),
+                field=f"eye-gaze row {index} analysis_zarr",
+            )
+        ).expanduser().resolve()
+        run_name = _exact_name(
+            row.get("eye_run_name"), field=f"eye-gaze row {index} eye_run_name"
+        )
+        channel_variant = _text(
+            row.get("eye_channel_variant"),
+            field=f"eye-gaze row {index} eye_channel_variant",
+        )
+        if channel_variant not in {"raw", "smoothed"}:
+            _fail("Eye-gaze channel variant must be exact 'raw' or 'smoothed'.")
+        run_path = f"analysis/eye_angle_runs/{run_name}"
+        _attrs, metadata_sha256 = _zarr_attrs(
+            archive / run_path,
+            field=f"eye-gaze row {index} exact eye-angle run",
+        )
+        receipt_path = Path(
+            _text(
+                row.get("eye_convention_receipt"),
+                field=f"eye-gaze row {index} convention receipt",
+            )
+        ).expanduser().resolve()
+        if not receipt_path.is_file():
+            raise FileNotFoundError(
+                f"Eye-gaze convention receipt does not exist: {receipt_path}"
+            )
+        try:
+            receipt = _mapping(
+                json.loads(receipt_path.read_bytes()),
+                field=f"eye-gaze row {index} convention receipt",
+            )
+        except json.JSONDecodeError as exc:
+            raise ComposableChaserCohortError(
+                f"Eye-gaze convention receipt is not strict JSON: {receipt_path}"
+            ) from exc
+        logical_sha256 = _digest(
+            receipt.get("source_eye_logical_sha256"),
+            field=f"eye-gaze row {index} source logical digest",
+        )
+        validated_receipt = validate_gaze_convention_review_receipt(
+            receipt,
+            expected_run_path=run_path,
+            expected_logical_sha256=logical_sha256,
+        )
+        frozen[recording_id] = {
+            "analysis_zarr": str(archive),
+            "run_name": run_name,
+            "run_path": run_path,
+            "channel_variant": channel_variant,
+            "run_metadata_sha256": metadata_sha256,
+            "source_eye_logical_sha256": logical_sha256,
+            "convention_receipt_path": str(receipt_path),
+            "convention_receipt_file_sha256": _sha256_file(receipt_path),
+            "convention_receipt_sha256": _digest(
+                validated_receipt.get("receipt_sha256"),
+                field=f"eye-gaze row {index} convention receipt digest",
+            ),
+        }
+    return frozen, {
+        "path": str(path),
+        "sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "row_count": len(rows),
+    }
 
 
 def _zarr_attrs(group: Path, *, field: str) -> tuple[dict[str, Any], str]:
@@ -748,6 +862,7 @@ def load_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
         2,
         3,
         4,
+        5,
         TASK_SCHEMA_VERSION,
     }:
         _fail("Cohort task schema is unsupported.")
@@ -767,6 +882,47 @@ def load_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
         _fail("Cohort task indices are not a contiguous one-based axis.")
     if int(task.get("recording_count", -1)) != len(entries):
         _fail("Cohort task recording count is stale.")
+    entry_records = [
+        _mapping(entry, field="cohort entry") for entry in entries
+    ]
+    selection_policy = _mapping(
+        task.get("selection_policy"), field="cohort selection policy"
+    )
+    gaze_resolution = selection_policy.get("eye_gaze_resolution")
+    gaze_entries = [entry.get("eye_gaze") is not None for entry in entry_records]
+    if gaze_resolution is None:
+        if any(gaze_entries):
+            _fail("Cohort task has eye-gaze entries without a resolution policy.")
+    else:
+        if gaze_resolution != EYE_GAZE_BINDING_RESOLUTION or not all(gaze_entries):
+            _fail("Eye-gaze task must bind every frozen cohort entry exactly.")
+        source_binding = _mapping(
+            selection_policy.get("eye_gaze_binding_source"),
+            field="eye-gaze binding source",
+        )
+        if int(source_binding.get("row_count", -1)) != len(entry_records):
+            _fail("Eye-gaze binding-source row count is stale.")
+        _text(source_binding.get("path"), field="eye-gaze binding-source path")
+        _digest(
+            source_binding.get("sha256"), field="eye-gaze binding-source digest"
+        )
+        for entry in entry_records:
+            eye_gaze = _mapping(entry.get("eye_gaze"), field="eye-gaze binding")
+            output_names = _mapping(
+                entry.get("output_run_names"), field="output run names"
+            )
+            gaze_run = _exact_name(
+                output_names.get("gaze_tracking"), field="gaze successor run"
+            )
+            expected_path = f"analysis/chaser_gaze_tracking_runs/{gaze_run}"
+            output_paths = entry.get("output_group_paths")
+            if not isinstance(output_paths, list) or expected_path not in output_paths:
+                _fail("Eye-gaze task lacks its exact successor output path.")
+            eye_run = _exact_name(
+                eye_gaze.get("run_name"), field="eye-gaze input run"
+            )
+            if eye_gaze.get("run_path") != f"analysis/eye_angle_runs/{eye_run}":
+                _fail("Eye-gaze task input run path is inconsistent.")
     return task
 
 
@@ -808,13 +964,89 @@ def _revalidate_entry(entry: Mapping[str, Any]) -> None:
         metadata = archive / group_path / "zarr.json"
         if not metadata.is_file() or _sha256_file(metadata) != expected:
             _fail(f"Frozen input metadata changed: {group_path}")
+    eye_gaze_raw = entry.get("eye_gaze")
+    if eye_gaze_raw is not None:
+        eye_gaze = _mapping(eye_gaze_raw, field="eye-gaze binding")
+        if Path(
+            _text(eye_gaze.get("analysis_zarr"), field="eye-gaze analysis Zarr")
+        ).expanduser().resolve() != archive.resolve():
+            _fail("Frozen eye-gaze archive differs from the cohort archive.")
+        run_name = _exact_name(
+            eye_gaze.get("run_name"), field="eye-gaze run name"
+        )
+        run_path = _text(eye_gaze.get("run_path"), field="eye-gaze run path")
+        if run_path != f"analysis/eye_angle_runs/{run_name}":
+            _fail("Frozen eye-gaze run path does not match its exact run name.")
+        if eye_gaze.get("channel_variant") not in {"raw", "smoothed"}:
+            _fail("Frozen eye-gaze channel variant is unsupported.")
+        receipt_path = Path(
+            _text(
+                eye_gaze.get("convention_receipt_path"),
+                field="eye-gaze convention receipt path",
+            )
+        ).expanduser().resolve()
+        if not receipt_path.is_file():
+            _fail("Frozen eye-gaze convention receipt is absent.")
+        expected_file_sha256 = _digest(
+            eye_gaze.get("convention_receipt_file_sha256"),
+            field="eye-gaze convention receipt file digest",
+        )
+        if _sha256_file(receipt_path) != expected_file_sha256:
+            _fail("Frozen eye-gaze convention receipt file has changed.")
+        try:
+            receipt = _mapping(
+                json.loads(receipt_path.read_bytes()),
+                field="eye-gaze convention receipt",
+            )
+        except json.JSONDecodeError as exc:
+            raise ComposableChaserCohortError(
+                "Frozen eye-gaze convention receipt is not strict JSON."
+            ) from exc
+        logical_sha256 = _digest(
+            eye_gaze.get("source_eye_logical_sha256"),
+            field="eye-gaze source logical digest",
+        )
+        validated = validate_gaze_convention_review_receipt(
+            receipt,
+            expected_run_path=run_path,
+            expected_logical_sha256=logical_sha256,
+        )
+        if validated.get("receipt_sha256") != _digest(
+            eye_gaze.get("convention_receipt_sha256"),
+            field="eye-gaze convention receipt digest",
+        ):
+            _fail("Frozen eye-gaze convention receipt identity has changed.")
 
 
-def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
-    """Create the receipt-bound plotting successor of one exact frozen task."""
+def successor_cohort_task(
+    source: str | Path | Mapping[str, Any],
+    *,
+    eye_gaze_bindings: str | Path | None = None,
+) -> dict[str, Any]:
+    """Create a receipt-bound plotting successor with optional reviewed gaze."""
 
     previous = load_cohort_task(source)
     previous_digest = previous["task_sha256"]
+    frozen_eye_gaze: dict[str, dict[str, Any]] = {}
+    eye_gaze_binding_source: dict[str, Any] | None = None
+    if eye_gaze_bindings is not None:
+        frozen_eye_gaze, eye_gaze_binding_source = _load_eye_gaze_bindings(
+            eye_gaze_bindings
+        )
+        expected_recordings = {
+            _text(
+                _mapping(raw_entry, field="cohort entry").get("recording_id"),
+                field="cohort recording identity",
+            )
+            for raw_entry in previous["entries"]
+        }
+        if set(frozen_eye_gaze) != expected_recordings:
+            missing = sorted(expected_recordings.difference(frozen_eye_gaze))
+            unexpected = sorted(set(frozen_eye_gaze).difference(expected_recordings))
+            _fail(
+                "Eye-gaze bindings must cover the exact frozen recording set; "
+                f"missing={missing!r}, unexpected={unexpected!r}."
+            )
     entries = []
     for raw_entry in previous["entries"]:
         entry = dict(_mapping(raw_entry, field="cohort entry"))
@@ -826,6 +1058,20 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
         output_names["body_alignment_plot_bundle"] = BODY_ALIGNMENT_RECIPE_BUNDLE_NAME
         archive = Path(_text(entry["analysis_zarr"], field="analysis Zarr"))
         recording_id = _text(entry["recording_id"], field="recording identity")
+        if frozen_eye_gaze:
+            eye_gaze = dict(frozen_eye_gaze[recording_id])
+            source_archive = Path(
+                _text(eye_gaze["analysis_zarr"], field="eye-gaze source archive")
+            ).expanduser().resolve()
+            if source_archive != archive.resolve():
+                _fail(
+                    f"Eye-gaze binding archive differs for {recording_id!r}."
+                )
+            entry["eye_gaze"] = eye_gaze
+        elif "eye_gaze" in entry:
+            eye_gaze = dict(_mapping(entry["eye_gaze"], field="eye-gaze binding"))
+        else:
+            eye_gaze = None
         existing_spatial_path = (
             f"analysis/chaser_spatial_occupancy_runs/{SPATIAL_OCCUPANCY_RUN}"
         )
@@ -847,6 +1093,8 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
                 "detailed_bundle": DETAILED_RECIPE_BUNDLE_NAME,
             }
         )
+        if eye_gaze is not None:
+            output_names["gaze_tracking"] = SUCCESSOR_RUN
         spatial_path = f"analysis/chaser_spatial_occupancy_runs/{spatial_occupancy_run}"
         output_paths = [
             str(path)
@@ -854,6 +1102,12 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
             if not str(path).startswith("analysis/chaser_spatial_occupancy_runs/")
         ]
         output_paths.append(spatial_path)
+        if eye_gaze is not None:
+            gaze_path = (
+                f"analysis/chaser_gaze_tracking_runs/{output_names['gaze_tracking']}"
+            )
+            if gaze_path not in output_paths:
+                output_paths.append(gaze_path)
         alignment_path = (
             f"analysis/chaser_body_alignment_by_distance_runs/{BODY_ALIGNMENT_RUN}"
         )
@@ -886,6 +1140,11 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
             status = "resume"
         else:
             status = "ready"
+        if eye_gaze is not None and status == "complete":
+            # The deployment commit is not known while planning, so an exact
+            # gaze child and v8 projection receipt must still be sealed by
+            # run-one even when every immutable science/plot output exists.
+            status = "plot_only"
         entry.update(
             {
                 "status": status,
@@ -904,6 +1163,22 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
                 "successor_of_entry_task_sha256": previous_digest,
             }
         )
+        if eye_gaze is not None:
+            input_bindings = []
+            for value in entry["input_group_bindings"]:
+                binding = dict(_mapping(value, field="input group binding"))
+                if str(binding.get("group_path")).startswith(
+                    "analysis/eye_angle_runs/"
+                ):
+                    continue
+                input_bindings.append(binding)
+            input_bindings.append(
+                {
+                    "group_path": eye_gaze["run_path"],
+                    "metadata_sha256": eye_gaze["run_metadata_sha256"],
+                }
+            )
+            entry["input_group_bindings"] = input_bindings
         entries.append(json_attr_safe(entry))
 
     status_counts: dict[str, int] = {}
@@ -932,6 +1207,14 @@ def successor_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, A
                 "successor_of_task_sha256": previous_digest,
                 "relative_frame_validation": RELATIVE_FRAME_VALIDATION_MODE,
                 "plot_recipe_provenance": "self_contained_exact_parameters_v5",
+                **(
+                    {
+                        "eye_gaze_resolution": EYE_GAZE_BINDING_RESOLUTION,
+                        "eye_gaze_binding_source": eye_gaze_binding_source,
+                    }
+                    if eye_gaze_binding_source is not None
+                    else {}
+                ),
             },
             "status_counts": status_counts,
             "runnable_task_indices": [
@@ -1201,6 +1484,14 @@ def run_one(
     keypoint_proxy = _mapping(entry["keypoint_proxy"], field="keypoint proxy")
     detection_proxy = _mapping(entry["detection_proxy"], field="detection proxy")
     motion_bouts = _mapping(entry["motion_and_bouts"], field="motion and bout binding")
+    eye_gaze_raw = entry.get("eye_gaze")
+    eye_gaze = (
+        _mapping(eye_gaze_raw, field="eye-gaze binding")
+        if eye_gaze_raw is not None
+        else None
+    )
+    if (eye_gaze is None) != ("gaze_tracking" not in outputs):
+        _fail("Eye-gaze input and gaze-successor output bindings must appear together.")
     stages: list[dict[str, Any]] = []
 
     def execute_if_missing(stage: str, group_path: str, command: Sequence[str]) -> None:
@@ -1522,6 +1813,40 @@ def run_one(
             ),
         )
 
+    if eye_gaze is not None:
+        execute_if_missing(
+            "gaze_tracking",
+            f"analysis/chaser_gaze_tracking_runs/{outputs['gaze_tracking']}",
+            _stage_command(
+                py,
+                "fisheye.utils.materialize_composable_chaser_successors",
+                archive,
+                "--run-name",
+                outputs["gaze_tracking"],
+                "--expected-recording-id",
+                recording_id,
+                "--relative-frame-run",
+                outputs["keypoint_relative"],
+                "--semantic-selection-run",
+                outputs["semantic_selection"],
+                "--eye-run-name",
+                eye_gaze["run_name"],
+                "--eye-channel-variant",
+                eye_gaze["channel_variant"],
+                "--eye-convention-receipt",
+                eye_gaze["convention_receipt_path"],
+                "--radial-run-name",
+                outputs["keypoint_radial"],
+                "--module",
+                "chaser_gaze_tracking_v3",
+                "--scratch-root",
+                scratch / "gaze_tracking",
+                "--copy-backend",
+                copy_backend,
+                "--apply",
+            ),
+        )
+
     exact_child_receipts: dict[str, Path] = {}
     if receipt_bound_relative:
         assert relative_receipt_dir is not None
@@ -1581,6 +1906,18 @@ def run_one(
                     "provider_epoch_behavior_summary_manifest",
                     "provider_epoch_behavior_summary_manifest_sha256",
                 ),
+            )
+        if "gaze_tracking" in outputs:
+            exact_child_specs.append(
+                (
+                    "gaze",
+                    (
+                        "analysis/chaser_gaze_tracking_runs/"
+                        f"{outputs['gaze_tracking']}"
+                    ),
+                    "composable_chaser_successor_manifest",
+                    "composable_chaser_successor_manifest_sha256",
+                )
             )
         for key, run_path, manifest_attr, manifest_digest_attr in exact_child_specs:
             receipt_path = (
@@ -1770,8 +2107,10 @@ def run_one(
                 apply=apply,
             )
         )
-        projection_receipt = (
-            relative_receipt_dir / EPOCH_ALIGNMENT_PROJECTION_RECEIPT_NAME
+        projection_receipt = relative_receipt_dir / (
+            GAZE_EPOCH_ALIGNMENT_PROJECTION_RECEIPT_NAME
+            if "gaze" in exact_child_receipts
+            else EPOCH_ALIGNMENT_PROJECTION_RECEIPT_NAME
         )
         stages.append(
             _invoke(
@@ -1801,6 +2140,11 @@ def run_one(
                     exact_child_receipts["escape"],
                     "--spatial-occupancy-receipt",
                     exact_child_receipts["spatial_occupancy"],
+                    *(
+                        ("--gaze-receipt", exact_child_receipts["gaze"])
+                        if "gaze" in exact_child_receipts
+                        else ()
+                    ),
                     *(
                         (
                             "--epoch-behavior-receipt",
@@ -2057,6 +2401,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     successor_parser.add_argument("task", type=Path)
     successor_parser.add_argument("--output", type=Path, required=True)
+    successor_parser.add_argument(
+        "--eye-gaze-bindings",
+        type=Path,
+        help=(
+            "Optional exact JSON row list covering every frozen recording with "
+            "analysis_zarr, eye_run_name, eye_channel_variant, and one accepted "
+            "eye_convention_receipt. No eye selector is resolved."
+        ),
+    )
     validate_parser = subparsers.add_parser("validate", help="validate a frozen task")
     validate_parser.add_argument("task", type=Path)
     run_parser = subparsers.add_parser("run-one", help="run one frozen task entry")
@@ -2088,7 +2441,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         write_json_atomic(args.output.expanduser().resolve(), result)
     elif args.command == "successor":
-        result = successor_cohort_task(args.task)
+        result = successor_cohort_task(
+            args.task,
+            eye_gaze_bindings=args.eye_gaze_bindings,
+        )
         write_json_atomic(args.output.expanduser().resolve(), result)
     elif args.command == "validate":
         task = load_cohort_task(args.task)
