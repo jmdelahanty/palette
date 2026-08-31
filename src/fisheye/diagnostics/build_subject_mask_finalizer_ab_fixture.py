@@ -19,7 +19,6 @@ from fisheye.diagnostics.benchmark_subject_mask_probability_sharding import (
     _copy_codec_kwargs,
     _storage_stats,
 )
-from fisheye.refinement.assemble_refined_subject_masks import _resolve_keypoint_success_array
 from fisheye.refinement.finalize_subject_masks import (
     _CROP_REBASE_COPY_ARRAYS,
     _load_subject_mask_source,
@@ -27,6 +26,7 @@ from fisheye.refinement.finalize_subject_masks import (
     finalize_subject_masks,
 )
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.keypoint_success_authority import resolve_keypoint_success_array
 from fisheye.shared.crop_row_rebase import CROP_REBASE_REQUIRED_AUTHORITY_ARRAYS
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
@@ -171,7 +171,7 @@ def _copy_context_arrays(
             "benchmark_source_keypoints_run": str(assignment_keypoints_run),
         }
     )
-    success_values, success_name = _resolve_keypoint_success_array(
+    success_values, success_name = resolve_keypoint_success_array(
         source_keypoints,
         assignment_keypoints_run,
     )

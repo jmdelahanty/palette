@@ -23,10 +23,10 @@ import numpy as np
 import zarr
 
 from ..refinement.assemble_refined_subject_masks import (
-    _resolve_keypoint_success_array,
     _resolve_subject_keypoint_group,
 )
 from ..refinement.finalize_subject_masks import _MASK_STORAGE_CHOICES, finalize_subject_masks
+from ..shared.keypoint_success_authority import resolve_keypoint_success_array
 from ..shared.refined_subject_component_contours import (
     COMPONENT_CONTOUR_SCHEMA_ID,
     DEFAULT_BOUNDARY_POLICY,
@@ -279,7 +279,9 @@ def _copy_keypoint_context(
     for name in _KEYPOINT_ROW_ARRAYS:
         if _copy_row_array(kp_group, target_run, name, start_row=start_row, stop_row=stop_row):
             copied_rows.append(name)
-    _success_values, success_dataset = _resolve_keypoint_success_array(kp_group, keypoint_run_name)
+    _success_values, success_dataset = resolve_keypoint_success_array(
+        kp_group, keypoint_run_name
+    )
     if _copy_row_array(kp_group, target_run, success_dataset, start_row=start_row, stop_row=stop_row):
         copied_rows.append(success_dataset)
     return {

@@ -16,7 +16,6 @@ import numpy as np
 
 from ..refinement.assemble_refined_subject_masks import (
     _resolve_eye_keypoint_indices,
-    _resolve_keypoint_success_array,
 )
 from ..refinement.subject_eye_assignment import (
     _split_union_by_keypoints_distance_batch_into,
@@ -25,6 +24,7 @@ from ..refinement.subject_eye_assignment import (
     assign_eyes_union_to_lr,
 )
 from ..shared.json_safety import json_attr_safe
+from ..shared.keypoint_success_authority import resolve_keypoint_success_array
 from ..shared.mask_probability_encoding import decode_probability_values_from_attrs
 from ..shared.zarr_io import open_zarr_root
 
@@ -145,7 +145,9 @@ def _real_inputs(
             f"{kp_parent_name}/{kp_run_name}/keypoints_roi has {int(keypoints_arr.shape[0])} rows; "
             f"cannot slice rows {start}:{stop}."
         )
-    keypoint_success, success_dataset = _resolve_keypoint_success_array(kp_group, kp_run_name)
+    keypoint_success, success_dataset = resolve_keypoint_success_array(
+        kp_group, kp_run_name
+    )
     eye_left_idx, eye_right_idx = _resolve_eye_keypoint_indices(kp_group, kp_run_name)
 
     source_path = f"subject_mask_runs/{subject_run}/mask_probs_roi"

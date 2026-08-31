@@ -30,6 +30,10 @@ from ..shared.crop_row_rebase import (
 )
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.json_safety import json_attr_safe
+from ..shared.keypoint_success_authority import (
+    resolve_keypoint_success_array,
+    resolve_raw_keypoint_success_array,
+)
 from ..shared.mask_geometry import (
     DEFAULT_MIN_ELLIPSE_FOREGROUND_PIXELS,
     MASK_ELLIPSE_METHOD,
@@ -151,7 +155,6 @@ from .assemble_refined_subject_masks import (
     _has_available_component,
     _require_available_component,
     _resolve_eye_keypoint_indices,
-    _resolve_keypoint_success_array,
     _resolve_subject_keypoint_group,
 )
 from ..shared.refined_subject_eye_geometry import write_refined_subject_eye_geometry
@@ -2548,18 +2551,9 @@ def _resolve_eye_assignment_context(
         kp_group = canonical.context._run_group
         keypoint_run_name = keypoint_path.split("/", 1)[1]
         keypoints_roi = canonical.keypoints_roi.coordinate_node
-        success_dataset = "detection_success"
-        success_node = kp_group.get(success_dataset)
-        if success_node is None:
-            raise ValueError(
-                "Canonical raw-keypoint eye assignment requires the exact "
-                "detection_success leaf; fallback success aliases are unsupported."
-            )
-        keypoint_success = np.asarray(success_node[:])
-        if success_node is None or np.dtype(success_node.dtype) != np.dtype("bool"):
-            raise ValueError(
-                "Canonical keypoint success authority must use exact bool dtype."
-            )
+        keypoint_success, success_dataset = resolve_raw_keypoint_success_array(
+            kp_group, keypoint_run_name
+        )
         if np.asarray(keypoint_success).shape != (
             canonical.context.row_identity.leading_dimension,
         ):
@@ -2605,7 +2599,7 @@ def _resolve_eye_assignment_context(
         raise ValueError(
             f"Keypoint run {keypoint_run_name!r} missing keypoints_roi; cannot assign eyes_union."
         )
-    keypoint_success, success_dataset = _resolve_keypoint_success_array(
+    keypoint_success, success_dataset = resolve_keypoint_success_array(
         kp_group, keypoint_run_name
     )
     eye_keypoint_indices = _resolve_eye_keypoint_indices(kp_group, keypoint_run_name)

@@ -10,6 +10,7 @@ import zarr
 from fisheye.refinement import assemble_refined_subject_masks as assemble_mod
 from fisheye.refinement import refine_subject_masks as batch_mod
 from fisheye.shared.detect_reason_codec import read_reason_labels
+from fisheye.shared import keypoint_success_authority as success_mod
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
@@ -139,7 +140,9 @@ def test_resolve_keypoint_success_array_prefers_usable_keypoints() -> None:
     run.create_array("refined_success", data=np.asarray([True, True, True], dtype=bool))
     run.create_array("usable_keypoints", data=np.asarray([True, False, True], dtype=bool))
 
-    success, dataset_name = assemble_mod._resolve_keypoint_success_array(run, "refined_kp_001")
+    success, dataset_name = success_mod.resolve_keypoint_success_array(
+        run, "refined_kp_001"
+    )
 
     assert dataset_name == "usable_keypoints"
     np.testing.assert_array_equal(success, np.asarray([True, False, True], dtype=bool))
@@ -150,10 +153,85 @@ def test_resolve_keypoint_success_array_falls_back_for_legacy_runs() -> None:
     run = root.create_group("legacy_kp_001")
     run.create_array("refined_success", data=np.asarray([True, False], dtype=bool))
 
-    success, dataset_name = assemble_mod._resolve_keypoint_success_array(run, "legacy_kp_001")
+    success, dataset_name = success_mod.resolve_keypoint_success_array(
+        run, "legacy_kp_001"
+    )
 
     assert dataset_name == "refined_success"
     np.testing.assert_array_equal(success, np.asarray([True, False], dtype=bool))
+
+
+def _raw_v2_success_manifest(*, rows: int) -> dict[str, object]:
+    return {
+        "schema_id": success_mod.KEYPOINT_RUN_MANIFEST_SCHEMA_ID,
+        "payload": {
+            "logical_schema": {
+                "dimensions": {"n_instances": int(rows)},
+            }
+        },
+    }
+
+
+def test_resolve_keypoint_success_array_uses_raw_v2_pose_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = zarr.group()
+    run = root.create_group("raw_v2")
+    run.attrs["run_manifest"] = _raw_v2_success_manifest(rows=3)
+    run.create_array(
+        "pose_success",
+        data=np.asarray([True, False, True], dtype=bool),
+    )
+    monkeypatch.setattr(
+        success_mod,
+        "validate_keypoint_run_manifest",
+        lambda _manifest: (),
+    )
+
+    success, dataset_name = success_mod.resolve_raw_keypoint_success_array(
+        run, "raw_v2"
+    )
+
+    assert dataset_name == "pose_success"
+    np.testing.assert_array_equal(
+        success,
+        np.asarray([True, False, True], dtype=bool),
+    )
+
+
+def test_raw_v2_success_profile_does_not_fall_back_to_legacy_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = zarr.group()
+    run = root.create_group("raw_v2")
+    run.attrs["run_manifest"] = _raw_v2_success_manifest(rows=2)
+    run.create_array(
+        "detection_success",
+        data=np.asarray([True, True], dtype=bool),
+    )
+    monkeypatch.setattr(
+        success_mod,
+        "validate_keypoint_run_manifest",
+        lambda _manifest: (),
+    )
+
+    with pytest.raises(ValueError, match="forbidden legacy success aliases"):
+        success_mod.resolve_raw_keypoint_success_array(run, "raw_v2")
+
+
+def test_declared_unknown_success_profile_does_not_use_compatibility_alias() -> None:
+    root = zarr.group()
+    run = root.create_group("unknown_profile")
+    run.attrs["run_manifest"] = {
+        "schema_id": "palette.keypoint.future_unknown",
+    }
+    run.create_array(
+        "usable_keypoints",
+        data=np.asarray([True, True], dtype=bool),
+    )
+
+    with pytest.raises(ValueError, match="compatibility fallback is disabled"):
+        success_mod.resolve_keypoint_success_array(run, "unknown_profile")
 
 
 def _build_assembly_root() -> zarr.Group:
