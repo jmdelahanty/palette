@@ -901,12 +901,13 @@ should remain separated:
 | Membership and bundle-set schemas/builders/validators | `src/fisheye/analysis_workflows/validated_behavior_cohort.py` |
 | Historical/future roster and recording-bundle adapters | `src/fisheye/analysis_workflows/validated_behavior_cohort_adapters.py` |
 | Bundle fanout planner and CLI | `src/fisheye/utils/materialize_validated_behavior_bundle_cohort.py` |
-| New table contracts and Arrow schemas | `src/fisheye/analytics_exports/contracts.py`, `src/fisheye/analytics_exports/arrow_contracts.py` |
+| New table contracts and Arrow schemas | `src/fisheye/analytics_exports/validated_behavior_contracts.py` |
 | Bundle-backed source-to-table adapters | `src/fisheye/analytics_exports/validated_behavior_adapters.py` |
 | Shard and cohort export manifests/validators | `src/fisheye/analytics_exports/validated_behavior_cohort.py` |
 | Atomic publication reuse | `src/fisheye/analytics_exports/publication.py` |
-| LSF plan/submission frontend | `src/fisheye/cluster/` plus a thin tracked script in `scripts/` |
-| Lazy manifest-selected reader | `src/fisheye/analytics_exports/query.py` or a dedicated `dataset.py` |
+| Export plan/shard/finalize CLI | `src/fisheye/utils/materialize_validated_behavior_cohort_export.py` |
+| LSF plan/submission frontend | `scripts/submit_validated_behavior_cohort_export_bsub.sh` |
+| Lazy manifest-selected reader | `src/fisheye/analytics_exports/validated_behavior_dataset.py` |
 | Marimo/query integration | `src/fisheye/group_analytics_viewer/` and `apps/marimo/components/` |
 | Membership/bundle unit tests | `tests/unit/fisheye/test_validated_behavior_cohort.py` |
 | Adapter/schema/publication tests | `tests/unit/fisheye/test_validated_behavior_cohort_export.py` |
@@ -936,26 +937,74 @@ validated-behavior family. Readers must reject attempts to open these tables as
 the existing `palette.analytics_export` v3 contracts, and vice versa. A
 compatibly named legacy table never authorizes a legacy source adapter.
 
+### Implementation status addendum — 2026-08-31
+
+The first dependent implementation slice is deliberately metadata-first. It
+installs exact generic contracts for `cohort_recordings`, `recording_bundles`,
+and `recording_capabilities`; one immutable Parquet part and exact receipt per
+recording; deterministic receipt-barrier fan-in; global primary/foreign-key,
+Arrow, inventory, and row-count validation; copied shard receipts inside the
+published generation; manifest-last commit; and a manifest-selected
+Polars/Arrow reader. The LSF frontend renders one bounded member array and a
+serialized finalizer with an all-success dependency.
+
+This slice is the reusable publication mechanics, not the complete scientific
+cohort export. It does not yet read a recording bundle's internal source or
+scientific child bindings and does not yet emit the Phase-A behavior tables.
+Those tables must enter through separately contracted recording-scoped
+adapters. The installed core profile contains no GoodBatBadBat or chaser
+formula and cannot fall back to old v3 sources.
+
+Receipt-mode reader validation revalidates the small membership, bundle-set,
+plan, copied shard receipts, validation receipt, closed file inventory, file
+sizes, Parquet row counts, and exact Arrow/provenance footer contracts without
+opening source Zarrs or rehashing every Parquet payload. Full mode additionally
+rehashes all selected parts and repeats global key and foreign-key validation.
+Both modes reject unselected files and remain read-only.
+
+After this branch has green required CI and is deployed as one clean,
+commit-pinned cluster worktree, the core mechanical canary is invoked as:
+
+```bash
+scripts/py -m fisheye.utils.materialize_validated_behavior_cohort_export plan \
+  --membership /absolute/immutable/membership.json \
+  --bundle-set /absolute/immutable/bundle-set.json \
+  --export-run-id validated_behavior_core_canary_v1 \
+  --plan-output /absolute/operations/export-plan.json \
+  --shard-root /absolute/operations/shards \
+  --publication-root /absolute/publication/root
+
+scripts/submit_validated_behavior_cohort_export_bsub.sh \
+  --plan /absolute/operations/export-plan.json \
+  --palette-repo /absolute/commit-pinned/palette \
+  --max-active 12
+```
+
+Omitting `--submit` renders the exact shard-array and dependent-finalizer
+commands. The current core canary proves cohort mechanics and query access; it
+is not a substitute for the still-pending Phase-A scientific adapters.
+
 ## Staged implementation checklist
 
 ### Phase 0 — Contract freeze
 
-- [ ] Freeze schema IDs, versions, state/reason vocabularies, and canonical JSON
+- [x] Freeze schema IDs, versions, state/reason vocabularies, and canonical JSON
       digest rules.
 - [ ] Freeze the recording-scoped identity and missing-batch policies.
 - [ ] Freeze table names, grains, keys, provider dimensions, units, and
       capability policies for the compact first release.
-- [ ] Decide and record allowed zero-row semantics per table.
+- [x] Decide and record allowed zero-row semantics for the installed core
+      metadata tables (none may be empty).
 - [ ] Unify the two currently divergent recording-analysis-unit policy IDs
       before reusing the provider-epoch plotting receipt.
 - [ ] Freeze the exact selected track and bout signal/measurement-level policy
       for every admitted recording.
-- [ ] Add the contracts and negative unit tests before live publication code.
+- [x] Add the contracts and negative unit tests before live publication code.
 
 ### Phase 1 — Durable membership and bundle set
 
-- [ ] Implement the one-time schema-v5 historical task importer.
-- [ ] Implement the future frozen-cohort-v2 importer into the same membership
+- [x] Implement the one-time schema-v5 historical task importer.
+- [x] Implement the future frozen-cohort-v2 importer into the same membership
       interface.
 - [ ] Validate the 84-member GoodBatBadBat manifest and four invalid states.
 - [ ] Add deterministic per-recording bundle plans using the coherent receipt
@@ -970,32 +1019,33 @@ compatibly named legacy table never authorizes a legacy source adapter.
 - [ ] Implement identity, capability, source-binding, semantic-epoch,
       controller-trial, canonical-bout, association, escape-event,
       epoch-behavior, radial, spatial, and alignment adapters.
-- [ ] Emit one recording's independently validated Parquet parts and shard
-      receipt.
+- [x] Emit one recording's independently validated core-metadata Parquet parts
+      and shard receipt in deterministic test fixtures.
 - [ ] Compare every exported field and row count to its exact child.
-- [ ] Test interrupted writes, tampering, mismatched retry, and manifest-last
+- [x] Test interrupted writes, tampering, mismatched retry, and manifest-last
       publication.
-- [ ] Keep the canary selector-ineligible and outside the registry.
+- [x] Keep the implementation selector-ineligible and outside the registry.
 
 ### Phase 3 — Compact 80-recording cohort export
 
 - [ ] Deploy one clean commit-pinned cluster worktree after required CI is
       green.
-- [ ] Freeze the exact export plan and table roster.
-- [ ] Submit per-recording shards with bounded `max_active` concurrency.
-- [ ] Require the all-success barrier for required tables.
-- [ ] Serialize shard inventory and deterministic fan-in.
-- [ ] Run global key, foreign-key, capability, source-closure, row-count, Arrow,
+- [x] Implement an exact immutable export plan and closed table roster.
+- [x] Render per-recording shards with bounded `max_active` concurrency.
+- [x] Require the all-success barrier for the serialized finalizer.
+- [x] Serialize shard inventory and deterministic fan-in.
+- [x] Run global key, foreign-key, row-count, Arrow,
       and inventory validation.
-- [ ] Publish the immutable generation and validation receipt.
+- [x] Publish the immutable generation and validation receipt in test fixtures.
 - [ ] Preserve 84 membership/capability rows and exact contributing-member
       rosters for every scientific table.
 
 ### Phase 4 — Lazy consumers and first cohort figures
 
-- [ ] Implement the manifest-selected dataset/table handles.
+- [x] Implement the manifest-selected dataset/table handles.
 - [ ] Migrate one Core Behavior cohort view and one chaser cohort view.
-- [ ] Enforce bounded collection at the renderer boundary.
+- [x] Provide an explicit bounded collection and Arrow batch boundary; renderer
+      migration remains pending.
 - [ ] Add provider and capability filters without source rediscovery.
 - [ ] Validate numerical parity with the recording-local source adapters.
 - [ ] Record bundle/export/table/filter/aggregation/display provenance in every

@@ -74953,10 +74953,10 @@
     "direct_zarr_api_site_count": 657,
     "dynamic_or_unresolved_writer_site_count": 349,
     "manual_zarr_metadata_site_count": 1,
-    "parsed_writer_candidate_module_count": 232,
+    "parsed_writer_candidate_module_count": 233,
     "reader_required_array_declaration_count": 102,
     "resolved_writer_leaf_name_count": 630,
-    "scanned_python_module_count": 1642,
+    "scanned_python_module_count": 1646,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
