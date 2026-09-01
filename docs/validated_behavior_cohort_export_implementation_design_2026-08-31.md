@@ -3,7 +3,7 @@
 <!-- decision-meta
 status: implementation-ready-design
 created: 2026-08-31
-last_updated: 2026-08-31
+last_updated: 2026-09-01
 baseline_commit: 32150c90c376c0bcc398e0c7d141ace33515a4f9
 scope: immutable cohort membership, recording-bundle fanout, normalized
   cross-recording Parquet export, lazy consumers, validation, and staged
@@ -901,7 +901,9 @@ should remain separated:
 | Membership and bundle-set schemas/builders/validators | `src/fisheye/analysis_workflows/validated_behavior_cohort.py` |
 | Historical/future roster and recording-bundle adapters | `src/fisheye/analysis_workflows/validated_behavior_cohort_adapters.py` |
 | Bundle fanout planner and CLI | `src/fisheye/utils/materialize_validated_behavior_bundle_cohort.py` |
-| New table contracts and Arrow schemas | `src/fisheye/analytics_exports/validated_behavior_contracts.py` |
+| Generic core table contracts and Arrow schemas | `src/fisheye/analytics_exports/validated_behavior_contracts.py` |
+| Installed compact scientific contracts | `src/fisheye/analytics_exports/validated_behavior_phase_a_contracts.py` |
+| Closed profile registry and routing | `src/fisheye/analytics_exports/validated_behavior_profiles.py` |
 | Bundle-backed source-to-table adapters | `src/fisheye/analytics_exports/validated_behavior_adapters.py` |
 | Shard and cohort export manifests/validators | `src/fisheye/analytics_exports/validated_behavior_cohort.py` |
 | Atomic publication reuse | `src/fisheye/analytics_exports/publication.py` |
@@ -984,6 +986,55 @@ Omitting `--submit` renders the exact shard-array and dependent-finalizer
 commands. The current core canary proves cohort mechanics and query access; it
 is not a substitute for the still-pending Phase-A scientific adapters.
 
+### Phase-A implementation addendum — 2026-09-01
+
+The compact scientific profile is now installed as
+`validated_recording_behavior_phase_a_v1`. It contains the three generic core
+tables and all 19 Phase-A scientific tables listed above. The profile registry
+routes an immutable plan or manifest by its exact sealed profile ID and then
+validates the full installed contract suite. The default CLI profile remains
+core metadata for backward compatibility; selecting Phase A is explicit.
+
+The source adapters consume only the exact recording bundle and child bindings
+already selected by that bundle. They perform targeted receipt-aware reads and
+array checks, do not rediscover selectors, do not encode GoodBatBadBat protocol
+branches, and retain only the most recent recording context in memory. The
+canonical-bout adapter deduplicates repeated bout facts from the persisted
+bout-by-chaser relation only after proving equality across every chaser and
+binding the exact bundle-selected swim-bout run and lineage. Unregistered
+semantic-role code zero is exported as nullable unknown evidence rather than
+being assigned an invented label.
+
+A commit-pinned, read-only-source canary at Palette commit
+`66cbeb061a93752799e55329c46d04af29b032e6` completed the entire publication
+path for
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat`: 22 Parquet tables, 16,070
+scientific rows, global primary- and foreign-key validation, full part hashes,
+immutable manifest publication, and lazy-reader reopening. Its manifest digest
+is `42be5eb566c3585eb4df17363ec3151670b4a5bdb4f12b8d5aec8150d5895419`.
+The canary lives under `/tmp/validated_behavior_phase_a_canary_66cbeb06_v2`,
+is explicitly selector-ineligible, and is engineering evidence rather than the
+cohort publication.
+
+That canary exposed and closed one generic finalizer defect: foreign-key
+validation had incorrectly assumed all local foreign-key fields were also
+members of the local primary key. The validator now reads every declared local
+and target relationship column directly from receipt-selected Parquet parts.
+Regression coverage proves both a valid non-primary local reference and a
+missing target that still fails closed.
+
+The historical temporal-proxy policy and four invalid-member dispositions are
+now durable repository inputs:
+
+- `docs/diagnostics/goodbatbadbat_temporal_alignment_policy_2026-09-01.json`
+- `docs/diagnostics/goodbatbadbat_invalid_member_dispositions_2026-09-01.json`
+
+They preserve the exact bytes used by the successful 84-member read-only
+membership planning pass. The next cohort step must regenerate membership and
+all 80 recording bundles against the same current `c0ec5dc0...` projection-
+receipt generation; the older one-recording `c5eebd...` canary bundle cannot be
+mixed into that bundle set.
+
 ## Staged implementation checklist
 
 ### Phase 0 — Contract freeze
@@ -991,13 +1042,13 @@ is not a substitute for the still-pending Phase-A scientific adapters.
 - [x] Freeze schema IDs, versions, state/reason vocabularies, and canonical JSON
       digest rules.
 - [ ] Freeze the recording-scoped identity and missing-batch policies.
-- [ ] Freeze table names, grains, keys, provider dimensions, units, and
+- [x] Freeze table names, grains, keys, provider dimensions, units, and
       capability policies for the compact first release.
 - [x] Decide and record allowed zero-row semantics for the installed core
       metadata tables (none may be empty).
 - [ ] Unify the two currently divergent recording-analysis-unit policy IDs
       before reusing the provider-epoch plotting receipt.
-- [ ] Freeze the exact selected track and bout signal/measurement-level policy
+- [x] Freeze the exact selected track and bout signal/measurement-level policy
       for every admitted recording.
 - [x] Add the contracts and negative unit tests before live publication code.
 
@@ -1016,12 +1067,13 @@ is not a substitute for the still-pending Phase-A scientific adapters.
 
 ### Phase 2 — Compact export canary
 
-- [ ] Implement identity, capability, source-binding, semantic-epoch,
+- [x] Implement identity, capability, source-binding, semantic-epoch,
       controller-trial, canonical-bout, association, escape-event,
       epoch-behavior, radial, spatial, and alignment adapters.
 - [x] Emit one recording's independently validated core-metadata Parquet parts
       and shard receipt in deterministic test fixtures.
-- [ ] Compare every exported field and row count to its exact child.
+- [x] Compare every exported field and row count to its exact child for the
+      one-recording canary.
 - [x] Test interrupted writes, tampering, mismatched retry, and manifest-last
       publication.
 - [x] Keep the implementation selector-ineligible and outside the registry.

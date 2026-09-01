@@ -1,0 +1,29 @@
+{
+  "entries": [
+    {
+      "detail": "Raw semantic step bounds overlap or are not strictly ordered.",
+      "reason_code": "invalid_semantic_selection",
+      "recording_id": "2026-08-12T21-14-36Z_arena_1_goodbatbadbat"
+    },
+    {
+      "detail": "Raw semantic step bounds overlap or are not strictly ordered.",
+      "reason_code": "invalid_semantic_selection",
+      "recording_id": "2026-08-12T21-14-36Z_arena_2_goodbatbadbat"
+    },
+    {
+      "detail": "Raw semantic step bounds overlap or are not strictly ordered.",
+      "reason_code": "invalid_semantic_selection",
+      "recording_id": "2026-08-12T21-14-36Z_arena_3_goodbatbadbat"
+    },
+    {
+      "detail": "Raw semantic step bounds overlap or are not strictly ordered.",
+      "reason_code": "invalid_semantic_selection",
+      "recording_id": "2026-08-12T21-14-37Z_arena_4_goodbatbadbat"
+    }
+  ],
+  "entry_count": 4,
+  "record_sha256": "85a65490751eae3d95848699acaade965953797ab0277d45db608416b62d257e",
+  "schema_id": "palette.analysis.validated_behavior_invalid_member_dispositions",
+  "schema_version": 1,
+  "source_membership_record_sha256": "a03076b5c18aa10b32de60d8b6c50c9edd09584eb131b6e1412525be6fb4a84b"
+}

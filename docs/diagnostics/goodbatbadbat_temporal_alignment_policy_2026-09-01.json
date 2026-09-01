@@ -1,0 +1,10 @@
+{
+  "camera_exposure_reference": "unknown",
+  "camera_presentation_clock_transform_available": false,
+  "physical_presentation_verified": false,
+  "policy_id": "historical_controller_input_provenance_proxy_v1",
+  "presentation_timestamp_available": false,
+  "scientific_use_class": "exploratory_proxy",
+  "temporal_alignment_class": "controller_input_provenance_proxy",
+  "temporal_alignment_requirement": "input_provenance_proxy_allowed"
+}
