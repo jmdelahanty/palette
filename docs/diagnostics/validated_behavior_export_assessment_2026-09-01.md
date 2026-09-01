@@ -163,6 +163,28 @@ B9 (axial bearing). This export is the input the B-series was waiting for.
    red-avoidance; the twins are load-bearing exactly as the sesh3 bearing
    analysis predicted.
 
+### Role-contrasts extensions (b6e97ed3, groups A/B/C, 24/24 tests, /tmp/role-contrasts-v002)
+
+- **A: distance-binned role contrasts (training)** — aggressive vs inert at
+  matched bins: peak speed +29.5 mm/s at 8–16 mm (q=0.002) but −28.9 at
+  0–8 mm (freeze-at-contact); bout rate lower near the aggressive chaser at
+  every bin ≤50 mm; separation gain +3.2/+2.8 mm at 10–30 mm onset
+  (q=0.00025); near-onset turn-toward fraction +0.158 (q=0.0008).
+- **B: pre→post quantile shape** — tails move, medians don't: peak-speed
+  q10/q25 down, path q75/q90 up, tortuosity q50 +1.27 (q=0.0018).
+- **C: IBI shape with dropout censoring (the G3 test)** — IBI-level censored
+  fraction is 11–17% (vs 1.4–2.6% frame dropout: long pauses preferentially
+  span a bad frame). Verdict: the long-pause tail SURVIVES censoring
+  (~33% attenuated: frac>2s +0.019 q=0.003; frac>5s +0.011 q=0.012);
+  the median/mean IBI shift does NOT (q50 +0.006 q=0.43) — that part was
+  dropout artifact. q90 borderline (q=0.068).
+
+Updated synthesis: the persistent post-training phenotype is intermittent,
+punctuated locomotion — straighter bouts, pruned micro-bout tail, and a
+censoring-robust growth in multi-second pauses — with median-level IBI
+shifts attributable to tracking dropout, not behavior. Wall-conditioning
+remains the outstanding confound check; everything unclustered.
+
 ### New residue found by the twin-null work
 **The arena center is not published anywhere in the export** — the
 `reviewed_arena_and_scale` binding carries digests and zarr refs but no
