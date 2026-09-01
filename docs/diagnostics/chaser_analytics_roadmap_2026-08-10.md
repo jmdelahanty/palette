@@ -3,7 +3,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-08-10
+last_verified: 2026-09-01
 implementation: specified-only
 -->
 
@@ -332,6 +332,336 @@ accepted, the full protocol step changes from 1380 to 1500 s (+8.7% recording
 duration). New protocol identity/hash is required under the schedule-mode
 contract. Palette stimulus epochs must always obtain the observed step duration
 from imported metadata; neither duration is an analysis constant.
+
+## Learned-preference dynamics — movement relative to the chaser (added 2026-08-30)
+
+Source: design discussion 2026-08-30, following the integration gap audit
+(`chaser_integration_gap_audit_2026-08-29.md`). Status: specified-only. Items
+here are B-series so they do not collide with A0–A7; several are B-flavored
+slices of A1–A5 and should be built *through* those components, not beside
+them.
+
+### Observation driving this section
+
+Recent sessions show two things by eye: (1) fish navigate away from the dot
+*more* during the RANDOM_NON_CHASING wander phase than during pursuit, and
+(2) during active chase moments the fish tend to freeze. Working hypothesis:
+a **phase-dependent strategy switch** — active distance-keeping when escape is
+feasible (the dot is not pursuing) and freezing when pursued. This is
+consistent with the 2026-07 finding "response is freeze, not approach" for
+the chase epoch, and it predicts that the wander phase, not the chase, is
+where a learned aversive state is legible. Every item below is a test of
+some part of that hypothesis.
+
+### Design constraints (apply to every B item)
+
+- **Learned ≠ present.** Red-avoidance is innate (present pre-training). A
+  learning claim must be a *within-session change* in wander-phase behavior as
+  a function of chase experience: before the first chase vs after, and
+  dose-response against number of prior chases (4/session under schedule v2)
+  or prior escapes.
+- **Null = rotated virtual twins** (radius-matched by construction, as in
+  `chaser_bout_response`), reconstructed from stored rotation angles.
+  Thigmotaxis must not be able to masquerade as avoidance — the wall-mediator
+  lesson.
+- **Contrast arm = RANDOM_NON_CHASING**, not INERT. The A6 contrast is
+  currently wired to INERT (`group_statistics/goodcopbadcop.py:868`); fixing
+  that (gap audit Q7) is a prerequisite, not part of these items. The wander
+  phase is the best test bed because the dot approaches the fish *by chance*
+  there — unforced approach trials with no pursuit contingency.
+- **Censoring.** Track loss during immobility is censoring, not state exit;
+  implemented once in A0, consumed here. Freeze-related items (B5) are
+  hard-blocked on gap audit Q1 (freeze metric on `speed_smoothed_mm`).
+- **Inference unit = session** (8 sessions / 32 fish). Continuous per-fish
+  parameters are preferred over event counts for exactly this reason.
+- **Selection.** Any "post-first-escape" split conditions on the fish having
+  escaped. Report non-escaping fish as their own stratum; never drop them.
+
+### Items, ranked by payoff
+
+**B1 — Distance setpoint and restoring gain (build first).**
+During wander only, model fish radial velocity relative to the chaser as a
+function of current distance: `v_radial ~ k · (d − d*)`. `d*` is the preferred
+distance, `k` the restoring gain. Fit per fish × experience bin, and for each
+twin. The state of preference is two numbers: a learned aversion shows as
+`d*` and/or `k` increasing after the first chase; an innate one shows nonzero
+`k` that does not move with experience. Extends `chaser_response_regimes`
+(`fish_radial_velocity_mm_s` exists) and consumes A0's approach velocity.
+Prediction from the strategy-switch hypothesis: `k_wander > k_chase`, and
+`k_chase` may be ≤ 0 (freeze).
+
+**B2 — Responsiveness to chaser approach (lagged transfer).**
+Wander only: regress fish radial velocity on chaser approach velocity at lags
+0–2 s, vs twins. Peak gain and lag give a responsiveness curve — reacting to
+the dot's *motion* vs merely sitting far away. Tracked across trials this
+shows sensitization/habituation before escape counts can. Lagged regression
+only; no transfer entropy at this n.
+
+**B3 — Bout-onset hazard conditioned on chaser geometry (A1 generalized).**
+Discrete-time GLM: `P(bout onset) ~ distance + approach velocity + bearing +
+experience + (1|fish) + (1|session)`; same for escape-class bouts. Yields the
+trigger geometry (distance per se vs looming) and whether experience shifts
+the trigger outward. `statsmodels` is pinned. Build as A1; do not fork it.
+
+**B4 — Bout direction relative to chaser bearing (A3 slice).**
+Per wander bout: heading change signed relative to chaser bearing →
+away/toward/orthogonal, vs twins, split by experience.
+`turn_bias_excess_vs_virtual` in `chaser_bout_response` is the seed; missing
+are the experience split and the distribution shape (directed flight vs
+undirected startle). Prediction: directed away-bouts at larger distances after
+chase experience.
+
+**B5 — Freeze/swim kinetics conditioned on proximity (A2 slice).**
+Dwell-time distributions of immobile vs swimming as a function of chaser
+distance, wander vs chase, pre vs post first chase. This is the direct test of
+"freeze during pursuit": freeze onset distance and dwell length should differ
+between phases and may move with experience. Most exposed item to the
+raw-speed artifact — blocked on gap audit Q1 and must sit on
+`speed_smoothed_mm`.
+
+**B6 — Vigilance during wander.**
+Fraction of time with the chaser in the frontal ±45° vs rotated controls
+(`chaser_gaze_tracking` already computes this), split by experience. Cheap;
+just never sliced this way.
+
+**B7 — Escape kinematics across trials (A4 slice).**
+Per trial ordinal: latency from realized `CHASER_CHASE_MOTION_START`, peak
+speed, first-turn angle, recapture time. Requires the schedule v2 importer
+(`agents_todo/brief_chaser_schedule_importer.md`, still specified-only). The
+~10 s positioning cue is the anticipation probe: distance at onset over trials.
+
+**B8 — Per-fish phenotype (A5 slice).**
+Once B1–B5 yield per-fish parameters (`d*`, `k`, hazard slope, freeze dwell),
+cluster fish (escape-dominant vs freeze-dominant) and test whether wander-phase
+avoidance tracks phenotype. Prediction under the strategy-switch hypothesis:
+the two are *not* alternatives — the same fish should show high wander `k`
+and high chase freeze probability.
+
+**B9 — Axial bearing shift: front/back → lateral, pre vs post chase.**
+Observation (2026-08-30): plots suggest the fish's bearing to the dot moves
+from front/back toward the sides after chase experience, while spatial
+avoidance per se is hard to demonstrate. Quantify it as a change in the
+*second harmonic* of the bearing distribution, not the first:
+
+- Statistic: `⟨cos 2θ⟩` over bearing θ (0° front, ±180° behind, ±90°
+  lateral); +1 all front/back, −1 all lateral, 0 no axial structure.
+  Equivalents: `fraction_lateral_45` (uniform = 0.50; already computed by
+  `chaser_egocentric_bearing` / `chaser_gaze_tracking`) and the doubled-angle
+  mean resultant `R₂` with axis `φ₂` (≈0° front/back-dominant, ≈90°
+  lateral-dominant). Report `⟨cos θ⟩` (front vs behind) alongside so a lateral
+  shift is not confused with a front→behind shift.
+- Model form if wanted: `p(θ) ∝ exp(a₁cos θ + b₁sin θ + a₂cos 2θ + b₂sin 2θ)`
+  per fish × phase; `Δa₂` is the pre/post contrast.
+- Sampling unit: **bearing at bout onset**, one sample per bout, wander phase
+  only. Per-frame time is autocorrelated (anticonservative) and an immobile
+  fish's bearing is set by the dot's path around it, not by the fish. Split
+  by fish state as a secondary view.
+- Null: rotated virtual twins, reported as `⟨cos 2θ⟩_excess_vs_virtual`. A
+  wall-following fish has a centre-ish dot lateral by geometry alone; without
+  the twin excess, "more lateral post-chase" = "more thigmotaxis post-chase".
+- Decomposition: bearing = heading − angle-to-dot. Test within distance bins
+  (or heading and angle-to-dot separately) so an orientation change is
+  distinguished from a position change. The orientation claim is the one
+  where bearing shifts *within* a distance bin.
+- Inference: per-fish paired Δ pre vs post, session-clustered; sign test
+  across sessions is the floor. Watson U² on doubled angles per fish is
+  descriptive only.
+- Interpretation: lateral eyes → dot-to-the-side is monocular monitoring;
+  front is the binocular strike zone. A lateral shift reads as *vigilance*,
+  not spatial avoidance, which is consistent with avoidance being hard to
+  show. Left/right asymmetry is testable with eye angles
+  (`analyze_goodcopbadcop_lateral_gaze.py`).
+- Blocked on: A6 contrast fix (Q7); egocentric summary metrics reaching the
+  export table (gap audit addendum — declared in `DEFAULT_METRICS`, absent
+  from `analytics_exports/contracts.py:794-805`).
+
+### Status note (2026-09-01): A5/B8 substantially realized on goodbatbadbat
+
+The strategy-state wave (`strategy_state_analysis_2026-09-01.md`) delivers
+the A5/B8 phenotype axis (explorer vs punctuated; conversion predicted by
+escape failure with a disposition component), a reusable LORO window decoder
+(A4's anticipation probe machinery, pending the schedule importer), and a
+time-resolved twin-excess tool that found the pre-epoch avoidance ramp
+(relevant to B1/B6 baselines). B5 remains blocked on gap-audit Q1.
+
+### Order of work
+
+B1 + B2 first (B9 alongside — it needs only existing bearing outputs plus the bout-onset sampling): ~one-day analyses on existing wander-phase data over
+`chaser_response_regimes` + the relative frame, continuous readouts (no n=40
+needed), and together they answer the actual question — is the fish
+maintaining distance, and does the setpoint/gain move with experience? B3–B5
+go through the component lifecycle recipe (contract doc, twins, DAG,
+MetricSpec) rather than as scratch scripts; the gap audit showed scratch
+analyses become orphans.
+
+## Stimulus-geometry hypothesis and the `sesh3` "woah" session (added 2026-08-30)
+
+Status: hypothesis record, specified-only. Source: discussion 2026-08-30 plus a
+read-only inspection of `/nvme1/sesh3` and one current-configuration
+recording. Nothing here has been re-analyzed under current guardrails.
+
+### The hypothesis as stated
+
+An older dish configuration — projection surface *at* the dish base, no gap
+between the rendered dot and the fish — produced visually striking spatial
+avoidance (`~/woah.png`, "Fish 1"). The current configuration interposes a
+gap, so a dot rendered at the same physical size is farther from the fish.
+Hypothesis: effective stimulus distance is a contributing factor to the
+disappearance of spatial avoidance.
+
+### What the geometry actually predicts
+
+For eye-to-surface gap `g`, horizontal distance `d`, and dot area `A`, the
+dot's solid angle at the eye is approximately `Ω ≈ A·g / (d² + g²)^{3/2}`.
+
+- Near field (`d ≪ g`, where chases happen): `Ω ≈ A/g²`. Halving the gap
+  quadruples apparent size. The intuition holds here.
+- Far field (`d ≫ g`): `Ω ≈ A·g/d³` — a *larger* gap makes a distant dot
+  slightly bigger, because a near-zero gap shows the dot edge-on. "Same size,
+  farther away" is not a uniform shrink.
+- Elevation `atan(g/d)`: with no gap the dot lives near the fish's horizontal
+  plane (lateral/horizon field, where agents live); with a gap it is always in
+  the lower field (where substrate lives). Regionally specialized retina makes
+  this a different stimulus at matched angular size. Strongest candidate
+  mechanism.
+- Retinal velocity and looming rate scale as `1/distance`: same physical chase
+  speed → shallower approach signal through a gap. Fewer escapes, more
+  freezing is a natural prediction.
+- Swim depth adds to `g` in the current configuration and is untracked — an
+  unmeasured within-session covariate of stimulus strength.
+
+### What `sesh3` actually is (read-only inspection, 2026-08-30)
+
+`/nvme1/sesh3/2025-09-23T22-11-11Z_arena_4_chaser_arena4.h5` (+ `_analysis.h5`,
+`Cam2010096.mp4` 4512×4512 @ 60 fps, 45,753 frames, and a partial-pipeline
+zarr with detect/refined/keypoints/id_assignment and old-schema
+`analysis/{speed_runs,swim_bout_runs,chaser_fish_metrics,eye_angle_runs}`).
+Not in the canonical registry. Protocol `chaser_arena4`, dish `alpine`,
+rig `omnifin0`, 1 fish.
+
+| parameter | `sesh3` (2025-09-23) | current GoodCopBadCop (e.g. 2026-06-14, dish `palm2`) |
+|---|---|---|
+| `z_eff_mm` (effective eye-to-stimulus height) | **8.68** | **14.94** in protocol; `calculated_z_eff_mm` 16.73 (dish base 5 mm + projector base 4.76 mm + water 5 mm, eye height 8 mm) |
+| chaser radius | **3.0 mm** | 2.0 mm |
+| `loom_mode` | **3 — looming expansion during chase** (`l_over_v_ms` 30, `max_angle_deg` 70; `CHASER_LOOM_START` events logged) | 0 — no loom |
+| `initial_distance_mm` (chase starts this far from fish) | **4 mm** | 20 mm |
+| chase speed | 25 mm/s | 40 mm/s |
+| chase duration / retreat after chase | 3 s / yes (40 mm retreat) | 5 s / no |
+| training | 150 s, 12 chase sequences (~1 per 12 s) | 180 s, 12 chase sequences |
+| pre / post period | 300 s / 300 s | 600 s / 600 s |
+| chasers | 1 (aggressive) | 2 (aggressive + inert) |
+| random jump interval | 0.5 s | 2.0 s |
+| pre / post park position | top_left / top_right | top_left / bottom_right |
+
+Back-of-envelope near-field apparent size (`A/g²`, radius² / z_eff²):
+`sesh3` 9/8.68² ≈ 0.119 vs current 4/16.7² ≈ 0.014 — roughly **8× smaller**
+apparent dot in the current configuration when the chaser is close. So the gap
+effect is real in magnitude. But:
+
+### The confound that dominates
+
+`sesh3` was a **looming** chaser that began each chase **4 mm** from the fish
+and retreated afterward. Looming is the canonical zebrafish escape stimulus.
+The current protocol has no loom, starts chases at 20 mm, and does not
+retreat. Any of loom, start distance, dot size, or gap could account for a
+stronger response in `sesh3`; they changed together. The gap hypothesis is not
+separable from the loom hypothesis on existing data.
+
+### `woah.png` — why it is striking and why it is not yet evidence
+
+Fish 1, pre (0–5 min) / training (5–7.5) / post (7.5–12.5) occupancy with
+chaser occupancy beneath. Pre: fish everywhere, heavy wall occupancy, hottest
+spot adjacent to the parked chaser. Post: a single compact blob at
+centre-left, far from the (now bottom-right) chaser, off the wall.
+
+Caveats, in order of weight:
+
+1. **A compact hot blob in a time-occupancy map is either place preference or
+   parking.** Freezing after a chase produces exactly this picture; that is the
+   retracted immobility result in its original visual form. Occupancy cannot
+   distinguish the two.
+2. During training the fish's hot spot sits within ~600 px of the chaser's
+   home — the "chaser recaptures a frozen fish" signature.
+3. Post-training **thigmotaxis decreased**. Anxiety-like avoidance predicts
+   more wall time, not a mid-dish parking spot.
+4. Frozen fish are the ones the tracker loses; dropout would concentrate the
+   blob further.
+5. n = 1, analyzed before every current guardrail (raw speed, nominal
+   geometry, no twins, no clustering). Note the pre-period hot spot *next to*
+   the parked chaser: if the post blob is avoidance, the pre blob is approach,
+   and both need the same scrutiny.
+
+None of this makes the freeze reading correct; it makes the figure
+non-diagnostic.
+
+### Discriminating tests, in order
+
+1. **Lightweight re-analysis of `sesh3` from its existing zarr** — do NOT force
+   it into the registry (old schema, old protocol; the recording is a
+   hypothesis generator, not cohort data). Read refined keypoints/detections →
+   centroid track → `speed_smoothed_mm` over post: (a) immobile fraction and
+   longest immobile stretch, (b) bout count and distinct visits to the blob
+   zone vs pre, (c) occupancy sampled at bout onset, (d) distance-to-chaser vs
+   rotated-twin nulls, (e) valid-tracked fraction. Scratch script,
+   `--exploratory-only` watermark, results out of repo. If (a) says parked, the
+   striking figure is freezing and the gap hypothesis loses its motivating
+   observation. Also: how many fish in that old cohort look like Fish 1?
+2. **Metadata.** `dish_design` is already a registry column (`palm1`/`palm2`
+   across the 40 GoodCopBadCop recordings) and the H5 arena config carries
+   `dish_config` + `z_eff_*_mm`. Add `z_eff_current_mm` and `loom_mode` to the
+   registry stimulus-run rows so configuration comparisons are queries, not
+   archaeology.
+3. **Loom on/off arm first**, same dish, same batch, schedule v2 — it is the
+   cheaper and larger candidate. If loom restores the response, the gap
+   question is moot for the next experiment.
+4. **Parametric gap** (spacers, 2–3 values, counterbalanced) with a
+   **size-compensated arm** (dot scaled so near-field angular size matches the
+   no-gap condition). Size compensation restores angular size but not
+   elevation, so that arm separates the "smaller" mechanism from the
+   "different retinal region" mechanism. Readouts: escape rate, freeze
+   probability during chase, B1 setpoint/gain — not occupancy.
+
+Retinal-region story predicts a step-like elevation effect; looming-rate story
+predicts a smooth `1/distance` effect. Steps 3–4 together discriminate.
+
+Note on `sesh3` events: the H5 logs `CHASER_TARGET_VISIBLE` / `_HIDDEN` and
+`show_target_dot: true`, but per the experimenter (2026-08-30) no target marker
+was projected in real time in that recording — treat those event names as
+stale protocol bookkeeping, not a stimulus change between pre and post.
+
+### Preliminary recovery cohort (decision 2026-08-30: worth collecting)
+
+Goal: recover the `sesh3` effect under current guardrails and attribute it.
+The minimum design that attributes rather than merely recovers is **2 × 2**:
+dish {old no-gap config, current `palm` config} × loom {off, on}, with
+everything else held at the *current* protocol (2 mm dot, 20 mm start, no
+retreat, schedule v2 timing, aggressive + inert chasers). Priority order if
+arms must be dropped:
+
+1. **old dish + loom off** — the clean gap test (current stimulus, old
+   geometry). This arm alone answers "is it the gap?"
+2. **current dish + loom on** — the clean loom test. Cheapest, no hardware
+   change.
+3. old dish + loom on — the `sesh3`-like arm; recovers the picture, attributes
+   nothing on its own, but with 1–2 closes the interaction.
+4. current dish + loom off — is the existing 40-recording cohort; no new
+   collection needed.
+
+Sizing: continuous per-fish readouts (B1 setpoint/gain, escape rate over
+valid-tracked time, freeze probability during chase) rather than occupancy, so
+~8 fish per new arm across ≥2 sessions each is enough for a go/no-go, not a
+paper. Counterbalance session order across arms; same batch/age.
+
+Lock before the first session: `dish_design` (new name for the no-gap dish —
+do not reuse `alpine` unless it is physically the same dish), `z_eff_current_mm`
+and `loom_mode` recorded in the H5 arena/protocol snapshot (already are) and
+promoted to registry columns; a protocol hash per arm under the schedule-mode
+contract; swim depth is still untracked — note it as a known covariate.
+
+Pre-registered predictions: gap mechanism → arm 1 recovers escape rate and
+B1 gain; loom mechanism → arm 2 recovers them; both → arm 3 ≫ either. If arm 1
+shows a shift in freeze probability without a shift in wander-phase avoidance,
+that is the strategy-switch hypothesis from the B-series, not spatial learning.
 
 ### `sesh3` re-analysis verdict (2026-08-30, exploratory only, n=1)
 
