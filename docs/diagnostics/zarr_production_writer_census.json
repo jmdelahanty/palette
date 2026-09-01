@@ -33544,7 +33544,7 @@
       "enclosing_symbol": "fisheye.analysis_workflows.materializers.eye_angles:materialize_eye_angles",
       "file": "src/fisheye/analysis_workflows/materializers/eye_angles.py",
       "filters_expression": null,
-      "line": 2336,
+      "line": 3314,
       "parent_path_pattern": "<unresolved-parent>",
       "path_pattern": "<unresolved-parent>/<dynamic-arrays>",
       "receiver_expression": null,
@@ -33552,7 +33552,7 @@
       "shape_expression": null,
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-42fa4f923037599c",
+      "site_id": "writer-897798371023d0ee",
       "status": "current",
       "status_basis": "packaged Palette module without a maintenance marker",
       "surface_class": "production",
@@ -69741,7 +69741,7 @@
     "writer_wrapper_call_site_count": 985
   },
   "wrapper_analysis": {
-    "function_definition_count": 6217,
+    "function_definition_count": 6237,
     "writer_function_count": 242,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",

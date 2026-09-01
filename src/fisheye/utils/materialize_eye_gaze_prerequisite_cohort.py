@@ -46,7 +46,7 @@ TASK_SCHEMA_VERSION = 1
 PROOF_SCHEMA_ID = "palette.eye_gaze_prerequisite_assignment_proof"
 PROOF_SCHEMA_VERSION = 1
 RECEIPT_SCHEMA_ID = "palette.eye_gaze_prerequisite_materialization_receipt"
-RECEIPT_SCHEMA_VERSION = 1
+RECEIPT_SCHEMA_VERSION = 2
 
 REBINDING_RUN = "assignment_keypoint_rebinding_goodbatbadbat_gaze_20260831_v3"
 SUBJECT_SHAPE_RUN = "subject_shape_goodbatbadbat_gaze_20260831_v3"
@@ -756,6 +756,7 @@ def materialize_one(
 ) -> dict[str, Any]:
     from fisheye.analysis.gaze_convention_validation import validate_eye_angle_run
     from fisheye.analysis_workflows.materializers.eye_angles import (
+        apply_eye_angle_materialization_plan,
         materialize_eye_angles,
     )
     from fisheye.analysis_workflows.materializers.subject_shape import (
@@ -802,9 +803,11 @@ def materialize_one(
     scratch = scratch_root.expanduser().resolve()
     receipt_dir = receipt_root.expanduser().resolve() / str(entry["recording_id"])
     review_png = receipt_dir / "gaze_convention_review.png"
+    eye_admission_receipt = receipt_dir / "eye_angle_admission_receipt.json"
     for path in (
         receipt_dir / "subject_shape_result.json",
         receipt_dir / "eye_angle_result.json",
+        eye_admission_receipt,
         receipt_dir / "gaze_convention_numeric_validation.json",
         receipt_dir / "materialization_receipt.json",
         review_png,
@@ -848,7 +851,7 @@ def materialize_one(
         field="subject-shape candidate publication owner",
     )
     _write_exclusive(receipt_dir / "subject_shape_result.json", shape)
-    eye = materialize_eye_angles(
+    eye_plan = materialize_eye_angles(
         archive,
         scratch_root=scratch / "eye_angles",
         subject_shape_run=str(outputs["subject_shape_run"]),
@@ -861,10 +864,32 @@ def materialize_one(
         num_workers=1,
         native_threads=1,
         copy_backend=copy_backend,
-        apply=True,
+        apply=False,
+        admission_receipt_output=eye_admission_receipt,
+    )
+    if (
+        not isinstance(eye_plan, Mapping)
+        or eye_plan.get("status") != "planned"
+        or eye_plan.get("admission_receipt_path")
+        != str(eye_admission_receipt)
+    ):
+        _fail("Eye-angle admission receipt was not planned exactly.")
+    eye_admission_payload_digest = _digest(
+        eye_plan.get("admission_receipt_payload_digest"),
+        field="eye-angle admission payload digest",
+    )
+    eye = apply_eye_angle_materialization_plan(
+        eye_admission_receipt,
+        copy_backend=copy_backend,
     )
     if not isinstance(eye, Mapping) or eye.get("status") != "complete":
         _fail("Eye-angle candidate did not complete exactly.")
+    if (
+        eye.get("admission_receipt_path") != str(eye_admission_receipt)
+        or eye.get("admission_receipt_payload_digest")
+        != eye_admission_payload_digest
+    ):
+        _fail("Eye-angle candidate did not consume its exact admission receipt.")
     _write_exclusive(receipt_dir / "eye_angle_result.json", eye)
     numeric = validate_eye_angle_run(
         archive,
@@ -893,6 +918,13 @@ def materialize_one(
             "palette_commit": commit,
             "rebinding_manifest_sha256": canonical_json_sha256(inspected),
             "subject_shape_result_sha256": canonical_json_sha256(shape),
+            "eye_angle_admission_receipt_path": str(eye_admission_receipt),
+            "eye_angle_admission_receipt_sha256": _sha256_file(
+                eye_admission_receipt
+            ),
+            "eye_angle_admission_payload_digest": (
+                eye_admission_payload_digest
+            ),
             "eye_angle_result_sha256": canonical_json_sha256(eye),
             "numeric_validation_sha256": canonical_json_sha256(numeric),
             "review_png": str(review_png),
