@@ -159,8 +159,12 @@ B9 (axial bearing). This export is the input the B-series was waiting for.
    (near excess −0.0087, p50 excess +5.1 mm, p≈1e-12), weaker during training
    (pursuit pulls observed distance toward the twins), intermediate post;
    inert chasers show similar pre/post excess to aggressive — object-specific
-   but not role-specific outside training. Consistent with innate
-   red-avoidance; the twins are load-bearing exactly as the sesh3 bearing
+   but not role-specific outside training. Color note (registry-verified
+   2026-09-01): BOTH goodbatbadbat chasers are black [0,0,0,1] — so this is
+   innate avoidance of a black dot, generalizing the older red-cohort
+   precedent (GoodCopBadCop: aggressive red [1,0,0], inert BLUE [0.09,0,1] —
+   role was color-confounded there; goodbatbadbat's role contrast is
+   color-clean). The twins are load-bearing exactly as the sesh3 bearing
    analysis predicted.
 
 ### Role-contrasts extensions (b6e97ed3, groups A/B/C, 24/24 tests, /tmp/role-contrasts-v002)
