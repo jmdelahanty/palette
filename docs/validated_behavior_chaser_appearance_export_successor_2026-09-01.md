@@ -128,10 +128,13 @@ average RGBA values and present the result as a protocol-authored color.
 - [x] Make static and Marimo grouped renderers consume truthful aggregate
   colors and independent role glyphs. A role with multiple protocol colors is
   rendered neutrally rather than assigned an invented protocol color.
-- [ ] Run a real one-recording Phase-C canary from a clean commit-pinned
-  deployment.
-- [ ] Confirm the produced Parquet row and lazy reader query against the real
-  cohort authority.
+- [x] Run a real one-recording Phase-C canary from a clean commit-pinned
+  worktree.
+- [x] Confirm the produced schema-v2 Parquet rows against the real cohort
+  authority and shard receipt.
+- [ ] Confirm finalized-manifest lazy-reader reopening after a complete
+  Phase-C cohort publication. A one-member shard from an 84-member plan is
+  intentionally not finalizable by itself.
 - [ ] Pass every required CI check before merge or production use.
 - [ ] Publish a new Phase-C cohort generation if the feature is accepted.
 - [ ] Optionally add recording-level color overlays to grouped-statistics
@@ -141,7 +144,42 @@ average RGBA values and present the result as a protocol-authored color.
 
 ## Current status
 
-The implementation is an engineering candidate based on Palette commit
-`6a9fa41793fc5a946ed13a4b910ff87ae4016f82`. It is not yet merge-ready,
-selector-eligible, deployed, or a replacement for the completed Phase-B
-cohort publication.
+The implementation commit is
+`909d67bcadd4e8f2dc8a6ebca966534b2a14c5f9`, based on Palette commit
+`6a9fa41793fc5a946ed13a4b910ff87ae4016f82`. It remains an engineering
+candidate and is not yet merge-ready, selector-eligible, deployed, or a
+replacement for the completed Phase-B cohort publication.
+
+## Commit-pinned canary evidence — 2026-09-01
+
+The selector-ineligible plan
+`phase-c-chaser-appearance-canary-909d67bc` reused the exact 84-member
+membership and bundle-set authorities from the completed Phase-B cohort. Its
+plan digest is
+`a7d073d97f6c0d7358e5542d0d4c99deec7726335d86c1f122b436b9ee0baed5`.
+The plan safety record sets source/Zarr mutation, registry update, selector
+activation, production authority, and selector eligibility to false.
+
+Member 1,
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat`, completed all 30 table parts.
+The exact shard receipt digest is
+`f5a73b46ccb5035586495f8651343c2d6104f3bf4ca81dc2b580411ae101dcba`.
+The `chaser_occurrences` part contains two rows, uses Arrow schema version 2,
+has contract digest
+`b0fa11f3f70f2c90772596d83f16f20a9f76426afdb0b312a0a29e51ef9f7605`,
+and file digest
+`eee2329a0a44d7a0adb18888338d1f2fbb280908631ef39ebe4d3c4b7d8391cf`.
+
+Both exact protocol occurrences have RGBA `(0, 0, 0, 1)` and
+`experimental_color_hex = #000000`. Their roles remain different and
+independently encoded:
+
+- identity code 1: `aggressive`, Plotly `star`, Matplotlib `*`;
+- identity code 2: `inert`, Plotly `circle`, Matplotlib `o`.
+
+Both rows bind appearance projection
+`966103d63f0b1081b43c97ea1068cb9adc2ea7e1f05cbc6c1d3b4156453b45e6`
+and occurrence record
+`713540f2c9b634dd772a4f38b2040dbb5ef285f6103f9ecdac4c96eab7333067`.
+This real specimen directly demonstrates why color and behavior role cannot be
+collapsed into one channel.
