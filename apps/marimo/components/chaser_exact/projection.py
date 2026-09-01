@@ -185,6 +185,8 @@ class ExactChaserSelectionIdentity:
     projection_receipt_path: str | None
     projection_receipt_sha256: str | None
     verification_mode: str
+    validated_behavior_bundle_path: str | None = None
+    validated_behavior_bundle_sha256: str | None = None
 
 
 def build_exact_chaser_selection_identity(
@@ -194,6 +196,8 @@ def build_exact_chaser_selection_identity(
     analysis_id: str,
     display_parameter_version: str,
     projection_receipt_path: str | Path | None = None,
+    validated_behavior_bundle_path: str | Path | None = None,
+    validated_behavior_bundle_sha256: str | None = None,
 ) -> ExactChaserSelectionIdentity:
     """Build an immutable identity without opening scientific arrays."""
 
@@ -222,6 +226,25 @@ def build_exact_chaser_selection_identity(
         receipt_path = str(resolved)
         receipt_sha256 = str(receipt["record_sha256"])
         verification_mode = RECEIPT_VERIFICATION_MODE
+    behavior_bundle_path = None
+    behavior_bundle_sha256 = None
+    if validated_behavior_bundle_path is not None:
+        behavior_bundle_path = str(
+            Path(validated_behavior_bundle_path).expanduser().resolve()
+        )
+        behavior_bundle_sha256 = _digest(
+            validated_behavior_bundle_sha256,
+            label="validated recording-behavior bundle digest",
+        )
+        if receipt_path is None:
+            raise ExactChaserProjectionError(
+                "A validated behavior-bundle identity requires its exact "
+                "projection receipt."
+            )
+    elif validated_behavior_bundle_sha256 is not None:
+        raise ExactChaserProjectionError(
+            "Validated behavior-bundle digest lacks its canonical bundle path."
+        )
     return ExactChaserSelectionIdentity(
         archive_path=str(archive),
         run_path=run_path,
@@ -235,6 +258,8 @@ def build_exact_chaser_selection_identity(
         projection_receipt_path=receipt_path,
         projection_receipt_sha256=receipt_sha256,
         verification_mode=verification_mode,
+        validated_behavior_bundle_path=behavior_bundle_path,
+        validated_behavior_bundle_sha256=behavior_bundle_sha256,
     )
 
 
@@ -705,9 +730,7 @@ def load_exact_chaser_projection(
         required_array_names=(
             SPATIAL_OCCUPANCY_ARRAYS
             if receipt_mode and analysis_id == "spatial_occupancy"
-            else ()
-            if receipt_mode
-            else None
+            else () if receipt_mode else None
         ),
     )
     if (
@@ -897,9 +920,7 @@ def load_exact_chaser_projection(
             required_array_names=(
                 CONTROLLER_TRIAL_ARRAYS
                 if receipt_mode and analysis_id == "controller_trials"
-                else ()
-                if receipt_mode
-                else None
+                else () if receipt_mode else None
             ),
         )
     generalized_bout_response = None
@@ -920,9 +941,7 @@ def load_exact_chaser_projection(
             required_array_names=(
                 BOUT_RESPONSE_ARRAYS
                 if receipt_mode and analysis_id == "generalized_bout_response"
-                else ()
-                if receipt_mode
-                else None
+                else () if receipt_mode else None
             ),
         )
     escape_freeze = None
@@ -1035,6 +1054,12 @@ def load_exact_chaser_projection(
             chaser_appearance=chaser_appearance,
             projection_verification_mode=selection_identity.verification_mode,
             projection_receipt_sha256=(selection_identity.projection_receipt_sha256),
+            validated_behavior_bundle_path=(
+                selection_identity.validated_behavior_bundle_path
+            ),
+            validated_behavior_bundle_sha256=(
+                selection_identity.validated_behavior_bundle_sha256
+            ),
         ),
         chaser_appearance=chaser_appearance,
     )

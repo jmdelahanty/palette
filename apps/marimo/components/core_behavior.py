@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import time
+from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -34,6 +35,10 @@ from fisheye.analysis.tail_kinematics_io import (
     load_tail_kinematics_window,
 )
 from fisheye.analytics_exports.baseline import is_baseline_label
+from fisheye.analysis_workflows.validated_recording_behavior_source import (
+    ValidatedRecordingBehaviorSource,
+    ValidatedRecordingBehaviorSourceError,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
 from fisheye.visualization.eye_angle_timeseries import (
@@ -44,7 +49,6 @@ from fisheye.visualization.eye_angle_timeseries import (
 
 from .registry import InteractiveSpecOption
 from .common import png_bytes_to_markdown_image
-
 
 TRACK_KINEMATICS_RENDERER = "palette-track-kinematics-summary-v1"
 
@@ -87,6 +91,8 @@ class CoreBehaviorOption:
     source_paths: Mapping[str, str]
     attrs: Mapping[str, Any]
     interactive_option: InteractiveSpecOption | None = None
+    validated_bundle_path: str | None = None
+    validated_bundle_sha256: str | None = None
 
 
 def scan_export_parquet(
@@ -105,7 +111,10 @@ def scan_export_parquet(
 
 
 def is_core_behavior_option(option: InteractiveSpecOption | CoreBehaviorOption) -> bool:
-    return isinstance(option, CoreBehaviorOption) or option.renderer == TRACK_KINEMATICS_RENDERER
+    return (
+        isinstance(option, CoreBehaviorOption)
+        or option.renderer == TRACK_KINEMATICS_RENDERER
+    )
 
 
 def _normal_path(value: object) -> str:
@@ -118,7 +127,11 @@ def _source_paths(option: InteractiveSpecOption | CoreBehaviorOption) -> dict[st
     raw = option.spec.get("source_paths")
     if not isinstance(raw, Mapping):
         return {}
-    return {str(key): _normal_path(value) for key, value in raw.items() if _normal_path(value)}
+    return {
+        str(key): _normal_path(value)
+        for key, value in raw.items()
+        if _normal_path(value)
+    }
 
 
 def _core_option_from_spec(option: InteractiveSpecOption) -> CoreBehaviorOption:
@@ -136,6 +149,40 @@ def _core_option_from_spec(option: InteractiveSpecOption) -> CoreBehaviorOption:
         source_paths=source_paths,
         attrs=option.attrs,
         interactive_option=option,
+    )
+
+
+def validated_core_behavior_option(
+    source: ValidatedRecordingBehaviorSource,
+) -> CoreBehaviorOption:
+    """Describe the exact provider-motion track selected by one bundle."""
+
+    catalog = source.provider_motion_catalog()
+    source_paths: dict[str, str] = {"run": catalog.run_path}
+    aliases = {"source_acquisition_frame_index": "frame_indices"}
+    for path in catalog.sample_array_paths:
+        source_paths[aliases.get(path, path)] = f"{catalog.run_path}/{path}"
+    return CoreBehaviorOption(
+        zarr_path=source.analysis_zarr,
+        run_path=catalog.run_path,
+        run_name=catalog.run_path.rsplit("/", 1)[-1],
+        label=(
+            f"validated bundle | track {catalog.track_id} | "
+            f"{source.bundle_sha256[:12]}"
+        ),
+        track_id=catalog.track_id,
+        source_paths=MappingProxyType(source_paths),
+        attrs=MappingProxyType(
+            {
+                "source_mode": "validated_recording_behavior_bundle_v1",
+                "bundle_path": str(source.bundle_path),
+                "bundle_sha256": source.bundle_sha256,
+                "provider_motion_manifest_sha256": catalog.manifest_sha256,
+                "provider_motion_verification_digest": catalog.verification_digest,
+            }
+        ),
+        validated_bundle_path=str(source.bundle_path),
+        validated_bundle_sha256=source.bundle_sha256,
     )
 
 
@@ -198,7 +245,9 @@ def _track_source_paths_from_group(
     return paths
 
 
-def _track_run_groups(parent: Any, parent_path: str, *, depth: int = 0) -> list[tuple[str, Any]]:
+def _track_run_groups(
+    parent: Any, parent_path: str, *, depth: int = 0
+) -> list[tuple[str, Any]]:
     if parent is None or depth > 2:
         return []
     if "tracks" in parent:
@@ -241,7 +290,9 @@ def discover_core_behavior_options(
             if value:
                 latest_paths.add(f"{parent_path}/{value}")
         for run_path, run_group in _track_run_groups(parent, parent_path):
-            status = str(run_group.attrs.get("palette_run_completion_status") or "").lower()
+            status = str(
+                run_group.attrs.get("palette_run_completion_status") or ""
+            ).lower()
             if status and status != "complete":
                 continue
             tracks = run_group.get("tracks")
@@ -577,7 +628,9 @@ class CoreBehaviorSource:
             raise ValueError("Not a core-behavior source")
         self.zarr_path = Path(zarr_path)
         self.option = (
-            option if isinstance(option, CoreBehaviorOption) else _core_option_from_spec(option)
+            option
+            if isinstance(option, CoreBehaviorOption)
+            else _core_option_from_spec(option)
         )
         self.source_paths = dict(self.option.source_paths)
         self.track_id = int(self.option.track_id)
@@ -607,6 +660,12 @@ class CoreBehaviorSource:
             "sample_reason_code",
             "transition_valid",
             "transition_reason_code",
+            "position_source_valid",
+            "linear_sample_valid",
+            "linear_sample_reason_code",
+            "angular_sample_valid",
+            "angular_sample_reason_code",
+            "body_frame_source_valid",
         }
         return tuple(sorted(key for key in self.source_paths if key not in excluded))
 
@@ -615,11 +674,14 @@ class CoreBehaviorSource:
             return tuple(
                 key
                 for key in self.available_series
-                if key.startswith(SPEED_SERIES_PREFIXES) or any(token in key for token in PATH_SERIES_TOKENS)
+                if key.startswith(SPEED_SERIES_PREFIXES)
+                or any(token in key for token in PATH_SERIES_TOKENS)
             )
         if analysis_id == "heading":
             return tuple(
-                key for key in self.available_series if any(token in key for token in HEADING_SERIES_TOKENS)
+                key
+                for key in self.available_series
+                if any(token in key for token in HEADING_SERIES_TOKENS)
             )
         return ()
 
@@ -680,7 +742,8 @@ class CoreBehaviorSource:
             pass
         try:
             if self.baseline_interval() is not None and (
-                "positions_mm" in self.source_paths or "positions_px" in self.source_paths
+                "positions_mm" in self.source_paths
+                or "positions_px" in self.source_paths
             ):
                 available.append("baseline")
         except Exception:
@@ -779,7 +842,11 @@ class CoreBehaviorSource:
                 "vergence_centroid_deg_smoothed",
             ),
         }
-        selected = [name for name in preferences.get(str(representation), ()) if name in available]
+        selected = [
+            name
+            for name in preferences.get(str(representation), ())
+            if name in available
+        ]
         if len(selected) < 3:
             selected.extend(name for name in sorted(available) if name not in selected)
         return tuple(selected[:3])
@@ -837,7 +904,10 @@ class CoreBehaviorSource:
         if not candidates:
             return None
         candidate = candidates[0]
-        signal = next((item for item in candidate.signals if item.is_default), candidate.signals[0])
+        signal = next(
+            (item for item in candidate.signals if item.is_default),
+            candidate.signals[0],
+        )
         self._swim_bout_selection_cache = (candidate, signal)
         return self._swim_bout_selection_cache
 
@@ -868,6 +938,13 @@ class CoreBehaviorSource:
         except Exception:
             return None
 
+    def _projection_metadata(
+        self,
+        loaded_paths: Sequence[str],
+    ) -> Mapping[str, Any]:
+        del loaded_paths
+        return MappingProxyType({})
+
     def time_bounds(self) -> tuple[float, float]:
         if self._time_seconds_cache is not None:
             return _finite_bounds(self._time_seconds_cache)
@@ -894,7 +971,9 @@ class CoreBehaviorSource:
         # Only the coordinate is materialized to resolve a chunk-friendly
         # contiguous slice. Payload arrays are read with that slice below.
         if self._time_seconds_cache is None:
-            self._time_seconds_cache = np.asarray(time_array[:], dtype=np.float64).reshape(-1)
+            self._time_seconds_cache = np.asarray(
+                time_array[:], dtype=np.float64
+            ).reshape(-1)
         times = self._time_seconds_cache
         if times.size == 0:
             return times, slice(0, 0)
@@ -902,12 +981,16 @@ class CoreBehaviorSource:
         hi = float(stop_s) if stop_s is not None else float(times[-1])
         if hi < lo:
             lo, hi = hi, lo
-        finite_monotonic = np.isfinite(times).all() and bool(np.all(np.diff(times) >= 0))
+        finite_monotonic = np.isfinite(times).all() and bool(
+            np.all(np.diff(times) >= 0)
+        )
         if finite_monotonic:
             start_index = int(np.searchsorted(times, lo, side="left"))
             stop_index = int(np.searchsorted(times, hi, side="right"))
         else:
-            selected = np.flatnonzero(np.isfinite(times) & (times >= lo) & (times <= hi))
+            selected = np.flatnonzero(
+                np.isfinite(times) & (times >= lo) & (times <= hi)
+            )
             if selected.size == 0:
                 return times[:0], slice(0, 0)
             start_index = int(selected[0])
@@ -930,11 +1013,17 @@ class CoreBehaviorSource:
         loaded_paths: list[str] = [self.source_paths["time_seconds"]]
         frame_array = self._array(root, "frame_indices")
         if frame_array is not None:
-            frame_values = np.asarray(frame_array[row_slice], dtype=np.int64).reshape(-1)
+            frame_values = np.asarray(frame_array[row_slice], dtype=np.int64).reshape(
+                -1
+            )
             if frame_values.shape[0] == times.shape[0]:
                 columns["frame_index"] = frame_values
                 loaded_paths.append(self.source_paths["frame_indices"])
-        for key in tuple(series_keys) if series_keys is not None else self.series_for(analysis_id):
+        for key in (
+            tuple(series_keys)
+            if series_keys is not None
+            else self.series_for(analysis_id)
+        ):
             array = self._array(root, key)
             if array is None:
                 continue
@@ -942,6 +1031,19 @@ class CoreBehaviorSource:
             if values.ndim != 1 or values.shape[0] != times.shape[0]:
                 continue
             columns[key] = values.astype(np.float64, copy=False)
+            loaded_paths.append(self.source_paths[key])
+        validity_keys = {
+            "speed": ("linear_sample_valid", "linear_sample_reason_code"),
+            "heading": ("angular_sample_valid", "angular_sample_reason_code"),
+        }.get(analysis_id, ())
+        for key in validity_keys:
+            array = self._array(root, key)
+            if array is None:
+                continue
+            values = np.asarray(array[row_slice]).reshape(-1)
+            if values.shape[0] != times.shape[0]:
+                continue
+            columns[key] = values
             loaded_paths.append(self.source_paths[key])
         frame = pl.DataFrame(columns)
         bounds = _finite_bounds(times)
@@ -955,6 +1057,7 @@ class CoreBehaviorSource:
             row_count=frame.height,
             load_duration_ms=(time.perf_counter() - started) * 1000.0,
             note="Deferred Zarr projection; Polars transformations are lazy after array read.",
+            metadata=self._projection_metadata(tuple(dict.fromkeys(loaded_paths))),
         )
 
     def project_positions(
@@ -967,12 +1070,18 @@ class CoreBehaviorSource:
         started = time.perf_counter()
         root = self._root()
         times, row_slice = self._row_projection(root, start_s=start_s, stop_s=stop_s)
-        position_key = "positions_mm" if "positions_mm" in self.source_paths else "positions_px"
+        position_key = (
+            "positions_mm" if "positions_mm" in self.source_paths else "positions_px"
+        )
         position_array = self._array(root, position_key)
         if position_array is None:
             raise ValueError("Track-kinematics spec has no projected position array")
         positions = np.asarray(position_array[row_slice], dtype=np.float64)
-        if positions.ndim != 2 or positions.shape[1] < 2 or positions.shape[0] != times.shape[0]:
+        if (
+            positions.ndim != 2
+            or positions.shape[1] < 2
+            or positions.shape[0] != times.shape[0]
+        ):
             raise ValueError("Projected position array must have shape (time, >=2)")
         unit = "mm" if position_key.endswith("_mm") else "px"
         columns: dict[str, Any] = {
@@ -981,13 +1090,24 @@ class CoreBehaviorSource:
             "y": positions[:, 1],
             "unit": np.full(times.shape[0], unit, dtype=object),
         }
-        loaded_paths = [self.source_paths["time_seconds"], self.source_paths[position_key]]
+        loaded_paths = [
+            self.source_paths["time_seconds"],
+            self.source_paths[position_key],
+        ]
         frame_array = self._array(root, "frame_indices")
         if frame_array is not None:
-            frame_values = np.asarray(frame_array[row_slice], dtype=np.int64).reshape(-1)
+            frame_values = np.asarray(frame_array[row_slice], dtype=np.int64).reshape(
+                -1
+            )
             if frame_values.shape[0] == times.shape[0]:
                 columns["frame_index"] = frame_values
                 loaded_paths.append(self.source_paths["frame_indices"])
+        validity_array = self._array(root, "position_source_valid")
+        if validity_array is not None:
+            validity = np.asarray(validity_array[row_slice], dtype=bool).reshape(-1)
+            if validity.shape[0] == times.shape[0]:
+                columns["position_source_valid"] = validity
+                loaded_paths.append(self.source_paths["position_source_valid"])
         frame = pl.DataFrame(columns)
         bounds = _finite_bounds(times)
         return CoreBehaviorProjection(
@@ -1000,6 +1120,7 @@ class CoreBehaviorSource:
             row_count=frame.height,
             load_duration_ms=(time.perf_counter() - started) * 1000.0,
             note="Deferred position projection from Zarr; Polars transformations are lazy after array read.",
+            metadata=self._projection_metadata(tuple(dict.fromkeys(loaded_paths))),
         )
 
     def project_swim_bouts(
@@ -1025,12 +1146,22 @@ class CoreBehaviorSource:
                 lazy = lazy.filter(pl.col("end_s") >= float(start_s))
             if stop_s is not None:
                 lazy = lazy.filter(pl.col("start_s") <= float(stop_s))
-        bounds_columns = [name for name in ("start_s", "end_s", "peak_time_s") if name in schema]
+        bounds_columns = [
+            name for name in ("start_s", "end_s", "peak_time_s") if name in schema
+        ]
         if bounds_columns:
-            bounds_row = lazy.select(
-                pl.min_horizontal(*[pl.col(name) for name in bounds_columns]).min().alias("start"),
-                pl.max_horizontal(*[pl.col(name) for name in bounds_columns]).max().alias("stop"),
-            ).collect().row(0)
+            bounds_row = (
+                lazy.select(
+                    pl.min_horizontal(*[pl.col(name) for name in bounds_columns])
+                    .min()
+                    .alias("start"),
+                    pl.max_horizontal(*[pl.col(name) for name in bounds_columns])
+                    .max()
+                    .alias("stop"),
+                )
+                .collect()
+                .row(0)
+            )
             bounds = (float(bounds_row[0] or 0.0), float(bounds_row[1] or 0.0))
         else:
             bounds = (0.0, 0.0)
@@ -1091,9 +1222,13 @@ class CoreBehaviorSource:
     ) -> CoreBehaviorProjection:
         started = time.perf_counter()
         catalog = self.eye_angle_catalog(run_name)
-        selected_series = tuple(series_keys) if series_keys is not None else self.default_eye_series_for(
-            catalog.run_name,
-            representation,
+        selected_series = (
+            tuple(series_keys)
+            if series_keys is not None
+            else self.default_eye_series_for(
+                catalog.run_name,
+                representation,
+            )
         )
         if not selected_series:
             raise ValueError(
@@ -1109,9 +1244,18 @@ class CoreBehaviorSource:
             legacy_compatibility=self.legacy_eye_angle_compatibility,
         )
         frame = payload.dataframe
-        bounds = _finite_bounds(frame["time_s"].to_numpy()) if "time_s" in frame.columns else (0.0, 0.0)
+        bounds = (
+            _finite_bounds(frame["time_s"].to_numpy())
+            if "time_s" in frame.columns
+            else (0.0, 0.0)
+        )
         qa_summary: dict[str, Any] = {}
-        for qa_name in ("valid_frame", "valid_left", "valid_right", "major_axis_marginal"):
+        for qa_name in (
+            "valid_frame",
+            "valid_left",
+            "valid_right",
+            "major_axis_marginal",
+        ):
             if qa_name not in frame.columns:
                 continue
             values = frame.get_column(qa_name).cast(pl.Boolean, strict=False)
@@ -1175,8 +1319,7 @@ class CoreBehaviorSource:
             "valid": payload.valid,
         }
         angle_columns = tuple(
-            f"tail_angle_{index:02d}_deg"
-            for index in range(payload.angle_deg.shape[1])
+            f"tail_angle_{index:02d}_deg" for index in range(payload.angle_deg.shape[1])
         )
         for index, name in enumerate(angle_columns):
             columns[name] = payload.angle_deg[:, index]
@@ -1249,8 +1392,12 @@ class CoreBehaviorSource:
                     _search(first_frame, right=False),
                     _search(last_frame, right=True),
                 )
-                projected_frames = np.asarray(track_frames[row_slice], dtype=np.int64).reshape(-1)
-                projected_positions = np.asarray(root[position_path][row_slice], dtype=np.float64)
+                projected_frames = np.asarray(
+                    track_frames[row_slice], dtype=np.int64
+                ).reshape(-1)
+                projected_positions = np.asarray(
+                    root[position_path][row_slice], dtype=np.float64
+                )
                 if (
                     projected_positions.ndim == 2
                     and projected_positions.shape[0] == projected_frames.shape[0]
@@ -1264,11 +1411,15 @@ class CoreBehaviorSource:
                             "frame_index": projected_frames,
                             "x": projected_positions[:, 0],
                             "y": projected_positions[:, 1],
-                            "unit": np.full(projected_frames.shape[0], unit, dtype=object),
+                            "unit": np.full(
+                                projected_frames.shape[0], unit, dtype=object
+                            ),
                         }
                     ).lazy()
             elif frame.height:
-                companion_notes.append("No track-position coordinate is available for this source.")
+                companion_notes.append(
+                    "No track-position coordinate is available for this source."
+                )
         except Exception as exc:
             companion_notes.append(f"Position companion could not be loaded: {exc}")
 
@@ -1333,11 +1484,165 @@ class CoreBehaviorSource:
                 return BaselineInterval(
                     label=label,
                     start_s=float(distance.epoch_start_frame[index]) / distance.fps,
-                    stop_s=(
-                        float(distance.epoch_end_frame[index] + 1) / distance.fps
-                    ),
+                    stop_s=(float(distance.epoch_end_frame[index] + 1) / distance.fps),
                 )
         return None
+
+
+class ValidatedCoreBehaviorSource(CoreBehaviorSource):
+    """Exact Core Behavior projections routed through one validated bundle.
+
+    Schema v1 intentionally exposes only direct provider-motion frame
+    surfaces.  It never invokes the older independent bout, eye, tail, or
+    baseline discovery paths; those capabilities remain unavailable here until
+    their exact normalized loaders are routed through the bundle.
+    """
+
+    def __init__(self, source: ValidatedRecordingBehaviorSource) -> None:
+        if not isinstance(source, ValidatedRecordingBehaviorSource):
+            raise TypeError(
+                "ValidatedCoreBehaviorSource requires one validated bundle handle"
+            )
+        self.validated_behavior_source = source
+        option = validated_core_behavior_option(source)
+        catalog = source.provider_motion_catalog()
+        self._provider_array_by_key = {
+            key: path.removeprefix(f"{catalog.run_path}/")
+            for key, path in option.source_paths.items()
+            if key != "run" and path.startswith(f"{catalog.run_path}/")
+        }
+        super().__init__(source.analysis_zarr, option)
+
+    @property
+    def capability_states(self) -> Mapping[str, Mapping[str, Any]]:
+        return self.validated_behavior_source.capability_states()
+
+    def available_analysis_ids(self) -> tuple[str, ...]:
+        if self._available_analysis_ids_cache is None:
+            available: list[str] = []
+            if self.series_for("speed"):
+                available.append("speed")
+            if self.series_for("heading"):
+                available.append("heading")
+            if (
+                "positions_mm" in self.source_paths
+                or "positions_px" in self.source_paths
+            ):
+                available.append("position")
+            self._available_analysis_ids_cache = tuple(available)
+        return self._available_analysis_ids_cache
+
+    def _root(self) -> "ValidatedCoreBehaviorSource":
+        return self
+
+    def _array(self, root: Any, key: str):
+        del root
+        path = self._provider_array_by_key.get(key)
+        if path is None:
+            return None
+        projection = self.validated_behavior_source.provider_motion_track_projection(
+            (path,)
+        )
+        return projection.arrays[path]
+
+    def _projection_metadata(
+        self,
+        loaded_paths: Sequence[str],
+    ) -> Mapping[str, Any]:
+        catalog = self.validated_behavior_source.provider_motion_catalog()
+        prefix = f"{catalog.run_path}/"
+        consumed = tuple(
+            path.removeprefix(prefix)
+            for path in loaded_paths
+            if path.startswith(prefix)
+        )
+        records = {
+            path: {
+                "source_path": f"{catalog.run_path}/{path}",
+                "sha256": catalog.array_records[path]["sha256"],
+                "dtype": catalog.array_records[path]["dtype"],
+                "shape": tuple(catalog.array_records[path]["shape"]),
+            }
+            for path in consumed
+        }
+        return _freeze_core_metadata(
+            {
+                "source_mode": "validated_recording_behavior_bundle_v1",
+                "bundle_path": str(self.validated_behavior_source.bundle_path),
+                "bundle_sha256": self.validated_behavior_source.bundle_sha256,
+                "recording_id": self.validated_behavior_source.recording_id,
+                "provider_motion": {
+                    "run_path": catalog.run_path,
+                    "manifest_sha256": catalog.manifest_sha256,
+                    "verification_digest": catalog.verification_digest,
+                    "track_id": catalog.track_id,
+                    "track_row_start": catalog.track_row_start,
+                    "track_row_stop": catalog.track_row_stop,
+                },
+                "consumed_arrays": records,
+                "track_partition_arrays": {
+                    path: catalog.array_records[path]["sha256"]
+                    for path in ("track_ids", "track_row_offsets")
+                },
+                "validation_policy": (
+                    "manifest_digest_per_consumed_array_plus_exact_track_partition"
+                ),
+                "selector_resolution": False,
+                "capability_states": self.capability_states,
+            }
+        )
+
+    def _unsupported_exact_route(self, capability: str) -> None:
+        record = self.validated_behavior_source.capability_record(capability)
+        raise ValidatedRecordingBehaviorSourceError(
+            f"Exact Core Behavior route for {capability!r} is not implemented in "
+            f"schema-v1 adapter slice (bundle state={record['state']!r}); "
+            "independent selector discovery is prohibited."
+        )
+
+    def _swim_bout_selection(self) -> tuple[Any, Any] | None:
+        return None
+
+    def eye_angle_options(self) -> tuple[Any, ...]:
+        return ()
+
+    def eye_angle_catalog(self, run_name: str | None = None) -> Any:
+        del run_name
+        self._unsupported_exact_route("eye_angles")
+        raise AssertionError("unreachable")
+
+    def tail_kinematics_options(self) -> tuple[Any, ...]:
+        return ()
+
+    def tail_kinematics_catalog(self, run_name: str | None = None) -> Any:
+        del run_name
+        self._unsupported_exact_route("tail_kinematics")
+        raise AssertionError("unreachable")
+
+    def baseline_interval(self) -> BaselineInterval | None:
+        return None
+
+    def project_swim_bouts(self, **_kwargs: Any) -> CoreBehaviorProjection:
+        self._unsupported_exact_route("canonical_swim_bouts")
+        raise AssertionError("unreachable")
+
+    def project_eye_angles(self, **_kwargs: Any) -> CoreBehaviorProjection:
+        self._unsupported_exact_route("eye_angles")
+        raise AssertionError("unreachable")
+
+    def project_tail_kinematics(self, **_kwargs: Any) -> CoreBehaviorProjection:
+        self._unsupported_exact_route("tail_kinematics")
+        raise AssertionError("unreachable")
+
+
+def _freeze_core_metadata(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_core_metadata(item) for key, item in value.items()}
+        )
+    if isinstance(value, (tuple, list)):
+        return tuple(_freeze_core_metadata(item) for item in value)
+    return value
 
 
 def load_core_behavior_projection(
@@ -1381,7 +1686,9 @@ def load_core_behavior_projection(
     if analysis_id == "baseline":
         interval = source.baseline_interval()
         if interval is None:
-            raise ValueError("No canonical pre-period window is available in this recording")
+            raise ValueError(
+                "No canonical pre-period window is available in this recording"
+            )
         position = source.project_positions(
             start_s=interval.start_s,
             stop_s=interval.stop_s,
@@ -1393,9 +1700,7 @@ def load_core_behavior_projection(
             stop_s=interval.stop_s,
         )
         speed_columns_available = [
-            name
-            for name in speed.columns
-            if _is_physical_speed_column(name)
+            name for name in speed.columns if _is_physical_speed_column(name)
         ]
         preferred_speed_columns = (
             "speed_smoothed_mm",
@@ -1422,7 +1727,9 @@ def load_core_behavior_projection(
             analysis_id="baseline",
             frame=joined,
             columns=tuple(schema.names()),
-            source_paths=tuple(dict.fromkeys((*position.source_paths, *speed.source_paths))),
+            source_paths=tuple(
+                dict.fromkeys((*position.source_paths, *speed.source_paths))
+            ),
             start_s=position.start_s,
             stop_s=position.stop_s,
             row_count=position.row_count,
@@ -1504,7 +1811,14 @@ def build_core_behavior_output(
         value_columns = [
             name
             for name in frame.columns
-            if name not in {"time_s", "frame_index", "row_index"}
+            if name
+            not in {
+                "time_s",
+                "frame_index",
+                "row_index",
+                "linear_sample_reason_code",
+                "angular_sample_reason_code",
+            }
             and frame.schema[name].is_numeric()
             and frame.schema[name] != pl.Boolean
         ]
@@ -1523,9 +1837,11 @@ def build_core_behavior_output(
             title=(
                 "Speed and path traces"
                 if projection.analysis_id == "speed"
-                else "Eye angles and convergence"
-                if projection.analysis_id == "eye_angles"
-                else "Heading and turning traces"
+                else (
+                    "Eye angles and convergence"
+                    if projection.analysis_id == "eye_angles"
+                    else "Heading and turning traces"
+                )
             ),
             xaxis_title="Time (s)",
             yaxis_title="Value",
@@ -1542,12 +1858,17 @@ def build_core_behavior_output(
             if isinstance(qa_summary, Mapping) and qa_summary:
                 qa_stats = [
                     mo.stat(
-                        label=str(name).removesuffix("_fraction").replace("_", " ").title(),
+                        label=str(name)
+                        .removesuffix("_fraction")
+                        .replace("_", " ")
+                        .title(),
                         value=f"{100.0 * float(value):.1f}%",
                     )
                     for name, value in qa_summary.items()
                 ]
-                eye_pieces.extend([mo.md("### Eye-angle QA in selected window"), mo.hstack(qa_stats)])
+                eye_pieces.extend(
+                    [mo.md("### Eye-angle QA in selected window"), mo.hstack(qa_stats)]
+                )
             provenance = projection.metadata.get("provenance", {})
             if isinstance(provenance, Mapping) and provenance:
                 provenance_view = (
@@ -1555,7 +1876,9 @@ def build_core_behavior_output(
                     if hasattr(mo, "tree")
                     else mo.md(f"Provenance: `{dict(provenance)}`")
                 )
-                eye_pieces.extend([mo.md("### Persisted computation contract"), provenance_view])
+                eye_pieces.extend(
+                    [mo.md("### Persisted computation contract"), provenance_view]
+                )
             pngs = projection.metadata.get("persisted_pngs", ())
             eye_pieces.append(mo.md("### Persisted snapshots"))
             if pngs:
@@ -1610,11 +1933,7 @@ def build_core_behavior_output(
             figure.update_layout(height=600)
             if projection.analysis_id == "baseline":
                 speed_column = next(
-                    (
-                        name
-                        for name in frame.columns
-                        if _is_physical_speed_column(name)
-                    ),
+                    (name for name in frame.columns if _is_physical_speed_column(name)),
                     None,
                 )
                 pieces: list[Any] = [figure]
@@ -1634,13 +1953,33 @@ def build_core_behavior_output(
                         height=360,
                     )
                     summary = projection.frame.select(
-                        pl.col(speed_column).drop_nans().drop_nulls().count().alias("finite_speed_samples"),
-                        pl.col(speed_column).drop_nans().drop_nulls().mean().alias("mean_speed"),
-                        pl.col(speed_column).drop_nans().drop_nulls().median().alias("median_speed"),
-                        pl.col(speed_column).drop_nans().drop_nulls().max().alias("max_speed"),
+                        pl.col(speed_column)
+                        .drop_nans()
+                        .drop_nulls()
+                        .count()
+                        .alias("finite_speed_samples"),
+                        pl.col(speed_column)
+                        .drop_nans()
+                        .drop_nulls()
+                        .mean()
+                        .alias("mean_speed"),
+                        pl.col(speed_column)
+                        .drop_nans()
+                        .drop_nulls()
+                        .median()
+                        .alias("median_speed"),
+                        pl.col(speed_column)
+                        .drop_nans()
+                        .drop_nulls()
+                        .max()
+                        .alias("max_speed"),
                     ).collect()
                     pieces.extend(
-                        [speed_fig, mo.md("### Descriptive pre-period activity"), mo.ui.table(summary)]
+                        [
+                            speed_fig,
+                            mo.md("### Descriptive pre-period activity"),
+                            mo.ui.table(summary),
+                        ]
                     )
                 body = mo.vstack(pieces)
             else:
@@ -1660,7 +1999,9 @@ def build_core_behavior_output(
                 .drop("_row")
                 .collect()
             )
-        speed_column = next((name for name in speed_frame.columns if name != "time_s"), None)
+        speed_column = next(
+            (name for name in speed_frame.columns if name != "time_s"), None
+        )
         segmentation_figure = go.Figure()
         if speed_column is not None and speed_frame.height:
             segmentation_figure.add_trace(
@@ -1677,7 +2018,14 @@ def build_core_behavior_output(
             stops = frame["end_s"].to_numpy().astype(np.float64, copy=False)
             widths = stops - starts
             valid = np.isfinite(starts) & np.isfinite(stops) & (widths > 0)
-            bout_column = next((name for name in ("bout_id", "source_bout_id") if name in frame.columns), None)
+            bout_column = next(
+                (
+                    name
+                    for name in ("bout_id", "source_bout_id")
+                    if name in frame.columns
+                ),
+                None,
+            )
             bout_ids = (
                 frame[bout_column].to_numpy()
                 if bout_column is not None
@@ -1694,7 +2042,9 @@ def build_core_behavior_output(
                         name="Persisted swim bouts",
                         marker=dict(color="#f59e0b", line=dict(width=0)),
                         opacity=0.24,
-                        customdata=np.column_stack([bout_ids[valid], starts[valid], stops[valid]]),
+                        customdata=np.column_stack(
+                            [bout_ids[valid], starts[valid], stops[valid]]
+                        ),
                         hovertemplate=(
                             "bout=%{customdata[0]}<br>"
                             "start=%{customdata[1]:.3f}s<br>"
@@ -1718,7 +2068,9 @@ def build_core_behavior_output(
                 barmode="overlay",
                 height=480,
                 margin=dict(l=55, r=55, t=60, b=50),
-                legend=dict(orientation="h", yanchor="top", y=-0.14, xanchor="left", x=0.0),
+                legend=dict(
+                    orientation="h", yanchor="top", y=-0.14, xanchor="left", x=0.0
+                ),
             )
             pieces.append(segmentation_figure)
         distribution_specs = _swim_bout_distribution_specs(frame)
@@ -1745,8 +2097,31 @@ def build_core_behavior_output(
                     mo.hstack(distribution_figures),
                 ]
             )
-        pieces.extend([mo.md("### Persisted bout rows"), mo.ui.table(frame, selection=None, page_size=12)])
+        pieces.extend(
+            [
+                mo.md("### Persisted bout rows"),
+                mo.ui.table(frame, selection=None, page_size=12),
+            ]
+        )
         body = mo.vstack(pieces)
     else:
         body = mo.md(f"Unsupported analysis `{projection.analysis_id}`")
-    return mo.vstack([header, source_note, body])
+    exact_provenance = (
+        mo.vstack(
+            [
+                mo.md("### Validated source identity"),
+                (
+                    mo.tree(
+                        dict(projection.metadata),
+                        label="Bundle, provider-motion, and consumed-array bindings",
+                    )
+                    if hasattr(mo, "tree")
+                    else mo.md(f"Source identity: `{dict(projection.metadata)}`")
+                ),
+            ]
+        )
+        if projection.metadata.get("source_mode")
+        == "validated_recording_behavior_bundle_v1"
+        else mo.md("")
+    )
+    return mo.vstack([header, source_note, body, exact_provenance])

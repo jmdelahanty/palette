@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import apps.marimo.components.chaser_exact.provider as exact_provider_module
 from apps.marimo.components import chaser_exact_successors as facade
 from apps.marimo.components.analysis_catalog import (
     CHASER_CANDIDATE_PROVIDER,
@@ -1059,3 +1060,90 @@ def test_palette_explorer_uses_one_exact_provider_load_and_render_boundary() -> 
     assert "EXACT_CHASER_PROVIDER_ADAPTER.initial_source_label(source_labels)" in source
     assert "source_picker.value is not None" in source
     assert "no analysis arrays will load until" in source
+
+
+def test_epoch_selection_is_bound_to_validated_behavior_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "recording.zarr"
+    receipt = tmp_path / "projection.json"
+    bundle = tmp_path / "behavior.json"
+    calls: list[tuple[str, object]] = []
+
+    class _ValidatedSource:
+        bundle_path = bundle
+        bundle_sha256 = "b" * 64
+
+        def require_analysis_zarr(self, value):
+            calls.append(("archive", Path(value)))
+
+        def scientific_child(self, capability):
+            calls.append(("capability", capability))
+
+        def exact_projection_receipt_path(self, *, explicit_path=None):
+            calls.append(("receipt", explicit_path))
+            return receipt
+
+    captured = {}
+    expected = object()
+
+    def build_identity(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return expected
+
+    monkeypatch.setattr(
+        exact_provider_module,
+        "build_exact_chaser_selection_identity",
+        build_identity,
+    )
+
+    observed = EXACT_CHASER_PROVIDER_ADAPTER.selection_identity(
+        archive,
+        object(),
+        analysis_id="epoch_behavior",
+        projection_receipt_path=receipt,
+        validated_behavior_source=_ValidatedSource(),
+    )
+
+    assert observed is expected
+    assert calls == [
+        ("archive", archive),
+        ("capability", "epoch_behavior"),
+        ("receipt", receipt),
+    ]
+    assert captured["kwargs"]["projection_receipt_path"] == receipt
+    assert captured["kwargs"]["validated_behavior_bundle_path"] == bundle
+    assert captured["kwargs"]["validated_behavior_bundle_sha256"] == "b" * 64
+
+
+def test_nonmigrated_exact_route_does_not_claim_bundle_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = {}
+
+    def build_identity(*args, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        exact_provider_module,
+        "build_exact_chaser_selection_identity",
+        build_identity,
+    )
+    sentinel = SimpleNamespace(
+        bundle_path=tmp_path / "behavior.json",
+        bundle_sha256="b" * 64,
+    )
+
+    EXACT_CHASER_PROVIDER_ADAPTER.selection_identity(
+        tmp_path / "recording.zarr",
+        object(),
+        analysis_id="distance_traces",
+        validated_behavior_source=sentinel,
+    )
+
+    assert captured["validated_behavior_bundle_path"] is None
+    assert captured["validated_behavior_bundle_sha256"] is None

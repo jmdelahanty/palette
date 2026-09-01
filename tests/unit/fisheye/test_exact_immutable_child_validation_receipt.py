@@ -8,6 +8,7 @@ from fisheye.analysis_workflows.exact_immutable_child_validation_receipt import 
     _streaming_declared_array_values_sha256,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
+from fisheye.shared.zarr.columnar import read_columnar_array_as_declared
 
 
 class _Array:
@@ -45,6 +46,17 @@ def test_streaming_receipt_reconstructs_columnar_fixed_byte_identity() -> None:
     )
 
     assert observed == array_values_sha256(logical)
+
+    decoded = read_columnar_array_as_declared(
+        _Array(_encoded(logical, width=16)),
+        expected_dtype=logical.dtype.str,
+        expected_shape=logical.shape,
+    )
+    assert decoded.dtype == logical.dtype
+    assert decoded.shape == logical.shape
+    assert decoded.flags.writeable is False
+    np.testing.assert_array_equal(decoded, logical)
+    assert array_values_sha256(decoded) == observed
 
 
 def test_streaming_receipt_rejects_bytes_outside_declared_logical_width() -> None:

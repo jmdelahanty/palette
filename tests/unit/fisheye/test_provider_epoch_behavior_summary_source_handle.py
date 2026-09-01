@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
+import fisheye.analysis_workflows.provider_epoch_behavior_summary_source_handle as subject
 from apps.marimo.components.chaser_exact_epoch_behavior_discovery import (
     compatible_epoch_behavior_binding,
 )
@@ -25,8 +27,10 @@ from fisheye.analysis_workflows.protocol_semantic_chaser_selection import (
 )
 from fisheye.analysis_workflows.provider_epoch_behavior_summary_source_handle import (
     ProviderEpochBehaviorSummarySourceError,
+    load_provider_epoch_behavior_summary_source_handle,
     validate_provider_epoch_behavior_summary_metadata,
 )
+from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_CONTRACT,
@@ -44,6 +48,28 @@ class _Group(dict[str, Any]):
 
     def group_keys(self) -> tuple[str, ...]:
         return tuple(self)
+
+
+class _Array:
+    def __init__(self, values: np.ndarray) -> None:
+        self.values = np.asarray(values)
+        self.dtype = self.values.dtype
+        self.shape = self.values.shape
+        self.attrs = {
+            "palette_storage_schema_id": "palette.columnar_zarr_storage.v1",
+            "palette_storage_writer": "fisheye.shared.zarr.columnar.store_array",
+        }
+
+    def __getitem__(self, key: object) -> np.ndarray:
+        return self.values[key]
+
+
+def _encoded(values: np.ndarray, *, width: int) -> np.ndarray:
+    encoded = np.zeros((values.shape[0], width), dtype=np.uint8)
+    for index, value in enumerate(values):
+        payload = bytes(value).rstrip(b"\x00")
+        encoded[index, : len(payload)] = np.frombuffer(payload, dtype=np.uint8)
+    return encoded
 
 
 def _semantic() -> dict[str, Any]:
@@ -241,3 +267,59 @@ def test_semantic_plan_rejects_raw_speed_before_source_loading(tmp_path: Path) -
             swim_bout_run_name="bouts-v1",
             speed_level="raw",
         )
+
+
+def test_targeted_loader_reconstructs_logical_fixed_byte_column(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "recording.zarr"
+    archive.mkdir()
+    receipt_path = tmp_path / "receipt.json"
+    logical = np.asarray(
+        [b"chaser_pre", b"chaser_training", b"chaser_post"],
+        dtype="S32",
+    )
+    path = "per_epoch_fish/analysis_role"
+    attrs = _attrs()
+    original = attrs[MANIFEST_ATTR]
+    body = {
+        **{key: value for key, value in original.items() if key != "payload_digest"},
+        "array_declarations": [
+            {
+                "path": path,
+                "dtype": logical.dtype.str,
+                "shape": list(logical.shape),
+                "content_sha256": array_values_sha256(logical),
+            }
+        ],
+    }
+    manifest = {**body, "payload_digest": canonical_json_sha256(body)}
+    attrs[MANIFEST_ATTR] = manifest
+    attrs[MANIFEST_DIGEST_ATTR] = canonical_json_sha256(manifest)
+    run = _Group(
+        {path: _Array(_encoded(logical, width=16))},
+        attrs=attrs,
+    )
+
+    monkeypatch.setattr(subject, "open_zarr_root", lambda *_args, **_kwargs: run)
+    monkeypatch.setattr(
+        subject,
+        "read_exact_immutable_child_validation_receipt",
+        lambda *_args, **_kwargs: {
+            "record_sha256": "a" * 64,
+            "direct_metadata_inventory": {"inventory_sha256": "b" * 64},
+        },
+    )
+
+    handle = load_provider_epoch_behavior_summary_source_handle(
+        archive,
+        run_name="epoch-v2",
+        expected_recording_id="recording-1",
+        direct_validation_receipt=receipt_path,
+        required_array_paths=(path,),
+    )
+
+    np.testing.assert_array_equal(handle.array(path), logical)
+    assert handle.array(path).dtype == logical.dtype
+    assert handle.verified_array_paths == (path,)

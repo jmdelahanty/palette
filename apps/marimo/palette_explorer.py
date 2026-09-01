@@ -28,9 +28,14 @@ def _():
     from apps.marimo.components.core_behavior import (
         TRACK_KINEMATICS_RENDERER,
         CoreBehaviorSource,
+        ValidatedCoreBehaviorSource,
         build_core_behavior_output,
         discover_core_behavior_options,
         load_core_behavior_projection,
+        validated_core_behavior_option,
+    )
+    from fisheye.analysis_workflows.validated_recording_behavior_source import (
+        ValidatedRecordingBehaviorSource,
     )
     from apps.marimo.components.bout_kinematics import (
         available_bout_analysis_ids,
@@ -82,6 +87,8 @@ def _():
 
     return (
         CoreBehaviorSource,
+        ValidatedCoreBehaviorSource,
+        ValidatedRecordingBehaviorSource,
         EXACT_CHASER_PROVIDER_ADAPTER,
         PROVIDERS,
         Path,
@@ -129,11 +136,17 @@ def _():
         resolve_time_window_from_widgets,
         resolve_time_windows_from_multiselect,
         time,
+        validated_core_behavior_option,
     )
 
 
 @app.cell(hide_code=True)
-def _(Path, discover_protocol_recording_options, mo):
+def _(
+    Path,
+    ValidatedRecordingBehaviorSource,
+    discover_protocol_recording_options,
+    mo,
+):
     cli_args = mo.cli_args()
     zarr_path_raw = cli_args.get("zarr-path")
     if not zarr_path_raw:
@@ -163,6 +176,18 @@ def _(Path, discover_protocol_recording_options, mo):
         raise ValueError(
             "Exact-chaser projection receipt was not found: "
             f"{exact_chaser_receipt_path}"
+        )
+    validated_behavior_bundle_raw = cli_args.get("validated-behavior-bundle")
+    validated_behavior_source = (
+        ValidatedRecordingBehaviorSource(
+            Path(str(validated_behavior_bundle_raw)).expanduser().resolve()
+        )
+        if validated_behavior_bundle_raw
+        else None
+    )
+    if validated_behavior_source is not None:
+        validated_behavior_source.exact_projection_receipt_path(
+            explicit_path=exact_chaser_receipt_path
         )
     workspace_mode = str(cli_args.get("workspace") or "").strip().lower() in {
         "1",
@@ -199,6 +224,7 @@ def _(Path, discover_protocol_recording_options, mo):
         recording_options,
         recording_scope_label,
         seed_zarr_path,
+        validated_behavior_source,
         workspace_mode,
     )
 
@@ -245,6 +271,8 @@ def _(
     initial_run_path,
     recording_by_label,
     recording_picker,
+    validated_behavior_source,
+    validated_core_behavior_option,
 ):
     selected_recording = recording_by_label[recording_picker.value]
     zarr_path = selected_recording.zarr_path
@@ -259,7 +287,23 @@ def _(
         if not initial_renderer or str(initial_renderer) == TRACK_KINEMATICS_RENDERER
         else []
     )
-    return core_options, selected_recording, spec_options, zarr_path
+    selected_validated_behavior_source = None
+    if (
+        validated_behavior_source is not None
+        and validated_behavior_source.analysis_zarr == zarr_path.expanduser().resolve()
+    ):
+        selected_validated_behavior_source = validated_behavior_source
+        core_options = [
+            validated_core_behavior_option(validated_behavior_source),
+            *core_options,
+        ]
+    return (
+        core_options,
+        selected_recording,
+        selected_validated_behavior_source,
+        spec_options,
+        zarr_path,
+    )
 
 
 @app.cell(hide_code=True)
@@ -387,6 +431,7 @@ def _(source_by_label, source_picker):
 def _(
     CoreBehaviorSource,
     EXACT_CHASER_PROVIDER_ADAPTER,
+    ValidatedCoreBehaviorSource,
     analyses_for_provider,
     available_bout_analysis_ids,
     available_chaser_analysis_ids,
@@ -394,13 +439,33 @@ def _(
     mo,
     selected_provider,
     selected_spec,
+    selected_validated_behavior_source,
     zarr_path,
 ):
     core_source = None
     if selected_provider is None or selected_spec is None:
         available_ids = ()
     elif selected_provider.provider_id == "core_behavior":
-        core_source = CoreBehaviorSource(zarr_path, selected_spec)
+        if getattr(selected_spec, "validated_bundle_path", None) is not None:
+            if selected_validated_behavior_source is None:
+                raise ValueError(
+                    "Selected validated Core Behavior source has no current bundle handle"
+                )
+            if (
+                selected_spec.validated_bundle_path
+                != str(selected_validated_behavior_source.bundle_path)
+                or selected_spec.validated_bundle_sha256
+                != selected_validated_behavior_source.bundle_sha256
+            ):
+                raise ValueError(
+                    "Selected validated Core Behavior option belongs to an earlier "
+                    "bundle identity"
+                )
+            core_source = ValidatedCoreBehaviorSource(
+                selected_validated_behavior_source
+            )
+        else:
+            core_source = CoreBehaviorSource(zarr_path, selected_spec)
         available_ids = core_source.available_analysis_ids()
     elif selected_provider.provider_id == "bout_kinematics":
         available_ids = available_bout_analysis_ids(zarr_path, selected_spec)
@@ -954,6 +1019,7 @@ def _(
     selected_analysis_id,
     selected_provider,
     selected_spec,
+    selected_validated_behavior_source,
     zarr_path,
 ):
     exact_chaser_projection = None
@@ -971,6 +1037,7 @@ def _(
                 selected_spec,
                 analysis_id=selected_analysis_id,
                 projection_receipt_path=exact_chaser_receipt_path,
+                validated_behavior_source=selected_validated_behavior_source,
             )
         except Exception as exc:
             exact_chaser_projection_error = f"{type(exc).__name__}: {exc}"
@@ -1107,6 +1174,7 @@ def _(
     selected_analysis_id,
     selected_provider,
     selected_spec,
+    selected_validated_behavior_source,
     zarr_path,
 ):
     if selected_provider is None or selected_provider.provider_id not in {
@@ -1163,6 +1231,7 @@ def _(
             option=selected_spec,
             analysis_id=selected_analysis_id,
             projection_receipt_path=exact_chaser_receipt_path,
+            validated_behavior_source=selected_validated_behavior_source,
         )
     elif selected_analysis_id == "gaze_tracking" and chaser_gaze_view is not None:
         chaser_output = build_chaser_gaze_tracking_output(

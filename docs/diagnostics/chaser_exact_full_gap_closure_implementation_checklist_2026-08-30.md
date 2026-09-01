@@ -37,6 +37,48 @@ The fastest safe path is intentionally split into three kinds of work:
 3. add a new immutable successor only where identity-bearing rows or samples
    are currently discarded.
 
+## Validated Core Behavior composition addendum — 2026-08-31
+
+The full-profile work in this checklist must not become a plot-specific or
+monolithic data authority. The recording-level composition direction is now
+documented in
+[`validated_recording_behavior_composition_design_2026-08-31.md`](../validated_recording_behavior_composition_design_2026-08-31.md).
+
+That design distinguishes exact source authorities, independently governed
+scientific successors, validation receipts, composition receipts, and
+render-only projections. It proposes one small digest-bound validated
+recording-behavior bundle that can expose Core Behavior and exact chaser
+capabilities to any number of visualization adapters without copying their
+scientific arrays.
+
+For the current GoodBatBadBat workflow, the intended initial composition uses
+the exact chaser-bound keypoint-provider motion and its same-track swim bouts as
+the corresponding Core Behavior source, while retaining detection centroids as
+a separately identified first-class position provider. Eye, gaze, and tail
+remain optional exact capabilities; they are never attached through an
+independent `latest` choice. The 2026-08-31 historical gaze batch remains
+unaccepted because of upstream segmentation quality and must appear as a scoped
+unavailable/review-required capability rather than invalidating unrelated
+chaser products.
+
+Phase 8 below should therefore consume or extend that generic composition
+interface. The existing full-chaser-profile applicability envelope remains a
+readiness/module-status view over independently sealed products; it must not
+duplicate their arrays, replace child receipts, or become a new numerical
+source.
+
+The first interface slice is now implemented in
+`fisheye.analysis_workflows.validated_recording_behavior_bundle`, with the
+explicit-input planner at
+`fisheye.utils.plan_validated_recording_behavior_bundle`. A read-only
+GoodBatBadBat smoke resolved 10 exact source bindings, 11 scientific children,
+17 complete capabilities, and four explicitly unavailable mask/gaze/tail
+capabilities. The final smoke was in-memory only and also proved exact
+direct/consolidated metadata equivalence for the provider-motion subtree. An
+earlier `/tmp` specimen predates that binding and is obsolete diagnostic
+evidence; durable materialization, consumer migration, commit, required CI,
+and any deployment or promotion remain unchecked work.
+
 ## Implementation addendum — 2026-08-30
 
 The first reader-only slice is implemented locally on

@@ -27,6 +27,7 @@ from fisheye.analysis_workflows.protocol_semantic_chaser_selection import (
     CHASER_WINDOW_ROLES,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
+from fisheye.shared.zarr.columnar import read_columnar_array_as_declared
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
@@ -39,7 +40,6 @@ from fisheye.shared.zarr_run_completion import (
     RUN_NAME_ATTR,
     RUN_STATUS_COMPLETE,
 )
-
 
 VERIFICATION_MODE = "receipt_bound_targeted_array_rehash_v1"
 _HANDLE_SEAL = object()
@@ -415,16 +415,16 @@ def load_provider_epoch_behavior_summary_source_handle(
     for path in sorted(requested):
         declaration = declarations[path]
         try:
-            values = np.asarray(run[path][...])
+            values = read_columnar_array_as_declared(
+                run[path],
+                expected_dtype=str(declaration["dtype"]),
+                expected_shape=tuple(int(value) for value in declaration["shape"]),
+            )
         except Exception as exc:
             raise ProviderEpochBehaviorSummarySourceError(
                 f"Cannot read semantic epoch summary array {path!r}: {exc}"
             ) from exc
-        if (
-            values.dtype.str != declaration.get("dtype")
-            or list(values.shape) != declaration.get("shape")
-            or array_values_sha256(values) != declaration.get("content_sha256")
-        ):
+        if array_values_sha256(values) != declaration.get("content_sha256"):
             _fail(f"Semantic epoch summary array {path!r} changed.")
         arrays[path] = values
     return ProviderEpochBehaviorSummarySourceHandle(
@@ -437,9 +437,11 @@ def load_provider_epoch_behavior_summary_source_handle(
         verification_mode=(
             "deep_audit"
             if deep_audit
-            else VERIFICATION_MODE
-            if required_array_paths is not None
-            else "metadata_only"
+            else (
+                VERIFICATION_MODE
+                if required_array_paths is not None
+                else "metadata_only"
+            )
         ),
         verified_array_paths=tuple(sorted(arrays)),
         receipt_digest=receipt_digest,
