@@ -14,6 +14,7 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.metadata_equivalence import ZarrMetadataEquivalenceError
 from tests.unit.fisheye.test_eye_angle_materializer import (
     _accept_synthetic_subject_shape_publication,
+    _apply_receipt_bound_eye_angles,
     _build_source,
     _materialize_storage_candidate,
     mod as materializer,
@@ -147,7 +148,7 @@ def eye_angle_pair(tmp_path_factory: pytest.TempPathFactory) -> Path:
             "emit_eye_angle_stage_completion",
             lambda *args, **kwargs: False,
         )
-        result = materializer.materialize_eye_angles(
+        result = _apply_receipt_bound_eye_angles(
             archive,
             scratch_root=directory / "source-scratch",
             subject_shape_run="shape_1",
@@ -311,6 +312,12 @@ def test_dependency_lineage_coordinated_rehash_is_rejected(
         lambda receipt: receipt["materialization"]["compute"].__setitem__(
             "writer", "hostile.writer"
         ),
+        lambda receipt: receipt["materialization"][
+            "staged_input_worker_attestation"
+        ].__setitem__("record_sha256", "0" * 64),
+        lambda receipt: receipt["materialization"][
+            "input_payload_validation"
+        ].__setitem__("complete_worker_chunk_set", False),
         lambda receipt: receipt["materialization"]["source_staging"].__setitem__(
             "unexpected_authority", True
         ),
@@ -360,7 +367,7 @@ def test_atomic_publication_coordinated_rehash_is_rejected(
         ValueError,
         match=(
             "publication|physical-copy|validation|materialization|staging|"
-            "staged-input|source identity|source-revision|logical-input role"
+            "staged-input|worker|source identity|source-revision|logical-input role"
         ),
     ):
         benchmark.require_workload(tampered)

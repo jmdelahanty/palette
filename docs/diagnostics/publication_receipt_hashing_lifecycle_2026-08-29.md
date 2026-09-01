@@ -400,11 +400,9 @@ Receipt-backed apply is fail-closed:
 The self-contained `apply_eye_angle_materialization_plan` API is the shared
 consumer. The eye-gaze prerequisite cohort now writes the receipt after its
 subject-shape candidate exists, applies that exact receipt, and binds both the
-receipt-file digest and payload digest into its version-2 cohort receipt. The
-older direct materializer API remains available for compatibility and treats
-any repeated receipt-bound arguments only as exact assertions.
+receipt-file digest and payload digest into its version-2 cohort receipt.
 
-This optimization removes the *second plan construction* when a prior
+The initial 2026-08-31 optimization removes the *second plan construction* when a prior
 approval/dry-run is part of the workflow. It does not claim that metadata reads
 are zero, and it does not remove the exact staged-payload verification before
 the scientific writer or the closing source audit around publication. A
@@ -423,9 +421,66 @@ independent of target identity becomes a workflow requirement.
 The 2026-08-31 camera-2010094 canary at commit `1b6d14c0` was a one-shot apply
 and did not use this new cross-invocation path. It remains the baseline: its
 reported plan phase was about 18m47s, followed by about 18m45s of staged-input
-validation. A receipt-backed canary is still required after the implementation
-commit passes CI; its telemetry must report receipt reuse and zero calls to the
-full plan, candidate-admission, and staged-receipt builders.
+validation.
+
+The receipt-backed camera-2010094 canary at merged commit `68d4edbd` completed
+successfully on 2026-09-01. It consumed the exact sealed receipt with payload
+digest `69bcd22355e6e6c4349b9ac0f36c943ef25b8200426e5c770a5dc0a2be3c34d8`,
+published a valid selector-visible run, and updated the registry. Its 64m38s
+wall time also isolated the remaining redundancy: about 18m42s before staging,
+about 18m47s after the 0.99s physical stage copy, and 18m33.755s in
+`post_rename_binding`. Scientific computation took 448.863s and the access-aware
+sharding transform took 5.971s. The three approximately equal serial intervals
+are decoded source audits, not planning, copying, sharding, or eye-angle
+computation. They are the production calls retired by the follow-up below.
+
+### Worker-consumption receipt and old-path retirement (2026-09-01)
+
+The follow-up implementation removes the remaining production ambiguity and
+the repeated decoded scans:
+
+- `materialize_eye_angles(..., apply=True)` now requires an exact admission
+  receipt at the shared Python API boundary, before planning or scratch
+  creation. The CLI inherits that gate instead of maintaining a separate
+  policy check.
+- The storage-candidate executor now plans, seals, and consumes the same
+  admission receipt. No maintained source caller can execute a fresh-plan
+  one-shot apply.
+- Receipt construction reads each worker chunk once. During that owned-snapshot
+  pass it emits the per-chunk receipts and streams full-array canonical digests
+  back to the sealed subject-shape and keypoint authorities. The immediate
+  second full decoded pass and the later planner-only frame-index rescan are
+  removed.
+- Staging, startup, and closing checks use the same receipt-bound resolver in
+  metadata/authority/inventory mode. They validate lifecycle, closed topology,
+  paths, shapes, dtypes, nested authorities, metadata generations, and receipt
+  seals without decoding the scientific payload again.
+- Every compute worker hashes the owned C-order snapshot it actually consumes
+  before scientific computation. Publication requires a sealed attestation for
+  the exact complete ordered receipt-chunk set; missing, duplicate, reordered,
+  or foreign receipts fail closed.
+- A full decoded source scrub remains available only through the explicitly
+  named diagnostic `audit_eye_angle_source_revision_full_payload`. The layout
+  benchmark invokes that diagnostic deliberately; normal production does not.
+
+The removal boundary is deliberate: diagnostic capability remains available,
+but routine callers cannot opt back into it with a mode flag. The old
+fresh-plan one-shot executor call and the three routine full-scan invocations
+are absent from maintained execution paths; unreceipted apply is rejected at
+the shared Python API before planning or scratch creation.
+
+This is not a weaker copy-integrity policy. A mutation before a worker reads its
+chunk differs from the receipt and stops the workload. A mutation after that
+worker has copied, hashed, and computed from its immutable in-memory snapshot
+does not invalidate the already-proven scientific result. Partial output never
+becomes complete or selector-visible because the complete worker attestation is
+required by local validation and every publication gate.
+
+The acceptance boundary is guarded by tests that prove one receipt-builder
+snapshot read per chunk, exact streaming-digest parity with the canonical array
+digest grammar, restored-mtime staged corruption rejection in the worker,
+complete worker-set enforcement, real materializer publication with persisted
+attestation, and rejection of unreceipted apply before planning.
 
 ## Compatibility and migration
 
