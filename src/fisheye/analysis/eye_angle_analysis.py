@@ -39,7 +39,10 @@ from fisheye.shared.provenance_attrs import (
     build_source_keypoints_attrs,
     resolve_source_keypoints_run,
 )
-from fisheye.shared.coordinate_frame_record import array_values_sha256
+from fisheye.shared.coordinate_frame_record import (
+    ARRAY_PAYLOAD_CANONICALIZATION,
+    array_values_sha256,
+)
 from fisheye.shared.coordinate_identity import (
     INSTANCE_KEY_ARRAY_REF,
     INSTANCE_KEY_MODE,
@@ -196,6 +199,13 @@ _EYE_ANGLE_WORKER_LOGICAL_INPUTS = (
     "detection_success",
     "instance_key",
     "source_acquisition_frame_index",
+)
+EYE_ANGLE_WORKER_INPUT_ATTESTATION_SCHEMA_ID = (
+    "palette.eye_angle_worker_input_attestation"
+)
+EYE_ANGLE_WORKER_INPUT_ATTESTATION_SCHEMA_VERSION = 1
+EYE_ANGLE_WORKER_INPUT_ATTESTATION_PROFILE = (
+    "complete_receipt_chunk_set_verified_in_worker_memory_v1"
 )
 EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL = "canonical_subject_shape_assignment"
 EYE_ANGLE_KEYPOINT_SOURCE_REFINED_DIAGNOSTIC = (
@@ -3898,6 +3908,57 @@ def _snapshot_payload_record(values: np.ndarray) -> dict[str, Any]:
     }
 
 
+class _StreamingArrayValuesSha256:
+    """Compute the canonical full-array digest from ordered row snapshots."""
+
+    def __init__(self, *, dtype: Any, shape: Sequence[int]) -> None:
+        self._dtype = np.dtype(dtype)
+        self._shape = tuple(int(value) for value in shape)
+        if not self._shape or any(value < 0 for value in self._shape):
+            raise ValueError("Streaming array digest requires a row-major shape.")
+        if self._dtype.hasobject:
+            raise ValueError("Streaming array digest cannot use object dtype.")
+        header = {
+            "canonicalization": ARRAY_PAYLOAD_CANONICALIZATION,
+            "dtype": np.lib.format.dtype_to_descr(self._dtype),
+            "shape": [int(value) for value in self._shape],
+        }
+        self._digest = hashlib.sha256()
+        self._digest.update(
+            json.dumps(
+                header,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+        self._digest.update(b"\x00")
+        self._rows = 0
+
+    def update(self, values: np.ndarray) -> None:
+        array = np.asarray(values)
+        if (
+            array.dtype != self._dtype
+            or array.ndim != len(self._shape)
+            or tuple(int(value) for value in array.shape[1:]) != self._shape[1:]
+            or self._rows + int(array.shape[0]) > self._shape[0]
+        ):
+            raise ValueError(
+                "Streaming array digest received a dtype, shape, or row extent "
+                "outside its declared full array."
+            )
+        self._digest.update(np.ascontiguousarray(array).tobytes(order="C"))
+        self._rows += int(array.shape[0])
+
+    def hexdigest(self) -> str:
+        if self._rows != self._shape[0]:
+            raise ValueError(
+                "Streaming array digest does not cover the declared row extent."
+            )
+        return self._digest.copy().hexdigest()
+
+
 def _keypoint_axis_receipt(context: EyeAngleInputContext) -> dict[str, Any]:
     labels = tuple(context.keypoint_labels)
     if not labels:
@@ -4019,11 +4080,32 @@ def _build_staged_eye_angle_input_integrity_receipt(
 
     row_count = int(geometry.ellipse_params.shape[0])
     chunk_records: list[dict[str, Any]] = []
-    geometry_parts: dict[str, list[np.ndarray]] = {
-        "left_params": [],
-        "right_params": [],
-        "left_success": [],
-        "right_success": [],
+    logical_input_specs = _logical_input_source_specs(context)
+    keypoint_input_names = (
+        "keypoints_roi",
+        "detection_success",
+        "instance_key",
+        "source_acquisition_frame_index",
+    )
+    keypoint_hashes = {
+        name: _StreamingArrayValuesSha256(
+            dtype=logical_input_specs[name]["snapshot_dtype"],
+            shape=logical_input_specs[name]["snapshot_shape"],
+        )
+        for name in keypoint_input_names
+    }
+    geometry_paths = {
+        "left_params": "components/eye_left/ellipse_params",
+        "right_params": "components/eye_right/ellipse_params",
+        "left_success": "components/eye_left/ellipse_success",
+        "right_success": "components/eye_right/ellipse_success",
+    }
+    geometry_hashes = {
+        name: _StreamingArrayValuesSha256(
+            dtype=geometry.group[relative_path].dtype,
+            shape=geometry.group[relative_path].shape,
+        )
+        for name, relative_path in geometry_paths.items()
     }
     for chunk_index, (start_row, stop_row) in enumerate(
         _row_chunks(row_count, chunk_rows)
@@ -4041,11 +4123,44 @@ def _build_staged_eye_angle_input_integrity_receipt(
                 stop_row=stop_row,
             )
         )
-        geometry_parts["left_params"].append(snapshot.ellipse_params[:, 0, ...])
-        geometry_parts["right_params"].append(snapshot.ellipse_params[:, 1, ...])
-        geometry_parts["left_success"].append(snapshot.ellipse_success[:, 0, ...])
-        geometry_parts["right_success"].append(snapshot.ellipse_success[:, 1, ...])
-    _verify_receipt_geometry_payloads(context, geometry_parts)
+        snapshot_arrays = _chunk_snapshot_arrays(snapshot)
+        for name in keypoint_input_names:
+            keypoint_hashes[name].update(snapshot_arrays[name])
+        geometry_hashes["left_params"].update(snapshot.ellipse_params[:, 0, ...])
+        geometry_hashes["right_params"].update(snapshot.ellipse_params[:, 1, ...])
+        geometry_hashes["left_success"].update(snapshot.ellipse_success[:, 0, ...])
+        geometry_hashes["right_success"].update(snapshot.ellipse_success[:, 1, ...])
+
+    keypoint_arrays = keypoint_authority.get("arrays")
+    if not isinstance(keypoint_arrays, Mapping):
+        raise ValueError(
+            "Canonical keypoint authority lacks its closed array inventory."
+        )
+    for name in keypoint_input_names:
+        declared = keypoint_arrays.get(name)
+        if (
+            not isinstance(declared, Mapping)
+            or keypoint_hashes[name].hexdigest() != declared.get("content_sha256")
+        ):
+            raise ValueError(
+                f"Eye-angle receipt snapshot for {name!r} differs from its "
+                "canonical keypoint authority."
+            )
+    allowed_geometry = authority.get("allowed_arrays")
+    if not isinstance(allowed_geometry, Mapping):
+        raise ValueError(
+            "Canonical subject-shape authority lacks its closed eye-array inventory."
+        )
+    for name, relative_path in geometry_paths.items():
+        declared = allowed_geometry.get(relative_path)
+        if (
+            not isinstance(declared, Mapping)
+            or geometry_hashes[name].hexdigest() != declared.get("content_sha256")
+        ):
+            raise ValueError(
+                f"Eye-angle receipt snapshot for {relative_path!r} differs from "
+                "its canonical subject-shape authority."
+            )
 
     body = {
         "schema_id": EYE_ANGLE_STAGED_INPUT_INTEGRITY_SCHEMA_ID,
@@ -4071,20 +4186,22 @@ def _build_staged_eye_angle_input_integrity_receipt(
         },
         "row_count": row_count,
         "requested_chunk_rows": int(chunk_rows),
-        "logical_inputs": _logical_input_source_specs(context),
+        "logical_inputs": logical_input_specs,
         "chunks": chunk_records,
         "closed_logical_input_inventory": True,
         "normal_reader_authority": False,
         "coordinate_authority": False,
     }
     receipt = {**body, "record_sha256": _canonical_json_sha256(body)}
-    # Re-read every logical input and compare it with the just-captured
-    # chunks.  This is the keypoint-side counterpart to the canonical
-    # subject-shape loader's two-read payload binding.
+    # The single owned-snapshot pass above both constructs the chunk receipt
+    # and streams full-array digests back to the canonical geometry/keypoint
+    # authorities. Workers independently reread and attest the exact receipt
+    # chunks that enter scientific computation, so a second planner scan would
+    # only duplicate the same payload proof.
     return _validate_staged_eye_angle_input_integrity_receipt(
         context,
         receipt,
-        verify_payload=True,
+        verify_payload=False,
     )
 
 
@@ -4413,6 +4530,106 @@ def _validate_chunk_snapshot_against_receipt(
             + "; ".join(errors)
         )
     return str(chunk["record_sha256"])
+
+
+def _complete_worker_input_attestation(
+    receipt: Mapping[str, Any],
+    results: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Seal the complete receipt-chunk set attested by compute workers."""
+
+    canonical_receipt = _canonical_staged_input_integrity_receipt(receipt)
+    expected = [str(chunk["record_sha256"]) for chunk in canonical_receipt["chunks"]]
+    observed_by_index: dict[int, str] = {}
+    for result in results:
+        timing = result.get("chunk_timing")
+        if not isinstance(timing, Mapping):
+            raise RuntimeError("Eye-angle worker result lacks chunk timing identity.")
+        chunk_index = timing.get("chunk_index")
+        receipt_sha256 = result.get("staged_input_chunk_receipt_sha256")
+        if (
+            type(chunk_index) is not int
+            or not 0 <= chunk_index < len(expected)
+            or not _is_sha256(receipt_sha256)
+            or chunk_index in observed_by_index
+        ):
+            raise RuntimeError(
+                "Eye-angle workers returned an invalid or duplicate receipt chunk."
+            )
+        observed_by_index[chunk_index] = str(receipt_sha256)
+    if set(observed_by_index) != set(range(len(expected))):
+        raise RuntimeError(
+            "Eye-angle workers did not return the complete receipt chunk index set."
+        )
+    observed = [observed_by_index[index] for index in range(len(expected))]
+    if observed != expected:
+        raise RuntimeError(
+            "Staged eye-angle workers did not attest the exact complete ordered "
+            "chunk integrity receipt set."
+        )
+    body = {
+        "schema_id": EYE_ANGLE_WORKER_INPUT_ATTESTATION_SCHEMA_ID,
+        "schema_version": EYE_ANGLE_WORKER_INPUT_ATTESTATION_SCHEMA_VERSION,
+        "evidence_profile": EYE_ANGLE_WORKER_INPUT_ATTESTATION_PROFILE,
+        "staged_input_integrity_receipt_sha256": canonical_receipt["record_sha256"],
+        "chunk_count": len(expected),
+        "ordered_chunk_receipt_set_sha256": _canonical_json_sha256(expected),
+        "complete_worker_chunk_set": True,
+        "verification_location": (
+            "worker_owned_c_order_snapshot_before_scientific_compute"
+        ),
+    }
+    return {**body, "record_sha256": _canonical_json_sha256(body)}
+
+
+def _canonical_worker_input_attestation(
+    value: Any,
+    *,
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate and bind one complete worker attestation to its receipt."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError("Eye-angle worker input attestation must be a mapping.")
+    canonical = _canonical_json_copy(value)
+    digest = canonical.pop("record_sha256", None)
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "evidence_profile",
+        "staged_input_integrity_receipt_sha256",
+        "chunk_count",
+        "ordered_chunk_receipt_set_sha256",
+        "complete_worker_chunk_set",
+        "verification_location",
+    }
+    canonical_receipt = _canonical_staged_input_integrity_receipt(receipt)
+    expected_chunks = [
+        str(chunk["record_sha256"]) for chunk in canonical_receipt["chunks"]
+    ]
+    if (
+        set(canonical) != expected_fields
+        or canonical.get("schema_id")
+        != EYE_ANGLE_WORKER_INPUT_ATTESTATION_SCHEMA_ID
+        or canonical.get("schema_version")
+        != EYE_ANGLE_WORKER_INPUT_ATTESTATION_SCHEMA_VERSION
+        or canonical.get("evidence_profile")
+        != EYE_ANGLE_WORKER_INPUT_ATTESTATION_PROFILE
+        or canonical.get("staged_input_integrity_receipt_sha256")
+        != canonical_receipt["record_sha256"]
+        or canonical.get("chunk_count") != len(expected_chunks)
+        or canonical.get("ordered_chunk_receipt_set_sha256")
+        != _canonical_json_sha256(expected_chunks)
+        or canonical.get("complete_worker_chunk_set") is not True
+        or canonical.get("verification_location")
+        != "worker_owned_c_order_snapshot_before_scientific_compute"
+        or not _is_sha256(digest)
+        or digest != _canonical_json_sha256(canonical)
+    ):
+        raise ValueError(
+            "Eye-angle worker input attestation is unsupported, stale, or unbound."
+        )
+    return {**canonical, "record_sha256": str(digest)}
 
 
 def _validate_staged_eye_angle_input_integrity_receipt(
@@ -4955,13 +5172,17 @@ def run(
         diagnostic_refined_keypoint_run=args.diagnostic_refined_keypoint_run,
         _staged_subject_shape_authority=staged_subject_shape_authority,
         _staged_keypoint_authority=staged_keypoint_authority,
-        _verify_staged_payload=True,
+        # Receipt-backed production validates payload chunks in the workers
+        # that consume them.  Avoid a separate whole-input decoded scan before
+        # those same reads; unreceipted diagnostic execution retains its
+        # historical full resolver validation.
+        _verify_staged_payload=(_staged_input_integrity_receipt is None),
     )
     staged_input_integrity_receipt = (
         _validate_staged_eye_angle_input_integrity_receipt(
             context,
             _staged_input_integrity_receipt,
-            verify_payload=True,
+            verify_payload=False,
         )
         if _staged_input_integrity_receipt is not None
         else None
@@ -5219,24 +5440,11 @@ def run(
             )
             for chunk_index, (start_row, stop_row) in enumerate(chunks)
         ]
-    if staged_input_integrity_receipt is not None:
-        expected_chunk_receipts = [
-            str(chunk["record_sha256"])
-            for chunk in staged_input_integrity_receipt["chunks"]
-        ]
-        observed_chunk_receipts = [
-            result.get("staged_input_chunk_receipt_sha256") for result in results
-        ]
-        if (
-            len(observed_chunk_receipts) != len(expected_chunk_receipts)
-            or len(set(observed_chunk_receipts)) != len(observed_chunk_receipts)
-            or sorted(str(value) for value in observed_chunk_receipts)
-            != sorted(expected_chunk_receipts)
-        ):
-            raise RuntimeError(
-                "Staged eye-angle workers did not attest the exact complete chunk "
-                "integrity receipt set."
-            )
+    worker_input_attestation = (
+        _complete_worker_input_attestation(staged_input_integrity_receipt, results)
+        if staged_input_integrity_receipt is not None
+        else None
+    )
     for result in sorted(results, key=lambda item: int(dict(item["chunk_timing"]).get("chunk_index") or 0)):
         chunk_timings.append(dict(result["chunk_timing"]))
     phase_seconds: dict[str, float] = {
@@ -6283,10 +6491,10 @@ def run(
         "cli_override" if smoothing_window_param is not None else "module_default"
     )
 
-    # Close the staged-source TOCTOU window after every source read and before
-    # any completion/provenance publication.  A fresh open avoids trusting
-    # cached group/array metadata. Exact worker snapshots are the computation
-    # authority; this independent full scan remains defense in depth.
+    # Close the staged-source metadata/authority window after every worker read
+    # and before completion.  Payload equality is already established by the
+    # exact complete worker receipt-chunk set, so a separate whole-input
+    # decoded rescan here would prove the same fact again.
     verified_root = _open_archive_for_eye_angle(args.zarr_path)
     verified_context = _resolve_eye_angle_inputs(
         verified_root,
@@ -6321,14 +6529,14 @@ def run(
             if staged_input_integrity_receipt is not None
             else None
         ),
-        _verify_staged_payload=True,
+        _verify_staged_payload=(staged_input_integrity_receipt is None),
     )
     if staged_input_integrity_receipt is not None:
         verified_staged_receipt = (
             _validate_staged_eye_angle_input_integrity_receipt(
                 verified_context,
                 staged_input_integrity_receipt,
-                verify_payload=True,
+                verify_payload=False,
             )
         )
         if (
@@ -6338,6 +6546,10 @@ def run(
             raise RuntimeError(
                 "Staged eye-angle input integrity receipt changed after source reads."
             )
+        worker_input_attestation = _canonical_worker_input_attestation(
+            worker_input_attestation,
+            receipt=verified_staged_receipt,
+        )
     verified_input_identity = _resolved_eye_angle_input_identity(verified_context)
     if verified_input_identity != initial_input_identity:
         raise RuntimeError(
@@ -6414,6 +6626,11 @@ def run(
             "staged_input_integrity_receipt_sha256": (
                 staged_input_integrity_receipt["record_sha256"]
                 if staged_input_integrity_receipt is not None
+                else None
+            ),
+            "staged_input_worker_attestation": (
+                _canonical_json_copy(worker_input_attestation)
+                if worker_input_attestation is not None
                 else None
             ),
             "resolved_head_keypoint_indices": {
@@ -6498,6 +6715,11 @@ def run(
             "staged_input_integrity_receipt_sha256": (
                 staged_input_integrity_receipt["record_sha256"]
                 if staged_input_integrity_receipt is not None
+                else None
+            ),
+            "staged_input_worker_attestation": (
+                _canonical_json_copy(worker_input_attestation)
+                if worker_input_attestation is not None
                 else None
             ),
         },

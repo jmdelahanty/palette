@@ -282,8 +282,10 @@ class EyeAngleMaterializationPlan:
             "full_selected_scientific_input_content_hash": True,
             "source_revision_assurance": (
                 "verified subject-shape coordinate authority (canonical or "
-                "explicitly admitted candidate) plus a two-pass, exact, chunked "
-                "content receipt for every staged worker input"
+                "explicitly admitted candidate) plus one owned-snapshot, exact, "
+                "chunked content receipt whose streamed full-array digests equal "
+                "the canonical authorities and whose chunks are re-attested by "
+                "the compute workers"
             ),
         }
         return json_attr_safe(payload)
@@ -1072,7 +1074,7 @@ def _resolve_source_plan(
     keypoint_run: str | None,
     completed_ineligible_subject_shape_candidate: Mapping[str, Any] | None = None,
     staged_input_integrity_receipt: Mapping[str, Any] | None = None,
-    staged_subject_shape_subset: bool = False,
+    receipt_bound_source: bool = False,
     verify_staged_payload: bool = True,
 ) -> tuple[
     Any,
@@ -1082,26 +1084,32 @@ def _resolve_source_plan(
     float | None,
     int,
 ]:
+    if receipt_bound_source and staged_input_integrity_receipt is None:
+        raise ValueError(
+            "Receipt-bound eye-angle source resolution requires the exact staged "
+            "input integrity receipt."
+        )
     if (
-        staged_subject_shape_subset
+        receipt_bound_source
         and completed_ineligible_subject_shape_candidate is not None
     ):
         raise ValueError(
-            "A staged subject-shape subset cannot also use live candidate admission."
+            "Receipt-bound eye-angle source resolution cannot also use a separate "
+            "candidate admission; candidate evidence is sealed inside the receipt."
         )
     root = open_zarr_root(source_zarr, mode="r")
     staged_subject_shape_authority = (
         eye_writer._staged_subject_shape_authority_from_input_receipt(
             staged_input_integrity_receipt
         )
-        if staged_input_integrity_receipt is not None and staged_subject_shape_subset
+        if staged_input_integrity_receipt is not None and receipt_bound_source
         else None
     )
     staged_keypoint_authority = (
         eye_writer._staged_keypoint_authority_from_input_receipt(
             staged_input_integrity_receipt
         )
-        if staged_input_integrity_receipt is not None and staged_subject_shape_subset
+        if staged_input_integrity_receipt is not None and receipt_bound_source
         else None
     )
     context = eye_writer._resolve_eye_angle_inputs(
@@ -1114,13 +1122,12 @@ def _resolve_source_plan(
         _completed_ineligible_subject_shape_candidate=(
             completed_ineligible_subject_shape_candidate
         ),
-        # The public live-source resolver does not accept the private
-        # ``False`` flag.  Reused-plan freshness keeps this resolver on its
-        # normal metadata/lifecycle path and uses ``verify_payload=False``
-        # only for the receipt binding below; staged subset resolution still
-        # receives the caller's exact payload-verification mode.
+        # Receipt-bound resolution is the shared evidence interface for both
+        # the authoritative immutable source and its staged subset. Its
+        # metadata-only mode validates detached authorities and closed array
+        # topology; workers validate every payload chunk while consuming it.
         _verify_staged_payload=(
-            verify_staged_payload if staged_subject_shape_subset else True
+            verify_staged_payload if receipt_bound_source else True
         ),
     )
     if staged_input_integrity_receipt is not None:
@@ -1186,8 +1193,8 @@ def _resolve_source_plan(
     elif staged_input_integrity_receipt is not None:
         # Reused admission receipts already carry the exact frame-index
         # payload receipt.  Startup freshness validation must remain cheap and
-        # must not reread that full array; stage_eye_angle_sources performs the
-        # existing payload verification after the exact files are copied.
+        # must not reread that full array. Compute workers validate every exact
+        # receipt chunk after the selected files are staged.
         resolved_frame_count = int(context.source_total_frames or 0)
         resolved_metadata_fps = staged_input_integrity_receipt["scientific_parameters"][
             "fps"
@@ -1400,12 +1407,6 @@ def build_eye_angle_materialization_plan(
         raise RuntimeError(
             "Staged input integrity receipt differs from the resolved source contract."
         )
-    sealed_frame_indices = eye_writer._load_validated_staged_frame_indices(
-        context,
-        staged_input_integrity_receipt,
-    )
-    if sealed_frame_indices.shape != (row_count,):
-        raise RuntimeError("Sealed acquisition-frame index row count changed.")
     if context.source_total_frames is None:
         raise RuntimeError(
             "Canonical eye inputs lack a sealed full-video frame extent."
@@ -1645,10 +1646,8 @@ def _validate_reused_plan_source(plan: EyeAngleMaterializationPlan) -> dict[str,
         plan.source_zarr,
         subject_shape_run=plan.subject_shape_run,
         keypoint_run=plan.keypoint_run,
-        completed_ineligible_subject_shape_candidate=(
-            plan.subject_shape_candidate_admission
-        ),
         staged_input_integrity_receipt=plan.staged_input_integrity_receipt,
+        receipt_bound_source=True,
         verify_staged_payload=False,
     )
     errors: list[str] = []
@@ -1788,10 +1787,12 @@ def _validate_file_inventory(
     }
 
 
-def audit_eye_angle_source_revision(
+def _audit_eye_angle_source_revision(
     plan: EyeAngleMaterializationPlan,
+    *,
+    verify_payload: bool,
 ) -> dict[str, Any]:
-    """Verify that resolved authoritative inputs still match the read-only plan."""
+    """Verify live authority, optionally with an explicit diagnostic payload scan."""
 
     inventory = _validate_file_inventory(plan.source_zarr, plan.physical_files)
     errors: list[str] = []
@@ -1808,12 +1809,9 @@ def audit_eye_angle_source_revision(
             plan.source_zarr,
             subject_shape_run=plan.subject_shape_run,
             keypoint_run=plan.keypoint_run,
-            completed_ineligible_subject_shape_candidate=(
-                plan.subject_shape_candidate_admission
-            ),
             staged_input_integrity_receipt=plan.staged_input_integrity_receipt,
-            staged_subject_shape_subset=False,
-            verify_staged_payload=True,
+            receipt_bound_source=True,
+            verify_staged_payload=verify_payload,
         )
         observed_contract_sha256 = _json_digest(contracts)
         if context.eye_geometry.run_name != plan.subject_shape_run:
@@ -1842,10 +1840,34 @@ def audit_eye_angle_source_revision(
             "observed_source_metadata_sha256": observed_metadata_sha256,
             "expected_source_contract_sha256": plan.source_contract_sha256,
             "observed_source_contract_sha256": observed_contract_sha256,
-            "full_selected_scientific_input_content_hash": True,
+            "payload_verification_mode": (
+                "full_decoded_logical_payload_v1"
+                if verify_payload
+                else "sealed_receipt_metadata_authority_inventory_v1"
+            ),
+            "full_selected_scientific_input_content_hash": bool(verify_payload),
+            "sealed_input_integrity_receipt_sha256": (
+                plan.staged_input_integrity_receipt.get("record_sha256")
+            ),
             "errors": errors,
         }
     )
+
+
+def audit_eye_angle_source_revision(
+    plan: EyeAngleMaterializationPlan,
+) -> dict[str, Any]:
+    """Verify immutable source generation without rereading decoded payloads."""
+
+    return _audit_eye_angle_source_revision(plan, verify_payload=False)
+
+
+def audit_eye_angle_source_revision_full_payload(
+    plan: EyeAngleMaterializationPlan,
+) -> dict[str, Any]:
+    """Diagnostic scrub that additionally rereads every selected logical payload."""
+
+    return _audit_eye_angle_source_revision(plan, verify_payload=True)
 
 
 def stage_eye_angle_sources(
@@ -1902,8 +1924,8 @@ def stage_eye_angle_sources(
         subject_shape_run=plan.subject_shape_run,
         keypoint_run=plan.keypoint_run,
         staged_input_integrity_receipt=plan.staged_input_integrity_receipt,
-        staged_subject_shape_subset=True,
-        verify_staged_payload=True,
+        receipt_bound_source=True,
+        verify_staged_payload=False,
     )
     if (
         staged_context.eye_geometry.run_name != plan.subject_shape_run
@@ -1946,6 +1968,14 @@ def stage_eye_angle_sources(
                 plan.staged_input_integrity_receipt.get("record_sha256")
             ),
             "staged_input_integrity_receipt": (plan.staged_input_integrity_receipt),
+            "staged_payload_verification": {
+                "mode": "deferred_complete_worker_chunk_attestation_v1",
+                "receipt_sha256": plan.staged_input_integrity_receipt.get(
+                    "record_sha256"
+                ),
+                "precompute_full_decoded_scan": False,
+                "publication_requires_complete_worker_chunk_set": True,
+            },
             "source_metadata_sha256": plan.source_metadata_sha256,
             "inventory": inventory,
             "source_revision_audit": source_revision,
@@ -2002,6 +2032,7 @@ def _validate_eye_angle_run(
     expected_angle_shard_rows: int | None,
     expected_angle_shard_columns: int | None,
     storage_profile_id: str = EYE_ANGLE_LEGACY_EXPLICIT_STORAGE,
+    expected_staged_input_integrity_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     group = open_zarr_root(path, mode="r")
     attrs = group.attrs
@@ -2042,6 +2073,21 @@ def _validate_eye_angle_run(
     )
     if observed_contract_sha256 != expected_source_contract_sha256:
         errors.append("persisted source contracts differ from the materialization plan")
+    if expected_staged_input_integrity_receipt is not None:
+        expected_receipt_sha256 = expected_staged_input_integrity_receipt.get(
+            "record_sha256"
+        )
+        if attrs.get("staged_input_integrity_receipt_sha256") != (
+            expected_receipt_sha256
+        ):
+            errors.append("staged input receipt digest mismatch")
+        try:
+            eye_writer._canonical_worker_input_attestation(
+                attrs.get("staged_input_worker_attestation"),
+                receipt=expected_staged_input_integrity_receipt,
+            )
+        except (TypeError, ValueError) as exc:
+            errors.append(f"worker input attestation mismatch: {exc}")
 
     index_specs = {
         "angle_channel_index": ("roi_angles", "frame_angles"),
@@ -2505,6 +2551,9 @@ def publish_eye_angle_run(
                 None if storage_candidate else plan.angle_shard_columns
             ),
             storage_profile_id=plan.storage_profile_id,
+            expected_staged_input_integrity_receipt=(
+                plan.staged_input_integrity_receipt
+            ),
         )
 
     def prepare(root: zarr.Group) -> tuple[zarr.Group]:
@@ -2880,6 +2929,11 @@ def materialize_eye_angles(
     receipt_input_path: Path | None = None
     receipt_input = admission_receipt
     receipt_output = admission_receipt_output
+    if apply and receipt_input is None:
+        raise ValueError(
+            "Eye-angle execution requires an exact admission receipt; create one "
+            "with a read-only plan invocation before applying it."
+        )
     if not apply and receipt_input is not None:
         raise ValueError(
             "An admission receipt is an apply input; use "
@@ -3125,6 +3179,9 @@ def materialize_eye_angles(
                     else plan.angle_shard_columns
                 ),
                 storage_profile_id=plan.storage_profile_id,
+                expected_staged_input_integrity_receipt=(
+                    plan.staged_input_integrity_receipt
+                ),
             )
             # The validation contract requires materialization provenance, which is
             # appended immediately after validating the scientific writer surface.
@@ -3138,6 +3195,12 @@ def materialize_eye_angles(
                     "Node-local regular eye-angle run is invalid: "
                     f"{regular_validation}"
                 )
+            worker_input_attestation = (
+                eye_writer._canonical_worker_input_attestation(
+                    regular_run.attrs.get("staged_input_worker_attestation"),
+                    receipt=plan.staged_input_integrity_receipt,
+                )
+            )
 
         materialization_payload = json_attr_safe(
             {
@@ -3179,6 +3242,13 @@ def materialize_eye_angles(
                     plan.staged_input_integrity_receipt.get("record_sha256")
                 ),
                 "staged_input_integrity_receipt": (plan.staged_input_integrity_receipt),
+                "staged_input_worker_attestation": worker_input_attestation,
+                "input_payload_validation": {
+                    "mode": "complete_worker_chunk_attestation_v1",
+                    "precompute_full_decoded_scan": False,
+                    "closing_source_full_decoded_scan": False,
+                    "complete_worker_chunk_set": True,
+                },
                 "algorithm_contract": {
                     "schema_id": eye_writer.EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_ID,
                     "schema_version": eye_writer.EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_VERSION,
@@ -3204,6 +3274,7 @@ def materialize_eye_angles(
             "staged_input_integrity_receipt_sha256": (
                 plan.staged_input_integrity_receipt.get("record_sha256")
             ),
+            "staged_input_worker_attestation": worker_input_attestation,
             "selected_arrays": list(plan.selected_arrays),
             "compute_arguments": writer_argv,
         }
@@ -3225,6 +3296,9 @@ def materialize_eye_angles(
                 expected_angle_shard_rows=None,
                 expected_angle_shard_columns=None,
                 storage_profile_id=plan.storage_profile_id,
+                expected_staged_input_integrity_receipt=(
+                    plan.staged_input_integrity_receipt
+                ),
             )
             if not candidate_validation["valid"]:
                 raise RuntimeError(
@@ -3359,6 +3433,9 @@ def materialize_eye_angles(
             expected_angle_chunk_columns=plan.angle_chunk_columns,
             expected_angle_shard_rows=plan.output_shard_rows,
             expected_angle_shard_columns=plan.angle_shard_columns,
+            expected_staged_input_integrity_receipt=(
+                plan.staged_input_integrity_receipt
+            ),
         )
         if not sharded_validation["valid"]:
             raise RuntimeError(
@@ -3377,6 +3454,7 @@ def materialize_eye_angles(
                 "staging": staging,
                 "local_materialization": materialization_payload,
                 "publish": publish,
+                "runtime_telemetry": _ordered_runtime_telemetry(telemetry),
             }
         )
         succeeded = True

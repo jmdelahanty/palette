@@ -41,7 +41,9 @@ from fisheye.analysis_workflows.eye_angle_candidate_execution import (
 from fisheye.analysis_workflows.materializers.eye_angles import (
     EYE_ANGLE_EXECUTION_PHASE_ORDER,
     EXECUTION_BINDING_ATTR,
-    materialize_eye_angles,
+    apply_eye_angle_materialization_plan,
+    build_eye_angle_materialization_admission_receipt,
+    build_eye_angle_materialization_plan,
     tombstone_eye_angle_execution_candidate,
 )
 from fisheye.shared.runtime_telemetry import (
@@ -381,7 +383,7 @@ def execute_eye_angle_candidate(
             }
 
         failure_phase = "materializer"
-        materialized = materialize_eye_angles(
+        materialization_plan = build_eye_angle_materialization_plan(
             archive,
             scratch_root=payload["scratch_root"],
             subject_shape_run=str(parameters["subject_shape_run"]),
@@ -400,8 +402,13 @@ def execute_eye_angle_candidate(
             native_threads=int(parameters["native_threads"]),
             fps=parameters["fps"],
             smoothing_window=parameters["smoothing_window"],
+        )
+        materialization_admission = build_eye_angle_materialization_admission_receipt(
+            materialization_plan
+        )
+        materialized = apply_eye_angle_materialization_plan(
+            materialization_admission,
             copy_backend=str(parameters["copy_backend"]),
-            apply=True,
             keep_scratch=bool(parameters["keep_scratch"]),
             check_capacity=bool(parameters["check_capacity"]),
             execution_binding=execution_binding,

@@ -626,6 +626,43 @@ def _accept_synthetic_subject_shape_publication(
     )
 
 
+def _apply_receipt_bound_eye_angles(
+    source_zarr: Path,
+    **kwargs: object,
+) -> dict[str, object]:
+    """Exercise the only production apply path: plan, seal, then consume."""
+
+    parameters = dict(kwargs)
+    if parameters.pop("apply", True) is not True:
+        raise AssertionError("Receipt-bound test helper is apply-only.")
+    copy_backend = str(parameters.pop("copy_backend", "python"))
+    keep_scratch = bool(parameters.pop("keep_scratch", False))
+    check_capacity = bool(parameters.pop("check_capacity", False))
+    stage_command = parameters.pop("stage_command", None)
+    execution_binding = parameters.pop("execution_binding", None)
+    expected_source_logical_hashes = parameters.pop(
+        "expected_source_logical_hashes", None
+    )
+    publication_acceptance_validator = parameters.pop(
+        "publication_acceptance_validator", None
+    )
+    # Receipt-backed production admits only a published immutable metadata
+    # generation. Synthetic fixtures must model that lifecycle boundary too.
+    zarr.consolidate_metadata(str(source_zarr))
+    plan = mod.build_eye_angle_materialization_plan(source_zarr, **parameters)
+    receipt = mod.build_eye_angle_materialization_admission_receipt(plan)
+    return mod.apply_eye_angle_materialization_plan(
+        receipt,
+        copy_backend=copy_backend,
+        keep_scratch=keep_scratch,
+        check_capacity=check_capacity,
+        stage_command=stage_command,
+        execution_binding=execution_binding,
+        expected_source_logical_hashes=expected_source_logical_hashes,
+        publication_acceptance_validator=publication_acceptance_validator,
+    )
+
+
 def _direct_bundle_coordinate_publication(
     root: zarr.Group,
     path: str,
@@ -1183,9 +1220,7 @@ def test_plan_rejects_reordered_same_count_instance_keys_before_scratch_creation
             keypoint_run="kp_raw_1",
             run_name="eye_1",
             fps=100.0,
-            apply=True,
-            copy_backend="python",
-            check_capacity=False,
+            apply=False,
         )
 
     assert not scratch.exists()
@@ -1215,9 +1250,7 @@ def test_plan_rejects_refined_keypoint_assertion_before_scratch_creation(
             keypoint_run="kp_refined_1",
             run_name="eye_1",
             fps=100.0,
-            apply=True,
-            copy_backend="python",
-            check_capacity=False,
+            apply=False,
         )
 
     assert not scratch.exists()
@@ -1678,6 +1711,207 @@ def _build_canonical_admission_source(
     zarr.consolidate_metadata(str(source))
 
 
+def _worker_results_for_receipt(
+    receipt: dict[str, object],
+) -> list[dict[str, object]]:
+    chunks = receipt["chunks"]
+    assert isinstance(chunks, list)
+    return [
+        {
+            "chunk_timing": {"chunk_index": index},
+            "staged_input_chunk_receipt_sha256": chunk["record_sha256"],
+        }
+        for index, chunk in enumerate(chunks)
+    ]
+
+
+def test_streaming_array_digest_matches_canonical_array_digest() -> None:
+    values = np.arange(60, dtype=np.float32).reshape(10, 3, 2)
+    values[1, 0, 0] = np.nan
+    values[2, 0, 0] = np.float32(-0.0)
+    streaming = mod.eye_writer._StreamingArrayValuesSha256(
+        dtype=values.dtype,
+        shape=values.shape,
+    )
+    for chunk in (values[:3], values[3:8], values[8:]):
+        streaming.update(chunk)
+    assert streaming.hexdigest() == array_values_sha256(values)
+
+    empty = np.empty((0, 3), dtype=np.uint64)
+    empty_streaming = mod.eye_writer._StreamingArrayValuesSha256(
+        dtype=empty.dtype,
+        shape=empty.shape,
+    )
+    assert empty_streaming.hexdigest() == array_values_sha256(empty)
+
+
+def test_plan_receipt_builder_reads_each_worker_chunk_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    _accept_synthetic_subject_shape_publication(monkeypatch, source)
+    snapshot_calls = 0
+    receipt_verify_flags: list[object] = []
+    real_snapshot = mod.eye_writer._load_eye_angle_chunk_input_snapshot
+    real_validate = mod.eye_writer._validate_staged_eye_angle_input_integrity_receipt
+
+    def _record_snapshot(*args: object, **kwargs: object) -> object:
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        return real_snapshot(*args, **kwargs)
+
+    def _record_validate(*args: object, **kwargs: object) -> object:
+        receipt_verify_flags.append(kwargs.get("verify_payload"))
+        return real_validate(*args, **kwargs)
+
+    def _unexpected_frame_rescan(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("planning must not rescan frame indices after sealing")
+
+    monkeypatch.setattr(
+        mod.eye_writer,
+        "_load_eye_angle_chunk_input_snapshot",
+        _record_snapshot,
+    )
+    monkeypatch.setattr(
+        mod.eye_writer,
+        "_validate_staged_eye_angle_input_integrity_receipt",
+        _record_validate,
+    )
+    monkeypatch.setattr(
+        mod.eye_writer,
+        "_load_validated_staged_frame_indices",
+        _unexpected_frame_rescan,
+    )
+
+    plan = mod.build_eye_angle_materialization_plan(
+        source,
+        scratch_root=scratch,
+        subject_shape_run="shape_1",
+        keypoint_run="kp_raw_1",
+        run_name="eye_1",
+        chunk_rows=2,
+        fps=100.0,
+    )
+
+    assert snapshot_calls == 2
+    assert receipt_verify_flags == [False]
+    assert len(plan.staged_input_integrity_receipt["chunks"]) == 2
+
+
+def test_complete_worker_input_attestation_binds_exact_receipt_chunk_set(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _source, _scratch, plan, _receipt, _receipt_path = _admission_fixture(
+        monkeypatch,
+        tmp_path,
+    )
+    integrity_receipt = plan.staged_input_integrity_receipt
+    results = _worker_results_for_receipt(integrity_receipt)
+
+    attestation = mod.eye_writer._complete_worker_input_attestation(
+        integrity_receipt,
+        list(reversed(results)),
+    )
+
+    assert mod.eye_writer._canonical_worker_input_attestation(
+        attestation,
+        receipt=integrity_receipt,
+    ) == attestation
+    assert attestation["complete_worker_chunk_set"] is True
+    assert attestation["chunk_count"] == len(results)
+    assert attestation["staged_input_integrity_receipt_sha256"] == (
+        integrity_receipt["record_sha256"]
+    )
+
+
+def test_worker_input_attestation_rejects_incomplete_or_misbound_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _source, _scratch, plan, _receipt, _receipt_path = _admission_fixture(
+        monkeypatch,
+        tmp_path,
+    )
+    integrity_receipt = plan.staged_input_integrity_receipt
+    results = _worker_results_for_receipt(integrity_receipt)
+
+    with pytest.raises(RuntimeError, match="complete receipt chunk index set"):
+        mod.eye_writer._complete_worker_input_attestation(
+            integrity_receipt,
+            results[:-1],
+        )
+
+    with pytest.raises(RuntimeError, match="invalid or duplicate"):
+        mod.eye_writer._complete_worker_input_attestation(
+            integrity_receipt,
+            [*results, copy.deepcopy(results[0])],
+        )
+
+    swapped = copy.deepcopy(results)
+    swapped[0]["staged_input_chunk_receipt_sha256"] = results[1][
+        "staged_input_chunk_receipt_sha256"
+    ]
+    with pytest.raises(RuntimeError, match="exact complete ordered"):
+        mod.eye_writer._complete_worker_input_attestation(
+            integrity_receipt,
+            swapped,
+        )
+
+
+def test_receipt_bound_staging_defers_all_payload_checks_to_workers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _source, _scratch, plan, _receipt, _receipt_path = _admission_fixture(
+        monkeypatch,
+        tmp_path,
+    )
+    receipt_verify_flags: list[object] = []
+    resolver_verify_flags: list[object] = []
+    real_validate = mod.eye_writer._validate_staged_eye_angle_input_integrity_receipt
+    real_resolve = mod.eye_writer._resolve_eye_angle_inputs
+
+    def _record_validate(*args: object, **kwargs: object) -> object:
+        receipt_verify_flags.append(kwargs.get("verify_payload"))
+        return real_validate(*args, **kwargs)
+
+    def _record_resolve(*args: object, **kwargs: object) -> object:
+        if kwargs.get("_staged_subject_shape_authority") is not None:
+            resolver_verify_flags.append(kwargs.get("_verify_staged_payload"))
+        return real_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mod.eye_writer,
+        "_validate_staged_eye_angle_input_integrity_receipt",
+        _record_validate,
+    )
+    monkeypatch.setattr(mod.eye_writer, "_resolve_eye_angle_inputs", _record_resolve)
+
+    staging = mod.stage_eye_angle_sources(
+        plan,
+        copy_backend="python",
+        check_capacity=False,
+    )
+
+    assert receipt_verify_flags and set(receipt_verify_flags) == {False}
+    assert resolver_verify_flags and set(resolver_verify_flags) == {False}
+    assert staging["staged_payload_verification"] == {
+        "mode": "deferred_complete_worker_chunk_attestation_v1",
+        "receipt_sha256": plan.staged_input_integrity_receipt["record_sha256"],
+        "precompute_full_decoded_scan": False,
+        "publication_requires_complete_worker_chunk_set": True,
+    }
+    source_audit = staging["source_revision_audit"]
+    assert source_audit["payload_verification_mode"] == (
+        "sealed_receipt_metadata_authority_inventory_v1"
+    )
+    assert source_audit["full_selected_scientific_input_content_hash"] is False
+
+
 def test_apply_with_valid_admission_receipt_skips_plan_and_staged_receipt_rebuild(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1746,7 +1980,7 @@ def test_apply_with_valid_admission_receipt_skips_plan_and_staged_receipt_rebuil
     assert resolution["receipt_payload_digest"] == receipt["payload_digest"]
 
 
-def test_same_size_payload_mutation_with_restored_mtime_reaches_stage_verify(
+def test_same_size_payload_mutation_with_restored_mtime_fails_in_worker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1773,44 +2007,36 @@ def test_same_size_payload_mutation_with_restored_mtime_reaches_stage_verify(
         payload_verify_flags.append(kwargs.get("verify_payload"))
         return real_staged_verify(*args, **kwargs)
 
-    real_resolve_inputs = mod.eye_writer._resolve_eye_angle_inputs
+    real_writer = mod.eye_writer.main
 
-    def _resolve_then_tamper(*args: object, **kwargs: object) -> object:
-        context = real_resolve_inputs(*args, **kwargs)
-        if kwargs.get("_staged_subject_shape_authority") is not None:
-            staged_path = plan.staged_zarr / target.relative_path
-            original_stat = staged_path.stat()
-            staged_root = zarr.open_group(
-                str(plan.staged_zarr),
-                mode="a",
-                use_consolidated=False,
-            )
-            staged_array = staged_root[
-                "analysis/subject_shape_runs/shape_1/components/eye_left/ellipse_success"
-            ]
-            staged_array[0] = not bool(staged_array[0])
-            os.utime(
-                staged_path,
-                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
-            )
-            assert staged_path.stat().st_size == target.size_bytes
-            assert staged_path.stat().st_mtime_ns == target.mtime_ns
-        return context
-
-    def _unexpected_writer(*_args: object, **_kwargs: object) -> object:
+    def _tamper_then_run_writer(*args: object, **kwargs: object) -> object:
         nonlocal writer_called
         writer_called = True
-        raise AssertionError("stale payload must fail before the scientific writer")
+        staged_path = plan.staged_zarr / target.relative_path
+        original_stat = staged_path.stat()
+        staged_root = zarr.open_group(
+            str(plan.staged_zarr),
+            mode="a",
+            use_consolidated=False,
+        )
+        staged_array = staged_root[
+            "analysis/subject_shape_runs/shape_1/components/eye_left/ellipse_success"
+        ]
+        staged_array[0] = not bool(staged_array[0])
+        os.utime(
+            staged_path,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
+        assert staged_path.stat().st_size == target.size_bytes
+        assert staged_path.stat().st_mtime_ns == target.mtime_ns
+        return real_writer(*args, **kwargs)
 
     monkeypatch.setattr(
         mod.eye_writer,
         "_validate_staged_eye_angle_input_integrity_receipt",
         _record_staged_verify,
     )
-    monkeypatch.setattr(
-        mod.eye_writer, "_resolve_eye_angle_inputs", _resolve_then_tamper
-    )
-    monkeypatch.setattr(mod.eye_writer, "main", _unexpected_writer)
+    monkeypatch.setattr(mod.eye_writer, "main", _tamper_then_run_writer)
 
     with pytest.raises(
         (ValueError, RuntimeError), match="staged|integrity|payload|Zstd"
@@ -1829,8 +2055,9 @@ def test_same_size_payload_mutation_with_restored_mtime_reaches_stage_verify(
         )
 
     assert staged_verify_called is True
-    assert True in payload_verify_flags
-    assert writer_called is False
+    assert payload_verify_flags
+    assert set(payload_verify_flags) == {False}
+    assert writer_called is True
 
 
 def test_admission_receipt_request_conflicts_fail_before_scratch(
@@ -2210,6 +2437,36 @@ def test_no_admission_receipt_keeps_live_plan_path(
     )
     assert result["status"] == "planned"
     assert calls == 1
+    assert not scratch.exists()
+
+
+def test_apply_without_admission_receipt_is_not_a_reachable_execution_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    planner_called = False
+
+    def _unexpected_plan(*_args: object, **_kwargs: object) -> object:
+        nonlocal planner_called
+        planner_called = True
+        raise AssertionError("unreceipted apply must stop before planning")
+
+    monkeypatch.setattr(mod, "build_eye_angle_materialization_plan", _unexpected_plan)
+    with pytest.raises(ValueError, match="requires an exact admission receipt"):
+        mod.materialize_eye_angles(
+            source,
+            scratch_root=scratch,
+            subject_shape_run="shape_1",
+            keypoint_run="kp_raw_1",
+            run_name="eye_1",
+            fps=100.0,
+            apply=True,
+        )
+
+    assert planner_called is False
     assert not scratch.exists()
 
 
@@ -2642,7 +2899,7 @@ def test_combined_receipt_rejects_staged_keypoint_input_tamper(
             subject_shape_run=plan.subject_shape_run,
             keypoint_run=plan.keypoint_run,
             staged_input_integrity_receipt=(plan.staged_input_integrity_receipt),
-            staged_subject_shape_subset=True,
+            receipt_bound_source=True,
             verify_staged_payload=True,
         )
 
@@ -2688,7 +2945,7 @@ def test_combined_receipt_rejects_another_keypoint_source_revision(
             subject_shape_run=plan_a.subject_shape_run,
             keypoint_run=plan_a.keypoint_run,
             staged_input_integrity_receipt=(plan_b.staged_input_integrity_receipt),
-            staged_subject_shape_subset=True,
+            receipt_bound_source=True,
             verify_staged_payload=True,
         )
 
@@ -2884,7 +3141,7 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
         capture_registry,
     )
 
-    result = mod.materialize_eye_angles(
+    result = _apply_receipt_bound_eye_angles(
         source,
         scratch_root=scratch,
         subject_shape_run="shape_1",
@@ -2928,6 +3185,11 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
         assert result["publish"][validation_name]["exact_compact_v7_valid"] is True
     assert result["publish"]["source_revision_audit"]["status"] == "current"
     assert result["publish"]["registry_updated"] is True
+    assert result["runtime_telemetry"]["materializer"] == "eye_angle_candidate"
+    assert any(
+        phase["name"] == "scientific_compute"
+        for phase in result["runtime_telemetry"]["phases"]
+    )
     assert len(registry_events) == 1
     assert registry_events[0]["run_name"] == "eye_1"
     assert registry_events[0]["source"] == "eye_angle_atomic_materializer"
@@ -2990,6 +3252,33 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
         local["source_staging"]["staged_input_integrity_receipt"]
     )
     assert run.attrs["staged_input_integrity_receipt_sha256"] == receipt_sha256
+    worker_attestation = run.attrs["staged_input_worker_attestation"]
+    assert mod.eye_writer._canonical_worker_input_attestation(
+        worker_attestation,
+        receipt=local["staged_input_integrity_receipt"],
+    ) == worker_attestation
+    assert local["staged_input_worker_attestation"] == worker_attestation
+    assert local["input_payload_validation"] == {
+        "mode": "complete_worker_chunk_attestation_v1",
+        "precompute_full_decoded_scan": False,
+        "closing_source_full_decoded_scan": False,
+        "complete_worker_chunk_set": True,
+    }
+    assert local["source_staging"]["staged_payload_verification"] == {
+        "mode": "deferred_complete_worker_chunk_attestation_v1",
+        "receipt_sha256": receipt_sha256,
+        "precompute_full_decoded_scan": False,
+        "publication_requires_complete_worker_chunk_set": True,
+    }
+    assert local["source_staging"]["source_revision_audit"][
+        "payload_verification_mode"
+    ] == "sealed_receipt_metadata_authority_inventory_v1"
+    assert local["source_staging"]["source_revision_audit"][
+        "full_selected_scientific_input_content_hash"
+    ] is False
+    assert result["publish"]["source_revision_audit"][
+        "full_selected_scientific_input_content_hash"
+    ] is False
     assert local["compute"]["writer"] == "fisheye.analysis.eye_angle_analysis"
     assert local["compute"]["angle_chunk_rows"] == 2
     assert local["compute"]["angle_chunk_columns"] == 4
@@ -3018,6 +3307,12 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
     assert (
         provenance["materialization"]["staged_input_integrity_receipt_sha256"]
         == receipt_sha256
+    )
+    assert provenance["execution"]["staged_input_worker_attestation"] == (
+        worker_attestation
+    )
+    assert provenance["materialization"]["staged_input_worker_attestation"] == (
+        worker_attestation
     )
     assert run.attrs["source_eye_geometry_authority_mode"] == (
         "digest_bound_staged_subset"
@@ -3054,7 +3349,7 @@ def _materialize_storage_candidate(
     run_name: str = "eye_candidate",
 ) -> dict[str, object]:
     _accept_synthetic_subject_shape_publication(monkeypatch, source)
-    return mod.materialize_eye_angles(
+    return _apply_receipt_bound_eye_angles(
         source,
         scratch_root=scratch,
         subject_shape_run="shape_1",
@@ -3453,7 +3748,7 @@ def test_publication_rejects_output_identity_that_differs_from_sealed_source(
         RuntimeError,
         match=rf"^Local run validation failed: .*{expected_error}",
     ):
-        mod.materialize_eye_angles(
+        _apply_receipt_bound_eye_angles(
             source,
             scratch_root=scratch,
             subject_shape_run="shape_1",
@@ -3476,7 +3771,7 @@ def test_publication_rejects_output_identity_that_differs_from_sealed_source(
     assert "eye_angle_runs" not in root["analysis"]
 
 
-def test_post_read_staged_payload_tamper_fails_before_publication(
+def test_post_read_staged_payload_mutation_does_not_invalidate_worker_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3504,37 +3799,33 @@ def test_post_read_staged_payload_tamper_fails_before_publication(
         process_then_tamper,
     )
 
-    with pytest.raises(ValueError, match="differs from its canonical payload"):
-        mod.materialize_eye_angles(
-            source,
-            scratch_root=scratch,
-            subject_shape_run="shape_1",
-            keypoint_run="kp_raw_1",
-            run_name="eye_1",
-            chunk_rows=2,
-            output_shard_rows=3,
-            execution_backend="serial_driver",
-            scheduler="single-threaded",
-            num_workers=1,
-            shard_workers=1,
-            fps=100.0,
-            copy_backend="python",
-            apply=True,
-            check_capacity=False,
-        )
+    result = _apply_receipt_bound_eye_angles(
+        source,
+        scratch_root=scratch,
+        subject_shape_run="shape_1",
+        keypoint_run="kp_raw_1",
+        run_name="eye_1",
+        chunk_rows=2,
+        output_shard_rows=3,
+        execution_backend="serial_driver",
+        scheduler="single-threaded",
+        num_workers=1,
+        shard_workers=1,
+        fps=100.0,
+        copy_backend="python",
+        apply=True,
+        check_capacity=False,
+    )
 
     assert tampered is True
-    assert scratch.exists()
-    staged = zarr.open_group(
-        str(scratch / "eye-inputs-and-output.zarr"),
-        mode="r",
-        use_consolidated=False,
-    )
-    local_run = staged["analysis/eye_angle_runs/eye_1"]
-    assert local_run.attrs.get("palette_run_completion_status") != "complete"
-    assert local_run.attrs.get("stage_selector_eligible") is not True
+    assert result["status"] == "complete"
+    assert not scratch.exists()
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)
-    assert "eye_angle_runs" not in root["analysis"]
+    published = root["analysis/eye_angle_runs/eye_1"]
+    assert published.attrs["palette_run_completion_status"] == "complete"
+    assert published.attrs["staged_input_worker_attestation"][
+        "complete_worker_chunk_set"
+    ] is True
 
 
 def test_publication_rolls_back_when_source_revision_changes(
@@ -3562,7 +3853,7 @@ def test_publication_rolls_back_when_source_revision_changes(
     monkeypatch.setattr(mod, "audit_eye_angle_source_revision", changing_audit)
 
     with pytest.raises(RuntimeError, match="inputs changed during materialization"):
-        mod.materialize_eye_angles(
+        _apply_receipt_bound_eye_angles(
             source,
             scratch_root=scratch,
             subject_shape_run="shape_1",
@@ -3602,7 +3893,7 @@ def _materialize_established_eye_source(
     scratch: Path,
 ) -> dict[str, object]:
     _accept_synthetic_subject_shape_publication(monkeypatch, source)
-    return mod.materialize_eye_angles(
+    return _apply_receipt_bound_eye_angles(
         source,
         scratch_root=scratch,
         subject_shape_run="shape_1",
@@ -3652,7 +3943,7 @@ def test_candidate_execution_binding_acceptance_and_post_return_tombstone(
         accepted.append("called")
         return {"accepted": True, "execution_binding": binding}
 
-    result = mod.materialize_eye_angles(
+    result = _apply_receipt_bound_eye_angles(
         source,
         scratch_root=tmp_path / "candidate-scratch",
         subject_shape_run="shape_1",
@@ -3744,7 +4035,7 @@ def test_candidate_atomic_acceptance_failure_is_failed_and_ineligible(
         raise RuntimeError("injected atomic acceptance rejection")
 
     with pytest.raises(RuntimeError, match="atomic acceptance rejection") as error:
-        mod.materialize_eye_angles(
+        _apply_receipt_bound_eye_angles(
             source,
             scratch_root=tmp_path / "candidate-scratch",
             subject_shape_run="shape_1",

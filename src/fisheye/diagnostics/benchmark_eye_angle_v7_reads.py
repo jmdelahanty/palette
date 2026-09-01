@@ -1021,6 +1021,7 @@ def _require_source_revision_audit(
     archive: Path,
     expected_contract_sha256: str,
     expected_metadata_sha256: str,
+    expected_staged_receipt_sha256: str,
     expected_subject_shape_run: str,
     expected_keypoint_run: str,
 ) -> Mapping[str, Any]:
@@ -1036,7 +1037,9 @@ def _require_source_revision_audit(
         "observed_source_metadata_sha256",
         "expected_source_contract_sha256",
         "observed_source_contract_sha256",
+        "payload_verification_mode",
         "full_selected_scientific_input_content_hash",
+        "sealed_input_integrity_receipt_sha256",
         "errors",
     }
     if (
@@ -1050,7 +1053,11 @@ def _require_source_revision_audit(
         or value.get("subject_shape_run") != expected_subject_shape_run
         or value.get("keypoint_run") != expected_keypoint_run
         or value.get("errors") != []
-        or value.get("full_selected_scientific_input_content_hash") is not True
+        or value.get("payload_verification_mode")
+        != "sealed_receipt_metadata_authority_inventory_v1"
+        or value.get("full_selected_scientific_input_content_hash") is not False
+        or value.get("sealed_input_integrity_receipt_sha256")
+        != expected_staged_receipt_sha256
         or value.get("expected_source_metadata_sha256") != expected_metadata_sha256
         or value.get("observed_source_metadata_sha256") != expected_metadata_sha256
         or value.get("expected_source_contract_sha256") != expected_contract_sha256
@@ -1303,6 +1310,24 @@ def _require_materialization_contracts(
         != staged_receipt["record_sha256"]
     ):
         raise ValueError("Candidate persisted staged-input digest differs.")
+    try:
+        worker_attestation = eye_writer._canonical_worker_input_attestation(
+            materialization.get("staged_input_worker_attestation"),
+            receipt=staged_receipt,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Candidate materialization worker-input attestation is invalid."
+        ) from exc
+    if candidate_attrs.get("staged_input_worker_attestation") != worker_attestation:
+        raise ValueError("Candidate persisted worker-input attestation differs.")
+    if materialization.get("input_payload_validation") != {
+        "mode": "complete_worker_chunk_attestation_v1",
+        "precompute_full_decoded_scan": False,
+        "closing_source_full_decoded_scan": False,
+        "complete_worker_chunk_set": True,
+    }:
+        raise ValueError("Candidate worker input-validation profile is invalid.")
     source_identity = _require_staged_source_identity(
         candidate_attrs.get("eye_angle_source_contracts"), staged_receipt
     )
@@ -1311,6 +1336,7 @@ def _require_materialization_contracts(
         archive=archive,
         expected_contract_sha256=expected_contract_sha256,
         expected_metadata_sha256=str(source_metadata_sha256),
+        expected_staged_receipt_sha256=str(staged_receipt["record_sha256"]),
         expected_subject_shape_run=source_identity["subject_shape_run"],
         expected_keypoint_run=source_identity["keypoint_run"],
     )
@@ -1470,6 +1496,7 @@ def _require_materialization_contracts(
         "source_authority_mode",
         "staged_input_integrity_receipt_sha256",
         "staged_input_integrity_receipt",
+        "staged_payload_verification",
         "source_metadata_sha256",
         "inventory",
         "source_revision_audit",
@@ -1506,6 +1533,13 @@ def _require_materialization_contracts(
         or staging.get("staged_input_integrity_receipt_sha256")
         != staged_receipt["record_sha256"]
         or staging.get("staged_input_integrity_receipt") != staged_receipt
+        or staging.get("staged_payload_verification")
+        != {
+            "mode": "deferred_complete_worker_chunk_attestation_v1",
+            "receipt_sha256": staged_receipt["record_sha256"],
+            "precompute_full_decoded_scan": False,
+            "publication_requires_complete_worker_chunk_set": True,
+        }
         or staging.get("source_metadata_sha256") != source_metadata_sha256
     ):
         raise ValueError("Candidate source-staging receipt is invalid.")
@@ -1525,6 +1559,7 @@ def _require_materialization_contracts(
         archive=archive,
         expected_contract_sha256=expected_contract_sha256,
         expected_metadata_sha256=str(source_metadata_sha256),
+        expected_staged_receipt_sha256=str(staged_receipt["record_sha256"]),
         expected_subject_shape_run=source_identity["subject_shape_run"],
         expected_keypoint_run=source_identity["keypoint_run"],
     )
@@ -1536,7 +1571,9 @@ def _require_materialization_contracts(
         "observed_source_metadata_sha256",
         "expected_source_contract_sha256",
         "observed_source_contract_sha256",
+        "payload_verification_mode",
         "full_selected_scientific_input_content_hash",
+        "sealed_input_integrity_receipt_sha256",
         "errors",
     ):
         if staging_revision.get(field) != publication_revision.get(field):
@@ -1761,6 +1798,8 @@ def _require_publication_receipt(
             "source_metadata_sha256",
             "staged_input_integrity_receipt_sha256",
             "staged_input_integrity_receipt",
+            "staged_input_worker_attestation",
+            "input_payload_validation",
             "algorithm_contract",
             "output_contract",
             "local_direct_consolidated_array_count",

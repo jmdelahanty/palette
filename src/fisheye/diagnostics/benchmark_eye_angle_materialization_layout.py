@@ -32,7 +32,7 @@ from fisheye.analysis_workflows.materializers.eye_angles import (
     _iter_arrays,
     _sealed_output_identity_digests,
     _validate_eye_angle_run,
-    audit_eye_angle_source_revision,
+    audit_eye_angle_source_revision_full_payload,
     build_eye_angle_materialization_plan,
     stage_eye_angle_sources,
 )
@@ -310,7 +310,7 @@ def run_benchmark(
     sealed_identity = _sealed_output_identity_digests(
         plan.staged_input_integrity_receipt
     )
-    source_before = audit_eye_angle_source_revision(plan)
+    source_before = audit_eye_angle_source_revision_full_payload(plan)
     if source_before["status"] != "current":
         raise RuntimeError(f"Source revision is not current: {source_before}")
     staging = stage_eye_angle_sources(
@@ -506,7 +506,7 @@ def run_benchmark(
             shutil.rmtree(run_path)
             shutil.rmtree(sharded_path)
 
-        source_after = audit_eye_angle_source_revision(plan)
+        source_after = audit_eye_angle_source_revision_full_payload(plan)
         if source_after["status"] != "current":
             raise RuntimeError(f"Source changed during benchmark: {source_after}")
         result.update(
