@@ -1084,8 +1084,48 @@ validation-receipt digest is
 `2907d8253d69c60bdcba584da121215c9f98c70f851e6829afff100f788b80f4`.
 These canaries used uncommitted code at base commit
 `7785979bc5b357dda289e2e3a7e263be2b6f54fa` and are engineering evidence only.
-Required CI, a clean commit-pinned deployment, and the full cohort publication
-remain pending.
+
+The implementation subsequently passed all 23 required checks on PR 103 and
+merged as `b45aa6a5e0193c3cf4c4c725f6a02f45d4696d43`. The merge tree is identical
+to the tested PR head `f66345137f40420f953e9b63c0f194e0b07d9286`. The exact
+merged commit was deployed in the locked worktree
+`/groups/johnson/johnsonlab/jeremy/gitrepos/palette-worktrees/validated-behavior-cohort-phase-b-20260901-b45aa6a5`;
+the shared `/groups` checkout was not moved.
+
+The full Phase-B cohort publication completed on 2026-09-01 under
+`/groups/johnson/johnsonlab/jeremy/operations/goodbatbadbat_validated_behavior_phase_b_20260901_b45aa6a5`.
+Its immutable plan digest is
+`cdd3e0420115639bd36b929ff10d21a11ef50c441ebf71dc330fe37fc1b5fd74`.
+LSF shard array `153808201` committed all 84 members with a `%12` concurrency
+bound and no nonempty error logs; 80 members contributed complete scientific
+tables and four retained their exact invalid membership/bundle evidence. The
+84 shard runtimes had a 34-second median and 88-second maximum. Peak shard
+memory had a 982 MiB median and 7,380 MiB maximum under a 16 GiB request.
+
+Dependent finalizer `153808202` completed in 3,203 seconds with 3,207.42 CPU
+seconds, 752 MiB peak memory, and empty stderr. It validated and published 30
+tables, 2,520 Parquet parts, 140,542,546 rows, and 6,991,873,998 Parquet bytes
+(6.512 GiB). The operation occupies about 14 GiB because it retains both the
+independently validated shard evidence and the immutable published copy. The
+committed generation ID is `76d794a6a8104a55ae8aebe784113a6b`; its manifest
+digest is `230c30e032352c95bb9919f5704da6eba9d94a369b464089f575048639791d05`.
+The validation receipt record digest is
+`1a41989d298687966681d7d14d0c91b45c1975abf38d55658498bfb06e8936e2`
+and its file digest is
+`b3cef34a09a22e787776334f8376606478b88add648b4185b209cae1b8f38285`.
+The hidden staging namespace was empty after commit, and the generation has
+exactly 2,605 files: the 2,520 parts, 84 copied shard receipts, and one
+validation receipt.
+
+The plan requested and used 65,536-row Parquet row groups; every observed
+nonempty dense row group was at most 65,536 rows. Independent receipt-mode
+opens took 32.02 and 39.65 seconds. After open, bounded dense reads took
+17--34 milliseconds, a provider-motion predicate returned 997 selected rows in
+65 milliseconds, and a cohort aggregation over 101,233 canonical bouts took
+230 milliseconds. These queries retained manifest, plan, table-contract,
+analysis-unit-policy, and semantic-metadata identities. The publication remains
+selector-ineligible and makes no production-authority, registry, source-Zarr,
+or physical-presentation mutation or claim.
 
 ## Staged implementation checklist
 
@@ -1141,6 +1181,8 @@ remain pending.
 - [x] Run global key, foreign-key, row-count, Arrow,
       and inventory validation.
 - [x] Publish the immutable generation and validation receipt in test fixtures.
+- [x] Publish and receipt-validate the full 84-member Phase-B cohort from the
+      exact merged and commit-pinned implementation.
 - [x] Preserve 84 membership/capability rows and exact contributing-member
       rosters for every scientific table.
 
@@ -1157,9 +1199,9 @@ remain pending.
 
 ### Phase 5 — Optional dense projections
 
-- [ ] Complete cohort-scale measurements of row counts, bytes, row-group
-      sizes, filter latency, memory, and publication time. The one-recording
-      write time, rows, and bytes are recorded above.
+- [x] Complete cohort-scale measurements of row counts, bytes, row-group
+      sizes, filter latency, memory, and publication time; the exact results
+      and immutable identities are recorded in the Phase-B addendum above.
 - [x] Implement streaming `provider_motion_samples` shards.
 - [x] Keep the persisted bout-detector response separate from physical motion.
 - [x] Implement exact native stimulus-state support without a presentation-time
@@ -1167,10 +1209,11 @@ remain pending.
 - [x] Implement provider-explicit `chaser_relative_samples` shards.
 - [x] Add deduplicated body frames, body-alignment rows, exact active-trial
       membership, and separate gap evidence.
-- [ ] Keep every worker's file ownership disjoint; if any Zarr staging is ever
-      introduced, require whole non-overlapping physical chunk ownership.
-- [ ] Publish dense tables as optional manifest-bound extensions, not as a
-      prerequisite for the compact release.
+- [x] Keep every current worker's Parquet part and receipt ownership disjoint.
+      No Zarr staging is used; any future Zarr writer still requires whole
+      non-overlapping physical chunk ownership.
+- [x] Publish dense tables in the explicit Phase-B manifest-bound profile, not
+      as a prerequisite for the compact Phase-A release.
 
 ### Phase 6 — Later scientific successors
 
