@@ -482,6 +482,54 @@ digest grammar, restored-mtime staged corruption rejection in the worker,
 complete worker-set enforcement, real materializer publication with persisted
 attestation, and rejection of unreceipted apply before planning.
 
+### Access-aligned receipt capture canary (2026-09-01)
+
+The remaining plan-time receipt builder was scientifically single-pass but not
+physically single-decode. Its fixed 8,192-row receipt slices repeatedly crossed
+the independently decoded chunk grids of source arrays whose row chunks ranged
+from 8,192 to 1,048,576 rows. Receipt identity and physical access planning are
+now separate: an access cursor reads each complete source decode unit once,
+while the ordered logical stream still emits the unchanged 8,192-row receipt
+records and unchanged canonical full-array digests. Up to four independent
+logical inputs may be read concurrently; result assembly remains ordered and
+deterministic.
+
+For sharded Zarr arrays, `Array.chunks` is the independently decoded inner
+unit. `Array.shards` is the outer storage container and is not a safe proxy for
+decode granularity. An initial outer-shard canary (LSF job `153824944`) showed
+the consequence and was stopped after approximately 30 minutes without a
+report or receipt. The corrected implementation explicitly prefers inner
+chunks and records the selected unit kind, dimensions, expected/read counts,
+rows, and decoded bytes for every source array.
+
+The corrected camera-2010096 canary (job `153825903`) completed read-only on a
+commit-pinned worker deployment. Relative to the prior plan-only baseline, its
+plan phase changed from 1,314.975 to 1,287.635 seconds, CPU time from 1,407.309
+to 1,381.860 seconds, and logical bytes read from 47,256,450,292 to
+45,742,826,375. That is a 2.08% wall-time and 3.20% logical-read reduction in
+this single observation. It performed exactly 896 recorded source reads for
+288,539,361 decoded logical bytes across eight physical arrays and reproduced
+the exact prior scientific receipt digest
+`fb88e0d3be9ca36409a02f1a021351992be2dcbddd217675ac4042927f72abc0`.
+
+A second change removes one more redundant decode from generic keypoint
+coordinate publication: derivation payloads hash the already validated,
+C-contiguous in-memory geometry snapshots rather than reopening the same Zarr
+nodes. The mandatory fresh post-stamp loader and transactional attribute
+rollback remain. The combined canary (job `153825970`) preserved the same
+scientific receipt and reduced logical bytes read again to 44,760,409,277,
+5.28% below baseline. Its 1,316.643-second plan phase did not improve wall time
+in that single run, so the measured claim is reduced logical I/O, not a proven
+additional latency gain; shared-storage latency dominates the run-to-run wall
+variation. Adversarial tests cover mutation between validation and fresh
+reload, exact rollback, NaNs, signed zero, and non-contiguous snapshots.
+
+Both successful canaries reported `status="planned"` and
+`mutates_archive=false`; neither created scratch state or a target analysis
+run. The detailed reports, receipts, submission script, and sealed comparison
+record live under the corresponding dated operation directories rather than
+inside a mutable source archive.
+
 ## Compatibility and migration
 
 Existing consumers may require a historical flat content digest. During a

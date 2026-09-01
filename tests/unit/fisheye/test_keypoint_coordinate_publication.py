@@ -165,6 +165,31 @@ def test_payload_without_snapshot_reads_array_once() -> None:
     )
 
 
+def test_payload_resident_snapshot_preserves_canonical_special_value_digest() -> None:
+    backing = np.asarray(
+        [
+            [np.nan, -0.0, 0.0, 1.5],
+            [2.5, np.nan, -3.0, -0.0],
+        ],
+        dtype="<f4",
+    )
+    resident = backing[:, ::-1]
+    assert not resident.flags.c_contiguous
+    node = _CountingPayloadArray(
+        np.ascontiguousarray(resident),
+        path="keypoints_runs/kp/keypoints_roi",
+    )
+
+    payload = publication_module._payload(node, resident)
+
+    assert node.reads == 0
+    assert payload["array_values_sha256"] == publication_module.array_values_sha256(
+        np.ascontiguousarray(resident)
+    )
+    assert payload["shape"] == [2, 4]
+    assert payload["dtype"] == np.dtype("<f4").str
+
+
 def test_complete_coordinate_successor_validates_evidence_then_uses_resolved_crop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -974,6 +999,49 @@ def test_keypoint_surface_publication_rejects_roi_image_mixing_transactionally(
     assert "coordinate_contract" not in run.attrs
     for name in publication_module.KEYPOINT_ARRAY_NAMES:
         assert COORDINATE_DESCRIPTOR_ATTR not in run[name].attrs
+
+
+def test_keypoint_publication_rejects_payload_race_and_restores_all_attrs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _crop, _roi_images = _fixture(monkeypatch)
+    prepare_keypoint_coordinate_context(
+        root,
+        "keypoints_runs/k1",
+        crop_path="crop_runs/c1",
+        model_input_transform=resolve_model_input_transform((40, 40)),
+        preprocessing_input_mode="numpy-list",
+        model_artifact=_artifact(),
+    )
+    placement = run["source_crop_xywh"]
+    geometry_nodes = [run[name] for name in publication_module.KEYPOINT_ARRAY_NAMES]
+    targets, snapshots = publication_module._attrs_snapshot(
+        run,
+        placement,
+        *geometry_nodes,
+    )
+    load_fresh = publication_module._load_persisted_keypoint_coordinate_surfaces
+    mutated = False
+
+    def mutate_after_validation_then_load(*args: Any, **kwargs: Any) -> Any:
+        nonlocal mutated
+        assert not mutated
+        mutated = True
+        run["keypoints_img"].data[0, 0, 0] += 1.0
+        return load_fresh(*args, **kwargs)
+
+    monkeypatch.setattr(
+        publication_module,
+        "_load_persisted_keypoint_coordinate_surfaces",
+        mutate_after_validation_then_load,
+    )
+
+    with pytest.raises(KeypointCoordinatePublicationError):
+        publish_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
+
+    assert mutated
+    for node, snapshot in zip(targets, snapshots, strict=True):
+        assert dict(node.attrs) == snapshot
 
 
 def test_fresh_keypoint_loader_rejects_persisted_payload_or_transform_tampering(
