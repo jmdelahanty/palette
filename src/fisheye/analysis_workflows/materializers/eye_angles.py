@@ -101,6 +101,18 @@ MATERIALIZATION_ADMISSION_RECEIPT_SCHEMA_VERSION = 1
 STAGING_SCHEMA_ID = "palette.eye_angle_source_staging.v1"
 PUBLISH_SCHEMA_ID = "palette.eye_angle_run_publish.v1"
 SOURCE_REVISION_AUDIT_SCHEMA_ID = "palette.eye_angle_source_revision_audit.v1"
+SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION = (
+    "authoritative_full_publication_v1"
+)
+SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET = (
+    "receipt_bound_staged_subset_v1"
+)
+SOURCE_PHYSICAL_PROFILES = frozenset(
+    {
+        SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION,
+        SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET,
+    }
+)
 GROUP_METADATA_NAMES = ("zarr.json", ".zgroup", ".zattrs")
 DEFAULT_CHUNK_ROWS = 8_192
 DEFAULT_ANGLE_CHUNK_ROWS = eye_writer.EYE_ANGLE_DENSE_CHUNK_ROWS
@@ -1074,7 +1086,9 @@ def _resolve_source_plan(
     keypoint_run: str | None,
     completed_ineligible_subject_shape_candidate: Mapping[str, Any] | None = None,
     staged_input_integrity_receipt: Mapping[str, Any] | None = None,
-    receipt_bound_source: bool = False,
+    source_physical_profile: str = (
+        SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION
+    ),
     verify_staged_payload: bool = True,
 ) -> tuple[
     Any,
@@ -1084,13 +1098,23 @@ def _resolve_source_plan(
     float | None,
     int,
 ]:
-    if receipt_bound_source and staged_input_integrity_receipt is None:
+    physical_profile = str(source_physical_profile)
+    if physical_profile not in SOURCE_PHYSICAL_PROFILES:
         raise ValueError(
-            "Receipt-bound eye-angle source resolution requires the exact staged "
-            "input integrity receipt."
+            f"Unsupported eye-angle source physical profile {physical_profile!r}; "
+            f"expected one of {sorted(SOURCE_PHYSICAL_PROFILES)!r}."
+        )
+    receipt_bound_staged_subset = (
+        physical_profile
+        == SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET
+    )
+    if receipt_bound_staged_subset and staged_input_integrity_receipt is None:
+        raise ValueError(
+            "Receipt-bound staged eye-angle source resolution requires the exact "
+            "staged input integrity receipt."
         )
     if (
-        receipt_bound_source
+        receipt_bound_staged_subset
         and completed_ineligible_subject_shape_candidate is not None
     ):
         raise ValueError(
@@ -1102,14 +1126,16 @@ def _resolve_source_plan(
         eye_writer._staged_subject_shape_authority_from_input_receipt(
             staged_input_integrity_receipt
         )
-        if staged_input_integrity_receipt is not None and receipt_bound_source
+        if staged_input_integrity_receipt is not None
+        and receipt_bound_staged_subset
         else None
     )
     staged_keypoint_authority = (
         eye_writer._staged_keypoint_authority_from_input_receipt(
             staged_input_integrity_receipt
         )
-        if staged_input_integrity_receipt is not None and receipt_bound_source
+        if staged_input_integrity_receipt is not None
+        and receipt_bound_staged_subset
         else None
     )
     context = eye_writer._resolve_eye_angle_inputs(
@@ -1122,12 +1148,12 @@ def _resolve_source_plan(
         _completed_ineligible_subject_shape_candidate=(
             completed_ineligible_subject_shape_candidate
         ),
-        # Receipt-bound resolution is the shared evidence interface for both
-        # the authoritative immutable source and its staged subset. Its
-        # metadata-only mode validates detached authorities and closed array
-        # topology; workers validate every payload chunk while consuming it.
+        # Only the physically reduced staged subset uses detached authorities
+        # and closed-topology validation. The full authoritative publication
+        # must resolve through its normal canonical/candidate grammar because
+        # it legitimately contains arrays outside the eye-angle subset.
         _verify_staged_payload=(
-            verify_staged_payload if receipt_bound_source else True
+            verify_staged_payload if receipt_bound_staged_subset else True
         ),
     )
     if staged_input_integrity_receipt is not None:
@@ -1646,8 +1672,13 @@ def _validate_reused_plan_source(plan: EyeAngleMaterializationPlan) -> dict[str,
         plan.source_zarr,
         subject_shape_run=plan.subject_shape_run,
         keypoint_run=plan.keypoint_run,
+        completed_ineligible_subject_shape_candidate=(
+            plan.subject_shape_candidate_admission
+        ),
         staged_input_integrity_receipt=plan.staged_input_integrity_receipt,
-        receipt_bound_source=True,
+        source_physical_profile=(
+            SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION
+        ),
         verify_staged_payload=False,
     )
     errors: list[str] = []
@@ -1809,8 +1840,13 @@ def _audit_eye_angle_source_revision(
             plan.source_zarr,
             subject_shape_run=plan.subject_shape_run,
             keypoint_run=plan.keypoint_run,
+            completed_ineligible_subject_shape_candidate=(
+                plan.subject_shape_candidate_admission
+            ),
             staged_input_integrity_receipt=plan.staged_input_integrity_receipt,
-            receipt_bound_source=True,
+            source_physical_profile=(
+                SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION
+            ),
             verify_staged_payload=verify_payload,
         )
         observed_contract_sha256 = _json_digest(contracts)
@@ -1924,7 +1960,9 @@ def stage_eye_angle_sources(
         subject_shape_run=plan.subject_shape_run,
         keypoint_run=plan.keypoint_run,
         staged_input_integrity_receipt=plan.staged_input_integrity_receipt,
-        receipt_bound_source=True,
+        source_physical_profile=(
+            SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET
+        ),
         verify_staged_payload=False,
     )
     if (

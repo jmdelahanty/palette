@@ -166,6 +166,15 @@ def _build_source(
         data=np.full(rows, 2.0, dtype=np.float32),
         chunks=(2,),
     )
+    # A real subject-shape publication contains scientific surfaces beyond the
+    # five eye-angle inputs. Keep one representative full-publication array in
+    # the fixture so live-source resolution cannot accidentally reuse the
+    # closed-topology staged-subset grammar.
+    shape.create_array(
+        "instance_key",
+        data=np.arange(1, rows + 1, dtype=np.uint64),
+        chunks=(2,),
+    )
 
     refined_parent = root.create_group("refined_keypoints_runs")
     refined_parent.attrs["latest"] = "kp_refined_1"
@@ -1725,6 +1734,58 @@ def _worker_results_for_receipt(
     ]
 
 
+def test_reused_receipt_resolves_full_authoritative_publication_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source, scratch, plan, _receipt, _receipt_path = _admission_fixture(
+        monkeypatch,
+        tmp_path,
+    )
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    assert "instance_key" in root[_SHAPE_RUN_PATH]
+
+    freshness = mod._validate_reused_plan_source(plan)
+
+    assert freshness["status"] == "current"
+    assert freshness["row_count"] == plan.row_count
+    assert freshness["selected_arrays"] == list(plan.selected_arrays)
+    assert not scratch.exists()
+
+
+def test_receipt_bound_staged_subset_keeps_closed_array_topology(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _source, plan, _staging = _stage_synthetic_source(monkeypatch, tmp_path)
+    staged_root = zarr.open_group(
+        str(plan.staged_zarr),
+        mode="a",
+        use_consolidated=False,
+    )
+    staged_shape = staged_root[_SHAPE_RUN_PATH]
+    staged_shape.create_array(
+        "unexpected_full_publication_surface",
+        data=np.ones(plan.row_count, dtype=np.float32),
+        chunks=(2,),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Staged subject-shape subset has a noncanonical array inventory",
+    ):
+        mod._resolve_source_plan(
+            plan.staged_zarr,
+            subject_shape_run=plan.subject_shape_run,
+            keypoint_run=plan.keypoint_run,
+            staged_input_integrity_receipt=plan.staged_input_integrity_receipt,
+            source_physical_profile=(
+                mod.SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET
+            ),
+            verify_staged_payload=False,
+        )
+
+
 def test_streaming_array_digest_matches_canonical_array_digest() -> None:
     values = np.arange(60, dtype=np.float32).reshape(10, 3, 2)
     values[1, 0, 0] = np.nan
@@ -2899,7 +2960,9 @@ def test_combined_receipt_rejects_staged_keypoint_input_tamper(
             subject_shape_run=plan.subject_shape_run,
             keypoint_run=plan.keypoint_run,
             staged_input_integrity_receipt=(plan.staged_input_integrity_receipt),
-            receipt_bound_source=True,
+            source_physical_profile=(
+                mod.SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET
+            ),
             verify_staged_payload=True,
         )
 
@@ -2945,7 +3008,9 @@ def test_combined_receipt_rejects_another_keypoint_source_revision(
             subject_shape_run=plan_a.subject_shape_run,
             keypoint_run=plan_a.keypoint_run,
             staged_input_integrity_receipt=(plan_b.staged_input_integrity_receipt),
-            receipt_bound_source=True,
+            source_physical_profile=(
+                mod.SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET
+            ),
             verify_staged_payload=True,
         )
 
