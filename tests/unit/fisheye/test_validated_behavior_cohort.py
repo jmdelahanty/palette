@@ -9,6 +9,7 @@ import pytest
 
 import fisheye.analysis_workflows.validated_behavior_cohort as core
 import fisheye.analysis_workflows.validated_behavior_cohort_adapters as adapters
+import fisheye.utils.materialize_validated_behavior_bundle_cohort as cohort_cli
 from fisheye.analysis_workflows.exact_chaser_projection_receipt import (
     EPOCH_ALIGNMENT_RECEIPT_SCHEMA_VERSION,
     EXACT_CHILD_KEYS_V7,
@@ -32,9 +33,6 @@ from fisheye.cohorts.registry import (
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.utils.materialize_composable_chaser_successor_cohort import (
     EXPECTED_SAFETY as TASK_SAFETY,
-)
-from fisheye.utils.materialize_validated_behavior_bundle_cohort import (
-    main as cohort_cli_main,
 )
 
 
@@ -741,7 +739,9 @@ def test_historical_disposition_planner_uses_explicit_invalid_roster(
 
 
 def test_membership_cli_writes_bounded_generic_summary(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     analysis_root = (tmp_path / "recordings").resolve()
     operations_root = (tmp_path / "operations").resolve()
@@ -779,9 +779,10 @@ def test_membership_cli_writes_bounded_generic_summary(
         adapters.HISTORICAL_CONTROLLER_PROXY_TEMPORAL_POLICY,
     )
     output = tmp_path / "membership.json"
+    monkeypatch.setattr(cohort_cli, "_current_palette_git_state", lambda: (COMMIT, ""))
 
     assert (
-        cohort_cli_main(
+        cohort_cli.main(
             [
                 "membership-from-chaser-task-v5",
                 "--source-membership",
@@ -829,3 +830,25 @@ def test_membership_cli_writes_bounded_generic_summary(
     assert summary["selector_eligible"] is False
     assert "members" not in summary
     assert output.is_file()
+
+
+def test_cli_rejects_false_or_dirty_software_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cohort_cli, "_current_palette_git_state", lambda: (COMMIT, ""))
+    with pytest.raises(
+        cohort_cli.ValidatedBehaviorCohortCliError,
+        match="must equal the exact commit",
+    ):
+        cohort_cli._require_current_software_authority("b" * 40)
+
+    monkeypatch.setattr(
+        cohort_cli,
+        "_current_palette_git_state",
+        lambda: (COMMIT, " M src/fisheye/example.py"),
+    )
+    with pytest.raises(
+        cohort_cli.ValidatedBehaviorCohortCliError,
+        match="clean commit-pinned",
+    ):
+        cohort_cli._require_current_software_authority(COMMIT)

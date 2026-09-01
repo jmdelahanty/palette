@@ -12,6 +12,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import subprocess
 from typing import Any, Mapping, Sequence
 
 from fisheye.analysis_workflows.validated_behavior_cohort import (
@@ -87,6 +88,42 @@ def _check_expected_digest(path: Path, expected: str | None, *, field: str) -> N
     if observed != _digest(expected, field=field):
         raise ValidatedBehaviorCohortCliError(
             f"{field} mismatch: expected {expected}, observed {observed}."
+        )
+
+
+def _current_palette_git_state() -> tuple[str, str]:
+    repository = Path(__file__).resolve().parents[3]
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "-C", str(repository), "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValidatedBehaviorCohortCliError(
+            "Cannot verify the current Palette Git identity."
+        ) from exc
+    return commit, status
+
+
+def _require_current_software_authority(expected_commit: str) -> None:
+    expected = str(expected_commit).strip()
+    current, status = _current_palette_git_state()
+    if expected != current:
+        raise ValidatedBehaviorCohortCliError(
+            "--palette-commit must equal the exact commit executing this command; "
+            f"expected {current}, received {expected}."
+        )
+    if status:
+        raise ValidatedBehaviorCohortCliError(
+            "Artifact planning requires a clean commit-pinned Palette worktree."
         )
 
 
@@ -243,6 +280,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _membership_command(args: argparse.Namespace) -> dict[str, Any]:
+    _require_current_software_authority(args.palette_commit)
     source = args.source_membership.expanduser().resolve()
     _check_expected_digest(
         source,
@@ -331,6 +369,7 @@ def _membership_command(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _bundle_set_command(args: argparse.Namespace) -> dict[str, Any]:
+    _require_current_software_authority(args.palette_commit)
     membership_path, membership_raw = _read_object(args.membership, field="membership")
     membership = validate_membership_current_sources(membership_raw)
     bundle_paths = _load_bundle_paths(
