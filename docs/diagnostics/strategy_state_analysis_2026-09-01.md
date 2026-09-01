@@ -116,3 +116,34 @@ coping locomotor state, not learned spatial avoidance.
   exploration decay (dot-independent)? The twins answer it: an
   exploration-only account predicts no ramp in twin-corrected excess.
   It ramps — but a dedicated novel-object control would settle it.
+
+## Addendum (2026-09-01): CRA quadrant endpoint is side-confounded in this layout
+
+The legacy CRA quadrant group statistics cannot regenerate anywhere (the code
+requires analytics-export contract v3; every existing export is v1/v2), but
+its endpoint has a direct phase-B equivalent (`same_quadrant_fraction_valid`).
+Run on goodbatbadbat it "works": specificity (agg−inert) post−pre = +0.122,
+q=0.002. **This is an artifact.** Geometry check (park positions extracted
+from `chaser_relative_samples`, fish fixed-quadrant occupancy from
+`provider_motion_samples`, saved in the session scratchpad):
+
+- Park layout is identical in all 80 recordings — pre: aggressive
+  bottom-left, inert bottom-right; post: aggressive top-right, inert
+  top-left. **Role↔arena-side is perfectly confounded cohort-wide**
+  (aggressive = left in pre, right in post).
+- Fish occupancy = (a) genuine dot-anchored avoidance of BOTH dots — the
+  occupancy field flips halves with the dots (59%/60% in the far half;
+  rankings fully reverse, so no fixed place preference) — which is
+  role-symmetric and cancels in the specificity; plus (b) a **stable
+  right-side bias** (right-half occupancy 0.538 pre, 0.542 post).
+- Arithmetic: the side bias alone predicts a specificity diff-in-diff of
+  +0.133 vs +0.122 observed. The endpoint measures the fish's lateral bias
+  with the role labels swapped between sides, not avoidance.
+- The training−pre specificity (+0.092, q=0.014) is the separately
+  established pursuit effect (the aggressive dot visits the fish).
+
+Consequences: quadrant-based role endpoints are unusable under this stimulus
+layout; twin-corrected distance endpoints remain the valid avoidance
+measures (the rotated null cancels side bias). The both-dot half-avoidance
+in (a) is itself a real, previously unquantified result: fish re-anchor
+their occupancy field to the dot pair's position.

@@ -658,6 +658,15 @@ and `loom_mode` recorded in the H5 arena/protocol snapshot (already are) and
 promoted to registry columns; a protocol hash per arm under the schedule-mode
 contract; swim depth is still untracked — note it as a known covariate.
 
+Layout lock (added 2026-09-01, from the CRA quadrant confound analysis in
+`strategy_state_analysis_2026-09-01.md`): **counterbalance park corners** —
+role↔arena-side assignment was constant across all 80 goodbatbadbat
+recordings (aggressive left in pre, right in post), and a stable ~4-point
+lateral occupancy bias made the quadrant specificity endpoint a pure
+geometry artifact (+0.122 "effect", fully predicted by the side bias).
+Randomize or counterbalance role↔corner per session, or restrict spatial
+endpoints to twin-corrected measures.
+
 Pre-registered predictions: gap mechanism → arm 1 recovers escape rate and
 B1 gain; loom mechanism → arm 2 recovers them; both → arm 3 ≫ either. If arm 1
 shows a shift in freeze probability without a shift in wander-phase avoidance,
