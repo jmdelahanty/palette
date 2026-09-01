@@ -28,6 +28,9 @@ Options:
   --artifact NAME    Initial artifact filter passed to the explorer.
   --exact-chaser-receipt PATH
                     Closed projection receipt for targeted exact-chaser reads.
+  --validated-behavior-bundle PATH
+                    Exact recording-behavior bundle for shared Core Behavior
+                    and bundle-bound exact-chaser routes.
   --token            Enable marimo token authentication.
   --no-token         Disable marimo token authentication. (default)
   --watch            Ask marimo to reload when the notebook changes.
@@ -69,7 +72,7 @@ while [[ $# -gt 0 ]]; do
       HOST="$2"
       shift 2
       ;;
-    --renderer|--run-path|--artifact|--recordings-root|--recording-name-contains|--registry|--exact-chaser-receipt)
+    --renderer|--run-path|--artifact|--recordings-root|--recording-name-contains|--registry|--exact-chaser-receipt|--validated-behavior-bundle)
       APP_ARGS+=("$1" "$2")
       shift 2
       ;;

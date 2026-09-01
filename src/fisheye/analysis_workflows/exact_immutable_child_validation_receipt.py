@@ -25,9 +25,9 @@ from fisheye.analysis_workflows.chaser_relative_frame_validation_receipt import 
     _streaming_array_values_sha256,
 )
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.zarr.columnar import validate_columnar_fixed_bytes_layout
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_io import open_zarr_root
-
 
 RECEIPT_SCHEMA_ID = "palette.analysis.exact_immutable_child.validation_receipt"
 RECEIPT_SCHEMA_VERSION = 1
@@ -84,9 +84,6 @@ _SELECTOR_PARTS = {
     "active",
     "default",
 }
-_COLUMNAR_FIXED_BYTES_MAX_WIDTH = 512
-_COLUMNAR_STORAGE_SCHEMA_ID = "palette.columnar_zarr_storage.v1"
-_COLUMNAR_STORAGE_WRITER = "fisheye.shared.zarr.columnar.store_array"
 
 
 class ExactImmutableChildValidationReceiptError(ValueError):
@@ -125,7 +122,9 @@ def _run_path(value: object) -> str:
         or not path.parts
         or path.parts[0] != "analysis"
         or "\\" in result
-        or any(part in {"", ".", ".."} or part in _SELECTOR_PARTS for part in path.parts)
+        or any(
+            part in {"", ".", ".."} or part in _SELECTOR_PARTS for part in path.parts
+        )
     ):
         _fail("run_path must name one exact non-selector child below analysis/.")
     return path.as_posix()
@@ -152,10 +151,7 @@ def _plain(value: Any) -> Any:
 
 
 def _array_paths(group: Any, *, prefix: str = "") -> set[str]:
-    paths = {
-        f"{prefix}/{name}" if prefix else str(name)
-        for name in group.array_keys()
-    }
+    paths = {f"{prefix}/{name}" if prefix else str(name) for name in group.array_keys()}
     for name in group.group_keys():
         child_prefix = f"{prefix}/{name}" if prefix else str(name)
         paths.update(_array_paths(group[name], prefix=child_prefix))
@@ -171,34 +167,16 @@ def _streaming_columnar_fixed_bytes_sha256(
     """Reconstruct one logical fixed-byte column from its bounded uint8 store."""
 
     logical_shape = tuple(expected_shape)
-    physical_dtype = np.dtype(node.dtype)
-    physical_shape = tuple(int(value) for value in node.shape)
-    logical_width = int(expected_dtype.itemsize)
-    if (
-        expected_dtype.kind != "S"
-        or expected_dtype.hasobject
-        or logical_width <= 0
-        or logical_width > _COLUMNAR_FIXED_BYTES_MAX_WIDTH
-        or len(logical_shape) != 1
-        or physical_dtype != np.dtype(np.uint8)
-        or len(physical_shape) != 2
-        or physical_shape[0] != logical_shape[0]
-    ):
-        _fail("Declared fixed-byte column shape or dtype changed.")
-    physical_width = physical_shape[1]
-    if (
-        physical_width <= 0
-        or physical_width > _COLUMNAR_FIXED_BYTES_MAX_WIDTH
-        or physical_width & (physical_width - 1)
-    ):
-        _fail("Declared fixed-byte column width is not a bounded power of two.")
-    attrs = getattr(node, "attrs", None)
-    if (
-        attrs is None
-        or attrs.get("palette_storage_schema_id") != _COLUMNAR_STORAGE_SCHEMA_ID
-        or attrs.get("palette_storage_writer") != _COLUMNAR_STORAGE_WRITER
-    ):
-        _fail("Declared fixed-byte column lacks its exact storage authority.")
+    try:
+        _row_count, logical_width, physical_width = (
+            validate_columnar_fixed_bytes_layout(
+                node,
+                expected_dtype=expected_dtype,
+                expected_shape=logical_shape,
+            )
+        )
+    except ValueError as exc:
+        _fail(str(exc))
 
     header = {
         "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
@@ -272,7 +250,9 @@ def _streaming_manifest_array_audit(
         if type(path) is not str or not path or path in by_path:
             _fail("Manifest array paths are absent or duplicated.")
         parsed = PurePosixPath(path)
-        if parsed.is_absolute() or any(part in {"", ".", ".."} for part in parsed.parts):
+        if parsed.is_absolute() or any(
+            part in {"", ".", ".."} for part in parsed.parts
+        ):
             _fail("Manifest array path leaves the exact immutable child.")
         by_path[path] = declaration
     run = open_zarr_root(run_directory, mode="r", use_consolidated=False)
@@ -345,8 +325,7 @@ def build_exact_immutable_child_validation_receipt(
     if manifest.get("run_path") != exact_path:
         _fail("Exact child manifest names another run path.")
     if (
-        attrs.get("palette_run_completion_contract")
-        != "palette.zarr_run_completion.v1"
+        attrs.get("palette_run_completion_contract") != "palette.zarr_run_completion.v1"
         or attrs.get("palette_run_completion_status") != "complete"
         or attrs.get("palette_run_name") != PurePosixPath(exact_path).name
         or attrs.get("stage_selector_eligible") is not False
@@ -356,8 +335,10 @@ def build_exact_immutable_child_validation_receipt(
     ):
         _fail("Exact child is not complete and selector-ineligible.")
     declarations = manifest.get("array_declarations")
-    if not isinstance(declarations, list) or not declarations or not all(
-        isinstance(value, Mapping) for value in declarations
+    if (
+        not isinstance(declarations, list)
+        or not declarations
+        or not all(isinstance(value, Mapping) for value in declarations)
     ):
         _fail("Exact child manifest lacks array declarations.")
     provenance = attrs.get("run_provenance")
@@ -440,9 +421,7 @@ def validate_exact_immutable_child_validation_receipt(
     exact_path = _run_path(value.get("run_path"))
     recording_id = _text(value.get("recording_id"), field="recording_id")
     manifest_name = _text(value.get("manifest_attr"), field="manifest_attr")
-    digest_name = _text(
-        value.get("manifest_digest_attr"), field="manifest_digest_attr"
-    )
+    digest_name = _text(value.get("manifest_digest_attr"), field="manifest_digest_attr")
     manifest = value.get("manifest")
     if not isinstance(manifest, dict):
         _fail("Exact-child receipt manifest is invalid.")
@@ -456,9 +435,10 @@ def validate_exact_immutable_child_validation_receipt(
         or value.get("array_declarations") != manifest.get("array_declarations")
     ):
         _fail("Exact-child receipt manifest bindings are invalid.")
-    if expected_analysis_zarr is not None and archive != Path(
-        expected_analysis_zarr
-    ).expanduser().resolve():
+    if (
+        expected_analysis_zarr is not None
+        and archive != Path(expected_analysis_zarr).expanduser().resolve()
+    ):
         _fail("Exact-child receipt names another archive.")
     if expected_run_path is not None and exact_path != _run_path(expected_run_path):
         _fail("Exact-child receipt names another run path.")
@@ -493,8 +473,7 @@ def validate_exact_immutable_child_validation_receipt(
         or not declarations
         or not all(isinstance(declaration, dict) for declaration in declarations)
         or audit.get("array_count") != len(declarations)
-        or audit.get("maximum_requested_block_bytes")
-        != STREAMING_HASH_BLOCK_BYTES
+        or audit.get("maximum_requested_block_bytes") != STREAMING_HASH_BLOCK_BYTES
     ):
         _fail("Exact-child receipt streaming audit is invalid.")
     _digest(
@@ -511,8 +490,7 @@ def validate_exact_immutable_child_validation_receipt(
         _fail("Exact-child receipt metadata inventory is invalid.")
     files = inventory.get("files")
     if (
-        inventory.get("policy_id")
-        != "all_direct_subtree_zarr_json_files_sha256_v1"
+        inventory.get("policy_id") != "all_direct_subtree_zarr_json_files_sha256_v1"
         or not isinstance(files, list)
         or not files
         or inventory.get("file_count") != len(files)

@@ -49426,7 +49426,7 @@
       "enclosing_symbol": "fisheye.shared.zarr.columnar:store_array",
       "file": "src/fisheye/shared/zarr/columnar.py",
       "filters_expression": null,
-      "line": 155,
+      "line": 282,
       "parent_path_pattern": "<parent>",
       "path_pattern": "<parent>/<name>",
       "receiver_expression": "parent",
@@ -49434,7 +49434,7 @@
       "shape_expression": null,
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-b5a328882bbf595f",
+      "site_id": "writer-62b57e82c567c622",
       "status": "current",
       "status_basis": "packaged Palette module without a maintenance marker",
       "surface_class": "production",
@@ -49468,7 +49468,7 @@
       "enclosing_symbol": "fisheye.shared.zarr.columnar:write_columnar_dataset",
       "file": "src/fisheye/shared/zarr/columnar.py",
       "filters_expression": null,
-      "line": 226,
+      "line": 353,
       "parent_path_pattern": "<parent>/<name>",
       "path_pattern": "<parent>/<name>/<field>",
       "receiver_expression": null,
@@ -49476,7 +49476,7 @@
       "shape_expression": "shape(data[field])",
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-6aa92f90c9a1b824",
+      "site_id": "writer-bfd1ca02303e96e1",
       "status": "current",
       "status_basis": "packaged Palette module without a maintenance marker",
       "surface_class": "production",
@@ -69705,7 +69705,7 @@
     "parsed_writer_candidate_module_count": 232,
     "reader_required_array_declaration_count": 102,
     "resolved_writer_leaf_name_count": 630,
-    "scanned_python_module_count": 1636,
+    "scanned_python_module_count": 1639,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
@@ -69741,7 +69741,7 @@
     "writer_wrapper_call_site_count": 985
   },
   "wrapper_analysis": {
-    "function_definition_count": 6165,
+    "function_definition_count": 6167,
     "writer_function_count": 242,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",

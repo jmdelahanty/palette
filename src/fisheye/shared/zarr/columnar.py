@@ -16,19 +16,25 @@ from zarr import Array as ZarrArray, Group as ZarrGroup
 from fisheye.shared.json_safety import decode_null_terminated_text
 
 __all__ = [
+    "COLUMNAR_FIXED_BYTES_MAX_WIDTH",
     "COLUMNAR_SHARD_ALIGNMENT_POLICY",
     "COLUMNAR_SHARD_POLICY",
     "COLUMNAR_STORAGE_SCHEMA_ID",
+    "COLUMNAR_STORAGE_WRITER",
     "DEFAULT_COLUMNAR_SHARD_ROWS",
     "load_structured_dataset",
     "pick_chunks",
     "pick_shards",
+    "read_columnar_array_as_declared",
     "read_columnar_dataset",
     "store_array",
+    "validate_columnar_fixed_bytes_layout",
     "write_columnar_dataset",
 ]
 
 COLUMNAR_STORAGE_SCHEMA_ID = "palette.columnar_zarr_storage.v1"
+COLUMNAR_STORAGE_WRITER = "fisheye.shared.zarr.columnar.store_array"
+COLUMNAR_FIXED_BYTES_MAX_WIDTH = 512
 DEFAULT_COLUMNAR_SHARD_ROWS = 262_144
 COLUMNAR_SHARD_POLICY = "multi_chunk_capped"
 COLUMNAR_SHARD_ALIGNMENT_POLICY = (
@@ -108,6 +114,127 @@ def _to_string_list(data: np.ndarray) -> List[str]:
     return strings
 
 
+def validate_columnar_fixed_bytes_layout(
+    node: object,
+    *,
+    expected_dtype: np.dtype,
+    expected_shape: Tuple[int, ...],
+) -> Tuple[int, int, int]:
+    """Validate the physical uint8 carrier for one logical fixed-byte column.
+
+    Returns ``(row_count, logical_width, physical_width)``.  This is shared by
+    streaming receipt audits and targeted consumers so both apply the same
+    logical-versus-physical storage grammar.
+    """
+
+    logical_dtype = np.dtype(expected_dtype)
+    logical_shape = tuple(int(value) for value in expected_shape)
+    try:
+        physical_dtype = np.dtype(getattr(node, "dtype"))
+        physical_shape = tuple(int(value) for value in getattr(node, "shape"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("Columnar fixed-byte physical metadata is invalid.") from exc
+    logical_width = int(logical_dtype.itemsize)
+    if (
+        logical_dtype.kind != "S"
+        or logical_dtype.hasobject
+        or logical_width <= 0
+        or logical_width > COLUMNAR_FIXED_BYTES_MAX_WIDTH
+        or len(logical_shape) != 1
+        or physical_dtype != np.dtype(np.uint8)
+        or len(physical_shape) != 2
+        or physical_shape[0] != logical_shape[0]
+    ):
+        raise ValueError("Declared fixed-byte column shape or dtype changed.")
+    physical_width = physical_shape[1]
+    if (
+        physical_width <= 0
+        or physical_width > COLUMNAR_FIXED_BYTES_MAX_WIDTH
+        or physical_width & (physical_width - 1)
+    ):
+        raise ValueError(
+            "Declared fixed-byte column width is not a bounded power of two."
+        )
+    attrs = getattr(node, "attrs", None)
+    if (
+        attrs is None
+        or attrs.get("palette_storage_schema_id") != COLUMNAR_STORAGE_SCHEMA_ID
+        or attrs.get("palette_storage_writer") != COLUMNAR_STORAGE_WRITER
+    ):
+        raise ValueError(
+            "Declared fixed-byte column lacks its exact storage authority."
+        )
+    return logical_shape[0], logical_width, physical_width
+
+
+def read_columnar_array_as_declared(
+    node: object,
+    *,
+    expected_dtype: str,
+    expected_shape: Tuple[int, ...],
+) -> np.ndarray:
+    """Read one column using its manifest-declared logical dtype and shape.
+
+    Numeric arrays must match their physical declaration exactly. Fixed-width
+    byte strings may use Palette's authorized two-dimensional uint8 carrier;
+    they are reconstructed to the logical one-dimensional ``S`` dtype before
+    the caller hashes or renders them. Object-reference arrays are prohibited.
+    """
+
+    try:
+        logical_dtype = np.dtype(expected_dtype)
+    except TypeError as exc:
+        raise ValueError("Declared columnar dtype is invalid.") from exc
+    logical_shape = tuple(int(value) for value in expected_shape)
+    if logical_dtype.hasobject:
+        raise ValueError("Object-reference arrays have no deterministic payload.")
+    try:
+        before_dtype = np.dtype(getattr(node, "dtype"))
+        before_shape = tuple(int(value) for value in getattr(node, "shape"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("Columnar array physical metadata is invalid.") from exc
+
+    if before_dtype == logical_dtype and before_shape == logical_shape:
+        result = np.array(node[...], copy=True, order="C")
+    elif logical_dtype.kind == "S":
+        row_count, logical_width, physical_width = validate_columnar_fixed_bytes_layout(
+            node,
+            expected_dtype=logical_dtype,
+            expected_shape=logical_shape,
+        )
+        physical = np.ascontiguousarray(np.asarray(node[...]))
+        if physical.dtype != np.dtype(np.uint8) or physical.shape != (
+            row_count,
+            physical_width,
+        ):
+            raise ValueError("Fixed-byte physical values changed while reading.")
+        if physical_width > logical_width and np.any(physical[:, logical_width:]):
+            raise ValueError(
+                "Fixed-byte column contains nonzero data outside its logical width."
+            )
+        logical_bytes = np.zeros((row_count, logical_width), dtype=np.uint8)
+        copied_width = min(logical_width, physical_width)
+        logical_bytes[:, :copied_width] = physical[:, :copied_width]
+        result = logical_bytes.view(logical_dtype).reshape(logical_shape)
+    else:
+        raise ValueError("Columnar array metadata differs from its declaration.")
+
+    try:
+        after_dtype = np.dtype(getattr(node, "dtype"))
+        after_shape = tuple(int(value) for value in getattr(node, "shape"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("Columnar array metadata changed while reading.") from exc
+    if (
+        before_dtype != after_dtype
+        or before_shape != after_shape
+        or result.dtype != logical_dtype
+        or result.shape != logical_shape
+    ):
+        raise ValueError("Columnar logical values changed while reading.")
+    result.setflags(write=False)
+    return result
+
+
 def store_array(
     parent: zarr.Group,
     name: str,
@@ -171,7 +298,7 @@ def store_array(
     arr.attrs.update(
         {
             "palette_storage_schema_id": COLUMNAR_STORAGE_SCHEMA_ID,
-            "palette_storage_writer": "fisheye.shared.zarr.columnar.store_array",
+            "palette_storage_writer": COLUMNAR_STORAGE_WRITER,
             "palette_physical_layout": (
                 "indexed_sharding_v1" if shards is not None else "regular_chunks_v1"
             ),

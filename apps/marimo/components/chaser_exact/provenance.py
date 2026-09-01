@@ -64,6 +64,8 @@ def build_projection_provenance(
     chaser_appearance: Any | None = None,
     projection_verification_mode: str = "deep_audit",
     projection_receipt_sha256: str | None = None,
+    validated_behavior_bundle_path: str | None = None,
+    validated_behavior_bundle_sha256: str | None = None,
 ) -> Mapping[str, Any]:
     """Build the readable, immutable identity record shared by exact views."""
 
@@ -79,6 +81,15 @@ def build_projection_provenance(
                     "manifest_declared_content_sha256_per_consumed_array"
                 ),
             },
+            "validated_recording_behavior_bundle": (
+                {
+                    "bundle_path": validated_behavior_bundle_path,
+                    "bundle_sha256": validated_behavior_bundle_sha256,
+                    "role": "exact_source_choice_and_compatibility_authority",
+                }
+                if validated_behavior_bundle_path is not None
+                else None
+            ),
             "spatial_verification": _verification(spatial),
             "radial_run_paths": [radial.run_path for radial in radials],
             "radial_manifest_sha256": [radial.manifest_sha256 for radial in radials],
@@ -134,7 +145,9 @@ def build_projection_provenance(
                     ),
                     "body_extension_present": generalized_bout_response.scientific_manifest.get(
                         "scientific_schema", {}
-                    ).get("body_extension_present"),
+                    ).get(
+                        "body_extension_present"
+                    ),
                     "deep_audited": generalized_bout_response.deep_audited,
                     **_verification(generalized_bout_response),
                 }
