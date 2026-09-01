@@ -364,6 +364,69 @@ and records component failure without invalidating the publication. The canary
 must remain selector-ineligible until that change completes required CI and a
 new successor is explicitly validated; this note does not activate it.
 
+## Eye-angle admission-receipt reuse (2026-08-31)
+
+The eye-angle materializer had a narrower repeat-read defect: a reviewed
+plan-only invocation could compute and report the exact staged-input integrity
+receipt, but a later apply invocation always rebuilt the plan and recomputed
+that receipt. The apply therefore repeated the expensive source scan even when
+the operator was deliberately executing the already-reviewed plan.
+
+The implementation candidate adds one sealed operation envelope,
+`palette.eye_angle_materialization_admission_receipt` v1, around the complete
+typed `EyeAngleMaterializationPlan`. Its payload has a separate
+`palette.eye_angle_materialization_plan` v2 identity so the historical
+materialization-v1 report plan remains byte-for-byte schema-compatible. The
+receipt payload includes the full selected
+physical-file manifest, source and authority contracts, the existing staged
+scientific-input receipt, all scientific/storage parameters, resolved paths,
+selector snapshots, and the exact clean Palette Git commit. Plan-only mode can
+write the envelope create-only; apply mode can consume it through the same
+materializer interface.
+
+Receipt-backed apply is fail-closed:
+
+- envelope, payload, nested authority, and inventory digests are validated;
+- the current process must run the exact clean commit that created the plan;
+- every repeated apply argument must agree with the sealed plan;
+- live lifecycle, authority, selector, metadata, and selected-file closure are
+  revalidated before scratch creation;
+- canonical subject-shape sources must also pass direct/consolidated metadata
+  equivalence at receipt admission (candidate and keypoint paths retain their
+  existing profile-specific metadata gates);
+- invalid or stale receipts never fall back to live replanning; and
+- the receipt-bound scratch directory remains the atomic single-consumer claim.
+
+The self-contained `apply_eye_angle_materialization_plan` API is the shared
+consumer. The eye-gaze prerequisite cohort now writes the receipt after its
+subject-shape candidate exists, applies that exact receipt, and binds both the
+receipt-file digest and payload digest into its version-2 cohort receipt. The
+older direct materializer API remains available for compatibility and treats
+any repeated receipt-bound arguments only as exact assertions.
+
+This optimization removes the *second plan construction* when a prior
+approval/dry-run is part of the workflow. It does not claim that metadata reads
+are zero, and it does not remove the exact staged-payload verification before
+the scientific writer or the closing source audit around publication. A
+same-size source mutation with a restored modification time is consequently
+caught before computation even though the initial reuse gate is intentionally
+metadata/inventory based.
+
+The physical path/size/mtime manifest is only a cheap freshness hint; it is not
+described as a standalone content receipt. Scientific content remains bound by
+the nested logical-input receipt and its exact post-copy verification. The
+scratch claim prevents concurrent consumers, while the immutable target path
+prevents successful replay. The receipt itself does not yet carry a durable
+claimed/running/committed lifecycle token; add one only if receipt single-use
+independent of target identity becomes a workflow requirement.
+
+The 2026-08-31 camera-2010094 canary at commit `1b6d14c0` was a one-shot apply
+and did not use this new cross-invocation path. It remains the baseline: its
+reported plan phase was about 18m47s, followed by about 18m45s of staged-input
+validation. A receipt-backed canary is still required after the implementation
+commit passes CI; its telemetry must report receipt reuse and zero calls to the
+full plan, candidate-admission, and staged-receipt builders.
+
 ## Compatibility and migration
 
 Existing consumers may require a historical flat content digest. During a

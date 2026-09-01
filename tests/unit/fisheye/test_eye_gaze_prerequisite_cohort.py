@@ -262,9 +262,33 @@ def test_materialization_wires_exact_ineligible_candidates_without_acceptance(
             "publish": {"publication_owner_uuid": "b" * 32},
         }
 
-    def fake_eye(*args: object, **kwargs: object) -> dict[str, object]:
-        calls["eye"] = {"args": args, **kwargs}
-        return {"status": "complete", "kind": "eye_angles"}
+    eye_admission_digest = "c" * 64
+
+    def fake_eye_plan(*args: object, **kwargs: object) -> dict[str, object]:
+        calls["eye_plan"] = {"args": args, **kwargs}
+        receipt = Path(str(kwargs["admission_receipt_output"]))
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text('{"fixture":true}\n', encoding="utf-8")
+        return {
+            "status": "planned",
+            "admission_receipt_path": str(receipt),
+            "admission_receipt_payload_digest": eye_admission_digest,
+        }
+
+    def fake_eye_apply(
+        admission_receipt: object,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        calls["eye_apply"] = {
+            "admission_receipt": admission_receipt,
+            **kwargs,
+        }
+        return {
+            "status": "complete",
+            "kind": "eye_angles",
+            "admission_receipt_path": str(admission_receipt),
+            "admission_receipt_payload_digest": eye_admission_digest,
+        }
 
     def fake_validate(*args: object, **kwargs: object) -> dict[str, object]:
         calls["validation"] = {"args": args, **kwargs}
@@ -273,7 +297,12 @@ def test_materialization_wires_exact_ineligible_candidates_without_acceptance(
 
     monkeypatch.setattr(cohort, "publish_assignment_keypoint_rebinding", fake_publish)
     monkeypatch.setattr(subject_shape, "materialize_subject_shape", fake_shape)
-    monkeypatch.setattr(eye_angles, "materialize_eye_angles", fake_eye)
+    monkeypatch.setattr(eye_angles, "materialize_eye_angles", fake_eye_plan)
+    monkeypatch.setattr(
+        eye_angles,
+        "apply_eye_angle_materialization_plan",
+        fake_eye_apply,
+    )
     monkeypatch.setattr(
         gaze_convention_validation,
         "validate_eye_angle_run",
@@ -305,20 +334,29 @@ def test_materialization_wires_exact_ineligible_candidates_without_acceptance(
     )
     assert calls["shape"]["apply"] is True
     assert "stage_selector_eligible" not in calls["shape"]
-    assert calls["eye"]["subject_shape_run"] == cohort.SUBJECT_SHAPE_RUN
-    assert calls["eye"]["subject_shape_candidate_owner"] == "b" * 32
-    assert calls["eye"]["keypoint_run"] == "keypoints_coordinate_001"
+    assert calls["eye_plan"]["subject_shape_run"] == cohort.SUBJECT_SHAPE_RUN
+    assert calls["eye_plan"]["subject_shape_candidate_owner"] == "b" * 32
+    assert calls["eye_plan"]["keypoint_run"] == "keypoints_coordinate_001"
     assert (
-        calls["eye"]["storage_profile"]
+        calls["eye_plan"]["storage_profile"]
         == cohort.EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
     )
-    assert calls["eye"]["apply"] is True
+    assert calls["eye_plan"]["apply"] is False
+    assert calls["eye_apply"]["copy_backend"] == "python"
+    assert Path(str(calls["eye_apply"]["admission_receipt"])).name == (
+        "eye_angle_admission_receipt.json"
+    )
     assert calls["validation"]["allow_ineligible_candidate"] is True
     assert result["human_gaze_direction_acceptance"] is False
     assert result["selector_eligible"] is False
     assert result["production_authority"] is False
     assert result["registry_update"] is False
     assert result["selector_activation"] is False
+    assert result["schema_version"] == 2
+    assert result["eye_angle_admission_payload_digest"] == eye_admission_digest
+    assert result["eye_angle_admission_receipt_sha256"] == cohort._sha256_file(
+        Path(result["eye_angle_admission_receipt_path"])
+    )
 
 
 def test_bsub_submitter_renders_pinned_proof_and_materialization_workers(
