@@ -373,7 +373,11 @@ def _payload(node: Any, values: np.ndarray | None = None) -> dict[str, Any]:
     value = _array(node, label=canonical_node_path(node)) if values is None else values
     return {
         "array_ref": f"/{canonical_node_path(node)}",
-        "array_values_sha256": array_values_sha256(node),
+        # ``value`` is the exact C-contiguous snapshot already used by the
+        # caller's geometry checks.  Hashing ``node`` here reopened and decoded
+        # the same Zarr payload a second time without adding a freshness
+        # boundary between validation and digest construction.
+        "array_values_sha256": array_values_sha256(value),
         "shape": [int(item) for item in value.shape],
         "dtype": value.dtype.str,
     }

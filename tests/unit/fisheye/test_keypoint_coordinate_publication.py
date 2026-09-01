@@ -124,6 +124,47 @@ class _RootRegistry:
             del parent.children[name]
 
 
+class _CountingPayloadArray:
+    def __init__(self, values: np.ndarray, *, path: str) -> None:
+        self._values = np.asarray(values)
+        self.path = path
+        self.shape = self._values.shape
+        self.dtype = self._values.dtype
+        self.reads = 0
+
+    def __getitem__(self, key: object) -> np.ndarray:
+        self.reads += 1
+        return np.asarray(self._values[key])
+
+
+def test_payload_hashes_resident_snapshot_without_reopening_array() -> None:
+    values = np.arange(30, dtype=np.float32).reshape(3, 5, 2)
+    node = _CountingPayloadArray(values, path="keypoints_runs/kp/keypoints_roi")
+
+    resident = np.ascontiguousarray(values.copy())
+    payload = publication_module._payload(node, resident)
+
+    assert node.reads == 0
+    assert payload == {
+        "array_ref": "/keypoints_runs/kp/keypoints_roi",
+        "array_values_sha256": publication_module.array_values_sha256(resident),
+        "shape": [3, 5, 2],
+        "dtype": np.dtype(np.float32).str,
+    }
+
+
+def test_payload_without_snapshot_reads_array_once() -> None:
+    values = np.arange(12, dtype=np.float32).reshape(3, 4)
+    node = _CountingPayloadArray(values, path="keypoints_runs/kp/pose_bbox_xyxy_roi")
+
+    payload = publication_module._payload(node)
+
+    assert node.reads == 1
+    assert payload["array_values_sha256"] == publication_module.array_values_sha256(
+        values
+    )
+
+
 def test_complete_coordinate_successor_validates_evidence_then_uses_resolved_crop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
