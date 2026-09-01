@@ -36,6 +36,11 @@ CORE_BEHAVIOR_PROVIDER = ProviderDefinition(
             "speed", "Speed traces", "Projected speed and acceleration series."
         ),
         AnalysisDefinition(
+            "distance_traveled",
+            "Distance traveled",
+            "Observed cumulative path and per-second distance with tracking-gap evidence.",
+        ),
+        AnalysisDefinition(
             "heading", "Heading and turning", "Heading and angular-motion traces."
         ),
         AnalysisDefinition(
