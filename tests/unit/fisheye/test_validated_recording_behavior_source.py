@@ -57,6 +57,16 @@ def _fixture(
     arrays = {
         "angular_sample_reason_code": np.zeros(7, dtype=np.uint16),
         "angular_sample_valid": np.ones(7, dtype=bool),
+        "cumulative_path_distance_mm": np.asarray(
+            [0.0, 0.2, 0.5, 0.9, 1.4, 2.0, 2.7], dtype=np.float32
+        ),
+        "delta_frames": np.asarray([0, 1, 1, 1, 1, 1, 1], dtype=np.int32),
+        "delta_seconds": np.asarray(
+            [0.0, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1], dtype=np.float32
+        ),
+        "frame_path_distance_smoothed_mm": np.asarray(
+            [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], dtype=np.float32
+        ),
         "heading_degrees": np.arange(7, dtype=np.float32) * 10.0,
         "linear_sample_reason_code": np.zeros(7, dtype=np.uint16),
         "linear_sample_valid": np.ones(7, dtype=bool),
@@ -68,6 +78,8 @@ def _fixture(
         "track_ids": np.asarray([2, 7], dtype=np.int64),
         "track_row_offsets": np.asarray([0, 3, 7], dtype=np.int64),
         "track_sample_key": np.arange(7, dtype=np.int64),
+        "transition_reason_code": np.asarray([0, 0, 0, 0, 0, 4, 0], dtype=np.uint16),
+        "transition_valid": np.asarray([False, True, True, True, True, False, True]),
     }
     for name, values in arrays.items():
         run.create_array(name, data=values, chunks=values.shape)
@@ -118,6 +130,41 @@ def _fixture(
     capabilities["epoch_behavior"] = _complete(
         "scientific_child_bindings", "epoch_behavior"
     )
+    capabilities["semantic_epochs"] = _complete(
+        "scientific_child_bindings", "semantic_epochs"
+    )
+    semantic_windows = [
+        {
+            "window_id": 0,
+            "analysis_role": "chaser_pre",
+            "source_label": "pre",
+            "start_frame": 103,
+            "end_frame_exclusive": 105,
+            "source_interval_sha256": "1" * 64,
+        },
+        {
+            "window_id": 1,
+            "analysis_role": "chaser_training",
+            "source_label": "training",
+            "start_frame": 105,
+            "end_frame_exclusive": 107,
+            "source_interval_sha256": "2" * 64,
+        },
+    ]
+    semantic_bindings = [
+        {
+            "source_window_id": index,
+            "analysis_role": window["analysis_role"],
+            "source_interval_sha256": window["source_interval_sha256"],
+            "selected_start_frame": window["start_frame"],
+            "selected_end_frame_exclusive": window["end_frame_exclusive"],
+            "protocol_semantic_hash": str(index + 3) * 64,
+            "protocol_semantic_step_index": index,
+            "protocol_semantic_step_ref": f"step-{index}",
+            "terminal_frame_excluded_pending_step_end_contract": True,
+        }
+        for index, window in enumerate(semantic_windows)
+    ]
     bundle = {
         "analysis_zarr": str(archive.resolve()),
         "recording_id": "synthetic-recording",
@@ -140,7 +187,15 @@ def _fixture(
                 "source_authority": source_authority,
                 "published_metadata": {},
                 "sealed_by": {},
-            }
+            },
+            "semantic_epochs": {
+                "binding_type": "exact_child_plus_epoch_transitive_semantic_v1",
+                "source": {
+                    "position_suite_epochs": semantic_windows,
+                    "semantic_role_bindings": semantic_bindings,
+                },
+                "sealed_by": {},
+            },
         },
         "scientific_child_bindings": {
             "epoch_behavior": {
@@ -149,7 +204,14 @@ def _fixture(
                 "run_path": "analysis/stimulus_epoch_behavior_summary_runs/epoch-v1",
                 "manifest_sha256": "f" * 64,
                 "payload_digest": "a" * 64,
-            }
+            },
+            "semantic_epochs": {
+                "receipt_path": str((tmp_path / "semantic.json").resolve()),
+                "receipt_sha256": "3" * 64,
+                "run_path": "analysis/protocol_semantic_epoch_runs/semantic-v1",
+                "manifest_sha256": "4" * 64,
+                "payload_digest": "5" * 64,
+            },
         },
         "capabilities": capabilities,
     }
@@ -342,6 +404,28 @@ def test_provider_projection_rejects_structural_and_non_sample_requests(
         source.provider_motion_track_projection(("time_seconds", "time_seconds"))
 
 
+def test_semantic_epoch_route_requires_exact_window_role_closure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle_path, _bundle, _arrays = _fixture(tmp_path, monkeypatch)
+    source = subject.ValidatedRecordingBehaviorSource(bundle_path)
+    records = source.semantic_epoch_records()
+    assert [(item.analysis_role, item.start_frame, item.end_frame_exclusive) for item in records] == [
+        ("chaser_pre", 103, 105),
+        ("chaser_training", 105, 107),
+    ]
+
+    source.bundle["source_bindings"]["semantic_epochs"]["source"][
+        "semantic_role_bindings"
+    ][0]["selected_end_frame_exclusive"] = 106
+    with pytest.raises(
+        subject.ValidatedRecordingBehaviorSourceError,
+        match="differs from its exact role binding",
+    ):
+        source.semantic_epoch_records()
+
+
 def test_validated_core_behavior_routes_direct_surfaces_without_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -350,7 +434,12 @@ def test_validated_core_behavior_routes_direct_surfaces_without_fallback(
     source = subject.ValidatedRecordingBehaviorSource(bundle_path)
     core = ValidatedCoreBehaviorSource(source)
 
-    assert core.available_analysis_ids() == ("speed", "heading", "position")
+    assert core.available_analysis_ids() == (
+        "speed",
+        "distance_traveled",
+        "heading",
+        "position",
+    )
     assert core.eye_angle_options() == ()
     assert core.tail_kinematics_options() == ()
     assert core.baseline_interval() is None
@@ -386,6 +475,38 @@ def test_validated_core_behavior_routes_direct_surfaces_without_fallback(
     position = load_core_behavior_projection(core, "position")
     assert "position_source_valid" in position.columns
     assert position.row_count == 4
+
+    distance = load_core_behavior_projection(core, "distance_traveled")
+    assert distance.columns == (
+        "time_s",
+        "frame_index",
+        "cumulative_path_distance_mm",
+        "frame_path_distance_smoothed_mm",
+        "delta_frames",
+        "delta_seconds",
+        "transition_valid",
+        "transition_reason_code",
+    )
+    per_second = distance.related_frames["per_second"].collect()
+    assert per_second["candidate_transition_count"].to_list() == [4]
+    assert per_second["valid_transition_count"].to_list() == [3]
+    assert per_second["invalid_transition_count"].to_list() == [1]
+    assert per_second["distance_mm"].item() == pytest.approx(1.6)
+    assert per_second["valid_transition_fraction"].item() == pytest.approx(0.75)
+    assert [record["analysis_role"] for record in distance.metadata["semantic_epochs"]] == [
+        "chaser_pre",
+        "chaser_training",
+    ]
+    assert set(distance.metadata["consumed_arrays"]) == {
+        "time_seconds",
+        "source_acquisition_frame_index",
+        "cumulative_path_distance_mm",
+        "frame_path_distance_smoothed_mm",
+        "delta_frames",
+        "delta_seconds",
+        "transition_valid",
+        "transition_reason_code",
+    }
 
     with pytest.raises(
         subject.ValidatedRecordingBehaviorSourceError,

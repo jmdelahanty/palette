@@ -125,6 +125,14 @@ def _digest(value: object, *, field: str) -> str:
     return value
 
 
+def _text(value: object, *, field: str) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise ValidatedRecordingBehaviorSourceError(
+            f"{field} must be one nonempty exact string."
+        )
+    return value
+
+
 def _exact_provider_array_path(value: object) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ValidatedRecordingBehaviorSourceError(
@@ -207,6 +215,22 @@ class ProviderMotionTrackProjection:
     @property
     def row_count(self) -> int:
         return self.track_row_stop - self.track_row_start
+
+
+@dataclass(frozen=True)
+class ValidatedSemanticEpoch:
+    """One exact semantic epoch sealed by the recording bundle."""
+
+    window_id: int
+    analysis_role: str
+    source_label: str
+    start_frame: int
+    end_frame_exclusive: int
+    source_interval_sha256: str
+    protocol_semantic_hash: str
+    protocol_semantic_step_index: int
+    protocol_semantic_step_ref: str
+    terminal_frame_excluded_pending_step_end_contract: bool
 
 
 class ValidatedRecordingBehaviorSource:
@@ -345,6 +369,130 @@ class ValidatedRecordingBehaviorSource:
         return self.require_capability(
             capability, expected_binding_scope="scientific_child_bindings"
         )
+
+    def semantic_epoch_records(self) -> tuple[ValidatedSemanticEpoch, ...]:
+        """Return the exact frame intervals selected as semantic epochs.
+
+        The capability points at the immutable scientific child, while the
+        transitive source binding carries the source intervals used by that
+        child.  Both are required: callers must never rediscover or infer
+        pre/training/post boundaries from labels or timing heuristics.
+        """
+
+        self.require_capability(
+            "semantic_epochs", expected_binding_scope="scientific_child_bindings"
+        )
+        source_bindings = _mapping(
+            self.bundle.get("source_bindings"), field="bundle.source_bindings"
+        )
+        binding = _mapping(
+            source_bindings.get("semantic_epochs"),
+            field="bundle.source_bindings.semantic_epochs",
+        )
+        if binding.get("binding_type") != "exact_child_plus_epoch_transitive_semantic_v1":
+            raise ValidatedRecordingBehaviorSourceError(
+                "Semantic-epoch source binding has an unsupported type."
+            )
+        source = _mapping(
+            binding.get("source"), field="semantic_epochs.source"
+        )
+        raw_windows = source.get("position_suite_epochs")
+        raw_bindings = source.get("semantic_role_bindings")
+        if not isinstance(raw_windows, (tuple, list)) or not raw_windows:
+            raise ValidatedRecordingBehaviorSourceError(
+                "Semantic-epoch source has no exact position-suite intervals."
+            )
+        if not isinstance(raw_bindings, (tuple, list)) or not raw_bindings:
+            raise ValidatedRecordingBehaviorSourceError(
+                "Semantic-epoch source has no exact role bindings."
+            )
+        role_bindings: dict[int, Mapping[str, Any]] = {}
+        for index, raw in enumerate(raw_bindings):
+            record = _mapping(raw, field=f"semantic_role_bindings[{index}]")
+            window_id = record.get("source_window_id")
+            if type(window_id) is not int or window_id in role_bindings:
+                raise ValidatedRecordingBehaviorSourceError(
+                    "Semantic role bindings do not name unique integer windows."
+                )
+            role_bindings[window_id] = record
+
+        result: list[ValidatedSemanticEpoch] = []
+        seen: set[int] = set()
+        for index, raw in enumerate(raw_windows):
+            window = _mapping(raw, field=f"position_suite_epochs[{index}]")
+            window_id = window.get("window_id")
+            start = window.get("start_frame")
+            stop = window.get("end_frame_exclusive")
+            if (
+                type(window_id) is not int
+                or window_id in seen
+                or type(start) is not int
+                or type(stop) is not int
+                or start < 0
+                or stop <= start
+            ):
+                raise ValidatedRecordingBehaviorSourceError(
+                    "Semantic position-suite intervals are invalid or duplicated."
+                )
+            seen.add(window_id)
+            try:
+                role = role_bindings[window_id]
+            except KeyError as exc:
+                raise ValidatedRecordingBehaviorSourceError(
+                    "A semantic position-suite interval lacks its exact role binding."
+                ) from exc
+            interval_digest = _digest(
+                window.get("source_interval_sha256"),
+                field=f"position_suite_epochs[{index}].source_interval_sha256",
+            )
+            if (
+                role.get("analysis_role") != window.get("analysis_role")
+                or role.get("source_interval_sha256") != interval_digest
+                or role.get("selected_start_frame") != start
+                or role.get("selected_end_frame_exclusive") != stop
+            ):
+                raise ValidatedRecordingBehaviorSourceError(
+                    "A semantic interval differs from its exact role binding."
+                )
+            semantic_step_index = role.get("protocol_semantic_step_index")
+            terminal_excluded = role.get(
+                "terminal_frame_excluded_pending_step_end_contract"
+            )
+            if type(semantic_step_index) is not int or type(terminal_excluded) is not bool:
+                raise ValidatedRecordingBehaviorSourceError(
+                    "Semantic role binding has invalid step or terminal-frame evidence."
+                )
+            result.append(
+                ValidatedSemanticEpoch(
+                    window_id=window_id,
+                    analysis_role=_text(
+                        window.get("analysis_role"),
+                        field=f"position_suite_epochs[{index}].analysis_role",
+                    ),
+                    source_label=_text(
+                        window.get("source_label"),
+                        field=f"position_suite_epochs[{index}].source_label",
+                    ),
+                    start_frame=start,
+                    end_frame_exclusive=stop,
+                    source_interval_sha256=interval_digest,
+                    protocol_semantic_hash=_text(
+                        role.get("protocol_semantic_hash"),
+                        field=f"semantic_role_bindings[{window_id}].protocol_semantic_hash",
+                    ),
+                    protocol_semantic_step_index=semantic_step_index,
+                    protocol_semantic_step_ref=_text(
+                        role.get("protocol_semantic_step_ref"),
+                        field=f"semantic_role_bindings[{window_id}].protocol_semantic_step_ref",
+                    ),
+                    terminal_frame_excluded_pending_step_end_contract=terminal_excluded,
+                )
+            )
+        if set(role_bindings) != seen:
+            raise ValidatedRecordingBehaviorSourceError(
+                "Semantic intervals and role bindings do not close the same axis."
+            )
+        return tuple(sorted(result, key=lambda item: item.window_id))
 
     def provider_motion_catalog(self) -> ProviderMotionArrayCatalog:
         if self._provider_catalog is not None:
@@ -628,6 +776,7 @@ class ValidatedRecordingBehaviorSource:
 __all__ = [
     "ProviderMotionArrayCatalog",
     "ProviderMotionTrackProjection",
+    "ValidatedSemanticEpoch",
     "ValidatedCapabilityBinding",
     "ValidatedCapabilityUnavailableError",
     "ValidatedRecordingBehaviorSource",

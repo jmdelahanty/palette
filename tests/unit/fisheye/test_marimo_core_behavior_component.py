@@ -431,6 +431,82 @@ def test_position_plot_avoids_arrow_backed_pandas_bridge(monkeypatch) -> None:
     assert list(figure.data[0].x) == [1.0, 2.0, 3.0]
 
 
+def test_distance_traveled_view_keeps_invalid_transitions_visible() -> None:
+    frame = pl.DataFrame(
+        {
+            "time_s": [0.0, 0.5, 1.0, 1.5],
+            "frame_index": [10, 11, 12, 13],
+            "cumulative_path_distance_mm": [0.0, 1.0, 1.0, 3.0],
+            "frame_path_distance_smoothed_mm": [0.0, 1.0, 0.0, 2.0],
+            "delta_frames": [0.0, 1.0, 1.0, 1.0],
+            "delta_seconds": [0.0, 0.5, 0.5, 0.5],
+            "transition_valid": [False, True, False, True],
+            "transition_reason_code": [1, 0, 4, 0],
+        }
+    )
+    per_second = pl.DataFrame(
+        {
+            "second_index": [0, 1],
+            "distance_mm": [1.0, 2.0],
+            "valid_transition_fraction": [1.0, 0.5],
+        }
+    )
+    projection = CoreBehaviorProjection(
+        analysis_id="distance_traveled",
+        frame=frame.lazy(),
+        columns=tuple(frame.columns),
+        source_paths=("persisted-motion",),
+        start_s=0.0,
+        stop_s=1.5,
+        row_count=frame.height,
+        load_duration_ms=1.0,
+        note="test",
+        related_frames={"per_second": per_second.lazy()},
+        metadata={
+            "distance_traveled": {
+                "unit": "mm",
+                "cumulative_array": "cumulative_path_distance_mm",
+                "increment_array": "frame_path_distance_smoothed_mm",
+            },
+            "semantic_epochs": (
+                {
+                    "analysis_role": "chaser_pre",
+                    "start_frame": 10,
+                    "end_frame_exclusive": 12,
+                },
+            ),
+        },
+    )
+
+    class _Mo:
+        @staticmethod
+        def md(text):
+            return text
+
+        @staticmethod
+        def stat(*, label, value):
+            return {"label": label, "value": value}
+
+        @staticmethod
+        def hstack(items):
+            return list(items)
+
+        @staticmethod
+        def vstack(items):
+            return list(items)
+
+    body = build_core_behavior_output(_Mo, go, px, projection=projection)[2]
+    cumulative_figure = body[1]
+    per_second_figure = body[2]
+    assert [trace.name for trace in cumulative_figure.data] == [
+        "Observed cumulative path",
+        "Invalid transition evidence",
+    ]
+    assert cumulative_figure.layout.title.text == "Observed cumulative smoothed path"
+    assert per_second_figure.data[1].yaxis == "y2"
+    assert per_second_figure.layout.yaxis2.range == (0.0, 1.02)
+
+
 def test_export_parquet_uses_true_polars_lazy_scan(tmp_path) -> None:
     parquet_path = tmp_path / "baseline_behavior_time_bins.parquet"
     pl.DataFrame(

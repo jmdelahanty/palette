@@ -51,6 +51,21 @@ def _condition_order(payload: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(str(value) for value in payload.get("condition_order", ()))
 
 
+def _conditions_for_metric(
+    payload: Mapping[str, object], metric_id: str
+) -> tuple[str, ...]:
+    observed = {
+        str(row["condition"])
+        for key in ("recording_rows", "descriptive_rows")
+        for row in _rows(payload, key)
+        if row.get("metric_id") == metric_id and row.get("condition") is not None
+    }
+    preferred = _condition_order(payload)
+    return tuple(value for value in preferred if value in observed) + tuple(
+        sorted(observed - set(preferred))
+    )
+
+
 def _condition_label(payload: Mapping[str, object], condition: str) -> str:
     labels = payload.get("condition_labels")
     return (
@@ -199,7 +214,7 @@ def core_behavior_metric_figure(
     catalog = _catalog(payload)
     metric = catalog[metric_id]
     scale, display_unit = _display_scale(str(metric["unit"]))
-    conditions = _condition_order(payload)
+    conditions = _conditions_for_metric(payload, metric_id)
     rows = [
         row for row in _rows(payload, "recording_rows") if row["metric_id"] == metric_id
     ]
@@ -287,6 +302,17 @@ def core_behavior_metric_figure(
         title=f"{_metric_label(metric)} across exact chaser epochs",
         legend_title="Summary",
     )
+
+
+def distance_traveled_metric_figure(
+    payload: Mapping[str, object], metric_id: str
+) -> go.Figure:
+    """Render one receipt-bound session or epoch distance metric."""
+
+    figure = core_behavior_metric_figure(payload, metric_id)
+    metric = _catalog(payload)[metric_id]
+    figure.update_layout(title=f"{_metric_label(metric)} · equal recording weight")
+    return figure
 
 
 def grouped_epoch_metric_figure(
@@ -1059,6 +1085,8 @@ def validated_behavior_statistics_figure(
     view_id = str(payload["view_id"])
     if view_id == "core_behavior":
         figure = core_behavior_metric_figure(payload, selected_metric)
+    elif view_id == "distance_traveled":
+        figure = distance_traveled_metric_figure(payload, selected_metric)
     elif view_id in {"near_field", "same_quadrant", "occupancy_support"}:
         figure = grouped_epoch_metric_figure(
             payload,
@@ -1141,6 +1169,7 @@ __all__ = [
     "body_bearing_distance_metric_figure",
     "body_bearing_polar_metric_figure",
     "core_behavior_metric_figure",
+    "distance_traveled_metric_figure",
     "distance_curve_metric_figure",
     "grouped_epoch_metric_figure",
     "spatial_occupancy_metric_figure",

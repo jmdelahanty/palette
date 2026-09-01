@@ -18,13 +18,13 @@ Worktree:
 Real sandbox result:
 
 ```text
-/tmp/goodbatbadbat-grouped-statistics-sandbox-v002
+/tmp/goodbatbadbat-grouped-statistics-sandbox-v003
 ```
 
 Preferred reviewed static report:
 
 ```text
-/tmp/goodbatbadbat-grouped-statistics-report-v008
+/tmp/goodbatbadbat-grouped-statistics-report-v009
 ```
 
 ## Boundary
@@ -44,19 +44,23 @@ Every metric specification declares:
 - its paired contrast set and multiplicity family, if applicable; and
 - `recording_id` as the experimental unit with equal recording weight.
 
-The only supported v1 reducer is `unique_exact_row`. If dropping a dimension
-would silently produce multiple rows for one recording/condition/group, the
-computation fails instead of averaging them. Null and nonfinite values remain
-explicit exclusions.
+The ordinary reducer is `unique_exact_row`. If dropping a dimension would
+silently produce multiple rows for one recording/condition/group, the
+computation fails instead of averaging them. The additional
+`terminal_at_max_order_v1` reducer is restricted to already-persisted
+cumulative measurements. It first requires constant declared source identity
+and a unique gapless order axis, then selects exactly one maximum-order row.
+Null and nonfinite metric values remain explicit exclusions.
 
 ## Implemented families
 
-The initial registry contains 41 scalar metrics plus two recording-histogram
+The current registry contains 45 scalar metrics plus two recording-histogram
 products:
 
 | Family | Metrics | Cohort use |
 |---|---:|---|
 | Core behavior | 8 | Paired pre/training/post speed, bout, heading, IBI, and dropout summaries |
+| Distance traveled | 4 | Whole-session terminal cumulative path plus exact-epoch path, speed, and dropout summaries |
 | Near field | 8 | Distance, near occupancy, entry rate, dwell, geometric enrichment, and coverage by provider/role |
 | Same quadrant | 1 | Same-quadrant fraction by provider/role/epoch |
 | Occupancy support | 2 | Provider/epoch tracking and in-arena coverage |
@@ -223,9 +227,8 @@ The four other parent cohort members remain explicit noncontributors rather
 than disappearing from the denominator. Every one of the 80 contributing
 recordings has a finite denominator in every persisted histogram panel.
 
-The preferred reviewed `v008` report contains twelve PNG figures plus an HTML
-index. Its
-manifest record SHA-256 is:
+The prior reviewed `v008` report contains twelve PNG figures plus an HTML
+index. Its manifest record SHA-256 is:
 
 ```text
 43344d568a48488c8deecac20437aa82c93722e6f8a6da869b089c9b9dffa14d
@@ -240,17 +243,40 @@ figures exposed Matplotlib's erroneous `[-180, 360]` autoscaled domain; `v007`
 proved the domain correction, and `v008` additionally removes colliding polar
 axis labels while preserving their units in the figure subtitles.
 
+The superseding `v003` statistics generation adds the four first-class
+distance-traveled metrics without recomputing the Phase-B export. It contains
+45 scalar specifications, 15,191 retained recording values, 23,794
+descriptive rows, and 153 paired contrasts. Its manifest record SHA-256 is:
+
+```text
+af3ea7310138390663c4bf65b52f02ba6f1c7ccaa7575e81081edb264b477478
+```
+
+The superseding `v009` report contains thirteen PNG figures plus its HTML
+index. Its manifest record SHA-256 is:
+
+```text
+58633f5a8f001507756363396825d0d747877a1b4f1721a137eaf8039ffd14bd
+```
+
+The distance family has 800 retained values, ten descriptive strata, and nine
+paired contrasts across the 80 complete recordings. Its whole-session
+cumulative-path reducer selects the exact terminal provider-motion row only
+after checking constant bundle/provider/run/track lineage and a unique gapless
+`track_sample_row_id` axis. See
+`docs/cumulative_path_distance_composition_implementation_2026-09-01.md`.
+
 ## Command
 
 ```bash
 scripts/py -m fisheye.utils.compute_validated_behavior_group_statistics \
   --export-root /groups/johnson/johnsonlab/jeremy/operations/goodbatbadbat_validated_behavior_phase_b_20260901_b45aa6a5/publication \
   --source-export-run-id goodbatbadbat-validated-behavior-phase-b-20260901-b45aa6a5 \
-  --statistics-run-id goodbatbadbat-grouped-statistics-sandbox-v002 \
+  --statistics-run-id goodbatbadbat-grouped-statistics-sandbox-v003 \
   --bootstrap-iterations 5000 \
   --permutation-iterations 5000 \
   --random-seed 20260901 \
-  --output-dir /tmp/goodbatbadbat-grouped-statistics-sandbox-v002 \
+  --output-dir /tmp/goodbatbadbat-grouped-statistics-sandbox-v003 \
   --apply
 ```
 
@@ -258,9 +284,9 @@ Render the exact statistics generation without recomputation:
 
 ```bash
 scripts/py -m fisheye.utils.render_validated_behavior_group_statistics \
-  --statistics-dir /tmp/goodbatbadbat-grouped-statistics-sandbox-v002 \
-  --report-run-id goodbatbadbat-grouped-statistics-report-v008 \
-  --output-dir /tmp/goodbatbadbat-grouped-statistics-report-v008 \
+  --statistics-dir /tmp/goodbatbadbat-grouped-statistics-sandbox-v003 \
+  --report-run-id goodbatbadbat-grouped-statistics-report-v009 \
+  --output-dir /tmp/goodbatbadbat-grouped-statistics-report-v009 \
   --apply
 ```
 
@@ -269,20 +295,21 @@ Run the read-only Marimo explorer:
 ```bash
 scripts/py -m marimo run \
   apps/marimo/validated_behavior_group_statistics_explorer.py -- \
-  --statistics-dir /tmp/goodbatbadbat-grouped-statistics-sandbox-v002
+  --statistics-dir /tmp/goodbatbadbat-grouped-statistics-sandbox-v003
 ```
 
 ## Validation completed in the sandbox worktree
 
-- 14 focused grouped-statistics, histogram-reducer, payload, report,
-  static-renderer, and
-  interactive-renderer tests pass outside the Codex sandbox.
-- Real-data payload and Plotly generation succeeds for all twelve view
+- 62 focused source-routing, grouped-statistics, reducer, payload, report,
+  static-renderer, and interactive-renderer tests pass outside the Codex
+  sandbox; 15 predeclared explorer compatibility cases remain expected
+  failures.
+- Real-data payload and Plotly generation succeeds for all thirteen view
   families, including six-panel signed-bearing and bearing--distance figures.
 - All twelve static signed-bearing axes are regression-checked at exactly
   `[-180, 180]`; visual review confirms that both anatomical sides occupy one
   full circle in the polar and bearing--distance surfaces.
-- The preferred real static report strictly reopens with all twelve artifact
+- The preferred real static report strictly reopens with all thirteen artifact
   sizes and SHA-256 digests intact.
 - The Marimo reactive-graph checker passes.
 - Python compilation and `git diff --check` pass.
@@ -291,7 +318,7 @@ This evidence is focused local validation, not repository-required CI.
 
 ## Before integration
 
-- Review the 41-metric exploratory registry and multiplicity-family boundaries.
+- Review the 45-metric exploratory registry and multiplicity-family boundaries.
 - Decide whether the statistics generation should use the generic derived
   publication lifecycle or a dedicated versioned statistics profile.
 - Decide whether to surface this standalone component inside the existing

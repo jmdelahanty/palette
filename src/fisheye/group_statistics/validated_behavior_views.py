@@ -70,6 +70,17 @@ VIEW_DEFINITIONS: tuple[StatisticsViewDefinition, ...] = (
         "core_behavior.mean_speed_mm_s",
     ),
     StatisticsViewDefinition(
+        "distance_traveled",
+        "Distance traveled",
+        "distance_traveled",
+        "distance_traveled",
+        (
+            "Whole-session and exact-epoch observed path distance with "
+            "recording-equal cohort summaries."
+        ),
+        "distance_traveled.epoch_total_path_mm",
+    ),
+    StatisticsViewDefinition(
         "near_field",
         "Near field",
         "near_field",

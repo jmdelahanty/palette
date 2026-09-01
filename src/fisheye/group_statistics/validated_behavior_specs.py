@@ -78,6 +78,8 @@ class ValidatedBehaviorMetricSpec:
     interpretation: str
     analysis_status: str = "exploratory"
     recording_reducer: str = "unique_exact_row"
+    source_identity_columns: tuple[str, ...] = ()
+    reducer_order_column: str | None = None
 
     def __post_init__(self) -> None:
         text_fields = {
@@ -96,8 +98,11 @@ class ValidatedBehaviorMetricSpec:
                 "Validated-behavior v1 statistics are exploratory while "
                 "authoritative acquisition-batch identity is unavailable"
             )
-        if self.recording_reducer != "unique_exact_row":
-            raise ValueError("Only fail-closed unique recording rows are supported")
+        if self.recording_reducer not in {
+            "unique_exact_row",
+            "terminal_at_max_order_v1",
+        }:
+            raise ValueError("Unsupported recording reducer")
         if len(set(self.group_columns)) != len(self.group_columns):
             raise ValueError(f"{self.metric_id}: group columns must be unique")
         if any(
@@ -105,6 +110,40 @@ class ValidatedBehaviorMetricSpec:
             for value in self.group_columns
         ):
             raise ValueError(f"{self.metric_id}: invalid group column")
+        if (
+            len(set(self.source_identity_columns)) != len(self.source_identity_columns)
+            or any(
+                type(value) is not str
+                or not value
+                or value != value.strip()
+                for value in self.source_identity_columns
+            )
+        ):
+            raise ValueError(f"{self.metric_id}: invalid source identity columns")
+        if self.reducer_order_column is not None and (
+            type(self.reducer_order_column) is not str
+            or not self.reducer_order_column
+            or self.reducer_order_column != self.reducer_order_column.strip()
+        ):
+            raise ValueError(f"{self.metric_id}: invalid reducer order column")
+        source_roles = (
+            self.group_columns
+            + self.source_identity_columns
+            + ((self.condition_column,) if self.condition_column else ())
+            + ((self.reducer_order_column,) if self.reducer_order_column else ())
+            + (self.value_column,)
+        )
+        if len(set(source_roles)) != len(source_roles):
+            raise ValueError(f"{self.metric_id}: source-column roles must be disjoint")
+        if self.recording_reducer == "unique_exact_row":
+            if self.source_identity_columns or self.reducer_order_column is not None:
+                raise ValueError(
+                    f"{self.metric_id}: unique-row reducer cannot declare terminal-row fields"
+                )
+        elif not self.source_identity_columns or self.reducer_order_column is None:
+            raise ValueError(
+                f"{self.metric_id}: terminal reducer requires identity and order columns"
+            )
         if len(set(self.expected_conditions)) != len(self.expected_conditions):
             raise ValueError(f"{self.metric_id}: expected conditions must be unique")
         if self.condition_column is None:
@@ -168,6 +207,8 @@ class ValidatedBehaviorMetricSpec:
             "interpretation": self.interpretation,
             "analysis_status": self.analysis_status,
             "recording_reducer": self.recording_reducer,
+            "source_identity_columns": list(self.source_identity_columns),
+            "reducer_order_column": self.reducer_order_column,
             "experimental_unit": "recording_id",
             "cohort_weighting": "equal_weight_per_finite_recording",
         }
@@ -341,9 +382,13 @@ def _metric(
     groups: Sequence[str] = (),
     contrasted: bool = False,
     retain: bool = True,
+    metric_id: str | None = None,
+    recording_reducer: str = "unique_exact_row",
+    source_identity_columns: Sequence[str] = (),
+    reducer_order_column: str | None = None,
 ) -> ValidatedBehaviorMetricSpec:
     return ValidatedBehaviorMetricSpec(
-        metric_id=f"{family}.{column}",
+        metric_id=metric_id or f"{family}.{column}",
         metric_family=family,
         source_table=table,
         value_column=column,
@@ -355,6 +400,9 @@ def _metric(
         multiplicity_family=f"{family}.epoch_contrasts" if contrasted else None,
         retain_recording_values=bool(retain),
         interpretation=interpretation,
+        recording_reducer=recording_reducer,
+        source_identity_columns=tuple(source_identity_columns),
+        reducer_order_column=reducer_order_column,
     )
 
 
@@ -420,6 +468,62 @@ DEFAULT_VALIDATED_BEHAVIOR_METRICS: tuple[ValidatedBehaviorMetricSpec, ...] = (
         ),
         condition="analysis_role",
         contrasted=True,
+    ),
+    _metric(
+        "distance_traveled",
+        "provider_motion_samples",
+        "cumulative_path_distance_mm",
+        "mm",
+        (
+            "Whole-session observed cumulative smoothed path distance at the "
+            "exact terminal provider-motion sample"
+        ),
+        groups=("provider_role",),
+        metric_id="distance_traveled.session_total_path_mm",
+        recording_reducer="terminal_at_max_order_v1",
+        source_identity_columns=(
+            "membership_member_sha256",
+            "bundle_set_member_sha256",
+            "bundle_record_sha256",
+            "source_binding_key",
+            "source_run_path",
+            "source_manifest_sha256",
+            "source_verification_digest",
+            "position_provider_id",
+            "position_provider_digest",
+            "track_id",
+        ),
+        reducer_order_column="track_sample_row_id",
+    ),
+    _metric(
+        "distance_traveled",
+        "epoch_behavior_summary",
+        "total_path_mm",
+        "mm",
+        "Observed path distance within the exact semantic epoch",
+        condition="analysis_role",
+        contrasted=True,
+        metric_id="distance_traveled.epoch_total_path_mm",
+    ),
+    _metric(
+        "distance_traveled",
+        "epoch_behavior_summary",
+        "mean_speed_mm_s",
+        "mm/s",
+        "Mean observed speed within the exact semantic epoch",
+        condition="analysis_role",
+        contrasted=True,
+        metric_id="distance_traveled.epoch_mean_speed_mm_s",
+    ),
+    _metric(
+        "distance_traveled",
+        "epoch_behavior_summary",
+        "tracking_dropout_fraction",
+        "fraction",
+        "Tracking dropout fraction within the exact semantic epoch",
+        condition="analysis_role",
+        contrasted=True,
+        metric_id="distance_traveled.epoch_tracking_dropout_fraction",
     ),
     *_many(
         "near_field",

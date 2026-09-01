@@ -743,6 +743,7 @@ def _(
         and selected_analysis_id
         in {
             "speed",
+            "distance_traveled",
             "heading",
             "position",
             "eye_angles",

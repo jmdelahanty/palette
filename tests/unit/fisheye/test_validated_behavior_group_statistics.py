@@ -165,6 +165,8 @@ def _frames(*, duplicate: bool = False, nonfinite: bool = False):
                     "recording_id": recording,
                     "analysis_role": condition,
                     "mean_speed_mm_s": value,
+                    "total_path_mm": value * 100.0,
+                    "tracking_dropout_fraction": min(value / 100.0, 1.0),
                 }
             )
     if duplicate:
@@ -198,6 +200,18 @@ def test_default_registry_is_composable_and_unique():
     assert len(core) == 8
     assert {spec.source_table for spec in core} == {"epoch_behavior_summary"}
     assert all(len(spec.spec_sha256) == 64 for spec in core)
+    distance = metric_specs_for_families(("distance_traveled",))
+    assert [spec.metric_id for spec in distance] == [
+        "distance_traveled.session_total_path_mm",
+        "distance_traveled.epoch_total_path_mm",
+        "distance_traveled.epoch_mean_speed_mm_s",
+        "distance_traveled.epoch_tracking_dropout_fraction",
+    ]
+    session = distance[0]
+    assert session.source_table == "provider_motion_samples"
+    assert session.recording_reducer == "terminal_at_max_order_v1"
+    assert session.reducer_order_column == "track_sample_row_id"
+    assert "source_manifest_sha256" in session.source_identity_columns
     histogram_ids = [spec.metric_id for spec in DEFAULT_VALIDATED_BEHAVIOR_HISTOGRAMS]
     assert histogram_ids == [
         "body_bearing_polar.recording_fraction",
@@ -215,6 +229,138 @@ def test_cli_lists_families_without_opening_a_dataset(capsys):
     assert "trial_response" in output
     assert "body_bearing_polar" in output
     assert "body_bearing_distance" in output
+    assert "distance_traveled" in output
+
+
+def _provider_motion_rows(*, gap: bool = False, mixed_identity: bool = False):
+    rows = []
+    for recording_index, recording_id in enumerate(("r1", "r2", "r3"), start=1):
+        orders = (10, 12, 13) if gap and recording_id == "r2" else (10, 11, 12)
+        for local_index, order in enumerate(orders):
+            rows.append(
+                {
+                    "recording_id": recording_id,
+                    "membership_member_sha256": "1" * 64,
+                    "bundle_set_member_sha256": "2" * 64,
+                    "bundle_record_sha256": "3" * 64,
+                    "source_binding_key": "provider_motion",
+                    "source_run_path": (
+                        "analysis/provider_track_motion_runs/mixed"
+                        if mixed_identity
+                        and recording_id == "r2"
+                        and local_index == 2
+                        else "analysis/provider_track_motion_runs/exact"
+                    ),
+                    "source_manifest_sha256": "4" * 64,
+                    "source_verification_digest": "5" * 64,
+                    "provider_role": "keypoint",
+                    "position_provider_id": "canonical-keypoints",
+                    "position_provider_digest": "6" * 64,
+                    "track_id": 7,
+                    "track_sample_row_id": order,
+                    "cumulative_path_distance_mm": float(
+                        recording_index * 100 + local_index * 10
+                    ),
+                }
+            )
+    return pl.DataFrame(rows)
+
+
+def _compute_distance_session(*, gap: bool = False, mixed_identity: bool = False):
+    frames = _frames()
+    frames["provider_motion_samples"] = _provider_motion_rows(
+        gap=gap, mixed_identity=mixed_identity
+    )
+    spec = next(
+        item
+        for item in DEFAULT_VALIDATED_BEHAVIOR_METRICS
+        if item.metric_id == "distance_traveled.session_total_path_mm"
+    )
+    return compute_validated_behavior_group_statistics(
+        _FakeDataset(frames),
+        ValidatedBehaviorGroupStatisticsConfig(
+            statistics_run_id="fixture-distance-session-v1",
+            metric_specs=(spec,),
+            bootstrap_iterations=0,
+            permutation_iterations=0,
+            confidence_level=0.95,
+            minimum_recordings=2,
+            random_seed=17,
+        ),
+    )
+
+
+def test_terminal_distance_reducer_selects_exact_final_row_per_recording():
+    result = _compute_distance_session()
+    assert [row["value"] for row in result.recording_values] == [120.0, 220.0, 320.0]
+    assert {row["condition"] for row in result.recording_values} == {"__all__"}
+    assert result.descriptive_statistics[0]["mean"] == pytest.approx(220.0)
+    assert result.recording_values[0]["recording_reducer"] == (
+        "terminal_at_max_order_v1"
+    )
+    query = result.source_queries[0]
+    assert query["selected_columns"][-2:] == [
+        "track_sample_row_id",
+        "cumulative_path_distance_mm",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("gap", "mixed_identity"),
+    ((True, False), (False, True)),
+)
+def test_terminal_distance_reducer_fails_closed_on_axis_or_identity_divergence(
+    gap: bool,
+    mixed_identity: bool,
+):
+    with pytest.raises(
+        ValidatedBehaviorGroupStatisticsError,
+        match="constant source identity and a unique gapless order axis",
+    ):
+        _compute_distance_session(gap=gap, mixed_identity=mixed_identity)
+
+
+def test_distance_family_round_trips_through_shared_static_and_interactive_views(
+    tmp_path: Path,
+):
+    frames = _frames()
+    frames["provider_motion_samples"] = _provider_motion_rows()
+    specs = metric_specs_for_families(("distance_traveled",))
+    result = compute_validated_behavior_group_statistics(
+        _FakeDataset(frames),
+        ValidatedBehaviorGroupStatisticsConfig(
+            statistics_run_id="fixture-distance-view-v1",
+            metric_specs=specs,
+            bootstrap_iterations=0,
+            permutation_iterations=0,
+            confidence_level=0.95,
+            minimum_recordings=2,
+            random_seed=17,
+        ),
+    )
+    statistics_dir = tmp_path / "distance-stats"
+    write_validated_behavior_group_statistics_sandbox(result, statistics_dir)
+    source = ValidatedBehaviorStatisticsViewSource.open(statistics_dir)
+    assert [item.view_id for item in available_statistics_views(source)] == [
+        "distance_traveled"
+    ]
+    payload = build_statistics_view_payload(source, "distance_traveled")
+    validate_statistics_view_payload(payload)
+    assert len(payload["metric_catalog"]) == 4
+    assert len(payload["recording_rows"]) == 30
+
+    static = render_statistics_view(payload)
+    static.canvas.draw()
+    assert len([axis for axis in static.axes if axis.get_visible()]) == 4
+
+    interactive = validated_behavior_statistics_figure(
+        payload,
+        metric_id="distance_traveled.session_total_path_mm",
+    )
+    assert any(
+        "All" in (tuple(trace.x) if trace.x is not None else ())
+        for trace in interactive.data
+    )
 
 
 def test_recording_level_descriptive_and_paired_results_are_deterministic():

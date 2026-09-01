@@ -36,6 +36,7 @@ from fisheye.analysis.tail_kinematics_io import (
 )
 from fisheye.analytics_exports.baseline import is_baseline_label
 from fisheye.analysis_workflows.validated_recording_behavior_source import (
+    ValidatedCapabilityUnavailableError,
     ValidatedRecordingBehaviorSource,
     ValidatedRecordingBehaviorSourceError,
 )
@@ -55,6 +56,10 @@ TRACK_KINEMATICS_RENDERER = "palette-track-kinematics-summary-v1"
 SPEED_SERIES_PREFIXES = ("speed_", "acceleration_", "smoothed_acceleration_")
 HEADING_SERIES_TOKENS = ("heading", "angular_velocity", "angular_speed")
 PATH_SERIES_TOKENS = ("cumulative_path_distance", "frame_path_distance")
+DISTANCE_TRAVELED_LEVELS = (
+    ("mm", "cumulative_path_distance_mm", "frame_path_distance_smoothed_mm"),
+    ("px", "cumulative_path_distance_px", "frame_path_distance_smoothed_px"),
+)
 
 
 @dataclass(frozen=True)
@@ -219,7 +224,15 @@ def _track_source_paths_from_group(
         "delta_heading_smoothed_degrees",
         "angular_velocity_smoothed_deg_s",
         "angular_speed_smoothed_deg_s",
+        "delta_frames",
+        "delta_seconds",
+        "frame_path_distance_raw_px",
+        "frame_path_distance_filtered_px",
+        "frame_path_distance_smoothed_px",
         "cumulative_path_distance_px",
+        "frame_path_distance_raw_mm",
+        "frame_path_distance_filtered_mm",
+        "frame_path_distance_smoothed_mm",
         "cumulative_path_distance_mm",
         "sample_valid",
         "sample_reason_code",
@@ -241,6 +254,18 @@ def _track_source_paths_from_group(
                     paths.setdefault(
                         f"speed_{level}_{unit}",
                         f"{track_path}/movement/speed/{level}/{unit}",
+                    )
+    path_parent = movement.get("frame_path_distance") if movement is not None else None
+    if path_parent is not None:
+        for level in ("raw", "filtered", "smoothed"):
+            if level not in path_parent:
+                continue
+            level_group = path_parent[level]
+            for unit in ("px", "mm"):
+                if unit in level_group:
+                    paths.setdefault(
+                        f"frame_path_distance_{level}_{unit}",
+                        f"{track_path}/movement/frame_path_distance/{level}/{unit}",
                     )
     return paths
 
@@ -675,7 +700,13 @@ class CoreBehaviorSource:
                 key
                 for key in self.available_series
                 if key.startswith(SPEED_SERIES_PREFIXES)
-                or any(token in key for token in PATH_SERIES_TOKENS)
+            )
+        if analysis_id == "distance_traveled":
+            return tuple(
+                key
+                for key in self.available_series
+                if any(token in key for token in PATH_SERIES_TOKENS)
+                or key in {"delta_frames", "delta_seconds"}
             )
         if analysis_id == "heading":
             return tuple(
@@ -718,6 +749,8 @@ class CoreBehaviorSource:
         available: list[str] = []
         if self.series_for("speed"):
             available.append("speed")
+        if self._distance_traveled_level() is not None:
+            available.append("distance_traveled")
         if self.series_for("heading"):
             available.append("heading")
         if "positions_mm" in self.source_paths or "positions_px" in self.source_paths:
@@ -945,6 +978,24 @@ class CoreBehaviorSource:
         del loaded_paths
         return MappingProxyType({})
 
+    def _semantic_epoch_metadata(self) -> tuple[Mapping[str, Any], ...]:
+        """Return no inferred epochs for an unvalidated source."""
+
+        return ()
+
+    def _distance_traveled_level(self) -> tuple[str, str, str] | None:
+        for unit, cumulative_key, increment_key in DISTANCE_TRAVELED_LEVELS:
+            if {
+                cumulative_key,
+                increment_key,
+                "delta_frames",
+                "delta_seconds",
+                "transition_valid",
+                "transition_reason_code",
+            }.issubset(self.source_paths):
+                return unit, cumulative_key, increment_key
+        return None
+
     def time_bounds(self) -> tuple[float, float]:
         if self._time_seconds_cache is not None:
             return _finite_bounds(self._time_seconds_cache)
@@ -1035,6 +1086,10 @@ class CoreBehaviorSource:
         validity_keys = {
             "speed": ("linear_sample_valid", "linear_sample_reason_code"),
             "heading": ("angular_sample_valid", "angular_sample_reason_code"),
+            "distance_traveled": (
+                "transition_valid",
+                "transition_reason_code",
+            ),
         }.get(analysis_id, ())
         for key in validity_keys:
             array = self._array(root, key)
@@ -1058,6 +1113,113 @@ class CoreBehaviorSource:
             load_duration_ms=(time.perf_counter() - started) * 1000.0,
             note="Deferred Zarr projection; Polars transformations are lazy after array read.",
             metadata=self._projection_metadata(tuple(dict.fromkeys(loaded_paths))),
+        )
+
+    def project_distance_traveled(
+        self,
+        *,
+        start_s: float | None = None,
+        stop_s: float | None = None,
+    ) -> CoreBehaviorProjection:
+        """Project persisted cumulative path with explicit gap coverage.
+
+        This is a view over the track-kinematics payload, not a new scientific
+        computation.  Per-second rows sum the persisted smoothed increments;
+        invalid transitions remain explicit and never contribute zero-valued
+        distance as if the animal had been observed stationary.
+        """
+
+        level = self._distance_traveled_level()
+        if level is None:
+            raise ValueError(
+                "Track-kinematics source lacks one complete distance-traveled level"
+            )
+        unit, cumulative_key, increment_key = level
+        projected = self.project_timeseries(
+            "distance_traveled",
+            start_s=start_s,
+            stop_s=stop_s,
+            series_keys=(
+                cumulative_key,
+                increment_key,
+                "delta_frames",
+                "delta_seconds",
+            ),
+        )
+        candidate = pl.col("delta_frames").cast(pl.Int64, strict=True) > 0
+        valid = (
+            candidate
+            & pl.col("transition_valid").fill_null(False)
+            & pl.col(increment_key).cast(pl.Float64, strict=True).is_finite()
+            & (pl.col("delta_seconds").cast(pl.Float64, strict=True) > 0.0)
+        )
+        per_second = (
+            projected.frame.with_columns(
+                pl.col("time_s").floor().cast(pl.Int64).alias("second_index")
+            )
+            .group_by("second_index")
+            .agg(
+                pl.when(valid)
+                .then(pl.col(increment_key).cast(pl.Float64, strict=True))
+                .otherwise(0.0)
+                .sum()
+                .alias(f"distance_{unit}"),
+                pl.when(valid)
+                .then(pl.col("delta_seconds").cast(pl.Float64, strict=True))
+                .otherwise(0.0)
+                .sum()
+                .alias("observed_duration_s"),
+                candidate.cast(pl.Int64).sum().alias("candidate_transition_count"),
+                valid.cast(pl.Int64).sum().alias("valid_transition_count"),
+                (candidate & ~valid)
+                .cast(pl.Int64)
+                .sum()
+                .alias("invalid_transition_count"),
+            )
+            .with_columns(
+                pl.when(pl.col("candidate_transition_count") > 0)
+                .then(
+                    pl.col("valid_transition_count")
+                    / pl.col("candidate_transition_count")
+                )
+                .otherwise(None)
+                .alias("valid_transition_fraction"),
+                pl.when(pl.col("observed_duration_s") > 0.0)
+                .then(pl.col(f"distance_{unit}") / pl.col("observed_duration_s"))
+                .otherwise(None)
+                .alias(f"observed_speed_{unit}_s"),
+            )
+            .sort("second_index")
+        )
+        metadata = {
+            **dict(projected.metadata),
+            "distance_traveled": {
+                "unit": unit,
+                "cumulative_array": cumulative_key,
+                "increment_array": increment_key,
+                "increment_level": "smoothed",
+                "transition_anchor": "destination_sample",
+                "window_distance_operation": "sum_valid_persisted_smoothed_increments",
+                "invalid_transition_policy": "excluded_and_reported_not_zero_distance",
+                "per_second_operation": "floor_time_s_then_sum_valid_increments",
+            },
+            "semantic_epochs": self._semantic_epoch_metadata(),
+        }
+        return CoreBehaviorProjection(
+            analysis_id="distance_traveled",
+            frame=projected.frame,
+            columns=projected.columns,
+            source_paths=projected.source_paths,
+            start_s=projected.start_s,
+            stop_s=projected.stop_s,
+            row_count=projected.row_count,
+            load_duration_ms=projected.load_duration_ms,
+            note=(
+                "Observed cumulative smoothed path from persisted provider-motion "
+                "arrays; tracking gaps remain explicit invalid evidence."
+            ),
+            related_frames=MappingProxyType({"per_second": per_second}),
+            metadata=_freeze_core_metadata(metadata),
         )
 
     def project_positions(
@@ -1522,6 +1684,8 @@ class ValidatedCoreBehaviorSource(CoreBehaviorSource):
             available: list[str] = []
             if self.series_for("speed"):
                 available.append("speed")
+            if self._distance_traveled_level() is not None:
+                available.append("distance_traveled")
             if self.series_for("heading"):
                 available.append("heading")
             if (
@@ -1590,6 +1754,31 @@ class ValidatedCoreBehaviorSource(CoreBehaviorSource):
                 "selector_resolution": False,
                 "capability_states": self.capability_states,
             }
+        )
+
+    def _semantic_epoch_metadata(self) -> tuple[Mapping[str, Any], ...]:
+        try:
+            records = self.validated_behavior_source.semantic_epoch_records()
+        except ValidatedCapabilityUnavailableError:
+            return ()
+        return tuple(
+            MappingProxyType(
+                {
+                    "window_id": record.window_id,
+                    "analysis_role": record.analysis_role,
+                    "source_label": record.source_label,
+                    "start_frame": record.start_frame,
+                    "end_frame_exclusive": record.end_frame_exclusive,
+                    "source_interval_sha256": record.source_interval_sha256,
+                    "protocol_semantic_hash": record.protocol_semantic_hash,
+                    "protocol_semantic_step_index": record.protocol_semantic_step_index,
+                    "protocol_semantic_step_ref": record.protocol_semantic_step_ref,
+                    "terminal_frame_excluded_pending_step_end_contract": (
+                        record.terminal_frame_excluded_pending_step_end_contract
+                    ),
+                }
+            )
+            for record in records
         )
 
     def _unsupported_exact_route(self, capability: str) -> None:
@@ -1664,6 +1853,8 @@ def load_core_behavior_projection(
             stop_s=stop_s,
             series_keys=series_keys,
         )
+    if analysis_id == "distance_traveled":
+        return source.project_distance_traveled(start_s=start_s, stop_s=stop_s)
     if analysis_id == "position":
         return source.project_positions(start_s=start_s, stop_s=stop_s)
     if analysis_id == "swim_bouts":
@@ -1787,6 +1978,59 @@ def _decimate_for_display(
     )
 
 
+def _distance_epoch_windows(
+    frame: pl.DataFrame,
+    metadata: Mapping[str, Any],
+) -> tuple[tuple[str, float, float], ...]:
+    """Map exact semantic frame intervals onto the selected time projection."""
+
+    if not {"frame_index", "time_s"}.issubset(frame.columns):
+        return ()
+    raw_epochs = metadata.get("semantic_epochs", ())
+    if not isinstance(raw_epochs, (tuple, list)):
+        return ()
+    frames = frame["frame_index"].to_numpy().astype(np.int64, copy=False)
+    times = frame["time_s"].to_numpy().astype(np.float64, copy=False)
+    result: list[tuple[str, float, float]] = []
+    for raw in raw_epochs:
+        if not isinstance(raw, Mapping):
+            continue
+        try:
+            start = int(raw["start_frame"])
+            stop = int(raw["end_frame_exclusive"])
+            label = str(raw["analysis_role"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        selected = np.flatnonzero(
+            (frames >= start) & (frames < stop) & np.isfinite(times)
+        )
+        if selected.size:
+            result.append(
+                (label, float(times[int(selected[0])]), float(times[int(selected[-1])]))
+            )
+    return tuple(result)
+
+
+def _add_distance_epoch_shading(
+    figure: Any,
+    windows: Sequence[tuple[str, float, float]],
+) -> None:
+    colors = {
+        "chaser_pre": "rgba(76,120,168,0.10)",
+        "chaser_training": "rgba(228,87,86,0.10)",
+        "chaser_post": "rgba(84,162,75,0.10)",
+    }
+    for label, start_s, stop_s in windows:
+        figure.add_vrect(
+            x0=start_s,
+            x1=stop_s,
+            fillcolor=colors.get(label, "rgba(120,120,120,0.08)"),
+            opacity=1.0,
+            line_width=0,
+            layer="below",
+        )
+
+
 def build_core_behavior_output(
     mo: Any,
     go: Any,
@@ -1807,7 +2051,165 @@ def build_core_behavior_output(
     source_note = mo.md(
         f"{projection.note} Source arrays: `{', '.join(projection.source_paths) or 'none'}`"
     )
-    if projection.analysis_id in {"speed", "heading", "eye_angles"}:
+    if projection.analysis_id == "distance_traveled":
+        contract = projection.metadata.get("distance_traveled", {})
+        if not isinstance(contract, Mapping):
+            contract = {}
+        unit = str(contract.get("unit") or "distance units")
+        cumulative_key = str(contract.get("cumulative_array") or "")
+        increment_key = str(contract.get("increment_array") or "")
+        required = {
+            cumulative_key,
+            increment_key,
+            "delta_frames",
+            "delta_seconds",
+            "transition_valid",
+        }
+        if not cumulative_key or not increment_key or not required.issubset(frame.columns):
+            body = mo.md("The persisted distance-traveled contract is incomplete.")
+        else:
+            candidate = frame["delta_frames"].cast(pl.Int64).to_numpy() > 0
+            transition_valid = frame["transition_valid"].cast(pl.Boolean).to_numpy()
+            increments = frame[increment_key].cast(pl.Float64).to_numpy()
+            deltas = frame["delta_seconds"].cast(pl.Float64).to_numpy()
+            valid = (
+                candidate
+                & transition_valid
+                & np.isfinite(increments)
+                & np.isfinite(deltas)
+                & (deltas > 0.0)
+            )
+            invalid = candidate & ~valid
+            candidate_count = int(np.count_nonzero(candidate))
+            valid_count = int(np.count_nonzero(valid))
+            window_distance = float(np.sum(increments[valid], dtype=np.float64))
+            cumulative = frame[cumulative_key].cast(pl.Float64).to_numpy()
+            finite_cumulative = cumulative[np.isfinite(cumulative)]
+            cumulative_end = (
+                float(finite_cumulative[-1]) if finite_cumulative.size else float("nan")
+            )
+            coverage = (
+                valid_count / candidate_count if candidate_count else float("nan")
+            )
+            summary = mo.hstack(
+                [
+                    mo.stat(
+                        label=f"Observed distance in window ({unit})",
+                        value=f"{window_distance:,.2f}",
+                    ),
+                    mo.stat(
+                        label=f"Cumulative at window end ({unit})",
+                        value=(
+                            f"{cumulative_end:,.2f}"
+                            if np.isfinite(cumulative_end)
+                            else "unavailable"
+                        ),
+                    ),
+                    mo.stat(
+                        label="Valid transition coverage",
+                        value=(f"{100.0 * coverage:.1f}%" if np.isfinite(coverage) else "n/a"),
+                    ),
+                    mo.stat(
+                        label="Invalid transitions",
+                        value=f"{int(np.count_nonzero(invalid)):,}",
+                    ),
+                ]
+            )
+            display = _decimate_for_display(frame, trace_count=2)
+            cumulative_figure = go.Figure()
+            cumulative_figure.add_trace(
+                go.Scattergl(
+                    x=display["time_s"],
+                    y=display[cumulative_key],
+                    mode="lines",
+                    name="Observed cumulative path",
+                    line=dict(color="#2563eb", width=2),
+                )
+            )
+            invalid_frame = frame.filter(pl.Series("_invalid", invalid))
+            if invalid_frame.height:
+                invalid_display = _decimate_for_display(
+                    invalid_frame,
+                    trace_count=1,
+                    max_total_values=12000,
+                )
+                cumulative_figure.add_trace(
+                    go.Scattergl(
+                        x=invalid_display["time_s"],
+                        y=invalid_display[cumulative_key],
+                        mode="markers",
+                        name="Invalid transition evidence",
+                        marker=dict(color="#dc2626", size=5, symbol="x"),
+                    )
+                )
+            epoch_windows = _distance_epoch_windows(frame, projection.metadata)
+            _add_distance_epoch_shading(cumulative_figure, epoch_windows)
+            cumulative_figure.update_layout(
+                title="Observed cumulative smoothed path",
+                xaxis_title="Time (s)",
+                yaxis_title=f"Cumulative distance ({unit})",
+                height=470,
+                margin=dict(l=65, r=30, t=65, b=55),
+                template="plotly_white",
+            )
+
+            per_second_lazy = projection.related_frames.get("per_second")
+            per_second = (
+                per_second_lazy.collect()
+                if per_second_lazy is not None
+                else pl.DataFrame()
+            )
+            distance_column = f"distance_{unit}"
+            per_second_figure = go.Figure()
+            if per_second.height and distance_column in per_second.columns:
+                per_second_figure.add_trace(
+                    go.Bar(
+                        x=per_second["second_index"],
+                        y=per_second[distance_column],
+                        name="Observed distance",
+                        marker_color="#64748b",
+                    )
+                )
+                per_second_figure.add_trace(
+                    go.Scatter(
+                        x=per_second["second_index"],
+                        y=per_second["valid_transition_fraction"],
+                        mode="lines",
+                        name="Transition coverage",
+                        yaxis="y2",
+                        line=dict(color="#dc2626", width=1.5),
+                    )
+                )
+            _add_distance_epoch_shading(per_second_figure, epoch_windows)
+            per_second_figure.update_layout(
+                title="Observed distance per second with coverage",
+                xaxis_title="Session second",
+                yaxis=dict(title=f"Distance ({unit})"),
+                yaxis2=dict(
+                    title="Valid transition fraction",
+                    overlaying="y",
+                    side="right",
+                    range=[0.0, 1.02],
+                ),
+                barmode="overlay",
+                height=420,
+                margin=dict(l=65, r=65, t=65, b=55),
+                template="plotly_white",
+            )
+            body = mo.vstack(
+                [
+                    summary,
+                    cumulative_figure,
+                    per_second_figure,
+                    mo.md(
+                        "Red crosses are candidate transitions that failed the persisted "
+                        "motion validity contract. They are retained as missing coverage, "
+                        "not interpreted as zero movement. Epoch shading is shown only "
+                        "when exact bundle-sealed semantic frame intervals are available."
+                    ),
+                ]
+            )
+    elif projection.analysis_id in {"speed", "heading", "eye_angles"}:
         value_columns = [
             name
             for name in frame.columns
@@ -1835,7 +2237,7 @@ def build_core_behavior_output(
             )
         figure.update_layout(
             title=(
-                "Speed and path traces"
+                "Speed and acceleration traces"
                 if projection.analysis_id == "speed"
                 else (
                     "Eye angles and convergence"

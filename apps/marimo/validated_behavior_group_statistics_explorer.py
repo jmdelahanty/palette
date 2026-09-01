@@ -129,7 +129,11 @@ def _(
     selected_view_id = view_label_to_id[view_picker.value]
     payload = build_statistics_view_payload(source, selected_view_id)
     metric_label_to_id = statistics_metric_options(payload)
-    provider_values = statistics_dimension_options(payload, "provider_role")
+    provider_values = (
+        ()
+        if selected_view_id == "distance_traveled"
+        else statistics_dimension_options(payload, "provider_role")
+    )
     behavior_values = statistics_dimension_options(payload, "behavior_role")
     condition_values = statistics_dimension_options(payload, "condition")
     return (

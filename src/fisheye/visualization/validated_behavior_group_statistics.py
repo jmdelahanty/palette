@@ -234,6 +234,105 @@ def core_behavior_figure(payload: Mapping[str, object]) -> Any:
     return figure
 
 
+def distance_traveled_figure(payload: Mapping[str, object]) -> Any:
+    """Render session and exact-epoch path summaries without pooling frames."""
+
+    catalog = _catalog(payload)
+    metric_ids = tuple(catalog)
+    summaries = _rows(payload, "descriptive_rows")
+    recording = _rows(payload, "recording_rows")
+    preferred = _condition_order(payload)
+    figure, axes = _subplot_grid(len(metric_ids), columns=2, width=5.2, height=4.0)
+    for axis, metric_id in zip(axes, metric_ids):
+        metric = catalog[metric_id]
+        scale, display_unit = _display_scale(str(metric["unit"]))
+        metric_recording = [row for row in recording if row["metric_id"] == metric_id]
+        metric_summaries = [row for row in summaries if row["metric_id"] == metric_id]
+        observed = {
+            str(row["condition"]) for row in (*metric_recording, *metric_summaries)
+        }
+        conditions = tuple(value for value in preferred if value in observed) + tuple(
+            sorted(observed - set(preferred))
+        )
+        by_recording: dict[str, dict[str, float]] = defaultdict(dict)
+        for row in metric_recording:
+            value = _finite(row.get("value"))
+            if value is not None:
+                by_recording[str(row["recording_id"])][str(row["condition"])] = value
+        for values in by_recording.values():
+            x_values = [
+                index for index, condition in enumerate(conditions) if condition in values
+            ]
+            y_values = [values[conditions[index]] * scale for index in x_values]
+            if len(x_values) >= 2:
+                axis.plot(x_values, y_values, color="#777777", alpha=0.10, linewidth=0.6)
+            elif x_values:
+                axis.scatter(
+                    x_values,
+                    y_values,
+                    color="#777777",
+                    alpha=0.16,
+                    s=12,
+                    zorder=2,
+                )
+
+        summary_by_condition = {
+            str(row["condition"]): row for row in metric_summaries
+        }
+        labels: list[str] = []
+        for index, condition in enumerate(conditions):
+            row = summary_by_condition.get(condition)
+            label = _condition_label(payload, condition)
+            if row is None:
+                labels.append(label)
+                continue
+            median = _finite(row.get("median"))
+            p25 = _finite(row.get("p25"))
+            p75 = _finite(row.get("p75"))
+            mean = _finite(row.get("mean"))
+            color = _condition_color(payload, condition)
+            if median is not None and p25 is not None and p75 is not None:
+                axis.errorbar(
+                    [index],
+                    [median * scale],
+                    yerr=[
+                        [max(0.0, (median - p25) * scale)],
+                        [max(0.0, (p75 - median) * scale)],
+                    ],
+                    color=color,
+                    marker="o",
+                    markersize=7,
+                    linewidth=2.4,
+                    capsize=4,
+                    zorder=4,
+                )
+            if mean is not None:
+                axis.scatter(
+                    [index],
+                    [mean * scale],
+                    marker="D",
+                    s=26,
+                    facecolors="white",
+                    edgecolors=color,
+                    linewidths=1.3,
+                    zorder=5,
+                )
+            labels.append(f"{label}\nn={int(row['finite_recording_count'])}")
+        axis.set_xticks(np.arange(len(conditions)), labels)
+        axis.set_ylabel(display_unit)
+        axis.set_title(_panel_metric_label(metric), fontsize=10)
+        _style_axis(axis)
+    for axis in axes[len(metric_ids) :]:
+        axis.set_visible(False)
+    figure.suptitle(
+        "Observed distance traveled · whole session and exact chaser epochs",
+        fontsize=16,
+        y=0.995,
+    )
+    _footer(figure, payload)
+    return figure
+
+
 def grouped_epoch_figure(payload: Mapping[str, object], *, columns: int = 4) -> Any:
     """Render provider/behavior-role series across the three exact epochs."""
 
@@ -900,6 +999,8 @@ def render_statistics_view(payload: Mapping[str, object]) -> Any:
     view_id = str(payload.get("view_id"))
     if view_id == "core_behavior":
         return core_behavior_figure(payload)
+    if view_id == "distance_traveled":
+        return distance_traveled_figure(payload)
     if view_id in {"near_field", "same_quadrant", "occupancy_support"}:
         return grouped_epoch_figure(payload)
     if view_id in {
@@ -927,6 +1028,7 @@ __all__ = [
     "body_bearing_distance_figure",
     "body_bearing_polar_figure",
     "core_behavior_figure",
+    "distance_traveled_figure",
     "distance_curve_figure",
     "grouped_epoch_figure",
     "render_statistics_view",

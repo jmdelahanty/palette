@@ -151,10 +151,14 @@ class ValidatedBehaviorGroupStatisticsResult:
 
 @dataclass(frozen=True, slots=True)
 class _MetricBatch:
+    metric_family: str
     source_table: str
     condition_column: str | None
     expected_conditions: tuple[str, ...]
     group_columns: tuple[str, ...]
+    recording_reducer: str
+    source_identity_columns: tuple[str, ...]
+    reducer_order_column: str | None
     specs: tuple[ValidatedBehaviorMetricSpec, ...]
 
 
@@ -190,6 +194,8 @@ def _query_identity(
         "recording_id",
         *((spec.condition_column,) if spec.condition_column else ()),
         *spec.group_columns,
+        *spec.source_identity_columns,
+        *((spec.reducer_order_column,) if spec.reducer_order_column else ()),
         spec.value_column,
     )
     table = dataset.table(spec.source_table)
@@ -198,6 +204,13 @@ def _query_identity(
         predicate_description=(
             "all manifest-selected rows; fail-closed unique recording/condition/"
             "group grain; null and nonfinite values retained as exclusions"
+            if spec.recording_reducer == "unique_exact_row"
+            else (
+                "all manifest-selected rows; require constant declared source identity "
+                "and unique gapless reducer order within recording/condition/group; "
+                "select the exact maximum-order row; null and nonfinite metric values "
+                "retained as exclusions"
+            )
         ),
     )
     body = {
@@ -213,23 +226,40 @@ def _metric_batches(
     specs: Sequence[ValidatedBehaviorMetricSpec],
 ) -> tuple[_MetricBatch, ...]:
     grouped: dict[
-        tuple[str, str | None, tuple[str, ...], tuple[str, ...]],
+        tuple[
+            str,
+            str,
+            str | None,
+            tuple[str, ...],
+            tuple[str, ...],
+            str,
+            tuple[str, ...],
+            str | None,
+        ],
         list[ValidatedBehaviorMetricSpec],
     ] = defaultdict(list)
     for spec in specs:
         key = (
+            spec.metric_family,
             spec.source_table,
             spec.condition_column,
             spec.expected_conditions,
             spec.group_columns,
+            spec.recording_reducer,
+            spec.source_identity_columns,
+            spec.reducer_order_column,
         )
         grouped[key].append(spec)
     return tuple(
         _MetricBatch(
-            source_table=key[0],
-            condition_column=key[1],
-            expected_conditions=key[2],
-            group_columns=key[3],
+            metric_family=key[0],
+            source_table=key[1],
+            condition_column=key[2],
+            expected_conditions=key[3],
+            group_columns=key[4],
+            recording_reducer=key[5],
+            source_identity_columns=key[6],
+            reducer_order_column=key[7],
             specs=tuple(sorted(values, key=lambda item: item.metric_id)),
         )
         for key, values in sorted(grouped.items(), key=lambda item: str(item[0]))
@@ -329,6 +359,9 @@ def _unit_lazy_frame(
     if batch.condition_column is not None:
         selected.append(batch.condition_column)
     selected.extend(batch.group_columns)
+    selected.extend(batch.source_identity_columns)
+    if batch.reducer_order_column is not None:
+        selected.append(batch.reducer_order_column)
     selected.extend(spec.value_column for spec in batch.specs)
     if len(set(selected)) != len(selected):
         _fail(f"{batch.source_table}: metric batch selects duplicate columns")
@@ -351,19 +384,86 @@ def _unit_lazy_frame(
     if lazy.filter(null_key).limit(1).collect().height:
         _fail(f"{batch.source_table}: a recording/condition/group key is null")
 
-    aggregations = [pl.len().alias("__source_row_count")]
-    aggregations.extend(
-        pl.col(spec.value_column).first().alias(spec.value_column)
-        for spec in batch.specs
-    )
-    units = lazy.group_by(unit_keys).agg(aggregations)
-    duplicate = units.filter(pl.col("__source_row_count") != 1).limit(1).collect()
-    if duplicate.height:
-        example = duplicate.to_dicts()[0]
-        _fail(
-            f"{batch.source_table}: metric grain is not one exact row per "
-            f"recording/condition/group; example={example!r}"
+    if batch.recording_reducer == "unique_exact_row":
+        aggregations = [pl.len().alias("__source_row_count")]
+        aggregations.extend(
+            pl.col(spec.value_column).first().alias(spec.value_column)
+            for spec in batch.specs
         )
+        units = lazy.group_by(unit_keys).agg(aggregations)
+        duplicate = units.filter(pl.col("__source_row_count") != 1).limit(1).collect()
+        if duplicate.height:
+            example = duplicate.to_dicts()[0]
+            _fail(
+                f"{batch.source_table}: metric grain is not one exact row per "
+                f"recording/condition/group; example={example!r}"
+            )
+    elif batch.recording_reducer == "terminal_at_max_order_v1":
+        assert batch.reducer_order_column is not None
+        order = batch.reducer_order_column
+        terminal_required = (*batch.source_identity_columns, order)
+        null_terminal = pl.any_horizontal(
+            [pl.col(name).is_null() for name in terminal_required]
+        )
+        null_example = lazy.filter(null_terminal).limit(1).collect()
+        if null_example.height:
+            _fail(
+                f"{batch.source_table}: terminal reducer identity/order is null; "
+                f"example={null_example.to_dicts()[0]!r}"
+            )
+        identity_aliases = {
+            name: f"__identity_n_unique_{index}"
+            for index, name in enumerate(batch.source_identity_columns)
+        }
+        checks = lazy.group_by(unit_keys).agg(
+            pl.len().alias("__source_row_count"),
+            pl.col(order).n_unique().alias("__order_n_unique"),
+            pl.col(order).min().alias("__order_min"),
+            pl.col(order).max().alias("__order_max"),
+            *(
+                pl.col(name).n_unique().alias(alias)
+                for name, alias in identity_aliases.items()
+            ),
+        )
+        invalid_check = (
+            (pl.col("__source_row_count") != pl.col("__order_n_unique"))
+            | (
+                pl.col("__source_row_count")
+                != (pl.col("__order_max") - pl.col("__order_min") + 1)
+            )
+        )
+        for alias in identity_aliases.values():
+            invalid_check = invalid_check | (pl.col(alias) != 1)
+        invalid = checks.filter(invalid_check).limit(1).collect()
+        if invalid.height:
+            _fail(
+                f"{batch.source_table}: terminal reducer requires one constant "
+                "source identity and a unique gapless order axis per recording/"
+                f"condition/group; example={invalid.to_dicts()[0]!r}"
+            )
+        terminal_keys = checks.select(
+            *unit_keys,
+            pl.col("__order_max").alias(order),
+        )
+        terminal_rows = lazy.join(
+            terminal_keys,
+            on=(*unit_keys, order),
+            how="inner",
+        )
+        aggregations = [pl.len().alias("__source_row_count")]
+        aggregations.extend(
+            pl.col(spec.value_column).first().alias(spec.value_column)
+            for spec in batch.specs
+        )
+        units = terminal_rows.group_by(unit_keys).agg(aggregations)
+        ambiguous = units.filter(pl.col("__source_row_count") != 1).limit(1).collect()
+        if ambiguous.height:
+            _fail(
+                f"{batch.source_table}: terminal reducer did not resolve exactly "
+                f"one maximum-order row; example={ambiguous.to_dicts()[0]!r}"
+            )
+    else:  # pragma: no cover - specification validation owns this branch
+        _fail(f"Unsupported recording reducer: {batch.recording_reducer}")
 
     observed = {
         str(value)
