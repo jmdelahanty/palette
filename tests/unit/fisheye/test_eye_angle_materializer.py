@@ -166,6 +166,15 @@ def _build_source(
         data=np.full(rows, 2.0, dtype=np.float32),
         chunks=(2,),
     )
+    # A real subject-shape publication contains scientific surfaces beyond the
+    # five eye-angle inputs. Keep one representative full-publication array in
+    # the fixture so live-source resolution cannot accidentally reuse the
+    # closed-topology staged-subset grammar.
+    shape.create_array(
+        "instance_key",
+        data=np.arange(1, rows + 1, dtype=np.uint64),
+        chunks=(2,),
+    )
 
     refined_parent = root.create_group("refined_keypoints_runs")
     refined_parent.attrs["latest"] = "kp_refined_1"
@@ -1725,6 +1734,96 @@ def _worker_results_for_receipt(
     ]
 
 
+def test_reused_receipt_validates_full_publication_without_proof_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source, scratch, plan, _receipt, _receipt_path = _admission_fixture(
+        monkeypatch,
+        tmp_path,
+    )
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    assert "instance_key" in root[_SHAPE_RUN_PATH]
+
+    def _unexpected_full_reload_or_payload_hash(
+        *_args: object,
+        **_kwargs: object,
+    ) -> object:
+        raise AssertionError(
+            "receipt reuse must not reload full publication proofs or hash payloads"
+        )
+
+    monkeypatch.setattr(
+        mod,
+        "_resolve_source_plan",
+        _unexpected_full_reload_or_payload_hash,
+    )
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "load_persisted_subject_shape_coordinate_publication",
+        _unexpected_full_reload_or_payload_hash,
+    )
+    monkeypatch.setattr(
+        mod.eye_writer,
+        "load_assignment_keypoint_source",
+        _unexpected_full_reload_or_payload_hash,
+    )
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "array_payload_sha256",
+        _unexpected_full_reload_or_payload_hash,
+    )
+    monkeypatch.setattr(
+        mod.eye_writer,
+        "array_values_sha256",
+        _unexpected_full_reload_or_payload_hash,
+    )
+
+    freshness = mod._validate_reused_plan_source(plan)
+
+    assert freshness["status"] == "current"
+    assert freshness["row_count"] == plan.row_count
+    assert freshness["selected_arrays"] == list(plan.selected_arrays)
+    assert freshness["validation_mode"] == (
+        "sealed_receipt_live_metadata_and_physical_revision_v1"
+    )
+    assert freshness["payload_rehash"] is False
+    assert not scratch.exists()
+
+
+def test_receipt_bound_staged_subset_keeps_closed_array_topology(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _source, plan, _staging = _stage_synthetic_source(monkeypatch, tmp_path)
+    staged_root = zarr.open_group(
+        str(plan.staged_zarr),
+        mode="a",
+        use_consolidated=False,
+    )
+    staged_shape = staged_root[_SHAPE_RUN_PATH]
+    staged_shape.create_array(
+        "unexpected_full_publication_surface",
+        data=np.ones(plan.row_count, dtype=np.float32),
+        chunks=(2,),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Staged subject-shape subset has a noncanonical array inventory",
+    ):
+        mod._resolve_source_plan(
+            plan.staged_zarr,
+            subject_shape_run=plan.subject_shape_run,
+            keypoint_run=plan.keypoint_run,
+            staged_input_integrity_receipt=plan.staged_input_integrity_receipt,
+            source_physical_profile=(
+                mod.SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET
+            ),
+            verify_staged_payload=False,
+        )
+
+
 def test_streaming_array_digest_matches_canonical_array_digest() -> None:
     values = np.arange(60, dtype=np.float32).reshape(10, 3, 2)
     values[1, 0, 0] = np.nan
@@ -1817,10 +1916,13 @@ def test_complete_worker_input_attestation_binds_exact_receipt_chunk_set(
         list(reversed(results)),
     )
 
-    assert mod.eye_writer._canonical_worker_input_attestation(
-        attestation,
-        receipt=integrity_receipt,
-    ) == attestation
+    assert (
+        mod.eye_writer._canonical_worker_input_attestation(
+            attestation,
+            receipt=integrity_receipt,
+        )
+        == attestation
+    )
     assert attestation["complete_worker_chunk_set"] is True
     assert attestation["chunk_count"] == len(results)
     assert attestation["staged_input_integrity_receipt_sha256"] == (
@@ -2899,7 +3001,9 @@ def test_combined_receipt_rejects_staged_keypoint_input_tamper(
             subject_shape_run=plan.subject_shape_run,
             keypoint_run=plan.keypoint_run,
             staged_input_integrity_receipt=(plan.staged_input_integrity_receipt),
-            receipt_bound_source=True,
+            source_physical_profile=(
+                mod.SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET
+            ),
             verify_staged_payload=True,
         )
 
@@ -2945,7 +3049,9 @@ def test_combined_receipt_rejects_another_keypoint_source_revision(
             subject_shape_run=plan_a.subject_shape_run,
             keypoint_run=plan_a.keypoint_run,
             staged_input_integrity_receipt=(plan_b.staged_input_integrity_receipt),
-            receipt_bound_source=True,
+            source_physical_profile=(
+                mod.SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET
+            ),
             verify_staged_payload=True,
         )
 
@@ -3253,10 +3359,13 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
     )
     assert run.attrs["staged_input_integrity_receipt_sha256"] == receipt_sha256
     worker_attestation = run.attrs["staged_input_worker_attestation"]
-    assert mod.eye_writer._canonical_worker_input_attestation(
-        worker_attestation,
-        receipt=local["staged_input_integrity_receipt"],
-    ) == worker_attestation
+    assert (
+        mod.eye_writer._canonical_worker_input_attestation(
+            worker_attestation,
+            receipt=local["staged_input_integrity_receipt"],
+        )
+        == worker_attestation
+    )
     assert local["staged_input_worker_attestation"] == worker_attestation
     assert local["input_payload_validation"] == {
         "mode": "complete_worker_chunk_attestation_v1",
@@ -3270,15 +3379,22 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
         "precompute_full_decoded_scan": False,
         "publication_requires_complete_worker_chunk_set": True,
     }
-    assert local["source_staging"]["source_revision_audit"][
-        "payload_verification_mode"
-    ] == "sealed_receipt_metadata_authority_inventory_v1"
-    assert local["source_staging"]["source_revision_audit"][
-        "full_selected_scientific_input_content_hash"
-    ] is False
-    assert result["publish"]["source_revision_audit"][
-        "full_selected_scientific_input_content_hash"
-    ] is False
+    assert (
+        local["source_staging"]["source_revision_audit"]["payload_verification_mode"]
+        == "sealed_receipt_metadata_authority_inventory_v1"
+    )
+    assert (
+        local["source_staging"]["source_revision_audit"][
+            "full_selected_scientific_input_content_hash"
+        ]
+        is False
+    )
+    assert (
+        result["publish"]["source_revision_audit"][
+            "full_selected_scientific_input_content_hash"
+        ]
+        is False
+    )
     assert local["compute"]["writer"] == "fisheye.analysis.eye_angle_analysis"
     assert local["compute"]["angle_chunk_rows"] == 2
     assert local["compute"]["angle_chunk_columns"] == 4
@@ -3823,9 +3939,10 @@ def test_post_read_staged_payload_mutation_does_not_invalidate_worker_snapshot(
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)
     published = root["analysis/eye_angle_runs/eye_1"]
     assert published.attrs["palette_run_completion_status"] == "complete"
-    assert published.attrs["staged_input_worker_attestation"][
-        "complete_worker_chunk_set"
-    ] is True
+    assert (
+        published.attrs["staged_input_worker_attestation"]["complete_worker_chunk_set"]
+        is True
+    )
 
 
 def test_publication_rolls_back_when_source_revision_changes(
