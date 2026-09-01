@@ -1382,6 +1382,17 @@ def _global_validate_generation(
     table_names = validate_table_specs(table_specs)
     if set(inventory) != set(table_names):
         _fail("Publication part inventory is incomplete.")
+    relation_fields_by_table: dict[str, set[tuple[str, ...]]] = {
+        name: {tuple(table_specs[name].contract.primary_key)} for name in table_names
+    }
+    for table_name in table_names:
+        for local_fields, target, target_fields in table_specs[table_name].foreign_keys:
+            relation_fields_by_table[table_name].add(tuple(local_fields))
+            relation_fields_by_table[target].add(tuple(target_fields))
+    relation_values_by_table: dict[str, dict[tuple[str, ...], set[tuple[Any, ...]]]] = {
+        name: {fields: set() for fields in relation_fields_by_table[name]}
+        for name in table_names
+    }
     keys_by_table: dict[str, set[tuple[Any, ...]]] = {}
     row_counts: dict[str, int] = {}
     expected_files: set[str] = set()
@@ -1431,11 +1442,20 @@ def _global_validate_generation(
                 part_seen: set[tuple[Any, ...]] = set()
                 part_minimum: tuple[Any, ...] | None = None
                 part_maximum: tuple[Any, ...] | None = None
-                for batch in parquet.iter_batches(
-                    columns=list(spec.contract.primary_key)
-                ):
-                    columns = [column.to_pylist() for column in batch.columns]
-                    for key in zip(*columns, strict=True):
+                validation_fields = tuple(
+                    dict.fromkeys(
+                        name
+                        for relation_fields in relation_fields_by_table[table_name]
+                        for name in relation_fields
+                    )
+                )
+                for batch in parquet.iter_batches(columns=list(validation_fields)):
+                    columns = batch.to_pydict()
+                    for row_index in range(batch.num_rows):
+                        key = tuple(
+                            columns[name][row_index]
+                            for name in spec.contract.primary_key
+                        )
                         if key in part_seen:
                             _fail(f"{table_name}: duplicate primary key within part.")
                         if key in seen:
@@ -1452,6 +1472,12 @@ def _global_validate_generation(
                             if part_maximum is None or key > part_maximum
                             else part_maximum
                         )
+                        for relation_fields in relation_fields_by_table[table_name]:
+                            relation_values_by_table[table_name][relation_fields].add(
+                                tuple(
+                                    columns[name][row_index] for name in relation_fields
+                                )
+                            )
                 part_bounds = (
                     None
                     if part_minimum is None
@@ -1472,22 +1498,8 @@ def _global_validate_generation(
         for table_name in table_names:
             spec = table_specs[table_name]
             for local_fields, target, target_fields in spec.foreign_keys:
-                local_indices = [
-                    spec.contract.primary_key.index(name) for name in local_fields
-                ]
-                target_spec = table_specs[target]
-                target_indices = [
-                    target_spec.contract.primary_key.index(name)
-                    for name in target_fields
-                ]
-                local_values = {
-                    tuple(key[index] for index in local_indices)
-                    for key in keys_by_table[table_name]
-                }
-                target_values = {
-                    tuple(key[index] for index in target_indices)
-                    for key in keys_by_table[target]
-                }
+                local_values = relation_values_by_table[table_name][tuple(local_fields)]
+                target_values = relation_values_by_table[target][tuple(target_fields)]
                 if not local_values.issubset(target_values):
                     _fail(f"{table_name}: foreign key to {target} is not closed.")
     if (

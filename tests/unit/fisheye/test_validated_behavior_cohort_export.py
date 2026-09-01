@@ -511,6 +511,137 @@ def test_scientific_adapter_rows_fail_closed_before_arrow_normalization(
         )
 
 
+def test_foreign_key_validation_reads_non_primary_local_columns(
+    tmp_path: Path,
+) -> None:
+    membership_path, bundle_set_path = _membership_and_bundle_set(tmp_path)
+    entity_contract = ArrowTableContract(
+        table_name="fixture_entities",
+        schema_namespace="fixture.analytics.validated_behavior.table",
+        fields=(
+            field("export_run_id", "string"),
+            field("recording_id", "string"),
+            field("entity_id", "int64"),
+        ),
+        primary_key=("export_run_id", "recording_id", "entity_id"),
+    )
+    event_contract = ArrowTableContract(
+        table_name="fixture_entity_events",
+        schema_namespace="fixture.analytics.validated_behavior.table",
+        fields=(
+            field("export_run_id", "string"),
+            field("recording_id", "string"),
+            field("event_id", "int64"),
+            field("entity_id", "int64"),
+        ),
+        primary_key=("export_run_id", "recording_id", "event_id"),
+    )
+    recording_fk = (
+        (
+            ("export_run_id", "recording_id"),
+            "cohort_recordings",
+            ("export_run_id", "recording_id"),
+        ),
+    )
+    specs = {
+        **CORE_TABLE_SPECS,
+        "fixture_entities": ValidatedBehaviorTableSpec(
+            contract=entity_contract,
+            grain="one row per fixture entity",
+            capability_policy="optional_explicit_coverage",
+            required_capability="semantic_epochs",
+            foreign_keys=recording_fk,
+            zero_rows_allowed=True,
+        ),
+        "fixture_entity_events": ValidatedBehaviorTableSpec(
+            contract=event_contract,
+            grain="one row per fixture event",
+            capability_policy="optional_explicit_coverage",
+            required_capability="semantic_epochs",
+            foreign_keys=recording_fk
+            + (
+                (
+                    ("export_run_id", "recording_id", "entity_id"),
+                    "fixture_entities",
+                    ("export_run_id", "recording_id", "entity_id"),
+                ),
+            ),
+            zero_rows_allowed=True,
+        ),
+    }
+
+    def run_export(*, run_id: str, child_entity_id: int) -> dict[str, Any]:
+        plan = build_validated_behavior_export_plan(
+            membership_path=membership_path,
+            bundle_set_path=bundle_set_path,
+            export_run_id=run_id,
+            shard_root=(tmp_path / f"{run_id}-shards").resolve(),
+            publication_root=(tmp_path / f"{run_id}-publication").resolve(),
+            palette_commit=COMMIT,
+            palette_repo=Path(__file__).resolve().parents[3],
+            table_specs=specs,
+            export_profile_id="non_primary_foreign_key_fixture_v1",
+            created_at_utc=NOW,
+        )
+        plan_path = tmp_path / f"{run_id}-plan.json"
+        write_validated_behavior_export_plan(plan_path, plan)
+
+        def entity_rows(
+            plan_value: dict[str, Any],
+            member: dict[str, Any],
+            _bundle_member: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], None]:
+            return [
+                {
+                    "export_run_id": plan_value["export_run_id"],
+                    "recording_id": member["recording_id"],
+                    "entity_id": 7,
+                }
+            ], None
+
+        def event_rows(
+            plan_value: dict[str, Any],
+            member: dict[str, Any],
+            _bundle_member: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], None]:
+            return [
+                {
+                    "export_run_id": plan_value["export_run_id"],
+                    "recording_id": member["recording_id"],
+                    "event_id": 1,
+                    "entity_id": child_entity_id,
+                }
+            ], None
+
+        extractors = {
+            "fixture_entities": entity_rows,
+            "fixture_entity_events": event_rows,
+        }
+        for ordinal in (1, 2):
+            write_validated_behavior_recording_shard(
+                plan_path=plan_path,
+                member_ordinal=ordinal,
+                table_specs=specs,
+                row_extractors=extractors,
+                created_at_utc=NOW,
+            )
+        return publish_validated_behavior_cohort(
+            plan_path=plan_path,
+            table_specs=specs,
+            generation_id=f"generation-{run_id}",
+            created_at_utc=NOW,
+        )
+
+    published = run_export(run_id="non_primary_fk_valid_v1", child_entity_id=7)
+    assert published["row_counts_by_table"]["fixture_entity_events"] == 1
+
+    with pytest.raises(
+        ValidatedBehaviorExportError,
+        match="fixture_entity_events: foreign key to fixture_entities is not closed",
+    ):
+        run_export(run_id="non_primary_fk_invalid_v1", child_entity_id=8)
+
+
 def test_plan_rejects_scientific_capability_absent_from_bundle_profile(
     tmp_path: Path,
 ) -> None:
