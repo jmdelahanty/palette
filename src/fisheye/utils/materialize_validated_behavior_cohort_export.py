@@ -1,8 +1,8 @@
 """Plan, shard, publish, or validate a generic behavior-cohort export.
 
-The initial installed profile contains only protocol-neutral cohort, bundle,
-and capability tables.  Scientific tables are added through exact table specs
-and recording-scoped adapters, not command-line formula switches.
+Profiles select closed table contracts and source adapters.  They never expose
+formula switches: every scientific value is copied from an exact bundle-bound
+source under its installed table contract.
 """
 
 from __future__ import annotations
@@ -18,12 +18,18 @@ from fisheye.analytics_exports.validated_behavior_cohort import (
     publish_validated_behavior_cohort,
     read_validated_behavior_export_manifest,
     read_validated_behavior_export_plan,
+    validated_behavior_manifest_path,
     write_validated_behavior_export_plan,
     write_validated_behavior_recording_shard,
 )
 from fisheye.analytics_exports.validated_behavior_contracts import (
     CORE_METADATA_PROFILE_ID,
-    CORE_TABLE_NAMES,
+)
+from fisheye.analytics_exports.validated_behavior_profiles import (
+    INSTALLED_VALIDATED_BEHAVIOR_PROFILES,
+    ValidatedBehaviorExportProfile,
+    profile_id_from_record,
+    resolve_validated_behavior_profile,
 )
 
 
@@ -84,20 +90,26 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    plan = subparsers.add_parser("plan", help="write one immutable core export plan")
+    plan = subparsers.add_parser("plan", help="write one immutable export plan")
     plan.add_argument("--membership", type=Path, required=True)
     plan.add_argument("--bundle-set", type=Path, required=True)
     plan.add_argument("--export-run-id", required=True)
     plan.add_argument("--plan-output", type=Path, required=True)
     plan.add_argument("--shard-root", type=Path, required=True)
     plan.add_argument("--publication-root", type=Path, required=True)
+    plan.add_argument(
+        "--profile",
+        choices=tuple(INSTALLED_VALIDATED_BEHAVIOR_PROFILES),
+        default=CORE_METADATA_PROFILE_ID,
+        help="Closed installed table/source profile (default: core metadata only).",
+    )
 
     shard = subparsers.add_parser("shard", help="materialize one recording shard")
     shard.add_argument("--plan", type=Path, required=True)
     shard.add_argument("--member-ordinal", type=int, required=True)
 
     run_shards = subparsers.add_parser(
-        "run-shards", help="materialize every core shard serially for a canary"
+        "run-shards", help="materialize every planned shard serially for a canary"
     )
     run_shards.add_argument("--plan", type=Path, required=True)
 
@@ -118,6 +130,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def _plan_command(args: argparse.Namespace) -> dict[str, Any]:
     repository, commit = _require_clean_current_authority()
+    profile = resolve_validated_behavior_profile(args.profile)
     value = build_validated_behavior_export_plan(
         membership_path=args.membership,
         bundle_set_path=args.bundle_set,
@@ -126,32 +139,42 @@ def _plan_command(args: argparse.Namespace) -> dict[str, Any]:
         publication_root=args.publication_root,
         palette_commit=commit,
         palette_repo=repository,
-        export_profile_id=CORE_METADATA_PROFILE_ID,
+        table_specs=profile.table_specs,
+        export_profile_id=profile.profile_id,
     )
     target = write_validated_behavior_export_plan(args.plan_output, value)
     return {
         "operation": "plan",
-        "profile_id": CORE_METADATA_PROFILE_ID,
+        "profile_id": profile.profile_id,
         "plan_path": str(target),
         "plan_sha256": value["plan_sha256"],
         "export_run_id": value["export_run_id"],
         "member_count": value["member_count"],
-        "table_names": list(CORE_TABLE_NAMES),
+        "table_names": list(value["table_names"]),
         "safety": value["safety"],
     }
 
 
-def _read_plan_for_execution(path: Path) -> Mapping[str, Any]:
-    plan, _membership, _bundle_set = read_validated_behavior_export_plan(path)
+def _read_plan_for_execution(
+    path: Path,
+) -> tuple[Mapping[str, Any], ValidatedBehaviorExportProfile]:
+    profile = resolve_validated_behavior_profile(
+        profile_id_from_record(path, record_kind="export plan")
+    )
+    plan, _membership, _bundle_set = read_validated_behavior_export_plan(
+        path, table_specs=profile.table_specs
+    )
     _require_clean_current_authority(plan["software_authority"])
-    return plan
+    return plan, profile
 
 
 def _shard_command(args: argparse.Namespace) -> dict[str, Any]:
-    plan = _read_plan_for_execution(args.plan)
+    plan, profile = _read_plan_for_execution(args.plan)
     receipt = write_validated_behavior_recording_shard(
         plan_path=args.plan,
         member_ordinal=args.member_ordinal,
+        table_specs=profile.table_specs,
+        row_extractors=profile.row_extractors(),
     )
     return {
         "operation": "shard",
@@ -169,12 +192,16 @@ def _shard_command(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _run_shards_command(args: argparse.Namespace) -> dict[str, Any]:
-    plan = _read_plan_for_execution(args.plan)
+    plan, profile = _read_plan_for_execution(args.plan)
+    extractors = profile.row_extractors()
     created = 0
     reused = 0
     for ordinal in range(1, int(plan["member_count"]) + 1):
         receipt = write_validated_behavior_recording_shard(
-            plan_path=args.plan, member_ordinal=ordinal
+            plan_path=args.plan,
+            member_ordinal=ordinal,
+            table_specs=profile.table_specs,
+            row_extractors=extractors,
         )
         if receipt["reused"]:
             reused += 1
@@ -190,9 +217,11 @@ def _run_shards_command(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _finalize_command(args: argparse.Namespace) -> dict[str, Any]:
-    plan = _read_plan_for_execution(args.plan)
+    plan, profile = _read_plan_for_execution(args.plan)
     manifest = publish_validated_behavior_cohort(
-        plan_path=args.plan, generation_id=args.generation_id
+        plan_path=args.plan,
+        table_specs=profile.table_specs,
+        generation_id=args.generation_id,
     )
     return {
         "operation": "finalize",
@@ -205,9 +234,16 @@ def _finalize_command(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _validate_command(args: argparse.Namespace) -> dict[str, Any]:
+    manifest_path = validated_behavior_manifest_path(
+        args.publication_root, args.export_run_id
+    )
+    profile = resolve_validated_behavior_profile(
+        profile_id_from_record(manifest_path, record_kind="export manifest")
+    )
     manifest, membership, bundle_set = read_validated_behavior_export_manifest(
         args.publication_root,
         args.export_run_id,
+        table_specs=profile.table_specs,
         validate_parts="full" if args.full_part_hashes else "receipt",
     )
     return {

@@ -47,7 +47,6 @@ from .validated_behavior_contracts import (
     validate_table_specs,
 )
 
-
 EXPORT_PLAN_SCHEMA_ID = "palette.analytics.validated_behavior_export_plan"
 EXPORT_PLAN_SCHEMA_VERSION = 1
 EXPORT_PLAN_METHOD_ID = "closed_membership_recording_shard_plan_v1"
@@ -66,9 +65,7 @@ EXPORT_STATUS = "complete_selector_ineligible"
 PUBLICATION_SCHEMA_ID = "palette.analytics.validated_behavior.publication"
 PUBLICATION_SCHEMA_VERSION = 1
 
-VALIDATION_RECEIPT_SCHEMA_ID = (
-    "palette.analytics.validated_behavior_cohort_validation"
-)
+VALIDATION_RECEIPT_SCHEMA_ID = "palette.analytics.validated_behavior_cohort_validation"
 VALIDATION_RECEIPT_SCHEMA_VERSION = 1
 VALIDATION_POLICY = "manifest_selected_schema_key_foreign_key_inventory_v1"
 
@@ -211,7 +208,9 @@ def _strict_object(path: str | Path, *, field: str) -> tuple[Path, dict[str, Any
     for component in unresolved.parts[1:]:
         current /= component
         if current.is_symlink():
-            raise FileNotFoundError(f"{field} contains a symbolic-link alias: {current}")
+            raise FileNotFoundError(
+                f"{field} contains a symbolic-link alias: {current}"
+            )
     source = unresolved.resolve()
     if not source.is_file():
         raise FileNotFoundError(f"{field} is absent or aliased: {source}")
@@ -273,9 +272,7 @@ def _validate_file_binding(value: object, *, field: str) -> dict[str, Any]:
         _fail(f"{field} field set is inexact.")
     path = _absolute_path(binding.get("path"), field=f"{field}.path")
     file_sha = _digest(binding.get("file_sha256"), field=f"{field}.file_sha256")
-    record_sha = _digest(
-        binding.get("record_sha256"), field=f"{field}.record_sha256"
-    )
+    record_sha = _digest(binding.get("record_sha256"), field=f"{field}.record_sha256")
     if not path.is_file() or path.is_symlink() or sha256_file(path) != file_sha:
         _fail(f"{field} file is absent, aliased, or changed.")
     return {
@@ -294,16 +291,12 @@ def _validate_plan_file_binding(
     if set(binding) != {"path", "file_sha256", "plan_sha256"}:
         _fail("export_plan file binding is inexact.")
     path = _absolute_path(binding.get("path"), field="export_plan.path")
-    file_sha = _digest(
-        binding.get("file_sha256"), field="export_plan.file_sha256"
-    )
+    file_sha = _digest(binding.get("file_sha256"), field="export_plan.file_sha256")
     plan_sha = _digest(binding.get("plan_sha256"), field="export_plan.plan_sha256")
     if path.is_symlink() or not path.is_file() or sha256_file(path) != file_sha:
         _fail("Bound export-plan file is absent, aliased, or changed.")
     _source, raw = _strict_object(path, field="export plan")
-    sealed = _validate_self_digest(
-        raw, digest_field="plan_sha256", field="Export plan"
-    )
+    sealed = _validate_self_digest(raw, digest_field="plan_sha256", field="Export plan")
     if sealed["plan_sha256"] != plan_sha:
         _fail("Bound export-plan record digest is stale.")
     if expected_plan is not None and _plain(sealed) != _plain(expected_plan):
@@ -342,9 +335,7 @@ def _software_authority(
     return {
         "repository": "palette",
         "commit": commit,
-        "deployment_path": str(
-            _absolute_path(palette_repo, field="palette_repo")
-        ),
+        "deployment_path": str(_absolute_path(palette_repo, field="palette_repo")),
     }
 
 
@@ -470,9 +461,7 @@ def build_validated_behavior_export_plan(
     membership_file = Path(membership_path).expanduser().resolve()
     bundle_file = Path(bundle_set_path).expanduser().resolve()
     membership = read_validated_behavior_cohort_membership(membership_file)
-    bundle_set = read_validated_behavior_bundle_set(
-        bundle_file, membership=membership
-    )
+    bundle_set = read_validated_behavior_bundle_set(bundle_file, membership=membership)
     if bundle_set["membership"]["file_sha256"] != sha256_file(membership_file):
         _fail("Bundle set does not bind the selected membership file bytes.")
     table_names = validate_table_specs(table_specs)
@@ -497,9 +486,7 @@ def build_validated_behavior_export_plan(
         "status": EXPORT_PLAN_STATUS,
         "export_run_id": safe_component(export_run_id, label="export run ID"),
         "export_profile": profile,
-        "membership": _file_binding(
-            membership_file, str(membership["record_sha256"])
-        ),
+        "membership": _file_binding(membership_file, str(membership["record_sha256"])),
         "bundle_set": _file_binding(bundle_file, str(bundle_set["record_sha256"])),
         "member_count": len(members),
         "members": members,
@@ -575,11 +562,9 @@ def validate_validated_behavior_export_plan(
     }:
         _fail("Export-profile field set is inexact.")
     safe_component(profile.get("profile_id"), label="export profile ID")
-    if (
-        profile.get("table_names") != list(table_names)
-        or profile.get("table_specs_sha256")
-        != canonical_json_sha256(table_records)
-    ):
+    if profile.get("table_names") != list(table_names) or profile.get(
+        "table_specs_sha256"
+    ) != canonical_json_sha256(table_records):
         _fail("Export profile does not close the installed table suite.")
     contracts = {name: table_specs[name].contract for name in table_names}
     validate_contract_envelope(
@@ -598,9 +583,10 @@ def validate_validated_behavior_export_plan(
     ):
         _fail("Export plan binds another membership or bundle-set generation.")
     members = _list(plan.get("members"), field="members")
-    if plan.get("member_count") != len(members) or len(members) != membership[
-        "member_count"
-    ]:
+    if (
+        plan.get("member_count") != len(members)
+        or len(members) != membership["member_count"]
+    ):
         _fail("Export-plan member count is invalid.")
     expected = [
         _member_plan_record(member, bundle_member)
@@ -632,9 +618,7 @@ def read_validated_behavior_export_plan(
     membership_binding = _validate_file_binding(
         raw.get("membership"), field="membership"
     )
-    membership = read_validated_behavior_cohort_membership(
-        membership_binding["path"]
-    )
+    membership = read_validated_behavior_cohort_membership(membership_binding["path"])
     bundle_binding = _validate_file_binding(raw.get("bundle_set"), field="bundle_set")
     bundle_set = read_validated_behavior_bundle_set(
         bundle_binding["path"], membership=membership
@@ -648,7 +632,9 @@ def read_validated_behavior_export_plan(
     return plan, membership, bundle_set
 
 
-def write_validated_behavior_export_plan(path: str | Path, plan: Mapping[str, Any]) -> Path:
+def write_validated_behavior_export_plan(
+    path: str | Path, plan: Mapping[str, Any]
+) -> Path:
     target = Path(path).expanduser().resolve()
     if target.exists() or target.is_symlink():
         raise FileExistsError(target)
@@ -661,10 +647,7 @@ def shard_relative_path(plan_sha256: str, ordinal: int, recording_id: str) -> Pa
     if type(ordinal) is not int or ordinal <= 0:
         _fail("member ordinal must be positive.")
     recording = safe_component(recording_id, label="recording ID")
-    return (
-        Path(f"plan={digest}")
-        / f"member={ordinal:06d}-{recording}"
-    )
+    return Path(f"plan={digest}") / f"member={ordinal:06d}-{recording}"
 
 
 def planned_shard_root(plan: Mapping[str, Any], member: Mapping[str, Any]) -> Path:
@@ -704,16 +687,12 @@ def _core_rows(
             {
                 **common,
                 "source_ordinal": int(membership_member["source_ordinal"]),
-                "source_member_sha256": str(
-                    membership_member["source_member_sha256"]
-                ),
+                "source_member_sha256": str(membership_member["source_member_sha256"]),
                 "dataset_id": str(membership_member["dataset_id"]),
                 "analysis_zarr": str(membership_member["analysis_zarr"]),
                 "protocol_names": list(membership_member["protocol_names"]),
                 "protocol_hashes": list(membership_member["protocol_hashes"]),
-                "source_subject_ids": list(
-                    membership_member["source_subject_ids"]
-                ),
+                "source_subject_ids": list(membership_member["source_subject_ids"]),
                 "source_subject_identity_status": str(
                     membership_member["source_subject_identity_status"]
                 ),
@@ -721,9 +700,7 @@ def _core_rows(
                 "acquisition_batch_identity_status": str(
                     membership_member["acquisition_batch_identity_status"]
                 ),
-                "analysis_unit_kind": str(
-                    membership_member["analysis_unit_kind"]
-                ),
+                "analysis_unit_kind": str(membership_member["analysis_unit_kind"]),
                 "analysis_unit_id": str(membership_member["analysis_unit_id"]),
                 "membership_state": str(membership_member["membership_state"]),
                 "reason_code": membership_member["reason_code"],
@@ -775,11 +752,11 @@ def _core_rows(
                         None if binding is None else _canonical_json_text(binding)
                     ),
                     "binding_sha256": (
-                        None if binding is None else canonical_json_sha256(_plain(binding))
+                        None
+                        if binding is None
+                        else canonical_json_sha256(_plain(binding))
                     ),
-                    "capabilities_sha256": str(
-                        bundle_member["capabilities_sha256"]
-                    ),
+                    "capabilities_sha256": str(bundle_member["capabilities_sha256"]),
                 }
             )
         return rows, None
@@ -812,6 +789,29 @@ def _part_footer(
         b"palette.recording_id": str(member["recording_id"]).encode("utf-8"),
         b"palette.table_name": table_name.encode("utf-8"),
     }
+
+
+def _validate_extracted_rows(
+    rows: Sequence[Mapping[str, Any]], spec: ValidatedBehaviorTableSpec
+) -> None:
+    """Reject adapter shape/null drift before Arrow can normalize it silently."""
+
+    fields = tuple(spec.contract.fields)
+    expected = {item.name for item in fields}
+    required = {item.name for item in fields if not item.nullable}
+    for index, row in enumerate(rows):
+        actual = set(row)
+        if actual != expected:
+            _fail(
+                f"{spec.table_name}: extracted row {index} has an inexact field set; "
+                f"missing={sorted(expected - actual)!r}, extra={sorted(actual - expected)!r}."
+            )
+        null_required = sorted(name for name in required if row[name] is None)
+        if null_required:
+            _fail(
+                f"{spec.table_name}: extracted row {index} has null required fields: "
+                f"{null_required!r}."
+            )
 
 
 def _part_receipt(
@@ -854,12 +854,12 @@ def _planned_zero_row_reason(
         _fail(f"{table_name}: member capability coverage is incomplete.")
     state = _text(matching[0].get("state"), field=f"{table_name} capability state")
     reason = matching[0].get("reason_code")
-    reason_text = "no-reason" if reason is None else _text(
-        reason, field=f"{table_name} capability reason"
+    reason_text = (
+        "no-reason"
+        if reason is None
+        else _text(reason, field=f"{table_name} capability reason")
     )
-    return safe_component(
-        f"capability-{state}-{reason_text}", label="zero-row reason"
-    )
+    return safe_component(f"capability-{state}-{reason_text}", label="zero-row reason")
 
 
 def _validate_part(
@@ -968,7 +968,9 @@ def _validate_shard_receipt(
         or receipt.get("validation_policy") != SHARD_VALIDATION_POLICY
         or receipt.get("safety") != SAFETY
     ):
-        _fail("Shard receipt identity, method, status, validation, or safety is invalid.")
+        _fail(
+            "Shard receipt identity, method, status, validation, or safety is invalid."
+        )
     if receipt.get("export_run_id") != plan["export_run_id"]:
         _fail("Shard belongs to another export run.")
     _plan_path, plan_binding = _validate_plan_file_binding(
@@ -1110,7 +1112,10 @@ def write_validated_behavior_recording_shard(
     plan, membership, bundle_set = read_validated_behavior_export_plan(
         plan_file, table_specs=table_specs
     )
-    if type(member_ordinal) is not int or not 1 <= member_ordinal <= plan["member_count"]:
+    if (
+        type(member_ordinal) is not int
+        or not 1 <= member_ordinal <= plan["member_count"]
+    ):
         _fail("member_ordinal is outside the closed plan axis.")
     member = plan["members"][member_ordinal - 1]
     membership_member = membership["members"][member_ordinal - 1]
@@ -1140,7 +1145,9 @@ def write_validated_behavior_recording_shard(
             )
             if planned_zero_reason is not None:
                 rows, zero_reason = [], planned_zero_reason
-            elif table_name in CORE_TABLE_SPECS and spec == CORE_TABLE_SPECS[table_name]:
+            elif (
+                table_name in CORE_TABLE_SPECS and spec == CORE_TABLE_SPECS[table_name]
+            ):
                 rows, zero_reason = _core_rows(
                     table_name, plan, membership_member, bundle_member
                 )
@@ -1155,6 +1162,7 @@ def write_validated_behavior_recording_shard(
                 _fail(f"{table_name}: extractor returned an uncontracted empty result.")
             if rows and zero_reason is not None:
                 _fail(f"{table_name}: non-empty rows cannot carry a zero-row reason.")
+            _validate_extracted_rows(rows, spec)
             table_dir = stage / "tables" / table_name
             table_dir.mkdir(parents=True, exist_ok=False)
             part = table_dir / "part-00000.parquet"
@@ -1168,9 +1176,7 @@ def write_validated_behavior_recording_shard(
                 table,
                 temporary_part,
                 compression=str(plan["parameters"]["parquet_compression"]),
-                row_group_size=int(
-                    plan["parameters"]["effective_row_group_rows"]
-                ),
+                row_group_size=int(plan["parameters"]["effective_row_group_rows"]),
             )
             os.replace(temporary_part, part)
             parts[table_name] = _part_receipt(
@@ -1237,7 +1243,13 @@ def write_validated_behavior_recording_shard(
 def validated_behavior_manifest_path(root: str | Path, export_run_id: str) -> Path:
     publication = _absolute_path(root, field="publication_root")
     run_id = safe_component(export_run_id, label="export run ID")
-    return publication / "validated_behavior" / "v1" / "manifests" / f"export_run_id={run_id}.json"
+    return (
+        publication
+        / "validated_behavior"
+        / "v1"
+        / "manifests"
+        / f"export_run_id={run_id}.json"
+    )
 
 
 def _generation_relative_path(export_run_id: str, generation_id: str) -> Path:
@@ -1266,7 +1278,9 @@ def _safe_selected_path(root: Path, relative_text: object, *, field: str) -> Pat
     try:
         resolved.relative_to(root)
     except ValueError as exc:
-        raise ValidatedBehaviorExportError(f"{field} escapes publication root.") from exc
+        raise ValidatedBehaviorExportError(
+            f"{field} escapes publication root."
+        ) from exc
     return resolved
 
 
@@ -1337,9 +1351,7 @@ def _validate_published_shard_roster(
         receipt_plan = _mapping(
             receipt.get("export_plan"), field="published shard export_plan"
         )
-        receipt_member = _mapping(
-            receipt.get("member"), field="published shard member"
-        )
+        receipt_member = _mapping(receipt.get("member"), field="published shard member")
         if (
             receipt["record_sha256"] != record_sha
             or receipt.get("export_run_id") != plan["export_run_id"]
@@ -1427,9 +1439,7 @@ def _global_validate_generation(
                         if key in part_seen:
                             _fail(f"{table_name}: duplicate primary key within part.")
                         if key in seen:
-                            _fail(
-                                f"{table_name}: duplicate primary key across parts."
-                            )
+                            _fail(f"{table_name}: duplicate primary key across parts.")
                         part_seen.add(key)
                         seen.add(key)
                         part_minimum = (
@@ -1480,13 +1490,15 @@ def _global_validate_generation(
                 }
                 if not local_values.issubset(target_values):
                     _fail(f"{table_name}: foreign key to {target} is not closed.")
-    if "cohort_recordings" in row_counts and row_counts["cohort_recordings"] != plan[
-        "member_count"
-    ]:
+    if (
+        "cohort_recordings" in row_counts
+        and row_counts["cohort_recordings"] != plan["member_count"]
+    ):
         _fail("cohort_recordings does not close the parent roster.")
-    if "recording_bundles" in row_counts and row_counts["recording_bundles"] != plan[
-        "member_count"
-    ]:
+    if (
+        "recording_bundles" in row_counts
+        and row_counts["recording_bundles"] != plan["member_count"]
+    ):
         _fail("recording_bundles does not close the parent roster.")
     part_file_count = len(expected_files)
     expected_files |= additional_expected_files or set()
@@ -1553,13 +1565,16 @@ def publish_validated_behavior_cohort(
         / ".staging"
         / f"export_run_id={run_id}-generation={generation}"
     )
-    if stage.exists() or stage.is_symlink() or final_generation.exists() or manifest_path.exists():
+    if (
+        stage.exists()
+        or stage.is_symlink()
+        or final_generation.exists()
+        or manifest_path.exists()
+    ):
         raise FileExistsError("Export staging, generation, or manifest already exists")
     stage.mkdir(parents=True, exist_ok=False)
     try:
-        inventory: dict[str, list[dict[str, Any]]] = {
-            name: [] for name in table_names
-        }
+        inventory: dict[str, list[dict[str, Any]]] = {name: [] for name in table_names}
         shard_roster: list[dict[str, Any]] = []
         for member, (receipt_path, receipt) in zip(
             plan["members"], shard_receipts, strict=True
@@ -1597,7 +1612,9 @@ def publish_validated_behavior_cohort(
                 target = stage / relative_inside_generation
                 target.parent.mkdir(parents=True, exist_ok=False)
                 shutil.copyfile(source, target)
-                final_relative = (generation_relative / relative_inside_generation).as_posix()
+                final_relative = (
+                    generation_relative / relative_inside_generation
+                ).as_posix()
                 inventory[table_name].append(
                     {
                         **_plain(source_entry),
@@ -1643,12 +1660,12 @@ def publish_validated_behavior_cohort(
             ),
             "safety": SAFETY,
         }
-        validation_receipt = _sealed(
-            validation_body, digest_field="record_sha256"
-        )
+        validation_receipt = _sealed(validation_body, digest_field="record_sha256")
         validation_stage_path = stage / "validation" / "receipt.json"
         _write_json(validation_stage_path, validation_receipt)
-        validation_relative = (generation_relative / "validation" / "receipt.json").as_posix()
+        validation_relative = (
+            generation_relative / "validation" / "receipt.json"
+        ).as_posix()
         publication = {
             "schema_id": PUBLICATION_SCHEMA_ID,
             "schema_version": PUBLICATION_SCHEMA_VERSION,
@@ -1685,9 +1702,7 @@ def publish_validated_behavior_cohort(
             "row_counts_by_table": validation["row_counts_by_table"],
             "parameters": plan["parameters"],
             "analysis_unit_policy": _plain(membership["analysis_unit_policy"]),
-            "acquisition_batch_policy": _plain(
-                membership["acquisition_batch_policy"]
-            ),
+            "acquisition_batch_policy": _plain(membership["acquisition_batch_policy"]),
             "temporal_alignment_policy": _plain(
                 membership["temporal_alignment_policy"]
             ),
@@ -1705,9 +1720,7 @@ def publish_validated_behavior_cohort(
         manifest = _sealed(body, digest_field="record_sha256")
 
         def validate_staging() -> None:
-            _validate_plan_file_binding(
-                manifest["export_plan"], expected_plan=plan
-            )
+            _validate_plan_file_binding(manifest["export_plan"], expected_plan=plan)
             if (
                 _validate_file_binding(plan["membership"], field="membership")
                 != plan["membership"]
@@ -1791,21 +1804,15 @@ def _validate_validation_receipt(
         _fail("Validation-receipt identity, status, policy, or safety is invalid.")
     if (
         receipt.get("export_run_id") != manifest["export_run_id"]
-        or receipt.get("export_plan_sha256")
-        != manifest["export_plan"]["plan_sha256"]
-        or receipt.get("generation_id")
-        != manifest["publication"]["generation_id"]
-        or receipt.get("generation_path")
-        != manifest["publication"]["generation_path"]
+        or receipt.get("export_plan_sha256") != manifest["export_plan"]["plan_sha256"]
+        or receipt.get("generation_id") != manifest["publication"]["generation_id"]
+        or receipt.get("generation_path") != manifest["publication"]["generation_path"]
         or receipt.get("part_inventory_sha256")
         != manifest["publication"]["part_inventory_sha256"]
-        or receipt.get("shard_receipts_sha256")
-        != manifest["shard_receipts_sha256"]
+        or receipt.get("shard_receipts_sha256") != manifest["shard_receipts_sha256"]
     ):
         _fail("Validation receipt binds another plan, shard roster, or generation.")
-    result = _mapping(
-        receipt.get("validation_result"), field="validation_result"
-    )
+    result = _mapping(receipt.get("validation_result"), field="validation_result")
     if set(result) != {
         "row_counts_by_table",
         "primary_key_counts_by_table",
@@ -1914,18 +1921,14 @@ def read_validated_behavior_export_manifest(
     membership_binding = _validate_file_binding(
         manifest.get("membership"), field="membership"
     )
-    membership = read_validated_behavior_cohort_membership(
-        membership_binding["path"]
-    )
+    membership = read_validated_behavior_cohort_membership(membership_binding["path"])
     bundle_binding = _validate_file_binding(
         manifest.get("bundle_set"), field="bundle_set"
     )
     bundle_set = read_validated_behavior_bundle_set(
         bundle_binding["path"], membership=membership
     )
-    plan_path, plan_binding = _validate_plan_file_binding(
-        manifest.get("export_plan")
-    )
+    plan_path, plan_binding = _validate_plan_file_binding(manifest.get("export_plan"))
     plan, plan_membership, plan_bundle_set = read_validated_behavior_export_plan(
         plan_path, table_specs=table_specs
     )
@@ -1940,8 +1943,7 @@ def read_validated_behavior_export_manifest(
         _fail("Export manifest binds another plan or input generation.")
     if (
         manifest.get("member_count") != membership["member_count"]
-        or manifest.get("membership_state_counts")
-        != _plain(membership["state_counts"])
+        or manifest.get("membership_state_counts") != _plain(membership["state_counts"])
         or manifest.get("bundle_state_counts") != _plain(bundle_set["state_counts"])
         or manifest.get("capability_matrix_sha256")
         != bundle_set["capability_matrix_sha256"]
@@ -1955,7 +1957,9 @@ def read_validated_behavior_export_manifest(
         or manifest.get("table_coverage") != plan["table_coverage"]
         or manifest.get("software_authority") != plan["software_authority"]
     ):
-        _fail("Export manifest cohort counts, policies, parameters, or software drifted.")
+        _fail(
+            "Export manifest cohort counts, policies, parameters, or software drifted."
+        )
     table_names = validate_table_specs(table_specs)
     if manifest.get("table_names") != list(table_names):
         _fail("Export manifest table roster differs from installed specs.")
@@ -2061,9 +2065,7 @@ def selected_table_parts(
     if table not in inventory:
         raise KeyError(f"Unknown validated-behavior table: {table}")
     return tuple(
-        _safe_selected_path(
-            publication_root, entry["path"], field=f"{table}.part.path"
-        )
+        _safe_selected_path(publication_root, entry["path"], field=f"{table}.part.path")
         for entry in inventory[table]
     )
 

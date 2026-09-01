@@ -10,11 +10,9 @@ from typing import Any, Iterator, Mapping, Sequence
 from .validated_behavior_cohort import (
     read_validated_behavior_export_manifest,
     selected_table_parts,
+    validated_behavior_manifest_path,
 )
-from .validated_behavior_contracts import (
-    CORE_TABLE_SPECS,
-    ValidatedBehaviorTableSpec,
-)
+from .validated_behavior_contracts import ValidatedBehaviorTableSpec
 
 
 @dataclass(frozen=True)
@@ -177,9 +175,7 @@ class ValidatedBehaviorExportDataset:
         *,
         validate: bool = True,
         full_part_hashes: bool = False,
-        table_specs: Mapping[
-            str, ValidatedBehaviorTableSpec
-        ] = CORE_TABLE_SPECS,
+        table_specs: Mapping[str, ValidatedBehaviorTableSpec] | None = None,
     ) -> "ValidatedBehaviorExportDataset":
         """Open one selected generation; never resolve ``latest`` or glob parts."""
 
@@ -189,10 +185,23 @@ class ValidatedBehaviorExportDataset:
             )
         mode = "full" if full_part_hashes else "receipt"
         resolved = Path(root).expanduser().resolve()
+        if table_specs is None:
+            from .validated_behavior_profiles import (
+                profile_id_from_record,
+                resolve_validated_behavior_profile,
+            )
+
+            manifest_path = validated_behavior_manifest_path(resolved, export_run_id)
+            profile = resolve_validated_behavior_profile(
+                profile_id_from_record(manifest_path, record_kind="export manifest")
+            )
+            selected_specs = profile.table_specs
+        else:
+            selected_specs = table_specs
         manifest, membership, bundle_set = read_validated_behavior_export_manifest(
             resolved,
             export_run_id,
-            table_specs=table_specs,
+            table_specs=selected_specs,
             validate_parts=mode,
         )
         return cls(
@@ -201,7 +210,7 @@ class ValidatedBehaviorExportDataset:
             manifest=manifest,
             membership=membership,
             bundle_set=bundle_set,
-            table_specs=MappingProxyType(dict(table_specs)),
+            table_specs=MappingProxyType(dict(selected_specs)),
             validation_mode=mode,
         )
 
