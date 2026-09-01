@@ -2819,6 +2819,62 @@ def publish_eye_angle_run(
             for name, expected in publication_pointer_snapshot.items()
         )
 
+    def consolidate_and_require_published_visibility(
+        *,
+        selector_eligible: bool,
+        preserve_parent_selector_snapshot: bool,
+    ) -> int:
+        """Publish one root metadata generation and verify both reader views."""
+
+        consolidate_metadata_capture_expected_warnings(plan.source_zarr)
+        direct_root = zarr.open_group(
+            str(plan.source_zarr), mode="r", use_consolidated=False
+        )
+        consolidated_root = zarr.open_group(
+            str(plan.source_zarr), mode="r", use_consolidated=True
+        )
+        for label, view_root in (
+            ("Direct", direct_root),
+            ("Consolidated", consolidated_root),
+        ):
+            view_parent = view_root["analysis/eye_angle_runs"]
+            if preserve_parent_selector_snapshot:
+                pointers_valid = candidate_pointers_unchanged(view_parent)
+            else:
+                pointers_valid = (
+                    str(view_parent.attrs.get("latest")) == plan.run_name
+                    and str(view_parent.attrs.get("latest_complete")) == plan.run_name
+                )
+            view_run = view_parent[plan.run_name]
+            if (
+                not pointers_valid
+                or view_run.attrs.get("palette_run_completion_status") != "complete"
+                or view_run.attrs.get("stage_selector_eligible")
+                is not selector_eligible
+            ):
+                raise RuntimeError(
+                    f"{label} eye-angle metadata does not expose the exact "
+                    "published completion, selector, and eligibility state."
+                )
+        with phase("published_direct_consolidated_comparison"):
+            receipt = validate_direct_consolidated_subtree(
+                plan.source_zarr,
+                subtree_path=f"analysis/eye_angle_runs/{plan.run_name}",
+            )
+            if receipt.array_count != 41:
+                raise RuntimeError(
+                    "Published eye-angle direct/consolidated metadata does not "
+                    "contain the exact 41-array topology."
+                )
+            if storage_candidate:
+                _require_candidate_direct_consolidated_equivalence(
+                    direct_root[f"analysis/eye_angle_runs/{plan.run_name}"],
+                    consolidated_root[f"analysis/eye_angle_runs/{plan.run_name}"],
+                    dimensions=candidate_dimensions(),
+                    label="Authoritative",
+                )
+            return receipt.array_count
+
     def after_rename(
         _root: zarr.Group,
         run_group: zarr.Group,
@@ -2896,29 +2952,10 @@ def publish_eye_angle_run(
                         "Published eye-angle candidate is invalid: "
                         f"{published_validation}"
                     )
-            consolidate_metadata_capture_expected_warnings(plan.source_zarr)
-            direct_root = zarr.open_group(
-                str(plan.source_zarr), mode="r", use_consolidated=False
+            published_compared = consolidate_and_require_published_visibility(
+                selector_eligible=False,
+                preserve_parent_selector_snapshot=True,
             )
-            consolidated_root = zarr.open_group(
-                str(plan.source_zarr), mode="r", use_consolidated=True
-            )
-            direct_parent = direct_root["analysis/eye_angle_runs"]
-            consolidated_parent = consolidated_root["analysis/eye_angle_runs"]
-            if not candidate_pointers_unchanged(
-                direct_parent
-            ) or not candidate_pointers_unchanged(consolidated_parent):
-                raise RuntimeError(
-                    "Eye-angle candidate consolidated metadata does not preserve "
-                    "the publication-lock selector snapshot."
-                )
-            with phase("published_direct_consolidated_comparison"):
-                published_compared = _require_candidate_direct_consolidated_equivalence(
-                    direct_root[f"analysis/eye_angle_runs/{plan.run_name}"],
-                    consolidated_root[f"analysis/eye_angle_runs/{plan.run_name}"],
-                    dimensions=candidate_dimensions(),
-                    label="Authoritative",
-                )
             archive_consolidated_counts.append(published_compared)
             with phase("decoded_equality"):
                 published_hashes = compute_eye_angle_logical_hashes(run_group)
@@ -2966,15 +3003,15 @@ def publish_eye_angle_run(
             raise RuntimeError(
                 "Eye-angle activation requires one complete, ineligible run."
             )
-        try:
-            run_group.attrs["stage_selector_eligible"] = True
-        except BaseException:
-            if run_group.attrs.get("stage_selector_eligible") is True:
-                return
-            raise
+        run_group.attrs["stage_selector_eligible"] = True
+        published_compared = consolidate_and_require_published_visibility(
+            selector_eligible=True,
+            preserve_parent_selector_snapshot=False,
+        )
+        archive_consolidated_counts.append(published_compared)
 
-    def repair_failed_candidate_visibility(target_run_path: Path) -> None:
-        """Make one owned candidate tombstone identical in both metadata views."""
+    def repair_failed_publication_visibility(target_run_path: Path) -> None:
+        """Make one owned publication tombstone identical in both metadata views."""
 
         if target_run_path.resolve() != plan.target_run_path.resolve():
             raise RuntimeError(
@@ -3068,9 +3105,8 @@ def publish_eye_angle_run(
         complete_run=complete,
         verify_pointers=verify,
         activate_run=finalize_visibility_boundary,
-        repair_failed_publication_visibility=(
-            repair_failed_candidate_visibility if storage_candidate else None
-        ),
+        repair_failed_publication_visibility=repair_failed_publication_visibility,
+        accept_persisted_activation_on_callback_error=False,
         after_rename=after_rename,
         payload_metadata={
             "authoritative_source_zarr": str(plan.source_zarr),
@@ -3091,7 +3127,14 @@ def publish_eye_angle_run(
                     "consolidated_parent_selectors_must_match_publication_snapshot": True,
                 }
                 if storage_candidate
-                else None
+                else {
+                    "authoritative_root_consolidation": (
+                        "after_final_selector_activation"
+                    ),
+                    "direct_consolidated_group_attrs_required": True,
+                    "direct_consolidated_array_declarations_required": 41,
+                    "consolidated_parent_selectors_must_select_published_run": True,
+                }
             ),
             "promotion_policy": (
                 "immutable_named_candidate_no_pointer_or_registry_activation"
@@ -3101,9 +3144,9 @@ def publish_eye_angle_run(
             "materialization": json_attr_safe(materialization_payload),
         },
     )
-    if storage_candidate and archive_consolidated_counts != [41]:
+    if archive_consolidated_counts != [41]:
         raise RuntimeError(
-            "Eye-angle candidate archive metadata was not consolidated exactly once."
+            "Eye-angle archive metadata was not consolidated exactly once."
         )
     result["archive_direct_consolidated_array_count"] = (
         archive_consolidated_counts[0] if archive_consolidated_counts else None
