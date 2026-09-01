@@ -1923,9 +1923,7 @@ def test_plan_receipt_builder_reads_access_units_without_worker_chunk_rescans(
     assert root_open_calls == 1
     assert receipt_verify_flags == [False]
     assert len(plan.staged_input_integrity_receipt["chunks"]) == 2
-    assert capture_telemetry["scan_profile"] == (
-        "outer_storage_unit_single_read_v1"
-    )
+    assert capture_telemetry["scan_profile"] == "inner_chunk_single_read_v1"
     assert capture_telemetry["logical_worker_inputs"] == list(
         mod.eye_writer._EYE_ANGLE_WORKER_LOGICAL_INPUTS
     )
@@ -1958,7 +1956,7 @@ class _CountingReceiptArray:
         return np.asarray(self._values[key])
 
 
-def test_access_aligned_direct_receipt_scan_reads_each_outer_shard_once() -> None:
+def test_access_aligned_direct_receipt_scan_reads_each_inner_chunk_once() -> None:
     values = np.arange(50, dtype=np.float32).reshape(25, 2)
     source = _CountingReceiptArray(
         values,
@@ -1979,18 +1977,27 @@ def test_access_aligned_direct_receipt_scan_reads_each_outer_shard_once() -> Non
         telemetry=telemetry,
     )
 
-    assert source.reads == [(0, 10), (10, 20), (20, 25)]
+    assert source.reads == [
+        (0, 4),
+        (4, 8),
+        (8, 12),
+        (12, 16),
+        (16, 20),
+        (20, 24),
+        (24, 25),
+    ]
     assert accumulator.full_digest() == array_values_sha256(values)
     for chunk_index, (start, stop) in enumerate(accumulator.ranges):
         payload = accumulator.chunk_payload(chunk_index)
         assert payload["content_sha256"] == array_values_sha256(values[start:stop])
     record = telemetry["keypoints_runs/kp/keypoints_roi"]
-    assert record["storage_unit_kind"] == "outer_shard"
-    assert record["source_read_count"] == 3
+    assert record["storage_unit_kind"] == "inner_chunk"
+    assert record["storage_shape"] == [4, 2]
+    assert record["source_read_count"] == 7
     assert record["source_rows_read"] == 25
 
 
-def test_access_aligned_stacked_scan_handles_misaligned_shard_grids_once() -> None:
+def test_access_aligned_stacked_scan_handles_misaligned_chunk_grids_once() -> None:
     left_values = np.arange(115, dtype=np.float32).reshape(23, 5)
     right_values = left_values + np.float32(1000.0)
     left = _CountingReceiptArray(
@@ -2028,8 +2035,17 @@ def test_access_aligned_stacked_scan_handles_misaligned_shard_grids_once() -> No
         right_authority_hash=right_hash,
     )
 
-    assert left.reads == [(0, 10), (10, 20), (20, 23)]
-    assert right.reads == [(0, 6), (6, 12), (12, 18), (18, 23)]
+    assert left.reads == [(0, 5), (5, 10), (10, 15), (15, 20), (20, 23)]
+    assert right.reads == [
+        (0, 3),
+        (3, 6),
+        (6, 9),
+        (9, 12),
+        (12, 15),
+        (15, 18),
+        (18, 21),
+        (21, 23),
+    ]
     assert accumulator.full_digest() == array_values_sha256(stacked)
     assert left_hash.hexdigest() == array_values_sha256(left_values)
     assert right_hash.hexdigest() == array_values_sha256(right_values)

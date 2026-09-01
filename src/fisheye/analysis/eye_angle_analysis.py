@@ -4046,10 +4046,20 @@ class _LogicalInputReceiptAccumulator:
 
 
 def _source_storage_row_unit(node: Any) -> tuple[int, str, list[int] | None]:
-    """Return the outermost physical row unit exposed by one array."""
+    """Return the independently decoded row unit exposed by one array.
+
+    For a sharded Zarr array, ``chunks`` is the inner chunk shape while
+    ``shards`` is only the outer file/container shape.  Receipt scans must
+    advance by inner chunks: asking Zarr for an entire shard needlessly
+    decodes every inner chunk in that container and defeats bounded parallel
+    reading.
+    """
 
     row_count = int(node.shape[0])
-    for attribute, label in (("shards", "outer_shard"), ("chunks", "chunk")):
+    for attribute, label in (
+        ("chunks", "inner_chunk"),
+        ("shards", "outer_shard_fallback"),
+    ):
         try:
             raw_shape = getattr(node, attribute, None)
         except Exception:
@@ -4066,7 +4076,7 @@ def _source_storage_row_unit(node: Any) -> tuple[int, str, list[int] | None]:
 
 
 class _AccessAlignedRowCursor:
-    """Read every outer storage row unit at most once while serving row spans."""
+    """Read every independently decoded row unit once while serving spans."""
 
     def __init__(
         self,
@@ -4483,7 +4493,7 @@ def _build_staged_eye_angle_input_integrity_receipt(
             ):
                 raise RuntimeError(
                     f"Receipt scan did not read {array_ref!r} exactly once per "
-                    "outer storage unit."
+                    "independently decoded storage unit."
                 )
     chunk_records = _receipt_chunk_records(accumulators)
 
@@ -4571,7 +4581,7 @@ def _build_staged_eye_angle_input_integrity_receipt(
                     "report_only_excluded_from_scientific_identity_and_"
                     "payload_digests"
                 ),
-                "scan_profile": "outer_storage_unit_single_read_v1",
+                "scan_profile": "inner_chunk_single_read_v1",
                 "requested_read_workers": int(_read_workers),
                 "effective_read_workers": int(effective_read_workers),
                 "requested_receipt_chunk_rows": int(chunk_rows),

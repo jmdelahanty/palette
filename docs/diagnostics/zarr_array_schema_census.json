@@ -27130,8 +27130,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 6812,
-      "occurrence_id": "schema-writer-9ea003d72d001f49",
+      "line": 6822,
+      "occurrence_id": "schema-writer-2ad8df80f16f0d6d",
       "path_pattern": "<require_runs_parent(analysis_group, 'eye_angle_runs')>/<resolved_run_name>/support/frame_time_seconds",
       "required": null,
       "shape_expression": "shape(np.arange(num_frames, dtype=np.float32) / float(fps))",
@@ -27143,7 +27143,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-15b922df292d1290"
+      "writer_site_id": "writer-262ef2d551390559"
     },
     {
       "access_pattern": "windowed",
@@ -27164,8 +27164,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 6819,
-      "occurrence_id": "schema-writer-896508f917aac933",
+      "line": 6829,
+      "occurrence_id": "schema-writer-4552141cb47489b3",
       "path_pattern": "<require_runs_parent(analysis_group, 'eye_angle_runs')>/<resolved_run_name>/support/frame_time_seconds",
       "required": null,
       "shape_expression": "shape(np.arange(num_frames, dtype=np.float32) / float(fps))",
@@ -27177,7 +27177,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-f216ba61a6848a83"
+      "writer_site_id": "writer-9b7dc91f567ad719"
     },
     {
       "access_pattern": "unclassified",
