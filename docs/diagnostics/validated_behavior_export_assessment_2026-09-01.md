@@ -108,6 +108,16 @@ will hit: empty semantic_metadata; aggressive-only trials; NaN recapture; and
 nothing warns that near-field epoch contrasts are chaser-mobility-confounded —
 the explorer renders them as findings.
 
+## Strategy-state analysis wave (2026-09-01)
+
+Individual pre→post change analysis (clustering, Sankey, LORO decoder,
+direction decomposition, time-resolved twin avoidance) is documented in
+`strategy_state_analysis_2026-09-01.md`; committed module on branch
+`agent/palette/validated-behavior-strategy-states-20260901` (abba9d3f).
+Headlines: explorer→punctuated conversion in non-escapers; aftereffect
+strongest post minutes 1–3; avoidance/kinematics dissociation; pre-epoch
+avoidance ramp.
+
 ## Relation to the roadmap
 
 `provider_motion_samples` + `chaser_relative_samples` + `body_relative_samples`
