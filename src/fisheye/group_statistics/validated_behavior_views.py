@@ -16,12 +16,18 @@ from typing import Any, Mapping, Sequence
 from fisheye.group_statistics.validated_behavior import (
     read_validated_behavior_group_statistics_sandbox,
 )
+from fisheye.group_statistics.validated_behavior_appearance import (
+    behavior_role_styles,
+    validate_chaser_appearance_dimension,
+)
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 SCHEMA_ID = "palette.analytics.validated_behavior.group_statistics.view_payload"
-SCHEMA_VERSION = 1
-METHOD_ID = "shared_normalized_statistics_view_payload_v1"
+SCHEMA_VERSION = 2
+LEGACY_SCHEMA_VERSION = 1
+METHOD_ID = "shared_normalized_statistics_view_payload_v2"
+LEGACY_METHOD_ID = "shared_normalized_statistics_view_payload_v1"
 
 CONDITION_ORDER = ("chaser_pre", "chaser_training", "chaser_post")
 CONDITION_LABELS: Mapping[str, str] = MappingProxyType(
@@ -544,6 +550,27 @@ def build_statistics_view_payload(
         if isinstance(record, Mapping)
         and record.get("metric_family") == definition.metric_family
     ]
+    source_export = source.manifest.get("source_export")
+    if not isinstance(source_export, Mapping):
+        _fail("Statistics source lacks its exact export identity")
+    raw_appearance = source_export.get("chaser_appearance_dimension")
+    appearance = (
+        None
+        if raw_appearance is None
+        else validate_chaser_appearance_dimension(
+            raw_appearance,
+            expected_export_manifest_sha256=str(
+                source_export.get("export_manifest_record_sha256")
+            ),
+        )
+    )
+    role_styles = behavior_role_styles(
+        appearance,
+        legacy_display_colors=BEHAVIOR_ROLE_COLORS,
+    )
+    role_colors = {
+        role: str(style["aggregate_color_hex"]) for role, style in role_styles.items()
+    }
     body: dict[str, object] = {
         "schema_id": SCHEMA_ID,
         "schema_version": SCHEMA_VERSION,
@@ -562,7 +589,11 @@ def build_statistics_view_payload(
         "condition_order": list(CONDITION_ORDER),
         "condition_labels": dict(CONDITION_LABELS),
         "condition_colors": dict(CONDITION_COLORS),
-        "behavior_role_colors": dict(BEHAVIOR_ROLE_COLORS),
+        "behavior_role_colors": role_colors,
+        "behavior_role_styles": json_attr_safe(role_styles),
+        "chaser_appearance_dimension": (
+            None if appearance is None else json_attr_safe(appearance)
+        ),
         "provider_line_styles": dict(PROVIDER_LINE_STYLES),
         "source_statistics": {
             "statistics_run_id": source.statistics_run_id,
@@ -582,12 +613,17 @@ def build_statistics_view_payload(
 def validate_statistics_view_payload(payload: Mapping[str, object]) -> None:
     """Fail closed when a normalized view payload is stale or unsupported."""
 
-    if (
-        payload.get("schema_id") != SCHEMA_ID
-        or payload.get("schema_version") != SCHEMA_VERSION
-    ):
+    if payload.get("schema_id") != SCHEMA_ID or payload.get("schema_version") not in {
+        LEGACY_SCHEMA_VERSION,
+        SCHEMA_VERSION,
+    }:
         _fail("Statistics view payload schema is unsupported")
-    if payload.get("method_id") != METHOD_ID:
+    expected_method = (
+        LEGACY_METHOD_ID
+        if payload.get("schema_version") == LEGACY_SCHEMA_VERSION
+        else METHOD_ID
+    )
+    if payload.get("method_id") != expected_method:
         _fail("Statistics view payload method is unsupported")
     body = {key: value for key, value in payload.items() if key != "payload_sha256"}
     if payload.get("payload_sha256") != canonical_json_sha256(body):
@@ -643,6 +679,35 @@ def validate_statistics_view_payload(payload: Mapping[str, object]) -> None:
         }
         if recipe.get("histogram_recipe_sha256") != canonical_json_sha256(recipe_body):
             _fail("Statistics histogram recipe digest is stale")
+    if payload.get("schema_version") == SCHEMA_VERSION:
+        source = payload.get("source_statistics")
+        if not isinstance(source, Mapping):
+            _fail("Statistics view payload lacks source-statistics identity")
+        raw_appearance = payload.get("chaser_appearance_dimension")
+        appearance = (
+            None
+            if raw_appearance is None
+            else validate_chaser_appearance_dimension(
+                raw_appearance,
+                expected_export_manifest_sha256=str(
+                    source.get("source_export_manifest_sha256")
+                ),
+            )
+        )
+        expected_styles = json_attr_safe(
+            behavior_role_styles(
+                appearance,
+                legacy_display_colors=BEHAVIOR_ROLE_COLORS,
+            )
+        )
+        if payload.get("behavior_role_styles") != expected_styles:
+            _fail("Statistics view payload has stale behavior-role styles")
+        expected_colors = {
+            role: str(style["aggregate_color_hex"])
+            for role, style in expected_styles.items()
+        }
+        if payload.get("behavior_role_colors") != expected_colors:
+            _fail("Statistics view payload has stale aggregate role colors")
     source = payload.get("source_statistics")
     if not isinstance(source, Mapping):
         _fail("Statistics view payload lacks source-statistics identity")
