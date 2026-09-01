@@ -650,6 +650,11 @@ def _body_bearing_polar_axis(axis: Any) -> None:
         ("Behind", "Right", "Front", "Left", "Behind"),
         fontsize=8,
     )
+    # Matplotlib's default polar domain is [0, 2*pi].  Adding signed negative
+    # bearings can otherwise autoscale it to [-pi, 2*pi], a 540-degree domain
+    # that renders as a misleading half-circle.  The persisted contract is one
+    # signed circle in [-180, 180], so make that display boundary explicit.
+    axis.set_thetalim(-np.pi, np.pi)
     axis.grid(alpha=0.22, linewidth=0.7)
 
 
@@ -759,10 +764,12 @@ def body_bearing_polar_figure(payload: Mapping[str, object]) -> Any:
                 fontsize=10,
                 pad=18,
             )
-            axis.set_ylabel("Mean recording fraction/bin (%)", fontsize=8)
             _body_bearing_polar_axis(axis)
     figure.suptitle(
-        "Signed anatomical bearing to the chaser",
+        (
+            "Signed anatomical bearing to the chaser\n"
+            "Radius: mean recording fraction per 10° bin (%)"
+        ),
         fontsize=16,
         y=0.995,
     )
@@ -867,7 +874,6 @@ def body_bearing_distance_figure(payload: Mapping[str, object]) -> Any:
                 fontsize=10,
                 pad=18,
             )
-            axis.set_ylabel("Fish–chaser distance (mm)", fontsize=8)
             _body_bearing_polar_axis(axis)
     if image is not None:
         figure.colorbar(
@@ -878,8 +884,9 @@ def body_bearing_distance_figure(payload: Mapping[str, object]) -> Any:
         )
     figure.suptitle(
         (
-            "Signed anatomical bearing × fish–chaser distance "
-            f"(shared q{ROBUST_HISTOGRAM_QUANTILE:.2f} scale)"
+            "Signed anatomical bearing × fish–chaser distance\n"
+            "Radius: distance (mm) · "
+            f"shared q{ROBUST_HISTOGRAM_QUANTILE:.2f} color scale"
         ),
         fontsize=16,
         y=0.995,

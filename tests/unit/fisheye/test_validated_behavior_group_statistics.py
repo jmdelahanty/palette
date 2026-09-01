@@ -458,6 +458,10 @@ def test_histogram_publication_and_shared_renderers_are_receipt_bound(
         assert len(payload["histogram_recipes"]) == 1
         static = render_statistics_view(payload)
         static.canvas.draw()
+        polar_axes = [axis for axis in static.axes if axis.name == "polar"]
+        assert len(polar_axes) == 6
+        assert all(axis.get_thetamin() == -180.0 for axis in polar_axes)
+        assert all(axis.get_thetamax() == 180.0 for axis in polar_axes)
         interactive = validated_behavior_statistics_figure(payload)
         assert (
             interactive.layout.meta["statistics_manifest_sha256"]

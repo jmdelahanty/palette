@@ -2,7 +2,7 @@
 
 ## Status
 
-This is an uncommitted sandbox implementation over the immutable Phase-B
+This is a sandbox implementation over the immutable Phase-B
 GoodBatBadBat cohort export. It includes the grouped-statistics computation,
 strict readers, normalized renderer payloads, an atomic static-report writer,
 and a standalone modular Marimo explorer. It is read-only with respect to the
@@ -12,19 +12,19 @@ not update a registry or selector.
 Worktree:
 
 ```text
-/tmp/palette-validated-behavior-grouped-statistics-20260901
+/tmp/palette-validated-behavior-grouped-statistics-main-20260901
 ```
 
 Real sandbox result:
 
 ```text
-/tmp/goodbatbadbat-grouped-statistics-sandbox-v001
+/tmp/goodbatbadbat-grouped-statistics-sandbox-v002
 ```
 
 Preferred reviewed static report:
 
 ```text
-/tmp/goodbatbadbat-grouped-statistics-report-v004
+/tmp/goodbatbadbat-grouped-statistics-report-v008
 ```
 
 ## Boundary
@@ -105,6 +105,10 @@ Display rules discovered against the real cohort and now covered explicitly:
 - condition colors encode exact pre/training/post roles;
 - aggressive/inert colors encode semantic behavior roles, never raw stimulus
   dot colors; and
+- static signed-bearing polar axes explicitly use the persisted `[-180, 180]`
+  domain; leaving Matplotlib's default `[0, 360]` domain in place would
+  autoscale signed samples to a misleading 540-degree, half-circle display;
+  and
 - detection/keypoint provider identity remains explicit and is additionally
   distinguished by line style where both occur in one panel.
 
@@ -219,18 +223,22 @@ The four other parent cohort members remain explicit noncontributors rather
 than disappearing from the denominator. Every one of the 80 contributing
 recordings has a finite denominator in every persisted histogram panel.
 
-The preferred reviewed `v006` report contains twelve PNG figures plus an HTML
+The preferred reviewed `v008` report contains twelve PNG figures plus an HTML
 index. Its
 manifest record SHA-256 is:
 
 ```text
-63edcfa9ea920d0ed28229b91ddb24cab8edf297fe898a2df2c3f765a086b7e2
+43344d568a48488c8deecac20437aa82c93722e6f8a6da869b089c9b9dffa14d
 ```
 
-Earlier `v001` through `v005` report directories are retained as immutable
-development evidence. `v006` supersedes them for visual review because it uses
+Earlier `v001` through `v007` report directories are retained as immutable
+development evidence. `v008` supersedes them for visual review because it uses
 the v2 statistics receipt, adds the signed-bearing polar and joint-distance
-surfaces, and binds the final formatted renderer sources.
+surfaces, binds the final formatted renderer sources, and constrains the static
+signed-bearing display to exactly one full circle. The `v006` static bearing
+figures exposed Matplotlib's erroneous `[-180, 360]` autoscaled domain; `v007`
+proved the domain correction, and `v008` additionally removes colliding polar
+axis labels while preserving their units in the figure subtitles.
 
 ## Command
 
@@ -251,8 +259,8 @@ Render the exact statistics generation without recomputation:
 ```bash
 scripts/py -m fisheye.utils.render_validated_behavior_group_statistics \
   --statistics-dir /tmp/goodbatbadbat-grouped-statistics-sandbox-v002 \
-  --report-run-id goodbatbadbat-grouped-statistics-report-v006 \
-  --output-dir /tmp/goodbatbadbat-grouped-statistics-report-v006 \
+  --report-run-id goodbatbadbat-grouped-statistics-report-v008 \
+  --output-dir /tmp/goodbatbadbat-grouped-statistics-report-v008 \
   --apply
 ```
 
@@ -271,6 +279,9 @@ scripts/py -m marimo run \
   interactive-renderer tests pass outside the Codex sandbox.
 - Real-data payload and Plotly generation succeeds for all twelve view
   families, including six-panel signed-bearing and bearing--distance figures.
+- All twelve static signed-bearing axes are regression-checked at exactly
+  `[-180, 180]`; visual review confirms that both anatomical sides occupy one
+  full circle in the polar and bearing--distance surfaces.
 - The preferred real static report strictly reopens with all twelve artifact
   sizes and SHA-256 digests intact.
 - The Marimo reactive-graph checker passes.
