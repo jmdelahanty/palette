@@ -3230,6 +3230,9 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
     scratch = tmp_path / "scratch"
     _build_source(source)
     _accept_synthetic_subject_shape_publication(monkeypatch, source)
+    # Start with a real but stale consolidated generation. The selector-visible
+    # publisher must replace it only after its final eligibility write.
+    zarr.consolidate_metadata(str(source))
     registry_events: list[dict[str, object]] = []
 
     def capture_registry(root, zarr_path, **kwargs):  # type: ignore[no-untyped-def]
@@ -3291,6 +3294,13 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
         assert result["publish"][validation_name]["exact_compact_v7_valid"] is True
     assert result["publish"]["source_revision_audit"]["status"] == "current"
     assert result["publish"]["registry_updated"] is True
+    assert result["publish"]["archive_direct_consolidated_array_count"] == 41
+    assert result["publish"]["metadata_visibility_policy"] == {
+        "authoritative_root_consolidation": "after_final_selector_activation",
+        "direct_consolidated_group_attrs_required": True,
+        "direct_consolidated_array_declarations_required": 41,
+        "consolidated_parent_selectors_must_select_published_run": True,
+    }
     assert result["runtime_telemetry"]["materializer"] == "eye_angle_candidate"
     assert any(
         phase["name"] == "scientific_compute"
@@ -3307,6 +3317,16 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
 
     strict_tables = load_eye_angle_run_tables(root, run_name="eye_1")
     assert strict_tables.schema_version == 7
+    consolidated_root = zarr.open_group(
+        str(source), mode="r", use_consolidated=True
+    )
+    consolidated_tables = load_eye_angle_run_tables(consolidated_root)
+    assert consolidated_tables.run_name == "eye_1"
+    assert consolidated_tables.schema_version == 7
+    consolidated_parent = consolidated_root["analysis/eye_angle_runs"]
+    assert consolidated_parent.attrs["latest"] == "eye_1"
+    assert consolidated_parent.attrs["latest_complete"] == "eye_1"
+    assert consolidated_parent["eye_1"].attrs["stage_selector_eligible"] is True
     assert parent.attrs["latest"] == "eye_1"
     assert parent.attrs["latest_complete"] == "eye_1"
     assert run.attrs["stage_selector_eligible"] is True
@@ -3448,6 +3468,100 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
         "complete_ineligible_then_pointers_then_eligibility_final"
     )
     assert publication["physical_copy"]["verification"] == ("sha256_all_physical_files")
+
+
+def test_selector_visible_consolidation_failure_tombstones_both_metadata_views(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    _accept_synthetic_subject_shape_publication(monkeypatch, source)
+    zarr.consolidate_metadata(str(source))
+    real_consolidate = mod.consolidate_metadata_capture_expected_warnings
+    failed_authoritative_consolidation = False
+    registry_events: list[object] = []
+
+    def fail_after_first_authoritative_consolidation(
+        archive, *args, **kwargs  # type: ignore[no-untyped-def]
+    ):
+        nonlocal failed_authoritative_consolidation
+        result = real_consolidate(archive, *args, **kwargs)
+        if (
+            Path(archive).resolve() == source.resolve()
+            and not failed_authoritative_consolidation
+        ):
+            failed_authoritative_consolidation = True
+            raise RuntimeError("injected selector-visible consolidation failure")
+        return result
+
+    monkeypatch.setattr(
+        mod,
+        "consolidate_metadata_capture_expected_warnings",
+        fail_after_first_authoritative_consolidation,
+    )
+    monkeypatch.setattr(
+        mod,
+        "emit_eye_angle_stage_completion",
+        lambda *args, **kwargs: registry_events.append((args, kwargs)),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="selector-visible consolidation failure",
+    ):
+        _apply_receipt_bound_eye_angles(
+            source,
+            scratch_root=scratch,
+            subject_shape_run="shape_1",
+            keypoint_run="kp_raw_1",
+            run_name="eye_visibility_failure",
+            chunk_rows=2,
+            angle_chunk_rows=2,
+            angle_chunk_columns=4,
+            output_shard_rows=3,
+            angle_shard_columns=4,
+            execution_backend="serial_driver",
+            scheduler="single-threaded",
+            num_workers=1,
+            shard_workers=1,
+            fps=100.0,
+            smoothing_window=3,
+            copy_backend="python",
+            apply=True,
+            keep_scratch=True,
+            check_capacity=False,
+            stage_command="unit-test-eye-visibility-failure",
+        )
+
+    assert failed_authoritative_consolidation is True
+    assert registry_events == []
+    for consolidated in (False, True):
+        root = zarr.open_group(
+            str(source), mode="r", use_consolidated=consolidated
+        )
+        parent = root["analysis/eye_angle_runs"]
+        assert parent.attrs["latest"] == "eye_visibility_failure"
+        assert parent.attrs["latest_complete"] == "eye_visibility_failure"
+        failed = parent["eye_visibility_failure"]
+        assert failed.attrs["palette_run_completion_status"] == "failed"
+        assert failed.attrs["stage_selector_eligible"] is False
+        assert "palette_run_completed_at_utc" not in failed.attrs
+        assert failed.attrs["atomic_publication_tombstone"]["schema_id"] == (
+            "palette.atomic_publication_tombstone"
+        )
+
+    from fisheye.analysis.eye_angle_io import EyeAngleIOError, load_eye_angle_run_tables
+
+    consolidated_root = zarr.open_group(
+        str(source), mode="r", use_consolidated=True
+    )
+    with pytest.raises(
+        EyeAngleIOError,
+        match="No stable complete selector-eligible eye-angle run",
+    ):
+        load_eye_angle_run_tables(consolidated_root)
 
 
 def _seed_eye_angle_selectors(source: Path) -> None:
