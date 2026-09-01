@@ -118,6 +118,7 @@ DEFAULT_ANGLE_SHARD_COLUMNS = 32
 DEFAULT_NUM_WORKERS = 8
 DEFAULT_SHARD_WORKERS = 8
 DEFAULT_NATIVE_THREADS = 1
+MAX_RECEIPT_CAPTURE_READ_WORKERS = 4
 DEFAULT_CAPACITY_MARGIN_BYTES = 1024 * 1024 * 1024
 ESTIMATED_OUTPUT_BYTES_PER_DETECTION = 2_048
 NATIVE_THREAD_ENV_VARS = (
@@ -1084,6 +1085,7 @@ def _resolve_source_plan(
     staged_input_integrity_receipt: Mapping[str, Any] | None = None,
     source_physical_profile: str = (SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION),
     verify_staged_payload: bool = True,
+    _opened_root: Any = None,
 ) -> tuple[
     Any,
     dict[str, Any],
@@ -1114,7 +1116,11 @@ def _resolve_source_plan(
             "Receipt-bound eye-angle source resolution cannot also use a separate "
             "candidate admission; candidate evidence is sealed inside the receipt."
         )
-    root = open_zarr_root(source_zarr, mode="r")
+    root = (
+        _opened_root
+        if _opened_root is not None
+        else open_zarr_root(source_zarr, mode="r")
+    )
     staged_subject_shape_authority = (
         eye_writer._staged_subject_shape_authority_from_input_receipt(
             staged_input_integrity_receipt
@@ -1250,6 +1256,7 @@ def build_eye_angle_materialization_plan(
     native_threads: int = DEFAULT_NATIVE_THREADS,
     fps: float | None = None,
     smoothing_window: int | None = None,
+    _receipt_capture_telemetry: dict[str, Any] | None = None,
 ) -> EyeAngleMaterializationPlan:
     """Resolve exact inputs without creating scratch or mutating the archive."""
 
@@ -1335,6 +1342,7 @@ def build_eye_angle_materialization_plan(
             expected_publication_owner=subject_shape_candidate_owner,
         )
 
+    source_root = open_zarr_root(source, mode="r")
     (
         context,
         contracts,
@@ -1349,9 +1357,9 @@ def build_eye_angle_materialization_plan(
         completed_ineligible_subject_shape_candidate=(
             subject_shape_candidate_admission
         ),
+        _opened_root=source_root,
     )
     resolved_name = _validate_run_name(run_name)
-    source_root = open_zarr_root(source, mode="r")
     existing_parent = source_root.get("analysis/eye_angle_runs")
     latest_before = (
         existing_parent.attrs.get("latest")
@@ -1415,6 +1423,11 @@ def build_eye_angle_materialization_plan(
                 chunk_rows=int(chunk_rows),
                 fps=resolved_fps,
                 fps_source=resolved_fps_source,
+                _capture_telemetry=_receipt_capture_telemetry,
+                _read_workers=min(
+                    MAX_RECEIPT_CAPTURE_READ_WORKERS,
+                    max(1, int(num_workers)),
+                ),
             )
         )
     )
@@ -3234,6 +3247,7 @@ def materialize_eye_angles(
     receipt_reuse_mode = (
         "admission_receipt_reuse" if receipt_input is not None else "fresh_plan"
     )
+    receipt_capture_telemetry: dict[str, Any] = {}
     with telemetry.phase("plan"):
         if receipt_input is not None:
             if isinstance(receipt_input, Mapping):
@@ -3293,6 +3307,7 @@ def materialize_eye_angles(
                 native_threads=native_threads,
                 fps=fps,
                 smoothing_window=smoothing_window,
+                _receipt_capture_telemetry=receipt_capture_telemetry,
             )
     telemetry.context["plan_resolution"] = {
         "mode": receipt_reuse_mode,
@@ -3324,6 +3339,9 @@ def materialize_eye_angles(
             "live_authority_and_physical_inventory_without_staged_payload_rehash"
             if receipt_input is not None
             else "full_live_plan_and_staged_payload_receipt"
+        ),
+        "receipt_capture": (
+            None if receipt_input is not None else receipt_capture_telemetry
         ),
     }
     execution_mode = any(
