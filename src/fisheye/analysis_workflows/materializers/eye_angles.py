@@ -1619,6 +1619,262 @@ def _validate_reused_plan_request(
         )
 
 
+def _sealed_selected_arrays(
+    plan: EyeAngleMaterializationPlan,
+) -> tuple[str, ...]:
+    """Reconstruct the selected input surface from the sealed source contract."""
+
+    def require_relative_array_path(value: Any) -> str:
+        if (
+            not isinstance(value, str)
+            or not value
+            or value.startswith("/")
+            or "\\" in value
+            or any(part in {"", ".", ".."} for part in value.split("/"))
+        ):
+            raise ValueError(
+                "Eye-angle receipt resolved source array path is unsafe."
+            )
+        return value
+
+    contracts = plan.source_contracts
+    geometry = contracts.get("eye_geometry")
+    resolved = contracts.get("resolved_arrays")
+    if not isinstance(geometry, Mapping) or not isinstance(resolved, Mapping):
+        raise ValueError("Eye-angle receipt lacks its sealed source array contract.")
+    components = geometry.get("components")
+    geometry_path = geometry.get("path")
+    if (
+        not isinstance(components, list)
+        or len(components) != 2
+        or not isinstance(geometry_path, str)
+        or not geometry_path
+    ):
+        raise ValueError("Eye-angle receipt eye-geometry contract is malformed.")
+    selected: list[str] = []
+    component_names: set[str] = set()
+    for component in components:
+        if not isinstance(component, Mapping):
+            raise ValueError("Eye-angle receipt component contract is malformed.")
+        name = component.get("component")
+        params = component.get("ellipse_params_path")
+        success = component.get("ellipse_success_path")
+        if (
+            name not in {"eye_left", "eye_right"}
+            or name in component_names
+        ):
+            raise ValueError("Eye-angle receipt component array paths are malformed.")
+        component_names.add(str(name))
+        selected.extend(
+            (
+                require_relative_array_path(params),
+                require_relative_array_path(success),
+            )
+        )
+    if component_names != {"eye_left", "eye_right"}:
+        raise ValueError("Eye-angle receipt lacks the exact two eye components.")
+    selected.append(
+        require_relative_array_path(
+            f"{geometry_path}/relations/eye_pair/separation_px"
+        )
+    )
+    for path in resolved.values():
+        if path is not None:
+            selected.append(require_relative_array_path(path))
+    return tuple(sorted(set(selected)))
+
+
+def _current_selected_physical_files(
+    plan: EyeAngleMaterializationPlan,
+    *,
+    selected_arrays: Sequence[str],
+) -> tuple[PhysicalFile, ...]:
+    """Enumerate the sealed logical input closure without opening array payloads."""
+
+    selected_files: set[Path] = set()
+    _add_group_metadata(plan.source_zarr, ".", selected_files)
+    for array_path in selected_arrays:
+        _add_array_tree(plan.source_zarr, array_path, selected_files)
+    if plan.source_keypoint_run:
+        source_path = f"keypoints_runs/{plan.source_keypoint_run}"
+        for group_path in _ancestor_groups(source_path):
+            _add_group_metadata(plan.source_zarr, group_path, selected_files)
+        _add_group_metadata(plan.source_zarr, source_path, selected_files)
+    return _physical_files(plan.source_zarr, selected_files)
+
+
+def _validate_receipt_bound_live_source_metadata(
+    plan: EyeAngleMaterializationPlan,
+    *,
+    source_root: zarr.Group,
+) -> dict[str, Any]:
+    """Validate immutable live evidence without reloading upstream payload proofs."""
+
+    receipt = eye_writer._canonical_staged_input_integrity_receipt(
+        plan.staged_input_integrity_receipt
+    )
+    subject_authority = (
+        eye_writer._staged_subject_shape_authority_from_input_receipt(receipt)
+    )
+    keypoint_authority = eye_writer._staged_keypoint_authority_from_input_receipt(
+        receipt
+    )
+    selected_arrays = _sealed_selected_arrays(plan)
+    errors: list[str] = []
+    if selected_arrays != plan.selected_arrays:
+        errors.append("sealed source array set differs from the plan")
+    if receipt["source_contract_sha256"] != plan.source_contract_sha256:
+        errors.append("staged receipt source contract differs from the plan")
+    if _json_digest(plan.source_contracts) != plan.source_contract_sha256:
+        errors.append("sealed plan source contract digest is stale")
+    if int(receipt["row_count"]) != int(plan.row_count):
+        errors.append("staged receipt row count differs from the plan")
+    if int(keypoint_authority["source_total_frames"]) != int(plan.frame_count):
+        errors.append("staged receipt frame count differs from the plan")
+    scientific_parameters = receipt["scientific_parameters"]
+    if (
+        scientific_parameters.get("fps") != plan.fps
+        or scientific_parameters.get("fps_source") != plan.fps_source
+    ):
+        errors.append("staged receipt FPS evidence differs from the plan")
+
+    contracts = plan.source_contracts
+    geometry_contract = contracts["eye_geometry"]
+    keypoint_contract = contracts["keypoints"]
+    diagnostic_contract = contracts["diagnostic_base_keypoints"]
+    resolved_arrays = contracts["resolved_arrays"]
+    expected_source_identity = {
+        "eye_geometry_stage": geometry_contract["stage_group"],
+        "eye_geometry_run": geometry_contract["run_name"],
+        "eye_geometry_path": geometry_contract["path"],
+        "keypoint_source_mode": keypoint_contract["source_mode"],
+        "keypoints_run": keypoint_contract["run_name"],
+        "keypoints_path": keypoint_contract["path"],
+        "diagnostic_base_keypoints_run": diagnostic_contract["run_name"],
+        "diagnostic_base_keypoints_path": diagnostic_contract["path"],
+        "detection_success_path": resolved_arrays["detection_success"],
+        "instance_key_path": resolved_arrays["instance_key"],
+        "source_acquisition_frame_index_path": resolved_arrays[
+            "source_acquisition_frame_index"
+        ],
+    }
+    if receipt["source_identity"] != expected_source_identity:
+        errors.append("staged receipt source identity differs from the plan")
+
+    subject_path = f"analysis/subject_shape_runs/{plan.subject_shape_run}"
+    keypoint_path = f"keypoints_runs/{plan.keypoint_run}"
+    subject_group = source_root.get(subject_path)
+    keypoint_group = source_root.get(keypoint_path)
+    if not isinstance(subject_group, zarr.Group):
+        errors.append("sealed subject-shape source is missing")
+    else:
+        try:
+            _require_complete_source(subject_group, label="Subject-shape source")
+        except ValueError as exc:
+            errors.append(str(exc))
+        expected_attrs = subject_authority["source_contract_attrs"]
+        observed_attrs = json_attr_safe(
+            {name: subject_group.attrs.get(name) for name in expected_attrs}
+        )
+        if observed_attrs != expected_attrs:
+            errors.append("subject-shape source contract attrs changed")
+        allowed_arrays = subject_authority["allowed_arrays"]
+        for relative_path, entry in allowed_arrays.items():
+            node = subject_group.get(relative_path)
+            if (
+                node is None
+                or np.dtype(node.dtype).str != entry["dtype"]
+                or [int(value) for value in node.shape] != entry["shape"]
+            ):
+                errors.append(
+                    f"subject-shape input metadata changed for {relative_path}"
+                )
+
+    if not isinstance(keypoint_group, zarr.Group):
+        errors.append("sealed canonical keypoint source is missing")
+    else:
+        try:
+            _require_complete_source(
+                keypoint_group,
+                label="Canonical base-keypoint source",
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+        if keypoint_group.attrs.get("keypoint_labels") != keypoint_authority[
+            "keypoint_labels"
+        ]:
+            errors.append("canonical keypoint labels changed")
+        for name, entry in keypoint_authority["arrays"].items():
+            source_dataset = str(entry.get("source_dataset", name))
+            node = keypoint_group.get(source_dataset)
+            if (
+                node is None
+                or np.dtype(node.dtype).str != entry["dtype"]
+                or [int(value) for value in node.shape] != entry["shape"]
+            ):
+                errors.append(
+                    f"canonical keypoint input metadata changed for {source_dataset}"
+                )
+
+    inventory = _validate_file_inventory(plan.source_zarr, plan.physical_files)
+    if not inventory["valid"]:
+        errors.append("sealed physical source inventory is stale")
+    current_files: tuple[PhysicalFile, ...] | None
+    try:
+        current_files = _current_selected_physical_files(
+            plan,
+            selected_arrays=selected_arrays,
+        )
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        current_files = None
+        errors.append(
+            f"physical source file manifest is unsafe or incomplete: {exc}"
+        )
+    if current_files is not None and current_files != plan.physical_files:
+        errors.append("physical source file manifest changed")
+    current_metadata_sha256: str | None = None
+    if current_files is not None:
+        try:
+            current_metadata_sha256 = _metadata_content_digest(
+                plan.source_zarr,
+                current_files,
+            )
+        except OSError as exc:
+            errors.append(f"selected source metadata could not be read: {exc}")
+        if current_metadata_sha256 != plan.source_metadata_sha256:
+            errors.append("selected source metadata changed")
+
+    if plan.fps_source == "authoritative_recording_metadata":
+        current_fps = get_fps(source_root)
+        if current_fps is None or float(current_fps) != float(plan.fps):
+            errors.append("recording metadata FPS changed")
+    elif scientific_parameters.get("fps") != plan.fps:
+        errors.append("sealed FPS differs from the plan")
+
+    if errors:
+        raise RuntimeError(
+            "Eye-angle admission receipt source freshness check failed: "
+            + "; ".join(errors)
+        )
+    return json_attr_safe(
+        {
+            "status": "current",
+            "inventory": inventory,
+            "source_metadata_sha256": current_metadata_sha256,
+            "source_contract_sha256": plan.source_contract_sha256,
+            "selected_arrays": list(selected_arrays),
+            "row_count": int(plan.row_count),
+            "frame_count": int(plan.frame_count),
+            "fps": plan.fps,
+            "validation_mode": (
+                "sealed_receipt_live_metadata_and_physical_revision_v1"
+            ),
+            "payload_rehash": False,
+            "normal_publication_proof_reload": False,
+        }
+    )
+
+
 def _validate_reused_plan_source(plan: EyeAngleMaterializationPlan) -> dict[str, Any]:
     """Perform cheap live-source checks before creating the receipt's scratch root."""
 
@@ -1627,12 +1883,6 @@ def _validate_reused_plan_source(plan: EyeAngleMaterializationPlan) -> dict[str,
     if plan.target_run_path.exists():
         raise FileExistsError(
             f"Refusing to replace existing authoritative run: {plan.target_run_path}"
-        )
-    inventory = _validate_file_inventory(plan.source_zarr, plan.physical_files)
-    if not inventory["valid"]:
-        raise RuntimeError(
-            "Eye-angle admission receipt source freshness check failed: "
-            "sealed physical source inventory is stale"
         )
     source_root = open_zarr_root(plan.source_zarr, mode="r")
     existing_parent = source_root.get("analysis/eye_angle_runs")
@@ -1653,85 +1903,38 @@ def _validate_reused_plan_source(plan: EyeAngleMaterializationPlan) -> dict[str,
         raise RuntimeError(
             "Eye-angle admission receipt source selectors changed before apply."
         )
-    canonical_subject_shape_metadata: dict[str, Any] | None = None
-    if plan.subject_shape_candidate_admission is None:
-        canonical_subject_shape_metadata = validate_direct_consolidated_subtree(
-            plan.source_zarr,
-            subtree_path=(
-                f"analysis/subject_shape_runs/{plan.subject_shape_run}"
-            ),
-        ).to_json()
-    (
-        context,
-        contracts,
-        selected_arrays,
-        current_files,
-        metadata_fps,
-        frame_count,
-    ) = _resolve_source_plan(
-        plan.source_zarr,
-        subject_shape_run=plan.subject_shape_run,
-        keypoint_run=plan.keypoint_run,
-        completed_ineligible_subject_shape_candidate=(
-            plan.subject_shape_candidate_admission
-        ),
-        staged_input_integrity_receipt=plan.staged_input_integrity_receipt,
-        source_physical_profile=(
-            SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION
-        ),
-        verify_staged_payload=False,
+    source_check = _validate_receipt_bound_live_source_metadata(
+        plan,
+        source_root=source_root,
     )
-    errors: list[str] = []
-    # Comparing the complete current selection catches newly created files,
-    # which an audit of only the sealed paths would otherwise miss.
-    if tuple(current_files) != tuple(plan.physical_files):
-        errors.append("physical source file manifest changed")
-    current_metadata_sha256 = _metadata_content_digest(
+    subject_shape_metadata = validate_direct_consolidated_subtree(
         plan.source_zarr,
-        current_files,
-    )
-    if current_metadata_sha256 != plan.source_metadata_sha256:
-        errors.append("selected source metadata changed")
-    if context.eye_geometry.run_name != plan.subject_shape_run:
-        errors.append("resolved subject-shape run changed")
-    if context.keypoint_run_name != plan.keypoint_run:
-        errors.append("resolved canonical base-keypoint run changed")
-    if int(context.eye_geometry.ellipse_params.shape[0]) != int(plan.row_count):
-        errors.append("resolved eye-angle row count changed")
-    if int(frame_count) != int(plan.frame_count):
-        errors.append("resolved frame count changed")
-    if tuple(selected_arrays) != tuple(plan.selected_arrays):
-        errors.append("resolved source array set changed")
-    if _json_digest(contracts) != plan.source_contract_sha256:
-        errors.append("logical source contract changed")
-    if plan.fps_source == "authoritative_recording_metadata":
-        current_fps = get_fps(source_root)
-        if current_fps is None or float(current_fps) != float(plan.fps):
-            errors.append("recording metadata FPS changed")
-    elif metadata_fps != plan.fps:
-        # The resolver should still return the sealed override value.  Keep
-        # this assertion as a cheap consistency check without rereading arrays.
-        errors.append("sealed FPS differs from resolved source parameters")
-    if errors:
+        subtree_path=f"analysis/subject_shape_runs/{plan.subject_shape_run}",
+    ).to_json()
+    keypoint_metadata = validate_direct_consolidated_subtree(
+        plan.source_zarr,
+        subtree_path=f"keypoints_runs/{plan.keypoint_run}",
+    ).to_json()
+    candidate_admission = plan.subject_shape_candidate_admission
+    if candidate_admission is not None and subject_shape_metadata != (
+        candidate_admission["direct_consolidated_metadata"]
+    ):
         raise RuntimeError(
             "Eye-angle admission receipt source freshness check failed: "
-            + "; ".join(errors)
+            "subject-shape candidate direct/consolidated metadata changed"
         )
     return json_attr_safe(
         {
-            "status": "current",
-            "inventory": inventory,
-            "source_metadata_sha256": current_metadata_sha256,
-            "source_contract_sha256": _json_digest(contracts),
-            "selected_arrays": list(selected_arrays),
-            "row_count": int(context.eye_geometry.ellipse_params.shape[0]),
-            "frame_count": int(frame_count),
-            "fps": plan.fps,
+            **source_check,
             "latest_before": latest_before,
             "latest_complete_before": latest_complete_before,
             "canonical_subject_shape_direct_consolidated_metadata": (
-                canonical_subject_shape_metadata
+                subject_shape_metadata if candidate_admission is None else None
             ),
+            "subject_shape_candidate_direct_consolidated_metadata": (
+                subject_shape_metadata if candidate_admission is not None else None
+            ),
+            "keypoint_direct_consolidated_metadata": keypoint_metadata,
         }
     )
 
@@ -1825,44 +2028,77 @@ def _audit_eye_angle_source_revision(
 ) -> dict[str, Any]:
     """Verify live authority, optionally with an explicit diagnostic payload scan."""
 
-    inventory = _validate_file_inventory(plan.source_zarr, plan.physical_files)
     errors: list[str] = []
-    if not inventory["valid"]:
-        errors.append("physical source inventory changed")
-    observed_metadata_sha256 = _metadata_content_digest(
-        plan.source_zarr,
-        plan.physical_files,
-    )
-    if observed_metadata_sha256 != plan.source_metadata_sha256:
-        errors.append("selected source metadata changed")
+    source_check: dict[str, Any] | None = None
     try:
-        context, contracts, arrays, _files, _fps, frame_count = _resolve_source_plan(
-            plan.source_zarr,
-            subject_shape_run=plan.subject_shape_run,
-            keypoint_run=plan.keypoint_run,
-            completed_ineligible_subject_shape_candidate=(
-                plan.subject_shape_candidate_admission
-            ),
-            staged_input_integrity_receipt=plan.staged_input_integrity_receipt,
-            source_physical_profile=(
-                SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION
-            ),
-            verify_staged_payload=verify_payload,
+        source_root = open_zarr_root(plan.source_zarr, mode="r")
+        source_check = _validate_receipt_bound_live_source_metadata(
+            plan,
+            source_root=source_root,
         )
-        observed_contract_sha256 = _json_digest(contracts)
-        if context.eye_geometry.run_name != plan.subject_shape_run:
-            errors.append("resolved subject-shape run changed")
-        if context.keypoint_run_name != plan.keypoint_run:
-            errors.append("resolved canonical base-keypoint run changed")
-        if int(frame_count) != int(plan.frame_count):
-            errors.append("resolved frame count changed")
-        if tuple(arrays) != tuple(plan.selected_arrays):
-            errors.append("resolved source array set changed")
-        if observed_contract_sha256 != plan.source_contract_sha256:
-            errors.append("logical source contract changed")
-    except Exception as exc:  # fail closed and preserve the exact resolver error
-        observed_contract_sha256 = None
-        errors.append(f"source resolution failed: {type(exc).__name__}: {exc}")
+    except Exception as exc:  # fail closed and preserve the exact receipt error
+        errors.append(
+            f"receipt-bound source validation failed: {type(exc).__name__}: {exc}"
+        )
+
+    if verify_payload and source_check is not None:
+        try:
+            (
+                context,
+                contracts,
+                arrays,
+                _files,
+                _fps,
+                frame_count,
+            ) = _resolve_source_plan(
+                plan.source_zarr,
+                subject_shape_run=plan.subject_shape_run,
+                keypoint_run=plan.keypoint_run,
+                completed_ineligible_subject_shape_candidate=(
+                    plan.subject_shape_candidate_admission
+                ),
+                staged_input_integrity_receipt=(
+                    plan.staged_input_integrity_receipt
+                ),
+                source_physical_profile=(
+                    SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION
+                ),
+                verify_staged_payload=True,
+            )
+            if context.eye_geometry.run_name != plan.subject_shape_run:
+                errors.append("resolved subject-shape run changed")
+            if context.keypoint_run_name != plan.keypoint_run:
+                errors.append("resolved canonical base-keypoint run changed")
+            if int(context.eye_geometry.ellipse_params.shape[0]) != int(
+                plan.row_count
+            ):
+                errors.append("resolved eye-angle row count changed")
+            if int(frame_count) != int(plan.frame_count):
+                errors.append("resolved frame count changed")
+            if tuple(arrays) != tuple(plan.selected_arrays):
+                errors.append("resolved source array set changed")
+            if _json_digest(contracts) != plan.source_contract_sha256:
+                errors.append("logical source contract changed")
+        except Exception as exc:
+            errors.append(
+                f"explicit deep source audit failed: {type(exc).__name__}: {exc}"
+            )
+
+    inventory = (
+        source_check["inventory"]
+        if source_check is not None
+        else _validate_file_inventory(plan.source_zarr, plan.physical_files)
+    )
+    observed_metadata_sha256 = (
+        source_check["source_metadata_sha256"]
+        if source_check is not None
+        else None
+    )
+    observed_contract_sha256 = (
+        source_check["source_contract_sha256"]
+        if source_check is not None
+        else None
+    )
     return json_attr_safe(
         {
             "schema_id": SOURCE_REVISION_AUDIT_SCHEMA_ID,
@@ -1882,6 +2118,7 @@ def _audit_eye_angle_source_revision(
                 else "sealed_receipt_metadata_authority_inventory_v1"
             ),
             "full_selected_scientific_input_content_hash": bool(verify_payload),
+            "normal_publication_proof_reload": bool(verify_payload),
             "sealed_input_integrity_receipt_sha256": (
                 plan.staged_input_integrity_receipt.get("record_sha256")
             ),

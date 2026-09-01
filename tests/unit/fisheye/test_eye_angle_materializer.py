@@ -1734,7 +1734,7 @@ def _worker_results_for_receipt(
     ]
 
 
-def test_reused_receipt_resolves_full_authoritative_publication_profile(
+def test_reused_receipt_validates_full_publication_without_proof_reload(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1745,11 +1745,50 @@ def test_reused_receipt_resolves_full_authoritative_publication_profile(
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)
     assert "instance_key" in root[_SHAPE_RUN_PATH]
 
+    def _unexpected_full_reload_or_payload_hash(
+        *_args: object,
+        **_kwargs: object,
+    ) -> object:
+        raise AssertionError(
+            "receipt reuse must not reload full publication proofs or hash payloads"
+        )
+
+    monkeypatch.setattr(
+        mod,
+        "_resolve_source_plan",
+        _unexpected_full_reload_or_payload_hash,
+    )
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "load_persisted_subject_shape_coordinate_publication",
+        _unexpected_full_reload_or_payload_hash,
+    )
+    monkeypatch.setattr(
+        mod.eye_writer,
+        "load_assignment_keypoint_source",
+        _unexpected_full_reload_or_payload_hash,
+    )
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "array_payload_sha256",
+        _unexpected_full_reload_or_payload_hash,
+    )
+    monkeypatch.setattr(
+        mod.eye_writer,
+        "array_values_sha256",
+        _unexpected_full_reload_or_payload_hash,
+    )
+
     freshness = mod._validate_reused_plan_source(plan)
 
     assert freshness["status"] == "current"
     assert freshness["row_count"] == plan.row_count
     assert freshness["selected_arrays"] == list(plan.selected_arrays)
+    assert freshness["validation_mode"] == (
+        "sealed_receipt_live_metadata_and_physical_revision_v1"
+    )
+    assert freshness["payload_rehash"] is False
+    assert freshness["normal_publication_proof_reload"] is False
     assert not scratch.exists()
 
 
