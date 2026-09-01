@@ -71,7 +71,9 @@ PALETTE_REPO="$(realpath -- "$PALETTE_REPO")"
 plan_info="$("$PALETTE_REPO/scripts/py" -c '
 import sys
 from fisheye.analytics_exports.validated_behavior_cohort import read_validated_behavior_export_plan
-p, _, _ = read_validated_behavior_export_plan(sys.argv[1])
+from fisheye.analytics_exports.validated_behavior_profiles import profile_id_from_record, resolve_validated_behavior_profile
+profile = resolve_validated_behavior_profile(profile_id_from_record(sys.argv[1], record_kind="export plan"))
+p, _, _ = read_validated_behavior_export_plan(sys.argv[1], table_specs=profile.table_specs)
 print(p["member_count"])
 print(p["export_run_id"])
 print(p["software_authority"]["commit"])
@@ -147,7 +149,9 @@ scripts/py -m fisheye.utils.materialize_validated_behavior_cohort_export validat
   --publication-root "\$(scripts/py -c '
 import sys
 from fisheye.analytics_exports.validated_behavior_cohort import read_validated_behavior_export_plan
-p, _, _ = read_validated_behavior_export_plan(sys.argv[1])
+from fisheye.analytics_exports.validated_behavior_profiles import profile_id_from_record, resolve_validated_behavior_profile
+profile = resolve_validated_behavior_profile(profile_id_from_record(sys.argv[1], record_kind="export plan"))
+p, _, _ = read_validated_behavior_export_plan(sys.argv[1], table_specs=profile.table_specs)
 print(p["publication_root"])
 ' "\${PLAN}")" \
   --export-run-id "${EXPORT_RUN_ID}"

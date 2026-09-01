@@ -37,7 +37,6 @@ from fisheye.analytics_exports.validated_behavior_dataset import (
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 import fisheye.utils.materialize_validated_behavior_cohort_export as export_cli
 
-
 COMMIT = "a" * 40
 NOW = "2026-08-31T12:00:00Z"
 
@@ -311,7 +310,9 @@ def test_core_contracts_are_generic_and_do_not_masquerade_as_v3() -> None:
         )
         for spec in CORE_TABLE_SPECS.values()
     )
-    assert all("chaser" not in spec.contract.schema_id for spec in CORE_TABLE_SPECS.values())
+    assert all(
+        "chaser" not in spec.contract.schema_id for spec in CORE_TABLE_SPECS.values()
+    )
 
 
 def test_recording_shards_are_deterministic_exact_and_reusable(tmp_path: Path) -> None:
@@ -433,6 +434,214 @@ def test_scientific_adapter_is_capability_gated_without_protocol_logic_in_core(
     ]
 
 
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("missing", "inexact field set"),
+        ("extra", "inexact field set"),
+        ("null", "null required fields"),
+    ),
+)
+def test_scientific_adapter_rows_fail_closed_before_arrow_normalization(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    membership_path, bundle_set_path = _membership_and_bundle_set(tmp_path)
+    event_contract = ArrowTableContract(
+        table_name="strict_fixture_events",
+        schema_namespace="fixture.analytics.validated_behavior.table",
+        fields=(
+            field("export_run_id", "string"),
+            field("recording_id", "string"),
+            field("event_id", "int64"),
+            field("value", "float64"),
+        ),
+        primary_key=("export_run_id", "recording_id", "event_id"),
+    )
+    event_spec = ValidatedBehaviorTableSpec(
+        contract=event_contract,
+        grain="one row per strict fixture event",
+        capability_policy="optional_explicit_coverage",
+        required_capability="semantic_epochs",
+        zero_rows_allowed=True,
+    )
+    specs = {**CORE_TABLE_SPECS, event_spec.table_name: event_spec}
+    plan = build_validated_behavior_export_plan(
+        membership_path=membership_path,
+        bundle_set_path=bundle_set_path,
+        export_run_id=f"strict_row_{mutation}_v1",
+        shard_root=(tmp_path / "strict-shards").resolve(),
+        publication_root=(tmp_path / "strict-publication").resolve(),
+        palette_commit=COMMIT,
+        palette_repo=Path(__file__).resolve().parents[3],
+        table_specs=specs,
+        export_profile_id="strict_fixture_extension_v1",
+        created_at_utc=NOW,
+    )
+    plan_path = tmp_path / "strict-plan.json"
+    write_validated_behavior_export_plan(plan_path, plan)
+
+    def extract(
+        plan_value: dict[str, Any],
+        membership_member: dict[str, Any],
+        _bundle_member: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], None]:
+        row: dict[str, Any] = {
+            "export_run_id": plan_value["export_run_id"],
+            "recording_id": membership_member["recording_id"],
+            "event_id": 1,
+            "value": 2.5,
+        }
+        if mutation == "missing":
+            del row["value"]
+        elif mutation == "extra":
+            row["undeclared"] = "unsafe"
+        else:
+            row["value"] = None
+        return [row], None
+
+    with pytest.raises(ValidatedBehaviorExportError, match=message):
+        write_validated_behavior_recording_shard(
+            plan_path=plan_path,
+            member_ordinal=1,
+            table_specs=specs,
+            row_extractors={event_spec.table_name: extract},
+            created_at_utc=NOW,
+        )
+
+
+def test_foreign_key_validation_reads_non_primary_local_columns(
+    tmp_path: Path,
+) -> None:
+    membership_path, bundle_set_path = _membership_and_bundle_set(tmp_path)
+    entity_contract = ArrowTableContract(
+        table_name="fixture_entities",
+        schema_namespace="fixture.analytics.validated_behavior.table",
+        fields=(
+            field("export_run_id", "string"),
+            field("recording_id", "string"),
+            field("entity_id", "int64"),
+        ),
+        primary_key=("export_run_id", "recording_id", "entity_id"),
+    )
+    event_contract = ArrowTableContract(
+        table_name="fixture_entity_events",
+        schema_namespace="fixture.analytics.validated_behavior.table",
+        fields=(
+            field("export_run_id", "string"),
+            field("recording_id", "string"),
+            field("event_id", "int64"),
+            field("entity_id", "int64"),
+        ),
+        primary_key=("export_run_id", "recording_id", "event_id"),
+    )
+    recording_fk = (
+        (
+            ("export_run_id", "recording_id"),
+            "cohort_recordings",
+            ("export_run_id", "recording_id"),
+        ),
+    )
+    specs = {
+        **CORE_TABLE_SPECS,
+        "fixture_entities": ValidatedBehaviorTableSpec(
+            contract=entity_contract,
+            grain="one row per fixture entity",
+            capability_policy="optional_explicit_coverage",
+            required_capability="semantic_epochs",
+            foreign_keys=recording_fk,
+            zero_rows_allowed=True,
+        ),
+        "fixture_entity_events": ValidatedBehaviorTableSpec(
+            contract=event_contract,
+            grain="one row per fixture event",
+            capability_policy="optional_explicit_coverage",
+            required_capability="semantic_epochs",
+            foreign_keys=recording_fk
+            + (
+                (
+                    ("export_run_id", "recording_id", "entity_id"),
+                    "fixture_entities",
+                    ("export_run_id", "recording_id", "entity_id"),
+                ),
+            ),
+            zero_rows_allowed=True,
+        ),
+    }
+
+    def run_export(*, run_id: str, child_entity_id: int) -> dict[str, Any]:
+        plan = build_validated_behavior_export_plan(
+            membership_path=membership_path,
+            bundle_set_path=bundle_set_path,
+            export_run_id=run_id,
+            shard_root=(tmp_path / f"{run_id}-shards").resolve(),
+            publication_root=(tmp_path / f"{run_id}-publication").resolve(),
+            palette_commit=COMMIT,
+            palette_repo=Path(__file__).resolve().parents[3],
+            table_specs=specs,
+            export_profile_id="non_primary_foreign_key_fixture_v1",
+            created_at_utc=NOW,
+        )
+        plan_path = tmp_path / f"{run_id}-plan.json"
+        write_validated_behavior_export_plan(plan_path, plan)
+
+        def entity_rows(
+            plan_value: dict[str, Any],
+            member: dict[str, Any],
+            _bundle_member: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], None]:
+            return [
+                {
+                    "export_run_id": plan_value["export_run_id"],
+                    "recording_id": member["recording_id"],
+                    "entity_id": 7,
+                }
+            ], None
+
+        def event_rows(
+            plan_value: dict[str, Any],
+            member: dict[str, Any],
+            _bundle_member: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], None]:
+            return [
+                {
+                    "export_run_id": plan_value["export_run_id"],
+                    "recording_id": member["recording_id"],
+                    "event_id": 1,
+                    "entity_id": child_entity_id,
+                }
+            ], None
+
+        extractors = {
+            "fixture_entities": entity_rows,
+            "fixture_entity_events": event_rows,
+        }
+        for ordinal in (1, 2):
+            write_validated_behavior_recording_shard(
+                plan_path=plan_path,
+                member_ordinal=ordinal,
+                table_specs=specs,
+                row_extractors=extractors,
+                created_at_utc=NOW,
+            )
+        return publish_validated_behavior_cohort(
+            plan_path=plan_path,
+            table_specs=specs,
+            generation_id=f"generation-{run_id}",
+            created_at_utc=NOW,
+        )
+
+    published = run_export(run_id="non_primary_fk_valid_v1", child_entity_id=7)
+    assert published["row_counts_by_table"]["fixture_entity_events"] == 1
+
+    with pytest.raises(
+        ValidatedBehaviorExportError,
+        match="fixture_entity_events: foreign key to fixture_entities is not closed",
+    ):
+        run_export(run_id="non_primary_fk_invalid_v1", child_entity_id=8)
+
+
 def test_plan_rejects_scientific_capability_absent_from_bundle_profile(
     tmp_path: Path,
 ) -> None:
@@ -541,9 +750,12 @@ def test_publication_and_lazy_reader_preserve_closed_states(tmp_path: Path) -> N
         columns=("recording_id", "capability_id", "state"),
     )
     assert capabilities.height == 3
-    assert dataset.table("recording_capabilities").query_identity()[
-        "export_manifest_record_sha256"
-    ] == published["record_sha256"]
+    assert (
+        dataset.table("recording_capabilities").query_identity()[
+            "export_manifest_record_sha256"
+        ]
+        == published["record_sha256"]
+    )
     full_dataset = ValidatedBehaviorExportDataset.open(
         plan["publication_root"],
         plan["export_run_id"],
@@ -562,8 +774,7 @@ def test_reader_rejects_manifest_unselected_file_in_generation(tmp_path: Path) -
         created_at_utc=NOW,
     )
     generation = (
-        Path(plan["publication_root"])
-        / published["publication"]["generation_path"]
+        Path(plan["publication_root"]) / published["publication"]["generation_path"]
     )
     (generation / "tables" / "cohort_recordings" / "unselected.parquet").write_bytes(
         b"not selected"
@@ -692,9 +903,9 @@ def test_lsf_submitter_renders_bounded_array_and_success_barrier(
     fake_git = fake_bin / "git"
     fake_git.write_text(
         "#!/usr/bin/env bash\n"
-        "case \" $* \" in\n"
+        'case " $* " in\n'
         f"  *\" rev-parse HEAD \"*) printf '{COMMIT}\\n';;\n"
-        "  *\" status --porcelain \"*) :;;\n"
+        '  *" status --porcelain "*) :;;\n'
         "  *) exit 2;;\n"
         "esac\n",
         encoding="utf-8",
@@ -707,7 +918,11 @@ def test_lsf_submitter_renders_bounded_array_and_success_barrier(
     result = subprocess.run(
         [
             "bash",
-            str(repository / "scripts" / "submit_validated_behavior_cohort_export_bsub.sh"),
+            str(
+                repository
+                / "scripts"
+                / "submit_validated_behavior_cohort_export_bsub.sh"
+            ),
             "--plan",
             str(plan_path),
             "--palette-repo",
@@ -733,7 +948,7 @@ def test_lsf_submitter_renders_bounded_array_and_success_barrier(
     run_dir = log_dir / "validated_behavior_export_mixed_behavior_export_v1"
     shard_job = (run_dir / "run_shard.sh").read_text(encoding="utf-8")
     finalizer = (run_dir / "run_finalize.sh").read_text(encoding="utf-8")
-    assert "--member-ordinal \"${LSB_JOBINDEX}\"" in shard_job
+    assert '--member-ordinal "${LSB_JOBINDEX}"' in shard_job
     assert "materialize_validated_behavior_cohort_export finalize" in finalizer
     assert "materialize_validated_behavior_cohort_export validate" in finalizer
     assert "registry" not in shard_job.casefold()
