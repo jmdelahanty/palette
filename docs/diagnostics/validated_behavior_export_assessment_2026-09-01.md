@@ -119,4 +119,55 @@ B9 (axial bearing). This export is the input the B-series was waiting for.
    table with rotation-0 parity check against `radial_near_field_summary`
    (risk 2).
 
-Statuses/results to be appended when the branches land.
+### Outcomes (landed 2026-09-01, all tested, none merged yet)
+
+1. **Role contrasts** — commit `983d3771`, 10/10 tests, output
+   `/tmp/role-contrasts-v001` (42 rows). Training, aggressive−inert, n=80,
+   provider-concordant: near_zone_fraction +0.008 (q=0.0002), entry rate
+   +0.4–0.6/min (q=0.0002), enrichment +0.55 (q=0.0002) — but distance_p50
+   **+4.5–4.7 mm farther** from the aggressive chaser (q≈0.0004); quadrant
+   occupancy no role difference. Reading: training near-zone occupancy is
+   substantially **pursuit-driven** (the aggressive dot approaches the fish),
+   so the near-zone role excess is not fish choice; the avoidance-consistent
+   piece is the +4.5 mm median distance. Pre-epoch role asymmetries exist but
+   carry `park_position_asymmetry=true` by construction.
+2. **Signal provenance** — commit `305fb4b1`, 305 tests across affected
+   suites. The successor manifest already sealed speed_level + all four
+   thresholds; the fix threads them into `TRIAL_ESCAPE_FREEZE_SUMMARIES`
+   (5 new columns incl. `signal_provenance_status` with sentinel
+   `unavailable_pre_provenance_run` for legacy runs; partial/malformed
+   provenance fails closed) and gates `speed_level="raw"` behind
+   `--allow-raw-speed-level REASON` in both CLI and successor, reason sealed
+   into the manifest. Contract payload_sha256 changes; the b45aa6a5
+   publication predates the new roster — next export run picks it up.
+3. **Twin nulls** — commit `bbc10923`, 21/21 tests, full 80-recording run in
+   59 s, output `/tmp/twin-nulls-v001` (5,760 summary rows + 960 excess rows).
+   **Rotation-0 parity: exact** on counts/fractions/entry counts (0 deviation)
+   and 6.3e-6 mm on distance quantiles; the hysteresis entry policy
+   reproduced exactly. Twin-excess, training/aggressive/keypoint:
+   near-zone excess −0.0028 mean (57/80 negative, Wilcoxon p=3.1e-4),
+   distance_p50 excess +1.48 mm (p=0.017) — a **small genuine
+   object-avoidance component on top of a mostly-geometric enrichment**.
+   Striking: object-specific avoidance is **strongest in the PRE epoch**
+   (near excess −0.0087, p50 excess +5.1 mm, p≈1e-12), weaker during training
+   (pursuit pulls observed distance toward the twins), intermediate post;
+   inert chasers show similar pre/post excess to aggressive — object-specific
+   but not role-specific outside training. Consistent with innate
+   red-avoidance; the twins are load-bearing exactly as the sesh3 bearing
+   analysis predicted.
+
+### New residue found by the twin-null work
+**The arena center is not published anywhere in the export** — the
+`reviewed_arena_and_scale` binding carries digests and zarr refs but no
+coordinates. The twin module recovers it per recording×provider by
+constraint-fitting against the summary's own `fish_arena_radius_mean_mm`
+(worst residual 2.4e-7 mm, gated at 0.01 mm, method recorded in its
+manifest), but the export should publish center + radius explicitly.
+
+### Revised synthesis after all three
+The cohort's spatial story now reads: innate object avoidance present from
+the pre epoch (twin-verified, both roles), largely geometric "enrichment"
+during training with a small genuine avoidance component, pursuit dynamics
+dominating proximity, and the best learned-change candidate remaining the
+persistent post-training turning increase (`mean_abs_bout_net_heading_change`,
+q=0.0006, unclustered). B-series items B1–B3 are the right next consumers.
