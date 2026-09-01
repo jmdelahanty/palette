@@ -52,9 +52,16 @@ and the exploratory posture is enforced in code, not prose.
 ### Findings worth attention (from the exploratory contrasts, n=80 paired)
 - Bout-rate suppression recovered: −19.2/min pre→training (d=−0.88),
   incomplete recovery training→post (+12.5), q=0.0006.
-- **Candidate persistent aftereffect**: `mean_abs_bout_net_heading_change`
-  rises in training AND stays elevated pre→post (−2.47° pre−post, d=−0.51,
-  q=0.0006). Most interesting row in the file; unclustered, hold loosely.
+- **Candidate persistent aftereffect — bouts get STRAIGHTER**:
+  `mean_abs_bout_net_heading_change_deg` (mean over bouts of |wrapped heading
+  at bout end − heading at bout start|, smoothed body-axis heading) falls
+  pre 24.8° → training 20.0° → post 22.4°; post stays 2.47° below pre
+  (d=−0.51, q=0.0006). Total within-bout turning (`mean_bout_heading_path`)
+  rises during training (+13.5°, q=0.0013) but returns to baseline post
+  (q=0.14) — so training bouts turn more but end straighter, and the reduced
+  net reorientation persists. Caveat: fish are also ~1.4 mm closer to the
+  wall post (70/80 recordings) and wall-following bouts are straighter —
+  wall-conditioning needed before this is called kinematic. Unclustered.
 - Trials: 208/319 speed-escape, 72 freeze-candidate, recapture ≈0.76 where
   traces valid.
 
@@ -169,5 +176,5 @@ The cohort's spatial story now reads: innate object avoidance present from
 the pre epoch (twin-verified, both roles), largely geometric "enrichment"
 during training with a small genuine avoidance component, pursuit dynamics
 dominating proximity, and the best learned-change candidate remaining the
-persistent post-training turning increase (`mean_abs_bout_net_heading_change`,
-q=0.0006, unclustered). B-series items B1–B3 are the right next consumers.
+persistent post-training bout STRAIGHTENING (reduced |net heading change|
+per bout, q=0.0006, unclustered; wall-proximity confound to be conditioned out). B-series items B1–B3 are the right next consumers.
