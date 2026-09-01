@@ -101,12 +101,8 @@ MATERIALIZATION_ADMISSION_RECEIPT_SCHEMA_VERSION = 1
 STAGING_SCHEMA_ID = "palette.eye_angle_source_staging.v1"
 PUBLISH_SCHEMA_ID = "palette.eye_angle_run_publish.v1"
 SOURCE_REVISION_AUDIT_SCHEMA_ID = "palette.eye_angle_source_revision_audit.v1"
-SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION = (
-    "authoritative_full_publication_v1"
-)
-SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET = (
-    "receipt_bound_staged_subset_v1"
-)
+SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION = "authoritative_full_publication_v1"
+SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET = "receipt_bound_staged_subset_v1"
 SOURCE_PHYSICAL_PROFILES = frozenset(
     {
         SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION,
@@ -1086,9 +1082,7 @@ def _resolve_source_plan(
     keypoint_run: str | None,
     completed_ineligible_subject_shape_candidate: Mapping[str, Any] | None = None,
     staged_input_integrity_receipt: Mapping[str, Any] | None = None,
-    source_physical_profile: str = (
-        SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION
-    ),
+    source_physical_profile: str = (SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION),
     verify_staged_payload: bool = True,
 ) -> tuple[
     Any,
@@ -1105,8 +1099,7 @@ def _resolve_source_plan(
             f"expected one of {sorted(SOURCE_PHYSICAL_PROFILES)!r}."
         )
     receipt_bound_staged_subset = (
-        physical_profile
-        == SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET
+        physical_profile == SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET
     )
     if receipt_bound_staged_subset and staged_input_integrity_receipt is None:
         raise ValueError(
@@ -1126,16 +1119,14 @@ def _resolve_source_plan(
         eye_writer._staged_subject_shape_authority_from_input_receipt(
             staged_input_integrity_receipt
         )
-        if staged_input_integrity_receipt is not None
-        and receipt_bound_staged_subset
+        if staged_input_integrity_receipt is not None and receipt_bound_staged_subset
         else None
     )
     staged_keypoint_authority = (
         eye_writer._staged_keypoint_authority_from_input_receipt(
             staged_input_integrity_receipt
         )
-        if staged_input_integrity_receipt is not None
-        and receipt_bound_staged_subset
+        if staged_input_integrity_receipt is not None and receipt_bound_staged_subset
         else None
     )
     context = eye_writer._resolve_eye_angle_inputs(
@@ -1632,9 +1623,7 @@ def _sealed_selected_arrays(
             or "\\" in value
             or any(part in {"", ".", ".."} for part in value.split("/"))
         ):
-            raise ValueError(
-                "Eye-angle receipt resolved source array path is unsafe."
-            )
+            raise ValueError("Eye-angle receipt resolved source array path is unsafe.")
         return value
 
     contracts = plan.source_contracts
@@ -1659,10 +1648,7 @@ def _sealed_selected_arrays(
         name = component.get("component")
         params = component.get("ellipse_params_path")
         success = component.get("ellipse_success_path")
-        if (
-            name not in {"eye_left", "eye_right"}
-            or name in component_names
-        ):
+        if name not in {"eye_left", "eye_right"} or name in component_names:
             raise ValueError("Eye-angle receipt component array paths are malformed.")
         component_names.add(str(name))
         selected.extend(
@@ -1674,9 +1660,7 @@ def _sealed_selected_arrays(
     if component_names != {"eye_left", "eye_right"}:
         raise ValueError("Eye-angle receipt lacks the exact two eye components.")
     selected.append(
-        require_relative_array_path(
-            f"{geometry_path}/relations/eye_pair/separation_px"
-        )
+        require_relative_array_path(f"{geometry_path}/relations/eye_pair/separation_px")
     )
     for path in resolved.values():
         if path is not None:
@@ -1713,8 +1697,8 @@ def _validate_receipt_bound_live_source_metadata(
     receipt = eye_writer._canonical_staged_input_integrity_receipt(
         plan.staged_input_integrity_receipt
     )
-    subject_authority = (
-        eye_writer._staged_subject_shape_authority_from_input_receipt(receipt)
+    subject_authority = eye_writer._staged_subject_shape_authority_from_input_receipt(
+        receipt
     )
     keypoint_authority = eye_writer._staged_keypoint_authority_from_input_receipt(
         receipt
@@ -1800,9 +1784,10 @@ def _validate_receipt_bound_live_source_metadata(
             )
         except ValueError as exc:
             errors.append(str(exc))
-        if keypoint_group.attrs.get("keypoint_labels") != keypoint_authority[
-            "keypoint_labels"
-        ]:
+        if (
+            keypoint_group.attrs.get("keypoint_labels")
+            != keypoint_authority["keypoint_labels"]
+        ):
             errors.append("canonical keypoint labels changed")
         for name, entry in keypoint_authority["arrays"].items():
             source_dataset = str(entry.get("source_dataset", name))
@@ -1827,9 +1812,7 @@ def _validate_receipt_bound_live_source_metadata(
         )
     except (FileNotFoundError, OSError, ValueError) as exc:
         current_files = None
-        errors.append(
-            f"physical source file manifest is unsafe or incomplete: {exc}"
-        )
+        errors.append(f"physical source file manifest is unsafe or incomplete: {exc}")
     if current_files is not None and current_files != plan.physical_files:
         errors.append("physical source file manifest changed")
     current_metadata_sha256: str | None = None
@@ -1870,7 +1853,6 @@ def _validate_receipt_bound_live_source_metadata(
                 "sealed_receipt_live_metadata_and_physical_revision_v1"
             ),
             "payload_rehash": False,
-            "normal_publication_proof_reload": False,
         }
     )
 
@@ -2057,9 +2039,7 @@ def _audit_eye_angle_source_revision(
                 completed_ineligible_subject_shape_candidate=(
                     plan.subject_shape_candidate_admission
                 ),
-                staged_input_integrity_receipt=(
-                    plan.staged_input_integrity_receipt
-                ),
+                staged_input_integrity_receipt=(plan.staged_input_integrity_receipt),
                 source_physical_profile=(
                     SOURCE_PHYSICAL_PROFILE_AUTHORITATIVE_PUBLICATION
                 ),
@@ -2069,9 +2049,7 @@ def _audit_eye_angle_source_revision(
                 errors.append("resolved subject-shape run changed")
             if context.keypoint_run_name != plan.keypoint_run:
                 errors.append("resolved canonical base-keypoint run changed")
-            if int(context.eye_geometry.ellipse_params.shape[0]) != int(
-                plan.row_count
-            ):
+            if int(context.eye_geometry.ellipse_params.shape[0]) != int(plan.row_count):
                 errors.append("resolved eye-angle row count changed")
             if int(frame_count) != int(plan.frame_count):
                 errors.append("resolved frame count changed")
@@ -2090,14 +2068,10 @@ def _audit_eye_angle_source_revision(
         else _validate_file_inventory(plan.source_zarr, plan.physical_files)
     )
     observed_metadata_sha256 = (
-        source_check["source_metadata_sha256"]
-        if source_check is not None
-        else None
+        source_check["source_metadata_sha256"] if source_check is not None else None
     )
     observed_contract_sha256 = (
-        source_check["source_contract_sha256"]
-        if source_check is not None
-        else None
+        source_check["source_contract_sha256"] if source_check is not None else None
     )
     return json_attr_safe(
         {
@@ -2118,7 +2092,6 @@ def _audit_eye_angle_source_revision(
                 else "sealed_receipt_metadata_authority_inventory_v1"
             ),
             "full_selected_scientific_input_content_hash": bool(verify_payload),
-            "normal_publication_proof_reload": bool(verify_payload),
             "sealed_input_integrity_receipt_sha256": (
                 plan.staged_input_integrity_receipt.get("record_sha256")
             ),
@@ -2197,9 +2170,7 @@ def stage_eye_angle_sources(
         subject_shape_run=plan.subject_shape_run,
         keypoint_run=plan.keypoint_run,
         staged_input_integrity_receipt=plan.staged_input_integrity_receipt,
-        source_physical_profile=(
-            SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET
-        ),
+        source_physical_profile=(SOURCE_PHYSICAL_PROFILE_RECEIPT_BOUND_STAGED_SUBSET),
         verify_staged_payload=False,
     )
     if (
@@ -3470,11 +3441,9 @@ def materialize_eye_angles(
                     "Node-local regular eye-angle run is invalid: "
                     f"{regular_validation}"
                 )
-            worker_input_attestation = (
-                eye_writer._canonical_worker_input_attestation(
-                    regular_run.attrs.get("staged_input_worker_attestation"),
-                    receipt=plan.staged_input_integrity_receipt,
-                )
+            worker_input_attestation = eye_writer._canonical_worker_input_attestation(
+                regular_run.attrs.get("staged_input_worker_attestation"),
+                receipt=plan.staged_input_integrity_receipt,
             )
 
         materialization_payload = json_attr_safe(

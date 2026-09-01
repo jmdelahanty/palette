@@ -1788,7 +1788,6 @@ def test_reused_receipt_validates_full_publication_without_proof_reload(
         "sealed_receipt_live_metadata_and_physical_revision_v1"
     )
     assert freshness["payload_rehash"] is False
-    assert freshness["normal_publication_proof_reload"] is False
     assert not scratch.exists()
 
 
@@ -1917,10 +1916,13 @@ def test_complete_worker_input_attestation_binds_exact_receipt_chunk_set(
         list(reversed(results)),
     )
 
-    assert mod.eye_writer._canonical_worker_input_attestation(
-        attestation,
-        receipt=integrity_receipt,
-    ) == attestation
+    assert (
+        mod.eye_writer._canonical_worker_input_attestation(
+            attestation,
+            receipt=integrity_receipt,
+        )
+        == attestation
+    )
     assert attestation["complete_worker_chunk_set"] is True
     assert attestation["chunk_count"] == len(results)
     assert attestation["staged_input_integrity_receipt_sha256"] == (
@@ -3357,10 +3359,13 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
     )
     assert run.attrs["staged_input_integrity_receipt_sha256"] == receipt_sha256
     worker_attestation = run.attrs["staged_input_worker_attestation"]
-    assert mod.eye_writer._canonical_worker_input_attestation(
-        worker_attestation,
-        receipt=local["staged_input_integrity_receipt"],
-    ) == worker_attestation
+    assert (
+        mod.eye_writer._canonical_worker_input_attestation(
+            worker_attestation,
+            receipt=local["staged_input_integrity_receipt"],
+        )
+        == worker_attestation
+    )
     assert local["staged_input_worker_attestation"] == worker_attestation
     assert local["input_payload_validation"] == {
         "mode": "complete_worker_chunk_attestation_v1",
@@ -3374,15 +3379,22 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
         "precompute_full_decoded_scan": False,
         "publication_requires_complete_worker_chunk_set": True,
     }
-    assert local["source_staging"]["source_revision_audit"][
-        "payload_verification_mode"
-    ] == "sealed_receipt_metadata_authority_inventory_v1"
-    assert local["source_staging"]["source_revision_audit"][
-        "full_selected_scientific_input_content_hash"
-    ] is False
-    assert result["publish"]["source_revision_audit"][
-        "full_selected_scientific_input_content_hash"
-    ] is False
+    assert (
+        local["source_staging"]["source_revision_audit"]["payload_verification_mode"]
+        == "sealed_receipt_metadata_authority_inventory_v1"
+    )
+    assert (
+        local["source_staging"]["source_revision_audit"][
+            "full_selected_scientific_input_content_hash"
+        ]
+        is False
+    )
+    assert (
+        result["publish"]["source_revision_audit"][
+            "full_selected_scientific_input_content_hash"
+        ]
+        is False
+    )
     assert local["compute"]["writer"] == "fisheye.analysis.eye_angle_analysis"
     assert local["compute"]["angle_chunk_rows"] == 2
     assert local["compute"]["angle_chunk_columns"] == 4
@@ -3927,9 +3939,10 @@ def test_post_read_staged_payload_mutation_does_not_invalidate_worker_snapshot(
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)
     published = root["analysis/eye_angle_runs/eye_1"]
     assert published.attrs["palette_run_completion_status"] == "complete"
-    assert published.attrs["staged_input_worker_attestation"][
-        "complete_worker_chunk_set"
-    ] is True
+    assert (
+        published.attrs["staged_input_worker_attestation"]["complete_worker_chunk_set"]
+        is True
+    )
 
 
 def test_publication_rolls_back_when_source_revision_changes(
