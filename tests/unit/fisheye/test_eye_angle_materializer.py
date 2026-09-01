@@ -1249,6 +1249,80 @@ def test_plan_rejects_refined_keypoint_assertion_before_scratch_creation(
     assert "eye_angle_runs" not in root["analysis"]
 
 
+def test_plan_rejects_missing_fps_before_building_the_input_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    _accept_synthetic_subject_shape_publication(monkeypatch, source)
+    receipt_builder_called = False
+
+    def _unexpected_receipt_builder(*args: object, **kwargs: object) -> object:
+        nonlocal receipt_builder_called
+        receipt_builder_called = True
+        raise AssertionError("receipt construction must not begin without FPS")
+
+    monkeypatch.setattr(
+        mod.eye_writer,
+        "_build_staged_eye_angle_input_integrity_receipt",
+        _unexpected_receipt_builder,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="requires a positive finite FPS",
+    ):
+        mod.materialize_eye_angles(
+            source,
+            scratch_root=scratch,
+            subject_shape_run="shape_1",
+            keypoint_run=None,
+            run_name="eye_1",
+            apply=False,
+        )
+
+    assert receipt_builder_called is False
+    assert not scratch.exists()
+
+
+def test_plan_binds_clipped_source_metadata_fps_as_authoritative(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    _accept_synthetic_subject_shape_publication(monkeypatch, source)
+    root = zarr.open_group(str(source), mode="r+", use_consolidated=False)
+    root.attrs["source_video_metadata"] = {
+        "schema_id": "palette.source_video_collection_metadata.v1",
+        "layout": "clipped_video_collection",
+        "fps": 30.0,
+        "collection": {"members": [{"fps": 30.0}]},
+    }
+
+    result = mod.materialize_eye_angles(
+        source,
+        scratch_root=scratch,
+        subject_shape_run="shape_1",
+        keypoint_run=None,
+        run_name="eye_1",
+        chunk_rows=2,
+        apply=False,
+    )
+
+    plan = result["plan"]
+    assert plan["fps"] == 30.0
+    assert plan["fps_source"] == "authoritative_recording_metadata"
+    assert plan["staged_input_integrity_receipt"]["scientific_parameters"] == {
+        "fps": 30.0,
+        "fps_source": "authoritative_recording_metadata",
+    }
+    assert not scratch.exists()
+
+
 def test_plan_is_read_only_and_selects_only_resolved_geometry_and_keypoints(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
