@@ -51,7 +51,7 @@ from fisheye.analysis_workflows.provider_track_motion_source_handle import (
 from fisheye.shared.json_safety import write_json_atomic
 
 REPORT_SCHEMA_ID = "palette.analysis.composable_chaser_successor.operator_report"
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 DISPOSITION = "selector_ineligible_non_authoritative_trial_v1"
 
 CONTROLLER = "controller_chase_trials"
@@ -227,6 +227,8 @@ def run_composable_chaser_successors(
     radial_run_name: str | None = None,
     include_body_extension: bool = True,
     speed_level: str = "filtered",
+    allow_raw_speed_level: bool = False,
+    raw_speed_level_reason: str | None = None,
     modules: Sequence[str] | None = None,
     apply: bool = False,
     scratch_root: str | Path | None = None,
@@ -246,6 +248,39 @@ def run_composable_chaser_successors(
         raise ComposableChaserSuccessorOperatorError(
             "apply and include_body_extension must be exact booleans."
         )
+    if type(allow_raw_speed_level) is not bool:
+        raise ComposableChaserSuccessorOperatorError(
+            "allow_raw_speed_level must be one exact boolean."
+        )
+    if allow_raw_speed_level:
+        if speed_level != "raw":
+            raise ComposableChaserSuccessorOperatorError(
+                "--allow-raw-speed-level is only meaningful with "
+                "--speed-level raw."
+            )
+        if (
+            type(raw_speed_level_reason) is not str
+            or not raw_speed_level_reason.strip()
+        ):
+            raise ComposableChaserSuccessorOperatorError(
+                "--allow-raw-speed-level requires one non-empty recorded "
+                "reason string."
+            )
+        raw_speed_level_reason = raw_speed_level_reason.strip()
+    else:
+        if raw_speed_level_reason is not None:
+            raise ComposableChaserSuccessorOperatorError(
+                "raw_speed_level_reason is only recordable together with "
+                "allow_raw_speed_level."
+            )
+        if speed_level == "raw" and ESCAPE_FREEZE in needed:
+            raise ComposableChaserSuccessorOperatorError(
+                "speed_level 'raw' is rejected for the escape/freeze "
+                "successor: raw centroid speed carries a known ~1.6 mm/s "
+                "noise floor and must never define freeze/escape thresholds "
+                "silently. Pass --allow-raw-speed-level with one recorded "
+                "reason to override explicitly."
+            )
 
     sources: dict[str, dict[str, Any]] = {}
     handles: dict[str, Any | None] = {}
@@ -435,6 +470,7 @@ def run_composable_chaser_successors(
                     prepared[BOUT_RESPONSE],
                     track_id=track_id,
                     speed_level=speed_level,
+                    raw_speed_level_reason=raw_speed_level_reason,
                 )
             elif module_id == GAZE_TRACKING:
                 if source_block(
@@ -568,6 +604,11 @@ def run_composable_chaser_successors(
         "analysis_zarr": str(archive),
         "run_name": name,
         "apply": apply,
+        "speed_level_policy": {
+            "speed_level": speed_level,
+            "raw_speed_level_allowed": allow_raw_speed_level,
+            "raw_speed_level_reason": raw_speed_level_reason,
+        },
         "requested_modules": [
             module_id for module_id in MODULE_ORDER if module_id in requested
         ],
@@ -632,6 +673,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=("raw", "smoothed", "filtered", "averaged"),
         default="filtered",
     )
+    parser.add_argument(
+        "--allow-raw-speed-level",
+        metavar="REASON",
+        help=(
+            "Explicitly allow --speed-level raw for the escape/freeze "
+            "successor; the supplied reason string is recorded in the run "
+            "report and the successor's scientific manifest."
+        ),
+    )
     parser.add_argument("--scratch-root", type=Path)
     parser.add_argument("--copy-backend", choices=("python", "rsync"), default="python")
     parser.add_argument(
@@ -660,6 +710,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         radial_run_name=args.radial_run_name,
         include_body_extension=not args.no_body_extension,
         speed_level=args.speed_level,
+        allow_raw_speed_level=args.allow_raw_speed_level is not None,
+        raw_speed_level_reason=args.allow_raw_speed_level,
         modules=args.module,
         apply=args.apply,
         scratch_root=args.scratch_root,

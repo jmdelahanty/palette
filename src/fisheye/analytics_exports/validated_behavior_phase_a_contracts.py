@@ -322,6 +322,11 @@ TRIAL_ESCAPE_FREEZE_SUMMARIES = _contract(
         field("freeze_candidate", "bool"),
         field("response_class_code", "int32"),
         field("response_class", "string"),
+        field("speed_level", "string"),
+        field("freeze_window_s", "float64"),
+        field("freeze_speed_threshold_mm_s", "float64"),
+        field("escape_speed_threshold_mm_s", "float64"),
+        field("signal_provenance_status", "string"),
     ),
     primary_key=("export_run_id", "recording_id", "trial_row_id"),
 )

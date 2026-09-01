@@ -1121,11 +1121,76 @@ def _trial_escape_freeze_events(
     return _complete_rows(rows)
 
 
+ESCAPE_SIGNAL_PROVENANCE_UNAVAILABLE = "unavailable_pre_provenance_run"
+
+_ESCAPE_THRESHOLD_PARAMETERS = (
+    "freeze_window_s",
+    "freeze_speed_threshold_mm_s",
+    "escape_speed_threshold_mm_s",
+)
+
+
+def _escape_signal_provenance(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy the sealed speed-signal definition behind the freeze metric.
+
+    A legacy run manifest that predates signal provenance yields one explicit
+    sentinel row state; a partially recorded manifest fails closed rather than
+    guessing which speed level defined ``freeze_low_speed_fraction``.
+    """
+
+    sources = manifest.get("sources")
+    motion = sources.get("motion") if isinstance(sources, Mapping) else None
+    parameters = manifest.get("parameters")
+    speed_level = motion.get("speed_level") if isinstance(motion, Mapping) else None
+    thresholds = {
+        name: (parameters.get(name) if isinstance(parameters, Mapping) else None)
+        for name in _ESCAPE_THRESHOLD_PARAMETERS
+    }
+    values = (speed_level, *thresholds.values())
+    if all(value is None for value in values):
+        return {
+            "speed_level": ESCAPE_SIGNAL_PROVENANCE_UNAVAILABLE,
+            **{name: float("nan") for name in _ESCAPE_THRESHOLD_PARAMETERS},
+            "signal_provenance_status": ESCAPE_SIGNAL_PROVENANCE_UNAVAILABLE,
+        }
+    if any(value is None for value in values):
+        _fail(
+            "Escape/freeze manifest records partial signal provenance; "
+            "speed_level and every escape/freeze threshold must be present "
+            "together or absent together."
+        )
+    if (
+        type(speed_level) is not str
+        or not speed_level
+        or speed_level != speed_level.strip()
+    ):
+        _fail(
+            "Escape/freeze manifest speed_level must be one non-empty "
+            "exact string."
+        )
+    result: dict[str, Any] = {"speed_level": speed_level}
+    for name, value in thresholds.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not np.isfinite(value)
+            or float(value) <= 0.0
+        ):
+            _fail(
+                f"Escape/freeze manifest parameter {name!r} must be one "
+                "positive finite number."
+            )
+        result[name] = float(value)
+    result["signal_provenance_status"] = "recorded"
+    return result
+
+
 def _trial_escape_freeze_summaries(
     context: _RecordingContext,
 ) -> tuple[list[dict[str, Any]], str | None]:
     handle, identities, roles = _escape_source(context)
     response_classes = _registry(handle.scientific_manifest, "response_class")
+    signal_provenance = _escape_signal_provenance(handle.scientific_manifest)
     sources = _array_rows(handle.arrays, _ESCAPE_TRIAL_ARRAYS)
     rows = []
     for source in sources:
@@ -1172,6 +1237,7 @@ def _trial_escape_freeze_summaries(
                 "response_class": _decode(
                     response_classes, response_code, field="response class"
                 ),
+                **signal_provenance,
             }
         )
     return _complete_rows(rows)

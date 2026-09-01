@@ -255,3 +255,110 @@ def test_semantic_loader_failure_is_structured_and_blocks_all_dependents(
         "dependency_unavailable",
         "source_handle_unavailable",
     ]
+
+
+def test_raw_speed_level_is_rejected_without_explicit_allowance(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        operator.ComposableChaserSuccessorOperatorError,
+        match="raw' is rejected for the escape/freeze",
+    ):
+        _run(tmp_path, speed_level="raw")
+
+
+def test_raw_speed_level_allowance_requires_raw_and_a_reason(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        operator.ComposableChaserSuccessorOperatorError,
+        match="only meaningful with",
+    ):
+        _run(
+            tmp_path,
+            allow_raw_speed_level=True,
+            raw_speed_level_reason="reason",
+        )
+    with pytest.raises(
+        operator.ComposableChaserSuccessorOperatorError,
+        match="requires one non-empty recorded",
+    ):
+        _run(
+            tmp_path,
+            speed_level="raw",
+            allow_raw_speed_level=True,
+            raw_speed_level_reason="   ",
+        )
+    with pytest.raises(
+        operator.ComposableChaserSuccessorOperatorError,
+        match="only recordable together with",
+    ):
+        _run(tmp_path, raw_speed_level_reason="orphan reason")
+
+
+def test_allowed_raw_speed_level_is_recorded_and_forwarded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_ready_fakes(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def escape(*args: Any, **kwargs: Any) -> _Prepared:
+        captured.update(kwargs)
+        return _Prepared("escape")
+
+    monkeypatch.setattr(
+        operator,
+        "prepare_escape_freeze_successor_from_handles",
+        escape,
+    )
+
+    result = _run(
+        tmp_path,
+        speed_level="raw",
+        allow_raw_speed_level=True,
+        raw_speed_level_reason="  noise-floor sensitivity probe  ",
+    )
+
+    assert result["status"] == "planned_no_writes"
+    assert result["speed_level_policy"] == {
+        "speed_level": "raw",
+        "raw_speed_level_allowed": True,
+        "raw_speed_level_reason": "noise-floor sensitivity probe",
+    }
+    assert captured["speed_level"] == "raw"
+    assert captured["raw_speed_level_reason"] == "noise-floor sensitivity probe"
+
+
+def test_default_speed_level_policy_is_recorded_without_a_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_ready_fakes(monkeypatch)
+
+    result = _run(tmp_path)
+
+    assert result["speed_level_policy"] == {
+        "speed_level": "filtered",
+        "raw_speed_level_allowed": False,
+        "raw_speed_level_reason": None,
+    }
+
+
+def test_cli_allow_raw_speed_level_maps_flag_value_to_the_reason() -> None:
+    parser = operator.build_arg_parser()
+    args = parser.parse_args(
+        [
+            "archive.zarr",
+            "--run-name",
+            "r1",
+            "--speed-level",
+            "raw",
+            "--allow-raw-speed-level",
+            "sensitivity probe",
+        ]
+    )
+
+    assert args.allow_raw_speed_level == "sensitivity probe"
+    default = parser.parse_args(["archive.zarr", "--run-name", "r1"])
+    assert default.allow_raw_speed_level is None

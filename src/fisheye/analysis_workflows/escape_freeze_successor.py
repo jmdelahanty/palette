@@ -127,6 +127,7 @@ class EscapeFreezeInput:
     freeze_fraction_threshold: float = 0.8
     minimum_freeze_valid_fraction: float = 0.5
     threshold_sweep_mm_s: Sequence[float] = (10.0, 15.0, 20.0, 25.0, 30.0)
+    source_raw_speed_level_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,7 +178,25 @@ def prepare_escape_freeze_successor(source: EscapeFreezeInput) -> PreparedEscape
     recording_id = _text(source.recording_id, name="recording_id")
     _text(source.source_motion_run_path, name="source_motion_run_path")
     _digest(source.source_motion_manifest_sha256, name="source_motion_manifest_sha256")
-    _text(source.source_speed_level, name="source_speed_level")
+    speed_level_value = _text(source.source_speed_level, name="source_speed_level")
+    raw_reason = source.source_raw_speed_level_reason
+    if speed_level_value == "raw":
+        if (
+            type(raw_reason) is not str
+            or not raw_reason
+            or raw_reason != raw_reason.strip()
+        ):
+            _fail(
+                "source_speed_level 'raw' requires one non-empty exact "
+                "source_raw_speed_level_reason: raw centroid speed carries a "
+                "known noise floor and must never feed escape/freeze "
+                "thresholds silently."
+            )
+    elif raw_reason is not None:
+        _fail(
+            "source_raw_speed_level_reason is only recordable when "
+            "source_speed_level is 'raw'."
+        )
     if type(source.controller_trials) is not PreparedControllerTrials:
         raise TypeError("controller_trials must be one prepared exact successor.")
     if type(source.bout_response) is not PreparedGeneralizedBoutResponse:
@@ -632,6 +651,7 @@ def prepare_escape_freeze_successor(source: EscapeFreezeInput) -> PreparedEscape
                 "run_path": source.source_motion_run_path,
                 "manifest_sha256": source.source_motion_manifest_sha256,
                 "speed_level": source.source_speed_level,
+                "raw_speed_level_reason": source.source_raw_speed_level_reason,
                 "relative_frame_projection": dict(projection),
             },
             "controller_trial_payload_sha256": source.controller_trials.payload_digest,
@@ -715,6 +735,7 @@ def escape_freeze_input_from_handles(
     freeze_fraction_threshold: float = 0.8,
     minimum_freeze_valid_fraction: float = 0.5,
     threshold_sweep_mm_s: Sequence[float] = (10.0, 15.0, 20.0, 25.0, 30.0),
+    raw_speed_level_reason: str | None = None,
 ) -> EscapeFreezeInput:
     """Bind exact relative/motion handles and prepared response dependencies."""
 
@@ -839,6 +860,7 @@ def escape_freeze_input_from_handles(
         freeze_fraction_threshold=freeze_fraction_threshold,
         minimum_freeze_valid_fraction=minimum_freeze_valid_fraction,
         threshold_sweep_mm_s=threshold_sweep_mm_s,
+        source_raw_speed_level_reason=raw_speed_level_reason,
     )
 
 

@@ -171,3 +171,61 @@ def test_stale_controller_binding_is_rejected() -> None:
         prepare_escape_freeze_successor(
             replace(source, controller_trials=other_controller)
         )
+
+
+def test_manifest_records_exact_speed_signal_provenance() -> None:
+    result = prepare_escape_freeze_successor(_source())
+
+    motion = result.manifest["sources"]["motion"]
+    parameters = result.manifest["parameters"]
+    assert motion["speed_level"] == "filtered"
+    assert motion["raw_speed_level_reason"] is None
+    assert parameters["escape_speed_threshold_mm_s"] == 20.0
+    assert parameters["high_turn_threshold_deg"] == 45.0
+    assert parameters["freeze_speed_threshold_mm_s"] == 2.0
+    assert parameters["freeze_window_s"] == 2.0
+
+
+def test_raw_speed_level_requires_one_recorded_reason() -> None:
+    with pytest.raises(
+        EscapeFreezeSuccessorError, match="requires one non-empty exact"
+    ):
+        prepare_escape_freeze_successor(
+            replace(_source(), source_speed_level="raw")
+        )
+    with pytest.raises(
+        EscapeFreezeSuccessorError, match="requires one non-empty exact"
+    ):
+        prepare_escape_freeze_successor(
+            replace(
+                _source(),
+                source_speed_level="raw",
+                source_raw_speed_level_reason="  padded  ",
+            )
+        )
+
+
+def test_raw_speed_level_with_reason_is_recorded_in_the_manifest() -> None:
+    result = prepare_escape_freeze_successor(
+        replace(
+            _source(),
+            source_speed_level="raw",
+            source_raw_speed_level_reason="noise-floor sensitivity probe",
+        )
+    )
+
+    motion = result.manifest["sources"]["motion"]
+    assert motion["speed_level"] == "raw"
+    assert motion["raw_speed_level_reason"] == "noise-floor sensitivity probe"
+
+
+def test_raw_reason_is_rejected_for_non_raw_speed_levels() -> None:
+    with pytest.raises(
+        EscapeFreezeSuccessorError, match="only recordable when"
+    ):
+        prepare_escape_freeze_successor(
+            replace(
+                _source(),
+                source_raw_speed_level_reason="not a raw run",
+            )
+        )
