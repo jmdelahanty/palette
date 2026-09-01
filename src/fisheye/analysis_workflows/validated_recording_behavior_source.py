@@ -218,7 +218,10 @@ class ValidatedRecordingBehaviorSource:
         *,
         expected_analysis_zarr: str | Path | None = None,
         expected_recording_id: str | None = None,
+        validate_current_sources: bool = True,
     ) -> None:
+        if type(validate_current_sources) is not bool:
+            raise TypeError("validate_current_sources must be the exact boolean.")
         path = Path(bundle_path).expanduser().resolve()
         if not path.is_file():
             raise FileNotFoundError(
@@ -228,7 +231,7 @@ class ValidatedRecordingBehaviorSource:
             path,
             expected_analysis_zarr=expected_analysis_zarr,
             expected_recording_id=expected_recording_id,
-            validate_current_sources=True,
+            validate_current_sources=validate_current_sources,
         )
         self.bundle_path = path
         self.bundle = bundle

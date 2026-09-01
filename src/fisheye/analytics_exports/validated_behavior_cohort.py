@@ -9,7 +9,8 @@ reconstructs unavailable evidence.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -128,9 +129,22 @@ _PUBLICATION_PART_FIELDS = _SHARD_PART_FIELDS | {
     "source_shard_record_sha256",
 }
 
+@dataclass(frozen=True)
+class ValidatedBehaviorBatchSource:
+    """One-pass bounded column batches for a recording-owned dense table.
+
+    Every non-empty batch carries the exact contract column roster. Dense
+    adapters emit rows in strictly increasing primary-key order, allowing the
+    writer and receipt validator to prove uniqueness with constant key memory.
+    """
+
+    batches: Iterable[Mapping[str, Any]]
+    zero_row_reason: str | None = None
+
+
 RowExtractor = Callable[
     [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]],
-    tuple[Sequence[Mapping[str, Any]], str | None],
+    tuple[Sequence[Mapping[str, Any]], str | None] | ValidatedBehaviorBatchSource,
 ]
 
 
@@ -772,6 +786,43 @@ def _primary_key_bounds(
     return {"minimum": list(min(keys)), "maximum": list(max(keys))}
 
 
+def _advance_ordered_key_summary(
+    table: Any,
+    spec: ValidatedBehaviorTableSpec,
+    *,
+    previous: tuple[Any, ...] | None,
+    minimum: tuple[Any, ...] | None,
+) -> tuple[tuple[Any, ...] | None, tuple[Any, ...] | None]:
+    """Prove strict key order for one Arrow batch without retaining all keys."""
+
+    if table.num_rows == 0:
+        return previous, minimum
+    columns = [table.column(name).to_pylist() for name in spec.contract.primary_key]
+    for key in zip(*columns, strict=True):
+        if previous is not None and key <= previous:
+            _fail(
+                f"{spec.table_name}: dense extractor primary keys are not strictly "
+                "increasing."
+            )
+        if minimum is None:
+            minimum = key
+        previous = key
+    return previous, minimum
+
+
+def _validate_extracted_columns(
+    columns: Mapping[str, Any], spec: ValidatedBehaviorTableSpec, *, batch_index: int
+) -> None:
+    expected = {item.name for item in spec.contract.fields}
+    actual = set(columns)
+    if actual != expected:
+        _fail(
+            f"{spec.table_name}: extracted column batch {batch_index} has an inexact "
+            f"field set; missing={sorted(expected - actual)!r}, "
+            f"extra={sorted(actual - expected)!r}."
+        )
+
+
 def _part_footer(
     *, plan: Mapping[str, Any], member: Mapping[str, Any], table_name: str
 ) -> dict[bytes, bytes]:
@@ -903,16 +954,29 @@ def _observed_primary_key_summary(
 ) -> tuple[int, dict[str, object] | None]:
     import pyarrow.parquet as pq
 
-    seen: set[tuple[Any, ...]] = set()
+    seen: set[tuple[Any, ...]] | None = (
+        set() if spec.primary_key_validation == "unordered_unique_v1" else None
+    )
+    count = 0
+    previous: tuple[Any, ...] | None = None
     minimum: tuple[Any, ...] | None = None
     maximum: tuple[Any, ...] | None = None
     parquet = pq.ParquetFile(part)
     for batch in parquet.iter_batches(columns=list(spec.contract.primary_key)):
         columns = [column.to_pylist() for column in batch.columns]
         for key in zip(*columns, strict=True):
-            if key in seen:
-                _fail(f"{spec.table_name}: shard contains a duplicate primary key.")
-            seen.add(key)
+            if seen is not None:
+                if key in seen:
+                    _fail(
+                        f"{spec.table_name}: shard contains a duplicate primary key."
+                    )
+                seen.add(key)
+            elif previous is not None and key <= previous:
+                _fail(
+                    f"{spec.table_name}: shard primary keys are not strictly increasing."
+                )
+            previous = key
+            count += 1
             minimum = key if minimum is None or key < minimum else minimum
             maximum = key if maximum is None or key > maximum else maximum
     bounds = (
@@ -920,7 +984,7 @@ def _observed_primary_key_summary(
         if minimum is None
         else {"minimum": list(minimum), "maximum": list(maximum)}
     )
-    return len(seen), bounds
+    return count, bounds
 
 
 def _validate_shard_receipt(
@@ -1152,17 +1216,27 @@ def write_validated_behavior_recording_shard(
                     table_name, plan, membership_member, bundle_member
                 )
             elif table_name in extractors:
-                raw_rows, zero_reason = extractors[table_name](
+                extracted = extractors[table_name](
                     plan, membership_member, bundle_member
                 )
-                rows = [dict(row) for row in raw_rows]
+                if isinstance(extracted, ValidatedBehaviorBatchSource):
+                    rows = None
+                    zero_reason = extracted.zero_row_reason
+                else:
+                    raw_rows, zero_reason = extracted
+                    rows = [dict(row) for row in raw_rows]
             else:
                 _fail(f"No recording-scoped extractor is installed for {table_name!r}.")
-            if not rows and (not spec.zero_rows_allowed or zero_reason is None):
-                _fail(f"{table_name}: extractor returned an uncontracted empty result.")
-            if rows and zero_reason is not None:
-                _fail(f"{table_name}: non-empty rows cannot carry a zero-row reason.")
-            _validate_extracted_rows(rows, spec)
+            if rows is not None:
+                if not rows and (not spec.zero_rows_allowed or zero_reason is None):
+                    _fail(
+                        f"{table_name}: extractor returned an uncontracted empty result."
+                    )
+                if rows and zero_reason is not None:
+                    _fail(
+                        f"{table_name}: non-empty rows cannot carry a zero-row reason."
+                    )
+                _validate_extracted_rows(rows, spec)
             table_dir = stage / "tables" / table_name
             table_dir.mkdir(parents=True, exist_ok=False)
             part = table_dir / "part-00000.parquet"
@@ -1170,21 +1244,95 @@ def write_validated_behavior_recording_shard(
                 spec.contract,
                 metadata=_part_footer(plan=plan, member=member, table_name=table_name),
             )
-            table = pa.Table.from_pylist(rows, schema=schema)
             temporary_part = table_dir / ".part-00000.parquet.tmp"
-            pq.write_table(
-                table,
-                temporary_part,
-                compression=str(plan["parameters"]["parquet_compression"]),
-                row_group_size=int(plan["parameters"]["effective_row_group_rows"]),
-            )
+            if rows is not None:
+                table = pa.Table.from_pylist(rows, schema=schema)
+                pq.write_table(
+                    table,
+                    temporary_part,
+                    compression=str(plan["parameters"]["parquet_compression"]),
+                    row_group_size=int(
+                        plan["parameters"]["effective_row_group_rows"]
+                    ),
+                )
+                row_count = table.num_rows
+                key_bounds = _primary_key_bounds(rows, spec)
+            else:
+                if spec.primary_key_validation != "strictly_increasing_v1":
+                    _fail(
+                        f"{table_name}: batch sources require strictly increasing "
+                        "primary-key validation."
+                    )
+                writer = pq.ParquetWriter(
+                    temporary_part,
+                    schema,
+                    compression=str(plan["parameters"]["parquet_compression"]),
+                )
+                row_count = 0
+                minimum_key: tuple[Any, ...] | None = None
+                previous_key: tuple[Any, ...] | None = None
+                try:
+                    for batch_index, columns in enumerate(extracted.batches):
+                        if not isinstance(columns, Mapping):
+                            _fail(
+                                f"{table_name}: extracted column batch {batch_index} "
+                                "is not one mapping."
+                            )
+                        _validate_extracted_columns(
+                            columns, spec, batch_index=batch_index
+                        )
+                        table = pa.Table.from_pydict(dict(columns), schema=schema)
+                        for field_contract in spec.contract.fields:
+                            if (
+                                not field_contract.nullable
+                                and table.column(field_contract.name).null_count
+                            ):
+                                _fail(
+                                    f"{table_name}: extracted column batch "
+                                    f"{batch_index} has null required field "
+                                    f"{field_contract.name!r}."
+                                )
+                        previous_key, minimum_key = _advance_ordered_key_summary(
+                            table,
+                            spec,
+                            previous=previous_key,
+                            minimum=minimum_key,
+                        )
+                        if table.num_rows:
+                            writer.write_table(
+                                table,
+                                row_group_size=int(
+                                    plan["parameters"]["effective_row_group_rows"]
+                                ),
+                            )
+                            row_count += table.num_rows
+                finally:
+                    writer.close()
+                if row_count == 0 and (
+                    not spec.zero_rows_allowed or zero_reason is None
+                ):
+                    _fail(
+                        f"{table_name}: extractor returned an uncontracted empty result."
+                    )
+                if row_count and zero_reason is not None:
+                    _fail(
+                        f"{table_name}: non-empty rows cannot carry a zero-row reason."
+                    )
+                key_bounds = (
+                    None
+                    if minimum_key is None
+                    else {
+                        "minimum": list(minimum_key),
+                        "maximum": list(previous_key),
+                    }
+                )
             os.replace(temporary_part, part)
             parts[table_name] = _part_receipt(
                 part=part,
                 relative_path=f"tables/{table_name}/part-00000.parquet",
-                row_count=table.num_rows,
+                row_count=row_count,
                 spec=spec,
-                key_bounds=_primary_key_bounds(rows, spec),
+                key_bounds=key_bounds,
             )
             zero_reasons[table_name] = zero_reason
         body = {
@@ -1366,6 +1514,38 @@ def _validate_published_shard_roster(
     return expected_files
 
 
+def _part_relation_values(
+    part: Path, fields: tuple[str, ...]
+) -> set[tuple[Any, ...]]:
+    """Collect one recording-scoped target relation, never a cohort relation."""
+
+    import pyarrow.parquet as pq
+
+    values: set[tuple[Any, ...]] = set()
+    parquet = pq.ParquetFile(part)
+    for batch in parquet.iter_batches(columns=list(fields)):
+        columns = [column.to_pylist() for column in batch.columns]
+        values.update(zip(*columns, strict=True))
+    return values
+
+
+def _part_foreign_key_is_closed(
+    local_part: Path,
+    local_fields: tuple[str, ...],
+    target_values: set[tuple[Any, ...]],
+) -> bool:
+    """Stream one local relation against a recording-bounded target set."""
+
+    import pyarrow.parquet as pq
+
+    parquet = pq.ParquetFile(local_part)
+    for batch in parquet.iter_batches(columns=list(local_fields)):
+        columns = [column.to_pylist() for column in batch.columns]
+        if any(key not in target_values for key in zip(*columns, strict=True)):
+            return False
+    return True
+
+
 def _global_validate_generation(
     generation_root: Path,
     *,
@@ -1377,33 +1557,31 @@ def _global_validate_generation(
     validate_keys: bool = True,
     additional_expected_files: set[str] | None = None,
 ) -> dict[str, Any]:
-    import pyarrow.parquet as pq
-
     table_names = validate_table_specs(table_specs)
     if set(inventory) != set(table_names):
         _fail("Publication part inventory is incomplete.")
-    relation_fields_by_table: dict[str, set[tuple[str, ...]]] = {
-        name: {tuple(table_specs[name].contract.primary_key)} for name in table_names
-    }
-    for table_name in table_names:
-        for local_fields, target, target_fields in table_specs[table_name].foreign_keys:
-            relation_fields_by_table[table_name].add(tuple(local_fields))
-            relation_fields_by_table[target].add(tuple(target_fields))
-    relation_values_by_table: dict[str, dict[tuple[str, ...], set[tuple[Any, ...]]]] = {
-        name: {fields: set() for fields in relation_fields_by_table[name]}
-        for name in table_names
-    }
-    keys_by_table: dict[str, set[tuple[Any, ...]]] = {}
     row_counts: dict[str, int] = {}
+    primary_key_counts: dict[str, int | None] = {}
     expected_files: set[str] = set()
     member_by_ordinal = {int(item["ordinal"]): item for item in plan["members"]}
+    expected_ordinals = tuple(member_by_ordinal)
+    if (
+        len(member_by_ordinal) != plan["member_count"]
+        or len({str(item["recording_id"]) for item in plan["members"]})
+        != plan["member_count"]
+    ):
+        _fail("Export plan member identities are not unique.")
+    parts_by_table_ordinal: dict[str, dict[int, Path]] = {}
     for table_name in table_names:
         spec = table_specs[table_name]
-        seen: set[tuple[Any, ...]] = set()
         count = 0
         entries = list(inventory[table_name])
         if len(entries) != plan["member_count"]:
             _fail(f"{table_name}: publication lacks one part per parent member.")
+        observed_ordinals = tuple(entry.get("member_ordinal") for entry in entries)
+        if observed_ordinals != expected_ordinals:
+            _fail(f"{table_name}: publication part roster is not exact and ordered.")
+        parts_by_ordinal: dict[int, Path] = {}
         for entry in entries:
             if set(entry) != _PUBLICATION_PART_FIELDS:
                 _fail(f"{table_name}: publication part field set is inexact.")
@@ -1428,6 +1606,7 @@ def _global_validate_generation(
                 _fail(f"{table_name}: inventory part path is invalid.")
             relative_inside_generation = expected_inside_generation
             part = generation_root / relative_inside_generation
+            parts_by_ordinal[ordinal] = part
             expected_files.add(relative_inside_generation.as_posix())
             _validate_part(
                 part,
@@ -1438,70 +1617,36 @@ def _global_validate_generation(
                 hash_bytes=hash_parts,
             )
             if validate_keys:
-                parquet = pq.ParquetFile(part)
-                part_seen: set[tuple[Any, ...]] = set()
-                part_minimum: tuple[Any, ...] | None = None
-                part_maximum: tuple[Any, ...] | None = None
-                validation_fields = tuple(
-                    dict.fromkeys(
-                        name
-                        for relation_fields in relation_fields_by_table[table_name]
-                        for name in relation_fields
-                    )
-                )
-                for batch in parquet.iter_batches(columns=list(validation_fields)):
-                    columns = batch.to_pydict()
-                    for row_index in range(batch.num_rows):
-                        key = tuple(
-                            columns[name][row_index]
-                            for name in spec.contract.primary_key
-                        )
-                        if key in part_seen:
-                            _fail(f"{table_name}: duplicate primary key within part.")
-                        if key in seen:
-                            _fail(f"{table_name}: duplicate primary key across parts.")
-                        part_seen.add(key)
-                        seen.add(key)
-                        part_minimum = (
-                            key
-                            if part_minimum is None or key < part_minimum
-                            else part_minimum
-                        )
-                        part_maximum = (
-                            key
-                            if part_maximum is None or key > part_maximum
-                            else part_maximum
-                        )
-                        for relation_fields in relation_fields_by_table[table_name]:
-                            relation_values_by_table[table_name][relation_fields].add(
-                                tuple(
-                                    columns[name][row_index] for name in relation_fields
-                                )
-                            )
-                part_bounds = (
-                    None
-                    if part_minimum is None
-                    else {
-                        "minimum": list(part_minimum),
-                        "maximum": list(part_maximum),
-                    }
-                )
+                part_key_count, part_bounds = _observed_primary_key_summary(part, spec)
                 if (
-                    len(part_seen) != entry["row_count"]
+                    part_key_count != entry["row_count"]
                     or entry.get("primary_key_bounds") != part_bounds
                 ):
                     _fail(f"{table_name}: part primary-key bounds are stale.")
             count += int(entry["row_count"])
-        keys_by_table[table_name] = seen
+        parts_by_table_ordinal[table_name] = parts_by_ordinal
         row_counts[table_name] = count
+        # Parts are recording-owned, every row's recording identity is checked
+        # against that owner, and plan recording IDs are unique. Once each part
+        # is unique, cross-part primary-key collisions are therefore impossible.
+        primary_key_counts[table_name] = count if validate_keys else None
     if validate_keys:
         for table_name in table_names:
             spec = table_specs[table_name]
             for local_fields, target, target_fields in spec.foreign_keys:
-                local_values = relation_values_by_table[table_name][tuple(local_fields)]
-                target_values = relation_values_by_table[target][tuple(target_fields)]
-                if not local_values.issubset(target_values):
-                    _fail(f"{table_name}: foreign key to {target} is not closed.")
+                for ordinal in expected_ordinals:
+                    target_values = _part_relation_values(
+                        parts_by_table_ordinal[target][ordinal],
+                        tuple(target_fields),
+                    )
+                    if not _part_foreign_key_is_closed(
+                        parts_by_table_ordinal[table_name][ordinal],
+                        tuple(local_fields),
+                        target_values,
+                    ):
+                        _fail(
+                            f"{table_name}: foreign key to {target} is not closed."
+                        )
     if (
         "cohort_recordings" in row_counts
         and row_counts["cohort_recordings"] != plan["member_count"]
@@ -1526,10 +1671,7 @@ def _global_validate_generation(
         _fail("Publication generation contains files outside its closed inventory.")
     return {
         "row_counts_by_table": row_counts,
-        "primary_key_counts_by_table": {
-            name: len(keys_by_table[name]) if validate_keys else None
-            for name in table_names
-        },
+        "primary_key_counts_by_table": primary_key_counts,
         "foreign_key_validation": "complete" if validate_keys else "receipt_bound",
         "inventory_file_count": part_file_count,
     }

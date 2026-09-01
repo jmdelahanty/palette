@@ -18,6 +18,13 @@ from .validated_behavior_phase_a_contracts import (
     PHASE_A_PROFILE_ID,
     PHASE_A_TABLE_SPECS,
 )
+from .validated_behavior_phase_b_adapters import (
+    build_phase_b_dense_row_extractors,
+)
+from .validated_behavior_phase_b_contracts import (
+    PHASE_B_PROFILE_ID,
+    PHASE_B_TABLE_SPECS,
+)
 
 
 class ValidatedBehaviorProfileError(ValueError):
@@ -38,6 +45,12 @@ def _no_extractors() -> Mapping[str, Callable[..., Any]]:
     return MappingProxyType({})
 
 
+def _phase_b_extractors() -> Mapping[str, Callable[..., Any]]:
+    extractors = dict(build_phase_a_row_extractors())
+    extractors.update(build_phase_b_dense_row_extractors())
+    return MappingProxyType(extractors)
+
+
 INSTALLED_VALIDATED_BEHAVIOR_PROFILES: Mapping[str, ValidatedBehaviorExportProfile] = (
     MappingProxyType(
         {
@@ -50,6 +63,11 @@ INSTALLED_VALIDATED_BEHAVIOR_PROFILES: Mapping[str, ValidatedBehaviorExportProfi
                 profile_id=PHASE_A_PROFILE_ID,
                 table_specs=PHASE_A_TABLE_SPECS,
                 row_extractor_factory=build_phase_a_row_extractors,
+            ),
+            PHASE_B_PROFILE_ID: ValidatedBehaviorExportProfile(
+                profile_id=PHASE_B_PROFILE_ID,
+                table_specs=PHASE_B_TABLE_SPECS,
+                row_extractor_factory=_phase_b_extractors,
             ),
         }
     )
