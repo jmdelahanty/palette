@@ -195,6 +195,42 @@ def test_capability_router_preserves_typed_absence(
     )
 
 
+def test_bundle_set_consumer_can_defer_whole_bundle_revalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle_path = tmp_path / "behavior-bundle.json"
+    bundle_path.write_text("{}\n", encoding="utf-8")
+    archive = (tmp_path / "analysis.zarr").resolve()
+    observed: dict[str, Any] = {}
+
+    def read_bundle(path: str | Path, **expected: Any) -> dict[str, Any]:
+        observed.update(expected)
+        return {
+            "analysis_zarr": str(archive),
+            "recording_id": "recording-a",
+            "record_sha256": "a" * 64,
+        }
+
+    monkeypatch.setattr(
+        subject, "read_validated_recording_behavior_bundle", read_bundle
+    )
+
+    source = subject.ValidatedRecordingBehaviorSource(
+        bundle_path,
+        expected_analysis_zarr=archive,
+        expected_recording_id="recording-a",
+        validate_current_sources=False,
+    )
+
+    assert source.bundle_sha256 == "a" * 64
+    assert observed["validate_current_sources"] is False
+    with pytest.raises(TypeError, match="exact boolean"):
+        subject.ValidatedRecordingBehaviorSource(  # type: ignore[arg-type]
+            bundle_path, validate_current_sources=1
+        )
+
+
 def test_targeted_provider_projection_hashes_only_consumed_arrays_and_partition(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

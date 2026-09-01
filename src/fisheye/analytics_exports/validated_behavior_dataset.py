@@ -46,6 +46,12 @@ class ValidatedBehaviorTable:
     def capability_policy(self) -> str:
         return self.spec.capability_policy
 
+    @property
+    def semantic_metadata(self) -> Mapping[str, str]:
+        """Return the plan-bound units and scientific interpretation metadata."""
+
+        return MappingProxyType(dict(self.spec.semantic_metadata))
+
     def scan(
         self,
         *,
@@ -152,6 +158,7 @@ class ValidatedBehaviorTable:
                 "analysis_unit_policy"
             ]["sha256"],
             "capability_policy": self.spec.capability_policy,
+            "semantic_metadata": dict(self.spec.semantic_metadata),
         }
 
 

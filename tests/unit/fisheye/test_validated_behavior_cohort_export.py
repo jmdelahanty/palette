@@ -17,6 +17,7 @@ from fisheye.analysis_workflows.validated_behavior_cohort import (
     policy_envelope,
 )
 from fisheye.analytics_exports.validated_behavior_cohort import (
+    ValidatedBehaviorBatchSource,
     ValidatedBehaviorExportError,
     build_validated_behavior_export_plan,
     planned_shard_receipt_path,
@@ -432,6 +433,152 @@ def test_scientific_adapter_is_capability_gated_without_protocol_logic_in_core(
             "value": 2.5,
         }
     ]
+
+
+def test_dense_column_batches_write_with_constant_memory_key_validation(
+    tmp_path: Path,
+) -> None:
+    membership_path, bundle_set_path = _membership_and_bundle_set(tmp_path)
+    contract = ArrowTableContract(
+        table_name="fixture_dense_samples",
+        schema_namespace="fixture.analytics.validated_behavior.table",
+        fields=(
+            field("export_run_id", "string"),
+            field("recording_id", "string"),
+            field("sample_id", "int64"),
+            field("value", "float32"),
+        ),
+        primary_key=("export_run_id", "recording_id", "sample_id"),
+    )
+    spec = ValidatedBehaviorTableSpec(
+        contract=contract,
+        grain="one row per exact dense fixture sample",
+        capability_policy="optional_explicit_coverage",
+        required_capability="semantic_epochs",
+        zero_rows_allowed=True,
+        primary_key_validation="strictly_increasing_v1",
+    )
+    specs = {**CORE_TABLE_SPECS, spec.table_name: spec}
+    plan = build_validated_behavior_export_plan(
+        membership_path=membership_path,
+        bundle_set_path=bundle_set_path,
+        export_run_id="dense_column_batch_export_v1",
+        shard_root=(tmp_path / "dense-shards").resolve(),
+        publication_root=(tmp_path / "dense-publication").resolve(),
+        palette_commit=COMMIT,
+        palette_repo=Path(__file__).resolve().parents[3],
+        table_specs=specs,
+        export_profile_id="dense_column_batch_profile_v1",
+        created_at_utc=NOW,
+    )
+    plan_path = tmp_path / "dense-plan.json"
+    write_validated_behavior_export_plan(plan_path, plan)
+
+    def extract(
+        plan_value: dict[str, Any],
+        member: dict[str, Any],
+        _bundle_member: dict[str, Any],
+    ) -> ValidatedBehaviorBatchSource:
+        common = {
+            "export_run_id": [plan_value["export_run_id"]],
+            "recording_id": [member["recording_id"]],
+        }
+        return ValidatedBehaviorBatchSource(
+            batches=(
+                {
+                    **common,
+                    "sample_id": [0],
+                    "value": [1.0],
+                },
+                {
+                    "export_run_id": [plan_value["export_run_id"]] * 2,
+                    "recording_id": [member["recording_id"]] * 2,
+                    "sample_id": [1, 2],
+                    "value": [2.0, 3.0],
+                },
+            )
+        )
+
+    receipt = write_validated_behavior_recording_shard(
+        plan_path=plan_path,
+        member_ordinal=1,
+        table_specs=specs,
+        row_extractors={spec.table_name: extract},
+        created_at_utc=NOW,
+    )
+
+    part = receipt["parts_by_table"][spec.table_name]
+    assert part["row_count"] == 3
+    assert part["primary_key_bounds"] == {
+        "minimum": ["dense_column_batch_export_v1", "recording-a", 0],
+        "maximum": ["dense_column_batch_export_v1", "recording-a", 2],
+    }
+
+
+def test_dense_column_batches_reject_nonincreasing_primary_keys(
+    tmp_path: Path,
+) -> None:
+    membership_path, bundle_set_path = _membership_and_bundle_set(tmp_path)
+    contract = ArrowTableContract(
+        table_name="fixture_dense_order_failure",
+        schema_namespace="fixture.analytics.validated_behavior.table",
+        fields=(
+            field("export_run_id", "string"),
+            field("recording_id", "string"),
+            field("sample_id", "int64"),
+        ),
+        primary_key=("export_run_id", "recording_id", "sample_id"),
+    )
+    spec = ValidatedBehaviorTableSpec(
+        contract=contract,
+        grain="one row per exact dense fixture sample",
+        capability_policy="optional_explicit_coverage",
+        required_capability="semantic_epochs",
+        zero_rows_allowed=True,
+        primary_key_validation="strictly_increasing_v1",
+    )
+    specs = {**CORE_TABLE_SPECS, spec.table_name: spec}
+    plan = build_validated_behavior_export_plan(
+        membership_path=membership_path,
+        bundle_set_path=bundle_set_path,
+        export_run_id="dense_order_failure_v1",
+        shard_root=(tmp_path / "dense-order-shards").resolve(),
+        publication_root=(tmp_path / "dense-order-publication").resolve(),
+        palette_commit=COMMIT,
+        palette_repo=Path(__file__).resolve().parents[3],
+        table_specs=specs,
+        export_profile_id="dense_order_failure_profile_v1",
+        created_at_utc=NOW,
+    )
+    plan_path = tmp_path / "dense-order-plan.json"
+    write_validated_behavior_export_plan(plan_path, plan)
+
+    def extract(
+        plan_value: dict[str, Any],
+        member: dict[str, Any],
+        _bundle_member: dict[str, Any],
+    ) -> ValidatedBehaviorBatchSource:
+        return ValidatedBehaviorBatchSource(
+            batches=(
+                {
+                    "export_run_id": [plan_value["export_run_id"]] * 2,
+                    "recording_id": [member["recording_id"]] * 2,
+                    "sample_id": [1, 1],
+                },
+            )
+        )
+
+    with pytest.raises(
+        ValidatedBehaviorExportError,
+        match="primary keys are not strictly increasing",
+    ):
+        write_validated_behavior_recording_shard(
+            plan_path=plan_path,
+            member_ordinal=1,
+            table_specs=specs,
+            row_extractors={spec.table_name: extract},
+            created_at_utc=NOW,
+        )
 
 
 @pytest.mark.parametrize(

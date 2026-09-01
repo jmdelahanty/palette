@@ -556,6 +556,7 @@ provider; they are not an anatomical body-frame supplier.
 | Table | Grain | Admission rule |
 |---|---|---|
 | `provider_motion_samples` | recording x provider x track sample | Exact bounded projection from the bundle-bound provider-motion run |
+| `bout_detector_signal_samples` | recording x selected bout-detector signal x sample row | Exact bound detector-response trace; explicitly not a physical speed estimator |
 | `stimulus_native_state_support` | recording x temporal-proxy binding x acquisition frame x chaser x native stimulus state | Every contributing state key/frame/source row/timestamp and exact multiplicity; no display-exposure claim |
 | `chaser_relative_samples` | recording x provider x acquisition frame x chaser | Exact relative-frame child; replaces any temptation to revive unsealed legacy distance tables |
 | `body_frame_samples` | recording x acquisition frame | Exact bundle-bound anatomical body frame; kept separate from chaser repetition |
@@ -903,8 +904,10 @@ should remain separated:
 | Bundle fanout planner and CLI | `src/fisheye/utils/materialize_validated_behavior_bundle_cohort.py` |
 | Generic core table contracts and Arrow schemas | `src/fisheye/analytics_exports/validated_behavior_contracts.py` |
 | Installed compact scientific contracts | `src/fisheye/analytics_exports/validated_behavior_phase_a_contracts.py` |
+| Installed dense scientific contracts | `src/fisheye/analytics_exports/validated_behavior_phase_b_contracts.py` |
 | Closed profile registry and routing | `src/fisheye/analytics_exports/validated_behavior_profiles.py` |
 | Bundle-backed source-to-table adapters | `src/fisheye/analytics_exports/validated_behavior_adapters.py` |
+| Receipt-bound dense source-to-table adapters | `src/fisheye/analytics_exports/validated_behavior_phase_b_adapters.py` |
 | Shard and cohort export manifests/validators | `src/fisheye/analytics_exports/validated_behavior_cohort.py` |
 | Atomic publication reuse | `src/fisheye/analytics_exports/publication.py` |
 | Export plan/shard/finalize CLI | `src/fisheye/utils/materialize_validated_behavior_cohort_export.py` |
@@ -1035,6 +1038,55 @@ all 80 recording bundles against the same current `c0ec5dc0...` projection-
 receipt generation; the older one-recording `c5eebd...` canary bundle cannot be
 mixed into that bundle set.
 
+### Phase-B implementation addendum — 2026-09-01
+
+The installed dense profile is
+`validated_recording_behavior_phase_b_v1`. It retains every Phase-A table and
+adds eight exact persisted sample surfaces: provider motion, the selected
+swim-bout detector response, native stimulus-state support, provider-explicit
+chaser-relative rows, deduplicated anatomical body frames, body-relative
+alignment rows, exact logged-active controller-trial membership, and separate
+controller-trial gap evidence.
+
+The physical motion columns and the exponentially filtered bout-detector trace
+are deliberately different tables. `detection_signal_mm_s` retains the source
+role `detector_response_not_physical_speed_estimator`; it is not relabeled as
+filtered or physical swimming speed. Native stimulus support retains every
+candidate and chaser row, logged session timestamps, and multiplicity, while
+sealing `physical_presentation_verified = false` for this historical proxy
+cohort. Trial gaps remain nonmember evidence keyed to an exact trial envelope.
+
+Dense adapters emit bounded Arrow column batches in strictly increasing
+primary-key order. The Parquet writer therefore proves per-part uniqueness
+with constant key memory. Cohort validation uses the exact one-part-per-member
+roster and recording-scoped foreign-key sets; it does not construct one
+cohort-wide set of every frame key. Existing compact profiles retain their
+established unordered-key contract and byte-compatible serialized table specs.
+
+Relative-frame projections use the reusable direct-subtree validation receipt,
+not the older candidate-chain receipt interface. The loader verifies the exact
+receipt and current immutable metadata, then content-checks only the arrays the
+dense adapters consume. The bundle-set seals each bundle byte identity, so the
+recording source can defer a second whole-bundle source walk while every dense
+source still performs its own targeted validation.
+
+A read-only-source, disposable one-recording canary against
+`2026-08-10T17-20-55Z_arena_1_goodbatbadbat` completed all 30 Parquet parts and
+its validated shard receipt in 36.69 seconds. A second canary completed the
+same shard, cross-table key and foreign-key finalization, immutable manifest,
+validation receipt, receipt-mode reopening, and one bounded predicate/projection
+query in 61.26 seconds. It wrote 1,736,530 rows and
+87,152,041 Parquet bytes (about 85 MiB on disk). The eight dense tables account
+for 1,720,437 rows; the controller-gap table correctly emitted a typed
+`complete-no-rows` part for this recording. The finalized canary manifest digest
+is `5975f47f56100e5d5b703694634862491a4ea9979559a201ae11f6bc656da3b1` and its
+validation-receipt digest is
+`2907d8253d69c60bdcba584da121215c9f98c70f851e6829afff100f788b80f4`.
+These canaries used uncommitted code at base commit
+`7785979bc5b357dda289e2e3a7e263be2b6f54fa` and are engineering evidence only.
+Required CI, a clean commit-pinned deployment, and the full cohort publication
+remain pending.
+
 ## Staged implementation checklist
 
 ### Phase 0 — Contract freeze
@@ -1057,13 +1109,13 @@ mixed into that bundle set.
 - [x] Implement the one-time schema-v5 historical task importer.
 - [x] Implement the future frozen-cohort-v2 importer into the same membership
       interface.
-- [ ] Validate the 84-member GoodBatBadBat manifest and four invalid states.
-- [ ] Add deterministic per-recording bundle plans using the coherent receipt
+- [x] Validate the 84-member GoodBatBadBat manifest and four invalid states.
+- [x] Add deterministic per-recording bundle plans using the coherent receipt
       generation.
-- [ ] Run an in-memory/read-only plan for all 84 members.
-- [ ] Materialize and validate a new canary bundle.
-- [ ] After required CI, fan out the other 79 bundles.
-- [ ] Build and validate the 84-member bundle-set manifest.
+- [x] Run an in-memory/read-only plan for all 84 members.
+- [x] Materialize and validate a new canary bundle.
+- [x] After required CI, fan out the other 79 bundles.
+- [x] Build and validate the 84-member bundle-set manifest.
 
 ### Phase 2 — Compact export canary
 
@@ -1080,7 +1132,7 @@ mixed into that bundle set.
 
 ### Phase 3 — Compact 80-recording cohort export
 
-- [ ] Deploy one clean commit-pinned cluster worktree after required CI is
+- [x] Deploy one clean commit-pinned cluster worktree after required CI is
       green.
 - [x] Implement an exact immutable export plan and closed table roster.
 - [x] Render per-recording shards with bounded `max_active` concurrency.
@@ -1089,7 +1141,7 @@ mixed into that bundle set.
 - [x] Run global key, foreign-key, row-count, Arrow,
       and inventory validation.
 - [x] Publish the immutable generation and validation receipt in test fixtures.
-- [ ] Preserve 84 membership/capability rows and exact contributing-member
+- [x] Preserve 84 membership/capability rows and exact contributing-member
       rosters for every scientific table.
 
 ### Phase 4 — Lazy consumers and first cohort figures
@@ -1105,12 +1157,16 @@ mixed into that bundle set.
 
 ### Phase 5 — Optional dense projections
 
-- [ ] Measure row counts, bytes, row-group sizes, filter latency, memory, and
-      publication time on a one-recording sample.
-- [ ] Implement streaming `provider_motion_samples` shards.
-- [ ] Implement provider-explicit `chaser_relative_samples` shards.
-- [ ] Add body-alignment and exact active-trial-membership samples only when a
-      consumer requires them.
+- [ ] Complete cohort-scale measurements of row counts, bytes, row-group
+      sizes, filter latency, memory, and publication time. The one-recording
+      write time, rows, and bytes are recorded above.
+- [x] Implement streaming `provider_motion_samples` shards.
+- [x] Keep the persisted bout-detector response separate from physical motion.
+- [x] Implement exact native stimulus-state support without a presentation-time
+      claim.
+- [x] Implement provider-explicit `chaser_relative_samples` shards.
+- [x] Add deduplicated body frames, body-alignment rows, exact active-trial
+      membership, and separate gap evidence.
 - [ ] Keep every worker's file ownership disjoint; if any Zarr staging is ever
       introduced, require whole non-overlapping physical chunk ownership.
 - [ ] Publish dense tables as optional manifest-bound extensions, not as a

@@ -46,6 +46,8 @@ class ValidatedBehaviorTableSpec:
     required_capability: str | None = None
     foreign_keys: tuple[tuple[tuple[str, ...], str, tuple[str, ...]], ...] = ()
     zero_rows_allowed: bool = False
+    primary_key_validation: str = "unordered_unique_v1"
+    semantic_metadata: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.capability_policy not in CAPABILITY_POLICIES:
@@ -63,6 +65,29 @@ class ValidatedBehaviorTableSpec:
                 f"{self.contract.table_name}: capability-scoped tables must permit "
                 "explicit non-contributor or complete-no-event empty parts"
             )
+        if self.primary_key_validation not in {
+            "unordered_unique_v1",
+            "strictly_increasing_v1",
+        }:
+            raise ValueError(
+                f"{self.contract.table_name}: unsupported primary-key validation"
+            )
+        semantic_keys = tuple(key for key, _value in self.semantic_metadata)
+        if (
+            len(set(semantic_keys)) != len(semantic_keys)
+            or any(
+                type(key) is not str
+                or not key
+                or key != key.strip()
+                or type(value) is not str
+                or not value
+                or value != value.strip()
+                for key, value in self.semantic_metadata
+            )
+        ):
+            raise ValueError(
+                f"{self.contract.table_name}: semantic metadata is invalid"
+            )
         names = {item.name for item in self.contract.fields}
         for local_fields, _target_table, _target_fields in self.foreign_keys:
             if not set(local_fields).issubset(names):
@@ -75,7 +100,7 @@ class ValidatedBehaviorTableSpec:
         return self.contract.table_name
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "table_name": self.table_name,
             "table_contract": self.contract.to_dict(),
             "grain": self.grain,
@@ -92,6 +117,16 @@ class ValidatedBehaviorTableSpec:
             "required_capability": self.required_capability,
             "zero_rows_allowed": self.zero_rows_allowed,
         }
+        # Preserve the established compact-profile records byte-for-byte.
+        # Dense profiles opt in explicitly so key uniqueness is provable with
+        # constant memory rather than a recording-sized Python set.
+        if self.primary_key_validation != "unordered_unique_v1":
+            result["primary_key_validation"] = self.primary_key_validation
+        if self.semantic_metadata:
+            result["semantic_metadata"] = {
+                key: value for key, value in self.semantic_metadata
+            }
+        return result
 
 
 def _contract(
@@ -251,6 +286,14 @@ def validate_table_specs(
                 target_names
             ):
                 raise ValueError(f"{name}: foreign-key declaration is invalid")
+            recording_prefix = ("export_run_id", "recording_id")
+            if (
+                tuple(local[:2]) != recording_prefix
+                or tuple(target_fields[:2]) != recording_prefix
+            ):
+                raise ValueError(
+                    f"{name}: foreign keys must be recording-scoped"
+                )
     return names
 
 
