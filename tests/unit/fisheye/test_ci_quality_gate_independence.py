@@ -52,6 +52,14 @@ def test_ci_quality_gates_are_independent_jobs() -> None:
         "git diff --exit-code -- scripts/fps_authority_access_ratchet_baseline.json"
         in _run_commands(jobs["import-boundaries"])
     )
+    assert "python scripts/check_keypoint_motion_authority_access.py" in _run_commands(
+        jobs["import-boundaries"]
+    )
+    assert (
+        "git diff --exit-code -- "
+        "scripts/keypoint_motion_authority_access_ratchet_baseline.json"
+        in _run_commands(jobs["import-boundaries"])
+    )
 
     for job_name in gate_commands:
         gate_dependencies = _normalized_needs(jobs[job_name]) & gate_commands.keys()
@@ -67,6 +75,13 @@ def test_each_quality_gate_command_has_exactly_one_job_owner() -> None:
         "lint-imports --config pyproject.toml": "import-boundaries",
         "python scripts/check_fps_authority_access.py": "import-boundaries",
         "git diff --exit-code -- scripts/fps_authority_access_ratchet_baseline.json": (
+            "import-boundaries"
+        ),
+        "python scripts/check_keypoint_motion_authority_access.py": (
+            "import-boundaries"
+        ),
+        "git diff --exit-code -- "
+        "scripts/keypoint_motion_authority_access_ratchet_baseline.json": (
             "import-boundaries"
         ),
         "python scripts/check_file_size_ratchet.py": "file-size-ratchet",

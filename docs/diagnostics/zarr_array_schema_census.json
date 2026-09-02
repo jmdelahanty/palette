@@ -9,14 +9,14 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-163b2b41c74aede1"
+            "schema-writer-52fbedeecf04cfa0"
           ],
           "shape": "shape(_float32(np.asarray(derivative['acceleration_mm'])))"
         },
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-88a86dc3261a9c78"
+            "schema-writer-80ceab5e97a528af"
           ],
           "shape": "shape(_float32(np.asarray(item['acceleration_mm'])))"
         }
@@ -31,21 +31,21 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-b576ecbb82042b72"
+            "schema-writer-04f9aef460dcd14c"
           ],
           "shape": "shape(_float32(np.asarray(derivative['acceleration_px'])))"
         },
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-195661c739efcaf8"
+            "schema-writer-386971275c48ec41"
           ],
           "shape": "shape(_float32(np.asarray(item['acceleration_px'])))"
         },
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-79cc51c67ec37e9c"
+            "schema-writer-f17bddba58dcca5d"
           ],
           "shape": "shape(data['acceleration_px'])"
         }
@@ -95,7 +95,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-d4ef69bf33995f0e"
+            "schema-writer-8d43aed5e71125d9"
           ],
           "shape": "shape(data['angular_speed_raw_deg_s'])"
         },
@@ -119,7 +119,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-f2986732e8e8f322"
+            "schema-writer-b34e25c4608ad194"
           ],
           "shape": "shape(data['angular_speed_smoothed_deg_s'])"
         },
@@ -143,7 +143,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-c513fbceeb57f5c3"
+            "schema-writer-d0b3ef2cd33f09a0"
           ],
           "shape": "shape(data['angular_velocity_deg_s'])"
         },
@@ -177,7 +177,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-0994ebdf3d4493a4"
+            "schema-writer-b9310d9205edf90f"
           ],
           "shape": "shape(data['angular_velocity_raw_deg_s'])"
         },
@@ -201,7 +201,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-7df5ef85ad03c558"
+            "schema-writer-72febd409d3f533b"
           ],
           "shape": "shape(data['angular_velocity_smoothed_deg_s'])"
         },
@@ -388,7 +388,7 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-0f0ce0ada3afe8b3"
+            "schema-writer-cea6f97b0c311f86"
           ],
           "shape": "len(bbox_coords)"
         },
@@ -2101,7 +2101,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-f537a499e53bbbda"
+            "schema-writer-0076f46fe0bee6a6"
           ],
           "shape": "shape(data['delta_frames'])"
         }
@@ -2145,7 +2145,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-df80ad414cc17405"
+            "schema-writer-dfeb4b9d9db4f385"
           ],
           "shape": "shape(data['delta_seconds'])"
         }
@@ -2395,7 +2395,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-837e70f204bd3623"
+            "schema-writer-1a6bb4f1681c2186"
           ],
           "shape": "shape(data['detection_source'])"
         },
@@ -3623,7 +3623,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-3c626a6a61a23a57"
+            "schema-writer-7316591b6814a0a9"
           ],
           "shape": "shape(data['frame_indices'])"
         },
@@ -4045,7 +4045,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-01fa66b8766cf7a1"
+            "schema-writer-b72a7296321ea78d"
           ],
           "shape": "shape(data['heading_degrees'])"
         },
@@ -4205,7 +4205,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-2185701cbadbc32b"
+            "schema-writer-85b014e670792afa"
           ],
           "shape": "shape(data['heading_usable'])"
         },
@@ -5622,7 +5622,7 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-0e907ddc4566f28c"
+            "schema-writer-68194034b4d5006d"
           ],
           "shape": "(num_frames, n_masks)"
         },
@@ -6135,7 +6135,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-636fd302f55694ba"
+            "schema-writer-c670c511a1c3c5fb"
           ],
           "shape": "shape(data['positions_mm'])"
         },
@@ -6160,7 +6160,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-47ea90c8027a6f2e"
+            "schema-writer-f822733017d97731"
           ],
           "shape": "shape(data['positions_px'])"
         },
@@ -7112,7 +7112,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-c6e97af0d723f3a9"
+            "schema-writer-4db1565d4a537843"
           ],
           "shape": "shape(data['second_indices'])"
         },
@@ -7223,14 +7223,14 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-4b9fd183381738d7"
+            "schema-writer-039e38a3f915b2b9"
           ],
           "shape": "shape(_float32(np.asarray(derivative['smoothed_acceleration_mm'])))"
         },
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-07c2775ccf116372"
+            "schema-writer-6e241ce1b85be155"
           ],
           "shape": "shape(_float32(np.asarray(item['smoothed_acceleration_mm'])))"
         }
@@ -7245,21 +7245,21 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-0afdb3932067f4ad"
+            "schema-writer-36121111bff7570b"
           ],
           "shape": "shape(_float32(np.asarray(derivative['smoothed_acceleration_px'])))"
         },
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-6fd7a53f64ad7f38"
+            "schema-writer-3102362c666dfcb0"
           ],
           "shape": "shape(_float32(np.asarray(item['smoothed_acceleration_px'])))"
         },
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-2c17a27c1f1de153"
+            "schema-writer-d1348b3cf717673e"
           ],
           "shape": "shape(data['smoothed_acceleration_px'])"
         }
@@ -7327,7 +7327,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-1ec302a4a81d5a71"
+            "schema-writer-8a01fc1622efca5c"
           ],
           "shape": "shape(data['source_acquisition_frame_index'])"
         },
@@ -8920,7 +8920,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-35f3aa3580673bff"
+            "schema-writer-55ddcecc29994855"
           ],
           "shape": "shape(data['time_seconds'])"
         },
@@ -9019,7 +9019,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-e1461fed1dc099ce"
+            "schema-writer-c8cad76d4c7701cd"
           ],
           "shape": "shape(_ordered_track_arena_ids(ordered_ids, track_id_to_arena_id))"
         },
@@ -9067,7 +9067,7 @@
           "dtype": "int32",
           "occurrence_ids": [
             "schema-writer-0ad07a52dbd16049",
-            "schema-writer-f95272cc8565de78"
+            "schema-writer-c3322563939eb2dd"
           ],
           "shape": "shape(ordered_ids)"
         },
@@ -9153,7 +9153,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-34c948be28627cf9"
+            "schema-writer-d78886042fcd634a"
           ],
           "shape": "shape(data['transition_reason_code'])"
         }
@@ -9175,7 +9175,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-b10e18de2e8d789a"
+            "schema-writer-e1a759b678de860e"
           ],
           "shape": "shape(data['transition_valid'])"
         }
@@ -31945,8 +31945,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10015,
-      "occurrence_id": "schema-writer-f95272cc8565de78",
+      "line": 9957,
+      "occurrence_id": "schema-writer-c3322563939eb2dd",
       "path_pattern": "<run_group>/track_ids",
       "required": null,
       "shape_expression": "shape(ordered_ids)",
@@ -31958,7 +31958,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-85fd1041d54c0fe6"
+      "writer_site_id": "writer-293ba2288547534d"
     },
     {
       "access_pattern": "unclassified",
@@ -31979,8 +31979,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10019,
-      "occurrence_id": "schema-writer-e1461fed1dc099ce",
+      "line": 9961,
+      "occurrence_id": "schema-writer-c8cad76d4c7701cd",
       "path_pattern": "<run_group>/track_arena_ids",
       "required": null,
       "shape_expression": "shape(_ordered_track_arena_ids(ordered_ids, track_id_to_arena_id))",
@@ -31992,7 +31992,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-6a6b6686e7191ab1"
+      "writer_site_id": "writer-d2c635d3ea9935e5"
     },
     {
       "access_pattern": "windowed",
@@ -32013,8 +32013,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10037,
-      "occurrence_id": "schema-writer-3c626a6a61a23a57",
+      "line": 9979,
+      "occurrence_id": "schema-writer-7316591b6814a0a9",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/frame_indices",
       "required": null,
       "shape_expression": "shape(data['frame_indices'])",
@@ -32026,7 +32026,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-a008aef056e59a4b"
+      "writer_site_id": "writer-d941a79572a22856"
     },
     {
       "access_pattern": "unclassified",
@@ -32047,8 +32047,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10056,
-      "occurrence_id": "schema-writer-75d86b16544320a8",
+      "line": 9998,
+      "occurrence_id": "schema-writer-32eda23a413680a2",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/track_sample_key",
       "required": null,
       "shape_expression": "shape(data['track_sample_key'])",
@@ -32060,7 +32060,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-a1227abc7a4c8b5c"
+      "writer_site_id": "writer-e3c774df3a86ea00"
     },
     {
       "access_pattern": "windowed",
@@ -32081,8 +32081,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10067,
-      "occurrence_id": "schema-writer-1ec302a4a81d5a71",
+      "line": 10009,
+      "occurrence_id": "schema-writer-8a01fc1622efca5c",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/source_acquisition_frame_index",
       "required": null,
       "shape_expression": "shape(data['source_acquisition_frame_index'])",
@@ -32094,7 +32094,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-d6498c5851b96882"
+      "writer_site_id": "writer-2f5282ea24aef4f1"
     },
     {
       "access_pattern": "windowed",
@@ -32115,8 +32115,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10073,
-      "occurrence_id": "schema-writer-70584e5352f28581",
+      "line": 10015,
+      "occurrence_id": "schema-writer-bfe05dc35f7688ff",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/source_frame_interpolation",
       "required": null,
       "shape_expression": "shape(data['source_frame_interpolation'])",
@@ -32128,7 +32128,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-a62a7721ac9e0c0e"
+      "writer_site_id": "writer-ad6496bd33325748"
     },
     {
       "access_pattern": "unclassified",
@@ -32149,8 +32149,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10079,
-      "occurrence_id": "schema-writer-09d27071b5c4183c",
+      "line": 10021,
+      "occurrence_id": "schema-writer-dadb191219ad1b38",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/source_instance_key",
       "required": null,
       "shape_expression": "shape(data['source_instance_key'])",
@@ -32162,7 +32162,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-c36c683c740ba9af"
+      "writer_site_id": "writer-bb1fbf2e30022f63"
     },
     {
       "access_pattern": "windowed",
@@ -32183,8 +32183,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10085,
-      "occurrence_id": "schema-writer-dc8749b07d2fc70a",
+      "line": 10027,
+      "occurrence_id": "schema-writer-4540ce82b65fc339",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/source_row_index",
       "required": null,
       "shape_expression": "shape(data['source_row_index'])",
@@ -32196,7 +32196,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-12d9a5d3024914a2"
+      "writer_site_id": "writer-e32fa4d195e19092"
     },
     {
       "access_pattern": "windowed",
@@ -32217,8 +32217,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10124,
-      "occurrence_id": "schema-writer-35f3aa3580673bff",
+      "line": 10066,
+      "occurrence_id": "schema-writer-55ddcecc29994855",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/time_seconds",
       "required": null,
       "shape_expression": "shape(data['time_seconds'])",
@@ -32230,7 +32230,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-9ec2a85acc057c41"
+      "writer_site_id": "writer-f9bd4eacb378be8f"
     },
     {
       "access_pattern": "unclassified",
@@ -32251,8 +32251,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10125,
-      "occurrence_id": "schema-writer-47ea90c8027a6f2e",
+      "line": 10067,
+      "occurrence_id": "schema-writer-f822733017d97731",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/positions_px",
       "required": null,
       "shape_expression": "shape(data['positions_px'])",
@@ -32264,7 +32264,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-ebaf281815042d69"
+      "writer_site_id": "writer-300af16f0206df0f"
     },
     {
       "access_pattern": "unclassified",
@@ -32285,8 +32285,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10133,
-      "occurrence_id": "schema-writer-636fd302f55694ba",
+      "line": 10075,
+      "occurrence_id": "schema-writer-c670c511a1c3c5fb",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/positions_mm",
       "required": null,
       "shape_expression": "shape(data['positions_mm'])",
@@ -32298,7 +32298,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-86c949b2b2390512"
+      "writer_site_id": "writer-9bebd7dde8b987ce"
     },
     {
       "access_pattern": "unclassified",
@@ -32319,8 +32319,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10151,
-      "occurrence_id": "schema-writer-01fa66b8766cf7a1",
+      "line": 10093,
+      "occurrence_id": "schema-writer-b72a7296321ea78d",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/heading_degrees",
       "required": null,
       "shape_expression": "shape(data['heading_degrees'])",
@@ -32332,7 +32332,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-e1164ed3b23ec478"
+      "writer_site_id": "writer-11daee6782b55ab5"
     },
     {
       "access_pattern": "unclassified",
@@ -32353,8 +32353,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10152,
-      "occurrence_id": "schema-writer-db81f110f475e2a9",
+      "line": 10094,
+      "occurrence_id": "schema-writer-ad7481336552a0b3",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/heading_radians",
       "required": null,
       "shape_expression": "shape(data['heading_radians'])",
@@ -32366,7 +32366,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-fb9ec775411acd17"
+      "writer_site_id": "writer-c2a6eb74853a0e35"
     },
     {
       "access_pattern": "unclassified",
@@ -32387,8 +32387,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10153,
-      "occurrence_id": "schema-writer-4158d764b2bf8cae",
+      "line": 10095,
+      "occurrence_id": "schema-writer-d6fb573a5d21b70a",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/delta_heading_degrees",
       "required": null,
       "shape_expression": "shape(data['delta_heading_degrees'])",
@@ -32400,7 +32400,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-750813969ca61ecd"
+      "writer_site_id": "writer-e4c58eca0eb40353"
     },
     {
       "access_pattern": "unclassified",
@@ -32421,8 +32421,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10154,
-      "occurrence_id": "schema-writer-c513fbceeb57f5c3",
+      "line": 10096,
+      "occurrence_id": "schema-writer-d0b3ef2cd33f09a0",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/angular_velocity_deg_s",
       "required": null,
       "shape_expression": "shape(data['angular_velocity_deg_s'])",
@@ -32434,7 +32434,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-30406aa94849d03b"
+      "writer_site_id": "writer-41c003aaf3df67a8"
     },
     {
       "access_pattern": "unclassified",
@@ -32455,8 +32455,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10155,
-      "occurrence_id": "schema-writer-0994ebdf3d4493a4",
+      "line": 10097,
+      "occurrence_id": "schema-writer-b9310d9205edf90f",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/angular_velocity_raw_deg_s",
       "required": null,
       "shape_expression": "shape(data['angular_velocity_raw_deg_s'])",
@@ -32468,7 +32468,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-7cb661fe91c2dce1"
+      "writer_site_id": "writer-665f2ca607afab03"
     },
     {
       "access_pattern": "unclassified",
@@ -32489,8 +32489,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10161,
-      "occurrence_id": "schema-writer-d4ef69bf33995f0e",
+      "line": 10103,
+      "occurrence_id": "schema-writer-8d43aed5e71125d9",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/angular_speed_raw_deg_s",
       "required": null,
       "shape_expression": "shape(data['angular_speed_raw_deg_s'])",
@@ -32502,7 +32502,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-024316d7da473846"
+      "writer_site_id": "writer-38c397983aa32517"
     },
     {
       "access_pattern": "unclassified",
@@ -32523,8 +32523,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10167,
-      "occurrence_id": "schema-writer-8c54b0e1a3313e24",
+      "line": 10109,
+      "occurrence_id": "schema-writer-54be326f378c5763",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/delta_heading_smoothed_degrees",
       "required": null,
       "shape_expression": "shape(data['delta_heading_smoothed_degrees'])",
@@ -32536,7 +32536,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-5821e6c16d640043"
+      "writer_site_id": "writer-f79fd8f6404fc88b"
     },
     {
       "access_pattern": "unclassified",
@@ -32557,8 +32557,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10173,
-      "occurrence_id": "schema-writer-7df5ef85ad03c558",
+      "line": 10115,
+      "occurrence_id": "schema-writer-72febd409d3f533b",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/angular_velocity_smoothed_deg_s",
       "required": null,
       "shape_expression": "shape(data['angular_velocity_smoothed_deg_s'])",
@@ -32570,7 +32570,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-40352f690809d50d"
+      "writer_site_id": "writer-f6167c0aa13cee15"
     },
     {
       "access_pattern": "unclassified",
@@ -32591,8 +32591,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10179,
-      "occurrence_id": "schema-writer-f2986732e8e8f322",
+      "line": 10121,
+      "occurrence_id": "schema-writer-b34e25c4608ad194",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/angular_speed_smoothed_deg_s",
       "required": null,
       "shape_expression": "shape(data['angular_speed_smoothed_deg_s'])",
@@ -32604,7 +32604,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-24da58c282723484"
+      "writer_site_id": "writer-1d2e8636425321e3"
     },
     {
       "access_pattern": "unclassified",
@@ -32625,8 +32625,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10185,
-      "occurrence_id": "schema-writer-04a07f3cca734058",
+      "line": 10127,
+      "occurrence_id": "schema-writer-c56c2ebc6ddb28b1",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/smoothed_heading_degrees",
       "required": null,
       "shape_expression": "shape(data['smoothed_heading_degrees'])",
@@ -32638,7 +32638,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-bffd617bb27f21f6"
+      "writer_site_id": "writer-25f21f8cfcc649de"
     },
     {
       "access_pattern": "unclassified",
@@ -32659,8 +32659,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10186,
-      "occurrence_id": "schema-writer-176ce2baf138ee8c",
+      "line": 10128,
+      "occurrence_id": "schema-writer-43b7c57fe7f44783",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/smoothed_heading_radians",
       "required": null,
       "shape_expression": "shape(data['smoothed_heading_radians'])",
@@ -32672,7 +32672,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-8cac9868011c7807"
+      "writer_site_id": "writer-c814773e4bd4188f"
     },
     {
       "access_pattern": "windowed",
@@ -32693,8 +32693,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10187,
-      "occurrence_id": "schema-writer-d55a8a24c3789ccc",
+      "line": 10129,
+      "occurrence_id": "schema-writer-28fd6b7e140902ed",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/keypoint_success",
       "required": null,
       "shape_expression": "shape(data['keypoint_success'])",
@@ -32706,7 +32706,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-bf14c11f4965695a"
+      "writer_site_id": "writer-78fb062c730e64e0"
     },
     {
       "access_pattern": "unclassified",
@@ -32727,8 +32727,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10188,
-      "occurrence_id": "schema-writer-837e70f204bd3623",
+      "line": 10130,
+      "occurrence_id": "schema-writer-1a6bb4f1681c2186",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/detection_source",
       "required": null,
       "shape_expression": "shape(data['detection_source'])",
@@ -32740,7 +32740,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-d2f8921b947b11e5"
+      "writer_site_id": "writer-ec78be51398cba0f"
     },
     {
       "access_pattern": "unclassified",
@@ -32761,8 +32761,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10189,
-      "occurrence_id": "schema-writer-b5044611a2d7dac9",
+      "line": 10131,
+      "occurrence_id": "schema-writer-195d018bf94017cd",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/sample_observed",
       "required": null,
       "shape_expression": "shape(data['sample_observed'])",
@@ -32774,7 +32774,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-480458d7210e99c7"
+      "writer_site_id": "writer-25cc50a3192b97d2"
     },
     {
       "access_pattern": "unclassified",
@@ -32795,8 +32795,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10190,
-      "occurrence_id": "schema-writer-fab86522d5d8df80",
+      "line": 10132,
+      "occurrence_id": "schema-writer-e0ce78fb5a2f8994",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/sample_valid",
       "required": null,
       "shape_expression": "shape(data['sample_valid'])",
@@ -32808,7 +32808,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-5b79d37425a680b9"
+      "writer_site_id": "writer-04b39de7d2bc993a"
     },
     {
       "access_pattern": "unclassified",
@@ -32829,8 +32829,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10191,
-      "occurrence_id": "schema-writer-ad4c47cf6f2162ed",
+      "line": 10133,
+      "occurrence_id": "schema-writer-eebbb5b856705d27",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/source_observed",
       "required": null,
       "shape_expression": "shape(data['source_observed'])",
@@ -32842,7 +32842,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-367f3c98e8f47df5"
+      "writer_site_id": "writer-73c92ea39e84eed4"
     },
     {
       "access_pattern": "windowed",
@@ -32863,8 +32863,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10192,
-      "occurrence_id": "schema-writer-8bd160f5497e58de",
+      "line": 10134,
+      "occurrence_id": "schema-writer-56fc937c3657df85",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/keypoint_usable",
       "required": null,
       "shape_expression": "shape(data['keypoint_usable'])",
@@ -32876,7 +32876,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-0a5f8059e1e722a1"
+      "writer_site_id": "writer-287aec69845b30b5"
     },
     {
       "access_pattern": "unclassified",
@@ -32897,8 +32897,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10193,
-      "occurrence_id": "schema-writer-c06ff0990758f818",
+      "line": 10135,
+      "occurrence_id": "schema-writer-b9ba754d9cf0452e",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/position_finite",
       "required": null,
       "shape_expression": "shape(data['position_finite'])",
@@ -32910,7 +32910,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-9486360288c03117"
+      "writer_site_id": "writer-a86ff71c1cfe7654"
     },
     {
       "access_pattern": "unclassified",
@@ -32931,8 +32931,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10194,
-      "occurrence_id": "schema-writer-2185701cbadbc32b",
+      "line": 10136,
+      "occurrence_id": "schema-writer-85b014e670792afa",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/heading_usable",
       "required": null,
       "shape_expression": "shape(data['heading_usable'])",
@@ -32944,7 +32944,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-09c5513dd179578b"
+      "writer_site_id": "writer-b745f54e843ebb92"
     },
     {
       "access_pattern": "unclassified",
@@ -32965,8 +32965,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10195,
-      "occurrence_id": "schema-writer-601ead7cc5105bed",
+      "line": 10137,
+      "occurrence_id": "schema-writer-96c017739548a5ea",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/sample_reason_code",
       "required": null,
       "shape_expression": "shape(data['sample_reason_code'])",
@@ -32978,7 +32978,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-d3fc6e5f0fdd35ba"
+      "writer_site_id": "writer-b05242022137f94e"
     },
     {
       "access_pattern": "unclassified",
@@ -32999,8 +32999,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10196,
-      "occurrence_id": "schema-writer-f537a499e53bbbda",
+      "line": 10138,
+      "occurrence_id": "schema-writer-0076f46fe0bee6a6",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/delta_frames",
       "required": null,
       "shape_expression": "shape(data['delta_frames'])",
@@ -33012,7 +33012,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-0cb2889308cc9e24"
+      "writer_site_id": "writer-4fc675395381d4a8"
     },
     {
       "access_pattern": "unclassified",
@@ -33033,8 +33033,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10197,
-      "occurrence_id": "schema-writer-df80ad414cc17405",
+      "line": 10139,
+      "occurrence_id": "schema-writer-dfeb4b9d9db4f385",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/delta_seconds",
       "required": null,
       "shape_expression": "shape(data['delta_seconds'])",
@@ -33046,7 +33046,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-d7eb5998348a5132"
+      "writer_site_id": "writer-b68f742b0718ec06"
     },
     {
       "access_pattern": "unclassified",
@@ -33067,8 +33067,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10198,
-      "occurrence_id": "schema-writer-b10e18de2e8d789a",
+      "line": 10140,
+      "occurrence_id": "schema-writer-e1a759b678de860e",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/transition_valid",
       "required": null,
       "shape_expression": "shape(data['transition_valid'])",
@@ -33080,7 +33080,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-22dc31cca5cc42fa"
+      "writer_site_id": "writer-024565e2447f1d96"
     },
     {
       "access_pattern": "unclassified",
@@ -33101,8 +33101,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10199,
-      "occurrence_id": "schema-writer-34c948be28627cf9",
+      "line": 10141,
+      "occurrence_id": "schema-writer-d78886042fcd634a",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/transition_reason_code",
       "required": null,
       "shape_expression": "shape(data['transition_reason_code'])",
@@ -33114,7 +33114,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-26a3fbac62145b52"
+      "writer_site_id": "writer-23c790b9c9bf7947"
     },
     {
       "access_pattern": "unclassified",
@@ -33135,8 +33135,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10205,
-      "occurrence_id": "schema-writer-a56ee6bdf0a89d37",
+      "line": 10147,
+      "occurrence_id": "schema-writer-ac02a288666ab0db",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/speed_raw_px",
       "required": null,
       "shape_expression": "shape(data['speed_raw_px'])",
@@ -33148,7 +33148,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-1e6d2a1ab19b76b3"
+      "writer_site_id": "writer-1910fabf00758ee5"
     },
     {
       "access_pattern": "unclassified",
@@ -33169,8 +33169,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10206,
-      "occurrence_id": "schema-writer-793703d6e092b471",
+      "line": 10148,
+      "occurrence_id": "schema-writer-c1d8bb92cbbf5947",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/speed_filtered_px",
       "required": null,
       "shape_expression": "shape(data['speed_filtered_px'])",
@@ -33182,7 +33182,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-54a513f2902a9010"
+      "writer_site_id": "writer-b327dd7636e4a381"
     },
     {
       "access_pattern": "unclassified",
@@ -33203,8 +33203,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10207,
-      "occurrence_id": "schema-writer-4a5fc2965c2a870b",
+      "line": 10149,
+      "occurrence_id": "schema-writer-ccc8b7ab18e8dae9",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/speed_smoothed_px",
       "required": null,
       "shape_expression": "shape(data['speed_smoothed_px'])",
@@ -33216,7 +33216,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-e71f4e39a24694e2"
+      "writer_site_id": "writer-8b2990ecf4d18b61"
     },
     {
       "access_pattern": "unclassified",
@@ -33237,8 +33237,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10208,
-      "occurrence_id": "schema-writer-f5e95fc5e6f44e29",
+      "line": 10150,
+      "occurrence_id": "schema-writer-bfa5966537c76eab",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/speed_averaged_px",
       "required": null,
       "shape_expression": "shape(data['speed_averaged_px'])",
@@ -33250,7 +33250,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-87cc2176bf236bff"
+      "writer_site_id": "writer-b4326c0fc8f055b3"
     },
     {
       "access_pattern": "unclassified",
@@ -33271,8 +33271,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10209,
-      "occurrence_id": "schema-writer-79cc51c67ec37e9c",
+      "line": 10151,
+      "occurrence_id": "schema-writer-f17bddba58dcca5d",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/acceleration_px",
       "required": null,
       "shape_expression": "shape(data['acceleration_px'])",
@@ -33284,7 +33284,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-efc9f3c6d96d1957"
+      "writer_site_id": "writer-dc7ed0a021f93b89"
     },
     {
       "access_pattern": "unclassified",
@@ -33305,8 +33305,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10210,
-      "occurrence_id": "schema-writer-2c17a27c1f1de153",
+      "line": 10152,
+      "occurrence_id": "schema-writer-d1348b3cf717673e",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/smoothed_acceleration_px",
       "required": null,
       "shape_expression": "shape(data['smoothed_acceleration_px'])",
@@ -33318,7 +33318,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-c67ea9d3f60b08fc"
+      "writer_site_id": "writer-0461dc399b87ef8b"
     },
     {
       "access_pattern": "windowed",
@@ -33339,8 +33339,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10240,
-      "occurrence_id": "schema-writer-f18bd6ee24eddfb7",
+      "line": 10182,
+      "occurrence_id": "schema-writer-5915404be43fd0b2",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/frame_path_distance_raw_px",
       "required": null,
       "shape_expression": "shape(data['frame_path_distance_raw_px'])",
@@ -33352,7 +33352,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-770bee166826a857"
+      "writer_site_id": "writer-1a3151a12b961fdd"
     },
     {
       "access_pattern": "windowed",
@@ -33373,8 +33373,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10246,
-      "occurrence_id": "schema-writer-2763e8ace486bba2",
+      "line": 10188,
+      "occurrence_id": "schema-writer-a91b1dbe820c63b2",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/frame_path_distance_filtered_px",
       "required": null,
       "shape_expression": "shape(data['frame_path_distance_filtered_px'])",
@@ -33386,7 +33386,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-67a413eefdae1305"
+      "writer_site_id": "writer-a4d48013848e9504"
     },
     {
       "access_pattern": "windowed",
@@ -33407,8 +33407,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10252,
-      "occurrence_id": "schema-writer-e638207c509bd03f",
+      "line": 10194,
+      "occurrence_id": "schema-writer-330b50409c3623f8",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/frame_path_distance_smoothed_px",
       "required": null,
       "shape_expression": "shape(data['frame_path_distance_smoothed_px'])",
@@ -33420,7 +33420,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-31f208e57b0f32ba"
+      "writer_site_id": "writer-2c65f4846864ccb0"
     },
     {
       "access_pattern": "unclassified",
@@ -33441,8 +33441,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10258,
-      "occurrence_id": "schema-writer-75e5f0c5a0fc5e09",
+      "line": 10200,
+      "occurrence_id": "schema-writer-53ae0d033c58a505",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/cumulative_path_distance_px",
       "required": null,
       "shape_expression": "shape(data['cumulative_path_distance_px'])",
@@ -33454,7 +33454,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-e25ae7a05a953b9c"
+      "writer_site_id": "writer-060d1f44fcff8bad"
     },
     {
       "access_pattern": "windowed",
@@ -33475,8 +33475,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10280,
-      "occurrence_id": "schema-writer-c6e97af0d723f3a9",
+      "line": 10222,
+      "occurrence_id": "schema-writer-4db1565d4a537843",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/second_indices",
       "required": null,
       "shape_expression": "shape(data['second_indices'])",
@@ -33488,7 +33488,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-a5d6326da16a82e7"
+      "writer_site_id": "writer-04361de1afd9b4a2"
     },
     {
       "access_pattern": "unclassified",
@@ -33509,8 +33509,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10281,
-      "occurrence_id": "schema-writer-c3ae7f9da78bce06",
+      "line": 10223,
+      "occurrence_id": "schema-writer-c3c9559fcfb0cafe",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/speed_per_second_px",
       "required": null,
       "shape_expression": "shape(data['speed_per_second_px'])",
@@ -33522,7 +33522,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-dd779c8724f29017"
+      "writer_site_id": "writer-6dd066045f242ec3"
     },
     {
       "access_pattern": "unclassified",
@@ -33543,8 +33543,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10283,
-      "occurrence_id": "schema-writer-96f288e7f849d29e",
+      "line": 10225,
+      "occurrence_id": "schema-writer-f64a0ca80339f34b",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/speed_per_second_mm",
       "required": null,
       "shape_expression": "shape(data['speed_per_second_mm'])",
@@ -33556,7 +33556,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-df52b67917371356"
+      "writer_site_id": "writer-45e49c064a73dbb0"
     },
     {
       "access_pattern": "unclassified",
@@ -33577,8 +33577,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10289,
-      "occurrence_id": "schema-writer-85f971431af8a450",
+      "line": 10231,
+      "occurrence_id": "schema-writer-9e9b00f571657e46",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/heading_per_second_degrees",
       "required": null,
       "shape_expression": "shape(data['heading_per_second_degrees'])",
@@ -33590,7 +33590,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-6d3ca93460d0c0e0"
+      "writer_site_id": "writer-24aeca2312111774"
     },
     {
       "access_pattern": "unclassified",
@@ -33611,8 +33611,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 10290,
-      "occurrence_id": "schema-writer-069749887d986420",
+      "line": 10232,
+      "occurrence_id": "schema-writer-61e8ff1c42ceafc1",
       "path_pattern": "<run_group>/tracks/<f'id_{track_id}'>/heading_per_second_resultant",
       "required": null,
       "shape_expression": "shape(data['heading_per_second_resultant'])",
@@ -33624,7 +33624,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-80cc3d3e062190d8"
+      "writer_site_id": "writer-58a6461d079f3134"
     },
     {
       "access_pattern": "unclassified",
@@ -33645,8 +33645,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 12753,
-      "occurrence_id": "schema-writer-8abe93ebd2c813ca",
+      "line": 12695,
+      "occurrence_id": "schema-writer-8f41b3b44b489231",
       "path_pattern": "<track_group>/movement/speed/<group_name>/px",
       "required": null,
       "shape_expression": "shape(data[flat_px_key])",
@@ -33658,7 +33658,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-9b30290857270bc6"
+      "writer_site_id": "writer-ca579491a9356729"
     },
     {
       "access_pattern": "unclassified",
@@ -33679,8 +33679,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 12755,
-      "occurrence_id": "schema-writer-6404bdbb26b6dc66",
+      "line": 12697,
+      "occurrence_id": "schema-writer-afba42f2e8e03b39",
       "path_pattern": "<track_group>/movement/speed/<group_name>/mm",
       "required": null,
       "shape_expression": "shape(data[flat_mm_key])",
@@ -33692,7 +33692,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-91713b12a44556ed"
+      "writer_site_id": "writer-84a11d55ac68e76c"
     },
     {
       "access_pattern": "unclassified",
@@ -33713,8 +33713,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 12761,
-      "occurrence_id": "schema-writer-b576ecbb82042b72",
+      "line": 12703,
+      "occurrence_id": "schema-writer-04f9aef460dcd14c",
       "path_pattern": "<track_group>/movement/speed/<group_name>/acceleration_px",
       "required": null,
       "shape_expression": "shape(_float32(np.asarray(derivative['acceleration_px'])))",
@@ -33726,7 +33726,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-5870fd40d1e24a9e"
+      "writer_site_id": "writer-1719f04c3888390c"
     },
     {
       "access_pattern": "unclassified",
@@ -33747,8 +33747,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 12767,
-      "occurrence_id": "schema-writer-0afdb3932067f4ad",
+      "line": 12709,
+      "occurrence_id": "schema-writer-36121111bff7570b",
       "path_pattern": "<track_group>/movement/speed/<group_name>/smoothed_acceleration_px",
       "required": null,
       "shape_expression": "shape(_float32(np.asarray(derivative['smoothed_acceleration_px'])))",
@@ -33760,7 +33760,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-56d6092b2ae0e152"
+      "writer_site_id": "writer-767e8d8fcd80c80f"
     },
     {
       "access_pattern": "unclassified",
@@ -33781,8 +33781,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 12774,
-      "occurrence_id": "schema-writer-163b2b41c74aede1",
+      "line": 12716,
+      "occurrence_id": "schema-writer-52fbedeecf04cfa0",
       "path_pattern": "<track_group>/movement/speed/<group_name>/acceleration_mm",
       "required": null,
       "shape_expression": "shape(_float32(np.asarray(derivative['acceleration_mm'])))",
@@ -33794,7 +33794,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-db11bfae25f6cb1a"
+      "writer_site_id": "writer-36cb6b127f7fe8ce"
     },
     {
       "access_pattern": "unclassified",
@@ -33815,8 +33815,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 12780,
-      "occurrence_id": "schema-writer-4b9fd183381738d7",
+      "line": 12722,
+      "occurrence_id": "schema-writer-039e38a3f915b2b9",
       "path_pattern": "<track_group>/movement/speed/<group_name>/smoothed_acceleration_mm",
       "required": null,
       "shape_expression": "shape(_float32(np.asarray(derivative['smoothed_acceleration_mm'])))",
@@ -33828,7 +33828,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-7031b9d141f5c11f"
+      "writer_site_id": "writer-b7469542886c909a"
     },
     {
       "access_pattern": "windowed",
@@ -33849,8 +33849,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 12791,
-      "occurrence_id": "schema-writer-27d550109276fedf",
+      "line": 12733,
+      "occurrence_id": "schema-writer-d5dfe6f735a02fc3",
       "path_pattern": "<track_group>/movement/speed/<group_name>/frame_path_distance_px",
       "required": null,
       "shape_expression": "shape(data[path_px_key])",
@@ -33862,7 +33862,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-7284ccb3c83417ea"
+      "writer_site_id": "writer-ca48c0ef18066405"
     },
     {
       "access_pattern": "windowed",
@@ -33883,8 +33883,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 12801,
-      "occurrence_id": "schema-writer-b174feffc71ece8a",
+      "line": 12743,
+      "occurrence_id": "schema-writer-5a59fba87b59aca9",
       "path_pattern": "<track_group>/movement/speed/<group_name>/frame_path_distance_mm",
       "required": null,
       "shape_expression": "shape(data[path_mm_key])",
@@ -33896,7 +33896,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-89e5676c16fa27dc"
+      "writer_site_id": "writer-55a14ebf24ac48a7"
     },
     {
       "access_pattern": "unclassified",
@@ -33917,8 +33917,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 12876,
-      "occurrence_id": "schema-writer-195661c739efcaf8",
+      "line": 12818,
+      "occurrence_id": "schema-writer-386971275c48ec41",
       "path_pattern": "<track_group>/speed_derivatives/<level>/acceleration_px",
       "required": null,
       "shape_expression": "shape(_float32(np.asarray(item['acceleration_px'])))",
@@ -33930,7 +33930,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-82b11621dd0ac6ff"
+      "writer_site_id": "writer-d56e2e07665dea00"
     },
     {
       "access_pattern": "unclassified",
@@ -33951,8 +33951,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 12882,
-      "occurrence_id": "schema-writer-6fd7a53f64ad7f38",
+      "line": 12824,
+      "occurrence_id": "schema-writer-3102362c666dfcb0",
       "path_pattern": "<track_group>/speed_derivatives/<level>/smoothed_acceleration_px",
       "required": null,
       "shape_expression": "shape(_float32(np.asarray(item['smoothed_acceleration_px'])))",
@@ -33964,7 +33964,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-c1f85c2ba1e5c65a"
+      "writer_site_id": "writer-b1a13cac8507b276"
     },
     {
       "access_pattern": "unclassified",
@@ -33985,8 +33985,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 12889,
-      "occurrence_id": "schema-writer-88a86dc3261a9c78",
+      "line": 12831,
+      "occurrence_id": "schema-writer-80ceab5e97a528af",
       "path_pattern": "<track_group>/speed_derivatives/<level>/acceleration_mm",
       "required": null,
       "shape_expression": "shape(_float32(np.asarray(item['acceleration_mm'])))",
@@ -33998,7 +33998,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-1c61887b10344e7f"
+      "writer_site_id": "writer-e567047a9e58a88e"
     },
     {
       "access_pattern": "unclassified",
@@ -34019,8 +34019,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/track_kinematics.py",
-      "line": 12895,
-      "occurrence_id": "schema-writer-07c2775ccf116372",
+      "line": 12837,
+      "occurrence_id": "schema-writer-6e241ce1b85be155",
       "path_pattern": "<track_group>/speed_derivatives/<level>/smoothed_acceleration_mm",
       "required": null,
       "shape_expression": "shape(_float32(np.asarray(item['smoothed_acceleration_mm'])))",
@@ -34032,7 +34032,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-0e55b724d1eb870a"
+      "writer_site_id": "writer-58107bebd5116151"
     },
     {
       "access_pattern": "unclassified",
@@ -60931,8 +60931,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/tracking/arena_assignment.py",
-      "line": 1121,
-      "occurrence_id": "schema-writer-0f0ce0ada3afe8b3",
+      "line": 1064,
+      "occurrence_id": "schema-writer-cea6f97b0c311f86",
       "path_pattern": "<assign_group>/arena_ids",
       "required": null,
       "shape_expression": "len(bbox_coords)",
@@ -60944,7 +60944,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-a3a1fdd3a6821ee6"
+      "writer_site_id": "writer-1bf9d3e03c4735ad"
     },
     {
       "access_pattern": "unclassified",
@@ -60965,8 +60965,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/tracking/arena_assignment.py",
-      "line": 1141,
-      "occurrence_id": "schema-writer-0e907ddc4566f28c",
+      "line": 1084,
+      "occurrence_id": "schema-writer-68194034b4d5006d",
       "path_pattern": "<assign_group>/n_detections_per_arena",
       "required": null,
       "shape_expression": "(num_frames, n_masks)",
@@ -60978,7 +60978,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-215552bb65c8a646"
+      "writer_site_id": "writer-8da9477e116cf7e7"
     },
     {
       "access_pattern": "unclassified",
@@ -74956,7 +74956,7 @@
     "parsed_writer_candidate_module_count": 234,
     "reader_required_array_declaration_count": 102,
     "resolved_writer_leaf_name_count": 630,
-    "scanned_python_module_count": 1661,
+    "scanned_python_module_count": 1663,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,

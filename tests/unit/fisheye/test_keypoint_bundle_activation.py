@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import pytest
 import zarr
 
+from fisheye.analysis_workflows.availability import _keypoint_crop_lineage
+from fisheye.shared.keypoint_motion_authority import (
+    KeypointMotionAuthorityError,
+    keypoint_lineage_from_attributes,
+    resolve_keypoint_motion_authority,
+)
 from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.shared.zarr.clipped_keypoint_finalization import (
     publish_selector_ineligible_clipped_keypoint_chain,
@@ -35,6 +42,7 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
     RUN_STATUS_COMPLETE,
 )
+from fisheye.tracking.arena_assignment import _selected_keypoint_source_rowset
 from tests.unit.fisheye.test_clipped_keypoint_finalization import (
     _clip_results,
     _crop,
@@ -97,6 +105,7 @@ def _candidate_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         {
             "status": "complete",
             "stage_selector_eligible": False,
+            "production_candidate": True,
             RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_COMPLETE,
             "run_manifest": crop.manifest,
         }
@@ -158,6 +167,92 @@ def test_bundle_activation_is_one_root_authority_and_is_idempotent(
     assert repeated["status"] == "already_active"
     assert repeated["activation_performed"] is False
     assert direct.attrs[KEYPOINT_BUNDLE_AUTHORITY_GENERATION_ATTR] == 1
+
+
+def test_active_bundle_round_trips_through_shared_motion_consumers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _candidate_archive(tmp_path, monkeypatch)
+    activate_keypoint_bundle_from_plan(_plan(archive))
+    root = zarr.open_group(
+        str(archive),
+        mode="r",
+        zarr_format=3,
+        use_consolidated=True,
+    )
+
+    authority = resolve_keypoint_motion_authority(root, "refined/refined_v2")
+
+    assert authority.profile_id == "active_refined_bundle_body_frame_v1"
+    assert authority.run_name == "refined_v2"
+    assert authority.base_run_name == "raw_v2"
+    assert authority.crop_run == "crop_v2_source"
+    assert authority.heading_group_path == "analysis/body_frame_runs/body_frame_v1"
+    assert authority.heading_array_name == "heading_deg"
+    assert authority.heading_group.path == "analysis/body_frame_runs/body_frame_v1"
+    assert _selected_keypoint_source_rowset(
+        root,
+        "refined/refined_v2",
+    ) == "crop_runs/crop_v2_source"
+
+    planned_lineage = _keypoint_crop_lineage(
+        archive,
+        selected_keypoint_run="refined/refined_v2",
+    )
+    assert planned_lineage == (
+        "crop_runs/crop_v2_source",
+        int(authority.heading_group["heading_deg"].shape[0]),
+        "refined_source",
+    )
+
+
+def test_shared_motion_resolver_rejects_active_member_cross_binding_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _candidate_archive(tmp_path, monkeypatch)
+    activate_keypoint_bundle_from_plan(_plan(archive))
+    root = zarr.open_group(
+        str(archive),
+        mode="a",
+        zarr_format=3,
+        use_consolidated=False,
+    )
+    source_quality = root["keypoint_quality_runs/quality_v1"]
+    other_quality = root["keypoint_quality_runs"].create_group("quality_other")
+    other_quality.attrs.update(dict(source_quality.attrs))
+    active = copy.deepcopy(dict(root.attrs[KEYPOINT_BUNDLE_AUTHORITY_ATTR]))
+    active["members"]["keypoint_quality"].update(
+        {
+            "run_id": "quality_other",
+            "run_path": "keypoint_quality_runs/quality_other",
+        }
+    )
+    root.attrs[KEYPOINT_BUNDLE_AUTHORITY_ATTR] = active
+
+    with pytest.raises(
+        KeypointMotionAuthorityError,
+        match="keypoint_quality binding",
+    ):
+        resolve_keypoint_motion_authority(root, "refined/refined_v2")
+
+
+def test_shared_motion_lineage_never_falls_back_from_unknown_manifest() -> None:
+    with pytest.raises(
+        KeypointMotionAuthorityError,
+        match="unsupported manifest profile",
+    ):
+        keypoint_lineage_from_attributes(
+            family="keypoints_runs",
+            run_name="raw_unknown",
+            attrs={
+                "run_manifest": {
+                    "schema_id": "palette.keypoint.unknown_manifest",
+                },
+                "source_crop_run": "legacy_crop_must_not_win",
+            },
+        )
 
 
 def test_bundle_activation_rejects_a_stale_reviewed_plan(

@@ -87,6 +87,10 @@ from fisheye.shared.proof_verification import (
     proof_verification_operation,
 )
 from fisheye.shared.json_safety import json_attr_safe
+from fisheye.shared.keypoint_motion_authority import (
+    KeypointLineageAuthority,
+    resolve_keypoint_motion_authority,
+)
 from fisheye.shared.metadata import resolve_fps
 from fisheye.shared.observation_coordinate_publication import (
     BoundSourceCameraPositionSurface,
@@ -240,6 +244,7 @@ ANGULAR_SAMPLE_REASON_CODES = {
 _UNKNOWN_SOURCE_VALUES = {"", "unknown", "none", "null"}
 
 KEYPOINT_USABILITY_DATASET_CANDIDATES = (
+    "axis_valid",
     "heading_usable",
     "refined_success",
     "detection_success",
@@ -1041,17 +1046,6 @@ def _track_kinematics_contract_attrs(
     return attrs
 
 
-@dataclass
-class KeypointResolution:
-    """Resolved keypoint run metadata."""
-
-    group: zarr.Group
-    run_name: str
-    is_refined: bool
-    base_run_name: str
-    crop_run: str
-
-
 @dataclass(frozen=True)
 class CollectionProxySuccessorTrackingResolution:
     """Original tracking authority for an exact current-coordinate successor."""
@@ -1091,76 +1085,10 @@ class OfflinePositionSource:
     position_surface: BoundSourceCameraPositionSurface | None = None
 
 
-def resolve_keypoint_group(
-    root: zarr.Group,
-    requested: Optional[str],
-    console: Console,
-) -> KeypointResolution:
-    """Resolve the keypoint group (preferring refined runs)."""
-
-    refined_parent = root.get("refined_keypoints_runs")
-    raw_parent = root.get("keypoints_runs")
-
-    if raw_parent is None and refined_parent is None:
-        raise ValueError("No keypoint runs found in archive.")
-
-    def resolve_raw(name: str) -> KeypointResolution:
-        if raw_parent is None or name not in raw_parent:
-            raise ValueError(f"Keypoint run '{name}' not found in keypoints_runs.")
-        group = raw_parent[name]
-        crop_run = group.attrs.get("source_crop_run")
-        if not crop_run:
-            raise ValueError(
-                f"Keypoint run '{name}' missing 'source_crop_run' attribute; cannot resolve detection source."
-            )
-        return KeypointResolution(group=group, run_name=name, is_refined=False, base_run_name=name, crop_run=crop_run)
-
-    def resolve_refined(name: str) -> KeypointResolution:
-        if refined_parent is None or name not in refined_parent:
-            raise ValueError(f"Refined keypoint run '{name}' not found.")
-        group = refined_parent[name]
-        base_run = group.attrs.get("source_keypoints_run")
-        if not base_run:
-            raise ValueError(
-                f"Refined keypoint run '{name}' missing 'source_keypoints_run' attribute; provenance is required."
-            )
-        base_resolution = resolve_raw(base_run)
-        return KeypointResolution(
-            group=group,
-            run_name=name,
-            is_refined=True,
-            base_run_name=base_resolution.base_run_name,
-            crop_run=base_resolution.crop_run,
-        )
-
-    if requested:
-        if requested.startswith("refined/"):
-            return resolve_refined(requested.split("/", 1)[1])
-        if refined_parent is not None and requested in refined_parent:
-            return resolve_refined(requested)
-        return resolve_raw(requested)
-
-    if refined_parent is not None:
-        latest_refined = refined_parent.attrs.get("latest")
-        if latest_refined:
-            console.print(
-                f"Using refined keypoints run: [cyan]{latest_refined}[/cyan]"
-            )
-            return resolve_refined(latest_refined)
-
-    if raw_parent is not None:
-        latest_raw = raw_parent.attrs.get("latest")
-        if latest_raw:
-            console.print(f"Using keypoints run: [cyan]{latest_raw}[/cyan]")
-            return resolve_raw(latest_raw)
-
-    raise ValueError("Unable to resolve a keypoint run; no runs detected.")
-
-
 def resolve_collection_proxy_successor_tracking(
     root: zarr.Group,
     *,
-    keypoints: KeypointResolution,
+    keypoints: KeypointLineageAuthority,
     position_crop_run: str,
 ) -> CollectionProxySuccessorTrackingResolution:
     """Bind successor positions to their exact historical tracking authority.
@@ -6239,10 +6167,11 @@ def _motion_v2_position_lineage_record(
             "Manifest v2 successor mapping does not identify the exact "
             "keypoint/tracking lineage."
         )
-    keypoint_group = _resolve_motion_input_node(
+    resolved_keypoints = resolve_keypoint_motion_authority(
         authoritative_root,
-        f"/{keypoint_path}",
+        keypoint_path,
     )
+    keypoint_group = resolved_keypoints.group
     tracking_group = _resolve_motion_input_node(
         authoritative_root,
         f"/{tracking_path}",
@@ -6262,8 +6191,7 @@ def _motion_v2_position_lineage_record(
     if (
         archive_identity(keypoint_group) != archive_identity(authoritative_root)
         or archive_identity(tracking_group) != archive_identity(authoritative_root)
-        or keypoint_group.attrs.get("source_crop_run")
-        != historical_rowset_path.split("/", 1)[1]
+        or resolved_keypoints.crop_run != historical_rowset_path.split("/", 1)[1]
         or tracking_group.attrs.get("source_rowset_path")
         != historical_rowset_path
         or lineage_detection_ids != {detection_run_id}
@@ -7196,9 +7124,23 @@ def _validate_track_motion_input_authority(
             families=frozenset({"tracking_runs"}),
             label="source_tracking_path",
         )
+        selected_keypoint_run = (
+            "refined/" + keypoint_prefix.split("/", 1)[1]
+            if keypoint_prefix.startswith("refined_keypoints_runs/")
+            else keypoint_prefix.split("/", 1)[1]
+        )
+        resolved_keypoints = resolve_keypoint_motion_authority(
+            authoritative_root,
+            selected_keypoint_run,
+        )
+        heading_prefix = str(resolved_keypoints.heading_group_path or "")
+        heading_name = str(resolved_keypoints.heading_array_name)
         heading_ref = _motion_array_ref_from_field(fields["heading_degrees"])
-        if heading_ref != f"/{keypoint_prefix}/heading":
-            raise ValueError("Offline heading authority is not the selected keypoint run.")
+        if heading_ref != f"/{heading_prefix}/{heading_name}":
+            raise ValueError(
+                "Offline heading authority is not the selected keypoint run's "
+                "exact resolved motion source."
+            )
         if fields["heading_degrees"].get("row_alignment") != (
             "keypoint_exact_row_key_equality_v1"
         ):
@@ -7206,9 +7148,9 @@ def _validate_track_motion_input_authority(
         keypoint_key_ref = str(
             keypoint_alignment["keypoint_row_key"].get("array_ref")
         )
-        if keypoint_key_ref != f"/{keypoint_prefix}/instance_key":
+        if keypoint_key_ref != f"/{heading_prefix}/instance_key":
             raise ValueError(
-                "Offline row-key authority is not the selected keypoint run."
+                "Offline row-key authority is not the resolved heading rowset."
             )
         usability_ref = _motion_array_ref_from_field(fields["keypoint_success"])
         selected_usability_name, selected_usability_node = (
@@ -7216,7 +7158,7 @@ def _validate_track_motion_input_authority(
                 authoritative_root,
                 _resolve_motion_input_node(
                     authoritative_root,
-                    f"/{keypoint_prefix}/heading",
+                    f"/{heading_prefix}/{heading_name}",
                 ),
             )
         )
@@ -7234,7 +7176,7 @@ def _validate_track_motion_input_authority(
         elif (
             selected_usability_name is None
             or selected_usability_node is None
-            or usability_ref != f"/{keypoint_prefix}/{selected_usability_name}"
+            or usability_ref != f"/{heading_prefix}/{selected_usability_name}"
         ):
             raise ValueError(
                 "Offline keypoint-usability authority is not the exact first "
@@ -13943,7 +13885,16 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         # Offline track kinematics now uses all keypoint frames across the video.
         console.print("[blue]Building offline track kinematics run from all keypoint frames...[/blue]")
 
-        keypoints_offline = resolve_keypoint_group(root, args.keypoint_run, console)
+        keypoints_offline = resolve_keypoint_motion_authority(
+            root,
+            args.keypoint_run,
+        )
+        console.print(
+            "[cyan]Using keypoint motion authority:[/cyan] "
+            f"{keypoints_offline.profile_id} "
+            f"(keypoints={keypoints_offline.run_name}, "
+            f"heading={keypoints_offline.heading_group_path})"
+        )
         position_crop_run = (
             _controlled_run_leaf(
                 args.position_source_run,
@@ -14055,7 +14006,15 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             else None
         )
 
-        heading_offline = keypoints_offline.group["heading"][:]
+        heading_group_offline = keypoints_offline.heading_group
+        if heading_group_offline is None:
+            raise ValueError(
+                "Resolved keypoint motion authority lacks a heading group."
+            )
+        heading_node_offline = heading_group_offline[
+            keypoints_offline.heading_array_name
+        ]
+        heading_offline = heading_node_offline[:]
         if heading_offline.shape[0] != positions_offline.shape[0]:
             raise ValueError(
                 "Offline: Heading array length does not match position source row count "
@@ -14073,7 +14032,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
         keypoint_success_offline, keypoint_usability_dataset = (
             load_keypoint_usability_array(
-                keypoints_offline.group,
+                heading_group_offline,
                 expected_length=heading_offline.shape[0],
             )
         )
@@ -14104,19 +14063,19 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             raise ValueError("Offline tracking metadata lacks one exact run name.")
         tracking_group_offline = root[f"tracking_runs/{tracking_run_name}"]
         keypoint_row_key_node = _motion_input_child(
-            keypoints_offline.group,
+            heading_group_offline,
             "instance_key",
         )
         keypoint_usability_node = (
             None
             if keypoint_usability_dataset == "implicit_all_true"
-            else keypoints_offline.group[keypoint_usability_dataset]
+            else heading_group_offline[keypoint_usability_dataset]
         )
         offline_input_authority = build_track_motion_input_authority(
             root,
             source_positions=canonical_position_surface.coordinates,
             mode="offline_exact_sources_v1",
-            heading_node=keypoints_offline.group["heading"],
+            heading_node=heading_node_offline,
             keypoint_usability_node=keypoint_usability_node,
             keypoint_row_key_node=keypoint_row_key_node,
             tracking_group=tracking_group_offline,

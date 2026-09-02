@@ -1299,7 +1299,7 @@ def test_successor_tracking_resolution_requires_exact_keypoint_source(
 
     resolved = mod.resolve_collection_proxy_successor_tracking(
         root,
-        keypoints=mod.KeypointResolution(
+        keypoints=mod.KeypointLineageAuthority(
             group=refined,
             run_name="refined",
             is_refined=True,
@@ -1322,7 +1322,7 @@ def test_successor_tracking_resolution_requires_exact_keypoint_source(
     with pytest.raises(ValueError, match="does not prove exact identity"):
         mod.resolve_collection_proxy_successor_tracking(
             root,
-            keypoints=mod.KeypointResolution(
+            keypoints=mod.KeypointLineageAuthority(
                 group=refined,
                 run_name="refined",
                 is_refined=True,
@@ -1373,7 +1373,7 @@ def test_successor_tracking_resolution_uses_historical_identity_for_unknown_keyp
 
     resolved = mod.resolve_collection_proxy_successor_tracking(
         root,
-        keypoints=mod.KeypointResolution(
+        keypoints=mod.KeypointLineageAuthority(
             group=refined,
             run_name="refined",
             is_refined=True,
@@ -1426,7 +1426,7 @@ def test_successor_tracking_resolution_rejects_detection_identity_disagreement(
     with pytest.raises(ValueError, match="do not identify one exact"):
         mod.resolve_collection_proxy_successor_tracking(
             root,
-            keypoints=mod.KeypointResolution(
+            keypoints=mod.KeypointLineageAuthority(
                 group=refined,
                 run_name="refined",
                 is_refined=True,
