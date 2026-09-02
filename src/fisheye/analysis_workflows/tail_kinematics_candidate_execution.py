@@ -133,23 +133,36 @@ def _validate_exact_tail_run(run_group: Any) -> TailKinematicsDimensions:
     return dimensions
 
 
-def compute_tail_kinematics_logical_hashes(run_group: Any) -> dict[str, object]:
-    """Hash all 21 or 23 exact decoded arrays with path/dtype/shape framing."""
+def build_tail_kinematics_logical_hashes_from_array_digests(
+    run_group: Any,
+    array_content_sha256: Mapping[str, str],
+) -> dict[str, object]:
+    """Build exact logical equality evidence from one sealed array digest set."""
 
     dimensions = _validate_exact_tail_run(run_group)
     declarations = build_tail_kinematics_array_declarations(
         include_source_revision_bundle=dimensions.include_source_revision_bundle,
         byte_planner_adopted=bool(_attrs(run_group).get("byte_planner_adopted")),
     )
+    expected_paths = {declaration.path for declaration in declarations}
+    if set(array_content_sha256) != expected_paths:
+        raise ValueError(
+            "tail-kinematics array digest inventory differs from the exact schema"
+        )
     records: list[dict[str, object]] = []
     for declaration in declarations:
-        values = np.asarray(_array_at_path(run_group, declaration.path)[:])
+        node = _array_at_path(run_group, declaration.path)
+        digest = array_content_sha256.get(declaration.path)
+        if type(digest) is not str or not _SHA256.fullmatch(digest):
+            raise ValueError(
+                f"tail-kinematics array digest is invalid for {declaration.path!r}"
+            )
         records.append(
             {
                 "path": declaration.path,
-                "dtype": values.dtype.str,
-                "shape": [int(value) for value in values.shape],
-                "array_values_sha256": array_values_sha256(values),
+                "dtype": np.dtype(node.dtype).str,
+                "shape": [int(value) for value in node.shape],
+                "array_values_sha256": digest,
             }
         )
     records.sort(key=lambda item: str(item["path"]))
@@ -158,6 +171,24 @@ def compute_tail_kinematics_logical_hashes(run_group: Any) -> dict[str, object]:
         "optional_revision_bundle_present": (dimensions.include_source_revision_bundle),
         "arrays": records,
     }
+
+
+def compute_tail_kinematics_logical_hashes(run_group: Any) -> dict[str, object]:
+    """Hash all 21 or 23 exact decoded arrays with path/dtype/shape framing."""
+
+    dimensions = _validate_exact_tail_run(run_group)
+    declarations = build_tail_kinematics_array_declarations(
+        include_source_revision_bundle=dimensions.include_source_revision_bundle,
+        byte_planner_adopted=bool(_attrs(run_group).get("byte_planner_adopted")),
+    )
+    digests: dict[str, str] = {}
+    for declaration in declarations:
+        values = np.asarray(_array_at_path(run_group, declaration.path)[:])
+        digests[declaration.path] = array_values_sha256(values)
+    return build_tail_kinematics_logical_hashes_from_array_digests(
+        run_group,
+        digests,
+    )
 
 
 def tail_kinematics_logical_manifest_sha256(run_group: Any) -> str:

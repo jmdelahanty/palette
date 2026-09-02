@@ -24,12 +24,14 @@ from fisheye.shared.coordinate_identity import (
     stamp_and_bind_row_identity_contract,
 )
 from fisheye.shared.coordinate_record import stamp_and_bind_persisted_coordinate_record
+from fisheye.shared.atomic_run_publisher import tree_inventory
 from fisheye.shared.pixel_frame_authority import (
     stamp_acquisition_camera_frame,
     stamp_acquisition_import_ownership,
     stamp_source_camera_pixel_frame_authority,
 )
 import fisheye.shared.tail_coordinate_publication as mod
+import fisheye.shared.coordinate_frame_record as coordinate_frame_record_mod
 
 
 def _identity_source(*, direct: bool = True) -> tuple[zarr.Group, SimpleNamespace]:
@@ -423,6 +425,31 @@ def _canonical_source_publication(root: zarr.Group) -> SimpleNamespace:
         )
     stamp_bound_canonical_coordinate_descriptors(descriptors.values())
     curvature_semantics = _fixture_record(source, "tail_curvature_semantics")
+    source_manifest_node = source.require_group("fixture_records/manifest")
+    source_manifest = stamp_and_bind_persisted_coordinate_record(
+        source_manifest_node,
+        {
+            "schema_id": "fixture.manifest",
+            "schema_version": 1,
+            "name": "manifest",
+            "arrays": {
+                name: {
+                    "array_ref": f"/{source.path}/{name}",
+                    "relative_ref": name,
+                    "dtype": np.dtype(source[name].dtype).str,
+                    "shape": [int(value) for value in source[name].shape],
+                    "content_sha256": array_payload_sha256(source[name]),
+                    "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+                }
+                for name in (
+                    "instance_key",
+                    "source_crop_row_ids",
+                    "source_acquisition_frame_index",
+                )
+            },
+        },
+        attr_name="fixture_manifest",
+    )
 
     def require_scalar_surface(relative_ref, *, units=None, surface_kind=None):
         assert relative_ref == "components/subject_body/tail_curvature_px_inv"
@@ -434,7 +461,7 @@ def _canonical_source_publication(root: zarr.Group) -> SimpleNamespace:
         _run=source,
         run_path="analysis/subject_shape_runs/shape",
         row_identity=identity,
-        manifest=_fixture_record(source, "manifest"),
+        manifest=source_manifest,
         temporal_authority=_fixture_record(source, "temporal_authority"),
         scientific_configuration=_fixture_record(
             source,
@@ -500,6 +527,118 @@ def _kinematics_run(root: zarr.Group, source: SimpleNamespace) -> zarr.Group:
     for name, values in arrays.items():
         run.create_array(name, data=values)
     return run
+
+
+def test_receipt_backed_tail_publication_reuses_one_decoded_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    archive = tmp_path / "archive.zarr"
+    root = zarr.open_group(str(archive), mode="w", use_consolidated=False)
+    source = _canonical_source_publication(root)
+    monkeypatch.setattr(mod, "_source_publication", lambda *_args: source)
+    tail = _kinematics_run(root, source)
+    run_path = archive / "analysis" / "tail_kinematics_runs" / "tail_001"
+
+    scan = mod.build_tail_kinematics_payload_scan_receipt(tail, workers=2)
+    assert scan["array_content_sha256"] == {
+        path: array_payload_sha256(tail[path])
+        for path in sorted(mod._KINEMATICS_ARRAYS)
+    }
+    copied = tree_inventory(run_path, hash_content=True).to_json()
+    physical_copy = {
+        "backend": "python",
+        "verification": "sha256_all_physical_files",
+        **copied,
+    }
+
+    def unexpected_decoded_hash(_node):
+        raise AssertionError("receipt-backed publication decoded an array again")
+
+    with monkeypatch.context() as hash_guard:
+        hash_guard.setattr(
+            coordinate_frame_record_mod,
+            "_read_array_snapshot",
+            unexpected_decoded_hash,
+        )
+        publication = mod.publish_tail_kinematics_coordinate_surfaces(
+            root,
+            tail,
+            payload_scan_receipt=scan,
+            payload_run_path=run_path,
+            verified_physical_copy=physical_copy,
+        )
+        assert (
+            publication.manifest.record_sha256
+            == tail.attrs[mod.TAIL_PUBLICATION_MANIFEST_DIGEST_ATTR]
+        )
+        mod.activate_tail_coordinate_publication(
+            root,
+            root["analysis/tail_kinematics_runs"],
+            tail,
+            run_name="tail_001",
+            expected_publication_owner_uuid=tail.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR],
+        )
+        proof = mod.validate_sealed_tail_publication_metadata(
+            root,
+            "analysis/tail_kinematics_runs/tail_001",
+            expected_selector_eligible=True,
+            expected_publication_owner=tail.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR],
+            expected_kind="tail_kinematics",
+            payload_run_path=run_path,
+        )
+        loaded = mod.load_tail_kinematics_coordinate_publication(
+            root,
+            "analysis/tail_kinematics_runs/tail_001",
+        )
+    assert loaded.manifest.record_sha256 == proof.manifest.record_sha256
+    assert proof.array_content_sha256 == scan["array_content_sha256"]
+
+
+def test_receipt_backed_tail_deep_audit_detects_payload_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    archive = tmp_path / "archive.zarr"
+    root = zarr.open_group(str(archive), mode="w", use_consolidated=False)
+    source = _canonical_source_publication(root)
+    monkeypatch.setattr(mod, "_source_publication", lambda *_args: source)
+    tail = _kinematics_run(root, source)
+    run_path = archive / "analysis" / "tail_kinematics_runs" / "tail_001"
+    scan = mod.build_tail_kinematics_payload_scan_receipt(tail, workers=2)
+    physical_copy = {
+        "backend": "python",
+        "verification": "sha256_all_physical_files",
+        **tree_inventory(run_path, hash_content=True).to_json(),
+    }
+    mod.publish_tail_kinematics_coordinate_surfaces(
+        root,
+        tail,
+        payload_scan_receipt=scan,
+        payload_run_path=run_path,
+        verified_physical_copy=physical_copy,
+    )
+    mod.activate_tail_coordinate_publication(
+        root,
+        root["analysis/tail_kinematics_runs"],
+        tail,
+        run_name="tail_001",
+        expected_publication_owner_uuid=tail.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR],
+    )
+
+    changed = np.asarray(tail["tail_angle_rad"][:], dtype=np.float32)
+    changed[0, 0] = 0.25
+    tail["tail_angle_rad"][:] = changed
+    with pytest.raises(
+        mod.TailCoordinatePublicationError,
+        match="deep physical payload audit failed|deep decoded payload audit differs",
+    ):
+        mod.deep_audit_tail_payload_receipt(
+            root,
+            "analysis/tail_kinematics_runs/tail_001",
+            payload_run_path=run_path,
+            hash_workers=2,
+        )
 
 
 def _posture_run(
