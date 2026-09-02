@@ -448,6 +448,84 @@ def test_keypoint_crop_loader_reuses_only_within_one_proof_scope(
     assert len(loads) == 2
 
 
+def test_keypoint_surface_loader_reuses_only_within_one_proof_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = object()
+    root = _RootRegistry(token)
+    root.register(SimpleNamespace(path="keypoints_runs/k1", attrs={}))
+    bound = object()
+    loads: list[tuple[Any, str, bool, bool]] = []
+    checks: list[tuple[object, Any, str, bool, bool]] = []
+
+    def load_fresh(
+        root_node: Any,
+        run_path: str,
+        *,
+        require_complete: bool,
+        expected_selector_eligible: bool,
+        resolved_crop_source: object | None = None,
+    ) -> object:
+        assert resolved_crop_source is None
+        loads.append(
+            (
+                root_node,
+                run_path,
+                require_complete,
+                expected_selector_eligible,
+            )
+        )
+        return bound
+
+    def check_unchanged(
+        value: object,
+        *,
+        root_node: Any,
+        run_path: str,
+        require_complete: bool,
+        expected_selector_eligible: bool,
+    ) -> None:
+        checks.append(
+            (
+                value,
+                root_node,
+                run_path,
+                require_complete,
+                expected_selector_eligible,
+            )
+        )
+
+    monkeypatch.setattr(
+        publication_module,
+        "_load_persisted_keypoint_coordinate_surfaces_fresh",
+        load_fresh,
+    )
+    monkeypatch.setattr(
+        publication_module,
+        "_assert_keypoint_coordinate_surfaces_unchanged",
+        check_unchanged,
+    )
+
+    with proof_verification_scope():
+        first = publication_module.load_persisted_keypoint_coordinate_surfaces(
+            root,
+            "keypoints_runs/k1",
+        )
+        second = publication_module.load_persisted_keypoint_coordinate_surfaces(
+            root,
+            "keypoints_runs/k1",
+        )
+        assert first is second is bound
+        assert len(loads) == 1
+
+    assert checks == [(bound, root, "keypoints_runs/k1", True, True)]
+    publication_module.load_persisted_keypoint_coordinate_surfaces(
+        root,
+        "keypoints_runs/k1",
+    )
+    assert len(loads) == 2
+
+
 class _MutableGroup(FakeGroup):
     def __init__(self, *, path: str, root: _RootRegistry, token: object) -> None:
         super().__init__(path=path, archive_token=token)

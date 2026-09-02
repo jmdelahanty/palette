@@ -3201,6 +3201,118 @@ def _load_persisted_keypoint_coordinate_surfaces(
         prefix="keypoints_runs/",
         label="keypoint rowset",
     )
+    if resolved_crop_source is not None:
+        # Producer-owned callers may provide a freshly bound crop source while
+        # constructing a new publication.  That dependency is intentionally
+        # not coalesced with ordinary persisted-reader proofs.
+        return _load_persisted_keypoint_coordinate_surfaces_fresh(
+            root_node,
+            path,
+            require_complete=require_complete,
+            expected_selector_eligible=expected_selector_eligible,
+            resolved_crop_source=resolved_crop_source,
+        )
+
+    key = _keypoint_coordinate_surfaces_proof_key(
+        root_node,
+        path,
+        require_complete=require_complete,
+        expected_selector_eligible=expected_selector_eligible,
+    )
+    return load_verified_value(
+        key,
+        lambda: _load_persisted_keypoint_coordinate_surfaces_fresh(
+            root_node,
+            path,
+            require_complete=require_complete,
+            expected_selector_eligible=expected_selector_eligible,
+        ),
+        lambda value: _assert_keypoint_coordinate_surfaces_unchanged(
+            value,
+            root_node=root_node,
+            run_path=path,
+            require_complete=require_complete,
+            expected_selector_eligible=expected_selector_eligible,
+        ),
+    )
+
+
+def _keypoint_coordinate_surfaces_proof_key(
+    root_node: Any,
+    run_path: str,
+    *,
+    require_complete: bool,
+    expected_selector_eligible: bool,
+) -> tuple[Any, ...]:
+    identity = archive_identity(root_node)
+    run = _node(root_node, run_path, label="keypoint rowset")
+    attrs = getattr(run, "attrs", {})
+    manifest = attrs.get("run_manifest")
+    manifest_payload_digest = (
+        manifest.get("payload_digest") if isinstance(manifest, Mapping) else None
+    )
+    return (
+        "palette.keypoint_coordinate_surfaces.v1",
+        identity.kind,
+        identity.key,
+        run_path,
+        require_complete,
+        expected_selector_eligible,
+        attrs.get(RUN_COMPLETION_STATUS_ATTR),
+        attrs.get("stage_selector_eligible"),
+        manifest_payload_digest,
+        attrs.get("coordinate_successor_authority_sha256"),
+        attrs.get(f"{KEYPOINT_COORDINATE_CONTEXT_ATTR}_sha256"),
+        attrs.get(f"{KEYPOINT_COORDINATE_DERIVATION_ATTR}_sha256"),
+        attrs.get(f"{KEYPOINT_LABEL_AUTHORITY_ATTR}_sha256"),
+        attrs.get("row_identity_contract_sha256"),
+        attrs.get("source_row_temporal_authority_sha256"),
+    )
+
+
+def _assert_keypoint_coordinate_surfaces_unchanged(
+    value: BoundKeypointCoordinateSurfaces,
+    *,
+    root_node: Any,
+    run_path: str,
+    require_complete: bool,
+    expected_selector_eligible: bool,
+) -> None:
+    current = _load_persisted_keypoint_coordinate_surfaces_fresh(
+        root_node,
+        run_path,
+        require_complete=require_complete,
+        expected_selector_eligible=expected_selector_eligible,
+    )
+    if (
+        current.context.context_record.record_sha256
+        != value.context.context_record.record_sha256
+        or current.derivation.record_sha256 != value.derivation.record_sha256
+        or current.context.row_identity.record_sha256
+        != value.context.row_identity.record_sha256
+        or current.context.temporal_authority.record_sha256
+        != value.context.temporal_authority.record_sha256
+        or current.context.keypoint_label_authority.record_sha256
+        != value.context.keypoint_label_authority.record_sha256
+    ):
+        _fail("Persisted keypoint coordinate surfaces changed after binding.")
+
+
+def _load_persisted_keypoint_coordinate_surfaces_fresh(
+    root_node: Any,
+    run_path: str,
+    *,
+    require_complete: bool,
+    expected_selector_eligible: bool,
+    resolved_crop_source: Any | None = None,
+) -> BoundKeypointCoordinateSurfaces:
+    """Freshly verify one graph through the profile-aware crop resolver."""
+
+    path = _canonical_path(
+        run_path,
+        prefix="keypoints_runs/",
+        label="keypoint rowset",
+    )
     run = _node(root_node, path, label="keypoint rowset")
     crop_evidence_attr = "coordinate_successor_historical_crop_adapter"
     if require_complete and crop_evidence_attr in getattr(run, "attrs", {}):
