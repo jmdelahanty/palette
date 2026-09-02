@@ -194,7 +194,7 @@ color or hard-codes an identity-to-role mapping.
   membership, time weights, empty denominators, equal-recording versus pooled
   summaries, manifest tamper detection, and both renderers.
 - [x] Run focused tests and `marimo check` outside the Codex sandbox.
-- [ ] Run required repository CI and retain every required green result before
+- [x] Run required repository CI and retain every required green result before
   integration.
 - [x] Publish one immutable Phase-C-bound canary and visually inspect all
   registered metric families.
@@ -282,8 +282,43 @@ and tortuosity correctly retained its complete logarithmic range.
 Focused distribution validation passed 15 tests; the neighboring cohort,
 export, group-statistics, and rendering suite passed 74 tests. Marimo's
 structural checker, Python compilation, formatting, and whitespace checks also
-passed. Required repository CI remains an integration gate and is not replaced
-by this local evidence.
+passed.
+
+Required repository CI run `33676511597` completed successfully for exact PR
+head `bec43b9a607c09f7f7981f9824d91304d868ee0f`: all seven contract,
+packaging, and collection gates and all 16 non-GPU test shards passed (23
+required checks total). PR 115 then merged through the repository's merge-commit
+workflow on 2026-09-02 at `0440c248ae45c124d80de37698b8a2f968f1a65a`.
+The remote `main` ref was independently verified at that exact merge commit.
+Integration did not activate a selector, mutate a registry or source Zarr,
+deploy code, or move the shared `/groups` checkout.
+
+## Post-merge explorer review
+
+The merged reader reopened the exact full-cohort distribution at record digest
+`bb90c675747fdc3403de24a21bd824a8603526b8d529f5d795ed13c571fe46e1`
+and enumerated all 17 registered metrics. The read-only Marimo explorer started
+successfully from merge commit `0440c248ae45c124d80de37698b8a2f968f1a65a`,
+and its HTTP application endpoint responded successfully on localhost.
+
+Visual review covered all 24 PNGs in the immutable central-range report bound
+by record digest
+`b19c17b8a8845572f5028b3b6eaba9141e0f5645b7e2c1bba9745fbeb22fc683`.
+The event, frame, and time labels are explicit; Whole, Pre, Training, and Post
+panels share their contracted axes and report 80 contributing recordings;
+signed distributions preserve both directions; tortuosity retains its complete
+logarithmic evidence range; and chaser distance distinguishes semantic role by
+glyph and position provider by line style while retaining the cohort's exact
+black protocol appearance. Frame- and time-weighted curves are visually almost
+identical for this nearly uniform-sampling cohort, as expected, but remain
+separate selectable contracts. No blocking layout, clipping, missing-panel, or
+role/provider-encoding defect was observed.
+
+The 10-degree signed frame-to-frame heading-change recipe places most central
+mass in its single `[-5, 5]` degree bin. That is faithful to the sealed v1 bin
+recipe rather than a renderer defect, but a finer scientific view would require
+a versioned metric recipe and a new distribution successor; a viewer must not
+silently re-bin it.
 
 ## Deferred work
 
