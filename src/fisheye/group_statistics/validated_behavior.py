@@ -50,6 +50,10 @@ from .validated_behavior_specs import (
     validate_histogram_specs,
     validate_metric_specs,
 )
+from .validated_behavior_appearance import (
+    build_chaser_appearance_dimension,
+    validate_chaser_appearance_dimension,
+)
 
 SCHEMA_ID = "palette.analytics.validated_behavior.group_statistics"
 SCHEMA_VERSION = 2
@@ -1296,6 +1300,9 @@ def compute_validated_behavior_group_statistics(
             "sha256"
         ],
     }
+    chaser_appearance = build_chaser_appearance_dimension(dataset)
+    if chaser_appearance is not None:
+        source_export["chaser_appearance_dimension"] = chaser_appearance
     return ValidatedBehaviorGroupStatisticsResult(
         config=config,
         source_export=MappingProxyType(source_export),
@@ -1632,6 +1639,12 @@ def _validate_statistics_directory(
     if not isinstance(source_export, Mapping):
         _fail("Grouped-statistics manifest lacks source-export identity")
     source_digest = source_export.get("export_manifest_record_sha256")
+    chaser_appearance = source_export.get("chaser_appearance_dimension")
+    if chaser_appearance is not None:
+        validate_chaser_appearance_dimension(
+            chaser_appearance,
+            expected_export_manifest_sha256=str(source_digest),
+        )
     primary_keys = {
         "recording_metric_values.parquet": (
             "statistics_run_id",

@@ -8,7 +8,10 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
-from .validated_behavior_adapters import build_phase_a_row_extractors
+from .validated_behavior_adapters import (
+    build_phase_a_row_extractors,
+    build_phase_c_compact_row_extractors,
+)
 from .validated_behavior_contracts import (
     CORE_METADATA_PROFILE_ID,
     CORE_TABLE_SPECS,
@@ -24,6 +27,10 @@ from .validated_behavior_phase_b_adapters import (
 from .validated_behavior_phase_b_contracts import (
     PHASE_B_PROFILE_ID,
     PHASE_B_TABLE_SPECS,
+)
+from .validated_behavior_phase_c_contracts import (
+    PHASE_C_PROFILE_ID,
+    PHASE_C_TABLE_SPECS,
 )
 
 
@@ -51,6 +58,12 @@ def _phase_b_extractors() -> Mapping[str, Callable[..., Any]]:
     return MappingProxyType(extractors)
 
 
+def _phase_c_extractors() -> Mapping[str, Callable[..., Any]]:
+    extractors = dict(build_phase_c_compact_row_extractors())
+    extractors.update(build_phase_b_dense_row_extractors())
+    return MappingProxyType(extractors)
+
+
 INSTALLED_VALIDATED_BEHAVIOR_PROFILES: Mapping[str, ValidatedBehaviorExportProfile] = (
     MappingProxyType(
         {
@@ -68,6 +81,11 @@ INSTALLED_VALIDATED_BEHAVIOR_PROFILES: Mapping[str, ValidatedBehaviorExportProfi
                 profile_id=PHASE_B_PROFILE_ID,
                 table_specs=PHASE_B_TABLE_SPECS,
                 row_extractor_factory=_phase_b_extractors,
+            ),
+            PHASE_C_PROFILE_ID: ValidatedBehaviorExportProfile(
+                profile_id=PHASE_C_PROFILE_ID,
+                table_specs=PHASE_C_TABLE_SPECS,
+                row_extractor_factory=_phase_c_extractors,
             ),
         }
     )

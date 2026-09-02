@@ -17,6 +17,10 @@ from fisheye.analytics_exports.validated_behavior_phase_b_contracts import (
     PHASE_B_PROFILE_ID,
     PHASE_B_TABLE_SPECS,
 )
+from fisheye.analytics_exports.validated_behavior_phase_c_contracts import (
+    PHASE_C_PROFILE_ID,
+    PHASE_C_TABLE_SPECS,
+)
 from fisheye.group_statistics.validated_behavior import (
     ValidatedBehaviorGroupStatisticsConfig,
     ValidatedBehaviorGroupStatisticsError,
@@ -74,7 +78,7 @@ class _FakeTable:
 
     @property
     def spec(self):
-        return PHASE_B_TABLE_SPECS[self.name]
+        return self.dataset.table_specs[self.name]
 
     def scan(self, *, columns=None, predicate=None):
         lazy = self.frame.lazy()
@@ -103,15 +107,22 @@ class _FakeTable:
 
 
 class _FakeDataset:
-    def __init__(self, frames: dict[str, pl.DataFrame]):
+    def __init__(
+        self,
+        frames: dict[str, pl.DataFrame],
+        *,
+        table_specs=PHASE_B_TABLE_SPECS,
+        profile_id: str = PHASE_B_PROFILE_ID,
+    ):
         self.root = Path("/tmp/fixture_validated_behavior")
         self.export_run_id = "fixture-phase-b"
         self.cache_identity = "a" * 64
         self.validation_mode = "receipt"
+        self.table_specs = table_specs
         self.manifest = {
             "record_sha256": self.cache_identity,
             "export_plan": {"plan_sha256": "b" * 64},
-            "export_profile": {"profile_id": PHASE_B_PROFILE_ID},
+            "export_profile": {"profile_id": profile_id},
             "analysis_unit_policy": {
                 "sha256": "c" * 64,
                 "record": {
@@ -193,6 +204,57 @@ def _compute(*, duplicate: bool = False, nonfinite: bool = False):
     return compute_validated_behavior_group_statistics(dataset, config)
 
 
+def _phase_c_appearance_rows() -> pl.DataFrame:
+    rows = []
+    for recording_id in ("r1", "r2", "r3"):
+        for code, role, color, symbol, marker in (
+            (1, "aggressive", "#0000ff", "star", "*"),
+            (2, "inert", "#ff0000", "circle", "o"),
+        ):
+            red, green, blue = (
+                int(color[index : index + 2], 16) / 255.0 for index in (1, 3, 5)
+            )
+            rows.append(
+                {
+                    "recording_id": recording_id,
+                    "chaser_identity_code": code,
+                    "chaser_index": code - 1,
+                    "chaser_identity": f"stimulus-exact:chaser_index:{code - 1}",
+                    "behavior_role_code": code,
+                    "behavior_role": role,
+                    "stimulus_run_path": "analysis/stimulus_runs/stimulus-exact",
+                    "source_protocol_sha256": "1" * 64,
+                    "experimental_color_r": red,
+                    "experimental_color_g": green,
+                    "experimental_color_b": blue,
+                    "experimental_color_a": 1.0,
+                    "experimental_color_hex": color,
+                    "experimental_color_css": (
+                        f"rgba({red * 255:.0f}, {green * 255:.0f}, "
+                        f"{blue * 255:.0f}, 1)"
+                    ),
+                    "contrast_outline_hex": "#ffffff",
+                    "plotly_role_symbol": symbol,
+                    "matplotlib_role_marker": marker,
+                    "appearance_schema_id": (
+                        "palette.visualization.chaser_appearance_projection"
+                    ),
+                    "appearance_schema_version": 1,
+                    "appearance_policy_id": (
+                        "protocol_rgba_independent_behavior_role_glyph_v1"
+                    ),
+                    "appearance_projection_sha256": (
+                        f"{code + int(recording_id[1])}" * 64
+                    )[:64],
+                    "occurrence_binding_sha256": "8" * 64,
+                    "color_semantics": "experimental_protocol_rgba",
+                    "role_semantics": "independent_marker_shape_and_text",
+                    "color_role_independence": True,
+                }
+            )
+    return pl.DataFrame(rows)
+
+
 def test_default_registry_is_composable_and_unique():
     ids = [spec.metric_id for spec in DEFAULT_VALIDATED_BEHAVIOR_METRICS]
     assert len(ids) == len(set(ids))
@@ -220,6 +282,55 @@ def test_default_registry_is_composable_and_unique():
     assert all(
         len(spec.spec_sha256) == 64 for spec in DEFAULT_VALIDATED_BEHAVIOR_HISTOGRAMS
     )
+
+
+def test_phase_c_statistics_persist_exact_chaser_appearance_dimension(
+    tmp_path: Path,
+):
+    frames = _frames()
+    frames["chaser_occurrences"] = _phase_c_appearance_rows()
+    dataset = _FakeDataset(
+        frames,
+        table_specs=PHASE_C_TABLE_SPECS,
+        profile_id=PHASE_C_PROFILE_ID,
+    )
+    config = ValidatedBehaviorGroupStatisticsConfig(
+        statistics_run_id="fixture-phase-c-appearance",
+        metric_specs=(_metric(),),
+        bootstrap_iterations=0,
+        permutation_iterations=0,
+        confidence_level=0.95,
+        minimum_recordings=2,
+        random_seed=17,
+    )
+
+    result = compute_validated_behavior_group_statistics(dataset, config)
+
+    dimension = result.source_export["chaser_appearance_dimension"]
+    assert dimension["record_sha256"]
+    assert len(dimension["rows"]) == 6
+    assert dimension["rows"][0]["experimental_color_hex"] == "#0000ff"
+    assert dimension["rows"][0]["behavior_role"] == "aggressive"
+    assert dimension["rows"][0]["plotly_role_symbol"] == "star"
+
+    output = tmp_path / "phase-c-statistics"
+    write_validated_behavior_group_statistics_sandbox(result, output)
+    source = ValidatedBehaviorStatisticsViewSource.open(output)
+    payload = build_statistics_view_payload(source, "core_behavior")
+    validate_statistics_view_payload(payload)
+    assert payload["chaser_appearance_dimension"]["record_sha256"] == dimension[
+        "record_sha256"
+    ]
+    assert payload["behavior_role_styles"]["aggressive"] == {
+        "aggregate_color_hex": "#0000ff",
+        "aggregate_color_css": "rgba(0, 0, 255, 1)",
+        "aggregate_color_policy": "unique_protocol_rgba_across_occurrences",
+        "experimental_color_hex_values": ["#0000ff"],
+        "experimental_color_css_values": ["rgba(0, 0, 255, 1)"],
+        "plotly_role_symbol": "star",
+        "matplotlib_role_marker": "*",
+        "color_role_independence": True,
+    }
 
 
 def test_cli_lists_families_without_opening_a_dataset(capsys):
