@@ -2556,8 +2556,8 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-required-5f4c831bd5fa5475",
-            "schema-required-bdf42c54d703b0db"
+            "schema-required-bdf42c54d703b0db",
+            "schema-required-d1b29af96a08daa0"
           ],
           "shape": "<unresolved>"
         },
@@ -3381,7 +3381,7 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-71a500828104eeb5"
+            "schema-writer-fd2a07a926708102"
           ],
           "shape": "shape(_stack_scalar_channels(frame_group, angle_names, row_count=num_frames, dtype=np.float32, fill_value=np.nan))"
         }
@@ -4412,7 +4412,7 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-required-180a61c34a238b38",
-            "schema-required-c3a11d7cc9f4d20e",
+            "schema-required-8066c98680bfc60b",
             "schema-required-e016a5aa27658a7a"
           ],
           "shape": "<unresolved>"
@@ -4804,7 +4804,7 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-required-00587bfa11165d62",
-            "schema-required-593fa42c11d45379"
+            "schema-required-520a8d71f40325d6"
           ],
           "shape": "<unresolved>"
         },
@@ -5738,9 +5738,9 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-2faca2723ffa1ee8",
-            "schema-writer-34796a4d18cdb9a3",
-            "schema-writer-87e2e2b03af00a25"
+            "schema-writer-3cf6dcf2581798a4",
+            "schema-writer-69ef50bc8926a8a4",
+            "schema-writer-dc0f9f13ee0f488e"
           ],
           "shape": "shape(metadata['name'])"
         },
@@ -7320,7 +7320,7 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-required-0b26b095ec1f32c9",
-            "schema-required-ff2e9fab31bb89ff"
+            "schema-required-fd69d46beecc646e"
           ],
           "shape": "<unresolved>"
         },
@@ -26046,8 +26046,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2145,
-      "occurrence_id": "schema-writer-34796a4d18cdb9a3",
+      "line": 2146,
+      "occurrence_id": "schema-writer-69ef50bc8926a8a4",
       "path_pattern": "<run_group>/angle_channel_index/name",
       "required": null,
       "shape_expression": "shape(metadata['name'])",
@@ -26059,7 +26059,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-27d9d1f056b2512d"
+      "writer_site_id": "writer-377cae260c1a067d"
     },
     {
       "access_pattern": "unclassified",
@@ -26080,8 +26080,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2146,
-      "occurrence_id": "schema-writer-5f98391db58b1c51",
+      "line": 2147,
+      "occurrence_id": "schema-writer-ec91d0e006391170",
       "path_pattern": "<run_group>/angle_channel_index/roi_available",
       "required": null,
       "shape_expression": "shape(roi_available)",
@@ -26093,7 +26093,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-147a1b11dd450d4f"
+      "writer_site_id": "writer-27becbe956a923e9"
     },
     {
       "access_pattern": "windowed",
@@ -26114,8 +26114,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2147,
-      "occurrence_id": "schema-writer-68114f25c1e593ab",
+      "line": 2148,
+      "occurrence_id": "schema-writer-648c3769f4c01dfd",
       "path_pattern": "<run_group>/angle_channel_index/frame_available",
       "required": null,
       "shape_expression": "shape(frame_available)",
@@ -26127,7 +26127,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-e3f0422e3d5c6f77"
+      "writer_site_id": "writer-2a057b95d50cee10"
     },
     {
       "access_pattern": "unclassified",
@@ -26148,8 +26148,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2148,
-      "occurrence_id": "schema-writer-533dde21ead11640",
+      "line": 2149,
+      "occurrence_id": "schema-writer-6cefab3725296089",
       "path_pattern": "<run_group>/angle_channel_index/representation",
       "required": null,
       "shape_expression": "shape(metadata['representation'])",
@@ -26161,7 +26161,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-cef5452ac8c9e8b5"
+      "writer_site_id": "writer-6b6793acb08a4f76"
     },
     {
       "access_pattern": "unclassified",
@@ -26182,8 +26182,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2149,
-      "occurrence_id": "schema-writer-ef165af79c844663",
+      "line": 2150,
+      "occurrence_id": "schema-writer-22cb9df59699986c",
       "path_pattern": "<run_group>/angle_channel_index/eye",
       "required": null,
       "shape_expression": "shape(metadata['eye'])",
@@ -26195,7 +26195,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-d1814b8d266ab8c8"
+      "writer_site_id": "writer-0ee1d0fe6eb55599"
     },
     {
       "access_pattern": "unclassified",
@@ -26216,8 +26216,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2150,
-      "occurrence_id": "schema-writer-338146bd1d142c57",
+      "line": 2151,
+      "occurrence_id": "schema-writer-114817e5409d352e",
       "path_pattern": "<run_group>/angle_channel_index/value_kind",
       "required": null,
       "shape_expression": "shape(metadata['value_kind'])",
@@ -26229,7 +26229,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-70a087541b6fb181"
+      "writer_site_id": "writer-d765f05685eec680"
     },
     {
       "access_pattern": "unclassified",
@@ -26250,8 +26250,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2151,
-      "occurrence_id": "schema-writer-092b28c12e4d4c50",
+      "line": 2152,
+      "occurrence_id": "schema-writer-05733b7500e1ee91",
       "path_pattern": "<run_group>/angle_channel_index/units",
       "required": null,
       "shape_expression": "shape(metadata['units'])",
@@ -26263,7 +26263,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-56c71214e8faa5c4"
+      "writer_site_id": "writer-7e18a4c2ed05f555"
     },
     {
       "access_pattern": "unclassified",
@@ -26284,8 +26284,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2152,
-      "occurrence_id": "schema-writer-abb803a5779f5da1",
+      "line": 2153,
+      "occurrence_id": "schema-writer-c8e226d391095728",
       "path_pattern": "<run_group>/angle_channel_index/source_channel",
       "required": null,
       "shape_expression": "shape(metadata['source_channel'])",
@@ -26297,7 +26297,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-ba1bbb88adbec620"
+      "writer_site_id": "writer-e4a7e0fbf1b89f9f"
     },
     {
       "access_pattern": "unclassified",
@@ -26318,8 +26318,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2153,
-      "occurrence_id": "schema-writer-427bf225017b0cc5",
+      "line": 2154,
+      "occurrence_id": "schema-writer-4b5022da5dcb35de",
       "path_pattern": "<run_group>/angle_channel_index/formula",
       "required": null,
       "shape_expression": "shape(metadata['formula'])",
@@ -26331,7 +26331,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-2829fe56d01abd69"
+      "writer_site_id": "writer-34a0447e82e84b00"
     },
     {
       "access_pattern": "unclassified",
@@ -26352,8 +26352,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2154,
-      "occurrence_id": "schema-writer-3c83dfac997cfc85",
+      "line": 2155,
+      "occurrence_id": "schema-writer-d8534dd656354ed3",
       "path_pattern": "<run_group>/angle_channel_index/compatibility_alias_of",
       "required": null,
       "shape_expression": "shape(metadata['compatibility_alias_of'])",
@@ -26365,7 +26365,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-eed7b0038e753f9a"
+      "writer_site_id": "writer-5616748884e3f7d7"
     },
     {
       "access_pattern": "unclassified",
@@ -26386,8 +26386,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2182,
-      "occurrence_id": "schema-writer-2faca2723ffa1ee8",
+      "line": 2183,
+      "occurrence_id": "schema-writer-dc0f9f13ee0f488e",
       "path_pattern": "<run_group>/vector_channel_index/name",
       "required": null,
       "shape_expression": "shape(metadata['name'])",
@@ -26399,7 +26399,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-1519b591c9c96d1d"
+      "writer_site_id": "writer-32d586b8ef779824"
     },
     {
       "access_pattern": "unclassified",
@@ -26420,8 +26420,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2183,
-      "occurrence_id": "schema-writer-6cf1c0edccbb5de7",
+      "line": 2184,
+      "occurrence_id": "schema-writer-1c545461aeeaec7c",
       "path_pattern": "<run_group>/vector_channel_index/roi_available",
       "required": null,
       "shape_expression": "shape(roi_available)",
@@ -26433,7 +26433,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-4f383adc41b2cde7"
+      "writer_site_id": "writer-3fa3c698d536431b"
     },
     {
       "access_pattern": "windowed",
@@ -26454,8 +26454,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2184,
-      "occurrence_id": "schema-writer-7f34dfda00ab747d",
+      "line": 2185,
+      "occurrence_id": "schema-writer-fd9b26bb8c01e5bd",
       "path_pattern": "<run_group>/vector_channel_index/frame_available",
       "required": null,
       "shape_expression": "shape(frame_available)",
@@ -26467,7 +26467,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-a1e2651f5b20fbe1"
+      "writer_site_id": "writer-dad47f64d2e3bbbe"
     },
     {
       "access_pattern": "unclassified",
@@ -26488,8 +26488,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2185,
-      "occurrence_id": "schema-writer-1e1b385e7f47da11",
+      "line": 2186,
+      "occurrence_id": "schema-writer-40dc5835e936fc45",
       "path_pattern": "<run_group>/vector_channel_index/representation",
       "required": null,
       "shape_expression": "shape(metadata['representation'])",
@@ -26501,7 +26501,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-fa1eb9cb50e81d7b"
+      "writer_site_id": "writer-fc60ce5ed115a479"
     },
     {
       "access_pattern": "unclassified",
@@ -26522,8 +26522,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2186,
-      "occurrence_id": "schema-writer-6255cb416bcff931",
+      "line": 2187,
+      "occurrence_id": "schema-writer-730fee84c67ccabc",
       "path_pattern": "<run_group>/vector_channel_index/eye",
       "required": null,
       "shape_expression": "shape(metadata['eye'])",
@@ -26535,7 +26535,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-e8285da99282798c"
+      "writer_site_id": "writer-3180055378b393f7"
     },
     {
       "access_pattern": "unclassified",
@@ -26556,8 +26556,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2187,
-      "occurrence_id": "schema-writer-7ba182917029f360",
+      "line": 2188,
+      "occurrence_id": "schema-writer-cde1d9c5267a3228",
       "path_pattern": "<run_group>/vector_channel_index/value_kind",
       "required": null,
       "shape_expression": "shape(metadata['value_kind'])",
@@ -26569,7 +26569,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-7af3639cdb4a5d43"
+      "writer_site_id": "writer-c4a1cf198fcc8ba6"
     },
     {
       "access_pattern": "unclassified",
@@ -26590,8 +26590,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2188,
-      "occurrence_id": "schema-writer-9e11348a967ddf4a",
+      "line": 2189,
+      "occurrence_id": "schema-writer-b32a95aa45c89a68",
       "path_pattern": "<run_group>/vector_channel_index/units",
       "required": null,
       "shape_expression": "shape(metadata['units'])",
@@ -26603,7 +26603,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-28cc5c521cff8f48"
+      "writer_site_id": "writer-2e715eb46180f69b"
     },
     {
       "access_pattern": "unclassified",
@@ -26624,8 +26624,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2214,
-      "occurrence_id": "schema-writer-87e2e2b03af00a25",
+      "line": 2215,
+      "occurrence_id": "schema-writer-3cf6dcf2581798a4",
       "path_pattern": "<run_group>/qa_channel_index/name",
       "required": null,
       "shape_expression": "shape(metadata['name'])",
@@ -26637,7 +26637,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-1688547e50fc7f86"
+      "writer_site_id": "writer-107b9cb799a6cd4c"
     },
     {
       "access_pattern": "unclassified",
@@ -26658,8 +26658,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2215,
-      "occurrence_id": "schema-writer-bf6ffb0773c80d98",
+      "line": 2216,
+      "occurrence_id": "schema-writer-1443f587cc354181",
       "path_pattern": "<run_group>/qa_channel_index/roi_available",
       "required": null,
       "shape_expression": "shape(roi_available)",
@@ -26671,7 +26671,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-b04a3351b13fe10f"
+      "writer_site_id": "writer-f0b79578d6c9dd90"
     },
     {
       "access_pattern": "windowed",
@@ -26692,8 +26692,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2216,
-      "occurrence_id": "schema-writer-d49ebd85ef2bebb1",
+      "line": 2217,
+      "occurrence_id": "schema-writer-013c062f932f2f4d",
       "path_pattern": "<run_group>/qa_channel_index/frame_available",
       "required": null,
       "shape_expression": "shape(frame_available)",
@@ -26705,7 +26705,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-741dca6e3a216708"
+      "writer_site_id": "writer-4552d094da313d38"
     },
     {
       "access_pattern": "unclassified",
@@ -26726,8 +26726,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2217,
-      "occurrence_id": "schema-writer-1bc0a252794b1409",
+      "line": 2218,
+      "occurrence_id": "schema-writer-cad1162c8af60a55",
       "path_pattern": "<run_group>/qa_channel_index/value_kind",
       "required": null,
       "shape_expression": "shape(metadata['value_kind'])",
@@ -26739,7 +26739,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-7da9b992e49c78e7"
+      "writer_site_id": "writer-175ddcb3adb2c1b8"
     },
     {
       "access_pattern": "unclassified",
@@ -26760,8 +26760,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2218,
-      "occurrence_id": "schema-writer-4d0652d8e55f21d8",
+      "line": 2219,
+      "occurrence_id": "schema-writer-3a5ec45f9e7065b9",
       "path_pattern": "<run_group>/qa_channel_index/dtype",
       "required": null,
       "shape_expression": "shape(metadata['dtype'])",
@@ -26773,7 +26773,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-5d92ade701c1b8fe"
+      "writer_site_id": "writer-5bcff4961615ef35"
     },
     {
       "access_pattern": "unclassified",
@@ -26794,8 +26794,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2281,
-      "occurrence_id": "schema-writer-1a5df9d5d787217f",
+      "line": 2282,
+      "occurrence_id": "schema-writer-c1585f1d028a8d62",
       "path_pattern": "<run_group>/roi_angles",
       "required": null,
       "shape_expression": "shape(_stack_scalar_channels(roi_group, angle_names, row_count=total_detections, dtype=np.float32, fill_value=np.nan))",
@@ -26807,7 +26807,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-c8952656ef5a7c40"
+      "writer_site_id": "writer-f6d8fb831acf6e5c"
     },
     {
       "access_pattern": "windowed",
@@ -26828,8 +26828,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2298,
-      "occurrence_id": "schema-writer-71a500828104eeb5",
+      "line": 2299,
+      "occurrence_id": "schema-writer-fd2a07a926708102",
       "path_pattern": "<run_group>/frame_angles",
       "required": null,
       "shape_expression": "shape(_stack_scalar_channels(frame_group, angle_names, row_count=num_frames, dtype=np.float32, fill_value=np.nan))",
@@ -26841,7 +26841,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-822c478e806c77f7"
+      "writer_site_id": "writer-df26a5aba24ebdfa"
     },
     {
       "access_pattern": "unclassified",
@@ -26862,8 +26862,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2333,
-      "occurrence_id": "schema-writer-54439ff80a4a0b94",
+      "line": 2334,
+      "occurrence_id": "schema-writer-e3f996bf423f8241",
       "path_pattern": "<run_group>/roi_vectors",
       "required": null,
       "shape_expression": "shape(_stack_vector_channels(roi_group, vector_names, row_count=total_detections))",
@@ -26875,7 +26875,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-a0d47b5f1e17248d"
+      "writer_site_id": "writer-b082bfbad15c895a"
     },
     {
       "access_pattern": "windowed",
@@ -26896,8 +26896,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2342,
-      "occurrence_id": "schema-writer-94d6c7a13391be98",
+      "line": 2343,
+      "occurrence_id": "schema-writer-d030d033021e5f1e",
       "path_pattern": "<run_group>/frame_vectors",
       "required": null,
       "shape_expression": "shape(_stack_vector_channels(frame_group, vector_names, row_count=num_frames))",
@@ -26909,7 +26909,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-a66a97f66c48f941"
+      "writer_site_id": "writer-3631f08e3cd851b4"
     },
     {
       "access_pattern": "unclassified",
@@ -26930,8 +26930,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2375,
-      "occurrence_id": "schema-writer-06fc2b931a8430c7",
+      "line": 2376,
+      "occurrence_id": "schema-writer-c05d82e598d63add",
       "path_pattern": "<run_group>/roi_qa",
       "required": null,
       "shape_expression": "shape(_stack_scalar_channels(qa_roi, qa_names, row_count=total_detections, dtype=np.uint16, fill_value=0))",
@@ -26943,7 +26943,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-e93db85ba344bbae"
+      "writer_site_id": "writer-bceedb269ae88236"
     },
     {
       "access_pattern": "windowed",
@@ -26964,8 +26964,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2389,
-      "occurrence_id": "schema-writer-c43034308b17787d",
+      "line": 2390,
+      "occurrence_id": "schema-writer-c72d4aadca644a54",
       "path_pattern": "<run_group>/frame_qa",
       "required": null,
       "shape_expression": "shape(_stack_scalar_channels(qa_frame, qa_names, row_count=num_frames, dtype=np.uint16, fill_value=0))",
@@ -26977,7 +26977,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-257ffbffba12f1d1"
+      "writer_site_id": "writer-fb6a27067003ed5a"
     },
     {
       "access_pattern": "unclassified",
@@ -26998,8 +26998,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2915,
-      "occurrence_id": "schema-required-5f4c831bd5fa5475",
+      "line": 2916,
+      "occurrence_id": "schema-required-d1b29af96a08daa0",
       "path_pattern": "<required-array-set:required_arrays>/detection_success",
       "required": true,
       "shape_expression": null,
@@ -27031,8 +27031,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2915,
-      "occurrence_id": "schema-required-c3a11d7cc9f4d20e",
+      "line": 2916,
+      "occurrence_id": "schema-required-8066c98680bfc60b",
       "path_pattern": "<required-array-set:required_arrays>/instance_key",
       "required": true,
       "shape_expression": null,
@@ -27064,8 +27064,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2915,
-      "occurrence_id": "schema-required-593fa42c11d45379",
+      "line": 2916,
+      "occurrence_id": "schema-required-520a8d71f40325d6",
       "path_pattern": "<required-array-set:required_arrays>/keypoints_roi",
       "required": true,
       "shape_expression": null,
@@ -27097,8 +27097,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 2915,
-      "occurrence_id": "schema-required-ff2e9fab31bb89ff",
+      "line": 2916,
+      "occurrence_id": "schema-required-fd69d46beecc646e",
       "path_pattern": "<required-array-set:required_arrays>/source_acquisition_frame_index",
       "required": true,
       "shape_expression": null,
@@ -27130,8 +27130,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 6422,
-      "occurrence_id": "schema-writer-ad7340e2f3968b60",
+      "line": 6822,
+      "occurrence_id": "schema-writer-2ad8df80f16f0d6d",
       "path_pattern": "<require_runs_parent(analysis_group, 'eye_angle_runs')>/<resolved_run_name>/support/frame_time_seconds",
       "required": null,
       "shape_expression": "shape(np.arange(num_frames, dtype=np.float32) / float(fps))",
@@ -27143,7 +27143,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-40fa880ed3fa5ccb"
+      "writer_site_id": "writer-262ef2d551390559"
     },
     {
       "access_pattern": "windowed",
@@ -27164,8 +27164,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/eye_angle_analysis.py",
-      "line": 6429,
-      "occurrence_id": "schema-writer-357266abe2b3d550",
+      "line": 6829,
+      "occurrence_id": "schema-writer-4552141cb47489b3",
       "path_pattern": "<require_runs_parent(analysis_group, 'eye_angle_runs')>/<resolved_run_name>/support/frame_time_seconds",
       "required": null,
       "shape_expression": "shape(np.arange(num_frames, dtype=np.float32) / float(fps))",
@@ -27177,7 +27177,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-f9a530aa7cc4cdef"
+      "writer_site_id": "writer-9b7dc91f567ad719"
     },
     {
       "access_pattern": "unclassified",

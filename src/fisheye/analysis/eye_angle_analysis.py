@@ -12,6 +12,7 @@ tools can consume clean, frame-aligned measurements.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import time
@@ -3948,7 +3949,8 @@ class _StreamingArrayValuesSha256:
                 "Streaming array digest received a dtype, shape, or row extent "
                 "outside its declared full array."
             )
-        self._digest.update(np.ascontiguousarray(array).tobytes(order="C"))
+        contiguous = np.ascontiguousarray(array)
+        self._digest.update(memoryview(contiguous).cast("B"))
         self._rows += int(array.shape[0])
 
     def hexdigest(self) -> str:
@@ -3957,6 +3959,288 @@ class _StreamingArrayValuesSha256:
                 "Streaming array digest does not cover the declared row extent."
             )
         return self._digest.copy().hexdigest()
+
+
+class _LogicalInputReceiptAccumulator:
+    """Build full-array and fixed worker-chunk digests from ordered row spans."""
+
+    def __init__(
+        self,
+        *,
+        dtype: Any,
+        shape: Sequence[int],
+        chunk_rows: int,
+    ) -> None:
+        self.dtype = np.dtype(dtype)
+        self.shape = tuple(int(value) for value in shape)
+        if not self.shape or any(value < 0 for value in self.shape):
+            raise ValueError("Receipt accumulator requires one row-major shape.")
+        self.ranges = tuple(_row_chunks(self.shape[0], int(chunk_rows)))
+        self._full = _StreamingArrayValuesSha256(
+            dtype=self.dtype,
+            shape=self.shape,
+        )
+        self._chunks = tuple(
+            _StreamingArrayValuesSha256(
+                dtype=self.dtype,
+                shape=(stop_row - start_row, *self.shape[1:]),
+            )
+            for start_row, stop_row in self.ranges
+        )
+        self._next_row = 0
+        self._chunk_index = 0
+
+    def update(self, *, start_row: int, values: np.ndarray) -> None:
+        array = np.asarray(values)
+        if start_row != self._next_row:
+            raise ValueError(
+                "Receipt accumulator input rows must be complete and ordered."
+            )
+        if (
+            array.dtype != self.dtype
+            or array.ndim != len(self.shape)
+            or tuple(int(value) for value in array.shape[1:]) != self.shape[1:]
+            or start_row + int(array.shape[0]) > self.shape[0]
+        ):
+            raise ValueError(
+                "Receipt accumulator input differs from its declared dtype or shape."
+            )
+        self._full.update(array)
+        source_offset = 0
+        stop_row = start_row + int(array.shape[0])
+        while self._next_row < stop_row:
+            if self._chunk_index >= len(self.ranges):
+                raise ValueError("Receipt accumulator exceeds its chunk inventory.")
+            chunk_start, chunk_stop = self.ranges[self._chunk_index]
+            if not (chunk_start <= self._next_row < chunk_stop):
+                raise ValueError("Receipt accumulator chunk coverage is inconsistent.")
+            take_stop = min(stop_row, chunk_stop)
+            take_rows = take_stop - self._next_row
+            self._chunks[self._chunk_index].update(
+                array[source_offset : source_offset + take_rows]
+            )
+            self._next_row = take_stop
+            source_offset += take_rows
+            if self._next_row == chunk_stop:
+                self._chunk_index += 1
+
+    def full_digest(self) -> str:
+        if self._next_row != self.shape[0]:
+            raise ValueError(
+                "Receipt accumulator does not cover its declared row extent."
+            )
+        return self._full.hexdigest()
+
+    def chunk_payload(self, chunk_index: int) -> dict[str, Any]:
+        if self._next_row != self.shape[0]:
+            raise ValueError(
+                "Receipt accumulator cannot finalize incomplete chunk coverage."
+            )
+        start_row, stop_row = self.ranges[chunk_index]
+        return {
+            "dtype": self.dtype.str,
+            "shape": [stop_row - start_row, *self.shape[1:]],
+            "canonicalization": EYE_ANGLE_INPUT_PAYLOAD_CANONICALIZATION,
+            "content_sha256": self._chunks[chunk_index].hexdigest(),
+        }
+
+
+def _source_storage_row_unit(node: Any) -> tuple[int, str, list[int] | None]:
+    """Return the independently decoded row unit exposed by one array.
+
+    For a sharded Zarr array, ``chunks`` is the inner chunk shape while
+    ``shards`` is only the outer file/container shape.  Receipt scans must
+    advance by inner chunks: asking Zarr for an entire shard needlessly
+    decodes every inner chunk in that container and defeats bounded parallel
+    reading.
+    """
+
+    row_count = int(node.shape[0])
+    for attribute, label in (
+        ("chunks", "inner_chunk"),
+        ("shards", "outer_shard_fallback"),
+    ):
+        try:
+            raw_shape = getattr(node, attribute, None)
+        except Exception:
+            raw_shape = None
+        if raw_shape is None:
+            continue
+        try:
+            storage_shape = [int(value) for value in raw_shape]
+        except (TypeError, ValueError):
+            continue
+        if storage_shape and storage_shape[0] > 0:
+            return storage_shape[0], label, storage_shape
+    return max(1, row_count), "full_array_fallback", None
+
+
+class _AccessAlignedRowCursor:
+    """Read every independently decoded row unit once while serving spans."""
+
+    def __init__(
+        self,
+        node: Any,
+        *,
+        array_ref: str,
+        dtype: Any = None,
+        telemetry: Optional[dict[str, Any]] = None,
+    ) -> None:
+        self.node = node
+        self.array_ref = str(array_ref)
+        self.dtype = dtype
+        self.row_count = int(node.shape[0])
+        (
+            self.storage_row_unit,
+            self.storage_unit_kind,
+            self.storage_shape,
+        ) = _source_storage_row_unit(node)
+        self._buffer: Optional[np.ndarray] = None
+        self._buffer_start = 0
+        self._buffer_stop = 0
+        self._telemetry = telemetry
+        if telemetry is not None:
+            telemetry[self.array_ref] = {
+                "storage_unit_kind": self.storage_unit_kind,
+                "storage_shape": self.storage_shape,
+                "storage_row_unit": int(self.storage_row_unit),
+                "row_count": int(self.row_count),
+                "expected_source_read_count": (
+                    0
+                    if self.row_count == 0
+                    else (
+                        self.row_count + self.storage_row_unit - 1
+                    )
+                    // self.storage_row_unit
+                ),
+                "source_read_count": 0,
+                "source_rows_read": 0,
+                "decoded_bytes_read": 0,
+            }
+
+    def span_from(self, start_row: int) -> tuple[int, np.ndarray]:
+        if not (0 <= int(start_row) < self.row_count):
+            raise ValueError("Access-aligned source row is out of bounds.")
+        if self._buffer is None or not (
+            self._buffer_start <= start_row < self._buffer_stop
+        ):
+            if self._buffer is not None and start_row != self._buffer_stop:
+                raise ValueError(
+                    "Access-aligned source cursor must advance monotonically."
+                )
+            unit_start = int(start_row)
+            unit_stop = min(
+                self.row_count,
+                unit_start + int(self.storage_row_unit),
+            )
+            values = _owned_c_array(
+                self.node[slice(unit_start, unit_stop)],
+                dtype=self.dtype,
+            )
+            expected_shape = (unit_stop - unit_start, *tuple(self.node.shape[1:]))
+            if tuple(int(value) for value in values.shape) != tuple(
+                int(value) for value in expected_shape
+            ):
+                raise ValueError(
+                    f"Source array {self.array_ref!r} returned an unexpected row span."
+                )
+            self._buffer = values
+            self._buffer_start = unit_start
+            self._buffer_stop = unit_stop
+            if self._telemetry is not None:
+                record = self._telemetry[self.array_ref]
+                record["source_read_count"] += 1
+                record["source_rows_read"] += int(values.shape[0])
+                record["decoded_bytes_read"] += int(values.nbytes)
+        offset = int(start_row) - self._buffer_start
+        assert self._buffer is not None
+        return self._buffer_stop, self._buffer[offset:]
+
+
+def _scan_direct_receipt_input(
+    node: Any,
+    *,
+    array_ref: str,
+    accumulator: _LogicalInputReceiptAccumulator,
+    dtype: Any = None,
+    telemetry: Optional[dict[str, Any]] = None,
+) -> None:
+    cursor = _AccessAlignedRowCursor(
+        node,
+        array_ref=array_ref,
+        dtype=dtype,
+        telemetry=telemetry,
+    )
+    position = 0
+    while position < cursor.row_count:
+        stop_row, values = cursor.span_from(position)
+        accumulator.update(start_row=position, values=values[: stop_row - position])
+        position = stop_row
+
+
+def _scan_stacked_receipt_input(
+    left_node: Any,
+    right_node: Any,
+    *,
+    left_ref: str,
+    right_ref: str,
+    accumulator: _LogicalInputReceiptAccumulator,
+    left_authority_hash: _StreamingArrayValuesSha256,
+    right_authority_hash: _StreamingArrayValuesSha256,
+    telemetry: Optional[dict[str, Any]] = None,
+) -> None:
+    left_cursor = _AccessAlignedRowCursor(
+        left_node,
+        array_ref=left_ref,
+        telemetry=telemetry,
+    )
+    right_cursor = _AccessAlignedRowCursor(
+        right_node,
+        array_ref=right_ref,
+        telemetry=telemetry,
+    )
+    if left_cursor.row_count != right_cursor.row_count:
+        raise ValueError("Stacked receipt source arrays have different row counts.")
+    position = 0
+    while position < left_cursor.row_count:
+        left_stop, left_values = left_cursor.span_from(position)
+        right_stop, right_values = right_cursor.span_from(position)
+        stop_row = min(left_stop, right_stop)
+        take_rows = stop_row - position
+        left_part = left_values[:take_rows]
+        right_part = right_values[:take_rows]
+        left_authority_hash.update(left_part)
+        right_authority_hash.update(right_part)
+        accumulator.update(
+            start_row=position,
+            values=np.stack((left_part, right_part), axis=1),
+        )
+        position = stop_row
+
+
+def _receipt_chunk_records(
+    accumulators: Mapping[str, _LogicalInputReceiptAccumulator],
+) -> list[dict[str, Any]]:
+    if set(accumulators) != set(_EYE_ANGLE_WORKER_LOGICAL_INPUTS):
+        raise ValueError("Receipt accumulators do not cover the worker input closure.")
+    ranges = accumulators[_EYE_ANGLE_WORKER_LOGICAL_INPUTS[0]].ranges
+    if any(accumulator.ranges != ranges for accumulator in accumulators.values()):
+        raise ValueError("Receipt accumulator chunk boundaries differ.")
+    records: list[dict[str, Any]] = []
+    for chunk_index, (start_row, stop_row) in enumerate(ranges):
+        body = {
+            "schema_id": EYE_ANGLE_STAGED_INPUT_CHUNK_SCHEMA_ID,
+            "schema_version": EYE_ANGLE_STAGED_INPUT_CHUNK_SCHEMA_VERSION,
+            "chunk_index": int(chunk_index),
+            "start_row": int(start_row),
+            "stop_row": int(stop_row),
+            "logical_inputs": {
+                name: accumulators[name].chunk_payload(chunk_index)
+                for name in _EYE_ANGLE_WORKER_LOGICAL_INPUTS
+            },
+        }
+        records.append({**body, "record_sha256": _canonical_json_sha256(body)})
+    return records
 
 
 def _keypoint_axis_receipt(context: EyeAngleInputContext) -> dict[str, Any]:
@@ -4034,11 +4318,17 @@ def _build_staged_eye_angle_input_integrity_receipt(
     chunk_rows: int,
     fps: Optional[float],
     fps_source: str,
+    _capture_telemetry: Optional[dict[str, Any]] = None,
+    _read_workers: int = 1,
 ) -> dict[str, Any]:
     """Seal exact staged worker inputs without granting coordinate authority."""
 
     if type(chunk_rows) is not int or chunk_rows <= 0:
         raise ValueError("Staged eye-angle integrity chunk_rows must be positive.")
+    if type(_read_workers) is not int or not (1 <= _read_workers <= 8):
+        raise ValueError(
+            "Staged eye-angle integrity read workers must be an integer from 1 to 8."
+        )
     if fps_source not in {
         "cli_override",
         "authoritative_recording_metadata",
@@ -4079,7 +4369,6 @@ def _build_staged_eye_angle_input_integrity_receipt(
         )
 
     row_count = int(geometry.ellipse_params.shape[0])
-    chunk_records: list[dict[str, Any]] = []
     logical_input_specs = _logical_input_source_specs(context)
     keypoint_input_names = (
         "keypoints_roi",
@@ -4087,12 +4376,13 @@ def _build_staged_eye_angle_input_integrity_receipt(
         "instance_key",
         "source_acquisition_frame_index",
     )
-    keypoint_hashes = {
-        name: _StreamingArrayValuesSha256(
+    accumulators = {
+        name: _LogicalInputReceiptAccumulator(
             dtype=logical_input_specs[name]["snapshot_dtype"],
             shape=logical_input_specs[name]["snapshot_shape"],
+            chunk_rows=chunk_rows,
         )
-        for name in keypoint_input_names
+        for name in _EYE_ANGLE_WORKER_LOGICAL_INPUTS
     }
     geometry_paths = {
         "left_params": "components/eye_left/ellipse_params",
@@ -4107,29 +4397,105 @@ def _build_staged_eye_angle_input_integrity_receipt(
         )
         for name, relative_path in geometry_paths.items()
     }
-    for chunk_index, (start_row, stop_row) in enumerate(
-        _row_chunks(row_count, chunk_rows)
-    ):
-        snapshot = _load_eye_angle_chunk_input_snapshot(
-            context,
-            start_row=start_row,
-            stop_row=stop_row,
-        )
-        chunk_records.append(
-            _chunk_integrity_record(
-                snapshot,
-                chunk_index=chunk_index,
-                start_row=start_row,
-                stop_row=stop_row,
+    source_array_telemetry: Optional[dict[str, Any]] = (
+        {} if _capture_telemetry is not None else None
+    )
+    geometry_path = str(geometry.group_path)
+    direct_sources = {
+        "keypoints_roi": (
+            context.kp_group["keypoints_roi"],
+            f"{context.kp_group_path}/keypoints_roi",
+            None,
+        ),
+        "detection_success": (
+            context.detection_success_source[context.detection_success_key],
+            str(context.detection_success_path),
+            bool,
+        ),
+        "instance_key": (
+            context.instance_key_source[context.instance_key_key],
+            str(context.instance_key_path),
+            np.uint64,
+        ),
+        "source_acquisition_frame_index": (
+            context.frame_indices_source[context.frame_indices_key],
+            str(context.frame_indices_path),
+            np.int64,
+        ),
+    }
+    scan_tasks: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] = [
+        (
+            _scan_stacked_receipt_input,
+            (
+                geometry.group[geometry_paths["left_params"]],
+                geometry.group[geometry_paths["right_params"]],
+            ),
+            {
+                "left_ref": f"{geometry_path}/{geometry_paths['left_params']}",
+                "right_ref": f"{geometry_path}/{geometry_paths['right_params']}",
+                "accumulator": accumulators["ellipse_params"],
+                "left_authority_hash": geometry_hashes["left_params"],
+                "right_authority_hash": geometry_hashes["right_params"],
+                "telemetry": source_array_telemetry,
+            },
+        ),
+        (
+            _scan_stacked_receipt_input,
+            (
+                geometry.group[geometry_paths["left_success"]],
+                geometry.group[geometry_paths["right_success"]],
+            ),
+            {
+                "left_ref": f"{geometry_path}/{geometry_paths['left_success']}",
+                "right_ref": f"{geometry_path}/{geometry_paths['right_success']}",
+                "accumulator": accumulators["ellipse_success"],
+                "left_authority_hash": geometry_hashes["left_success"],
+                "right_authority_hash": geometry_hashes["right_success"],
+                "telemetry": source_array_telemetry,
+            },
+        ),
+    ]
+    for name in keypoint_input_names:
+        node, array_ref, dtype = direct_sources[name]
+        scan_tasks.append(
+            (
+                _scan_direct_receipt_input,
+                (node,),
+                {
+                    "array_ref": array_ref,
+                    "accumulator": accumulators[name],
+                    "dtype": dtype,
+                    "telemetry": source_array_telemetry,
+                },
             )
         )
-        snapshot_arrays = _chunk_snapshot_arrays(snapshot)
-        for name in keypoint_input_names:
-            keypoint_hashes[name].update(snapshot_arrays[name])
-        geometry_hashes["left_params"].update(snapshot.ellipse_params[:, 0, ...])
-        geometry_hashes["right_params"].update(snapshot.ellipse_params[:, 1, ...])
-        geometry_hashes["left_success"].update(snapshot.ellipse_success[:, 0, ...])
-        geometry_hashes["right_success"].update(snapshot.ellipse_success[:, 1, ...])
+    effective_read_workers = min(int(_read_workers), len(scan_tasks))
+    if effective_read_workers == 1:
+        for function, args, kwargs in scan_tasks:
+            function(*args, **kwargs)
+    else:
+        with ThreadPoolExecutor(
+            max_workers=effective_read_workers,
+            thread_name_prefix="eye-receipt-read",
+        ) as executor:
+            futures = [
+                executor.submit(function, *args, **kwargs)
+                for function, args, kwargs in scan_tasks
+            ]
+            for future in futures:
+                future.result()
+    if source_array_telemetry is not None:
+        for array_ref, record in source_array_telemetry.items():
+            if (
+                record["source_read_count"]
+                != record["expected_source_read_count"]
+                or record["source_rows_read"] != record["row_count"]
+            ):
+                raise RuntimeError(
+                    f"Receipt scan did not read {array_ref!r} exactly once per "
+                    "independently decoded storage unit."
+                )
+    chunk_records = _receipt_chunk_records(accumulators)
 
     keypoint_arrays = keypoint_authority.get("arrays")
     if not isinstance(keypoint_arrays, Mapping):
@@ -4140,7 +4506,8 @@ def _build_staged_eye_angle_input_integrity_receipt(
         declared = keypoint_arrays.get(name)
         if (
             not isinstance(declared, Mapping)
-            or keypoint_hashes[name].hexdigest() != declared.get("content_sha256")
+            or accumulators[name].full_digest()
+            != declared.get("content_sha256")
         ):
             raise ValueError(
                 f"Eye-angle receipt snapshot for {name!r} differs from its "
@@ -4198,11 +4565,44 @@ def _build_staged_eye_angle_input_integrity_receipt(
     # authorities. Workers independently reread and attest the exact receipt
     # chunks that enter scientific computation, so a second planner scan would
     # only duplicate the same payload proof.
-    return _validate_staged_eye_angle_input_integrity_receipt(
+    validated = _validate_staged_eye_angle_input_integrity_receipt(
         context,
         receipt,
         verify_payload=False,
     )
+    if _capture_telemetry is not None:
+        source_records = source_array_telemetry or {}
+        _capture_telemetry.clear()
+        _capture_telemetry.update(
+            {
+                "schema_id": "palette.eye_angle_receipt_capture_telemetry",
+                "schema_version": 1,
+                "identity_policy": (
+                    "report_only_excluded_from_scientific_identity_and_"
+                    "payload_digests"
+                ),
+                "scan_profile": "inner_chunk_single_read_v1",
+                "requested_read_workers": int(_read_workers),
+                "effective_read_workers": int(effective_read_workers),
+                "requested_receipt_chunk_rows": int(chunk_rows),
+                "receipt_chunk_count": len(chunk_records),
+                "logical_worker_inputs": list(_EYE_ANGLE_WORKER_LOGICAL_INPUTS),
+                "authority_only_not_worker_inputs": [
+                    f"{geometry_path}/relations/eye_pair/separation_px"
+                ],
+                "source_arrays": source_records,
+                "source_array_count": len(source_records),
+                "source_read_count": sum(
+                    int(record["source_read_count"])
+                    for record in source_records.values()
+                ),
+                "decoded_bytes_read": sum(
+                    int(record["decoded_bytes_read"])
+                    for record in source_records.values()
+                ),
+            }
+        )
+    return validated
 
 
 def _canonical_chunk_integrity_record(value: Any) -> dict[str, Any]:

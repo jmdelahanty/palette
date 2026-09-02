@@ -1364,6 +1364,20 @@ def test_plan_is_read_only_and_selects_only_resolved_geometry_and_keypoints(
     assert result["status"] == "planned"
     assert result["mutates_archive"] is False
     assert not scratch.exists()
+    capture = result["runtime_telemetry"]["execution"]["plan_resolution"][
+        "receipt_capture"
+    ]
+    assert capture["identity_policy"] == (
+        "report_only_excluded_from_scientific_identity_and_payload_digests"
+    )
+    assert capture["receipt_chunk_count"] == 2
+    assert capture["requested_read_workers"] == 4
+    assert capture["effective_read_workers"] == 4
+    assert capture["source_array_count"] == 8
+    assert capture["source_read_count"] == 16
+    assert capture["authority_only_not_worker_inputs"] == [
+        "analysis/subject_shape_runs/shape_1/relations/eye_pair/separation_px"
+    ]
     plan = result["plan"]
     assert plan["row_count"] == 4
     assert plan["frame_count"] == 4
@@ -1844,7 +1858,7 @@ def test_streaming_array_digest_matches_canonical_array_digest() -> None:
     assert empty_streaming.hexdigest() == array_values_sha256(empty)
 
 
-def test_plan_receipt_builder_reads_each_worker_chunk_once(
+def test_plan_receipt_builder_reads_access_units_without_worker_chunk_rescans(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1854,8 +1868,10 @@ def test_plan_receipt_builder_reads_each_worker_chunk_once(
     _accept_synthetic_subject_shape_publication(monkeypatch, source)
     snapshot_calls = 0
     receipt_verify_flags: list[object] = []
+    root_open_calls = 0
     real_snapshot = mod.eye_writer._load_eye_angle_chunk_input_snapshot
     real_validate = mod.eye_writer._validate_staged_eye_angle_input_integrity_receipt
+    real_open_root = mod.open_zarr_root
 
     def _record_snapshot(*args: object, **kwargs: object) -> object:
         nonlocal snapshot_calls
@@ -1868,6 +1884,11 @@ def test_plan_receipt_builder_reads_each_worker_chunk_once(
 
     def _unexpected_frame_rescan(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("planning must not rescan frame indices after sealing")
+
+    def _record_open_root(*args: object, **kwargs: object) -> object:
+        nonlocal root_open_calls
+        root_open_calls += 1
+        return real_open_root(*args, **kwargs)
 
     monkeypatch.setattr(
         mod.eye_writer,
@@ -1884,6 +1905,8 @@ def test_plan_receipt_builder_reads_each_worker_chunk_once(
         "_load_validated_staged_frame_indices",
         _unexpected_frame_rescan,
     )
+    monkeypatch.setattr(mod, "open_zarr_root", _record_open_root)
+    capture_telemetry: dict[str, object] = {}
 
     plan = mod.build_eye_angle_materialization_plan(
         source,
@@ -1893,11 +1916,190 @@ def test_plan_receipt_builder_reads_each_worker_chunk_once(
         run_name="eye_1",
         chunk_rows=2,
         fps=100.0,
+        _receipt_capture_telemetry=capture_telemetry,
     )
 
-    assert snapshot_calls == 2
+    assert snapshot_calls == 0
+    assert root_open_calls == 1
     assert receipt_verify_flags == [False]
     assert len(plan.staged_input_integrity_receipt["chunks"]) == 2
+    assert capture_telemetry["scan_profile"] == "inner_chunk_single_read_v1"
+    assert capture_telemetry["logical_worker_inputs"] == list(
+        mod.eye_writer._EYE_ANGLE_WORKER_LOGICAL_INPUTS
+    )
+    assert capture_telemetry["authority_only_not_worker_inputs"] == [
+        "analysis/subject_shape_runs/shape_1/relations/eye_pair/separation_px"
+    ]
+
+
+class _CountingReceiptArray:
+    def __init__(
+        self,
+        values: np.ndarray,
+        *,
+        shards: tuple[int, ...] | None,
+        chunks: tuple[int, ...],
+    ) -> None:
+        self._values = np.asarray(values)
+        self.shape = self._values.shape
+        self.dtype = self._values.dtype
+        self.shards = shards
+        self.chunks = chunks
+        self.reads: list[tuple[int, int]] = []
+
+    def __getitem__(self, key: object) -> np.ndarray:
+        if not isinstance(key, slice):
+            raise AssertionError("Receipt scanner must use row slices.")
+        start = int(key.start or 0)
+        stop = int(key.stop if key.stop is not None else self.shape[0])
+        self.reads.append((start, stop))
+        return np.asarray(self._values[key])
+
+
+def test_access_aligned_direct_receipt_scan_reads_each_inner_chunk_once() -> None:
+    values = np.arange(50, dtype=np.float32).reshape(25, 2)
+    source = _CountingReceiptArray(
+        values,
+        shards=(10, 2),
+        chunks=(4, 2),
+    )
+    accumulator = mod.eye_writer._LogicalInputReceiptAccumulator(
+        dtype=values.dtype,
+        shape=values.shape,
+        chunk_rows=3,
+    )
+    telemetry: dict[str, object] = {}
+
+    mod.eye_writer._scan_direct_receipt_input(
+        source,
+        array_ref="keypoints_runs/kp/keypoints_roi",
+        accumulator=accumulator,
+        telemetry=telemetry,
+    )
+
+    assert source.reads == [
+        (0, 4),
+        (4, 8),
+        (8, 12),
+        (12, 16),
+        (16, 20),
+        (20, 24),
+        (24, 25),
+    ]
+    assert accumulator.full_digest() == array_values_sha256(values)
+    for chunk_index, (start, stop) in enumerate(accumulator.ranges):
+        payload = accumulator.chunk_payload(chunk_index)
+        assert payload["content_sha256"] == array_values_sha256(values[start:stop])
+    record = telemetry["keypoints_runs/kp/keypoints_roi"]
+    assert record["storage_unit_kind"] == "inner_chunk"
+    assert record["storage_shape"] == [4, 2]
+    assert record["source_read_count"] == 7
+    assert record["source_rows_read"] == 25
+
+
+def test_access_aligned_stacked_scan_handles_misaligned_chunk_grids_once() -> None:
+    left_values = np.arange(115, dtype=np.float32).reshape(23, 5)
+    right_values = left_values + np.float32(1000.0)
+    left = _CountingReceiptArray(
+        left_values,
+        shards=(10, 5),
+        chunks=(5, 5),
+    )
+    right = _CountingReceiptArray(
+        right_values,
+        shards=(6, 5),
+        chunks=(3, 5),
+    )
+    stacked = np.stack((left_values, right_values), axis=1)
+    accumulator = mod.eye_writer._LogicalInputReceiptAccumulator(
+        dtype=stacked.dtype,
+        shape=stacked.shape,
+        chunk_rows=4,
+    )
+    left_hash = mod.eye_writer._StreamingArrayValuesSha256(
+        dtype=left_values.dtype,
+        shape=left_values.shape,
+    )
+    right_hash = mod.eye_writer._StreamingArrayValuesSha256(
+        dtype=right_values.dtype,
+        shape=right_values.shape,
+    )
+
+    mod.eye_writer._scan_stacked_receipt_input(
+        left,
+        right,
+        left_ref="shape/left",
+        right_ref="shape/right",
+        accumulator=accumulator,
+        left_authority_hash=left_hash,
+        right_authority_hash=right_hash,
+    )
+
+    assert left.reads == [(0, 5), (5, 10), (10, 15), (15, 20), (20, 23)]
+    assert right.reads == [
+        (0, 3),
+        (3, 6),
+        (6, 9),
+        (9, 12),
+        (12, 15),
+        (15, 18),
+        (18, 21),
+        (21, 23),
+    ]
+    assert accumulator.full_digest() == array_values_sha256(stacked)
+    assert left_hash.hexdigest() == array_values_sha256(left_values)
+    assert right_hash.hexdigest() == array_values_sha256(right_values)
+
+
+def test_access_aligned_receipt_matches_legacy_worker_chunk_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    _build_source(source, rows=11)
+    _accept_synthetic_subject_shape_publication(monkeypatch, source)
+    context, *_rest = mod._resolve_source_plan(
+        source,
+        subject_shape_run="shape_1",
+        keypoint_run="kp_raw_1",
+    )
+
+    receipt = mod.eye_writer._build_staged_eye_angle_input_integrity_receipt(
+        context,
+        chunk_rows=3,
+        fps=100.0,
+        fps_source="cli_override",
+    )
+    parallel_receipt = mod.eye_writer._build_staged_eye_angle_input_integrity_receipt(
+        context,
+        chunk_rows=3,
+        fps=100.0,
+        fps_source="cli_override",
+        _read_workers=4,
+    )
+    legacy_chunks = []
+    for chunk_index, (start_row, stop_row) in enumerate(
+        mod.eye_writer._row_chunks(11, 3)
+    ):
+        snapshot = mod.eye_writer._load_eye_angle_chunk_input_snapshot(
+            context,
+            start_row=start_row,
+            stop_row=stop_row,
+        )
+        legacy_chunks.append(
+            mod.eye_writer._chunk_integrity_record(
+                snapshot,
+                chunk_index=chunk_index,
+                start_row=start_row,
+                stop_row=stop_row,
+            )
+        )
+    expected = copy.deepcopy(receipt)
+    expected["chunks"] = legacy_chunks
+    expected = _resign_integrity_record(expected)
+
+    assert receipt == expected
+    assert parallel_receipt == expected
 
 
 def test_complete_worker_input_attestation_binds_exact_receipt_chunk_set(
