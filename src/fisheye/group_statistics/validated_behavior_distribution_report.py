@@ -23,14 +23,19 @@ from fisheye.visualization.validated_behavior_distributions import (
 
 from .validated_behavior_distribution_views import (
     DEFAULT_COHORT_STATISTIC,
+    DEFAULT_DISPLAY_RANGE,
+    DISPLAY_RANGE_LABELS,
     ValidatedBehaviorDistributionViewSource,
     available_distribution_metrics,
     build_distribution_view_payload,
+    resolve_distribution_display_range,
+    validate_distribution_display_range,
 )
 
 SCHEMA_ID = "palette.analytics.validated_behavior.distributions.static_report"
-SCHEMA_VERSION = 1
-METHOD_ID = "shared_payload_matplotlib_distribution_report_v1"
+SCHEMA_VERSION = 2
+METHOD_ID = "shared_payload_matplotlib_distribution_report_v2"
+LEGACY_METHOD_ID = "shared_payload_matplotlib_distribution_report_v1"
 STATUS = "selector_ineligible_exploratory_candidate"
 
 
@@ -47,6 +52,7 @@ def _html_document(
     report_run_id: str,
     distribution_run_id: str,
     distribution_digest: str,
+    display_range_label: str,
     artifacts: Sequence[Mapping[str, object]],
 ) -> str:
     tiles = "\n".join(
@@ -82,6 +88,8 @@ def _html_document(
     <h1>Validated behavior distributions</h1>
     <p>Report <code>{escape(report_run_id)}</code></p>
     <p>Whole-session, pre, training, and post views. Default curves use equal recording weight.</p>
+    <p>X-axis view: <strong>{escape(display_range_label)}</strong>. Central views retain complete
+       bins and leave all tail evidence sealed in the source distribution.</p>
     <p>Distribution <code>{escape(distribution_run_id)}</code> · <code>{escape(distribution_digest)}</code></p>
   </header>
   <main>{tiles}</main>
@@ -91,10 +99,10 @@ def _html_document(
 
 
 def _validate_report_directory(root: Path, manifest: Mapping[str, object]) -> None:
+    version_method = (manifest.get("schema_version"), manifest.get("method_id"))
     if (
         manifest.get("schema_id") != SCHEMA_ID
-        or manifest.get("schema_version") != SCHEMA_VERSION
-        or manifest.get("method_id") != METHOD_ID
+        or version_method not in {(1, LEGACY_METHOD_ID), (SCHEMA_VERSION, METHOD_ID)}
         or manifest.get("status") != STATUS
     ):
         _fail("Distribution report schema, method, or status is unsupported")
@@ -114,6 +122,16 @@ def _validate_report_directory(root: Path, manifest: Mapping[str, object]) -> No
     if not isinstance(artifacts, list) or not artifacts:
         _fail("Distribution report contains no figures")
     expected = {"manifest.json", "index.html"}
+    renderer = manifest.get("renderer")
+    if not isinstance(renderer, Mapping):
+        _fail("Distribution report renderer record is malformed")
+    report_display_range = renderer.get("display_range_id")
+    if manifest.get("schema_version") == SCHEMA_VERSION and (
+        report_display_range not in DISPLAY_RANGE_LABELS
+        or renderer.get("display_range_policy")
+        != "whole_bin_minimum_per_series_equal_recording_mass_v1"
+    ):
+        _fail("Distribution report display-range contract is unsupported")
     for record in artifacts:
         if not isinstance(record, Mapping):
             _fail("Distribution report artifact is malformed")
@@ -125,6 +143,18 @@ def _validate_report_directory(root: Path, manifest: Mapping[str, object]) -> No
             path
         ) != record.get("file_sha256"):
             _fail(f"Distribution report artifact bytes are stale: {name}")
+        if manifest.get("schema_version") == SCHEMA_VERSION:
+            display_range = record.get("display_range")
+            if record.get(
+                "requested_display_range_id"
+            ) != report_display_range or not isinstance(display_range, Mapping):
+                _fail("Distribution report artifact display range is absent or stale")
+            try:
+                validate_distribution_display_range(display_range)
+            except ValueError as exc:
+                raise ValidatedBehaviorDistributionReportError(
+                    "Distribution report artifact display range is invalid"
+                ) from exc
         expected.add(name)
     index = manifest.get("index")
     path = root / "index.html"
@@ -162,12 +192,18 @@ def render_validated_behavior_distribution_report(
     output_dir: str | Path,
     metric_ids: Sequence[str] | None = None,
     dpi: int = PLOT_DPI,
+    display_range_id: str = DEFAULT_DISPLAY_RANGE,
 ) -> Mapping[str, object]:
     """Render one immutable PNG per selected metric and supported weighting."""
 
     safe_component(report_run_id, label="report_run_id")
     if type(dpi) is not int or not 72 <= dpi <= 600:
         raise ValueError("dpi must be one integer from 72 through 600")
+    if display_range_id not in DISPLAY_RANGE_LABELS:
+        raise ValueError(
+            f"Unknown display range {display_range_id!r}; choose one of "
+            f"{tuple(DISPLAY_RANGE_LABELS)}"
+        )
     catalog = {
         str(record["metric_id"]): record
         for record in available_distribution_metrics(source)
@@ -195,8 +231,13 @@ def render_validated_behavior_distribution_report(
                 payload = build_distribution_view_payload(
                     source, metric_id, str(weighting_id)
                 )
+                display_range = resolve_distribution_display_range(
+                    payload, display_range_id=display_range_id
+                )
                 figure = render_distribution_figure(
-                    payload, cohort_statistic=DEFAULT_COHORT_STATISTIC
+                    payload,
+                    cohort_statistic=DEFAULT_COHORT_STATISTIC,
+                    display_range_id=display_range_id,
                 )
                 artifact_id = f"{metric_id.replace('.', '_')}__{weighting_id}"
                 filename = f"{artifact_id}.png"
@@ -220,7 +261,8 @@ def render_validated_behavior_distribution_report(
                         "label": metric["interpretation"],
                         "description": (
                             f"{str(weighting_id).title()}-weighted whole-session and "
-                            "exact semantic-epoch distributions."
+                            "exact semantic-epoch distributions; "
+                            f"{DISPLAY_RANGE_LABELS[display_range_id]} x-axis."
                         ),
                         "path": filename,
                         "media_type": "image/png",
@@ -230,6 +272,8 @@ def render_validated_behavior_distribution_report(
                         "histogram_recipe_sha256": payload["histogram_recipe"][
                             "histogram_recipe_sha256"
                         ],
+                        "requested_display_range_id": display_range_id,
+                        "display_range": dict(display_range),
                     }
                 )
 
@@ -237,6 +281,7 @@ def render_validated_behavior_distribution_report(
             report_run_id=report_run_id,
             distribution_run_id=source.distribution_run_id,
             distribution_digest=source.cache_identity,
+            display_range_label=DISPLAY_RANGE_LABELS[display_range_id],
             artifacts=artifacts,
         )
         index_path = temporary / "index.html"
@@ -266,6 +311,11 @@ def render_validated_behavior_distribution_report(
                 "backend": "matplotlib_agg",
                 "dpi": dpi,
                 "cohort_statistic": DEFAULT_COHORT_STATISTIC,
+                "display_range_id": display_range_id,
+                "display_range_label": DISPLAY_RANGE_LABELS[display_range_id],
+                "display_range_policy": (
+                    "whole_bin_minimum_per_series_equal_recording_mass_v1"
+                ),
                 "scope_layout": "whole_pre_training_post_shared_axis_v1",
                 "pooled_observations": "not_used_in_default_report",
                 "role_style": "semantic_glyph_independent_protocol_color_policy",

@@ -10,6 +10,8 @@ from fisheye.group_statistics.validated_behavior_distribution_report import (
     render_validated_behavior_distribution_report,
 )
 from fisheye.group_statistics.validated_behavior_distribution_views import (
+    DEFAULT_DISPLAY_RANGE,
+    DISPLAY_RANGE_LABELS,
     ValidatedBehaviorDistributionViewSource,
     available_distribution_metrics,
 )
@@ -41,6 +43,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metrics", help="Optional comma-separated exact metric IDs.")
     parser.add_argument("--dpi", type=int, default=170)
     parser.add_argument(
+        "--display-range",
+        choices=tuple(DISPLAY_RANGE_LABELS),
+        default=DEFAULT_DISPLAY_RANGE,
+        help=(
+            "Display-only x-axis range. central_99 retains whole bins covering at "
+            "least 99%% of every equal-recording series; all evidence remains sealed."
+        ),
+    )
+    parser.add_argument(
         "--list-metrics",
         action="store_true",
         help="List metrics in the exact distribution and exit.",
@@ -66,6 +77,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"distribution_run_id\t{source.distribution_run_id}")
     print(f"distribution_manifest_sha256\t{source.cache_identity}")
     print(f"selected_metric_count\t{len(selected or metrics)}")
+    print(f"display_range\t{args.display_range}")
     if not args.apply:
         print("dry_run\ttrue")
         print("pass --apply with --output-dir to write the report")
@@ -78,6 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
         metric_ids=selected,
         dpi=args.dpi,
+        display_range_id=args.display_range,
     )
     print(f"manifest\t{manifest['manifest_path']}")
     print(f"record_sha256\t{manifest['record_sha256']}")

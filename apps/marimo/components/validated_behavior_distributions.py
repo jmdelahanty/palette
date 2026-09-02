@@ -13,6 +13,9 @@ from plotly.subplots import make_subplots
 from fisheye.group_statistics.validated_behavior_distribution_views import (
     COHORT_STATISTIC_LABELS,
     DEFAULT_COHORT_STATISTIC,
+    DEFAULT_DISPLAY_RANGE,
+    FULL_EVIDENCE_RANGE,
+    resolve_distribution_display_range,
     validate_distribution_view_payload,
     validate_motion_trace_payload,
 )
@@ -165,6 +168,7 @@ def validated_behavior_distribution_figure(
     provider_role: str | None = None,
     behavior_role: str | None = None,
     show_recording_iqr: bool = True,
+    display_range_id: str = DEFAULT_DISPLAY_RANGE,
 ) -> go.Figure:
     """Render the same four-scope histogram payload used by static figures."""
 
@@ -182,6 +186,12 @@ def validated_behavior_distribution_figure(
     ]
     if not rows:
         raise ValueError("No distribution series matches the selected dimensions")
+    display_range = resolve_distribution_display_range(
+        payload,
+        display_range_id=display_range_id,
+        provider_role=provider_role,
+        behavior_role=behavior_role,
+    )
     scopes = tuple(str(value) for value in payload["scope_order"])
     labels = payload.get("scope_labels", {})
     figure = make_subplots(
@@ -288,11 +298,14 @@ def validated_behavior_distribution_figure(
             type="log" if recipe.get("axis_scale") == "log10" else "linear",
             range=(
                 [
-                    math.log10(float(recipe["resolved_lower_bound"])),
-                    math.log10(float(recipe["resolved_upper_bound"])),
+                    math.log10(float(display_range["display_lower_bound"])),
+                    math.log10(float(display_range["display_upper_bound"])),
                 ]
                 if recipe.get("axis_scale") == "log10"
-                else None
+                else [
+                    float(display_range["display_lower_bound"]),
+                    float(display_range["display_upper_bound"]),
+                ]
             ),
             row=1,
             col=column,
@@ -301,16 +314,26 @@ def validated_behavior_distribution_figure(
         title_text=f"{COHORT_STATISTIC_LABELS[cohort_statistic]} (%)", row=1, col=1
     )
     warning = " · pooled diagnostic" if cohort_statistic == "pooled_fraction" else ""
+    range_note = (
+        ""
+        if display_range["effective_display_range_id"] == FULL_EVIDENCE_RANGE
+        else (
+            "<br><sup>Central x-view retains ≥"
+            f"{100.0 * float(display_range['minimum_series_fraction_retained']):.2f}% "
+            "of every displayed series; full tails remain in the sealed payload</sup>"
+        )
+    )
     figure.update_layout(
         title=(
             f"{metric['interpretation']} · {str(payload['weighting_id']).title()} "
-            f"weighted{warning}"
+            f"weighted{warning}{range_note}"
         ),
         template="plotly_white",
         height=520,
         hovermode="closest",
         margin={"l": 60, "r": 25, "t": 90, "b": 60},
         legend={"title": {"text": "Provider · role"}, "orientation": "h"},
+        meta={"display_range": dict(display_range)},
     )
     return figure
 

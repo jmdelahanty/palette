@@ -31,6 +31,8 @@ def _():
     )
     from fisheye.group_statistics.validated_behavior_distribution_views import (
         COHORT_STATISTIC_LABELS,
+        DEFAULT_DISPLAY_RANGE,
+        DISPLAY_RANGE_LABELS,
         ValidatedBehaviorDistributionViewSource,
         available_distribution_metrics,
         build_distribution_view_payload,
@@ -40,6 +42,8 @@ def _():
 
     return (
         COHORT_STATISTIC_LABELS,
+        DEFAULT_DISPLAY_RANGE,
+        DISPLAY_RANGE_LABELS,
         Path,
         ValidatedBehaviorDistributionViewSource,
         available_distribution_metrics,
@@ -166,6 +170,8 @@ def _(
 @app.cell
 def _(
     COHORT_STATISTIC_LABELS,
+    DEFAULT_DISPLAY_RANGE,
+    DISPLAY_RANGE_LABELS,
     distribution_dimension_options,
     distribution_payload,
     mo,
@@ -177,6 +183,14 @@ def _(
         options=list(statistic_label_to_id),
         value=COHORT_STATISTIC_LABELS["mean_recording_fraction"],
         label="Cohort statistic",
+    )
+    display_range_label_to_id = {
+        label: range_id for range_id, label in DISPLAY_RANGE_LABELS.items()
+    }
+    display_range_picker = mo.ui.dropdown(
+        options=list(display_range_label_to_id),
+        value=DISPLAY_RANGE_LABELS[DEFAULT_DISPLAY_RANGE],
+        label="X-axis range",
     )
     provider_values = distribution_dimension_options(
         distribution_payload, "provider_role"
@@ -201,7 +215,7 @@ def _(
         label="Chaser role",
     )
     iqr_picker = mo.ui.checkbox(value=True, label="Show recording IQR")
-    controls = [statistic_picker]
+    controls = [statistic_picker, display_range_picker]
     if provider_values:
         controls.append(provider_picker)
     if role_values:
@@ -209,6 +223,8 @@ def _(
     controls.append(iqr_picker)
     mo.hstack(controls, justify="start", align="end", wrap=True)
     return (
+        display_range_label_to_id,
+        display_range_picker,
         iqr_picker,
         provider_label_to_value,
         provider_picker,
@@ -221,6 +237,8 @@ def _(
 
 @app.cell
 def _(
+    display_range_label_to_id,
+    display_range_picker,
     distribution_payload,
     iqr_picker,
     provider_label_to_value,
@@ -232,6 +250,7 @@ def _(
     validated_behavior_distribution_figure,
 ):
     selected_statistic = statistic_label_to_id[statistic_picker.value]
+    selected_display_range = display_range_label_to_id[display_range_picker.value]
     selected_provider = provider_label_to_value[provider_picker.value]
     selected_role = role_label_to_value[role_picker.value]
     distribution_figure = validated_behavior_distribution_figure(
@@ -240,8 +259,18 @@ def _(
         provider_role=selected_provider,
         behavior_role=selected_role,
         show_recording_iqr=iqr_picker.value,
+        display_range_id=selected_display_range,
     )
-    return distribution_figure, selected_provider, selected_role, selected_statistic
+    selected_effective_display_range = distribution_figure.layout.meta["display_range"][
+        "effective_display_range_id"
+    ]
+    return (
+        distribution_figure,
+        selected_effective_display_range,
+        selected_provider,
+        selected_role,
+        selected_statistic,
+    )
 
 
 @app.cell
@@ -251,6 +280,7 @@ def _(
     distribution_provenance_rows,
     mo,
     pl,
+    selected_effective_display_range,
     selected_statistic,
 ):
     support_rows = distribution_payload["recording_support_rows"]
@@ -284,9 +314,29 @@ def _(
             kind="info",
         )
     )
+    range_notice = (
+        mo.callout(
+            mo.md(
+                "**Central x-view is display-only.** It retains at least 99% of "
+                "the equal-recording mass in every displayed series using whole "
+                "sealed bins. Choose **Full evidence range** to inspect all tails."
+            ),
+            kind="info",
+        )
+        if selected_effective_display_range == "central_99"
+        else mo.callout(
+            mo.md(
+                "The x-axis spans every sealed histogram bin. This also occurs when "
+                "the central view is requested for an already logarithmic axis. "
+                "Plotly zoom does not change the evidence or cohort statistic."
+            ),
+            kind="info",
+        )
+    )
     mo.vstack(
         [
             mo.ui.plotly(distribution_figure),
+            range_notice,
             warning,
             mo.accordion(
                 {

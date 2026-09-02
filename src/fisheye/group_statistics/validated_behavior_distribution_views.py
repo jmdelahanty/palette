@@ -45,6 +45,26 @@ COHORT_STATISTIC_LABELS: Mapping[str, str] = MappingProxyType(
         "pooled_fraction": "Pooled observations (diagnostic)",
     }
 )
+FULL_EVIDENCE_RANGE = "full_evidence"
+CENTRAL_99_RANGE = "central_99"
+DEFAULT_DISPLAY_RANGE = CENTRAL_99_RANGE
+DISPLAY_RANGE_LABELS: Mapping[str, str] = MappingProxyType(
+    {
+        CENTRAL_99_RANGE: "Central 99% (tails retained)",
+        FULL_EVIDENCE_RANGE: "Full evidence range",
+    }
+)
+DISPLAY_RANGE_REFERENCE_STATISTIC = DEFAULT_COHORT_STATISTIC
+CENTRAL_DISPLAY_FRACTION = 0.99
+DISPLAY_RANGE_REASONS = frozenset(
+    {
+        "complete_sealed_histogram_axis",
+        "whole_bin_minimum_99_percent_each_equal_recording_series",
+        "central_target_requires_complete_axis",
+        "complete_log_axis_already_exposes_tail",
+        "no_finite_equal_recording_series",
+    }
+)
 SCOPE_COLORS: Mapping[str, str] = MappingProxyType(
     {
         "whole_session": "#4C78A8",
@@ -413,6 +433,230 @@ def distribution_dimension_options(
     return tuple(sorted(values))
 
 
+def resolve_distribution_display_range(
+    payload: Mapping[str, object],
+    *,
+    display_range_id: str = DEFAULT_DISPLAY_RANGE,
+    provider_role: str | None = None,
+    behavior_role: str | None = None,
+) -> Mapping[str, object]:
+    """Resolve a transparent display-only x range from complete sealed bins.
+
+    ``central_99`` retains whole bins covering at least 99% of the
+    equal-recording mean in every finite scope/group series currently shown.
+    It never removes rows from the payload and it never changes persisted
+    counts. Logarithmic evidence axes already expose their tails and therefore
+    remain on their complete range.
+    """
+
+    validate_distribution_view_payload(payload)
+    if display_range_id not in DISPLAY_RANGE_LABELS:
+        raise ValueError(
+            f"Unknown display range {display_range_id!r}; choose one of "
+            f"{tuple(DISPLAY_RANGE_LABELS)}"
+        )
+    recipe = payload.get("histogram_recipe")
+    if not isinstance(recipe, Mapping):  # validated above
+        _fail("Distribution view lacks its histogram recipe")
+    evidence_lower = float(recipe["resolved_lower_bound"])
+    evidence_upper = float(recipe["resolved_upper_bound"])
+    selected = [
+        row
+        for row in payload["cohort_rows"]
+        if isinstance(row, Mapping)
+        and (provider_role is None or row.get("provider_role") == provider_role)
+        and (behavior_role is None or row.get("behavior_role") == behavior_role)
+    ]
+    if not selected:
+        raise ValueError("No distribution series matches the selected dimensions")
+    grouped: dict[tuple[str, str], list[Mapping[str, object]]] = {}
+    for row in selected:
+        key = (str(row["scope_id"]), str(row["group_key_sha256"]))
+        grouped.setdefault(key, []).append(row)
+
+    finite_series: list[list[tuple[float, float, float]]] = []
+    for rows in grouped.values():
+        values: list[tuple[float, float, float]] = []
+        for row in sorted(rows, key=lambda value: int(value["bin_index"])):
+            fraction = row.get(DISPLAY_RANGE_REFERENCE_STATISTIC)
+            if fraction is None:
+                continue
+            numeric = float(fraction)
+            if numeric > 0.0:
+                values.append(
+                    (float(row["bin_left"]), float(row["bin_right"]), numeric)
+                )
+        if values and sum(value[2] for value in values) > 0.0:
+            finite_series.append(values)
+
+    applied = (
+        display_range_id == CENTRAL_99_RANGE
+        and recipe.get("axis_scale") != "log10"
+        and bool(finite_series)
+    )
+    display_lower = evidence_lower
+    display_upper = evidence_upper
+    reason = "complete_sealed_histogram_axis"
+    if applied:
+        signed_axis = evidence_lower < 0.0 < evidence_upper
+        series_limits: list[float] = []
+        for series in finite_series:
+            total = sum(value[2] for value in series)
+            target = CENTRAL_DISPLAY_FRACTION * total
+            cumulative = 0.0
+            if signed_axis:
+                ordered = sorted(
+                    series,
+                    key=lambda value: max(abs(value[0]), abs(value[1])),
+                )
+                for left, right, fraction in ordered:
+                    cumulative += fraction
+                    if cumulative + 1e-15 >= target:
+                        series_limits.append(max(abs(left), abs(right)))
+                        break
+            else:
+                for _left, right, fraction in series:
+                    cumulative += fraction
+                    if cumulative + 1e-15 >= target:
+                        series_limits.append(right)
+                        break
+        if series_limits:
+            if signed_axis:
+                extent = max(series_limits)
+                display_lower = max(evidence_lower, -extent)
+                display_upper = min(evidence_upper, extent)
+            else:
+                display_upper = min(evidence_upper, max(series_limits))
+            applied = not (
+                math.isclose(display_lower, evidence_lower, abs_tol=1e-12)
+                and math.isclose(display_upper, evidence_upper, abs_tol=1e-12)
+            )
+            reason = (
+                "whole_bin_minimum_99_percent_each_equal_recording_series"
+                if applied
+                else "central_target_requires_complete_axis"
+            )
+    elif display_range_id == CENTRAL_99_RANGE and recipe.get("axis_scale") == "log10":
+        reason = "complete_log_axis_already_exposes_tail"
+    elif display_range_id == CENTRAL_99_RANGE:
+        reason = "no_finite_equal_recording_series"
+
+    retained: list[float] = []
+    for series in finite_series:
+        total = sum(value[2] for value in series)
+        inside = sum(
+            fraction
+            for left, right, fraction in series
+            if left >= display_lower - 1e-12 and right <= display_upper + 1e-12
+        )
+        retained.append(min(1.0, max(0.0, inside / total)))
+    minimum_retained = min(retained) if retained else 1.0
+    body: dict[str, object] = {
+        "requested_display_range_id": display_range_id,
+        "effective_display_range_id": (
+            CENTRAL_99_RANGE if applied else FULL_EVIDENCE_RANGE
+        ),
+        "display_only": True,
+        "range_reference_statistic": DISPLAY_RANGE_REFERENCE_STATISTIC,
+        "central_fraction_target": CENTRAL_DISPLAY_FRACTION,
+        "evidence_lower_bound": evidence_lower,
+        "evidence_upper_bound": evidence_upper,
+        "display_lower_bound": display_lower,
+        "display_upper_bound": display_upper,
+        "finite_series_count": len(finite_series),
+        "minimum_series_fraction_retained": minimum_retained,
+        "maximum_series_fraction_omitted": max(0.0, 1.0 - minimum_retained),
+        "reason": reason,
+    }
+    result = MappingProxyType(
+        {**body, "display_range_sha256": canonical_json_sha256(body)}
+    )
+    validate_distribution_display_range(result)
+    return result
+
+
+def validate_distribution_display_range(record: Mapping[str, object]) -> None:
+    """Reject stale or semantically impossible display-only range records."""
+
+    body = {
+        key: value for key, value in record.items() if key != "display_range_sha256"
+    }
+    if record.get("display_range_sha256") != canonical_json_sha256(body):
+        _fail("Distribution display-range digest is stale")
+    requested = record.get("requested_display_range_id")
+    effective = record.get("effective_display_range_id")
+    if requested not in DISPLAY_RANGE_LABELS or effective not in DISPLAY_RANGE_LABELS:
+        _fail("Distribution display-range identity is unsupported")
+    if record.get("display_only") is not True:
+        _fail("Distribution display range is not explicitly display-only")
+    if record.get(
+        "range_reference_statistic"
+    ) != DISPLAY_RANGE_REFERENCE_STATISTIC or not math.isclose(
+        float(record.get("central_fraction_target", math.nan)),
+        CENTRAL_DISPLAY_FRACTION,
+        abs_tol=1e-12,
+    ):
+        _fail("Distribution display-range reference contract is stale")
+    numeric = {
+        name: float(record.get(name, math.nan))
+        for name in (
+            "evidence_lower_bound",
+            "evidence_upper_bound",
+            "display_lower_bound",
+            "display_upper_bound",
+            "minimum_series_fraction_retained",
+            "maximum_series_fraction_omitted",
+        )
+    }
+    if not all(math.isfinite(value) for value in numeric.values()):
+        _fail("Distribution display range contains a non-finite value")
+    if not (
+        numeric["evidence_lower_bound"] < numeric["evidence_upper_bound"]
+        and numeric["evidence_lower_bound"]
+        <= numeric["display_lower_bound"]
+        < numeric["display_upper_bound"]
+        <= numeric["evidence_upper_bound"]
+    ):
+        _fail("Distribution display bounds escape the sealed evidence axis")
+    retained = numeric["minimum_series_fraction_retained"]
+    omitted = numeric["maximum_series_fraction_omitted"]
+    if not (
+        0.0 <= retained <= 1.0
+        and 0.0 <= omitted <= 1.0
+        and math.isclose(retained + omitted, 1.0, abs_tol=1e-12)
+    ):
+        _fail("Distribution retained and omitted display fractions disagree")
+    count = record.get("finite_series_count")
+    if type(count) is not int or count < 0:
+        _fail("Distribution display range has an invalid finite-series count")
+    if record.get("reason") not in DISPLAY_RANGE_REASONS:
+        _fail("Distribution display-range reason is unsupported")
+    full_bounds = math.isclose(
+        numeric["display_lower_bound"],
+        numeric["evidence_lower_bound"],
+        abs_tol=1e-12,
+    ) and math.isclose(
+        numeric["display_upper_bound"],
+        numeric["evidence_upper_bound"],
+        abs_tol=1e-12,
+    )
+    if effective == CENTRAL_99_RANGE:
+        if (
+            requested != CENTRAL_99_RANGE
+            or retained + 1e-12 < CENTRAL_DISPLAY_FRACTION
+            or full_bounds
+            or record.get("reason")
+            != "whole_bin_minimum_99_percent_each_equal_recording_series"
+        ):
+            _fail("Distribution central display-range claim is inconsistent")
+    elif not (
+        full_bounds
+        and math.isclose(retained, 1.0, abs_tol=1e-12)
+        and math.isclose(omitted, 0.0, abs_tol=1e-12)
+    ):
+        _fail("Distribution full display-range claim is inconsistent")
+
+
 def distribution_recording_ids(
     source: ValidatedBehaviorDistributionViewSource,
 ) -> tuple[str, ...]:
@@ -629,8 +873,15 @@ def validate_motion_trace_payload(payload: Mapping[str, object]) -> None:
 
 
 __all__ = [
+    "CENTRAL_99_RANGE",
+    "CENTRAL_DISPLAY_FRACTION",
     "COHORT_STATISTIC_LABELS",
     "DEFAULT_COHORT_STATISTIC",
+    "DEFAULT_DISPLAY_RANGE",
+    "DISPLAY_RANGE_LABELS",
+    "DISPLAY_RANGE_REASONS",
+    "DISPLAY_RANGE_REFERENCE_STATISTIC",
+    "FULL_EVIDENCE_RANGE",
     "METHOD_ID",
     "SCHEMA_ID",
     "SCHEMA_VERSION",
@@ -644,6 +895,8 @@ __all__ = [
     "build_motion_trace_payload",
     "distribution_dimension_options",
     "distribution_recording_ids",
+    "resolve_distribution_display_range",
     "validate_distribution_view_payload",
+    "validate_distribution_display_range",
     "validate_motion_trace_payload",
 ]

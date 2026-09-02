@@ -16,6 +16,9 @@ import numpy as np
 from fisheye.group_statistics.validated_behavior_distribution_views import (
     COHORT_STATISTIC_LABELS,
     DEFAULT_COHORT_STATISTIC,
+    DEFAULT_DISPLAY_RANGE,
+    FULL_EVIDENCE_RANGE,
+    resolve_distribution_display_range,
     validate_distribution_view_payload,
     validate_motion_trace_payload,
 )
@@ -92,7 +95,12 @@ def _selected_rows(
     ]
 
 
-def _footer(figure: Any, payload: Mapping[str, object], statistic: str) -> None:
+def _footer(
+    figure: Any,
+    payload: Mapping[str, object],
+    statistic: str,
+    display_range: Mapping[str, object],
+) -> None:
     source = payload.get("source_distribution")
     digest = (
         str(source.get("distribution_manifest_sha256", "unknown"))[:12]
@@ -101,10 +109,20 @@ def _footer(figure: Any, payload: Mapping[str, object], statistic: str) -> None:
     )
     figure.text(
         0.5,
-        0.012,
+        0.022,
         (
-            "Exploratory · recording_id experimental unit · "
-            f"{COHORT_STATISTIC_LABELS[statistic]} · distribution {digest}"
+            "Exploratory · recording_id unit · "
+            f"{COHORT_STATISTIC_LABELS[statistic]} · "
+            + (
+                "full evidence x-range"
+                if display_range["effective_display_range_id"] == FULL_EVIDENCE_RANGE
+                else (
+                    "central x ≥"
+                    f"{100.0 * float(display_range['minimum_series_fraction_retained']):.2f}% "
+                    "per series; tails sealed"
+                )
+            )
+            + f" · distribution {digest}"
         ),
         ha="center",
         va="bottom",
@@ -120,6 +138,7 @@ def render_distribution_figure(
     provider_role: str | None = None,
     behavior_role: str | None = None,
     show_recording_iqr: bool = True,
+    display_range_id: str = DEFAULT_DISPLAY_RANGE,
 ) -> Any:
     """Render aligned whole/pre/training/post histograms from one shared payload."""
 
@@ -136,6 +155,12 @@ def render_distribution_figure(
     )
     if not rows:
         raise ValueError("No distribution series matches the selected dimensions")
+    display_range = resolve_distribution_display_range(
+        payload,
+        display_range_id=display_range_id,
+        provider_role=provider_role,
+        behavior_role=behavior_role,
+    )
     by_scope_group: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
     for row in rows:
         by_scope_group[(str(row["scope_id"]), str(row["group_key_sha256"]))].append(row)
@@ -259,8 +284,8 @@ def render_distribution_figure(
         if recipe.get("axis_scale") == "log10":
             axis.set_xscale("log")
         axis.set_xlim(
-            float(recipe["resolved_lower_bound"]),
-            float(recipe["resolved_upper_bound"]),
+            float(display_range["display_lower_bound"]),
+            float(display_range["display_upper_bound"]),
         )
     axes_array[0].set_ylabel(f"{COHORT_STATISTIC_LABELS[cohort_statistic]} (%)")
     handles, legend_labels = axes_array[-1].get_legend_handles_labels()
@@ -281,22 +306,28 @@ def render_distribution_figure(
             frameon=False,
         )
     warning = " · pooled diagnostic" if cohort_statistic == "pooled_fraction" else ""
+    range_note = (
+        ""
+        if display_range["effective_display_range_id"] == FULL_EVIDENCE_RANGE
+        else " · Central ≥99% x-view"
+    )
     figure.suptitle(
-        f"{metric['interpretation']} · {str(payload['weighting_id']).title()} weighted{warning}",
+        f"{metric['interpretation']} · {str(payload['weighting_id']).title()} "
+        f"weighted{warning}{range_note}",
         fontsize=15,
         y=0.98,
     )
     figure.supxlabel(
-        f"{metric['interpretation']} ({metric['unit']})", y=0.075, fontsize=10
+        f"{metric['interpretation']} ({metric['unit']})", y=0.085, fontsize=10
     )
     figure.subplots_adjust(
         left=0.055,
         right=0.99,
-        bottom=0.17,
+        bottom=0.19,
         top=0.76 if show_legend else 0.84,
         wspace=0.08,
     )
-    _footer(figure, payload, cohort_statistic)
+    _footer(figure, payload, cohort_statistic, display_range)
     return figure
 
 

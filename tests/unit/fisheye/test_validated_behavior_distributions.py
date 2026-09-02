@@ -16,16 +16,20 @@ from fisheye.group_statistics.validated_behavior_distribution_specs import (
     validate_distribution_metric_specs,
 )
 from fisheye.group_statistics.validated_behavior_distribution_report import (
+    ValidatedBehaviorDistributionReportError,
     read_validated_behavior_distribution_report,
     render_validated_behavior_distribution_report,
 )
 from fisheye.group_statistics.validated_behavior_distribution_views import (
+    CENTRAL_99_RANGE,
+    FULL_EVIDENCE_RANGE,
     TRACE_METHOD_ID,
     TRACE_SCHEMA_ID,
     TRACE_SCHEMA_VERSION,
     ValidatedBehaviorDistributionViewSource,
     _even_display_indices,
     build_distribution_view_payload,
+    resolve_distribution_display_range,
     validate_distribution_view_payload,
     validate_motion_trace_payload,
 )
@@ -511,6 +515,58 @@ def test_shared_payload_feeds_static_and_plotly_renderers(tmp_path: Path):
     assert "Mean recording fraction" in rendered["layout"]["yaxis"]["title"]["text"]
 
 
+def test_central_display_range_retains_whole_bins_without_mutating_payload(
+    tmp_path: Path,
+):
+    target = _write_fixture_distribution(tmp_path)
+    source = ValidatedBehaviorDistributionViewSource.open(target)
+    original = build_distribution_view_payload(source, "fixture.duration_s", "event")
+    original_json = json.dumps(dict(original), sort_keys=True)
+    payload = json.loads(json.dumps(dict(original)))
+    whole_rows = [
+        row for row in payload["cohort_rows"] if row["scope_id"] == "whole_session"
+    ]
+    assert len(whole_rows) >= 2
+    fractions = [0.995] + [0.0] * (len(whole_rows) - 2) + [0.005]
+    for row, fraction in zip(whole_rows, fractions, strict=True):
+        row["mean_recording_fraction"] = fraction
+        row["median_recording_fraction"] = fraction
+        row["pooled_fraction"] = fraction
+    body = {key: value for key, value in payload.items() if key != "payload_sha256"}
+    payload["payload_sha256"] = canonical_json_sha256(body)
+    validate_distribution_view_payload(payload)
+
+    central = resolve_distribution_display_range(
+        payload, display_range_id=CENTRAL_99_RANGE
+    )
+    full = resolve_distribution_display_range(
+        payload, display_range_id=FULL_EVIDENCE_RANGE
+    )
+    assert central["effective_display_range_id"] == CENTRAL_99_RANGE
+    assert central["display_upper_bound"] == pytest.approx(whole_rows[0]["bin_right"])
+    assert central["minimum_series_fraction_retained"] == pytest.approx(0.995)
+    assert full["display_upper_bound"] == pytest.approx(
+        payload["histogram_recipe"]["resolved_upper_bound"]
+    )
+    assert json.dumps(dict(original), sort_keys=True) == original_json
+
+    static = render_distribution_figure(payload, display_range_id=CENTRAL_99_RANGE)
+    try:
+        static.canvas.draw()
+        assert static.axes[0].get_xlim()[1] == pytest.approx(
+            central["display_upper_bound"]
+        )
+    finally:
+        plt.close(static)
+    interactive = validated_behavior_distribution_figure(
+        payload, display_range_id=CENTRAL_99_RANGE
+    ).to_plotly_json()
+    assert (
+        interactive["layout"]["meta"]["display_range"]["display_range_sha256"]
+        == central["display_range_sha256"]
+    )
+
+
 def test_static_distribution_report_is_atomic_and_digest_validated(tmp_path: Path):
     target = _write_fixture_distribution(tmp_path)
     source = ValidatedBehaviorDistributionViewSource.open(target)
@@ -522,8 +578,63 @@ def test_static_distribution_report_is_atomic_and_digest_validated(tmp_path: Pat
     )
     reopened = read_validated_behavior_distribution_report(report_dir)
     assert reopened["record_sha256"] == manifest["record_sha256"]
+    assert reopened["schema_version"] == 2
+    assert reopened["renderer"]["display_range_id"] == CENTRAL_99_RANGE
     assert len(reopened["artifacts"]) == 1
+    assert reopened["artifacts"][0]["display_range"]["display_only"] is True
     assert (report_dir / "index.html").is_file()
+
+
+def test_static_distribution_report_reader_retains_v1_compatibility(tmp_path: Path):
+    target = _write_fixture_distribution(tmp_path)
+    source = ValidatedBehaviorDistributionViewSource.open(target)
+    report_dir = tmp_path / "legacy-report"
+    render_validated_behavior_distribution_report(
+        source,
+        report_run_id="fixture-legacy-distribution-report-v1",
+        output_dir=report_dir,
+    )
+    path = report_dir / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = 1
+    manifest["method_id"] = "shared_payload_matplotlib_distribution_report_v1"
+    for field in ("display_range_id", "display_range_label", "display_range_policy"):
+        manifest["renderer"].pop(field)
+    for artifact in manifest["artifacts"]:
+        artifact.pop("requested_display_range_id")
+        artifact.pop("display_range")
+    body = {key: value for key, value in manifest.items() if key != "record_sha256"}
+    manifest["record_sha256"] = canonical_json_sha256(body)
+    path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    reopened = read_validated_behavior_distribution_report(report_dir)
+    assert reopened["schema_version"] == 1
+
+
+def test_static_distribution_report_rejects_semantically_false_range(tmp_path: Path):
+    target = _write_fixture_distribution(tmp_path)
+    source = ValidatedBehaviorDistributionViewSource.open(target)
+    report_dir = tmp_path / "stale-range-report"
+    render_validated_behavior_distribution_report(
+        source,
+        report_run_id="fixture-stale-range-report-v2",
+        output_dir=report_dir,
+    )
+    path = report_dir / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    display = manifest["artifacts"][0]["display_range"]
+    display["minimum_series_fraction_retained"] = 0.5
+    display["maximum_series_fraction_omitted"] = 0.5
+    range_body = {
+        key: value for key, value in display.items() if key != "display_range_sha256"
+    }
+    display["display_range_sha256"] = canonical_json_sha256(range_body)
+    body = {key: value for key, value in manifest.items() if key != "record_sha256"}
+    manifest["record_sha256"] = canonical_json_sha256(body)
+    path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    with pytest.raises(
+        ValidatedBehaviorDistributionReportError, match="display range is invalid"
+    ):
+        read_validated_behavior_distribution_report(report_dir)
 
 
 def test_motion_trace_payload_preserves_decimation_endpoints_and_frame_time_identity():
