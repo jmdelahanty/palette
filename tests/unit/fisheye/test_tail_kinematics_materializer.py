@@ -110,13 +110,27 @@ def _patch_provenance(monkeypatch) -> None:
         },
     )
 
-    def _fake_publish(_root, run_group):
+    def _fake_publish(_root, run_group, **kwargs):
+        scan = kwargs["payload_scan_receipt"]
         run_group.attrs["tail_coordinate_publication_manifest_sha256"] = "9" * 64
+        run_group.attrs["test_tail_payload_array_digests"] = scan[
+            "array_content_sha256"
+        ]
+        return SimpleNamespace(manifest=SimpleNamespace(record_sha256="9" * 64))
 
     monkeypatch.setattr(
         tail_mod,
         "publish_tail_kinematics_coordinate_surfaces",
         _fake_publish,
+    )
+    monkeypatch.setattr(
+        mod.tail_publication_mod,
+        "validate_sealed_tail_publication_metadata",
+        lambda root, run_path, **_kwargs: SimpleNamespace(
+            array_content_sha256=dict(
+                root[run_path].attrs["test_tail_payload_array_digests"]
+            )
+        ),
     )
 
     activation_receipt = object()
@@ -686,6 +700,10 @@ def test_materialize_tail_kinematics_process_workers_own_complete_shards(
     assert run.attrs["effective_output_shard_rows"] == 8
     assert tuple(run["tail_angle_rad"].shards) == (8, 10)
     assert tuple(run["source_acquisition_frame_index"].shards) == (8,)
+    assert len(run.attrs["staged_input_integrity_receipt_sha256"]) == 64
+    worker_attestation = run.attrs["staged_input_worker_attestation"]
+    assert worker_attestation["complete_worker_chunk_set"] is True
+    assert worker_attestation["chunk_count"] == summary["completed_block_count"]
     np.testing.assert_allclose(np.asarray(run["tail_angle_deg"][:]), 0.0, atol=1e-5)
 
 
@@ -794,6 +812,9 @@ def test_tail_failed_exact_receipt_rollback_never_restores_precopy_snapshot(
             mod.tail_publication_mod.TAIL_PUBLICATION_OWNER_ATTR: candidate_owner,
             "palette_run_completion_status": "running",
             "stage_selector_eligible": False,
+            "tail_coordinate_publication_deferred": (
+                "authoritative_archive_post_copy_pre_activation"
+            ),
         }
     )
     target = source / "analysis" / "tail_kinematics_runs" / "tail_c"
@@ -882,7 +903,9 @@ def test_tail_failed_exact_receipt_rollback_never_restores_precopy_snapshot(
     monkeypatch.setattr(
         mod.tail_mod,
         "publish_tail_kinematics_coordinate_surfaces",
-        lambda *_args, **_kwargs: None,
+        lambda *_args, **_kwargs: SimpleNamespace(
+            manifest=SimpleNamespace(record_sha256="9" * 64)
+        ),
     )
     monkeypatch.setattr(mod, "mark_run_complete", mark_complete)
     monkeypatch.setattr(
@@ -903,6 +926,7 @@ def test_tail_failed_exact_receipt_rollback_never_restores_precopy_snapshot(
         mod.publish_tail_kinematics_run(
             plan,
             staging_payload={},
+            payload_scan_receipt={"record_sha256": "8" * 64},
             copy_backend="python",
         )
 

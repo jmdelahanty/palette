@@ -63,7 +63,9 @@ from fisheye.shared.coordinate_frame_record import (
     verify_bound_body_estimator_source,
     verify_bound_selected_camera_frame_evidence,
     verify_bound_body_source_coordinate_descriptor,
+    array_payload_digest_evidence_scope,
     array_payload_sha256,
+    array_values_sha256,
 )
 from fisheye.shared.proof_verification import proof_verification_scope
 from fisheye.shared.coordinate_identity import (
@@ -174,6 +176,82 @@ def test_array_payload_hash_reuses_only_one_operation_scoped_proof() -> None:
     array_payload_sha256(node)
     # Outside a scope, each call retains the traditional two-read proof.
     assert node.read_count == 5
+
+
+def test_array_payload_hash_reuses_only_archive_bound_digest_evidence() -> None:
+    token = object()
+    node = _CountingArrayNode(
+        "analysis/run/values",
+        token=token,
+        data=np.arange(12, dtype=np.float32),
+    )
+    digest = array_values_sha256(node._data)
+    evidence = {
+        node.path: {
+            "dtype": node.dtype.str,
+            "shape": list(node.shape),
+            "content_sha256": digest,
+            "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        }
+    }
+
+    with array_payload_digest_evidence_scope(node, evidence):
+        assert array_payload_sha256(node) == digest
+        assert array_payload_sha256(node) == digest
+        assert node.read_count == 0
+
+        foreign = _CountingArrayNode(
+            node.path,
+            token=object(),
+            data=node._data.copy(),
+        )
+        with pytest.raises(
+            CoordinateFrameRecordError,
+            match="names another archive",
+        ):
+            array_payload_sha256(foreign)
+        assert foreign.read_count == 0
+
+    array_payload_sha256(node)
+    assert node.read_count == 2
+
+
+def test_array_payload_digest_evidence_is_closed_and_metadata_bound() -> None:
+    node = _CountingArrayNode(
+        "analysis/run/values",
+        token=object(),
+        data=np.arange(6, dtype=np.int16),
+    )
+    digest = array_values_sha256(node._data)
+    evidence = {
+        "analysis/run/other": {
+            "dtype": node.dtype.str,
+            "shape": list(node.shape),
+            "content_sha256": digest,
+            "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        }
+    }
+    with array_payload_digest_evidence_scope(node, evidence):
+        with pytest.raises(
+            CoordinateFrameRecordError,
+            match="missing or differs",
+        ):
+            array_payload_sha256(node)
+    assert node.read_count == 0
+
+    evidence[node.path] = {
+        "dtype": np.dtype("float32").str,
+        "shape": list(node.shape),
+        "content_sha256": digest,
+        "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+    }
+    with array_payload_digest_evidence_scope(node, evidence):
+        with pytest.raises(
+            CoordinateFrameRecordError,
+            match="missing or differs",
+        ):
+            array_payload_sha256(node)
+    assert node.read_count == 0
 
 
 class _FailOnceAttrs(dict[str, Any]):
@@ -582,7 +660,9 @@ def test_physical_detects_stale_source_pixel_extent(
 ) -> None:
     _, bound = _stamp_physical(physical_inputs)
     physical_inputs["root"].attrs["source_video_metadata"]["width"] = 159
-    with pytest.raises(CoordinateFrameRecordError, match="source_camera_frame_unverified"):
+    with pytest.raises(
+        CoordinateFrameRecordError, match="source_camera_frame_unverified"
+    ):
         verify_bound_coordinate_frame(
             bound, expected_kind=PHYSICAL_FRAME_CALIBRATION_KIND
         )
@@ -610,7 +690,9 @@ def test_physical_stamp_rejects_hostile_attrs_without_any_mutation(
             selected_camera_evidence=physical_inputs["selected"],
         )
     assert dict(attrs) == before
-    assert json.dumps(dict(attrs), sort_keys=True, separators=(",", ":")) == encoded_before
+    assert (
+        json.dumps(dict(attrs), sort_keys=True, separators=(",", ":")) == encoded_before
+    )
 
 
 def test_frame_transaction_fully_rolls_back_after_post_write_failure(
@@ -830,7 +912,9 @@ def _source_descriptor_for_identity(
             np.asarray([0, 1, 2], dtype=np.int64),
         )
         key_name = "track_sample_key"
-    key = _Node(f"{rowset_path}/{key_name}", token=physical_inputs["token"], data=values)
+    key = _Node(
+        f"{rowset_path}/{key_name}", token=physical_inputs["token"], data=values
+    )
     if domain == TRACK_SAMPLE_DOMAIN:
         source_rowset = _Node(
             f"{rowset_path}_immediate_source",
@@ -1552,7 +1636,9 @@ def test_body_source_binds_payload_content_and_detects_mutation(
     body_inputs: dict[str, Any],
 ) -> None:
     bound = _stamp_body(body_inputs)
-    assert bound.record.source_coordinate_payload == body_inputs["source"].source_payload
+    assert (
+        bound.record.source_coordinate_payload == body_inputs["source"].source_payload
+    )
 
     body_inputs["coordinates"]._data[0, 0] += 1.0
     with pytest.raises(
@@ -2081,9 +2167,9 @@ def test_body_bound_detects_stale_contract_and_estimator_evidence(
     body_inputs: dict[str, Any],
 ) -> None:
     bound = _stamp_body(body_inputs)
-    body_inputs["contract_node"].attrs[BODY_FRAME_CONTRACT_ATTR]["angle_convention"] = (
-        "wrong"
-    )
+    body_inputs["contract_node"].attrs[BODY_FRAME_CONTRACT_ATTR][
+        "angle_convention"
+    ] = "wrong"
     with pytest.raises(CoordinateFrameRecordError):
         verify_bound_coordinate_frame(
             bound, expected_kind=FISH_ANATOMICAL_BODY_FRAME_KIND

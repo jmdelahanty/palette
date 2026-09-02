@@ -37,6 +37,9 @@ from ...analysis.bout_kinematics_schema import (
 from ...shared.json_safety import json_attr_safe
 from ...shared.run_provenance import build_run_provenance
 from ...shared.zarr_io import open_zarr_root
+from ...shared.zarr.metadata_equivalence import (
+    validate_direct_consolidated_subtree,
+)
 from ...shared.zarr_helpers import (
     archive_metadata_publication_lock,
     consolidate_metadata_capture_expected_warnings,
@@ -46,8 +49,10 @@ from ...shared.zarr_sharded_copy import (
     SHARD_POLICY_MULTI_CHUNK_CAPPED,
     copy_completed_run_to_sharded,
 )
-from fisheye.shared.atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
-
+from fisheye.shared.atomic_run_publisher import (
+    AtomicRunPublishSpec,
+    atomic_publish_run_group,
+)
 
 MATERIALIZATION_SCHEMA_ID = "palette.bout_kinematics_storage_materialization.v1"
 PUBLISH_SCHEMA_ID = "palette.bout_kinematics_storage_publish.v1"
@@ -109,12 +114,7 @@ class BoutKinematicsComputePlan:
 
     @property
     def local_run_path(self) -> Path:
-        return (
-            self.local_zarr
-            / "analysis"
-            / "bout_kinematics_runs"
-            / self.run_name
-        )
+        return self.local_zarr / "analysis" / "bout_kinematics_runs" / self.run_name
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -453,6 +453,44 @@ def _copy_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _consolidate_and_validate_bout_visibility(
+    source_zarr: Path,
+    *,
+    run_name: str,
+    expected_selector_eligible: bool,
+    expected_latest: Any,
+    expected_latest_complete: Any,
+) -> None:
+    """Publish and re-open the exact direct/consolidated lifecycle state."""
+
+    run_path = f"analysis/bout_kinematics_runs/{run_name}"
+    consolidate_metadata_capture_expected_warnings(source_zarr)
+    validate_direct_consolidated_subtree(source_zarr, subtree_path=run_path)
+    direct_root = open_zarr_root(source_zarr, mode="r")
+    consolidated_root = zarr.open_group(
+        str(source_zarr),
+        mode="r",
+        zarr_format=3,
+        use_consolidated=True,
+    )
+    for label, checked_root in (
+        ("direct", direct_root),
+        ("consolidated", consolidated_root),
+    ):
+        parent = checked_root["analysis/bout_kinematics_runs"]
+        run = parent[run_name]
+        if (
+            parent.attrs.get("latest") != expected_latest
+            or parent.attrs.get("latest_complete") != expected_latest_complete
+            or run.attrs.get("palette_run_completion_status") != "complete"
+            or run.attrs.get("stage_selector_eligible")
+            is not expected_selector_eligible
+        ):
+            raise RuntimeError(
+                f"Bout-kinematics {label} publication visibility is stale."
+            )
+
+
 def publish_bout_kinematics_candidate(
     plan: BoutKinematicsStoragePlan,
     *,
@@ -492,9 +530,10 @@ def publish_bout_kinematics_candidate(
 
     def verify(root: zarr.Group) -> None:
         parent = root["analysis/bout_kinematics_runs"]
-        if parent.attrs.get("latest") != plan.latest_before or parent.attrs.get(
-            "latest_complete"
-        ) != plan.latest_complete_before:
+        if (
+            parent.attrs.get("latest") != plan.latest_before
+            or parent.attrs.get("latest_complete") != plan.latest_complete_before
+        ):
             raise RuntimeError(
                 "Non-promoting publication changed bout-kinematics parent pointers."
             )
@@ -509,6 +548,32 @@ def publish_bout_kinematics_candidate(
                 "Non-promoted bout-kinematics candidate must remain complete and "
                 "selector-ineligible."
             )
+
+    def activate(
+        _root: zarr.Group,
+        parent: zarr.Group,
+        run_group: zarr.Group,
+    ) -> None:
+        if (
+            parent.attrs.get("latest") != plan.latest_before
+            or parent.attrs.get("latest_complete") != plan.latest_complete_before
+            or run_group.attrs.get("palette_run_completion_status") != "complete"
+            or run_group.attrs.get("stage_selector_eligible") is not False
+        ):
+            raise RuntimeError(
+                "Bout-kinematics candidate lost its complete, ineligible, "
+                "pointer-preserving state before consolidation."
+            )
+        _consolidate_and_validate_bout_visibility(
+            plan.source_zarr,
+            run_name=plan.run_name,
+            expected_selector_eligible=False,
+            expected_latest=plan.latest_before,
+            expected_latest_complete=plan.latest_complete_before,
+        )
+
+    def repair_failed_visibility(_target_run_path: Path) -> None:
+        consolidate_metadata_capture_expected_warnings(plan.source_zarr)
 
     return atomic_publish_run_group(
         AtomicRunPublishSpec(
@@ -528,6 +593,8 @@ def publish_bout_kinematics_candidate(
         prepare_parents=prepare,
         complete_run=complete,
         verify_pointers=verify,
+        activate_run=activate,
+        repair_failed_publication_visibility=repair_failed_visibility,
         payload_metadata={
             "source_run": plan.source_run_name,
             "source_run_path": str(plan.source_run_path),
@@ -535,6 +602,7 @@ def publish_bout_kinematics_candidate(
             "promotion_policy": "named_candidate_only_parent_pointers_unchanged",
             "materialization": json_attr_safe(dict(materialization_payload)),
         },
+        accept_persisted_activation_on_callback_error=False,
     )
 
 
@@ -580,11 +648,13 @@ def publish_computed_bout_kinematics_run(
     def verify(root: zarr.Group) -> None:
         parent = root["analysis/bout_kinematics_runs"]
         run_group = parent[plan.run_name]
-        if str(parent.attrs.get("latest")) != plan.run_name or str(
-            parent.attrs.get("latest_complete")
-        ) != plan.run_name or (
-            run_group.attrs.get("palette_run_completion_status") != "complete"
-            or run_group.attrs.get("stage_selector_eligible") is not False
+        if (
+            str(parent.attrs.get("latest")) != plan.run_name
+            or str(parent.attrs.get("latest_complete")) != plan.run_name
+            or (
+                run_group.attrs.get("palette_run_completion_status") != "complete"
+                or run_group.attrs.get("stage_selector_eligible") is not False
+            )
         ):
             raise RuntimeError(
                 "Bout-kinematics run was not persisted complete and ineligible "
@@ -605,12 +675,17 @@ def publish_computed_bout_kinematics_run(
             raise RuntimeError(
                 "Bout-kinematics activation requires one complete, ineligible run."
             )
-        try:
-            run_group.attrs["stage_selector_eligible"] = True
-        except BaseException:
-            if run_group.attrs.get("stage_selector_eligible") is True:
-                return
-            raise
+        run_group.attrs["stage_selector_eligible"] = True
+        _consolidate_and_validate_bout_visibility(
+            plan.source_zarr,
+            run_name=plan.run_name,
+            expected_selector_eligible=True,
+            expected_latest=plan.run_name,
+            expected_latest_complete=plan.run_name,
+        )
+
+    def repair_failed_visibility(_target_run_path: Path) -> None:
+        consolidate_metadata_capture_expected_warnings(plan.source_zarr)
 
     return atomic_publish_run_group(
         AtomicRunPublishSpec(
@@ -631,6 +706,7 @@ def publish_computed_bout_kinematics_run(
         complete_run=complete,
         verify_pointers=verify,
         activate_run=activate,
+        repair_failed_publication_visibility=repair_failed_visibility,
         payload_metadata={
             "copy_backend": copy_backend,
             "promotion_policy": (
@@ -638,6 +714,7 @@ def publish_computed_bout_kinematics_run(
             ),
             "materialization": json_attr_safe(dict(materialization_payload)),
         },
+        accept_persisted_activation_on_callback_error=False,
     )
 
 
@@ -711,9 +788,7 @@ def materialize_bout_kinematics_compute(
             "logical_fingerprint": logical,
             "local_validation": local_validation,
         }
-        local_group.attrs["node_local_materialization"] = json_attr_safe(
-            local_payload
-        )
+        local_group.attrs["node_local_materialization"] = json_attr_safe(local_payload)
         publish = publish_computed_bout_kinematics_run(
             plan,
             logical_sha256=str(logical["logical_sha256"]),
@@ -749,7 +824,9 @@ def promote_bout_kinematics_candidate(
     name = _safe_run_name(run_name, label="candidate run name")
     candidate_path = source / "analysis" / "bout_kinematics_runs" / name
     if not candidate_path.is_dir():
-        raise FileNotFoundError(f"Bout-kinematics candidate not found: {candidate_path}")
+        raise FileNotFoundError(
+            f"Bout-kinematics candidate not found: {candidate_path}"
+        )
 
     def inspect_candidate() -> tuple[dict[str, Any], dict[str, Any]]:
         group = open_zarr_root(candidate_path, mode="r")
@@ -830,6 +907,7 @@ def promote_bout_kinematics_candidate(
                     raise RuntimeError(
                         f"Bout-kinematics {label} candidate metadata differs."
                     )
+
         try:
             logical, validation = inspect_candidate()
             promoted_at = datetime.now(timezone.utc).isoformat()
@@ -852,9 +930,10 @@ def promote_bout_kinematics_candidate(
 
             verify_root = open_zarr_root(source, mode="r")
             verify_parent = verify_root["analysis/bout_kinematics_runs"]
-            if str(verify_parent.attrs.get("latest")) != name or str(
-                verify_parent.attrs.get("latest_complete")
-            ) != name:
+            if (
+                str(verify_parent.attrs.get("latest")) != name
+                or str(verify_parent.attrs.get("latest_complete")) != name
+            ):
                 raise RuntimeError(
                     "Bout-kinematics candidate pointer verification failed."
                 )

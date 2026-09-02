@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import math
 from types import SimpleNamespace
 
@@ -383,6 +384,101 @@ def _build_shape_root(*, row_count: int = 2) -> zarr.Group:
         overwrite=True,
     )
     return root
+
+
+def _staged_source_receipts(
+    shape: zarr.Group,
+    *,
+    row_count: int,
+    chunk_rows: int,
+) -> tuple[dict[str, object], dict[str, object]]:
+    run_name = "shape_001"
+    run_path = f"analysis/subject_shape_runs/{run_name}"
+    publication = _fake_coordinate_publication(shape, run_path)
+    authority = mod._build_staged_source_authority(
+        shape,
+        run_name=run_name,
+        row_count=row_count,
+        source_sample_count=4,
+        publication=publication,
+    )
+    receipt = mod.build_tail_kinematics_staged_input_integrity_receipt(
+        shape,
+        run_name=run_name,
+        authority=authority,
+        chunk_rows=chunk_rows,
+        read_workers=2,
+    )
+    return authority, receipt
+
+
+def test_staged_input_receipt_is_checked_in_each_worker_owned_block() -> None:
+    root = _build_shape_root(row_count=9)
+    shape = root["analysis/subject_shape_runs/shape_001"]
+    authority, receipt = _staged_source_receipts(
+        shape,
+        row_count=9,
+        chunk_rows=4,
+    )
+    assert [(chunk["start_row"], chunk["stop_row"]) for chunk in receipt["chunks"]] == [
+        (0, 4),
+        (4, 8),
+        (8, 9),
+    ]
+
+    _name, _group, sources = mod._resolve_tail_kinematics_sources(
+        root,
+        "shape_001",
+        _staged_source_authority=authority,
+        _staged_input_integrity_receipt=receipt,
+    )
+    values = np.asarray(shape["components/subject_body/tail_sample_xy"][0:4]).copy()
+    values[0, 0, 0] += 1.0
+    shape["components/subject_body/tail_sample_xy"][0:4] = values
+    with pytest.raises(
+        subject_shape_io.SubjectShapeIOError,
+        match="worker input.*differs",
+    ):
+        mod._read_tail_kinematics_source_block(sources, slice(0, 4))
+
+
+def test_staged_input_receipt_rejects_gaps_and_requires_complete_attestation() -> None:
+    root = _build_shape_root(row_count=9)
+    shape = root["analysis/subject_shape_runs/shape_001"]
+    authority, receipt = _staged_source_receipts(
+        shape,
+        row_count=9,
+        chunk_rows=4,
+    )
+    expected = [str(chunk["record_sha256"]) for chunk in receipt["chunks"]]
+    attestation = mod._complete_staged_input_worker_attestation(receipt, expected)
+    assert attestation["complete_worker_chunk_set"] is True
+    assert attestation["chunk_count"] == 3
+    with pytest.raises(RuntimeError, match="exact complete"):
+        mod._complete_staged_input_worker_attestation(receipt, expected[:-1])
+
+    broken = deepcopy(receipt)
+    broken["chunks"][1]["start_row"] = 5
+    broken_chunk_body = {
+        key: value
+        for key, value in broken["chunks"][1].items()
+        if key != "record_sha256"
+    }
+    broken["chunks"][1]["record_sha256"] = mod._canonical_sha256(broken_chunk_body)
+    broken_body = {
+        key: value for key, value in broken.items() if key != "record_sha256"
+    }
+    broken["record_sha256"] = mod._canonical_sha256(broken_body)
+    with pytest.raises(
+        subject_shape_io.SubjectShapeIOError,
+        match="gap, overlap",
+    ):
+        mod._canonical_staged_input_integrity_receipt(
+            shape,
+            run_name="shape_001",
+            authority=authority,
+            receipt=broken,
+        )
 
 
 def test_normal_tail_writer_rejects_unpublished_subject_shape_source() -> None:

@@ -249,12 +249,14 @@ def _translate_phases(runtime: Mapping[str, Any]) -> list[CandidatePhaseMeasurem
     )
     records = runtime.get("phases")
     expected = required_execution_phases(CandidateComputationMode.SCIENTIFIC_COMPUTE)
-    if not isinstance(records, list) or [record.get("name") for record in records] != [
-        phase.value for phase in expected
-    ]:
+    if not isinstance(records, list) or [
+        record.get("name") for record in records
+    ] != list(TAIL_KINEMATICS_EXECUTION_PHASE_ORDER):
         raise ValueError("tail-kinematics materializer phase sequence differs")
+    records_by_name = {str(record["name"]): record for record in records}
     result: list[CandidatePhaseMeasurement] = []
-    for phase, record in zip(expected, records, strict=True):
+    for phase in expected:
+        record = records_by_name[phase.value]
         if record.get("outcome") != "ok":
             raise ValueError("successful tail materializer has a failed phase")
         cpu = record.get("cpu_seconds")
@@ -510,9 +512,7 @@ def execute_tail_kinematics_candidate(
                 "cache_state": payload["cache_state"],
             },
             phases=phases,
-            publication_runtime_telemetry=materialized["publish"][
-                "runtime_telemetry"
-            ],
+            publication_runtime_telemetry=materialized["publish"]["runtime_telemetry"],
             coordinate_evidence=coordinate,
             logical_equality={
                 "contract_id": adapter["logical_equality_contract"],
