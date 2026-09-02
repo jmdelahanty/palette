@@ -20,7 +20,9 @@ from fisheye.analysis_workflows import (
 from fisheye.utils.plan_analysis_workflow import build_availability
 
 
-def _write_zarr_metadata(path: Path, attributes: dict[str, object] | None = None) -> None:
+def _write_zarr_metadata(
+    path: Path, attributes: dict[str, object] | None = None
+) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / "zarr.json").write_text(
         json.dumps(
@@ -343,6 +345,55 @@ def test_availability_refuses_child_when_dependency_is_unavailable(
     assert plan.execution_order == ("track_kinematics", "swim_bouts")
 
 
+def test_availability_resolves_dependencies_before_declaration_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = AnalysisWorkflow(
+        schema_id=ANALYSIS_WORKFLOW_SCHEMA_ID,
+        schema_version=ANALYSIS_WORKFLOW_SCHEMA_VERSION,
+        workflow_id="reverse_declaration_order",
+        description="dependency-first availability fixture",
+        nodes=(
+            WorkflowNode(
+                node_id="eye_angles",
+                kind="analysis",
+                stage_id="eye_angles",
+                depends_on=("subject_shape",),
+            ),
+            WorkflowNode(
+                node_id="subject_shape",
+                kind="analysis",
+                stage_id="subject_shape",
+            ),
+        ),
+        targets=("eye_angles",),
+    )
+    observed: list[tuple[str, dict[str, str]]] = []
+
+    def discover(_zarr_path, stage_id, *, dependency_runs, **_kwargs):
+        observed.append((stage_id, dict(dependency_runs)))
+        run_name = "shape_a" if stage_id == "subject_shape" else "eyes_a"
+        return StageAvailability(
+            stage_id=stage_id,
+            available=True,
+            run_name=run_name,
+            reason="complete",
+        )
+
+    monkeypatch.setattr(
+        "fisheye.utils.plan_analysis_workflow.discover_stage_availability",
+        discover,
+    )
+
+    availability = build_availability(workflow, Path("recording.zarr"))
+
+    assert availability["eye_angles"].available is True
+    assert observed == [
+        ("subject_shape", {}),
+        ("eye_angles", {"subject_shape": "shape_a"}),
+    ]
+
+
 def test_workflow_rejects_dependency_cycles() -> None:
     with pytest.raises(ValueError, match="dependency cycle"):
         AnalysisWorkflow(
@@ -358,7 +409,9 @@ def test_workflow_rejects_dependency_cycles() -> None:
         )
 
 
-def test_availability_resolver_uses_latest_complete_metadata_pointer(tmp_path: Path) -> None:
+def test_availability_resolver_uses_latest_complete_metadata_pointer(
+    tmp_path: Path,
+) -> None:
     parent = tmp_path / "analysis" / "track_kinematics_runs" / "offline"
     _write_zarr_metadata(
         parent,
@@ -421,9 +474,7 @@ def _write_keypoint_crop_tracking_lineage(
             "artifact_class": "geometry_only_analysis",
             "stage_selector_eligible": False,
             "run_manifest": {
-                "payload": {
-                    "source_refined_snapshot": {"run_id": "refined_a"}
-                }
+                "payload": {"source_refined_snapshot": {"run_id": "refined_a"}}
             },
         },
     )
@@ -557,9 +608,7 @@ def test_subject_mask_resolver_uses_active_root_bundle_authority(
                 "bundle_id": bundle_id,
                 "bundle_path": f"subject_mask_bundle_runs/{bundle_id}",
                 "members": {
-                    "refined": {
-                        "run_path": "refined_subject_masks_runs/refined_a"
-                    }
+                    "refined": {"run_path": "refined_subject_masks_runs/refined_a"}
                 },
             },
         },
@@ -666,9 +715,7 @@ def test_visualization_availability_is_tied_to_selected_track_run(
     )
     motion_authority = {
         "run_ref": "/analysis/track_kinematics_runs/offline/track_a",
-        "track_ref": (
-            "/analysis/track_kinematics_runs/offline/track_a/tracks/id_0"
-        ),
+        "track_ref": ("/analysis/track_kinematics_runs/offline/track_a/tracks/id_0"),
         "track_id": 0,
         "motion_manifest_sha256": "a" * 64,
         "positions_px_coordinate_descriptor_sha256": "b" * 64,
@@ -684,9 +731,7 @@ def test_visualization_availability_is_tied_to_selected_track_run(
         },
     )
     artifact = (
-        render
-        / "visualizations"
-        / "track_kinematics_summary_track_0_interactive"
+        render / "visualizations" / "track_kinematics_summary_track_0_interactive"
     )
     _write_zarr_metadata(
         artifact,

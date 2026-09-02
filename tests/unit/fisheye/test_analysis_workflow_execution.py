@@ -186,6 +186,7 @@ def _analysis_execution_plan(tmp_path: Path):
         zarr_path=tmp_path / "recording_analysis.zarr",
         execution_id="canary_20260713_01",
         num_workers=8,
+        admission_receipt_root=tmp_path / "operation" / "admission_receipts",
         python_executable="/palette/python",
     )
     return workflow, execution
@@ -267,7 +268,26 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
     assert eyes[eyes.index("--angle-shard-columns") + 1] == "32"
     assert eyes[eyes.index("--shard-workers") + 1] == "8"
     assert eyes[eyes.index("--native-threads") + 1] == "1"
+    receipt_path = (
+        tmp_path
+        / "operation"
+        / "admission_receipts"
+        / "eye_angles__eye_angles_canary_20260713_01.json"
+    ).resolve()
+    assert eyes[eyes.index("--admission-receipt") + 1] == str(receipt_path)
     assert "--apply" in eyes
+    admission = commands["eye_angles"].admission
+    assert admission is not None
+    assert admission.receipt_path == str(receipt_path)
+    assert admission.argv[:4] == eyes[:4]
+    assert admission.argv[admission.argv.index("--subject-shape-run") + 1] == (
+        "subject_shape_canary_20260713_01"
+    )
+    assert admission.argv[admission.argv.index("--write-admission-receipt") + 1] == (
+        str(receipt_path)
+    )
+    assert "--apply" not in admission.argv
+    assert "--admission-receipt" not in admission.argv
 
     shape = commands["subject_shape"].argv
     assert shape[:4] == (
@@ -284,6 +304,48 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
     assert shape[shape.index("--output-shard-rows") + 1] == "131072"
     assert shape[shape.index("--native-threads") + 1] == "1"
     assert "--apply" in shape
+
+
+def test_eye_angle_execution_cannot_render_without_external_receipt_root(
+    tmp_path: Path,
+) -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    plan = plan_analysis_workflow(
+        workflow,
+        {
+            "subject_shape": _status(
+                "subject_shape", available=True, run_name="shape_v4"
+            ),
+            "eye_angles": _status("eye_angles", available=False),
+        },
+        targets=("eye_angles",),
+    )
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    with pytest.raises(
+        WorkflowExecutionError,
+        match="explicit admission_receipt_root: eye_angles",
+    ):
+        build_workflow_execution_plan(
+            workflow,
+            plan,
+            zarr_path=zarr_path,
+            execution_id="missing_receipt_root",
+            num_workers=2,
+            python_executable="python",
+        )
+    with pytest.raises(
+        WorkflowExecutionError,
+        match="outside the analysis Zarr",
+    ):
+        build_workflow_execution_plan(
+            workflow,
+            plan,
+            zarr_path=zarr_path,
+            execution_id="receipt_inside_archive",
+            num_workers=2,
+            admission_receipt_root=zarr_path / ".receipts",
+            python_executable="python",
+        )
 
 
 def test_output_run_override_is_used_by_downstream_commands(tmp_path: Path) -> None:
@@ -690,6 +752,7 @@ def test_apply_validates_manifest_selected_eye_trace_export(
     zarr_path = tmp_path / "recording_analysis.zarr"
     _write_group(zarr_path)
     observed: list[tuple[Path, str]] = []
+    admitted_inputs: list[tuple[str, str, dict[str, str]]] = []
 
     monkeypatch.setenv("LSB_JOBID", "12345")
     monkeypatch.setattr(
@@ -707,8 +770,9 @@ def test_apply_validates_manifest_selected_eye_trace_export(
     )
     monkeypatch.setattr(
         "fisheye.utils.execute_analysis_workflow.verify_persisted_stage_output",
-        lambda *_args, **_kwargs: pytest.fail(
-            "Parquet exports must not enter Zarr stage discovery"
+        lambda _path, stage_id, *, requested_run, dependency_runs, session=None: (
+            admitted_inputs.append((stage_id, requested_run, dict(dependency_runs)))
+            or _status(stage_id, available=True, run_name=requested_run)
         ),
     )
 
@@ -721,6 +785,7 @@ def test_apply_validates_manifest_selected_eye_trace_export(
     )
 
     assert payload["status"] == "complete"
+    assert admitted_inputs == [("eye_angles", "eye_angles_v7", {})]
     assert observed == [((tmp_path / "exports").resolve(), "eye_trace_query_v1")]
     result = next(
         row for row in payload["node_results"] if row["node_id"] == "eye_traces"
@@ -874,9 +939,7 @@ def test_execution_composes_clipped_tracking_and_active_mask_bundle(
     commands = {command.node_id: command for command in execution.commands}
     tracks = commands["tracks"].argv
     assert "fisheye.tracking.arena_assignment" in tracks
-    assert tracks[tracks.index("--source-keypoint-run") + 1] == (
-        "canonical_clipped_a"
-    )
+    assert tracks[tracks.index("--source-keypoint-run") + 1] == ("canonical_clipped_a")
     assert tracks[tracks.index("--arena-run-name") + 1] == (
         "arena_assignment_tracks_clipped_a"
     )
@@ -977,6 +1040,25 @@ def test_apply_verifies_completed_run_before_reporting_success(
         "fisheye.utils.execute_analysis_workflow.subprocess.run",
         fake_run,
     )
+    verified: list[tuple[str, str, dict[str, str]]] = []
+    verification_sessions: list[object | None] = []
+
+    def verify(
+        _path: Path,
+        stage_id: str,
+        *,
+        requested_run: str,
+        dependency_runs: dict[str, str],
+        session: object | None = None,
+    ) -> StageAvailability:
+        verification_sessions.append(session)
+        verified.append((stage_id, requested_run, dict(dependency_runs)))
+        return _status(stage_id, available=True, run_name=requested_run)
+
+    monkeypatch.setattr(
+        "fisheye.utils.execute_analysis_workflow.verify_persisted_stage_output",
+        verify,
+    )
     report_path = tmp_path / "execution.json"
 
     payload = execute_workflow_plan(
@@ -996,7 +1078,174 @@ def test_apply_verifies_completed_run_before_reporting_success(
     )
     assert swim_result["status"] == "complete"
     assert swim_result["verification"]["available"] is True
+    assert verified[-1] == (
+        "swim_bouts",
+        "swim_bouts_apply_canary",
+        {"track_kinematics": "track_a"},
+    )
+    assert all(item is not None for item in verification_sessions[:-1])
+    assert verification_sessions[-1] is None
     assert json.loads(report_path.read_text(encoding="utf-8"))["status"] == "complete"
+
+
+def test_apply_blocks_mutation_when_reused_input_fails_dynamic_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    plan = plan_analysis_workflow(
+        workflow,
+        {
+            "eye_angles": _status(
+                "eye_angles",
+                available=True,
+                run_name="eye_wrong_shape",
+            ),
+        },
+        targets=("eye_traces",),
+    )
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _write_group(zarr_path)
+    execution = build_workflow_execution_plan(
+        workflow,
+        plan,
+        zarr_path=zarr_path,
+        execution_id="dynamic_admission_failure",
+        num_workers=1,
+        export_run_overrides={"eye_traces": "eye_export_blocked"},
+        export_root=tmp_path / "exports",
+        scratch_root=tmp_path / "scratch",
+        python_executable="python",
+    )
+    subprocess_calls: list[tuple[str, ...]] = []
+    monkeypatch.setenv("LSB_JOBID", "12345")
+    monkeypatch.setattr(
+        "fisheye.utils.execute_analysis_workflow.subprocess.run",
+        lambda argv, *, check, env: (
+            subprocess_calls.append(tuple(argv)) or subprocess.CompletedProcess(argv, 0)
+        ),
+    )
+    monkeypatch.setattr(
+        "fisheye.utils.execute_analysis_workflow.verify_persisted_stage_output",
+        lambda _path, stage_id, *, requested_run, dependency_runs, session=None: _status(
+            stage_id,
+            available=False,
+            run_name=requested_run,
+        ),
+    )
+
+    payload = execute_workflow_plan(
+        zarr_path,
+        execution,
+        workflow_payload=workflow.to_dict(),
+        apply=True,
+        report_path=tmp_path / "execution.json",
+    )
+
+    assert payload["status"] == "failed"
+    results = {row["node_id"]: row for row in payload["node_results"]}
+    assert results["eye_angles"]["status"] == "failed_verification"
+    assert results["eye_traces"]["status"] == "blocked_dependency"
+    assert subprocess_calls == []
+
+
+def test_apply_seals_eye_admission_and_continues_independent_tail_after_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    availability = {
+        "refined_subject_masks": _status(
+            "refined_subject_masks", available=True, run_name="bundle/masks_a"
+        ),
+        "subject_shape": _status("subject_shape", available=True, run_name="shape_a"),
+        "track_kinematics": _status(
+            "track_kinematics", available=True, run_name="track_a"
+        ),
+        "swim_bouts": _status("swim_bouts", available=True, run_name="bouts_a"),
+        "track_kinematics_visualization": _status(
+            "track_kinematics_visualization",
+            available=True,
+            run_name="track_a",
+        ),
+        "eye_angles": _status("eye_angles", available=False),
+        "bout_kinematics": _status("bout_kinematics", available=False),
+        "tail_kinematics": _status("tail_kinematics", available=False),
+    }
+    plan = plan_analysis_workflow(
+        workflow,
+        availability,
+        targets=("bout_kinematics", "tail_kinematics"),
+    )
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _write_group(zarr_path)
+    receipt_root = tmp_path / "operation" / "admission_receipts"
+    execution = build_workflow_execution_plan(
+        workflow,
+        plan,
+        zarr_path=zarr_path,
+        execution_id="continue_after_eye_failure",
+        num_workers=2,
+        admission_receipt_root=receipt_root,
+        python_executable="python",
+    )
+    assert [command.node_id for command in execution.commands] == [
+        "eye_angles",
+        "bout_kinematics",
+        "tail_kinematics",
+    ]
+
+    observed: list[tuple[str, ...]] = []
+
+    def fake_run(argv, *, check, env):
+        command = tuple(argv)
+        observed.append(command)
+        assert check is False
+        assert env["PALETTE_DISABLE_REGISTRY_WRITES"] == "1"
+        if "--write-admission-receipt" in command:
+            receipt = Path(command[command.index("--write-admission-receipt") + 1])
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text('{"sealed":true}\n', encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0)
+        if "fisheye.analysis_workflows.materializers.eye_angles" in command:
+            return subprocess.CompletedProcess(argv, 7)
+        assert "fisheye.analysis_workflows.materializers.tail_kinematics" in command
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setenv("LSB_JOBID", "12345")
+    monkeypatch.setattr(
+        "fisheye.utils.execute_analysis_workflow.subprocess.run",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "fisheye.utils.execute_analysis_workflow.verify_persisted_stage_output",
+        lambda *_args, **_kwargs: _status(
+            "tail_kinematics",
+            available=True,
+            run_name="tail_kinematics_continue_after_eye_failure",
+        ),
+    )
+
+    payload = execute_workflow_plan(
+        zarr_path,
+        execution,
+        workflow_payload=workflow.to_dict(),
+        apply=True,
+        report_path=tmp_path / "operation" / "execution.json",
+    )
+
+    assert payload["status"] == "failed"
+    results = {row["node_id"]: row for row in payload["node_results"]}
+    assert results["eye_angles"]["status"] == "failed"
+    assert results["eye_angles"]["admission"]["status"] == "complete"
+    assert len(results["eye_angles"]["admission"]["receipt_sha256"]) == 64
+    assert results["bout_kinematics"]["status"] == "blocked_dependency"
+    assert results["bout_kinematics"]["blocked_by"] == ["eye_angles"]
+    assert results["tail_kinematics"]["status"] == "complete"
+    assert len(observed) == 3
+    assert "--write-admission-receipt" in observed[0]
+    assert "--admission-receipt" in observed[1]
+    assert "fisheye.analysis_workflows.materializers.tail_kinematics" in observed[2]
 
 
 def test_cli_renders_sleepyfish_style_swim_bout_command(

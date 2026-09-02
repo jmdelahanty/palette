@@ -16,7 +16,13 @@ from fisheye.analysis.eye_angle_storage import (
     EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
 )
 from fisheye.shared import atomic_run_publisher as atomic_mod
+from fisheye.shared import (
+    subject_shape_coordinate_publication as subject_shape_publication_mod,
+)
 from fisheye.analysis_workflows.materializers import eye_angles as mod
+from fisheye.analysis_workflows.runtime_verification import (
+    verify_persisted_stage_output,
+)
 from fisheye.shared import eye_geometry_source as eye_geometry_source_mod
 from fisheye.shared.coordinate_descriptor import (
     CANONICAL_OVERLAY_DIRECT,
@@ -623,10 +629,36 @@ def _accept_synthetic_subject_shape_publication(
     def _load(root: zarr.Group, path: str) -> object:
         return _fake_coordinate_publication(root, root[path], path)
 
+    def _validate_metadata(
+        root: zarr.Group,
+        path: str,
+        *,
+        expected_selector_eligible: bool,
+        expected_publication_owner: str,
+        payload_run_path: str | Path | None = None,
+    ) -> object:
+        del payload_run_path
+        publication = _fake_coordinate_publication(root, root[path], path)
+        return subject_shape_publication_mod.SealedSubjectShapePublicationMetadataProof(
+            _verification_seal=(
+                subject_shape_publication_mod._METADATA_PUBLICATION_SEAL
+            ),
+            run_path=path,
+            manifest=publication.manifest,
+            row_count=publication.row_identity.leading_dimension,
+            selector_eligible=expected_selector_eligible,
+            publication_owner=expected_publication_owner,
+        )
+
     monkeypatch.setattr(
         eye_geometry_source_mod,
         "load_persisted_subject_shape_coordinate_publication",
         _load,
+    )
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "validate_sealed_subject_shape_publication_metadata",
+        _validate_metadata,
     )
     monkeypatch.setattr(
         mod.eye_writer,
@@ -3519,9 +3551,7 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
 
     strict_tables = load_eye_angle_run_tables(root, run_name="eye_1")
     assert strict_tables.schema_version == 7
-    consolidated_root = zarr.open_group(
-        str(source), mode="r", use_consolidated=True
-    )
+    consolidated_root = zarr.open_group(str(source), mode="r", use_consolidated=True)
     consolidated_tables = load_eye_angle_run_tables(consolidated_root)
     assert consolidated_tables.run_name == "eye_1"
     assert consolidated_tables.schema_version == 7
@@ -3670,6 +3700,21 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
         "complete_ineligible_then_pointers_then_eligibility_final"
     )
     assert publication["physical_copy"]["verification"] == ("sha256_all_physical_files")
+    workflow_verification = verify_persisted_stage_output(
+        source,
+        "eye_angles",
+        requested_run="eye_1",
+        dependency_runs={"subject_shape": "shape_1"},
+    )
+    assert workflow_verification.available is True
+    wrong_shape_verification = verify_persisted_stage_output(
+        source,
+        "eye_angles",
+        requested_run="eye_1",
+        dependency_runs={"subject_shape": "another_shape"},
+    )
+    assert wrong_shape_verification.available is False
+    assert "planned subject-shape authority" in (wrong_shape_verification.reason or "")
 
 
 def test_selector_visible_consolidation_failure_tombstones_both_metadata_views(
@@ -3740,9 +3785,7 @@ def test_selector_visible_consolidation_failure_tombstones_both_metadata_views(
     assert failed_authoritative_consolidation is True
     assert registry_events == []
     for consolidated in (False, True):
-        root = zarr.open_group(
-            str(source), mode="r", use_consolidated=consolidated
-        )
+        root = zarr.open_group(str(source), mode="r", use_consolidated=consolidated)
         parent = root["analysis/eye_angle_runs"]
         assert parent.attrs["latest"] == "eye_visibility_failure"
         assert parent.attrs["latest_complete"] == "eye_visibility_failure"
@@ -3756,9 +3799,7 @@ def test_selector_visible_consolidation_failure_tombstones_both_metadata_views(
 
     from fisheye.analysis.eye_angle_io import EyeAngleIOError, load_eye_angle_run_tables
 
-    consolidated_root = zarr.open_group(
-        str(source), mode="r", use_consolidated=True
-    )
+    consolidated_root = zarr.open_group(str(source), mode="r", use_consolidated=True)
     with pytest.raises(
         EyeAngleIOError,
         match="No stable complete selector-eligible eye-angle run",
