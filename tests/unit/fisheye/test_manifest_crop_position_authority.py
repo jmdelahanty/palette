@@ -191,6 +191,14 @@ def test_real_geometry_crop_publisher_round_trips_track_motion_v2(
     row_count = int(offline.positions_px.shape[0])
     instance_keys = np.asarray(offline.instance_key, dtype=np.uint64)
     keypoint = root.require_group("keypoints_runs").create_group("kp_geometry_profile")
+    keypoint.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "source_crop_run": "crop_track_roundtrip",
+            "keypoints_processed": row_count,
+        }
+    )
     heading = keypoint.create_array(
         "heading",
         data=np.zeros(row_count, dtype=np.float32),

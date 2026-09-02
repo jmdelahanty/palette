@@ -57,6 +57,12 @@ def _fresh_full_motion_run(
         archive_token=world["archive_token"],
     )
     crop = crop_parent.create_group("c1")
+    crop.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        }
+    )
     crop.children["centers_img_xy"] = source.coordinates.coordinate_node
     crop.children["instance_key"] = source.coordinates.row_identity._key_array_node
     root["crop_runs"] = crop_parent
@@ -66,6 +72,14 @@ def _fresh_full_motion_run(
         archive_token=world["archive_token"],
     )
     keypoint = keypoint_parent.create_group("kp_1")
+    keypoint.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "source_crop_run": "c1",
+            "keypoints_processed": 2,
+        }
+    )
     heading_node = keypoint.create_array(
         "heading",
         data=source_heading_values,
@@ -1714,6 +1728,13 @@ def test_manifest_rejects_coherent_detection_path_outside_crop_lineage(
 def _configure_v2_successor_run(root, run) -> tuple[str, str]:
     historical_rowset = "crop_runs/historical_collection"
     detection_run_id = "finalized_collection_proxy:collection_1"
+    historical = root["crop_runs"].create_group("historical_collection")
+    historical.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        }
+    )
     root["keypoints_runs"]["kp_1"].attrs.update(
         {
             "source_crop_run": "historical_collection",

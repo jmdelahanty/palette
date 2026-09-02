@@ -27,12 +27,12 @@ from ..shared.rowset_fingerprint import (
     resolve_rowset_edit_revision,
 )
 from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
+from ..shared.keypoint_motion_authority import (
+    resolve_keypoint_lineage_authority,
+)
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
-from ..shared.zarr.keypoint_bundle_activation import (
-    resolve_active_keypoint_bundle_from_root,
-)
 from ..shared.observation_coordinate_publication import (
     CROP_GEOMETRY_SELECTION_ATTR,
     load_persisted_source_camera_position_surface,
@@ -45,7 +45,6 @@ from ..shared.zarr.arena_geometry_selection import (
 from ..shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     is_run_complete_in_parent,
-    is_run_selector_eligible,
     mark_run_complete,
     mark_run_started,
     note_pending_latest,
@@ -207,64 +206,8 @@ def _selected_keypoint_source_rowset(
 ) -> str:
     """Resolve one authorized keypoint selection to its exact crop rowset."""
 
-    requested = str(selection).strip().strip("/")
-    if not requested:
-        raise ValueError("--source-keypoint-run must be nonempty.")
-    if requested.startswith("refined/"):
-        family = "refined_keypoints_runs"
-        run_name = requested.split("/", 1)[1]
-    elif requested.startswith("refined_keypoints_runs/"):
-        family = "refined_keypoints_runs"
-        run_name = requested.split("/", 1)[1]
-    elif requested.startswith("keypoints_runs/"):
-        family = "keypoints_runs"
-        run_name = requested.split("/", 1)[1]
-    else:
-        family = "keypoints_runs"
-        run_name = requested
-    if _EXACT_RUN_NAME.fullmatch(run_name) is None:
-        raise ValueError(f"Unsafe keypoint run selection: {selection!r}.")
-    parent = root.get(family)
-    if parent is None or run_name not in parent:
-        raise ValueError(f"Selected keypoint authority is absent: {family}/{run_name}.")
-    group = parent[run_name]
-    if not is_run_complete_in_parent(parent, group, legacy_default=False):
-        raise ValueError(f"Selected keypoint authority is incomplete: {family}/{run_name}.")
-
-    authorized_by_bundle = False
-    if family == "refined_keypoints_runs":
-        active = resolve_active_keypoint_bundle_from_root(root)
-        if active is not None:
-            member = active.get("refined_keypoints")
-            authorized_by_bundle = (
-                isinstance(member, Mapping)
-                and member.get("run_path") == f"{family}/{run_name}"
-            )
-    if not authorized_by_bundle and not is_run_selector_eligible(group):
-        raise ValueError(
-            f"Selected keypoint authority is not active or selector-eligible: "
-            f"{family}/{run_name}."
-        )
-
-    raw_group = group
-    if family == "refined_keypoints_runs":
-        raw_run = _clean_source_text(group.attrs.get("source_keypoints_run"))
-        raw_parent = root.get("keypoints_runs")
-        if not raw_run or raw_parent is None or raw_run not in raw_parent:
-            raise ValueError(
-                "Selected refined keypoint authority lacks its exact canonical base run."
-            )
-        raw_group = raw_parent[raw_run]
-        if not is_run_complete_in_parent(raw_parent, raw_group, legacy_default=False):
-            raise ValueError("Selected refined keypoint base run is incomplete.")
-    crop_run = _clean_source_text(raw_group.attrs.get("source_crop_run"))
-    crop_parent = root.get("crop_runs")
-    if not crop_run or crop_parent is None or crop_run not in crop_parent:
-        raise ValueError("Selected keypoint authority lacks its exact source crop run.")
-    crop_group = crop_parent[crop_run]
-    if not is_run_complete_in_parent(crop_parent, crop_group, legacy_default=False):
-        raise ValueError("Selected keypoint source crop run is incomplete.")
-    return f"crop_runs/{crop_run}"
+    authority = resolve_keypoint_lineage_authority(root, selection)
+    return f"crop_runs/{authority.crop_run}"
 
 
 def _arena_assignment_run_group(
