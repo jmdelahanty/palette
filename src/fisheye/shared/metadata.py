@@ -307,6 +307,51 @@ def get_fps(root: zarr.Group) -> Optional[float]:
     return canonical_fps
 
 
+def resolve_fps(
+    root: zarr.Group,
+    *,
+    explicit_fps: object | None = None,
+) -> float:
+    """Resolve one required FPS without allowing an override conflict.
+
+    A supplied value is a compatibility source for archives that have no
+    canonical FPS.  Once canonical metadata exists, an explicit value must
+    agree exactly within the metadata tolerance; it cannot replace authority.
+    """
+
+    metadata_fps = get_fps(root)
+    if explicit_fps is None:
+        if metadata_fps is None:
+            raise SourceVideoMetadataMissingError(
+                "A positive FPS is required from supported source_video_metadata "
+                "or root.fps. Supply an explicit compatibility FPS only for an "
+                "archive that has no canonical value."
+            )
+        return float(metadata_fps)
+
+    if (
+        isinstance(explicit_fps, bool)
+        or not isinstance(explicit_fps, (int, float))
+        or not math.isfinite(float(explicit_fps))
+        or float(explicit_fps) <= 0
+    ):
+        raise SourceVideoMetadataError(
+            "An explicit compatibility FPS must be one positive finite number."
+        )
+    resolved = float(explicit_fps)
+    if metadata_fps is not None and not math.isclose(
+        resolved,
+        float(metadata_fps),
+        rel_tol=0.0,
+        abs_tol=1e-6,
+    ):
+        raise SourceVideoMetadataConflictError(
+            "Explicit FPS differs from canonical recording metadata: "
+            f"{resolved!r} != {float(metadata_fps)!r}."
+        )
+    return resolved
+
+
 def get_pipeline_type(root: zarr.Group) -> str:
     """
     Get pipeline type following unified spec.

@@ -5,6 +5,12 @@ import inspect
 import pytest
 
 from fisheye.analysis import track_kinematics as mod
+from fisheye.shared.metadata import resolve_fps
+
+
+def test_track_kinematics_uses_shared_fps_authority_resolver() -> None:
+    assert mod.resolve_fps is resolve_fps
+    assert "find_fps" not in mod.__all__
 
 
 def test_track_kinematics_reviewed_defaults_are_canonical() -> None:

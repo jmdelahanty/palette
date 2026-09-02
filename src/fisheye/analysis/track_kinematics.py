@@ -37,7 +37,6 @@ from .compute_speed import (  # re-exported for compatibility
     TRANSITION_REASON_CODES,
     TrackSpeeds,
     compute_track_speed,
-    find_fps,
     load_arena_ids,
     resolve_dimensions,
 )
@@ -88,6 +87,7 @@ from fisheye.shared.proof_verification import (
     proof_verification_operation,
 )
 from fisheye.shared.json_safety import json_attr_safe
+from fisheye.shared.metadata import resolve_fps
 from fisheye.shared.observation_coordinate_publication import (
     BoundSourceCameraPositionSurface,
     COLLECTION_PROXY_SUCCESSOR_MAPPING_ATTR,
@@ -13383,7 +13383,15 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         action="store_true",
         help="Include track_id < 0 rows in offline outputs for diagnostic use.",
     )
-    parser.add_argument("--fps", type=float, default=None, help="Override frames-per-second value.")
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=None,
+        help=(
+            "Compatibility FPS for archives without canonical frame-rate metadata. "
+            "When canonical metadata exists, this value must match it."
+        ),
+    )
     parser.add_argument("--no-write", action="store_true", help="Do not write results back to the Zarr archive.")
     parser.add_argument(
         "--offline-only",
@@ -13556,9 +13564,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     if not render_online and not render_offline:
         render_online = render_offline = True
 
-    fps = float(args.fps) if args.fps else find_fps(root, console)
-    if fps <= 0:
-        raise ValueError("FPS must be positive.")
+    fps = resolve_fps(root, explicit_fps=args.fps)
 
     if render_online:
         # Online track kinematics prefers the sealed refined surface and otherwise
@@ -14500,7 +14506,6 @@ __all__ = [
     "bind_staged_offline_track_kinematics_run",
     "build_track_motion_staged_scientific_validation",
     "compute_track_speed",
-    "find_fps",
     "_filter_public_track_rows",
     "load_arena_ids",
     "load_bound_track_motion_run",
