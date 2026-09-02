@@ -48,6 +48,7 @@ from rich.console import Console
 from rich.table import Table
 from scipy.signal import savgol_filter
 
+from fisheye.shared.metadata import get_fps as get_authoritative_fps
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 
@@ -104,12 +105,22 @@ def _effective_smoothing_window(requested: int, sample_count: int) -> int:
 
 
 def find_fps(root: zarr.Group, console: Console, fallback: float = 60.0) -> float:
-    """Extract FPS from root/raw_video attrs; fall back to provided default."""
-    for key in ("fps", "video_fps"):
-        if key in root.attrs:
-            val = float(root.attrs[key])
-            if val > 0:
-                return val
+    """Resolve canonical FPS, retaining only closed legacy fallbacks.
+
+    Versioned source-video metadata is authoritative and fails closed on an
+    invalid value or a conflicting legacy ``root.fps`` mirror.  ``video_fps``
+    and ``raw_video.attrs['fps']`` remain compatibility sources only when the
+    canonical resolver reports that no FPS metadata exists.
+    """
+
+    authoritative_fps = get_authoritative_fps(root)
+    if authoritative_fps is not None:
+        return float(authoritative_fps)
+
+    if "video_fps" in root.attrs:
+        val = float(root.attrs["video_fps"])
+        if val > 0:
+            return val
 
     if "raw_video" in root and "fps" in root["raw_video"].attrs:
         val = float(root["raw_video"].attrs["fps"])

@@ -53,6 +53,8 @@ jobs:
       - name: Lint import boundaries
         run: |
           lint-imports --config pyproject.toml
+          python scripts/check_fps_authority_access.py
+          git diff --exit-code -- scripts/fps_authority_access_ratchet_baseline.json
 
   file-size-ratchet:
     name: file-size ratchet
