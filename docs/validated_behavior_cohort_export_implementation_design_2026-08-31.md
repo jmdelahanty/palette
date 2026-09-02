@@ -1214,6 +1214,11 @@ or physical-presentation mutation or claim.
       non-overlapping physical chunk ownership.
 - [x] Publish dense tables in the explicit Phase-B manifest-bound profile, not
       as a prerequisite for the compact Phase-A release.
+- [x] Define the Phase-C protocol-authored chaser-appearance successor without
+      mutating Phase A/B. Its exact authority chain, occurrence schema v2,
+      grouped-statistics handoff, and color/role plotting rules are documented
+      in
+      `validated_behavior_chaser_appearance_export_successor_2026-09-01.md`.
 
 ### Phase 6 — Later scientific successors
 

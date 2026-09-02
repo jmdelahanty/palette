@@ -85,10 +85,31 @@ def _condition_color(payload: Mapping[str, object], condition: str) -> str:
 
 
 def _role_color(payload: Mapping[str, object], role: str) -> str:
+    styles = payload.get("behavior_role_styles")
+    if isinstance(styles, Mapping):
+        style = styles.get(role)
+        if isinstance(style, Mapping):
+            color = style.get("aggregate_color_css")
+            if isinstance(color, str):
+                return color
+            color = style.get("aggregate_color_hex")
+            if isinstance(color, str):
+                return color
     colors = payload.get("behavior_role_colors")
     return (
         str(colors.get(role, "#555555")) if isinstance(colors, Mapping) else "#555555"
     )
+
+
+def _role_symbol(payload: Mapping[str, object], role: str) -> str:
+    styles = payload.get("behavior_role_styles")
+    if isinstance(styles, Mapping):
+        style = styles.get(role)
+        if isinstance(style, Mapping):
+            symbol = style.get("plotly_role_symbol")
+            if isinstance(symbol, str) and symbol:
+                return symbol
+    return "circle"
 
 
 def _provider_dash(payload: Mapping[str, object], provider: str) -> str:
@@ -380,7 +401,7 @@ def grouped_epoch_metric_figure(
                     "dash": _provider_dash(payload, provider),
                     "width": 2.4,
                 },
-                marker={"size": 8},
+                marker={"size": 8, "symbol": _role_symbol(payload, role)},
                 error_y={
                     "type": "data",
                     "symmetric": False,
@@ -613,6 +634,7 @@ def trial_response_metric_figure(
                 y=[point[1] for point in points],
                 mode="lines+markers",
                 line={"color": _role_color(payload, role), "width": 2.4},
+                marker={"symbol": _role_symbol(payload, role), "size": 8},
                 error_y={
                     "type": "data",
                     "symmetric": False,
