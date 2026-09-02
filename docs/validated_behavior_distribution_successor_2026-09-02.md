@@ -196,9 +196,9 @@ color or hard-codes an identity-to-role mapping.
 - [x] Run focused tests and `marimo check` outside the Codex sandbox.
 - [ ] Run required repository CI and retain every required green result before
   integration.
-- [ ] Publish one immutable Phase-C-bound canary and visually inspect all
+- [x] Publish one immutable Phase-C-bound canary and visually inspect all
   registered metric families.
-- [ ] Record paths, row counts, digests, runtime, and any typed exclusions in
+- [x] Record paths, row counts, digests, runtime, and any typed exclusions in
   this document without rewriting prior evidence.
 
 ## Canary evidence
@@ -222,6 +222,69 @@ log-spaced positive axis rather than silent clipping. Time-weighted epoch
 histograms also require both transition endpoints inside the same epoch;
 boundary-crossing transitions contribute only to the whole-session view.
 
+## Full cohort evidence
+
+The commit-pinned cohort publication ran from Palette commit
+`0f223d30f32fabf333d3d07f1f0c23f82b739a23` against Phase-C export
+`goodbatbadbat-validated-behavior-phase-c-20260902-19a006cc`, parent manifest
+`8fb2c7ecabeff2b13b6178416842f477d99c55ae8d7df540f5dd71eea7ad1646`.
+The immutable distribution is
+`/groups/johnson/johnsonlab/jeremy/operations/goodbatbadbat_validated_behavior_distributions_20260902_0f223d30/distribution`.
+Its record digest is
+`bb90c675747fdc3403de24a21bd824a8603526b8d529f5d795ed13c571fe46e1`.
+
+The publication retained all 84 parent members: 80 recordings contributed and
+the four exact members with invalid semantic selection remain typed
+noncontributors in every applicable denominator. It contains 101,233 bout
+observations, 101,153 producer-authored inter-bout intervals, 9,600
+recording-support rows, 475,258 nonzero recording-bin rows, and 71,992 complete
+cohort-bin rows across 17 metric specifications. Serial wall time was 12m04s;
+peak resident memory was 7,830,316 KiB (about 7.47 GiB), with no swap. The
+strict reader independently reopened the final generation and enumerated all
+17 metric contracts.
+
+The first immutable full-evidence report is
+`/groups/johnson/johnsonlab/jeremy/operations/goodbatbadbat_validated_behavior_distributions_20260902_0f223d30/report`.
+It contains 24 PNGs plus an HTML index, has v1 record digest
+`3de2dab6c426b3c097fd806f65428440dfa93724077533b37d79e8cd78823100`,
+and rendered in 16.39 s with 1,203,900 KiB peak resident memory. Visual review
+covered bout kinematics, bout heading, interval, motion-speed,
+motion-displacement, motion-heading, and chaser-distance families in both
+available frame/time weightings.
+
+That review found sparse but valid tails extending the full linear axes: for
+example, mean-recording mass above 100 mm/s was about 0.052% for filtered
+speed, above 1,000 deg/s was about 0.370% for absolute signed angular-velocity
+tails, and above 60 s was about 0.097% for inter-bout intervals. The complete
+histograms remain authoritative; no observation was clipped or reclassified.
+Viewer commit `957f2e2b25ebddeae1f59e3c9f9a069db5aba2cf` adds a display-only
+`central_99` choice that uses whole persisted bins and chooses one shared range
+retaining at least 99% of the equal-recording mass in every displayed
+scope/group series. `full_evidence` remains an immediate choice. Every range
+record carries its bounds, retained/omitted fractions, reason, and digest;
+schema-v2 report validation rejects internally inconsistent claims while the
+reader retains v1 report compatibility.
+
+The immutable central-view report is
+`/groups/johnson/johnsonlab/jeremy/operations/goodbatbadbat_validated_behavior_distributions_20260902_0f223d30/report_central99_957f2e2b`.
+Its v2 record digest is
+`b19c17b8a8845572f5028b3b6eaba9141e0f5645b7e2c1bba9745fbeb22fc683`;
+24 figures plus HTML rendered in 20.30 s with 1,201,780 KiB peak resident
+memory. Representative resolved central bounds were 45.6 s for IBI (minimum
+99.003% retained), 37 mm/s for filtered speed (99.012%), ±700 deg/s for
+signed angular velocity (99.017%), 440 deg for within-bout heading path
+(99.017%), and 75 mm for chaser distance (99.304%). Tortuosity retains its
+complete 0.00126–7,943 logarithmic axis. Both immutable report generations
+strictly reopened with the v2 reader. The Plotly/Marimo backend rendered all 48
+full/central variants from the exact cohort payload; 23 central ranges applied
+and tortuosity correctly retained its complete logarithmic range.
+
+Focused distribution validation passed 15 tests; the neighboring cohort,
+export, group-statistics, and rendering suite passed 74 tests. Marimo's
+structural checker, Python compilation, formatting, and whitespace checks also
+passed. Required repository CI remains an integration gate and is not replaced
+by this local evidence.
+
 ## Deferred work
 
 - A recording-Zarr-local histogram cache is optional acceleration, not a new
@@ -229,5 +292,9 @@ boundary-crossing transitions contribute only to the whole-session view.
   recipe; exact unbinned recording data remains authoritative.
 - Distributed shard fanout may follow after profiling the serial canary. It
   must preserve whole non-overlapping output shards and deterministic fan-in.
+- The valid serial full-cohort reducer peaked at about 7.47 GiB. A later
+  optimization should stream or shard recording histograms before deterministic
+  fan-in and prove byte-identical cohort/support outputs; this is a performance
+  successor, not permission to weaken validation or rewrite the sealed cohort.
 - Peak-to-peak bout heading and other new scientific metrics require explicit
   successor contracts rather than viewer-side formulas.
