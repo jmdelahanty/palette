@@ -3,6 +3,35 @@ set -euo pipefail
 
 palette_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 palette_repo_root="$(cd "$palette_script_dir/.." && pwd)"
+
+palette_pytest_invocation=0
+palette_previous_arg=""
+for palette_arg in "$@"; do
+  if [[ "$palette_previous_arg" == "-m" && "$palette_arg" == "pytest" ]]; then
+    palette_pytest_invocation=1
+    break
+  fi
+  case "${palette_arg##*/}" in
+    pytest|py.test)
+      palette_pytest_invocation=1
+      break
+      ;;
+  esac
+  palette_previous_arg="$palette_arg"
+done
+
+if [[ "$palette_pytest_invocation" -eq 1 ]]; then
+  palette_short_hostname="$(/bin/hostname -s 2>/dev/null || /bin/hostname 2>/dev/null || true)"
+  palette_short_hostname="${palette_short_hostname%%.*}"
+  palette_short_hostname="${palette_short_hostname,,}"
+  case "$palette_short_hostname" in
+    login1|login2)
+      echo "Palette tests must run from a workstation checkout, never on campus login node '$palette_short_hostname'." >&2
+      exit 64
+      ;;
+  esac
+fi
+
 case ":${PYTHONPATH:-}:" in
   *":$palette_repo_root/src:"*) ;;
   *) export PYTHONPATH="$palette_repo_root/src${PYTHONPATH:+:$PYTHONPATH}" ;;
