@@ -187,14 +187,16 @@ def test_execution_receipt_finalizer_uses_exact_selected_runs(
     }
 
 
-def test_execution_v2_receipt_excludes_parquet_exports_from_stage_registry(
+@pytest.mark.parametrize("schema_version", (2, 3))
+def test_execution_receipt_excludes_parquet_exports_from_stage_registry(
     tmp_path: Path,
+    schema_version: int,
 ) -> None:
     zarr_path = tmp_path / "analysis.zarr"
-    receipt = tmp_path / "execution-v2.json"
+    receipt = tmp_path / f"execution-v{schema_version}.json"
     payload = {
         "schema_id": "palette.analysis_workflow_execution",
-        "schema_version": 2,
+        "schema_version": schema_version,
         "mode": "apply",
         "status": "complete",
         "registry_write_mode": "deferred_to_serial_finalizer",
@@ -222,6 +224,63 @@ def test_execution_v2_receipt_excludes_parquet_exports_from_stage_registry(
     receipt.write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
     assert mod._execution_report_requests(receipt) == []
+
+
+def test_execution_v3_finalizer_revalidates_bound_admission_receipt(
+    tmp_path: Path,
+) -> None:
+    zarr_path = (tmp_path / "analysis.zarr").resolve()
+    admission_path = (tmp_path / "admission" / "eye.json").resolve()
+    admission_path.parent.mkdir()
+    admission_path.write_text('{"sealed":true}\n', encoding="utf-8")
+    admission_sha256 = hashlib.sha256(admission_path.read_bytes()).hexdigest()
+    execution_receipt = tmp_path / "execution-v3.json"
+    payload = {
+        "schema_id": "palette.analysis_workflow_execution",
+        "schema_version": 3,
+        "mode": "apply",
+        "status": "complete",
+        "registry_write_mode": "deferred_to_serial_finalizer",
+        "zarr_path": str(zarr_path),
+        "execution_plan": {
+            "commands": [
+                {
+                    "node_id": "eye_angles",
+                    "node_kind": "analysis",
+                    "stage_id": "eye_angles",
+                    "output_run": "eye_v3",
+                    "output_kind": "zarr_stage",
+                    "output_root": str(zarr_path),
+                    "admission": {
+                        "receipt_path": str(admission_path),
+                        "argv": ["scripts/py", "--write-admission-receipt"],
+                    },
+                }
+            ]
+        },
+        "node_results": [
+            {
+                "node_id": "eye_angles",
+                "status": "complete",
+                "run_name": "eye_v3",
+                "admission": {
+                    "status": "complete",
+                    "receipt_path": str(admission_path),
+                    "receipt_sha256": admission_sha256,
+                },
+            }
+        ],
+    }
+    execution_receipt.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    requests = mod._execution_report_requests(execution_receipt)
+    assert len(requests) == 1
+    assert requests[0].stage_id == "eye_angles"
+    assert requests[0].requested_run == "eye_v3"
+
+    admission_path.write_text('{"sealed":false}\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="admission receipt digest differs"):
+        mod._execution_report_requests(execution_receipt)
 
 
 def test_execution_v2_export_receipt_fails_closed_before_registry_skip(

@@ -15,6 +15,7 @@ from fisheye.analysis_workflows import (
     load_analysis_workflow,
     plan_analysis_workflow,
 )
+from fisheye.analysis_workflows.dag import topological_order
 from fisheye.registry.stage_catalog import canonical_stage_id
 from fisheye.shared.json_safety import write_json_atomic
 
@@ -55,7 +56,8 @@ def build_availability(
     unavailable = {canonical_stage_id(value) for value in forced_unavailable}
     forced = dict(forced_available or {})
     statuses: dict[str, StageAvailability] = {}
-    for node in workflow.nodes:
+    for node_id in topological_order(workflow):
+        node = workflow.node_by_id[node_id]
         if node.stage_id is None or node.stage_id in statuses:
             continue
         stage_id = node.stage_id
@@ -130,7 +132,8 @@ def build_plan_payload(
         "zarr_path": str(zarr_path),
         "workflow": workflow.to_dict(),
         "availability": {
-            stage_id: status.to_dict() for stage_id, status in sorted(availability.items())
+            stage_id: status.to_dict()
+            for stage_id, status in sorted(availability.items())
         },
         "plan": plan.to_dict(),
     }
@@ -180,7 +183,9 @@ def _print_human(payload: Mapping[str, object]) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("zarr_path", type=Path, help="Analysis Zarr to inspect read-only.")
+    parser.add_argument(
+        "zarr_path", type=Path, help="Analysis Zarr to inspect read-only."
+    )
     parser.add_argument(
         "--config",
         type=Path,
@@ -224,8 +229,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         help="Override activity/spatial summary bin width (profile default: 5 seconds).",
     )
-    parser.add_argument("--json", action="store_true", help="Print the full machine-readable plan.")
-    parser.add_argument("--json-output", type=Path, help="Optionally write the plan as JSON.")
+    parser.add_argument(
+        "--json", action="store_true", help="Print the full machine-readable plan."
+    )
+    parser.add_argument(
+        "--json-output", type=Path, help="Optionally write the plan as JSON."
+    )
     return parser
 
 

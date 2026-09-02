@@ -111,7 +111,7 @@ def _execution_report_requests(path: Path) -> list[RequestedPublication]:
     if payload.get("schema_id") != "palette.analysis_workflow_execution":
         raise ValueError(f"Unsupported analysis execution receipt: {path}")
     schema_version = payload.get("schema_version")
-    if schema_version not in {1, 2}:
+    if schema_version not in {1, 2, 3}:
         raise ValueError(f"Unsupported analysis execution receipt version: {path}")
     if payload.get("mode") != "apply" or payload.get("status") != "complete":
         raise RuntimeError(f"Analysis execution receipt is not complete: {path}")
@@ -150,7 +150,55 @@ def _execution_report_requests(path: Path) -> list[RequestedPublication]:
             raise RuntimeError(
                 f"Execution node {node_id!r} run identity differs from its command"
             )
-        if schema_version == 2:
+        if schema_version == 3:
+            admission = command.get("admission")
+            result_admission = result.get("admission")
+            if admission is None:
+                if result_admission is not None:
+                    raise ValueError(
+                        f"Execution node {node_id!r} records undeclared admission evidence"
+                    )
+            else:
+                if not isinstance(admission, Mapping) or set(admission) != {
+                    "argv",
+                    "receipt_path",
+                }:
+                    raise ValueError(
+                        f"Execution node {node_id!r} admission command is malformed"
+                    )
+                admission_argv = admission.get("argv")
+                if not isinstance(admission_argv, list) or not admission_argv:
+                    raise ValueError(
+                        f"Execution node {node_id!r} admission argv is absent"
+                    )
+                receipt_path = Path(
+                    _require_text(
+                        admission.get("receipt_path"),
+                        field="admission.receipt_path",
+                    )
+                )
+                if (
+                    not receipt_path.is_absolute()
+                    or receipt_path != receipt_path.resolve()
+                    or not isinstance(result_admission, Mapping)
+                    or result_admission.get("status") != "complete"
+                    or result_admission.get("receipt_path") != str(receipt_path)
+                ):
+                    raise RuntimeError(
+                        f"Execution node {node_id!r} admission evidence is incomplete"
+                    )
+                receipt_sha256 = result_admission.get("receipt_sha256")
+                if (
+                    type(receipt_sha256) is not str
+                    or not _SHA256.fullmatch(receipt_sha256)
+                    or not receipt_path.is_file()
+                    or hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+                    != receipt_sha256
+                ):
+                    raise RuntimeError(
+                        f"Execution node {node_id!r} admission receipt digest differs"
+                    )
+        if schema_version in {2, 3}:
             output_kind = command.get("output_kind")
             if output_kind == "parquet_export":
                 if (
