@@ -34,11 +34,13 @@ deliberately not accepted here.
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import hashlib
 import json
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 import numpy as np
 
@@ -66,6 +68,10 @@ ROW_IDENTITY_KEY_DIGEST_ATTR = "row_identity_key_sha256"
 ROW_IDENTITY_KEY_SCHEMA_ID = "palette.row_identity_key_array"
 ROW_IDENTITY_KEY_SCHEMA_VERSION = 1
 ROW_IDENTITY_KEY_CONTENT_CANONICALIZATION = "numpy_dtype_shape_c_order_bytes_v1"
+
+_ACTIVE_ROW_AUTHORITY_ARRAY_DIGEST_EVIDENCE: ContextVar[
+    tuple[ArchiveIdentity, Mapping[str, Mapping[str, Any]]] | None
+] = ContextVar("palette_row_authority_array_digest_evidence", default=None)
 ROW_IDENTITY_CONTRACT_REF_ATTR = "row_identity_contract_ref"
 ROW_IDENTITY_CONTRACT_SHA256_ATTR = "row_identity_contract_sha256"
 ROW_IDENTITY_LOCAL_CONTRACT_REF = "@row_identity_contract"
@@ -342,6 +348,11 @@ class BoundSourceRowTemporalAuthority:
         repr=False,
         compare=False,
     )
+    _array_digest_evidence: Mapping[str, Mapping[str, Any]] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def archive_identity(self) -> ArchiveIdentity:
@@ -438,6 +449,11 @@ class BoundRowIdentityContract:
     _key_array_node: Any = field(repr=False, compare=False)
     _verification_seal: object = field(repr=False, compare=False)
     _manifest_authority: BoundCoordinateRecord | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _array_digest_evidence: Mapping[str, Mapping[str, Any]] | None = field(
         default=None,
         repr=False,
         compare=False,
@@ -545,12 +561,24 @@ class BoundRowIdentityContract:
                 )
             )
         if self._manifest_authority is None:
-            current = validate_stamped_row_identity(
-                self._rowset_node,
-                self._key_array_node,
-                verify_values=True,
-                track_time_lineage=self.track_time_lineage,
-            )
+            if self._array_digest_evidence is None:
+                current = validate_stamped_row_identity(
+                    self._rowset_node,
+                    self._key_array_node,
+                    verify_values=True,
+                    track_time_lineage=self.track_time_lineage,
+                )
+            else:
+                with row_authority_array_digest_evidence_scope(
+                    self._rowset_node,
+                    self._array_digest_evidence,
+                ):
+                    current = validate_stamped_row_identity(
+                        self._rowset_node,
+                        self._key_array_node,
+                        verify_values=True,
+                        track_time_lineage=self.track_time_lineage,
+                    )
         else:
             authority = verify_bound_coordinate_record(self._manifest_authority)
             if (
@@ -782,6 +810,102 @@ def identity_array_content_sha256(values: Any) -> str:
     digest.update(b"\x00")
     digest.update(array.tobytes(order="C"))
     return digest.hexdigest()
+
+
+@contextmanager
+def row_authority_array_digest_evidence_scope(
+    archive_node: Any,
+    values: Mapping[str, Mapping[str, Any]],
+) -> Iterator[None]:
+    """Reuse one validated immutable-array receipt for row authorities.
+
+    The scope does not create authority.  Its caller must first validate a
+    closed payload receipt and its mutation-exclusion lifecycle.  Within that
+    proof epoch, row-identity and temporal-authority loaders can compare the
+    receipt's exact dtype, shape, and canonical content digest instead of
+    decoding the same immutable arrays again.
+    """
+
+    if not isinstance(values, Mapping) or any(
+        type(path) is not str
+        or not path
+        or path.startswith("/")
+        or not isinstance(record, Mapping)
+        for path, record in values.items()
+    ):
+        raise RowIdentityContractError(
+            (
+                _issue(
+                    "row_authority_digest_evidence_invalid",
+                    "values",
+                    "Receipt evidence must be a canonical array-path mapping.",
+                ),
+            )
+        )
+    token = _ACTIVE_ROW_AUTHORITY_ARRAY_DIGEST_EVIDENCE.set(
+        (archive_identity(archive_node), dict(values))
+    )
+    try:
+        yield
+    finally:
+        _ACTIVE_ROW_AUTHORITY_ARRAY_DIGEST_EVIDENCE.reset(token)
+
+
+def _receipt_bound_array_content_sha256(node: Any) -> str | None:
+    """Return exact active receipt evidence, or ``None`` outside a scope."""
+
+    binding = _ACTIVE_ROW_AUTHORITY_ARRAY_DIGEST_EVIDENCE.get()
+    if binding is None:
+        return None
+    expected_archive, evidence = binding
+    observed_archive = archive_identity(node)
+    path = _persisted_node_path(node, label="receipt_array")
+    record = evidence.get(path)
+    try:
+        dtype = np.dtype(getattr(node, "dtype"))
+        shape = tuple(int(value) for value in getattr(node, "shape"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RowIdentityContractError(
+            (_issue("row_authority_array_metadata_invalid", path, str(exc)),)
+        ) from exc
+    digest = record.get("content_sha256") if isinstance(record, Mapping) else None
+    if (
+        observed_archive != expected_archive
+        or not isinstance(record, Mapping)
+        or set(record)
+        != {"dtype", "shape", "content_sha256", "canonicalization"}
+        or record.get("dtype") != dtype.str
+        or record.get("shape") != [int(value) for value in shape]
+        or record.get("canonicalization")
+        != ROW_IDENTITY_KEY_CONTENT_CANONICALIZATION
+        or type(digest) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    ):
+        raise RowIdentityContractError(
+            (
+                _issue(
+                    "row_authority_digest_evidence_mismatch",
+                    path,
+                    "Receipt evidence is missing or differs from live metadata.",
+                ),
+            )
+        )
+    return digest
+
+
+def _capture_active_row_authority_digest_evidence(
+    *nodes: Any,
+) -> Mapping[str, Mapping[str, Any]] | None:
+    binding = _ACTIVE_ROW_AUTHORITY_ARRAY_DIGEST_EVIDENCE.get()
+    if binding is None:
+        return None
+    _expected_archive, evidence = binding
+    captured: dict[str, Mapping[str, Any]] = {}
+    for node in nodes:
+        _receipt_bound_array_content_sha256(node)
+        path = _persisted_node_path(node, label="receipt_array")
+        captured[path] = copy.deepcopy(evidence[path])
+    return captured
 
 
 def _parse_key_array(
@@ -1441,7 +1565,7 @@ def _time_array_record(
     expected_dtype: np.dtype[Any],
     expected_shape: tuple[int, ...],
     label: str,
-) -> tuple[np.ndarray, TrackSampleTimeArrayRecord]:
+) -> tuple[np.ndarray | None, TrackSampleTimeArrayRecord]:
     path = _persisted_node_path(node, label=label)
     if path != expected_path:
         raise RowIdentityContractError(
@@ -1452,6 +1576,41 @@ def _time_array_record(
                     f"Expected exact rowset child {expected_path!r}, found {path!r}.",
                 ),
             )
+        )
+    declared_shape = tuple(int(item) for item in getattr(node, "shape", ()))
+    try:
+        declared_dtype = np.dtype(getattr(node, "dtype"))
+    except (AttributeError, TypeError) as exc:
+        raise RowIdentityContractError(
+            (_issue("track_time_array_dtype_invalid", label, str(exc)),)
+        ) from exc
+    if (
+        declared_shape != expected_shape
+        or declared_dtype != expected_dtype
+    ):
+        raise RowIdentityContractError(
+            (
+                _issue(
+                    "track_time_array_metadata_mismatch",
+                    label,
+                    f"Expected dtype {expected_dtype.str!r} and shape {expected_shape!r}.",
+                ),
+            )
+        )
+    receipt_digest = _receipt_bound_array_content_sha256(node)
+    if receipt_digest is not None:
+        return None, TrackSampleTimeArrayRecord(
+            ref=f"/{path}",
+            dtype=(
+                tuple(
+                    (name, np.dtype(field[0]).str)
+                    for name, field in declared_dtype.fields.items()
+                )
+                if declared_dtype.fields is not None
+                else declared_dtype.str
+            ),
+            shape=declared_shape,
+            content_sha256=receipt_digest,
         )
     try:
         values = np.array(node[:], copy=True, order="C")
@@ -1465,19 +1624,7 @@ def _time_array_record(
                 ),
             )
         ) from exc
-    declared_shape = tuple(int(item) for item in getattr(node, "shape", ()))
-    try:
-        declared_dtype = np.dtype(getattr(node, "dtype"))
-    except (AttributeError, TypeError) as exc:
-        raise RowIdentityContractError(
-            (_issue("track_time_array_dtype_invalid", label, str(exc)),)
-        ) from exc
-    if (
-        values.shape != expected_shape
-        or declared_shape != expected_shape
-        or values.dtype != expected_dtype
-        or declared_dtype != expected_dtype
-    ):
+    if values.shape != expected_shape or values.dtype != expected_dtype:
         raise RowIdentityContractError(
             (
                 _issue(
@@ -1590,8 +1737,9 @@ def _build_source_row_temporal_authority_record(
         expected_shape=(leading,),
         label="source_acquisition_frame_index",
     )
-    if np.any(source_frames < 0) or np.any(
-        source_frames >= acquisition.record.source_total_frames
+    if source_frames is not None and (
+        np.any(source_frames < 0)
+        or np.any(source_frames >= acquisition.record.source_total_frames)
     ):
         raise RowIdentityContractError(
             (
@@ -1621,9 +1769,12 @@ def _build_source_row_temporal_authority_record(
                     ),
                 )
             )
-        if identity_array_content_sha256(source_keys) != (
-            source_identity.contract.key_array.content_sha256
-        ):
+        observed_key_digest = (
+            observation_instance_record.content_sha256
+            if source_keys is None
+            else identity_array_content_sha256(source_keys)
+        )
+        if observed_key_digest != source_identity.contract.key_array.content_sha256:
             raise RowIdentityContractError(
                 (
                     _issue(
@@ -1655,12 +1806,13 @@ def _build_source_row_temporal_authority_record(
                 ),
             )
         )
-    _require_live_array_record(
-        source_acquisition_frame_index_node,
-        source_frame_record,
-        label="source_acquisition_frame_index",
-    )
-    if observation_instance_record is not None:
+    if source_frames is not None:
+        _require_live_array_record(
+            source_acquisition_frame_index_node,
+            source_frame_record,
+            label="source_acquisition_frame_index",
+        )
+    if observation_instance_record is not None and source_keys is not None:
         _require_live_array_record(
             source_identity._key_array_node,
             observation_instance_record,
@@ -1764,6 +1916,10 @@ def load_bound_source_row_temporal_authority(
         _source_rowset_node=source_rowset_node,
         _source_frame_index_node=source_acquisition_frame_index_node,
         _manifest_authority=None,
+        _array_digest_evidence=_capture_active_row_authority_digest_evidence(
+            source_row_identity._key_array_node,
+            source_acquisition_frame_index_node,
+        ),
         _verification_seal=_BOUND_SOURCE_ROW_TEMPORAL_AUTHORITY_SEAL,
     )
 
@@ -1906,21 +2062,30 @@ def require_bound_source_row_temporal_authority(
             )
         )
     def verify() -> None:
-        if value._manifest_authority is None:
-            current = load_bound_source_row_temporal_authority(
-                value._source_rowset_node,
-                value._source_frame_index_node,
-                source_row_identity=value.source_row_identity,
-                acquisition_frame=value.acquisition_frame,
-            )
-        else:
-            current = _bind_manifest_source_row_temporal_authority(
+        def reload() -> BoundSourceRowTemporalAuthority:
+            if value._manifest_authority is None:
+                return load_bound_source_row_temporal_authority(
+                    value._source_rowset_node,
+                    value._source_frame_index_node,
+                    source_row_identity=value.source_row_identity,
+                    acquisition_frame=value.acquisition_frame,
+                )
+            return _bind_manifest_source_row_temporal_authority(
                 value._source_rowset_node,
                 value._source_frame_index_node,
                 source_row_identity=value.source_row_identity,
                 acquisition_frame=value.acquisition_frame,
                 manifest_authority=value._manifest_authority,
             )
+
+        if value._array_digest_evidence is None:
+            current = reload()
+        else:
+            with row_authority_array_digest_evidence_scope(
+                value._source_rowset_node,
+                value._array_digest_evidence,
+            ):
+                current = reload()
         if (
             current.record != value.record
             or current.record_ref != value.record_ref
@@ -2714,12 +2879,29 @@ def validate_stamped_row_identity(
             )
         )
     else:
-        try:
-            values = np.asarray(key_array_node[:])
-        except Exception as exc:
-            issues.append(_issue("row_identity_key_unreadable", "key_array", f"Unable to read key values: {exc}."))
+        receipt_digest = _receipt_bound_array_content_sha256(key_array_node)
+        if receipt_digest is not None:
+            if receipt_digest != contract.key_array.content_sha256:
+                issues.append(
+                    _issue(
+                        "key_content_digest_mismatch",
+                        "key_array",
+                        "Receipt-bound key content differs from the identity contract.",
+                    )
+                )
         else:
-            issues.extend(validate_row_identity_values(contract, values))
+            try:
+                values = np.asarray(key_array_node[:])
+            except Exception as exc:
+                issues.append(
+                    _issue(
+                        "row_identity_key_unreadable",
+                        "key_array",
+                        f"Unable to read key values: {exc}.",
+                    )
+                )
+            else:
+                issues.extend(validate_row_identity_values(contract, values))
     if issues:
         raise RowIdentityContractError(issues)
     return contract
@@ -2752,6 +2934,9 @@ def load_bound_row_identity_contract(
         _rowset_node=rowset_node,
         _key_array_node=key_array_node,
         _manifest_authority=None,
+        _array_digest_evidence=_capture_active_row_authority_digest_evidence(
+            key_array_node
+        ),
         _verification_seal=_BOUND_ROW_IDENTITY_SEAL,
     )
     bound.assert_verified()
@@ -2891,6 +3076,7 @@ __all__ = [
     "load_bound_source_row_temporal_authority",
     "load_bound_track_sample_time_lineage",
     "parse_row_identity_contract",
+    "row_authority_array_digest_evidence_scope",
     "row_identity_contract_attrs",
     "row_identity_key_attrs",
     "require_bound_row_identity_contract",

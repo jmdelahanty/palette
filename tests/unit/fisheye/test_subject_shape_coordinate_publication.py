@@ -806,8 +806,9 @@ def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authori
     )
 
     # Immutable output payloads are guarded by the explicit deep-audit path;
-    # normal loads use the sealed receipt.  Array descriptors, exact refined
-    # authority, and directly copied identity remain ordinary live load gates.
+    # normal loads use the sealed receipt. Array descriptors and exact refined
+    # authority remain ordinary live metadata gates; out-of-band payload
+    # mutation, including identity arrays, is an explicit custody audit.
     original = float(body["centroid_xy"][0, 0])
     body["centroid_xy"][0, 0] = original + 1.0
     with pytest.raises(SubjectShapeCoordinatePublicationError):
@@ -829,10 +830,15 @@ def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authori
 
     original_key = np.asarray(run["instance_key"][:]).copy()
     run["instance_key"][:] = original_key[::-1]
+    load_persisted_subject_shape_coordinate_publication(
+        root,
+        "analysis/subject_shape_runs/shape_001",
+    )
     with pytest.raises(SubjectShapeCoordinatePublicationError):
-        load_persisted_subject_shape_coordinate_publication(
-            root,
-            "analysis/subject_shape_runs/shape_001",
+        deep_audit_subject_shape_payload_receipt(
+            run,
+            payload_run_path=payload_run_path,
+            hash_workers=1,
         )
     run["instance_key"][:] = original_key
 

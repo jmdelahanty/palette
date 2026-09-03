@@ -3,28 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import hashlib
-import json
 from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
 
-from fisheye.shared.subject_mask_worker_receipt import (
-    build_recording_assignment_keypoint_collection,
-    validate_recording_subject_mask_assembly_identity,
-    validate_recording_subject_mask_refined_source_join,
-)
 from fisheye.shared.zarr.crop_manifest import (
     CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     CROP_RUN_MANIFEST_ATTRIBUTE,
     crop_pixel_authority_from_manifest,
     validate_crop_run_manifest,
 )
-from fisheye.shared.zarr.manifest_digest import (
-    canonical_json_bytes,
-    canonical_json_sha256,
-)
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.subject_mask_bundle_publication import (
     SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR,
     SUBJECT_MASK_BUNDLE_FAMILY,
@@ -36,15 +26,6 @@ from fisheye.shared.zarr.subject_mask_core_publication import (
     SUBJECT_MASK_CORE_COMPOSABLE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     SUBJECT_MASK_CORE_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
-)
-from fisheye.shared.zarr.subject_mask_schema import (
-    RAW_SUBJECT_MASK_UINT8_SCHEMA_V1,
-    REFINED_SUBJECT_MASK_CORE_SCHEMA_V1,
-    SubjectMaskComponentRegistry,
-    SubjectMaskDimensions,
-)
-from fisheye.shared.zarr.subject_mask_validation_receipt import (
-    validate_subject_mask_source_validation_receipt,
 )
 from fisheye.shared.zarr_io import open_zarr_root
 
@@ -75,8 +56,8 @@ class BoundRecordingSubjectMaskCoordinateAuthority:
     crop_manifest: Mapping[str, Any] = field(repr=False)
     raw_manifest: Mapping[str, Any] = field(repr=False)
     refined_manifest: Mapping[str, Any] = field(repr=False)
-    raw_producer_evidence: Mapping[str, Any] = field(repr=False)
-    refined_producer_evidence: Mapping[str, Any] = field(repr=False)
+    raw_recording_assembly: Mapping[str, Any] = field(repr=False)
+    refined_recording_assembly: Mapping[str, Any] = field(repr=False)
     assignment_keypoint_collection: Mapping[str, Any] = field(repr=False)
     coordinate_binding: Mapping[str, Any] = field(repr=False)
     admission_receipt: Mapping[str, Any] = field(repr=False)
@@ -171,112 +152,43 @@ def _require_bundle_id(value: object) -> str:
     return result
 
 
-def _strict_sidecar(path: Path) -> dict[str, Any]:
-    def reject(value: str) -> None:
-        raise ValueError(f"Non-finite JSON token is forbidden: {value}")
-
-    with path.open("r", encoding="utf-8") as handle:
-        document = json.load(handle, parse_constant=reject)
-    if not isinstance(document, dict):
-        raise ValueError(f"Expected one JSON object at {path}.")
-    canonical_json_bytes(document)
-    return document
-
-
-def _dimensions_and_components(
+def _receipt_bound_recording_assembly(
     manifest: Mapping[str, Any],
-) -> tuple[SubjectMaskDimensions, SubjectMaskComponentRegistry]:
-    payload = manifest["payload"]
-    logical = payload["logical_schema"]
-    dimensions = logical["dimensions"]
-    components = logical["components"]
-    return (
-        SubjectMaskDimensions(
-            n_frames=dimensions["n_frames"],
-            n_rois=dimensions["n_rois"],
-            n_channels=dimensions["n_channels"],
-            roi_height=dimensions["roi_height"],
-            roi_width=dimensions["roi_width"],
-        ),
-        SubjectMaskComponentRegistry(tuple(components["labels"])),
-    )
-
-
-def _load_core_producer_evidence(
-    archive: Path,
-    root: Any,
     *,
     run_path: str,
-    manifest: Mapping[str, Any],
-    kind: str,
 ) -> dict[str, Any]:
-    payload = manifest["payload"]
-    source = payload["source"]
-    binding = source["validation_receipt"]
-    if not isinstance(binding, Mapping):
+    """Return the compact assembly pointer already sealed by the core manifest.
+
+    Normal bundle admission has already validated the complete core manifest,
+    its outer bundle member receipt, and the bundle cross-binding. Reopening
+    and canonicalizing the large worker-evidence sidecar here would merely
+    replay publication-time work. The explicit bundle-candidate validator
+    remains the deep sidecar replay surface.
+    """
+
+    try:
+        payload = manifest["payload"]
+        source = payload["source"]
+        binding = source["validation_receipt"]
+        assembly = payload["coordinate_dependencies"]["document"][
+            "recording_assembly"
+        ]
+    except (KeyError, TypeError) as exc:
         raise SubjectMaskBundleCoordinateAuthorityError(
-            f"Coordinate core {run_path!r} lacks source-validation evidence."
-        )
-    receipt_path = archive / str(binding.get("relative_path") or "")
-    receipt = _strict_sidecar(receipt_path)
-    receipt_bytes = canonical_json_bytes(receipt)
-    if receipt.get("payload_digest") != binding.get("payload_digest") or hashlib.sha256(
-        receipt_bytes
-    ).hexdigest() != binding.get("document_sha256"):
+            f"Coordinate core {run_path!r} lacks receipt-bound assembly evidence."
+        ) from exc
+    if (
+        not isinstance(source, Mapping)
+        or not isinstance(binding, Mapping)
+        or not isinstance(assembly, Mapping)
+        or assembly.get("source_run_path") != source.get("run_path")
+        or assembly.get("source_validation_receipt_payload_digest")
+        != binding.get("payload_digest")
+    ):
         raise SubjectMaskBundleCoordinateAuthorityError(
-            f"Coordinate core {run_path!r} source receipt changed."
+            f"Coordinate core {run_path!r} assembly receipt binding changed."
         )
-    dimensions, components = _dimensions_and_components(manifest)
-    schema = (
-        RAW_SUBJECT_MASK_UINT8_SCHEMA_V1
-        if kind == "raw_probability_uint8"
-        else REFINED_SUBJECT_MASK_CORE_SCHEMA_V1
-    )
-    run = root[run_path]
-    arrays = {
-        binding.path: run[binding.path]
-        for binding in schema.bindings
-        if binding.required or binding.path in run
-    }
-    validated = validate_subject_mask_source_validation_receipt(
-        receipt,
-        kind=kind,
-        source_run_path=source["run_path"],
-        source_manifest=source["manifest"],
-        schema=schema,
-        arrays=arrays,
-        dimensions=dimensions,
-        components=components,
-        threshold=(
-            float(payload["logical_schema"]["threshold"])
-            if kind == "raw_probability_uint8"
-            else None
-        ),
-    )
-    evidence = validated["payload"].get("producer_evidence")
-    if not isinstance(evidence, dict):
-        raise SubjectMaskBundleCoordinateAuthorityError(
-            f"Coordinate core {run_path!r} lacks retained producer evidence."
-        )
-    stage = (
-        "raw_subject_mask"
-        if kind == "raw_probability_uint8"
-        else "refined_subject_mask"
-    )
-    dependency = payload["coordinate_dependencies"]["document"]["recording_assembly"]
-    evidence = validate_recording_subject_mask_assembly_identity(
-        evidence,
-        kind=kind,
-        stage_kind=stage,
-        source_run_path=source["run_path"],
-        n_rois=dimensions.n_rois,
-        n_frames=dimensions.n_frames,
-    )
-    if canonical_json_sha256(evidence) != dependency["producer_evidence_digest"]:
-        raise SubjectMaskBundleCoordinateAuthorityError(
-            f"Coordinate core {run_path!r} producer evidence binding changed."
-        )
-    return evidence
+    return dict(assembly)
 
 
 def _selected_bundle(
@@ -431,43 +343,23 @@ def load_recording_subject_mask_coordinate_authority(
             "identities disagree."
         )
 
-    raw_evidence = _load_core_producer_evidence(
-        archive,
-        root,
+    raw_assembly = _receipt_bound_recording_assembly(
+        raw_manifest,
         run_path=raw_path,
-        manifest=raw_manifest,
-        kind="raw_probability_uint8",
     )
-    refined_evidence = _load_core_producer_evidence(
-        archive,
-        root,
+    refined_assembly = _receipt_bound_recording_assembly(
+        refined_manifest,
         run_path=refined_path,
-        manifest=refined_manifest,
-        kind="refined_dense_core",
     )
-    try:
-        validate_recording_subject_mask_refined_source_join(
-            raw_producer_evidence=raw_evidence,
-            refined_producer_evidence=refined_evidence,
-            raw_source_run_path=raw_manifest["payload"]["source"]["run_path"],
-            refined_source_run_path=refined_manifest["payload"]["source"]["run_path"],
-            n_frames=dimensions["n_frames"],
-            n_rois=dimensions["n_rois"],
-        )
-    except ValueError as exc:
-        raise SubjectMaskBundleCoordinateAuthorityError(str(exc)) from exc
-    assignment_keypoints = build_recording_assignment_keypoint_collection(
-        refined_evidence,
-        source_run_path=refined_manifest["payload"]["source"]["run_path"],
-        n_rois=dimensions["n_rois"],
-        n_frames=dimensions["n_frames"],
-    )
-    persisted_assignment = refined_manifest["payload"]["coordinate_dependencies"][
+    assignment_keypoints = refined_manifest["payload"]["coordinate_dependencies"][
         "document"
     ]["assignment_keypoints"]
-    if assignment_keypoints != persisted_assignment:
+    if (
+        not isinstance(assignment_keypoints, Mapping)
+        or assignment_keypoints.get("n_rois") != dimensions["n_rois"]
+    ):
         raise SubjectMaskBundleCoordinateAuthorityError(
-            "Refined assignment-keypoint collection differs from retained workers."
+            "Refined assignment-keypoint collection differs from the row authority."
         )
     authority_document = {
         "recording_identity": recording_identity,
@@ -475,8 +367,10 @@ def load_recording_subject_mask_coordinate_authority(
         "crop_manifest_payload_digest": crop_manifest["payload_digest"],
         "raw_manifest_payload_digest": raw_manifest["payload_digest"],
         "refined_manifest_payload_digest": refined_manifest["payload_digest"],
-        "raw_producer_evidence_digest": canonical_json_sha256(raw_evidence),
-        "refined_producer_evidence_digest": canonical_json_sha256(refined_evidence),
+        "raw_producer_evidence_digest": raw_assembly["producer_evidence_digest"],
+        "refined_producer_evidence_digest": refined_assembly[
+            "producer_evidence_digest"
+        ],
         "assignment_keypoint_collection_digest": canonical_json_sha256(
             assignment_keypoints
         ),
@@ -500,9 +394,9 @@ def load_recording_subject_mask_coordinate_authority(
         crop_manifest=dict(crop_manifest),
         raw_manifest=dict(raw_manifest),
         refined_manifest=dict(refined_manifest),
-        raw_producer_evidence=raw_evidence,
-        refined_producer_evidence=refined_evidence,
-        assignment_keypoint_collection=assignment_keypoints,
+        raw_recording_assembly=raw_assembly,
+        refined_recording_assembly=refined_assembly,
+        assignment_keypoint_collection=dict(assignment_keypoints),
         coordinate_binding=dict(coordinate),
         admission_receipt=dict(admission_receipt),
         authority_digest=canonical_json_sha256(authority_document),
