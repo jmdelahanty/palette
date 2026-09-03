@@ -388,17 +388,34 @@ the independent physical-copy and mutation-exclusion proof.
 
 The production design is:
 
-1. receipt-bearing maintained tail producers remain the preferred source;
-2. the core cohort binder gains a strict receipt-required mode and uses it only
-   for profiles that declare the complete receipt contract;
-3. absent, partial, stale, wrong-run, or wrong-manifest receipts fail closed in
-   strict mode;
-4. historical receipt-free publications retain exhaustive validation and may
-   be optimized with one proof-verification operation scope, which deduplicates
-   repeated hashes but does not pretend a receipt exists; and
-5. an existing immutable publication is never retrofitted in place. If this
-   canary must avoid the exhaustive path, it needs a newly verified successor
-   or a separately specified immutable sidecar proof.
+1. every maintained tail-kinematics producer issues the complete sealed payload
+   receipt through the atomic materializer;
+2. the maintained tail loader, activation path, and core cohort binder require
+   that receipt profile unconditionally;
+3. absent, partial, stale, wrong-run, or wrong-manifest receipts fail before
+   decoded tail-array validation;
+4. there is no receipt-free tail-kinematics loader; the independent posture
+   artifact retains its own kind-derived validation contract, and a CI access
+   ratchet rejects any caller-selectable receipt bypass; and
+5. an existing immutable receipt-free publication is never retrofitted in
+   place. The four Sleepyfish recordings need newly published receipt-bearing
+   successors from the maintained materializer before core-cohort admission.
+
+Receipts eliminate repeated proof-of-identity decoding, not scientific data
+access itself. Tail computation, Parquet projection, an explicitly requested
+deep audit, and small semantic-axis checks still read the arrays they actually
+use. The prohibited pattern is replaying a complete decoded hash merely to
+re-prove an immutable publication at each planning or loading boundary.
+
+Implementation checkpoint on 2026-09-03: the public kinematics publisher now
+requires the atomic materializer's scan, installed-path, and verified-copy
+evidence; activation and the maintained loader require the sealed receipt pair;
+the direct archive CLI is fail-closed; and
+`scripts/check_tail_payload_receipt_access.py` prevents maintained code from
+reintroducing receipt-free loading, making receipt policy caller-selectable, or
+bypassing the atomic materializer. This checkpoint does not create the four
+Sleepyfish successors; that remains the next data-recovery action after
+merge-safe CI.
 
 ## Resolver and adapter boundary
 
@@ -525,15 +542,14 @@ reselecting core motion/body/bout authority.
 - [ ] Seal the cross-grain join record and bind every capability to it.
 - [ ] Reuse one strict source binding within a recording to avoid repeated
       whole-source validation.
-- [ ] Add receipt-required tail binding for profiles that declare the sealed
-      payload-receipt contract; fail before decoded reads when evidence is
-      absent or stale.
-- [ ] Add one proof-verification operation scope to deduplicate compatibility
-      hashing for historical receipt-free tail runs without weakening the
-      exhaustive fallback.
-- [ ] Decide whether the four receipt-free Sleepyfish tail publications should
-      use the exhaustive path or receive newly verified immutable successors;
-      never mutate them in place.
+- [x] Make maintained tail publication, activation, loading, and core binding
+      receipt-only; fail before decoded reads when evidence is absent or stale.
+- [x] Retire direct archive publication and reject receipt-free loaders,
+      caller-selectable receipt policy, and low-level writer access with an
+      independent CI ratchet.
+- [ ] Publish new receipt-bearing successors for the four receipt-free
+      Sleepyfish tail publications through the maintained atomic materializer;
+      never mutate the originals in place.
 - [ ] Keep the five scientific grains in separate normalized tables.
 - [ ] Route planning, sharding, publication, validation, and reading through
       the existing generic cohort engine.

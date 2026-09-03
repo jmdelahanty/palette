@@ -190,7 +190,7 @@ def test_tail_schema_accepts_complete_nested_revision_identity() -> None:
     )
 
 
-def test_tail_reader_freshly_rechecks_sealed_payload_and_attrs(monkeypatch) -> None:
+def test_receipt_free_tail_fails_before_decode(monkeypatch) -> None:
     root = zarr.group()
     run = root.require_group("analysis/tail_kinematics_runs/tail")
     run.attrs.update(
@@ -200,81 +200,41 @@ def test_tail_reader_freshly_rechecks_sealed_payload_and_attrs(monkeypatch) -> N
             "palette_run_completion_status": "complete",
             "stage_selector_eligible": True,
             "source_subject_shape_path": "analysis/subject_shape_runs/shape",
-            "scientific_setting": "v1",
         }
     )
     run.create_array("valid", data=np.asarray([True, False], dtype=bool))
-
-    sentinel = SimpleNamespace()
-    monkeypatch.setattr(mod, "_source_publication", lambda *_args: sentinel)
-    monkeypatch.setattr(mod, "_identity", lambda *_args, **_kwargs: sentinel)
-    monkeypatch.setattr(
-        mod,
-        "_stamp_or_load_source_authority",
-        lambda *_args, **_kwargs: sentinel,
-    )
-    monkeypatch.setattr(
-        mod,
-        "_stamp_or_load_collection_axis",
-        lambda *_args, **_kwargs: sentinel,
-    )
-    monkeypatch.setattr(
-        mod,
-        "_stamp_or_load_measurement_collection_axis",
-        lambda *_args, **_kwargs: sentinel,
-    )
-    monkeypatch.setattr(
-        mod,
-        "_stamp_or_load_derivation",
-        lambda *_args, **_kwargs: sentinel,
-    )
-    monkeypatch.setattr(mod, "_descriptor_bindings", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(
-        mod,
-        "_source_measurement_inputs",
-        lambda *_args, **_kwargs: ({}, {}),
-    )
-    monkeypatch.setattr(
-        mod,
-        "_stamp_or_load_measurement_authority",
-        lambda *_args, **_kwargs: sentinel,
-    )
-    monkeypatch.setattr(mod, "_measurement_bindings", lambda *_args, **_kwargs: {})
-
-    def live_manifest(*_args, **_kwargs):
-        return {
-            "schema_id": "fixture.tail_manifest",
-            "valid_sha256": array_payload_sha256(run["valid"]),
-            "scientific_setting": run.attrs["scientific_setting"],
-        }
-
-    monkeypatch.setattr(mod, "_manifest_record", live_manifest)
     manifest = stamp_and_bind_persisted_coordinate_record(
         run,
-        live_manifest(),
+        {
+            "schema_id": "fixture.tail_manifest",
+            "schema_version": 1,
+        },
         attr_name=mod.TAIL_PUBLICATION_MANIFEST_ATTR,
     )
     run.attrs[mod.TAIL_PUBLICATION_MANIFEST_ALIAS_ATTR] = manifest.record_sha256
 
-    mod.load_tail_kinematics_coordinate_publication(
-        root,
-        "analysis/tail_kinematics_runs/tail",
-    )
+    def forbidden_after_receipt_gate(*_args, **_kwargs):
+        raise AssertionError("receipt-free maintained load crossed the receipt gate")
 
-    run["valid"][0] = False
-    with pytest.raises(mod.TailCoordinatePublicationError, match="manifest differs"):
-        mod.load_tail_kinematics_coordinate_publication(
-            root,
-            "analysis/tail_kinematics_runs/tail",
+    with monkeypatch.context() as receipt_gate:
+        receipt_gate.setattr(
+            coordinate_frame_record_mod,
+            "_read_array_snapshot",
+            forbidden_after_receipt_gate,
         )
-
-    run["valid"][:] = np.asarray([True, False], dtype=bool)
-    run.attrs["scientific_setting"] = "v2"
-    with pytest.raises(mod.TailCoordinatePublicationError, match="manifest differs"):
-        mod.load_tail_kinematics_coordinate_publication(
-            root,
-            "analysis/tail_kinematics_runs/tail",
+        receipt_gate.setattr(
+            mod,
+            "_source_publication",
+            forbidden_after_receipt_gate,
         )
+        with pytest.raises(
+            mod.TailCoordinatePublicationError,
+            match="requires one complete sealed payload receipt pair",
+        ):
+            mod.load_tail_kinematics_coordinate_publication(
+                root,
+                "analysis/tail_kinematics_runs/tail",
+            )
 
 
 def _fixture_record(source: zarr.Group, name: str):
@@ -529,6 +489,75 @@ def _kinematics_run(root: zarr.Group, source: SimpleNamespace) -> zarr.Group:
     return run
 
 
+def _publish_receipt_backed_kinematics(
+    root: zarr.Group,
+    tail: zarr.Group,
+    *,
+    run_path,
+):
+    scan = mod.build_tail_kinematics_payload_scan_receipt(tail, workers=2)
+    copied = tree_inventory(run_path, hash_content=True).to_json()
+    physical_copy = {
+        "backend": "python",
+        "verification": "sha256_all_physical_files",
+        **copied,
+    }
+    return mod.publish_tail_kinematics_coordinate_surfaces(
+        root,
+        tail,
+        payload_scan_receipt=scan,
+        payload_run_path=run_path,
+        verified_physical_copy=physical_copy,
+    )
+
+
+def test_tail_kinematics_publication_requires_complete_receipt_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = zarr.group()
+    source = _canonical_source_publication(root)
+    monkeypatch.setattr(mod, "_source_publication", lambda *_args: source)
+    tail = _kinematics_run(root, source)
+
+    with pytest.raises(
+        mod.TailCoordinatePublicationError,
+        match="requires the complete sealed payload receipt evidence",
+    ):
+        mod.publish_tail_kinematics_coordinate_surfaces(root, tail)
+
+    assert "coordinate_contract" not in tail.attrs
+    assert mod.TAIL_PUBLICATION_MANIFEST_ATTR not in tail.attrs
+
+
+def test_receipt_free_tail_kinematics_cannot_be_activated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = zarr.group()
+    source = _canonical_source_publication(root)
+    monkeypatch.setattr(mod, "_source_publication", lambda *_args: source)
+    tail = _kinematics_run(root, source)
+    mod._publish_tail_coordinate_surfaces(root, tail, kind="tail_kinematics")
+    parent = root["analysis/tail_kinematics_runs"]
+
+    with pytest.raises(
+        mod.TailCoordinatePublicationError,
+        match="receipt-free publications cannot become eligible",
+    ):
+        mod.activate_tail_coordinate_publication(
+            root,
+            parent,
+            tail,
+            run_name="tail_001",
+            expected_publication_owner_uuid=tail.attrs[
+                mod.TAIL_PUBLICATION_OWNER_ATTR
+            ],
+        )
+
+    assert tail.attrs["stage_selector_eligible"] is False
+    assert parent.attrs.get("latest") is None
+    assert parent.attrs.get("latest_complete") is None
+
+
 def test_receipt_backed_tail_publication_reuses_one_decoded_scan(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -593,6 +622,51 @@ def test_receipt_backed_tail_publication_reuses_one_decoded_scan(
         )
     assert loaded.manifest.record_sha256 == proof.manifest.record_sha256
     assert proof.array_content_sha256 == scan["array_content_sha256"]
+
+
+def test_stale_tail_receipt_fails_before_source_or_array_decode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    archive = tmp_path / "archive.zarr"
+    root = zarr.open_group(str(archive), mode="w", use_consolidated=False)
+    source = _canonical_source_publication(root)
+    monkeypatch.setattr(mod, "_source_publication", lambda *_args: source)
+    tail = _kinematics_run(root, source)
+    run_path = archive / "analysis" / "tail_kinematics_runs" / "tail_001"
+    _publish_receipt_backed_kinematics(root, tail, run_path=run_path)
+    mod.activate_tail_coordinate_publication(
+        root,
+        root["analysis/tail_kinematics_runs"],
+        tail,
+        run_name="tail_001",
+        expected_publication_owner_uuid=tail.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR],
+    )
+    fresh_root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
+    fresh_tail = fresh_root["analysis/tail_kinematics_runs/tail_001"]
+    validation = dict(
+        fresh_tail.attrs[mod.TAIL_PAYLOAD_VALIDATION_RECEIPT_ATTR]
+    )
+    validation["record_sha256"] = "0" * 64
+    fresh_tail.attrs[mod.TAIL_PAYLOAD_VALIDATION_RECEIPT_ATTR] = validation
+
+    def forbidden_after_receipt_gate(*_args, **_kwargs):
+        raise AssertionError("stale receipt crossed into scientific array validation")
+
+    monkeypatch.setattr(
+        coordinate_frame_record_mod,
+        "_read_array_snapshot",
+        forbidden_after_receipt_gate,
+    )
+    monkeypatch.setattr(mod, "_source_publication", forbidden_after_receipt_gate)
+    with pytest.raises(
+        mod.TailCoordinatePublicationError,
+        match="payload receipt validation failed",
+    ):
+        mod.load_tail_kinematics_coordinate_publication(
+            fresh_root,
+            "analysis/tail_kinematics_runs/tail_001",
+        )
 
 
 def test_receipt_backed_tail_deep_audit_detects_payload_mutation(
@@ -681,13 +755,16 @@ def _posture_run(
 
 def test_real_tail_publication_binds_descriptors_identity_and_fresh_seals(
     monkeypatch,
+    tmp_path,
 ) -> None:
-    root = zarr.group()
+    archive = tmp_path / "archive.zarr"
+    root = zarr.open_group(str(archive), mode="w", use_consolidated=False)
     source = _canonical_source_publication(root)
     monkeypatch.setattr(mod, "_source_publication", lambda *_args: source)
 
     tail = _kinematics_run(root, source)
-    mod.publish_tail_kinematics_coordinate_surfaces(root, tail)
+    run_path = archive / "analysis" / "tail_kinematics_runs" / "tail_001"
+    _publish_receipt_backed_kinematics(root, tail, run_path=run_path)
     with pytest.raises(
         mod.TailCoordinatePublicationError,
         match="selector-eligible",
@@ -847,21 +924,35 @@ def test_real_tail_publication_binds_descriptors_identity_and_fresh_seals(
     changed = np.asarray(tail["tail_angle_sample_xy"][:], dtype=np.float32)
     changed[0, 0, 0] += 1.0
     tail["tail_angle_sample_xy"][:] = changed
-    with pytest.raises(mod.TailCoordinatePublicationError, match="invalid|differs"):
-        mod.load_tail_kinematics_coordinate_publication(
+    # Routine loads trust the sealed receipt under the immutable-publication
+    # contract and intentionally do not replay decoded payload hashing.
+    mod.load_tail_kinematics_coordinate_publication(
+        root,
+        "analysis/tail_kinematics_runs/tail_001",
+    )
+    with pytest.raises(
+        mod.TailCoordinatePublicationError,
+        match="deep physical payload audit failed|deep decoded payload audit differs",
+    ):
+        mod.deep_audit_tail_payload_receipt(
             root,
             "analysis/tail_kinematics_runs/tail_001",
+            payload_run_path=run_path,
+            hash_workers=2,
         )
 
 
 def test_tail_activation_preserves_foreign_lease_and_restores_own_selector(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
-    root = zarr.group()
+    archive = tmp_path / "archive.zarr"
+    root = zarr.open_group(str(archive), mode="w", use_consolidated=False)
     source = _canonical_source_publication(root)
     monkeypatch.setattr(mod, "_source_publication", lambda *_args: source)
     tail = _kinematics_run(root, source)
-    mod.publish_tail_kinematics_coordinate_surfaces(root, tail)
+    run_path = archive / "analysis" / "tail_kinematics_runs" / "tail_001"
+    _publish_receipt_backed_kinematics(root, tail, run_path=run_path)
     parent = root["analysis/tail_kinematics_runs"]
     parent.attrs["latest_complete"] = "prior"
     parent.attrs["latest"] = "prior"
@@ -898,18 +989,21 @@ def test_tail_activation_preserves_foreign_lease_and_restores_own_selector(
 
 def test_tail_publication_rejects_contradictory_angle_metadata(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
-    root = zarr.group()
+    archive = tmp_path / "archive.zarr"
+    root = zarr.open_group(str(archive), mode="w", use_consolidated=False)
     source = _canonical_source_publication(root)
     monkeypatch.setattr(mod, "_source_publication", lambda *_args: source)
     tail = _kinematics_run(root, source)
     tail.attrs["tail_angle_positive_direction"] = "clockwise_y_down"
+    run_path = archive / "analysis" / "tail_kinematics_runs" / "tail_001"
 
     with pytest.raises(
         mod.TailCoordinatePublicationError,
         match="contradict.*controlled operation",
     ):
-        mod.publish_tail_kinematics_coordinate_surfaces(root, tail)
+        _publish_receipt_backed_kinematics(root, tail, run_path=run_path)
 
 
 def test_posture_family_selectors_advance_independently(
