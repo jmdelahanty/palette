@@ -10,6 +10,10 @@ import zarr
 
 from fisheye.analysis import tail_kinematics_runs as mod
 from fisheye.analysis import subject_shape_io
+from fisheye.analysis.tail_kinematics_schema import (
+    TAIL_KINEMATICS_ARRAY_SCHEMA_ID,
+    validate_tail_kinematics_array_schema,
+)
 from fisheye.shared.coordinate_frame_record import array_payload_sha256
 from fisheye.shared.detect_reason_codec import decode_reason_bytes
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
@@ -324,7 +328,7 @@ def _build_shape_root(*, row_count: int = 2) -> zarr.Group:
 
     shape.create_array(
         "source_acquisition_frame_index",
-        data=np.arange(10, 10 + int(row_count), dtype=np.int32),
+        data=np.arange(10, 10 + int(row_count), dtype=np.int64),
         overwrite=True,
     )
     shape.create_array(
@@ -570,6 +574,28 @@ def test_write_tail_kinematics_run_group_writes_schema_and_row_lineage(
         == "vectorized_shared_grid_v1"
     )
     assert run.attrs["completed_block_count"] == 1
+    assert run.attrs["tail_kinematics_array_schema"]["schema_id"] == (
+        TAIL_KINEMATICS_ARRAY_SCHEMA_ID
+    )
+    assert run.attrs["tail_kinematics_array_schema_sha256"] == (
+        run.attrs["tail_kinematics_array_schema"]["payload_digest"]
+    )
+    assert (
+        validate_tail_kinematics_array_schema(
+            run,
+            byte_planner_adopted=False,
+        )
+        == ()
+    )
+    from fisheye.analytics_exports.tail_trace_samples import (
+        _tail_array_schema_adoption,
+    )
+
+    adopted, export_binding = _tail_array_schema_adoption(run)
+    assert adopted is False
+    assert export_binding["payload_sha256"] == (
+        run.attrs["tail_kinematics_array_schema"]["payload_digest"]
+    )
     assert tuple(run["tail_angle_rad"].chunks) == (2, 10)
     assert tuple(run["tail_angle_rad"].shards) == (2, 10)
     assert tuple(run["source_acquisition_frame_index"].shards) == (2,)

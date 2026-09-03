@@ -40,6 +40,9 @@ from ...analysis.tail_kinematics_runs import (
     _resolve_tail_kinematics_sources,
     write_tail_kinematics_run_group,
 )
+from ...analysis.tail_kinematics_schema import (
+    validate_tail_kinematics_array_schema,
+)
 from ...analysis_workflows.tail_kinematics_candidate_execution import (
     build_tail_kinematics_logical_hashes_from_array_digests,
 )
@@ -668,7 +671,14 @@ def _validate_tail_run(
         attrs.get("tail_coordinate_publication_manifest_sha256"), str
     ):
         errors.append("selector-eligible run lacks tail coordinate publication seal")
-    if attrs.get("byte_planner_adopted") is True:
+    byte_planner_adopted = attrs.get("byte_planner_adopted") is True
+    errors.extend(
+        validate_tail_kinematics_array_schema(
+            group,
+            byte_planner_adopted=byte_planner_adopted,
+        )
+    )
+    if byte_planner_adopted:
         errors.extend(tail_mod.validate_tail_kinematics_storage_receipt(group))
     return {
         "valid": not errors,

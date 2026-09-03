@@ -50,7 +50,9 @@ from ..shared.zarr_io import open_zarr_root
 from ..shared.zarr.storage_profiles import StorageProfile, get_storage_profile
 from .tail_kinematics_schema import (
     TailKinematicsDimensions,
+    infer_tail_kinematics_dimensions,
     stamp_tail_kinematics_array_schema,
+    validate_tail_kinematics_array_schema,
 )
 from .tail_kinematics_storage import (
     build_tail_kinematics_storage_receipt,
@@ -2969,6 +2971,16 @@ def write_tail_kinematics_run_group(
             shard_rows=int(effective_output_shard_rows),
             precreated=storage_receipt is not None,
         )
+        if storage_receipt is None:
+            # The logical array schema is scientific publication evidence, not
+            # a byte-planner-only optimization.  Stamp the ordinary maintained
+            # layout as well so every selector-eligible tail publication can be
+            # admitted through the same strict reader contract.
+            stamp_tail_kinematics_array_schema(
+                run_group,
+                infer_tail_kinematics_dimensions(run_group),
+                byte_planner_adopted=False,
+            )
         if backend == "serial":
             for row_slice in compute_block_slices:
                 read_started = time.perf_counter()
@@ -3037,6 +3049,16 @@ def write_tail_kinematics_run_group(
                     record_block_result(future.result())
 
         _revalidate_tail_kinematics_sources(sources)
+
+        array_schema_errors = validate_tail_kinematics_array_schema(
+            run_group,
+            byte_planner_adopted=storage_receipt is not None,
+        )
+        if array_schema_errors:
+            raise RuntimeError(
+                "Tail-kinematics exact array-schema validation failed: "
+                + "; ".join(array_schema_errors)
+            )
 
         staged_input_attestation = (
             _complete_staged_input_worker_attestation(

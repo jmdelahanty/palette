@@ -11,6 +11,9 @@ import zarr
 
 from fisheye.analysis import tail_kinematics_runs as tail_mod
 from fisheye.analysis import subject_shape_io
+from fisheye.analysis.tail_kinematics_schema import (
+    TAIL_KINEMATICS_ARRAY_SCHEMA_ID,
+)
 from fisheye.analysis_workflows.materializers import tail_kinematics as mod
 from fisheye.shared import atomic_run_publisher as atomic_mod
 from fisheye.analysis_workflows.tail_kinematics_candidate_execution import (
@@ -270,7 +273,7 @@ def _build_source_zarr(path: Path, *, row_count: int = 9) -> None:
 
     shape.create_array(
         "source_acquisition_frame_index",
-        data=np.arange(100, 100 + row_count, dtype=np.int32),
+        data=np.arange(100, 100 + row_count, dtype=np.int64),
         chunks=(2,),
         overwrite=True,
     )
@@ -460,6 +463,12 @@ def test_materialize_tail_kinematics_stages_computes_and_atomically_publishes(
         run.attrs["cluster_output_staging"]["pre_pointer_validation"]["valid"] is True
     )
     assert run.attrs["cluster_output_staging"]["final_validation"]["valid"] is True
+    assert run.attrs["tail_kinematics_array_schema"]["schema_id"] == (
+        TAIL_KINEMATICS_ARRAY_SCHEMA_ID
+    )
+    assert run.attrs["tail_kinematics_array_schema_sha256"] == (
+        run.attrs["tail_kinematics_array_schema"]["payload_digest"]
+    )
     assert run.attrs["cluster_output_staging"]["rollback_policy"] == (
         "retain_owner_bound_failed_public_tombstone_and_"
         "stage_specific_receipt_rollback_only"

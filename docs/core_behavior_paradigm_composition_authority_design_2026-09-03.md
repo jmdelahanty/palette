@@ -419,6 +419,24 @@ successors were subsequently published from CI-tested commit
 `tail_kinematics_sleepyfish_2026_08_06_core_behavior_receipt_v011_289e9ddc_*`
 runs; direct and consolidated selector metadata agree for all four.
 
+A later real-source five-grain resolver canary exposed one additional
+producer/consumer mismatch in those v011 successors.  Their sealed payload
+receipt pair is valid, but the ordinary maintained tail writer had stamped the
+exact `tail_kinematics_array_schema` declaration only for the explicit
+byte-planned candidate profile.  The strict tail export therefore rejected
+v011 before reading scientific arrays with `Tail source lacks its exact
+array-schema manifest.`  A completed workflow report and selector eligibility
+were correctly insufficient to override that missing evidence.
+
+The ordinary and byte-planned writers now share the same logical schema
+obligation: every newly created tail run stamps the profile-specific exact
+array declaration, and the atomic materializer validates it before publication
+regardless of physical storage profile.  Existing v011 artifacts remain
+immutable and are not retrofitted; the four recordings require new ordinary
+successors before five-grain cohort admission.  This is a metadata-contract
+repair in the producer followed by normal immutable republication, not a
+receipt bypass or a new tail-loading profile.
+
 Subject-shape publications follow the same maintained-consumption rule. Both
 supported payload profiles are receipt-bearing: v1 records the sealed result of
 the post-binding decoded scan, while v2 composes staged-transfer and final
