@@ -337,6 +337,17 @@ def test_source_binder_proves_tail_shape_and_track_authorities(
         validity_node=shape_arrays["components/subject_body/tail_base_valid"],
         semantics=SimpleNamespace(record_sha256="c" * 64),
     )
+    acquisition = SimpleNamespace(
+        record=SimpleNamespace(
+            recording_id="recording",
+            source_video_metadata={"fps": 100.0},
+        ),
+        record_ref=(
+            "/analysis/acquisition_camera_frames/camera"
+            "@acquisition_camera_frame"
+        ),
+        record_sha256="9" * 64,
+    )
     shape_publication = SimpleNamespace(
         _run=shape_nested,
         run_path="analysis/subject_shape_runs/shape_1",
@@ -346,6 +357,7 @@ def test_source_binder_proves_tail_shape_and_track_authorities(
             run_path="analysis/subject_shape_runs/shape_1",
         ),
         body_frame=SimpleNamespace(record_sha256="d" * 64),
+        temporal_authority=SimpleNamespace(acquisition_frame=acquisition),
         selector_eligible=True,
         require_scalar_surface=lambda *_args, **_kwargs: reference,
     )
@@ -376,7 +388,8 @@ def test_source_binder_proves_tail_shape_and_track_authorities(
         **track_payload,
         "payload_sha256": canonical_json_sha256(track_payload),
     }
-    root = _Group(attrs={"fps": 100.0})
+    # A conflicting loose root attribute must not participate in canonical binding.
+    root = _Group(attrs={"fps": 1.0})
     monkeypatch.setattr(
         mod,
         "load_tail_kinematics_coordinate_publication",
@@ -405,6 +418,11 @@ def test_source_binder_proves_tail_shape_and_track_authorities(
 
     assert bound.binding["tail_row_count"] == 3
     assert bound.binding["source_tail_sample_count"] == 3
+    assert bound.binding["source_sample_rate_hz"] == 100.0
+    assert bound.binding["source_sample_rate_authority"] == (
+        "/analysis/acquisition_camera_frames/camera@acquisition_camera_frame"
+        ".source_video_metadata.fps"
+    )
     assert bound.binding["tail_byte_planner_adopted"] is True
     assert bound.binding["track_identity_index"]["row_count"] == 3
     assert bound.binding["payload_sha256"] == canonical_json_sha256(
@@ -440,6 +458,22 @@ def test_source_binder_proves_tail_shape_and_track_authorities(
     changed["source_sample_rate_hz"] = 50.0
     track_source.binding = changed
     with pytest.raises(ValueError, match="disagree on exact source FPS"):
+        mod.bind_tail_trace_sources(
+            root,
+            zarr_path=tmp_path / "recording_analysis.zarr",
+            tail_kinematics_run="tail_1",
+            subject_shape_run="shape_1",
+            track_kinematics_run="track_1",
+            track_scope="offline",
+            source_window_rows=2,
+            prebound_track_source=track_source,
+        )
+
+    shape_publication.temporal_authority = None
+    with pytest.raises(
+        ValueError,
+        match="requires canonical subject-shape acquisition authority",
+    ):
         mod.bind_tail_trace_sources(
             root,
             zarr_path=tmp_path / "recording_analysis.zarr",
