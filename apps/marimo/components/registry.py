@@ -59,6 +59,9 @@ from fisheye.visualization.chaser_body_bearing_distance import (
     DISTANCE_BIN_WIDTH_MM,
     INTERACTIVE_POINT_CLOUD_MAX_ROWS_PER_PANEL_CHASER,
 )
+from fisheye.visualization.chaser_spatial_occupancy_display import (
+    spatial_occupancy_display_contract_record,
+)
 from fisheye.visualization.bout_kinematics_interactive import (
     BOUT_EYE_GAZE_PLOT_RENDERER,
     BOUT_HEADING_PLOT_RENDERER,
@@ -1127,38 +1130,7 @@ def discover_exact_chaser_successor_options(
                 "read_only_exact_children_no_selector_no_interpolation"
             ),
             "display_parameters": {
-                "spatial_occupancy": {
-                    "recipe_id": (
-                        "paired_provider_exact_epoch_spatial_occupancy_heatmap_v4"
-                    ),
-                    "source_arrays": [
-                        "occupancy_density_valid_in_arena",
-                        "occupancy_fraction_candidate_epoch",
-                    ],
-                    "default_normalization": "valid_in_arena",
-                    "available_normalizations": [
-                        "valid_in_arena",
-                        "candidate_epoch",
-                    ],
-                    "density_multiplier_to_percent": 100.0,
-                    "density_color_normalization": (
-                        "shared_robust_p98_default_full_range_available"
-                    ),
-                    "provider_difference": (
-                        "detection_minus_keypoint_percentage_points_per_bin"
-                    ),
-                    "difference_color_normalization": (
-                        "symmetric_shared_robust_p98_default_full_range_available"
-                    ),
-                    "display_bin_widths_mm": [2.0, 4.0],
-                    "coarsening": ("aligned_exact_2x2_count_sum_no_interpolation"),
-                    "coverage_annotation_array": (
-                        "in_arena_coverage_fraction_candidate"
-                    ),
-                    "arena_bin_center_mask_role": (
-                        "hover_evidence_only_bins_not_discarded_boundary_bins_may_straddle_circle"
-                    ),
-                },
+                "spatial_occupancy": spatial_occupancy_display_contract_record(),
                 "distance_distributions": {
                     "recipe_id": (
                         "paired_provider_persisted_distance_cdf_and_geometric_mass_v1"

@@ -33,6 +33,10 @@ from fisheye.analysis_workflows.gaze_tracking_successor import (
 )
 from fisheye.analysis_workflows.generalized_bout_response_successor import ROLE_CODES
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.visualization.chaser_spatial_occupancy_display import (
+    DEFAULT_DISPLAY_MODE_ID,
+    DISPLAY_RECIPE_ID,
+)
 
 
 class _Group(dict[str, Any]):
@@ -554,6 +558,8 @@ def test_exact_successor_discovery_uses_spatial_bundle_and_exact_children(
     assert options[0].spec["schema_version"] == 10
     assert options[0].spec["provider_ids"] == ["keypoint.v1", "detection.v1"]
     spatial_parameters = options[0].spec["display_parameters"]["spatial_occupancy"]
+    assert spatial_parameters["recipe_id"] == DISPLAY_RECIPE_ID
+    assert spatial_parameters["default_display_mode"] == DEFAULT_DISPLAY_MODE_ID
     assert spatial_parameters["source_arrays"] == [
         "occupancy_density_valid_in_arena",
         "occupancy_fraction_candidate_epoch",

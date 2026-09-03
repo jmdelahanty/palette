@@ -202,14 +202,15 @@ def test_spatial_heatmap_uses_persisted_density_and_provider_difference() -> Non
     keypoint_pre = np.asarray(figure.data[0].z)
     detection_pre = np.asarray(figure.data[1].z)
     difference_pre = np.asarray(figure.data[2].z)
-    assert keypoint_pre[0, 1] == 50.0
-    assert detection_pre[0, 1] == 100.0
-    assert difference_pre[0, 1] == 50.0
+    assert keypoint_pre.shape == (1, 1)
+    assert keypoint_pre[0, 0] == 100.0
+    assert detection_pre[0, 0] == 100.0
+    assert difference_pre[0, 0] == 0.0
     customdata = np.asarray(figure.data[0].customdata)
-    assert customdata[0, 1, 0] == 1
-    assert not bool(customdata[0, 1, 1])
-    assert customdata[0, 1, 2] == 2.0
-    assert np.isfinite(keypoint_pre[0, 1])
+    assert customdata[0, 0, 0] == 2
+    assert bool(customdata[0, 0, 1])
+    assert customdata[0, 0, 2] == 4.0
+    assert np.isfinite(keypoint_pre[0, 0])
     display = figure.layout.meta["spatial_occupancy_display"]
     assert display["recipe_id"] == SPATIAL_OCCUPANCY_DISPLAY_RECIPE
     assert display["source_array"] == "occupancy_density_valid_in_arena"
@@ -231,16 +232,16 @@ def test_spatial_heatmap_uses_persisted_density_and_provider_difference() -> Non
         "valid_in_arena",
         "candidate_epoch",
     ]
-    assert display["default_display_mode"] == "2_mm_valid_in_arena_robust_p98"
+    assert display["default_display_mode"] == "4_mm_valid_in_arena_robust_p98"
     assert display["available_display_modes"] == [
-        "2_mm_valid_in_arena_robust_p98",
-        "2_mm_valid_in_arena_full_range",
         "4_mm_valid_in_arena_robust_p98",
         "4_mm_valid_in_arena_full_range",
-        "2_mm_candidate_epoch_robust_p98",
-        "2_mm_candidate_epoch_full_range",
+        "2_mm_valid_in_arena_robust_p98",
+        "2_mm_valid_in_arena_full_range",
         "4_mm_candidate_epoch_robust_p98",
         "4_mm_candidate_epoch_full_range",
+        "2_mm_candidate_epoch_robust_p98",
+        "2_mm_candidate_epoch_full_range",
     ]
     assert (
         display["display_surfaces"]["2mm_valid_in_arena"]["count_aggregation"] == "none"
@@ -261,31 +262,31 @@ def test_spatial_heatmap_uses_persisted_density_and_provider_difference() -> Non
         display["display_surfaces"]["2mm_candidate_epoch"]["denominator"]
         == "candidate_frame_count"
     )
-    density_scale = display["display_surfaces"]["2mm_valid_in_arena"][
+    density_scale = display["display_surfaces"]["4mm_valid_in_arena"][
         "color_scale_percent_per_bin"
     ]
     assert figure.layout.coloraxis.cmax == density_scale["robust_limit"]
     assert density_scale["full_range_reference_available"] is True
     buttons = figure.layout.updatemenus[0].buttons
     assert [button.label for button in buttons] == [
-        "2 mm · valid in-arena · robust p98",
-        "2 mm · valid in-arena · full range",
         "4 mm · valid in-arena · robust p98",
         "4 mm · valid in-arena · full range",
-        "2 mm · candidate epoch · robust p98",
-        "2 mm · candidate epoch · full range",
+        "2 mm · valid in-arena · robust p98",
+        "2 mm · valid in-arena · full range",
         "4 mm · candidate epoch · robust p98",
         "4 mm · candidate epoch · full range",
+        "2 mm · candidate epoch · robust p98",
+        "2 mm · candidate epoch · full range",
     ]
-    coarse_trace_z = buttons[2].args[0]["z"]
+    coarse_trace_z = buttons[0].args[0]["z"]
     assert np.asarray(coarse_trace_z[0]).shape == (1, 1)
     assert np.asarray(coarse_trace_z[0])[0, 0] == 100.0
-    candidate_trace_z = buttons[4].args[0]["z"]
+    candidate_trace_z = buttons[6].args[0]["z"]
     assert np.asarray(candidate_trace_z[0])[0, 1] == 25.0
     assert np.asarray(candidate_trace_z[1])[0, 1] == 50.0
     assert np.asarray(candidate_trace_z[2])[0, 1] == 25.0
-    assert "candidate epoch" in buttons[4].args[0]["hovertemplate"][0]
-    coarse_candidate_trace_z = buttons[6].args[0]["z"]
+    assert "candidate epoch" in buttons[6].args[0]["hovertemplate"][0]
+    coarse_candidate_trace_z = buttons[4].args[0]["z"]
     assert np.asarray(coarse_candidate_trace_z[0])[0, 0] == 50.0
     overlay = display["chaser_location_overlay"]
     assert overlay["color_source"] == "sealed_protocol_rgba"

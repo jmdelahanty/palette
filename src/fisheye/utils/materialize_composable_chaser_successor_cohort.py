@@ -33,6 +33,9 @@ from fisheye.analysis_workflows.eye_gaze_source_handle import (
 )
 from fisheye.shared.json_safety import json_attr_safe, write_json_atomic
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.visualization.chaser_spatial_occupancy_display import (
+    DISPLAY_RECIPE_ID as SPATIAL_OCCUPANCY_PLOT_RECIPE_ID,
+)
 
 
 TASK_SCHEMA_ID = "palette.composable_chaser_successor_cohort_task"
@@ -100,7 +103,7 @@ SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN = (
 )
 SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME = (
     "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260827_"
-    "body_frame_projection_recipe_v3"
+    "body_frame_projection_recipe_v4"
 )
 DASHBOARD_RECIPE_BUNDLE_NAME = "goodbatbadbat_chaser_dashboard_body_frame_recipe_v3"
 DETAILED_RECIPE_BUNDLE_NAME = "goodbatbadbat_chaser_detailed_body_frame_recipe_v7"
@@ -2807,6 +2810,7 @@ def run_one(
         spatial_receipt,
         recording_id=recording_id,
         require_self_contained_recipe=receipt_bound_relative,
+        expected_plot_recipe_id=SPATIAL_OCCUPANCY_PLOT_RECIPE_ID,
     ):
         stages.append(
             {"stage": "spatial_occupancy_plots", "mode": "reused_exact_receipt"}
