@@ -3222,6 +3222,12 @@ def write_tail_kinematics_run(
     dry_run: bool = False,
     storage_profile: StorageProfile | None = None,
 ) -> dict[str, object]:
+    if not dry_run:
+        raise RuntimeError(
+            "Direct archive tail-kinematics publication is retired because it "
+            "cannot issue the maintained atomic payload receipt. Use "
+            "fisheye.analysis_workflows.materializers.tail_kinematics instead."
+        )
     root = open_zarr_root(zarr_path, mode="a")
     return write_tail_kinematics_run_group(
         root,

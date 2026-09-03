@@ -307,6 +307,29 @@ def _source_binding(
     return {**payload, "payload_sha256": canonical_json_sha256(payload)}
 
 
+def bind_eye_trace_source(
+    root: Any,
+    *,
+    zarr_path: str | Path,
+    eye_angle_run: str,
+    expected_recording_id: str | None = None,
+) -> dict[str, Any]:
+    """Bind one explicit canonical eye-angle source without publishing."""
+
+    source = Path(zarr_path).expanduser().resolve()
+    recording_id = _recording_id(source)
+    if expected_recording_id is not None and recording_id != str(expected_recording_id):
+        raise EyeAngleIOError(
+            "Eye-trace source archive has another recording identity."
+        )
+    return _source_binding(
+        root,
+        zarr_path=source,
+        recording_id=recording_id,
+        run_name=safe_component(eye_angle_run, label="eye-angle run ID"),
+    )
+
+
 class _ProjectedPayloadHasher:
     def __init__(self) -> None:
         self._hashers = {name: hashlib.sha256() for name in EYE_TRACE_SCIENTIFIC_DTYPES}
@@ -398,25 +421,20 @@ def _batch_columns(window: Any) -> dict[str, np.ndarray]:
     }
 
 
-def _arrow_batch(
-    columns: Mapping[str, np.ndarray],
-    *,
-    recording_id: str,
-    zarr_path: Path,
+def eye_trace_constant_values(
     source_binding: Mapping[str, Any],
     projection: Mapping[str, Any],
-) -> Any:
-    import pyarrow as pa
+) -> dict[str, Any]:
+    """Return the exact standalone provenance constants for one eye trace."""
 
-    count = int(np.asarray(columns["source_acquisition_frame_index"]).shape[0])
     binding_sha = str(source_binding["payload_sha256"])
     projection_sha = str(projection["payload_sha256"])
     lineage_sha = _source_lineage_sha256(source_binding, projection)
-    constants: dict[str, Any] = {
+    return {
         "export_schema_version": EXPORT_SCHEMA_VERSION,
         "table_name": EYE_TRACE_SAMPLES_TABLE,
-        "recording_id": recording_id,
-        "zarr_path": str(zarr_path),
+        "recording_id": source_binding["recording_id"],
+        "zarr_path": source_binding["zarr_path"],
         "source_lineage_hash": lineage_sha,
         "source_eye_angle_run": source_binding["run_name"],
         "source_eye_angle_path": source_binding["run_path"],
@@ -428,6 +446,24 @@ def _arrow_batch(
         "source_binding_sha256": binding_sha,
         "projection_contract_sha256": projection_sha,
     }
+
+
+def _arrow_batch(
+    columns: Mapping[str, Any],
+    *,
+    recording_id: str,
+    zarr_path: Path,
+    source_binding: Mapping[str, Any],
+    projection: Mapping[str, Any],
+) -> Any:
+    import pyarrow as pa
+
+    if recording_id != source_binding["recording_id"] or str(zarr_path) != str(
+        source_binding["zarr_path"]
+    ):
+        raise ValueError("Eye-trace Arrow batch identity differs from its binding.")
+    count = int(np.asarray(columns["source_acquisition_frame_index"]).shape[0])
+    constants = eye_trace_constant_values(source_binding, projection)
     schema = exact_arrow_schema(
         EYE_TRACE_SAMPLES_TABLE,
         metadata=_footer_metadata(),
@@ -439,6 +475,47 @@ def _arrow_batch(
         else:
             arrays.append(pa.array([constants[field.name]] * count, type=field.type))
     return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def iter_projected_eye_trace_batches(
+    root: Any,
+    *,
+    source_binding: Mapping[str, Any],
+    projection: Mapping[str, Any],
+    row_group_rows: int,
+) -> Any:
+    """Yield bounded exact standalone-column batches from a bound eye source."""
+
+    if type(row_group_rows) is not int or row_group_rows <= 0:
+        raise ValueError("row_group_rows must be a positive exact integer.")
+    if projection.get("table_name") != EYE_TRACE_SAMPLES_TABLE:
+        raise ValueError("Eye-trace projection names another table.")
+    constants = eye_trace_constant_values(source_binding, projection)
+    frame_count = int(source_binding["frame_count"])
+    for start in range(0, frame_count, row_group_rows):
+        stop = min(frame_count, start + row_group_rows)
+        window = load_eye_angle_series_rows(
+            root,
+            run_name=str(source_binding["run_name"]),
+            start_row=start,
+            stop_row=stop,
+            angle_channels=EYE_TRACE_ANGLE_CHANNELS,
+            qa_channels=EYE_TRACE_QA_CHANNELS,
+            max_rows=row_group_rows,
+        )
+        columns = _batch_columns(window)
+        expected_frames = np.arange(start, stop, dtype=np.int64)
+        if not np.array_equal(
+            columns["source_acquisition_frame_index"], expected_frames
+        ):
+            raise ValueError(
+                "Eye-trace bounded reader returned a noncontiguous frame axis."
+            )
+        count = stop - start
+        yield {
+            **{name: [value] * count for name, value in constants.items()},
+            **columns,
+        }
 
 
 def _write_streaming_part(
@@ -469,27 +546,13 @@ def _write_streaming_part(
         use_dictionary=dictionary_columns,
     )
     try:
-        frame_count = int(source_binding["frame_count"])
-        for start in range(0, frame_count, row_group_rows):
-            stop = min(frame_count, start + row_group_rows)
-            window = load_eye_angle_series_rows(
-                root,
-                run_name=str(source_binding["run_name"]),
-                start_row=start,
-                stop_row=stop,
-                angle_channels=EYE_TRACE_ANGLE_CHANNELS,
-                qa_channels=EYE_TRACE_QA_CHANNELS,
-                max_rows=row_group_rows,
-            )
-            columns = _batch_columns(window)
-            expected_frames = np.arange(start, stop, dtype=np.int64)
-            if not np.array_equal(
-                columns["source_acquisition_frame_index"], expected_frames
-            ):
-                raise ValueError(
-                    "Eye-trace bounded reader returned a noncontiguous frame axis."
-                )
-            hasher.update(columns)
+        for columns in iter_projected_eye_trace_batches(
+            root,
+            source_binding=source_binding,
+            projection=projection,
+            row_group_rows=row_group_rows,
+        ):
+            hasher.update({name: columns[name] for name in EYE_TRACE_SCIENTIFIC_DTYPES})
             writer.write_table(
                 _arrow_batch(
                     columns,
@@ -747,11 +810,11 @@ def export_eye_trace_samples(
     runtime = ExportRuntimePhaseRecorder()
     with runtime.measure("source_binding_before"):
         root = open_zarr_root(source_path, mode="r")
-        before = _source_binding(
+        before = bind_eye_trace_source(
             root,
             zarr_path=source_path,
-            recording_id=recording_id,
-            run_name=source_run,
+            expected_recording_id=recording_id,
+            eye_angle_run=source_run,
         )
     projection = eye_trace_projection_contract()
     generation_id = uuid.uuid4().hex
@@ -786,11 +849,11 @@ def export_eye_trace_samples(
         # cached group attributes from the pre-extraction handle.
         with runtime.measure("source_binding_after"):
             after_root = open_zarr_root(source_path, mode="r")
-            after = _source_binding(
+            after = bind_eye_trace_source(
                 after_root,
                 zarr_path=source_path,
-                recording_id=recording_id,
-                run_name=source_run,
+                expected_recording_id=recording_id,
+                eye_angle_run=source_run,
             )
             if after != before:
                 raise RuntimeError(
@@ -931,8 +994,11 @@ __all__ = [
     "EYE_TRACE_EXPORT_SCHEMA_VERSION",
     "EYE_TRACE_QA_CHANNELS",
     "EYE_TRACE_SCIENTIFIC_DTYPES",
+    "bind_eye_trace_source",
+    "eye_trace_constant_values",
     "export_eye_trace_samples",
     "eye_trace_parquet_policy",
     "eye_trace_projection_contract",
+    "iter_projected_eye_trace_batches",
     "validate_eye_trace_export_payload",
 ]

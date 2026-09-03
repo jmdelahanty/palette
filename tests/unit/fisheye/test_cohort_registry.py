@@ -27,7 +27,6 @@ from fisheye.cohorts.release import main as cohort_release_main
 from fisheye.cohorts.spec import CohortSpec, CohortSpecError, canonical_sha256
 from fisheye.registry.db import Registry
 
-
 HASH_A = "a" * 64
 HASH_B = "b" * 64
 
@@ -216,6 +215,67 @@ def test_exact_protocol_freeze_includes_every_matching_dataset(tmp_path: Path) -
     errors = validate_frozen_cohort(frozen)
     assert any("recording_id is duplicated" in error for error in errors)
     assert "manifest_sha256 mismatch" in errors
+
+
+def test_exact_recording_roster_selects_only_requested_and_requires_all(
+    tmp_path: Path,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    registry = Registry(registry_path)
+    for dataset_id, recording_id in (
+        ("selected_a", "recording_a"),
+        ("selected_b", "recording_b"),
+        ("unrelated", "recording_c"),
+    ):
+        _seed_dataset(
+            registry,
+            tmp_path,
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            protocol_hash=HASH_A,
+        )
+    registry.close()
+
+    selected = _spec(
+        dataset={
+            "statuses": ["active"],
+            "zarr_uses": ["analysis"],
+            "zarr_origins": ["source"],
+            "recording_ids_any": ["recording_a", "recording_b"],
+        }
+    )
+    plan = build_cohort_plan(registry_path, selected)
+    assert plan["summary"]["candidate_dataset_count"] == 2
+    assert plan["summary"]["included_count"] == 2
+    assert plan["summary"]["blocked_count"] == 0
+    assert plan["selection_policy"]["recording_id_selection"] == {
+        "mode": "explicit_closed_roster",
+        "requested_recording_ids": ["recording_a", "recording_b"],
+        "require_every_requested_recording": True,
+    }
+    assert {member["recording_id"] for member in freeze_cohort(plan)["members"]} == {
+        "recording_a",
+        "recording_b",
+    }
+
+    missing = _spec(
+        dataset={
+            "statuses": ["active"],
+            "zarr_uses": ["analysis"],
+            "zarr_origins": ["source"],
+            "recording_ids_any": ["recording_a", "recording_missing"],
+        }
+    )
+    blocked = build_cohort_plan(registry_path, missing)
+    assert blocked["summary"]["blocked_count"] == 1
+    assert blocked["summary"]["blocker_reasons"] == {
+        "requested_recording_id_not_found": 1
+    }
+    assert blocked["summary"]["missing_requested_recording_ids"] == [
+        "recording_missing"
+    ]
+    with pytest.raises(CohortSelectionError, match="1 otherwise-matching"):
+        freeze_cohort(blocked)
 
 
 def test_frozen_cohort_registry_binding_rejects_another_registry(
@@ -489,13 +549,11 @@ def test_multiple_latest_stimulus_runs_block_an_otherwise_matching_recording(
             str(tmp_path / "ambiguous_stimulus.zarr"),
         ),
     )
-    registry.conn.execute(
-        """
+    registry.conn.execute("""
         INSERT INTO recording_stimulus_modes (
             dataset_id, stimulus_run_id, stimulus_mode, step_count, total_duration_s
         ) VALUES ('ambiguous_stimulus', 'second_latest', 'CHASER', 1, 10.0)
-        """
-    )
+        """)
     registry.conn.commit()
     registry.close()
 
@@ -640,9 +698,12 @@ def test_release_render_freezes_membership_and_wires_dependency_dag(
         for stage in submission["stages"]
         if stage["name"] == "recording_analytics"
     )
-    assert analytics_submission["command"][
-        analytics_submission["command"].index("--speed-level") + 1
-    ] == "smoothed"
+    assert (
+        analytics_submission["command"][
+            analytics_submission["command"].index("--speed-level") + 1
+        ]
+        == "smoothed"
+    )
     assert "--chaser-authority-manifest" in export_submission["command"]
     assert "--chaser-authority-sha256" in export_submission["command"]
     assert export_submission["command"][-2:] == [

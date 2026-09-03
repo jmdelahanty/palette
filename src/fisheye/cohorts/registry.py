@@ -18,7 +18,6 @@ from fisheye.registry.identity import (
     read_registry_identity,
 )
 
-
 PLAN_SCHEMA_ID = "palette.cohort_selection_plan"
 PLAN_SCHEMA_VERSION = 2
 MANIFEST_SCHEMA_ID = "palette.frozen_cohort_manifest"
@@ -84,6 +83,11 @@ def _placeholders(values: Sequence[Any]) -> str:
 
 def _candidate_rows(conn: sqlite3.Connection, spec: CohortSpec) -> list[dict[str, Any]]:
     dataset = spec.dataset
+    recording_predicate = ""
+    if dataset.recording_ids_any:
+        recording_predicate = (
+            f" AND dcc.recording_id IN ({_placeholders(dataset.recording_ids_any)})"
+        )
     sql = f"""
         SELECT
             dcc.dataset_id,
@@ -138,13 +142,19 @@ def _candidate_rows(conn: sqlite3.Connection, spec: CohortSpec) -> list[dict[str
         WHERE dcc.dataset_status IN ({_placeholders(dataset.statuses)})
           AND dcc.zarr_use IN ({_placeholders(dataset.zarr_uses)})
           AND dcc.zarr_origin IN ({_placeholders(dataset.zarr_origins)})
+          {recording_predicate}
         ORDER BY
             COALESCE(dcc.recording_started_utc, ''),
             COALESCE(dcc.recording_id, ''),
             COALESCE(dcc.arena_id, ''),
             dcc.dataset_id
     """
-    params = [*dataset.statuses, *dataset.zarr_uses, *dataset.zarr_origins]
+    params = [
+        *dataset.statuses,
+        *dataset.zarr_uses,
+        *dataset.zarr_origins,
+        *dataset.recording_ids_any,
+    ]
     rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
     return rows
 
@@ -493,6 +503,14 @@ def build_cohort_plan(registry_path: str | Path, spec: CohortSpec) -> dict[str, 
         if row["decision"] == "excluded"
         for reason in row["exclusions"]
     )
+    requested_recording_ids = set(spec.dataset.recording_ids_any)
+    missing_requested_recording_ids = sorted(
+        requested_recording_ids - set(by_recording)
+    )
+    if missing_requested_recording_ids:
+        blocker_reasons["requested_recording_id_not_found"] += len(
+            missing_requested_recording_ids
+        )
     snapshot_payload = {
         "candidate_rows": candidates,
         "stimulus_context": stimuli,
@@ -529,15 +547,27 @@ def build_cohort_plan(registry_path: str | Path, spec: CohortSpec) -> dict[str, 
             "duplicate_recording_dataset_policy": "error",
             "missing_selected_metadata": spec.missing_selected_metadata,
             "subject_match_policy": spec.subjects.match_policy,
+            "recording_id_selection": {
+                "mode": (
+                    "explicit_closed_roster"
+                    if spec.dataset.recording_ids_any
+                    else "unrestricted"
+                ),
+                "requested_recording_ids": list(spec.dataset.recording_ids_any),
+                "require_every_requested_recording": bool(
+                    spec.dataset.recording_ids_any
+                ),
+            },
         },
         "summary": {
             "candidate_dataset_count": len(decisions),
             "candidate_recording_count": len(by_recording),
             "included_count": counts["included"],
             "excluded_count": counts["excluded"],
-            "blocked_count": counts["blocked"],
+            "blocked_count": counts["blocked"] + len(missing_requested_recording_ids),
             "blocker_reasons": dict(sorted(blocker_reasons.items())),
             "exclusion_reasons": dict(sorted(exclusion_reasons.items())),
+            "missing_requested_recording_ids": missing_requested_recording_ids,
         },
         "records": decisions,
     }
@@ -610,10 +640,7 @@ def validate_frozen_cohort(
         if manifest_schema_version == MANIFEST_SCHEMA_VERSION:
             if not _is_canonical_uuid(registry.get("registry_uuid")):
                 errors.append("registry.registry_uuid must be a canonical UUID")
-            if (
-                registry.get("identity_provenance")
-                not in REGISTRY_IDENTITY_PROVENANCES
-            ):
+            if registry.get("identity_provenance") not in REGISTRY_IDENTITY_PROVENANCES:
                 errors.append("registry.identity_provenance is unsupported")
             if not str(registry.get("identity_minted_at_utc") or "").strip():
                 errors.append("registry.identity_minted_at_utc is required")

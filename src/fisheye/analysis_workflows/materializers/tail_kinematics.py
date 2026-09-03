@@ -848,7 +848,7 @@ def publish_tail_kinematics_run(
             )
         del run_group.attrs["tail_coordinate_publication_deferred"]
         run_group.attrs["stage_selector_eligible"] = False
-        publication = tail_mod.publish_tail_kinematics_coordinate_surfaces(
+        publication = tail_publication_mod.publish_tail_kinematics_coordinate_surfaces(
             root,
             run_group,
             payload_scan_receipt=payload_scan_receipt,

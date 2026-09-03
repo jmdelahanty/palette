@@ -496,6 +496,26 @@ def test_normal_tail_writer_rejects_unpublished_subject_shape_source() -> None:
         )
 
 
+def test_public_tail_writer_retires_non_atomic_publication_before_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(
+        mod,
+        "open_zarr_root",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("retired writer opened the archive")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="atomic payload receipt"):
+        mod.write_tail_kinematics_run(
+            tmp_path / "archive.zarr",
+            shape_run="shape_001",
+            run_name="tail_rejected",
+        )
+
+
 def test_write_tail_kinematics_run_group_writes_schema_and_row_lineage(
     monkeypatch,
 ) -> None:

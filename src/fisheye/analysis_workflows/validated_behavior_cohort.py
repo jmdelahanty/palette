@@ -23,7 +23,6 @@ from typing import Any, Mapping, Sequence
 
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
-
 MEMBERSHIP_SCHEMA_ID = "palette.analysis.validated_behavior_cohort_membership"
 MEMBERSHIP_SCHEMA_VERSION = 1
 MEMBERSHIP_STATUS = "complete_selector_ineligible_membership"
@@ -504,13 +503,18 @@ def _validate_membership_member(
     protocol_names = _sorted_unique_texts(
         member.get("protocol_names"),
         field=f"members[{ordinal - 1}].protocol_names",
-        nonempty=True,
+        nonempty=False,
     )
     protocol_hashes = _sorted_unique_texts(
         member.get("protocol_hashes"),
         field=f"members[{ordinal - 1}].protocol_hashes",
-        nonempty=True,
+        nonempty=False,
     )
+    if bool(protocol_names) != bool(protocol_hashes):
+        _fail(
+            f"members[{ordinal - 1}] protocol names and hashes must be "
+            "coherently present or absent."
+        )
     for index, item in enumerate(protocol_hashes):
         _digest(item, field=f"members[{ordinal - 1}].protocol_hashes[{index}]")
     source_subject_ids = _sorted_unique_texts(

@@ -9,7 +9,7 @@ import uuid
 import pytest
 import zarr
 
-from fisheye.analysis import subject_shape_runs, tail_kinematics_runs
+from fisheye.analysis import subject_shape_runs
 from fisheye.analysis_workflows.analysis_candidate_execution import (
     PhysicalIOScope,
     build_candidate_execution_request,
@@ -21,6 +21,9 @@ from fisheye.analysis_workflows.analysis_candidate_execution_catalog import (
 from fisheye.analysis_workflows.analysis_candidate_invocation import (
     CandidateInvocationContract,
     candidate_invocation_contract_is_frozen,
+)
+from fisheye.analysis_workflows.materializers.tail_kinematics import (
+    materialize_tail_kinematics,
 )
 from fisheye.analysis_workflows.tail_kinematics_candidate_execution import (
     build_tail_kinematics_execution_suite,
@@ -75,8 +78,10 @@ def test_fresh_process_publishes_exact_tail_candidate_and_receipt(
         run_name="shape_1",
         chunk_size=2,
     )
-    tail_kinematics_runs.write_tail_kinematics_run_group(
-        root,
+    consolidate_metadata_capture_expected_warnings(archive)
+    materialize_tail_kinematics(
+        archive,
+        scratch_root=tmp_path / "tail-source-scratch",
         shape_run="shape_1",
         run_name="tail_source",
         tail_angle_sample_count=10,
@@ -84,10 +89,14 @@ def test_fresh_process_publishes_exact_tail_candidate_and_receipt(
         output_shard_rows=4,
         execution_backend="serial",
         num_workers=1,
-        dry_run=False,
+        copy_backend="python",
+        apply=True,
+        keep_scratch=False,
+        check_capacity=False,
         stage_command="tail execution source fixture",
     )
     consolidate_metadata_capture_expected_warnings(archive)
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
     source = root["analysis/tail_kinematics_runs/tail_source"]
     source_publication = (
         tail_coordinate_publication.load_tail_kinematics_coordinate_publication(
