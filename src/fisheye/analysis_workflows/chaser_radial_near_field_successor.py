@@ -30,6 +30,10 @@ from fisheye.analysis.provider_chaser_position_suite import (
 from fisheye.analysis_workflows.chaser_relative_distance_view import (
     load_chaser_relative_distance_view,
 )
+from fisheye.analysis_workflows.near_field_visit_state_machine import (
+    ExactNearFieldVisitError,
+    segment_exact_time_near_field_visits,
+)
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
@@ -175,112 +179,30 @@ def _exact_time_visits(
     exit_mm: float,
 ) -> _ExactVisitResult:
     """Integrate tracked intervals and hysteretic visits without bridging gaps."""
-
-    frame = np.asarray(frame_id, dtype=np.int64).reshape(-1)
-    timestamp = np.asarray(timestamp_ns, dtype=np.int64).reshape(-1)
-    timestamp_ok = np.asarray(timestamp_valid, dtype=bool).reshape(-1)
-    distance = np.asarray(distance_mm, dtype=np.float64).reshape(-1)
-    observed = (
-        np.asarray(distance_valid, dtype=bool).reshape(-1)
-        & timestamp_ok
-        & np.isfinite(distance)
-    )
-    if not (frame.size == timestamp.size == distance.size == observed.size):
-        _fail("Exact temporal vectors have inconsistent lengths.")
-    if frame.size > 1 and np.any(np.diff(frame) <= 0):
-        _fail("Exact temporal frame IDs must be strictly increasing.")
-    if np.any(timestamp_ok & (timestamp < 0)):
-        _fail("Declared-valid session timestamps must be non-negative.")
-
-    state = "unknown"
-    unknown_origin = "boundary"
-    entry_timestamp_ns: int | None = None
-    complete_dwell: list[float] = []
-    near_dwell_s = 0.0
-    tracked_s = 0.0
-    entries = 0
-    gaps = 0
-    censors = 0
-    boundary_censors = 0
-    gap_censors = 0
-    gap_open = False
-
-    for index in range(frame.size):
-        continuous = index > 0 and bool(
-            observed[index - 1]
-            and observed[index]
-            and frame[index] == frame[index - 1] + 1
-            and timestamp[index] > timestamp[index - 1]
+    try:
+        segmented = segment_exact_time_near_field_visits(
+            frame_id=frame_id,
+            timestamp_ns=timestamp_ns,
+            timestamp_valid=timestamp_valid,
+            distance_mm=distance_mm,
+            distance_valid=distance_valid,
+            near_zone_mm=near_zone_mm,
+            enter_mm=enter_mm,
+            exit_mm=exit_mm,
         )
-        if continuous:
-            delta_s = float(timestamp[index] - timestamp[index - 1]) / 1e9
-            tracked_s += delta_s
-            if distance[index - 1] <= near_zone_mm:
-                near_dwell_s += delta_s
-            gap_open = False
-        elif index > 0:
-            if not gap_open:
-                gaps += 1
-            gap_open = True
-            if state in {"inside", "censored_inside"}:
-                censors += 1
-                gap_censors += 1
-            state = "unknown"
-            unknown_origin = "gap"
-            entry_timestamp_ns = None
-
-        if not observed[index]:
-            continue
-        value = float(distance[index])
-        if state == "unknown":
-            if value > exit_mm:
-                state = "outside"
-            elif value < enter_mm:
-                state = "censored_inside"
-                censors += 1
-                if unknown_origin == "boundary":
-                    boundary_censors += 1
-                else:
-                    gap_censors += 1
-            continue
-        if state == "outside":
-            if value < enter_mm:
-                state = "inside"
-                entries += 1
-                entry_timestamp_ns = int(timestamp[index])
-            continue
-        if state == "inside":
-            if value > exit_mm:
-                if entry_timestamp_ns is None:  # pragma: no cover - invariant
-                    _fail("Complete near-field visit lacks its exact entry time.")
-                complete_dwell.append(
-                    float(timestamp[index] - entry_timestamp_ns) / 1e9
-                )
-                state = "outside"
-                entry_timestamp_ns = None
-            continue
-        if state == "censored_inside" and value > exit_mm:
-            state = "outside"
-
-    if state in {"inside", "censored_inside"}:
-        censors += 1
-        boundary_censors += 1
-    dwell = np.asarray(complete_dwell, dtype=np.float64)
+    except ExactNearFieldVisitError as exc:
+        _fail(str(exc))
     return _ExactVisitResult(
-        near_dwell_s=near_dwell_s,
-        valid_tracked_duration_s=tracked_s,
-        entry_count=entries,
-        entry_rate_per_min=(
-            float(entries) / (tracked_s / 60.0) if tracked_s > 0 else math.nan
-        ),
-        complete_visit_median_dwell_s=(
-            float(np.median(dwell)) if dwell.size else math.nan
-        ),
-        complete_visit_total_dwell_s=(float(np.sum(dwell)) if dwell.size else 0.0),
-        invalid_gap_count=gaps,
-        censor_event_count=censors,
-        boundary_censor_event_count=boundary_censors,
-        invalid_gap_censor_event_count=gap_censors,
+        near_dwell_s=segmented.near_dwell_s,
+        valid_tracked_duration_s=segmented.valid_tracked_duration_s,
+        entry_count=segmented.entry_count,
+        entry_rate_per_min=segmented.entry_rate_per_min,
+        complete_visit_median_dwell_s=(segmented.complete_visit_median_dwell_s),
+        complete_visit_total_dwell_s=(segmented.complete_visit_total_dwell_s),
+        invalid_gap_count=segmented.invalid_gap_count,
+        censor_event_count=segmented.censor_event_count,
+        boundary_censor_event_count=segmented.boundary_censor_event_count,
+        invalid_gap_censor_event_count=(segmented.invalid_gap_censor_event_count),
     )
 
 
