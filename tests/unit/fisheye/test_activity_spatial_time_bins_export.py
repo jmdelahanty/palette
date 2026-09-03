@@ -112,9 +112,7 @@ def test_binning_contract_versions_exact_half_open_frame_selection() -> None:
         source_frame_stop_exclusive=200_003,
     )
 
-    assert policy["schema_version"] == (
-        mod.ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION_V3
-    )
+    assert policy["schema_version"] == (mod.ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION_V3)
     assert policy["frame_selection_policy"] == (
         mod.ACTIVITY_SPATIAL_FRAME_SELECTION_POLICY
     )
@@ -488,7 +486,7 @@ def test_source_binding_requires_exact_per_track_run_map(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    root, _track_binding, _candidate = _patch_bound_sources(monkeypatch)
+    root, track_binding, _candidate = _patch_bound_sources(monkeypatch)
     bound = mod.bind_activity_spatial_sources(
         root,
         zarr_path=tmp_path / "recording_analysis.zarr",
@@ -508,6 +506,56 @@ def test_source_binding_requires_exact_per_track_run_map(
         {key: value for key, value in bound.binding.items() if key != "payload_sha256"}
     )
 
+    source_path = (tmp_path / "recording_analysis.zarr").resolve()
+    prebound_body = {
+        key: value for key, value in track_binding.items() if key != "payload_sha256"
+    }
+    prebound_body.update(
+        {
+            "recording_id": "recording",
+            "zarr_path": str(source_path),
+            "scope": "offline",
+        }
+    )
+    prebound_track = SimpleNamespace(
+        binding={
+            **prebound_body,
+            "payload_sha256": canonical_json_sha256(prebound_body),
+        },
+        run_group=object(),
+    )
+    monkeypatch.setattr(
+        mod.track_export,
+        "bind_kinematics_samples_source",
+        lambda *_args, **_kwargs: pytest.fail("prebound track source was reopened"),
+    )
+    rebound = mod.bind_activity_spatial_sources(
+        root,
+        zarr_path=source_path,
+        recording_id="recording",
+        track_kinematics_run="track_run",
+        track_scope="offline",
+        swim_bout_runs_by_track={7: "bouts_track_7"},
+        prebound_track_source=prebound_track,
+    )
+    assert rebound.track_source is prebound_track
+
+    changed_binding = dict(prebound_track.binding)
+    changed_binding["run_name"] = "another_track_run"
+    with pytest.raises(ValueError, match="explicit activity dependency"):
+        mod.bind_activity_spatial_sources(
+            root,
+            zarr_path=source_path,
+            recording_id="recording",
+            track_kinematics_run="track_run",
+            track_scope="offline",
+            swim_bout_runs_by_track={7: "bouts_track_7"},
+            prebound_track_source=SimpleNamespace(
+                binding=changed_binding,
+                run_group=object(),
+            ),
+        )
+
     with pytest.raises(ValueError, match="every and only"):
         mod.bind_activity_spatial_sources(
             root,
@@ -516,6 +564,7 @@ def test_source_binding_requires_exact_per_track_run_map(
             track_kinematics_run="track_run",
             track_scope="offline",
             swim_bout_runs_by_track={},
+            prebound_track_source=prebound_track,
         )
 
 
@@ -778,9 +827,7 @@ def test_bounded_export_has_source_backed_edge_bin_equivalence(
         full_export_run_id="activity_full",
         bounded_export_root=tmp_path / "exports_bounded",
         bounded_export_run_id="activity_bounded",
-        output=tmp_path
-        / "palette_benchmarks"
-        / "activity_window_equivalence.json",
+        output=tmp_path / "palette_benchmarks" / "activity_window_equivalence.json",
     )
 
     payload = evidence["payload"]

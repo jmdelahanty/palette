@@ -35,7 +35,6 @@ from fisheye.utils.materialize_composable_chaser_successor_cohort import (
     EXPECTED_SAFETY as TASK_SAFETY,
 )
 
-
 COMMIT = "a" * 40
 NOW = "2026-08-31T12:00:00Z"
 
@@ -236,6 +235,27 @@ def test_generic_membership_accepts_multiple_protocols_and_exact_dispositions(
         "behavior-a",
         "behavior-b",
     ]
+
+
+def test_membership_allows_absent_protocol_identity_but_rejects_half_identity(
+    tmp_path: Path,
+) -> None:
+    membership = _generic_membership(tmp_path)
+    membership["members"][0]["protocol_names"] = []
+    membership["members"][0]["protocol_hashes"] = []
+    _reseal_membership(membership)
+
+    validated = core.validate_validated_behavior_cohort_membership(membership)
+    assert validated["members"][0]["protocol_names"] == ()
+    assert validated["members"][0]["protocol_hashes"] == ()
+
+    membership["members"][0]["protocol_names"] = ["unbound-protocol"]
+    _reseal_membership(membership)
+    with pytest.raises(
+        core.ValidatedBehaviorCohortError,
+        match="protocol names and hashes must be coherently present or absent",
+    ):
+        core.validate_validated_behavior_cohort_membership(membership)
 
 
 def test_membership_rejects_duplicate_recording_even_when_redigested(

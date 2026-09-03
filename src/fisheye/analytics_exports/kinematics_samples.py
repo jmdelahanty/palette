@@ -314,9 +314,16 @@ _SHA256_LENGTH = 64
 
 
 @dataclass(frozen=True)
-class _BoundSource:
+class BoundKinematicsSamplesSource:
+    """Strictly validated track source used by standalone and cohort exports."""
+
     binding: Mapping[str, Any]
     run_group: Any
+
+
+# Keep the private spelling for internal type annotations while exposing one
+# supported source interface to sibling export profiles.
+_BoundSource = BoundKinematicsSamplesSource
 
 
 def _recording_id(path: Path) -> str:
@@ -799,6 +806,40 @@ def _source_binding(
     )
 
 
+def bind_kinematics_samples_source(
+    root: Any,
+    *,
+    zarr_path: str | Path,
+    track_kinematics_run: str,
+    track_scope: str,
+    expected_recording_id: str | None = None,
+) -> BoundKinematicsSamplesSource:
+    """Bind one explicit canonical track-kinematics publication.
+
+    This is the shared admission boundary used by both the standalone
+    ``kinematics_samples`` exporter and composable cohort profiles.  It does
+    not discover a selector or publish any output.
+    """
+
+    source = Path(zarr_path).expanduser().resolve()
+    recording_id = _recording_id(source)
+    if expected_recording_id is not None and recording_id != str(expected_recording_id):
+        raise ValueError("Kinematic source archive has another recording identity.")
+    run_name = safe_component(
+        track_kinematics_run,
+        label="track-kinematics run ID",
+    )
+    if track_scope not in {"online", "offline"}:
+        raise ValueError("track_scope must be 'online' or 'offline'.")
+    return _source_binding(
+        root,
+        zarr_path=source,
+        recording_id=recording_id,
+        run_name=run_name,
+        scope=track_scope,
+    )
+
+
 class _ProjectedPayloadHasher:
     def __init__(self) -> None:
         self._hashers = {
@@ -999,16 +1040,13 @@ def _read_projected_window(
     return columns, frames
 
 
-def _arrow_batch(
-    columns: Mapping[str, np.ndarray[Any, Any]],
-    *,
+def kinematics_sample_constant_values(
     source_binding: Mapping[str, Any],
     projection: Mapping[str, Any],
-) -> Any:
-    import pyarrow as pa
+) -> dict[str, Any]:
+    """Return the exact standalone provenance constants for one projection."""
 
-    count = int(np.asarray(columns["track_id"]).shape[0])
-    constants: dict[str, Any] = {
+    return {
         "export_schema_version": EXPORT_SCHEMA_VERSION,
         "table_name": KINEMATICS_SAMPLES_TABLE,
         "recording_id": source_binding["recording_id"],
@@ -1038,6 +1076,18 @@ def _arrow_batch(
         ],
         "physical_authority_sha256": source_binding["physical_authority_sha256"],
     }
+
+
+def _arrow_batch(
+    columns: Mapping[str, Any],
+    *,
+    source_binding: Mapping[str, Any],
+    projection: Mapping[str, Any],
+) -> Any:
+    import pyarrow as pa
+
+    count = int(np.asarray(columns["track_id"]).shape[0])
+    constants = kinematics_sample_constant_values(source_binding, projection)
     schema = exact_arrow_schema(KINEMATICS_SAMPLES_TABLE, metadata=_footer_metadata())
     arrays = [
         pa.array(
@@ -1051,6 +1101,62 @@ def _arrow_batch(
         for field in schema
     ]
     return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def iter_projected_kinematics_sample_batches(
+    bound: BoundKinematicsSamplesSource,
+    *,
+    projection: Mapping[str, Any],
+    source_window_rows: int,
+) -> Any:
+    """Yield bounded exact standalone-column batches from a bound source.
+
+    The iterator verifies every selected source surface against the manifest
+    while it is already resident for projection.  Consumers may add outer
+    dataset provenance columns, but must not alter these returned values.
+    """
+
+    if type(source_window_rows) is not int or source_window_rows <= 0:
+        raise ValueError("source_window_rows must be a positive exact integer.")
+    if projection.get("table_name") != KINEMATICS_SAMPLES_TABLE or float(
+        projection.get("source_sample_rate_hz", float("nan"))
+    ) != float(bound.binding["source_sample_rate_hz"]):
+        raise ValueError("Kinematic projection differs from its bound source.")
+    constants = kinematics_sample_constant_values(bound.binding, projection)
+    for track in bound.binding["tracks"]:
+        track_id = int(track["track_id"])
+        track_group = bound.run_group["tracks"][f"id_{track_id}"]
+        sample_count = int(track["sample_count"])
+        source_hasher = _SelectedSourcePayloadHasher(track)
+        last_frame: int | None = None
+        for start in range(0, sample_count, source_window_rows):
+            stop = min(sample_count, start + source_window_rows)
+            columns, source_frames = _read_projected_window(
+                track_group,
+                track_id=track_id,
+                start=start,
+                stop=stop,
+                stride=int(projection["sampling_stride_frames"]),
+                source_rate_hz=float(projection["source_sample_rate_hz"]),
+                source_hasher=source_hasher,
+                source_frame_start=projection.get("source_frame_start"),
+                source_frame_stop_exclusive=projection.get(
+                    "source_frame_stop_exclusive"
+                ),
+            )
+            if source_frames.size:
+                if last_frame is not None and int(source_frames[0]) <= last_frame:
+                    raise ValueError(
+                        f"Track {track_id} frame identity is not globally increasing."
+                    )
+                last_frame = int(source_frames[-1])
+            count = int(columns["track_id"].shape[0])
+            if count:
+                yield {
+                    **{name: [value] * count for name, value in constants.items()},
+                    **columns,
+                }
+        source_hasher.finish()
 
 
 def _write_streaming_part(
@@ -1081,44 +1187,22 @@ def _write_streaming_part(
         use_dictionary=dictionary_columns,
     )
     try:
-        for track in bound.binding["tracks"]:
-            track_id = int(track["track_id"])
-            track_group = bound.run_group["tracks"][f"id_{track_id}"]
-            sample_count = int(track["sample_count"])
-            source_hasher = _SelectedSourcePayloadHasher(track)
-            last_frame: int | None = None
-            for start in range(0, sample_count, source_window_rows):
-                stop = min(sample_count, start + source_window_rows)
-                columns, source_frames = _read_projected_window(
-                    track_group,
-                    track_id=track_id,
-                    start=start,
-                    stop=stop,
-                    stride=int(projection["sampling_stride_frames"]),
-                    source_rate_hz=float(projection["source_sample_rate_hz"]),
-                    source_hasher=source_hasher,
-                    source_frame_start=projection.get("source_frame_start"),
-                    source_frame_stop_exclusive=projection.get(
-                        "source_frame_stop_exclusive"
-                    ),
-                )
-                if source_frames.size:
-                    if last_frame is not None and int(source_frames[0]) <= last_frame:
-                        raise ValueError(
-                            f"Track {track_id} frame identity is not globally increasing."
-                        )
-                    last_frame = int(source_frames[-1])
-                hasher.update(columns)
-                if int(columns["track_id"].shape[0]):
-                    writer.write_table(
-                        _arrow_batch(
-                            columns,
-                            source_binding=bound.binding,
-                            projection=projection,
-                        ),
-                        row_group_size=row_group_rows,
-                    )
-            source_hasher.finish()
+        for columns in iter_projected_kinematics_sample_batches(
+            bound,
+            projection=projection,
+            source_window_rows=source_window_rows,
+        ):
+            hasher.update(
+                {name: columns[name] for name in KINEMATICS_SCIENTIFIC_DTYPES}
+            )
+            writer.write_table(
+                _arrow_batch(
+                    columns,
+                    source_binding=bound.binding,
+                    projection=projection,
+                ),
+                row_group_size=row_group_rows,
+            )
     finally:
         writer.close()
     return hasher.finish()
@@ -1513,12 +1597,12 @@ def export_kinematics_samples(
     runtime = ExportRuntimePhaseRecorder()
     with runtime.measure("source_binding_before"):
         root = open_zarr_root(source_path, mode="r")
-        before = _source_binding(
+        before = bind_kinematics_samples_source(
             root,
             zarr_path=source_path,
-            recording_id=recording_id,
-            run_name=source_run,
-            scope=track_scope,
+            expected_recording_id=recording_id,
+            track_kinematics_run=source_run,
+            track_scope=track_scope,
         )
     projection = kinematics_projection_contract(
         source_sample_rate_hz=float(before.binding["source_sample_rate_hz"]),
@@ -1553,12 +1637,12 @@ def export_kinematics_samples(
             )
         with runtime.measure("source_binding_after"):
             after_root = open_zarr_root(source_path, mode="r")
-            after = _source_binding(
+            after = bind_kinematics_samples_source(
                 after_root,
                 zarr_path=source_path,
-                recording_id=recording_id,
-                run_name=source_run,
-                scope=track_scope,
+                expected_recording_id=recording_id,
+                track_kinematics_run=source_run,
+                track_scope=track_scope,
             )
             if after.binding != before.binding:
                 raise RuntimeError(
@@ -1698,13 +1782,17 @@ def export_kinematics_samples(
 
 
 __all__ = [
+    "BoundKinematicsSamplesSource",
     "KINEMATICS_EXPORT_SCHEMA_ID",
     "KINEMATICS_EXPORT_SCHEMA_VERSION",
     "KINEMATICS_FRAME_SELECTION_POLICY",
     "KINEMATICS_PROJECTION_SCHEMA_VERSION_V2",
     "KINEMATICS_SAMPLING_POLICY",
     "KINEMATICS_SCIENTIFIC_DTYPES",
+    "bind_kinematics_samples_source",
     "export_kinematics_samples",
+    "iter_projected_kinematics_sample_batches",
+    "kinematics_sample_constant_values",
     "kinematics_parquet_policy",
     "kinematics_projection_contract",
     "validate_kinematics_samples_export_payload",

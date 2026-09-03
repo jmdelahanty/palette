@@ -129,6 +129,7 @@ _PUBLICATION_PART_FIELDS = _SHARD_PART_FIELDS | {
     "source_shard_record_sha256",
 }
 
+
 @dataclass(frozen=True)
 class ValidatedBehaviorBatchSource:
     """One-pass bounded column batches for a recording-owned dense table.
@@ -456,6 +457,30 @@ def _table_coverage_records(
     return records
 
 
+def _require_declared_bundle_export_profile(
+    bundle_set: Mapping[str, Any], export_profile_id: object
+) -> str:
+    """Bind profile-aware bundle sets without invalidating legacy bundles.
+
+    Recording-bundle v1 artifacts predate an explicit export-profile field and
+    remain readable. New bundle profiles that declare the field are fail-closed:
+    a planner cannot reinterpret them through another installed table profile.
+    """
+
+    requested = safe_component(export_profile_id, label="export profile ID")
+    bundle_profile = _mapping(bundle_set.get("bundle_profile"), field="bundle_profile")
+    declared = bundle_profile.get("export_profile_id")
+    if declared is None:
+        return requested
+    normalized = safe_component(declared, label="bundle export profile ID")
+    if normalized != requested:
+        _fail(
+            "Bundle set declares export profile "
+            f"{normalized!r}, not requested profile {requested!r}."
+        )
+    return requested
+
+
 def build_validated_behavior_export_plan(
     *,
     membership_path: str | Path,
@@ -481,8 +506,11 @@ def build_validated_behavior_export_plan(
     table_names = validate_table_specs(table_specs)
     table_records = _spec_records(table_specs)
     coverage = _table_coverage_records(bundle_set, table_specs)
+    requested_profile_id = _require_declared_bundle_export_profile(
+        bundle_set, export_profile_id
+    )
     profile_body = {
-        "profile_id": safe_component(export_profile_id, label="export profile ID"),
+        "profile_id": requested_profile_id,
         "table_names": list(table_names),
         "table_specs_sha256": canonical_json_sha256(table_records),
     }
@@ -575,7 +603,8 @@ def validate_validated_behavior_export_plan(
         "record_sha256",
     }:
         _fail("Export-profile field set is inexact.")
-    safe_component(profile.get("profile_id"), label="export profile ID")
+    profile_id = safe_component(profile.get("profile_id"), label="export profile ID")
+    _require_declared_bundle_export_profile(bundle_set, profile_id)
     if profile.get("table_names") != list(table_names) or profile.get(
         "table_specs_sha256"
     ) != canonical_json_sha256(table_records):
@@ -967,9 +996,7 @@ def _observed_primary_key_summary(
         for key in zip(*columns, strict=True):
             if seen is not None:
                 if key in seen:
-                    _fail(
-                        f"{spec.table_name}: shard contains a duplicate primary key."
-                    )
+                    _fail(f"{spec.table_name}: shard contains a duplicate primary key.")
                 seen.add(key)
             elif previous is not None and key <= previous:
                 _fail(
@@ -1251,9 +1278,7 @@ def write_validated_behavior_recording_shard(
                     table,
                     temporary_part,
                     compression=str(plan["parameters"]["parquet_compression"]),
-                    row_group_size=int(
-                        plan["parameters"]["effective_row_group_rows"]
-                    ),
+                    row_group_size=int(plan["parameters"]["effective_row_group_rows"]),
                 )
                 row_count = table.num_rows
                 key_bounds = _primary_key_bounds(rows, spec)
@@ -1514,9 +1539,7 @@ def _validate_published_shard_roster(
     return expected_files
 
 
-def _part_relation_values(
-    part: Path, fields: tuple[str, ...]
-) -> set[tuple[Any, ...]]:
+def _part_relation_values(part: Path, fields: tuple[str, ...]) -> set[tuple[Any, ...]]:
     """Collect one recording-scoped target relation, never a cohort relation."""
 
     import pyarrow.parquet as pq
@@ -1644,9 +1667,7 @@ def _global_validate_generation(
                         tuple(local_fields),
                         target_values,
                     ):
-                        _fail(
-                            f"{table_name}: foreign key to {target} is not closed."
-                        )
+                        _fail(f"{table_name}: foreign key to {target} is not closed.")
     if (
         "cohort_recordings" in row_counts
         and row_counts["cohort_recordings"] != plan["member_count"]

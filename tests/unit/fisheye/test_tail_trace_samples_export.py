@@ -357,6 +357,8 @@ def test_source_binder_proves_tail_shape_and_track_authorities(
     track_source = _track_source()
     track_source.binding.update(
         {
+            "recording_id": "recording",
+            "zarr_path": str((tmp_path / "recording_analysis.zarr").resolve()),
             "source_sample_rate_hz": 100.0,
             "source_manifest_sha256": "e" * 64,
             "scope": "offline",
@@ -408,12 +410,31 @@ def test_source_binder_proves_tail_shape_and_track_authorities(
     assert bound.binding["payload_sha256"] == canonical_json_sha256(
         {key: value for key, value in bound.binding.items() if key != "payload_sha256"}
     )
+    assert bound.track_source is track_source
+    assert bound.subject_shape_publication is shape_publication
     projected = mod.read_projected_tail_trace_window(
         bound,
         start_row=0,
         stop_row=2,
     )
     assert projected["track_id"].tolist() == [7] * 6
+
+    monkeypatch.setattr(
+        mod.track_export,
+        "bind_kinematics_samples_source",
+        lambda *_args, **_kwargs: pytest.fail("prebound track source was reopened"),
+    )
+    rebound = mod.bind_tail_trace_sources(
+        root,
+        zarr_path=tmp_path / "recording_analysis.zarr",
+        tail_kinematics_run="tail_1",
+        subject_shape_run="shape_1",
+        track_kinematics_run="track_1",
+        track_scope="offline",
+        source_window_rows=2,
+        prebound_track_source=track_source,
+    )
+    assert rebound.track_source is track_source
 
     changed = deepcopy(track_source.binding)
     changed["source_sample_rate_hz"] = 50.0
@@ -427,6 +448,7 @@ def test_source_binder_proves_tail_shape_and_track_authorities(
             track_kinematics_run="track_1",
             track_scope="offline",
             source_window_rows=2,
+            prebound_track_source=track_source,
         )
 
 
