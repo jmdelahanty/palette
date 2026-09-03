@@ -520,14 +520,14 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-a4a53029ad431c21"
+            "schema-writer-1d69319c7b469533"
           ],
           "shape": "shape(derived['valid'])"
         },
         {
           "dtype": "bool",
           "occurrence_ids": [
-            "schema-writer-1e00fe2483f05e77"
+            "schema-writer-f60e2650756b1c7b"
           ],
           "shape": "shape(body['valid'][:])"
         }
@@ -4434,7 +4434,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-71b8d1fda3beba1a"
+            "schema-writer-328fb0e84078df68"
           ],
           "shape": "shape(_source_row_node(source, 'instance_key')[:])"
         },
@@ -44496,8 +44496,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/subject_shape_coordinate_publication.py",
-      "line": 2679,
-      "occurrence_id": "schema-writer-71b8d1fda3beba1a",
+      "line": 2714,
+      "occurrence_id": "schema-writer-328fb0e84078df68",
       "path_pattern": "<run>/instance_key",
       "required": null,
       "shape_expression": "shape(_source_row_node(source, 'instance_key')[:])",
@@ -44509,7 +44509,7 @@
       "subgroup": null,
       "write_lifecycle": "immutable_publication",
       "write_lifecycle_basis": "publication/compaction surface",
-      "writer_site_id": "writer-aaf0e4dd4c5947f5"
+      "writer_site_id": "writer-2038562d724ab5d1"
     },
     {
       "access_pattern": "unclassified",
@@ -44530,8 +44530,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/subject_shape_coordinate_publication.py",
-      "line": 3175,
-      "occurrence_id": "schema-writer-6ac12536a2d6a564",
+      "line": 3210,
+      "occurrence_id": "schema-writer-9e250c2a3fee1799",
       "path_pattern": "<run>/component_centroid_xy",
       "required": null,
       "shape_expression": "shape(np.stack([np.asarray(run[f'components/{name}/centroid_xy'][:], dtype=np.float32) for name in component_names], axis=1))",
@@ -44543,7 +44543,7 @@
       "subgroup": null,
       "write_lifecycle": "immutable_publication",
       "write_lifecycle_basis": "publication/compaction surface",
-      "writer_site_id": "writer-5a3343b82951c82b"
+      "writer_site_id": "writer-f84c020de151014a"
     },
     {
       "access_pattern": "unclassified",
@@ -44564,8 +44564,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/subject_shape_coordinate_publication.py",
-      "line": 3176,
-      "occurrence_id": "schema-writer-da0c8674c3b777da",
+      "line": 3211,
+      "occurrence_id": "schema-writer-32b5061a5e9fb673",
       "path_pattern": "<run>/component_centroid_valid",
       "required": null,
       "shape_expression": "shape(np.stack([np.asarray(run[f'components/{name}/centroid_valid'][:], dtype=bool) for name in component_names], axis=1))",
@@ -44577,7 +44577,7 @@
       "subgroup": null,
       "write_lifecycle": "immutable_publication",
       "write_lifecycle_basis": "publication/compaction surface",
-      "writer_site_id": "writer-90b500b420d05017"
+      "writer_site_id": "writer-8dbc3a53da67f25b"
     },
     {
       "access_pattern": "unclassified",
@@ -44598,8 +44598,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/subject_shape_coordinate_publication.py",
-      "line": 3275,
-      "occurrence_id": "schema-writer-a4a53029ad431c21",
+      "line": 3310,
+      "occurrence_id": "schema-writer-1d69319c7b469533",
       "path_pattern": "<run>/body_frame/axis_valid",
       "required": null,
       "shape_expression": "shape(derived['valid'])",
@@ -44611,7 +44611,7 @@
       "subgroup": null,
       "write_lifecycle": "immutable_publication",
       "write_lifecycle_basis": "publication/compaction surface",
-      "writer_site_id": "writer-94a49fa16dc325fa"
+      "writer_site_id": "writer-c17f721caa467418"
     },
     {
       "access_pattern": "unclassified",
@@ -44632,8 +44632,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/subject_shape_coordinate_publication.py",
-      "line": 3293,
-      "occurrence_id": "schema-writer-1e00fe2483f05e77",
+      "line": 3328,
+      "occurrence_id": "schema-writer-f60e2650756b1c7b",
       "path_pattern": "<run>/body_frame/axis_valid",
       "required": null,
       "shape_expression": "shape(body['valid'][:])",
@@ -44645,7 +44645,7 @@
       "subgroup": null,
       "write_lifecycle": "immutable_publication",
       "write_lifecycle_basis": "publication/compaction surface",
-      "writer_site_id": "writer-74671666ae773208"
+      "writer_site_id": "writer-c680d5061f3d9e88"
     },
     {
       "access_pattern": "windowed",

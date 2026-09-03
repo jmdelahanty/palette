@@ -28,6 +28,7 @@ from fisheye.shared.coordinate_identity import (
     load_row_identity_contract_attrs,
     load_bound_row_identity_contract,
     parse_row_identity_contract,
+    row_authority_array_digest_evidence_scope,
     row_identity_contract_attrs,
     row_identity_key_attrs,
     require_bound_row_identity_contract,
@@ -617,6 +618,52 @@ def test_temporal_authorities_reload_fresh_from_persisted_nodes() -> None:
     assert "source_temporal_authority_unverified" in _issue_codes(forged_exc.value)
 
 
+def test_receipt_bound_temporal_authority_reuses_array_digests() -> None:
+    values = build_track_sample_key(
+        np.asarray([4, 4], dtype=np.int64),
+        np.asarray([1, 2], dtype=np.int64),
+    )
+    _rowset, _key, lineage = _track_lineage(values, total_frames=3)
+    source = lineage._source_temporal_authority
+    source_rowset = source._source_rowset_node
+    source_key = source.source_row_identity._key_array_node
+    source_frames = source._source_frame_index_node
+    source_key.read_count = 0
+    source_frames.read_count = 0
+    evidence = {
+        source_key.path: {
+            "dtype": source_key.dtype.str,
+            "shape": list(source_key.shape),
+            "content_sha256": (
+                source.source_row_identity.contract.key_array.content_sha256
+            ),
+            "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        },
+        source_frames.path: {
+            "dtype": source_frames.dtype.str,
+            "shape": list(source_frames.shape),
+            "content_sha256": (
+                source.record.source_acquisition_frame_index.content_sha256
+            ),
+            "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        },
+    }
+
+    with row_authority_array_digest_evidence_scope(source_rowset, evidence):
+        identity = load_bound_row_identity_contract(source_rowset, source_key)
+        loaded = load_bound_source_row_temporal_authority(
+            source_rowset,
+            source_frames,
+            source_row_identity=identity,
+            acquisition_frame=source.acquisition_frame,
+        )
+        require_bound_source_row_temporal_authority(loaded)
+
+    assert loaded.record == source.record
+    assert source_key.read_count == 0
+    assert source_frames.read_count == 0
+
+
 def test_identity_authorities_reuse_one_operation_proof_and_recheck_on_close() -> None:
     values = build_track_sample_key(
         np.asarray([4, 4], dtype=np.int64),
@@ -846,6 +893,44 @@ def test_bound_identity_is_derived_from_exact_stamped_sibling_nodes() -> None:
     with pytest.raises(RowIdentityContractError) as stale_exc:
         bound.assert_verified()
     assert "key_content_digest_mismatch" in _issue_codes(stale_exc.value)
+
+
+def test_receipt_bound_identity_reuses_digest_without_decoding_values() -> None:
+    values = np.asarray([11, 12], dtype=np.uint64)
+    rowset = _Node(path="analysis/detect_runs/d1")
+    key = _Node(values, path="analysis/detect_runs/d1/instance_key")
+    stamped = stamp_and_bind_row_identity_contract(
+        rowset,
+        key,
+        contract=build_row_identity_contract(
+            domain=OBSERVATION_INSTANCE_DOMAIN,
+            values=values,
+        ),
+    )
+    key.read_count = 0
+    evidence = {
+        key.path: {
+            "dtype": key.dtype.str,
+            "shape": list(key.shape),
+            "content_sha256": stamped.contract.key_array.content_sha256,
+            "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        }
+    }
+
+    with row_authority_array_digest_evidence_scope(rowset, evidence):
+        loaded = load_bound_row_identity_contract(rowset, key)
+        loaded.assert_verified()
+
+    assert loaded == stamped
+    assert key.read_count == 0
+
+    stale_evidence = copy.deepcopy(evidence)
+    stale_evidence[key.path]["content_sha256"] = "a" * 64
+    with row_authority_array_digest_evidence_scope(rowset, stale_evidence):
+        with pytest.raises(RowIdentityContractError) as exc_info:
+            load_bound_row_identity_contract(rowset, key)
+    assert "key_content_digest_mismatch" in _issue_codes(exc_info.value)
+    assert key.read_count == 0
 
 
 def test_free_constructed_bound_identity_is_not_writer_evidence() -> None:

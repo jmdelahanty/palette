@@ -1319,6 +1319,13 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
 
     with monkeypatch.context() as admission_guard:
         admission_guard.setattr(
+            bundle_publication,
+            "_persisted_core_producer_evidence",
+            lambda *_args, **_kwargs: pytest.fail(
+                "receipt-bound bundle admission replayed producer sidecars"
+            ),
+        )
+        admission_guard.setattr(
             "fisheye.shared.zarr.subject_mask_quality_manifest."
             "streaming_array_sha256",
             forbid_quality_payload_hash,
@@ -1391,25 +1398,27 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
         "eye_right",
         "swim_bladder",
     ]
-    source_reloads = 0
-    original_source_loader = shape_source_module.load_subject_shape_bundle_source
+    receipt_source_rechecks = 0
+    original_source_loader = (
+        shape_source_module._load_receipt_bound_subject_shape_bundle_source
+    )
 
     def count_source_reload(*args, **kwargs):
-        nonlocal source_reloads
-        source_reloads += 1
+        nonlocal receipt_source_rechecks
+        receipt_source_rechecks += 1
         return original_source_loader(*args, **kwargs)
 
     with monkeypatch.context() as proof_guard:
         proof_guard.setattr(
             shape_source_module,
-            "load_subject_shape_bundle_source",
+            "_load_receipt_bound_subject_shape_bundle_source",
             count_source_reload,
         )
         with proof_verification_scope():
             assert require_bound_subject_shape_bundle_source(shape_source) is shape_source
             assert require_bound_subject_shape_bundle_source(shape_source) is shape_source
             assert require_bound_subject_shape_bundle_source(shape_source) is shape_source
-    assert source_reloads == 2
+    assert receipt_source_rechecks == 2
     offsets = shape_source.translation_offsets()
     np.testing.assert_array_equal(
         shape_source.transform_roi_points(np.zeros((4, 2), dtype=np.float32)),
@@ -1572,10 +1581,37 @@ def test_recording_bundle_publishes_coordinate_bound_members_and_subject_shape_v
     selected_run = selected_parent["shape_bundle_v5_supported"]
     assert selected_run.attrs["stage_selector_eligible"] is True
     assert SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR not in selected_run.attrs
-    selected_publication = load_persisted_subject_shape_coordinate_publication(
-        selected_root,
-        "analysis/subject_shape_runs/shape_bundle_v5_supported",
+    decoded_identity_or_derivation_paths: list[str] = []
+    array_type = type(selected_run["instance_key"])
+    original_array_getitem = array_type.__getitem__
+    selected_subject_shape_prefix = (
+        "/analysis/subject_shape_runs/shape_bundle_v5_supported/"
     )
+
+    def count_forbidden_decodes(array: Any, selection: Any) -> Any:
+        path = f"/{str(array.path).strip('/')}"
+        if path.startswith(selected_subject_shape_prefix):
+            decoded_identity_or_derivation_paths.append(path)
+        return original_array_getitem(array, selection)
+
+    with monkeypatch.context() as receipt_load_guard:
+        receipt_load_guard.setattr(
+            bundle_publication,
+            "_persisted_core_producer_evidence",
+            lambda *_args, **_kwargs: pytest.fail(
+                "subject-shape load replayed bundle producer sidecars"
+            ),
+        )
+        receipt_load_guard.setattr(
+            array_type,
+            "__getitem__",
+            count_forbidden_decodes,
+        )
+        selected_publication = load_persisted_subject_shape_coordinate_publication(
+            selected_root,
+            "analysis/subject_shape_runs/shape_bundle_v5_supported",
+        )
+    assert decoded_identity_or_derivation_paths == []
     assert selected_publication.source_binding is not None
     assert (
         selected_publication.source_binding.record_sha256 == shape_source.source_digest

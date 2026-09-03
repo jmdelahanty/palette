@@ -91,6 +91,10 @@ ARRAY_PAYLOAD_CANONICALIZATION = "numpy_dtype_shape_c_order_bytes_v1"
 _ACTIVE_ARRAY_PAYLOAD_DIGEST_EVIDENCE: ContextVar[
     tuple[ArchiveIdentity, Mapping[str, Mapping[str, Any]]] | None
 ] = ContextVar("palette_array_payload_digest_evidence", default=None)
+_ACTIVE_VALIDATED_SCIENTIFIC_ARRAY_RECEIPT: ContextVar[bool] = ContextVar(
+    "palette_validated_scientific_array_receipt",
+    default=False,
+)
 
 PHYSICAL_FRAME_CALIBRATION_KIND = "physical_frame_calibration"
 FISH_ANATOMICAL_BODY_FRAME_KIND = "fish_anatomical_body_frame"
@@ -653,6 +657,28 @@ def array_payload_digest_evidence_scope(
         _ACTIVE_ARRAY_PAYLOAD_DIGEST_EVIDENCE.reset(token)
 
 
+@contextmanager
+def validated_scientific_array_receipt_scope() -> Iterator[None]:
+    """Mark active digest evidence as a completed scientific receipt.
+
+    Digest reuse alone can avoid rehashing but cannot replace first-write
+    scientific validation.  Immutable loaders enter this nested scope only
+    after validating a receipt bound to the completed scientific manifest.
+    """
+
+    if _ACTIVE_ARRAY_PAYLOAD_DIGEST_EVIDENCE.get() is None:
+        _fail(
+            "scientific_array_receipt_evidence_missing",
+            "$",
+            "Scientific receipt reuse requires active array-digest evidence.",
+        )
+    token = _ACTIVE_VALIDATED_SCIENTIFIC_ARRAY_RECEIPT.set(True)
+    try:
+        yield
+    finally:
+        _ACTIVE_VALIDATED_SCIENTIFIC_ARRAY_RECEIPT.reset(token)
+
+
 def _declared_array_metadata(node: Any) -> tuple[str, tuple[int, ...]]:
     path = f"/{_node_path(node)}"
     try:
@@ -721,8 +747,8 @@ def _recheck_array_snapshot(node: Any, snapshot: _ArrayPayloadSnapshot) -> None:
         )
 
 
-def array_payload_sha256(node: Any) -> str:
-    """Hash a stable payload, reusing it only in one explicit proof scope."""
+def _receipt_bound_array_payload_sha256(node: Any) -> str | None:
+    """Return active receipt evidence, or ``None`` when no scope is active."""
 
     identity = archive_identity(node)
     path = _node_path(node)
@@ -737,34 +763,67 @@ def array_payload_sha256(node: Any) -> str:
         )
 
     evidence_binding = _ACTIVE_ARRAY_PAYLOAD_DIGEST_EVIDENCE.get()
-    if evidence_binding is not None:
-        evidence_identity, evidence = evidence_binding
-        if (
-            evidence_identity.kind != identity.kind
-            or evidence_identity.key != identity.key
-        ):
-            _fail(
-                "array_digest_evidence_archive_mismatch",
-                f"/{path}",
-                "Preverified array payload evidence names another archive.",
-            )
-        record = evidence.get(path)
-        digest = record.get("content_sha256") if isinstance(record, Mapping) else None
-        if (
-            not isinstance(record, Mapping)
-            or set(record) != {"dtype", "shape", "content_sha256", "canonicalization"}
-            or record.get("dtype") != dtype.str
-            or record.get("shape") != [int(value) for value in shape]
-            or record.get("canonicalization") != ARRAY_PAYLOAD_CANONICALIZATION
-            or type(digest) is not str
-            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
-        ):
-            _fail(
-                "array_digest_evidence_mismatch",
-                f"/{path}",
-                "Preverified array payload evidence is missing or differs from live metadata.",
-            )
-        return digest
+    if evidence_binding is None:
+        return None
+    evidence_identity, evidence = evidence_binding
+    if (
+        evidence_identity.kind != identity.kind
+        or evidence_identity.key != identity.key
+    ):
+        _fail(
+            "array_digest_evidence_archive_mismatch",
+            f"/{path}",
+            "Preverified array payload evidence names another archive.",
+        )
+    record = evidence.get(path)
+    digest = record.get("content_sha256") if isinstance(record, Mapping) else None
+    if (
+        not isinstance(record, Mapping)
+        or set(record) != {"dtype", "shape", "content_sha256", "canonicalization"}
+        or record.get("dtype") != dtype.str
+        or record.get("shape") != [int(value) for value in shape]
+        or record.get("canonicalization") != ARRAY_PAYLOAD_CANONICALIZATION
+        or type(digest) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    ):
+        _fail(
+            "array_digest_evidence_mismatch",
+            f"/{path}",
+            "Preverified array payload evidence is missing or differs from live metadata.",
+        )
+    return digest
+
+
+def _validated_scientific_array_payload_sha256(node: Any) -> str | None:
+    if not _ACTIVE_VALIDATED_SCIENTIFIC_ARRAY_RECEIPT.get():
+        return None
+    digest = _receipt_bound_array_payload_sha256(node)
+    if digest is None:
+        _fail(
+            "scientific_array_receipt_evidence_missing",
+            f"/{_node_path(node)}",
+            "Scientific receipt scope lacks its array-digest evidence.",
+        )
+    return digest
+
+
+def array_payload_sha256(node: Any) -> str:
+    """Hash a stable payload, reusing it only in one explicit proof scope."""
+
+    identity = archive_identity(node)
+    path = _node_path(node)
+    try:
+        dtype = np.dtype(getattr(node, "dtype"))
+        shape = tuple(int(value) for value in getattr(node, "shape"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        _fail(
+            "array_metadata_invalid",
+            f"/{path}",
+            f"Array payload metadata is unavailable: {exc}.",
+        )
+    receipt_digest = _receipt_bound_array_payload_sha256(node)
+    if receipt_digest is not None:
+        return receipt_digest
 
     def load_stable_snapshot() -> _ArrayPayloadSnapshot:
         value = _read_array_snapshot(node)
@@ -2291,8 +2350,10 @@ def bind_body_source_coordinate_descriptor(
 
     row_identity = _require_row_identity(row_identity, body_frame=True)
     shape = _coordinate_shape(coordinate_node)
-    source_payload_snapshot = _read_array_snapshot(coordinate_node)
-    if source_payload_snapshot.values.dtype.kind not in "fiu":
+    source_payload, source_payload_snapshot = _bind_geometry_array_record(
+        coordinate_node
+    )
+    if np.dtype(source_payload.dtype).kind not in "fiu":
         _fail(
             "body_source_dtype_invalid",
             "coordinate_node.dtype",
@@ -2432,11 +2493,7 @@ def bind_body_source_coordinate_descriptor(
             "coordinate_node.path",
             "Source coordinates are not descendants of the exact identity rowset.",
         )
-    _recheck_array_snapshot(coordinate_node, source_payload_snapshot)
-    source_payload = _geometry_array_record_from_snapshot(
-        coordinate_node,
-        source_payload_snapshot,
-    )
+    _recheck_geometry_array_record(coordinate_node, source_payload_snapshot)
     return BoundBodySourceCoordinateDescriptor(
         record_ref=f"/{_node_path(coordinate_node)}@{COORDINATE_DESCRIPTOR_ATTR}",
         record_sha256=descriptor.digest(),
@@ -2817,8 +2874,9 @@ def build_body_estimator_source_manifest_record(
             "support_arrays",
             "Source and support-array roles must use distinct exact nodes.",
         )
-    snapshots = {
-        name: _read_array_snapshot(node) for name, node in support_nodes.items()
+    support_bindings = {
+        name: _bind_geometry_array_record(node)
+        for name, node in support_nodes.items()
     }
     identity = _archive_for_nodes(
         source._coordinate_node,
@@ -2838,7 +2896,7 @@ def build_body_estimator_source_manifest_record(
     ):
         _fail("archive_mismatch", "$", "Estimator source authorities span archives.")
     for name, node in support_nodes.items():
-        _recheck_array_snapshot(node, snapshots[name])
+        _recheck_geometry_array_record(node, support_bindings[name][1])
     return {
         "schema_id": BODY_ESTIMATOR_SOURCE_MANIFEST_SCHEMA_ID,
         "schema_version": 1,
@@ -2857,8 +2915,8 @@ def build_body_estimator_source_manifest_record(
         },
         "labels": list(labels),
         "support_arrays": {
-            name: _geometry_array_record_from_snapshot(node, snapshots[name]).to_dict()
-            for name, node in sorted(support_nodes.items())
+            name: support_bindings[name][0].to_dict()
+            for name in sorted(support_nodes)
         },
     }
 
@@ -2894,8 +2952,9 @@ def _bind_body_estimator_source(
         )
     shape = source.source_payload.shape
     leading = source.row_identity.leading_dimension
-    snapshots = {
-        name: _read_array_snapshot(node) for name, node in support_nodes.items()
+    support_bindings = {
+        name: _bind_geometry_array_record(node)
+        for name, node in support_nodes.items()
     }
     if method in {"keypoint_head_axis", "mask_component_axis"}:
         expected_shape = (leading, len(labels), 2)
@@ -2928,11 +2987,11 @@ def _bind_body_estimator_source(
                     "exact subject-component label authority and that same shape."
                 ),
             )
-        validity = snapshots.get("validity")
+        validity = support_bindings.get("validity")
         if (
             validity is None
-            or validity.values.dtype != np.dtype("bool")
-            or validity.shape
+            or np.dtype(validity[0].dtype) != np.dtype("bool")
+            or validity[0].shape
             != (
                 leading,
                 len(labels),
@@ -2956,15 +3015,15 @@ def _bind_body_estimator_source(
                 "source_descriptor",
                 "Spline source requires polyline_xy with shape (N, P>=2, 2).",
             )
-        anchors = snapshots.get("polarity_anchors")
-        valid = snapshots.get("polarity_valid")
+        anchors = support_bindings.get("polarity_anchors")
+        valid = support_bindings.get("polarity_valid")
         if (
             anchors is None
-            or anchors.values.dtype.kind not in "fiu"
-            or anchors.shape != (leading, 3, 2)
+            or np.dtype(anchors[0].dtype).kind not in "fiu"
+            or anchors[0].shape != (leading, 3, 2)
             or valid is None
-            or valid.values.dtype != np.dtype("bool")
-            or valid.shape != (leading, 3)
+            or np.dtype(valid[0].dtype) != np.dtype("bool")
+            or valid[0].shape != (leading, 3)
         ):
             _fail(
                 "estimator_source_polarity_invalid",
@@ -2990,7 +3049,7 @@ def _bind_body_estimator_source(
     ):
         _fail("archive_mismatch", "$", "Estimator source authorities span archives.")
     for name, node in support_nodes.items():
-        _recheck_array_snapshot(node, snapshots[name])
+        _recheck_geometry_array_record(node, support_bindings[name][1])
     expected_manifest = build_body_estimator_source_manifest_record(
         method=method,
         source_descriptor=source,
@@ -3030,10 +3089,8 @@ def _bind_body_estimator_source(
             },
             "labels": list(labels),
             "support_arrays": {
-                name: _geometry_array_record_from_snapshot(
-                    node, snapshots[name]
-                ).to_dict()
-                for name, node in sorted(support_nodes.items())
+                name: support_bindings[name][0].to_dict()
+                for name in sorted(support_nodes)
             },
             "producer_manifest": {
                 "record_ref": manifest.record_ref,
@@ -3194,6 +3251,35 @@ def _geometry_array_record_from_snapshot(
         shape=snapshot.shape,
         content_sha256=snapshot.content_sha256,
     )
+
+
+def _bind_geometry_array_record(
+    node: Any,
+) -> tuple[BodyGeometryArrayRecord, _ArrayPayloadSnapshot | None]:
+    """Bind one array from a validated receipt or one stable decoded snapshot."""
+
+    receipt_digest = _validated_scientific_array_payload_sha256(node)
+    if receipt_digest is not None:
+        dtype, shape = _declared_array_metadata(node)
+        return (
+            BodyGeometryArrayRecord(
+                array_ref=f"/{_node_path(node)}",
+                dtype=dtype,
+                shape=shape,
+                content_sha256=receipt_digest,
+            ),
+            None,
+        )
+    snapshot = _read_array_snapshot(node)
+    return _geometry_array_record_from_snapshot(node, snapshot), snapshot
+
+
+def _recheck_geometry_array_record(
+    node: Any,
+    snapshot: _ArrayPayloadSnapshot | None,
+) -> None:
+    if snapshot is not None:
+        _recheck_array_snapshot(node, snapshot)
 
 
 def _validate_axis_geometry_values(
@@ -3527,6 +3613,78 @@ def bind_body_frame_geometry(
             "Geometry arrays must be distinct exact children of the frame node.",
         )
     leading = row_identity.leading_dimension
+    receipt_origin_digest = _validated_scientific_array_payload_sha256(
+        origin_xy_node
+    )
+    if receipt_origin_digest is not None:
+        receipt_nodes = {
+            "origin_xy": origin_xy_node,
+            "forward_axis_xy": forward_axis_xy_node,
+            "left_axis_xy": left_axis_xy_node,
+            "axis_valid": axis_valid_node,
+        }
+        receipt_digests = {
+            "origin_xy": receipt_origin_digest,
+            "forward_axis_xy": _validated_scientific_array_payload_sha256(
+                forward_axis_xy_node
+            ),
+            "left_axis_xy": _validated_scientific_array_payload_sha256(
+                left_axis_xy_node
+            ),
+            "axis_valid": _validated_scientific_array_payload_sha256(
+                axis_valid_node
+            ),
+        }
+        if any(value is None for value in receipt_digests.values()):
+            _fail(
+                "array_digest_evidence_mismatch",
+                "geometry",
+                "Receipt-bound body geometry evidence is incomplete.",
+            )
+        metadata = {
+            name: _declared_array_metadata(node)
+            for name, node in receipt_nodes.items()
+        }
+        vector_dtype = np.dtype(metadata["origin_xy"][0])
+        if (
+            metadata["origin_xy"][1] != (leading, 2)
+            or metadata["forward_axis_xy"][1] != (leading, 2)
+            or metadata["left_axis_xy"][1] != (leading, 2)
+            or metadata["axis_valid"][1] != (leading,)
+            or np.dtype(metadata["forward_axis_xy"][0]) != vector_dtype
+            or np.dtype(metadata["left_axis_xy"][0]) != vector_dtype
+            or vector_dtype.kind != "f"
+            or vector_dtype.itemsize not in {4, 8}
+            or np.dtype(metadata["axis_valid"][0]) != np.dtype("bool")
+        ):
+            _fail(
+                "geometry_metadata_mismatch",
+                "geometry",
+                "Receipt-bound body geometry has invalid dtype or shape metadata.",
+            )
+        record = BodyFrameGeometryRecord(
+            **{
+                name: BodyGeometryArrayRecord(
+                    array_ref=f"/{_node_path(node)}",
+                    dtype=metadata[name][0],
+                    shape=metadata[name][1],
+                    content_sha256=str(receipt_digests[name]),
+                )
+                for name, node in receipt_nodes.items()
+            }
+        )
+        return BoundBodyFrameGeometry(
+            record=record,
+            row_identity=row_identity,
+            estimator_source=estimator_source,
+            archive_identity=identity,
+            frame_node=frame_node,
+            origin_node=origin_xy_node,
+            forward_node=forward_axis_xy_node,
+            left_node=left_axis_xy_node,
+            valid_node=axis_valid_node,
+            _verification_seal=_BODY_GEOMETRY_SEAL,
+        )
     snapshots = {
         "origin_xy": _read_array_snapshot(origin_xy_node),
         "forward_axis_xy": _read_array_snapshot(forward_axis_xy_node),
@@ -4502,6 +4660,7 @@ __all__ = [
     "stamp_fish_anatomical_body_frame_record",
     "stamp_physical_frame_calibration_record",
     "stamp_selected_camera_frame_evidence",
+    "validated_scientific_array_receipt_scope",
     "verify_bound_body_frame_contract",
     "verify_bound_body_frame_estimator",
     "verify_bound_body_frame_geometry",
