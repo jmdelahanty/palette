@@ -29,6 +29,9 @@ from fisheye.analysis_workflows.chaser_body_alignment_by_distance_successor impo
 from fisheye.analysis_workflows.chaser_radial_near_field_successor import (
     PreparedChaserRadialNearField,
 )
+from fisheye.analysis_workflows.chaser_near_field_visit_successor import (
+    PreparedChaserNearFieldVisits,
+)
 from fisheye.analysis_workflows.chaser_spatial_occupancy_successor import (
     PreparedChaserSpatialOccupancy,
 )
@@ -119,6 +122,10 @@ _TYPE_INFO: Mapping[type[Any], tuple[str, str]] = MappingProxyType(
         PreparedChaserRadialNearField: (
             "chaser_radial_near_field",
             "analysis/chaser_radial_near_field_runs",
+        ),
+        PreparedChaserNearFieldVisits: (
+            "chaser_near_field_visits",
+            "analysis/chaser_near_field_visits_runs",
         ),
         PreparedChaserSpatialOccupancy: (
             "chaser_spatial_occupancy",
@@ -744,6 +751,13 @@ class ComposableChaserSuccessorSourceHandle:
                 n_epoch_chaser_rows=int(dimensions["n_epoch_chaser_rows"]),
                 n_radial_rows=int(dimensions["n_radial_rows"]),
                 n_cdf_rows=int(dimensions["n_cdf_rows"]),
+                **values,
+            )
+        if self.successor_kind == "chaser_near_field_visits":
+            return PreparedChaserNearFieldVisits(
+                n_visits=int(dimensions["n_visits"]),
+                n_samples=int(dimensions["n_samples"]),
+                n_summary_rows=int(dimensions["n_summary_rows"]),
                 **values,
             )
         if self.successor_kind == "chaser_spatial_occupancy":
