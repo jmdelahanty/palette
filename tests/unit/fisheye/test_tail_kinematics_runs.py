@@ -587,6 +587,15 @@ def test_write_tail_kinematics_run_group_writes_schema_and_row_lineage(
         )
         == ()
     )
+    from fisheye.analytics_exports.tail_trace_samples import (
+        _tail_array_schema_adoption,
+    )
+
+    adopted, export_binding = _tail_array_schema_adoption(run)
+    assert adopted is False
+    assert export_binding["payload_sha256"] == (
+        run.attrs["tail_kinematics_array_schema"]["payload_digest"]
+    )
     assert tuple(run["tail_angle_rad"].chunks) == (2, 10)
     assert tuple(run["tail_angle_rad"].shards) == (2, 10)
     assert tuple(run["source_acquisition_frame_index"].shards) == (2,)
