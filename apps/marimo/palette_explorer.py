@@ -441,8 +441,8 @@ def _(EXACT_CHASER_PROVIDER_ADAPTER, mo, provider_specs, selected_provider):
             mo.callout(
                 mo.md(
                     "Multiple immutable selector-ineligible runs are available. "
-                    "Choose one explicitly; no analysis arrays or distribution "
-                    "tables will load until you do."
+                    "Choose one explicitly; no analysis arrays will load until "
+                    "you do, and no distribution tables will load either."
                 ),
                 kind="warn",
             )
