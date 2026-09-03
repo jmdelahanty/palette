@@ -43,7 +43,7 @@ dependencies:
   - rich
   - tqdm
   - click
-  - pydantic
+  - "pydantic>=2,<3"
   - hsluv
   - networkx
   - bokeh

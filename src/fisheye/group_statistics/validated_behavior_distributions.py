@@ -19,15 +19,12 @@ from pathlib import Path
 import shutil
 import tempfile
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
 from fisheye.analysis_workflows.provider_epoch_behavior_summary_source_handle import (
     load_provider_epoch_behavior_summary_source_handle,
-)
-from fisheye.analysis.swim_bout_io import (
-    load_exact_selector_ineligible_default_swim_bout_tables,
 )
 from fisheye.analysis_workflows.validated_recording_behavior_source import (
     ValidatedRecordingBehaviorSource,
@@ -47,7 +44,6 @@ from fisheye.shared.json_safety import (
     write_json_atomic,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
-from fisheye.shared.zarr_io import open_zarr_root
 
 from .validated_behavior_distribution_specs import (
     SCOPE_LABELS,
@@ -647,66 +643,10 @@ def _fps_from_epoch_rows(rows: Sequence[Mapping[str, Any]]) -> float:
 def _load_bound_swim_bout_tables(source: ValidatedRecordingBehaviorSource) -> Any:
     """Open the exact canonical source named by the validated bundle."""
 
-    binding = source.bundle["source_bindings"]["canonical_swim_bouts"]["source"]
-    run_path = str(binding["run_path"])
-    root = open_zarr_root(source.analysis_zarr, mode="r", use_consolidated=True)
-    tables = load_exact_selector_ineligible_default_swim_bout_tables(
-        root, run_name=run_path.rsplit("/", 1)[-1]
-    )
-    frame_contract = tables.run_attrs.get("frame_axis_contract")
-    motion_authority = tables.run_attrs.get("source_track_motion_authority")
-    if not isinstance(frame_contract, Mapping) or not isinstance(
-        motion_authority, Mapping
-    ):
-        _fail("Bound swim-bout run lacks exact frame or motion authority")
-    expected = {
-        "run_path": run_path,
-        "lineage_hash": binding["lineage_hash"],
-        "track_id": int(binding["track_id"]),
-        "candidate_id": int(binding["default_candidate_id"]),
-        "signal_id": int(binding["default_signal_id"]),
-        "signal_level": str(binding["default_signal_level"]),
-        "frame_axis_sha256": str(binding["frame_axis_sha256"]),
-        "motion_manifest": str(binding["source_track_motion_manifest_sha256"]),
-        "motion_verification": str(binding["source_track_motion_verification_digest"]),
-    }
-    observed = {
-        "run_path": tables.run_path,
-        "lineage_hash": tables.run_attrs.get("lineage_hash"),
-        "track_id": tables.candidate.track_id,
-        "candidate_id": tables.candidate.candidate_id,
-        "signal_id": tables.signal.signal_id,
-        "signal_level": tables.signal.speed_level,
-        "frame_axis_sha256": frame_contract.get("content_sha256"),
-        "motion_manifest": frame_contract.get("source_track_motion_manifest_sha256"),
-        "motion_verification": motion_authority.get("provider_verification_digest"),
-    }
-    if observed != expected or tables.signal.role != "detector_response":
-        _fail("Selected swim-bout interval source differs from the validated bundle")
-    fps = tables.run_attrs.get("fps")
-    if (
-        isinstance(fps, bool)
-        or not isinstance(fps, (int, float))
-        or not math.isfinite(float(fps))
-        or float(fps) <= 0
-    ):
-        _fail("Bound swim-bout run lacks exact positive FPS")
-    required = {
-        "interval_id",
-        "valid",
-        "prev_bout_id",
-        "next_bout_id",
-        "prev_end_frame",
-        "next_start_frame",
-        "interval_frames",
-        "prev_end_time_s",
-        "next_start_time_s",
-        "interval_s",
-    }
-    names = set(tables.inter_bout_intervals.dtype.names or ())
-    if not required.issubset(names):
-        _fail("Bound swim-bout run lacks required interval fields")
-    return tables
+    try:
+        return source.canonical_swim_bout_tables()
+    except ValueError as exc:
+        raise ValidatedBehaviorDistributionError(str(exc)) from exc
 
 
 def _materialize_bound_intervals(

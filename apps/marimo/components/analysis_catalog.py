@@ -70,6 +70,27 @@ CORE_BEHAVIOR_PROVIDER = ProviderDefinition(
 )
 
 
+RECORDING_BEHAVIOR_DISTRIBUTION_PROVIDER = ProviderDefinition(
+    provider_id="recording_behavior_distributions",
+    label="Recording behavior distributions",
+    description=(
+        "Receipt-bound whole-session, protocol-epoch, and named-time "
+        "distributions from one immutable recording run."
+    ),
+    component_key="recording_behavior_distributions",
+    analyses=(
+        AnalysisDefinition(
+            "distributions",
+            "Persisted behavior distributions",
+            (
+                "Exact persisted histogram bins, denominators, exclusions, and "
+                "scope memberships without viewer-side rebinning."
+            ),
+        ),
+    ),
+)
+
+
 CHASER_PROVIDER = ProviderDefinition(
     provider_id="stimulus_chaser",
     label="Chaser stimulus",
@@ -352,6 +373,9 @@ BOUT_KINEMATICS_PROVIDER = ProviderDefinition(
 
 PROVIDERS: Mapping[str, ProviderDefinition] = {
     CORE_BEHAVIOR_PROVIDER.provider_id: CORE_BEHAVIOR_PROVIDER,
+    RECORDING_BEHAVIOR_DISTRIBUTION_PROVIDER.provider_id: (
+        RECORDING_BEHAVIOR_DISTRIBUTION_PROVIDER
+    ),
     CHASER_PROVIDER.provider_id: CHASER_PROVIDER,
     CHASER_CANDIDATE_PROVIDER.provider_id: CHASER_CANDIDATE_PROVIDER,
     CHASER_EXACT_SUCCESSOR_PROVIDER.provider_id: CHASER_EXACT_SUCCESSOR_PROVIDER,

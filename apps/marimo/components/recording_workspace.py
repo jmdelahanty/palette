@@ -29,6 +29,7 @@ class RecordingExplorationWorkspace:
     core_source: Any | None
     core_projection: Any | None
     chaser_view: Any | None
+    distribution_view: Any | None = None
 
     @property
     def provider_id(self) -> str | None:
@@ -112,6 +113,13 @@ class RecordingExplorationWorkspace:
             }
         }
 
+    @property
+    def distribution_series(self) -> tuple[Any, ...]:
+        """Exact persisted histogram series selected in the distribution view."""
+
+        values = getattr(self.distribution_view, "series", ())
+        return tuple(values) if values is not None else ()
+
     def open_zarr(self) -> Any:
         """Open the selected recording Zarr in read-only mode."""
 
@@ -128,6 +136,7 @@ class RecordingExplorationWorkspace:
             "core_frame_available": self.core_frame is not None,
             "related_core_frames": tuple(sorted(self.related_core_frames)),
             "chaser_tables": tuple(sorted(self.chaser_tables)),
+            "distribution_series_count": len(self.distribution_series),
             "persisted_pngs": tuple(sorted(self.persisted_pngs)),
         }
 

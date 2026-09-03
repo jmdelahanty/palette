@@ -66,6 +66,16 @@ def _():
         resolve_time_windows_from_multiselect,
     )
     from apps.marimo.components.provenance import build_spec_provenance_panel
+    from apps.marimo.components.recording_behavior_distributions import (
+        RENDERER_ID as RECORDING_DISTRIBUTION_RENDERER,
+        build_recording_behavior_distribution_output,
+        discover_recording_behavior_distribution_options,
+        load_recording_behavior_distribution_handle,
+        load_recording_behavior_distribution_projection,
+        recording_distribution_metric_options,
+        recording_distribution_scope_options,
+        recording_distribution_weighting_options,
+    )
     from apps.marimo.components.provider_chaser_candidate import (
         available_provider_chaser_candidate_analysis_ids,
         build_provider_chaser_candidate_bearing_output,
@@ -92,6 +102,7 @@ def _():
         EXACT_CHASER_PROVIDER_ADAPTER,
         PROVIDERS,
         Path,
+        RECORDING_DISTRIBUTION_RENDERER,
         RecordingExplorationWorkspace,
         TRACK_KINEMATICS_RENDERER,
         analyses_for_provider,
@@ -116,12 +127,14 @@ def _():
         build_fish_heading_output,
         build_provider_chaser_candidate_bearing_output,
         build_provider_chaser_candidate_bout_response_output,
+        build_recording_behavior_distribution_output,
         build_spatial_occupancy_output,
         build_spec_provenance_panel,
         build_static_artifacts_panel,
         build_tail_kinematics_output,
         discover_chaser_gaze_tracking_components,
         discover_core_behavior_options,
+        discover_recording_behavior_distribution_options,
         discover_protocol_recording_options,
         discover_recording_explorer_spec_options,
         go,
@@ -131,10 +144,15 @@ def _():
         load_core_behavior_projection,
         load_goodcopbadcop_view,
         load_provider_chaser_candidate_projection,
+        load_recording_behavior_distribution_handle,
+        load_recording_behavior_distribution_projection,
         mo,
         px,
         resolve_time_window_from_widgets,
         resolve_time_windows_from_multiselect,
+        recording_distribution_metric_options,
+        recording_distribution_scope_options,
+        recording_distribution_weighting_options,
         time,
         validated_core_behavior_option,
     )
@@ -263,8 +281,10 @@ def _(mo, recording_options, recording_scope_label, seed_zarr_path):
 
 @app.cell(hide_code=True)
 def _(
+    RECORDING_DISTRIBUTION_RENDERER,
     TRACK_KINEMATICS_RENDERER,
     discover_core_behavior_options,
+    discover_recording_behavior_distribution_options,
     discover_recording_explorer_spec_options,
     initial_artifact,
     initial_renderer,
@@ -287,6 +307,21 @@ def _(
         if not initial_renderer or str(initial_renderer) == TRACK_KINEMATICS_RENDERER
         else []
     )
+    distribution_options = (
+        list(
+            discover_recording_behavior_distribution_options(
+                zarr_path,
+                run_path_filter=(
+                    str(initial_run_path) if initial_run_path else None
+                ),
+            )
+        )
+        if (
+            (not initial_renderer or str(initial_renderer) == RECORDING_DISTRIBUTION_RENDERER)
+            and not initial_artifact
+        )
+        else []
+    )
     selected_validated_behavior_source = None
     if (
         validated_behavior_source is not None
@@ -299,6 +334,7 @@ def _(
         ]
     return (
         core_options,
+        distribution_options,
         selected_recording,
         selected_validated_behavior_source,
         spec_options,
@@ -310,6 +346,7 @@ def _(
 def _(
     PROVIDERS,
     core_options,
+    distribution_options,
     group_specs_by_provider,
     mo,
     spec_options,
@@ -318,6 +355,10 @@ def _(
     specs_by_provider = group_specs_by_provider(spec_options)
     if core_options:
         specs_by_provider["core_behavior"] = list(core_options)
+    if distribution_options:
+        specs_by_provider["recording_behavior_distributions"] = list(
+            distribution_options
+        )
     provider_by_label = {
         PROVIDERS[provider_id].label: PROVIDERS[provider_id]
         for provider_id in PROVIDERS
@@ -377,14 +418,18 @@ def _(EXACT_CHASER_PROVIDER_ADAPTER, mo, provider_specs, selected_provider):
         }
         source_labels = list(source_by_label)
         requires_explicit_choice = (
-            selected_provider.provider_id == EXACT_CHASER_PROVIDER_ADAPTER.provider_id
+            selected_provider.provider_id
+            in {
+                EXACT_CHASER_PROVIDER_ADAPTER.provider_id,
+                "recording_behavior_distributions",
+            }
             and len(source_labels) > 1
         )
         initial_source_label = (
             EXACT_CHASER_PROVIDER_ADAPTER.initial_source_label(source_labels)
             if selected_provider.provider_id
             == EXACT_CHASER_PROVIDER_ADAPTER.provider_id
-            else next(iter(source_by_label))
+            else (None if requires_explicit_choice else next(iter(source_by_label)))
         )
         source_picker = mo.ui.dropdown(
             options=source_labels,
@@ -395,9 +440,9 @@ def _(EXACT_CHASER_PROVIDER_ADAPTER, mo, provider_specs, selected_provider):
         selection_guidance = (
             mo.callout(
                 mo.md(
-                    "Multiple immutable exact-successor bundles are available. "
+                    "Multiple immutable selector-ineligible runs are available. "
                     "Choose one explicitly; no analysis arrays will load until "
-                    "you do."
+                    "you do, and no distribution tables will load either."
                 ),
                 kind="warn",
             )
@@ -429,6 +474,29 @@ def _(source_by_label, source_picker):
 
 @app.cell(hide_code=True)
 def _(
+    load_recording_behavior_distribution_handle,
+    selected_provider,
+    selected_spec,
+    zarr_path,
+):
+    recording_distribution_handle = None
+    recording_distribution_handle_error = None
+    if (
+        selected_provider is not None
+        and selected_provider.provider_id == "recording_behavior_distributions"
+        and selected_spec is not None
+    ):
+        try:
+            recording_distribution_handle = (
+                load_recording_behavior_distribution_handle(zarr_path, selected_spec)
+            )
+        except Exception as exc:
+            recording_distribution_handle_error = f"{type(exc).__name__}: {exc}"
+    return recording_distribution_handle, recording_distribution_handle_error
+
+
+@app.cell(hide_code=True)
+def _(
     CoreBehaviorSource,
     EXACT_CHASER_PROVIDER_ADAPTER,
     ValidatedCoreBehaviorSource,
@@ -437,6 +505,8 @@ def _(
     available_chaser_analysis_ids,
     available_provider_chaser_candidate_analysis_ids,
     mo,
+    recording_distribution_handle,
+    recording_distribution_handle_error,
     selected_provider,
     selected_spec,
     selected_validated_behavior_source,
@@ -469,6 +539,13 @@ def _(
         available_ids = core_source.available_analysis_ids()
     elif selected_provider.provider_id == "bout_kinematics":
         available_ids = available_bout_analysis_ids(zarr_path, selected_spec)
+    elif selected_provider.provider_id == "recording_behavior_distributions":
+        available_ids = (
+            ("distributions",)
+            if recording_distribution_handle is not None
+            or recording_distribution_handle_error is not None
+            else ()
+        )
     elif selected_provider.provider_id == "stimulus_chaser_candidate":
         available_ids = available_provider_chaser_candidate_analysis_ids(
             zarr_path, selected_spec
@@ -519,6 +596,187 @@ def _(analysis_by_label, analysis_picker):
         selected_analysis.analysis_id if selected_analysis is not None else ""
     )
     return selected_analysis, selected_analysis_id
+
+
+@app.cell(hide_code=True)
+def _(
+    mo,
+    recording_distribution_handle,
+    recording_distribution_metric_options,
+    selected_analysis_id,
+):
+    if (
+        recording_distribution_handle is not None
+        and selected_analysis_id == "distributions"
+    ):
+        recording_distribution_metric_by_label = dict(
+            recording_distribution_metric_options(recording_distribution_handle)
+        )
+        preferred_metric_label = next(
+            (
+                label
+                for label, metric_id in recording_distribution_metric_by_label.items()
+                if metric_id == "bout.duration_s"
+            ),
+            next(iter(recording_distribution_metric_by_label)),
+        )
+        recording_distribution_metric_picker = mo.ui.dropdown(
+            options=list(recording_distribution_metric_by_label),
+            value=preferred_metric_label,
+            label="Metric",
+        )
+        recording_distribution_metric_output = (
+            recording_distribution_metric_picker
+        )
+    else:
+        recording_distribution_metric_by_label = {}
+        recording_distribution_metric_picker = None
+        recording_distribution_metric_output = mo.md("")
+    recording_distribution_metric_output
+    return (
+        recording_distribution_metric_by_label,
+        recording_distribution_metric_picker,
+    )
+
+
+@app.cell(hide_code=True)
+def _(
+    mo,
+    recording_distribution_handle,
+    recording_distribution_metric_by_label,
+    recording_distribution_metric_picker,
+    recording_distribution_scope_options,
+    recording_distribution_weighting_options,
+):
+    if (
+        recording_distribution_handle is not None
+        and recording_distribution_metric_picker is not None
+    ):
+        recording_distribution_metric_id = recording_distribution_metric_by_label[
+            recording_distribution_metric_picker.value
+        ]
+        weighting_ids = list(
+            recording_distribution_weighting_options(
+                recording_distribution_handle,
+                recording_distribution_metric_id,
+            )
+        )
+        recording_distribution_weighting_picker = mo.ui.dropdown(
+            options=weighting_ids,
+            value=weighting_ids[0],
+            label="Weighting",
+        )
+        recording_distribution_scope_by_label = dict(
+            recording_distribution_scope_options(recording_distribution_handle)
+        )
+        scope_labels = list(recording_distribution_scope_by_label)
+        recording_distribution_scope_picker = mo.ui.multiselect(
+            options=scope_labels,
+            value=scope_labels,
+            label="Persisted scopes",
+        )
+        recording_distribution_controls_output = mo.hstack(
+            [
+                recording_distribution_weighting_picker,
+                recording_distribution_scope_picker,
+            ],
+            widths=[1, 3],
+        )
+    else:
+        recording_distribution_metric_id = None
+        recording_distribution_weighting_picker = None
+        recording_distribution_scope_by_label = {}
+        recording_distribution_scope_picker = None
+        recording_distribution_controls_output = mo.md("")
+    recording_distribution_controls_output
+    return (
+        recording_distribution_metric_id,
+        recording_distribution_scope_by_label,
+        recording_distribution_scope_picker,
+        recording_distribution_weighting_picker,
+    )
+
+
+@app.cell(hide_code=True)
+def _(
+    load_recording_behavior_distribution_projection,
+    recording_distribution_handle,
+    recording_distribution_metric_id,
+    recording_distribution_scope_by_label,
+    recording_distribution_scope_picker,
+    recording_distribution_weighting_picker,
+):
+    recording_distribution_projection = None
+    recording_distribution_projection_error = None
+    if (
+        recording_distribution_handle is not None
+        and recording_distribution_metric_id is not None
+        and recording_distribution_weighting_picker is not None
+        and recording_distribution_scope_picker is not None
+        and bool(recording_distribution_scope_picker.value)
+    ):
+        try:
+            recording_distribution_projection = (
+                load_recording_behavior_distribution_projection(
+                    recording_distribution_handle,
+                    metric_id=recording_distribution_metric_id,
+                    weighting_id=str(
+                        recording_distribution_weighting_picker.value
+                    ),
+                    scope_ids=tuple(
+                        recording_distribution_scope_by_label[label]
+                        for label in recording_distribution_scope_picker.value
+                    ),
+                )
+            )
+        except Exception as exc:
+            recording_distribution_projection_error = (
+                f"{type(exc).__name__}: {exc}"
+            )
+    return (
+        recording_distribution_projection,
+        recording_distribution_projection_error,
+    )
+
+
+@app.cell(hide_code=True)
+def _(
+    build_recording_behavior_distribution_output,
+    mo,
+    recording_distribution_handle_error,
+    recording_distribution_projection,
+    recording_distribution_projection_error,
+    selected_analysis_id,
+    selected_provider,
+):
+    if (
+        selected_provider is not None
+        and selected_provider.provider_id == "recording_behavior_distributions"
+        and selected_analysis_id == "distributions"
+    ):
+        distribution_error = (
+            recording_distribution_handle_error
+            or recording_distribution_projection_error
+        )
+        if distribution_error:
+            recording_distribution_output = mo.callout(
+                f"Recording distribution failed closed: `{distribution_error}`",
+                kind="danger",
+            )
+        elif recording_distribution_projection is not None:
+            recording_distribution_output = (
+                build_recording_behavior_distribution_output(
+                    mo, recording_distribution_projection
+                )
+            )
+        else:
+            recording_distribution_output = mo.md(
+                "Select at least one persisted scope to render this metric."
+            )
+    else:
+        recording_distribution_output = mo.md("")
+    recording_distribution_output
+    return
 
 
 @app.cell(hide_code=True)
@@ -1320,6 +1578,7 @@ def _(
     core_projection,
     core_source,
     exact_chaser_projection,
+    recording_distribution_projection,
     selected_analysis,
     selected_provider,
     selected_recording,
@@ -1343,6 +1602,7 @@ def _(
                 else chaser_loaded
             )
         ),
+        distribution_view=recording_distribution_projection,
     )
     return (recording_workspace,)
 
@@ -1378,7 +1638,8 @@ def _(mo, workspace_mode):
 def _(recording_workspace, workspace_mode):
     # Start here. `exploration` follows the recording and analysis selected above.
     # Try `exploration.summary()`, `exploration.core_frame`,
-    # `exploration.chaser_tables`, `exploration.persisted_pngs`,
+    # `exploration.chaser_tables`, `exploration.distribution_series`,
+    # `exploration.persisted_pngs`,
     # or `exploration.open_zarr()`.
     exploration = recording_workspace if workspace_mode else None
     exploration
