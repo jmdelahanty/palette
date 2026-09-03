@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 
 import numpy as np
 import pytest
@@ -31,9 +32,40 @@ from fisheye.analysis_workflows.near_field_visit_state_machine import (
     RIGHT_CENSOR_PHASE_END,
     segment_exact_time_near_field_visits,
 )
+from fisheye.analysis_workflows.exact_immutable_child_validation_receipt import (
+    ensure_exact_immutable_child_validation_receipt,
+)
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.utils.plot_chaser_near_field_visit_successor import (
+    main as plot_main,
+    render_near_field_visit_trajectories,
+)
+from fisheye.visualization.chaser_near_field_visits import (
+    VISIT_TRAJECTORY_ARRAY_NAMES,
+    ChaserNearFieldVisitViewError,
+    validated_near_field_visit_trajectory_view,
+)
 
 SHA = "a" * 64
+
+
+class _PreparedViewHandle:
+    def __init__(self, prepared, arrays=None):
+        self.successor_kind = "chaser_near_field_visits"
+        self.recording_id = prepared.recording_id
+        self.run_path = "analysis/chaser_near_field_visits_runs/prepared"
+        self.manifest_sha256 = "8" * 64
+        self.scientific_payload_sha256 = prepared.payload_digest
+        self.verification_mode = "deep_audit"
+        self.receipt_digest = None
+        self.scientific_manifest = prepared.manifest
+        self.arrays = arrays or prepared.arrays
+
+    def require_verified_arrays(self, names):
+        assert set(names).issubset(self.arrays)
+
+    def array(self, name):
+        return self.arrays[name]
 
 
 def _radial_inputs() -> ChaserRadialNearFieldInput:
@@ -126,8 +158,10 @@ def _radial_inputs() -> ChaserRadialNearFieldInput:
     )
 
 
-def _visit_inputs() -> ChaserNearFieldVisitInput:
-    source = _radial_inputs()
+def _visit_inputs(
+    source: ChaserRadialNearFieldInput | None = None,
+) -> ChaserNearFieldVisitInput:
+    source = source or _radial_inputs()
     radial = prepare_chaser_radial_near_field_successor(source)
     return ChaserNearFieldVisitInput(
         recording_id=source.recording_id,
@@ -317,6 +351,38 @@ def test_short_visit_threshold_changes_quality_not_membership() -> None:
     assert strict.array("visit_quality_code").tolist() == [1, 1]
 
 
+def test_visit_view_rejects_timestamp_relative_time_disagreement() -> None:
+    prepared = prepare_chaser_near_field_visit_successor(_visit_inputs())
+    arrays = dict(prepared.arrays)
+    time_from_first = np.array(arrays["sample_time_from_first_sample_s"], copy=True)
+    time_from_first[1] += 0.25
+    arrays["sample_time_from_first_sample_s"] = time_from_first
+
+    with pytest.raises(
+        ChaserNearFieldVisitViewError,
+        match="disagrees with session timestamps",
+    ):
+        validated_near_field_visit_trajectory_view(
+            _PreparedViewHandle(prepared, arrays)
+        )
+
+
+def test_visit_view_rejects_summary_role_disagreement() -> None:
+    prepared = prepare_chaser_near_field_visit_successor(_visit_inputs())
+    arrays = dict(prepared.arrays)
+    summary_role = np.array(arrays["summary_behavior_role_code"], copy=True)
+    summary_role[0] = 2
+    arrays["summary_behavior_role_code"] = summary_role
+
+    with pytest.raises(
+        ChaserNearFieldVisitViewError,
+        match="disagrees with its summary behavior role",
+    ):
+        validated_near_field_visit_trajectory_view(
+            _PreparedViewHandle(prepared, arrays)
+        )
+
+
 def test_visit_successor_publication_round_trip(tmp_path) -> None:
     archive = tmp_path / "analysis.zarr"
     root = open_zarr_root(archive, mode="w-")
@@ -346,3 +412,158 @@ def test_visit_successor_publication_round_trip(tmp_path) -> None:
         reused.array("sample_acquisition_frame_id"),
         prepared.array("sample_acquisition_frame_id"),
     )
+
+
+def test_persisted_visit_view_and_static_render_use_exact_ragged_rows(
+    tmp_path,
+) -> None:
+    archive = tmp_path / "analysis.zarr"
+    root = open_zarr_root(archive, mode="w-")
+    root.attrs["recording_id"] = "recording"
+    prepared = prepare_chaser_near_field_visit_successor(_visit_inputs())
+    plan = build_composable_chaser_successor_publication_plan(
+        archive,
+        run_name="visits-v1",
+        prepared=prepared,
+    )
+    publish_composable_chaser_successor_run(
+        plan,
+        scratch_root=tmp_path / "scratch",
+    )
+    handle = load_composable_chaser_successor_source_handle(
+        archive,
+        successor_kind="chaser_near_field_visits",
+        run_name="visits-v1",
+        deep_audit=True,
+    )
+
+    view = validated_near_field_visit_trajectory_view(handle)
+    files, parameters = render_near_field_visit_trajectories(
+        handle,
+        output_stem=tmp_path / "visits",
+    )
+
+    assert len(view.panels) == 2
+    assert len(view.visits) == 2
+    assert view.panels[0].chaser_identity == "red"
+    assert view.panels[0].behavior_role == "aggressive"
+    assert view.panels[0].total_visit_count == 2
+    assert view.panels[1].total_visit_count == 0
+    assert view.visits[0].visit_row_id == 0
+    assert view.visits[0].acquisition_frame_id.tolist() == [1, 2]
+    assert view.visits[0].quality == "short_visit_retained"
+    assert all(path.is_file() and path.stat().st_size > 0 for path in files)
+    assert parameters["selection"]["visit_row_ids"] == [0, 1]
+    assert parameters["viewer_policy"]["visit_reconstruction"] == "prohibited"
+    assert (
+        parameters["rendering"]["chaser_marker"]["appearance_authority_claimed"]
+        is False
+    )
+
+
+def test_receipt_bound_visit_plot_rehashes_only_declared_view_arrays(
+    tmp_path,
+) -> None:
+    archive = tmp_path / "analysis.zarr"
+    root = open_zarr_root(archive, mode="w-")
+    root.attrs["recording_id"] = "recording"
+    prepared = prepare_chaser_near_field_visit_successor(_visit_inputs())
+    plan = build_composable_chaser_successor_publication_plan(
+        archive,
+        run_name="visits-v1",
+        prepared=prepared,
+    )
+    publish_composable_chaser_successor_run(
+        plan,
+        scratch_root=tmp_path / "scratch",
+    )
+    validation_receipt = tmp_path / "visits.exact_child_receipt.json"
+    ensure_exact_immutable_child_validation_receipt(
+        archive,
+        run_path="analysis/chaser_near_field_visits_runs/visits-v1",
+        manifest_attr="composable_chaser_successor_manifest",
+        manifest_digest_attr="composable_chaser_successor_manifest_sha256",
+        palette_commit="a" * 40,
+        output_json=validation_receipt,
+        expected_recording_id="recording",
+    )
+    output_dir = tmp_path / "plots"
+
+    assert (
+        plot_main(
+            [
+                str(archive),
+                "--run-name",
+                "visits-v1",
+                "--bundle-name",
+                "visit-review-v1",
+                "--expected-recording-id",
+                "recording",
+                "--output-dir",
+                str(output_dir),
+                "--source-validation-receipt",
+                str(validation_receipt),
+            ]
+        )
+        == 0
+    )
+
+    receipt_path = output_dir / "visit-review-v1_near_field_visit_plot_receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["schema_id"] == (
+        "palette.analysis.chaser_near_field_visits.plot_receipt"
+    )
+    assert receipt["source_binding"]["verification_mode"] == (
+        "receipt_bound_targeted_array_rehash_v1"
+    )
+    assert receipt["source_binding"]["verified_array_names"] == sorted(
+        VISIT_TRAJECTORY_ARRAY_NAMES
+    )
+    assert len(receipt["outputs"]) == 4
+    assert receipt["plot_parameters"]["selection"]["visit_row_ids"] == [0, 1]
+
+
+def test_visit_plot_retains_boundary_censored_visits_by_default(tmp_path) -> None:
+    source = _radial_inputs()
+    distance = np.array(source.distance_mm, copy=True)
+    distance[:, 0] = np.asarray([4.0, 4.0, 7.0, 7.0, 7.0, 4.0, 4.0, 4.0])
+    chaser = np.array(source.chaser_xy_px, copy=True)
+    chaser[:, 0, 0] = source.fish_xy_px[:, 0] + distance[:, 0]
+    source = replace(
+        source,
+        distance_px=distance,
+        distance_mm=distance,
+        chaser_xy_px=chaser,
+    )
+    prepared = prepare_chaser_near_field_visit_successor(_visit_inputs(source))
+    archive = tmp_path / "analysis.zarr"
+    root = open_zarr_root(archive, mode="w-")
+    root.attrs["recording_id"] = "recording"
+    plan = build_composable_chaser_successor_publication_plan(
+        archive,
+        run_name="censored-v1",
+        prepared=prepared,
+    )
+    publish_composable_chaser_successor_run(
+        plan,
+        scratch_root=tmp_path / "scratch",
+    )
+    handle = load_composable_chaser_successor_source_handle(
+        archive,
+        successor_kind="chaser_near_field_visits",
+        run_name="censored-v1",
+        deep_audit=True,
+    )
+
+    view = validated_near_field_visit_trajectory_view(handle)
+    files, parameters = render_near_field_visit_trajectories(
+        handle,
+        output_stem=tmp_path / "censored",
+    )
+
+    assert [visit.complete for visit in view.visits] == [False, False]
+    assert view.visits[0].left_censor_reason == "phase_start_inside"
+    assert view.visits[1].right_censor_reason == "phase_end_inside"
+    assert parameters["selection"]["include_censored"] is True
+    assert parameters["selection"]["visit_row_ids"] == [0, 1]
+    assert all(path.is_file() for path in files)
