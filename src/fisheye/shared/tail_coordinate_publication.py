@@ -2143,7 +2143,7 @@ def _prepare_record_groups(run: Any) -> None:
     records.require_group("measurement_authority")
 
 
-def publish_tail_coordinate_surfaces(
+def _publish_tail_coordinate_surfaces(
     root: Any,
     run: Any,
     *,
@@ -2302,7 +2302,7 @@ def _load_tail_coordinate_publication(
     expected_kind: str | None = None,
     require_complete: bool = True,
 ) -> BoundTailCoordinatePublication:
-    """Freshly validate one closed future tail publication."""
+    """Freshly validate one closed tail publication under its declared kind."""
 
     path = str(run_path).strip("/")
     run = root.get(path)
@@ -2332,6 +2332,11 @@ def _load_tail_coordinate_publication(
         run,
         manifest_sha256=manifest.record_sha256,
     )
+    if kind == _KINEMATICS_KIND and payload_digests is None:
+        _fail(
+            "Maintained tail loading requires one complete sealed payload "
+            "receipt pair. Receipt-free tail kinematics are unsupported."
+        )
     if payload_digests is not None:
         try:
             verify_payload_integrity_receipt(
@@ -2440,7 +2445,7 @@ def _load_tail_coordinate_publication(
     )
 
 
-def load_tail_coordinate_publication(
+def _load_complete_tail_coordinate_publication(
     root: Any,
     run_path: str,
     *,
@@ -2471,7 +2476,16 @@ def publish_tail_kinematics_coordinate_surfaces(
     verified_physical_copy: Mapping[str, Any] | None = None,
     payload_hash_workers: int = 4,
 ) -> BoundTailCoordinatePublication:
-    return publish_tail_coordinate_surfaces(
+    if (
+        payload_scan_receipt is None
+        or payload_run_path is None
+        or verified_physical_copy is None
+    ):
+        _fail(
+            "Canonical tail-kinematics publication requires the complete sealed "
+            "payload receipt evidence produced by the atomic materializer."
+        )
+    return _publish_tail_coordinate_surfaces(
         root,
         run,
         kind=_KINEMATICS_KIND,
@@ -2485,7 +2499,7 @@ def publish_tail_kinematics_coordinate_surfaces(
 def publish_tail_posture_coordinate_surfaces(
     root: Any, run: Any
 ) -> BoundTailCoordinatePublication:
-    return publish_tail_coordinate_surfaces(root, run, kind=_POSTURE_KIND)
+    return _publish_tail_coordinate_surfaces(root, run, kind=_POSTURE_KIND)
 
 
 def _tail_activation_inputs(
@@ -2501,6 +2515,15 @@ def _tail_activation_inputs(
     name = str(run_name).strip()
     kind = str(run.attrs.get("tail_coordinate_publication_kind") or "")
     prefix = _expected_prefix(kind)
+    if (
+        kind == _KINEMATICS_KIND
+        and run.attrs.get(TAIL_PAYLOAD_RECEIPT_PROFILE_ATTR)
+        != TAIL_PAYLOAD_RECEIPT_PROFILE
+    ):
+        _fail(
+            "Tail-kinematics activation requires the complete maintained payload "
+            "receipt profile; receipt-free publications cannot become eligible."
+        )
     expected_path = f"{prefix}{name}"
     expected_parent = prefix.rstrip("/")
     if (
@@ -2721,15 +2744,21 @@ def rollback_deferred_tail_coordinate_publication_activation(
 def load_tail_kinematics_coordinate_publication(
     root: Any, run_path: str
 ) -> BoundTailCoordinatePublication:
-    return load_tail_coordinate_publication(
-        root, run_path, expected_kind=_KINEMATICS_KIND
+    return _load_complete_tail_coordinate_publication(
+        root,
+        run_path,
+        expected_kind=_KINEMATICS_KIND,
     )
 
 
 def load_tail_posture_coordinate_publication(
     root: Any, run_path: str
 ) -> BoundTailCoordinatePublication:
-    return load_tail_coordinate_publication(root, run_path, expected_kind=_POSTURE_KIND)
+    return _load_complete_tail_coordinate_publication(
+        root,
+        run_path,
+        expected_kind=_POSTURE_KIND,
+    )
 
 
 __all__ = [
@@ -2755,10 +2784,8 @@ __all__ = [
     "commit_deferred_tail_coordinate_publication_activation",
     "defer_tail_coordinate_publication_activation",
     "deep_audit_tail_payload_receipt",
-    "load_tail_coordinate_publication",
     "load_tail_kinematics_coordinate_publication",
     "load_tail_posture_coordinate_publication",
-    "publish_tail_coordinate_surfaces",
     "publish_tail_kinematics_coordinate_surfaces",
     "publish_tail_posture_coordinate_surfaces",
     "rollback_deferred_tail_coordinate_publication_activation",

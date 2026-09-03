@@ -17,6 +17,10 @@ from typing import Any, Mapping, Sequence
 from fisheye.analysis_workflows.exact_chaser_projection_receipt import (
     validate_exact_chaser_projection_receipt,
 )
+from fisheye.analysis_workflows.validated_behavior_source_admission import (
+    EXACT_CHASER_ADMISSION_ROLE,
+    validate_admission_receipt_binding,
+)
 from fisheye.analysis_workflows.validated_behavior_cohort import (
     CAPABILITY_STATES,
     MEMBERSHIP_REASON_CODES,
@@ -44,7 +48,6 @@ from fisheye.cohorts.registry import (
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
-
 HISTORICAL_TASK_ADAPTER_ID = "composable_chaser_task_v5"
 HISTORICAL_TASK_PROFILE = "historical_composable_chaser_task_v5_import_v1"
 FROZEN_COHORT_ADAPTER_ID = "frozen_cohort_manifest_v2"
@@ -56,7 +59,6 @@ INVALID_DISPOSITIONS_SCHEMA_ID = (
 )
 INVALID_DISPOSITIONS_SCHEMA_VERSION = 1
 
-EXACT_CHASER_ADMISSION_ROLE = "exact_chaser_projection"
 RECORDING_ANALYSIS_UNIT_POLICY_ID = "recording_scoped_distinct_animal_v1"
 MISSING_BATCH_POLICY_ID = "missing_acquisition_batch_not_inferred_v1"
 
@@ -429,43 +431,6 @@ def plan_composable_chaser_task_v5_dispositions(
     return dispositions
 
 
-def _shallow_exact_chaser_receipt(
-    binding: Mapping[str, Any],
-    *,
-    recording_id: str,
-    analysis_zarr: str,
-) -> dict[str, Any]:
-    path = Path(_text(binding.get("path"), field="admission receipt path")).resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"Admission receipt does not exist: {path}")
-    observed_file_sha = sha256_file(path)
-    if observed_file_sha != _digest(
-        binding.get("file_sha256"), field="admission receipt file digest"
-    ):
-        _fail(f"Admission receipt file digest changed: {path}")
-    _, raw = _read_object(path, field="admission receipt")
-    receipt = validate_exact_chaser_projection_receipt(
-        raw,
-        expected_analysis_zarr=analysis_zarr,
-        expected_recording_id=recording_id,
-        validate_current_metadata=False,
-        validate_child_receipts=False,
-    )
-    if binding.get("role") != EXACT_CHASER_ADMISSION_ROLE:
-        _fail("Historical chaser admission requires the exact-chaser receipt role.")
-    expected = {
-        "role": EXACT_CHASER_ADMISSION_ROLE,
-        "path": str(path),
-        "file_sha256": observed_file_sha,
-        "record_sha256": receipt["record_sha256"],
-        "schema_id": receipt["schema_id"],
-        "schema_version": receipt["schema_version"],
-    }
-    if _plain(binding) != _plain(expected):
-        _fail(f"Admission receipt binding is stale or inexact: {path}")
-    return expected
-
-
 def _normalized_member(
     *,
     source_ordinal: int,
@@ -492,7 +457,7 @@ def _normalized_member(
         )
         if Path(receipt_path).name.casefold().startswith("latest"):
             _fail("Admission receipt cannot be selected through a latest alias.")
-        _shallow_exact_chaser_receipt(
+        validate_admission_receipt_binding(
             receipt,
             recording_id=normalized_recording,
             analysis_zarr=archive,
@@ -861,7 +826,7 @@ def validate_membership_current_sources(value: object) -> Mapping[str, Any]:
             ):
                 _fail("Invalid-member disposition no longer matches its decision row.")
         for binding in member["admission_receipts"]:
-            _shallow_exact_chaser_receipt(
+            validate_admission_receipt_binding(
                 binding,
                 recording_id=member["recording_id"],
                 analysis_zarr=member["analysis_zarr"],
@@ -975,9 +940,11 @@ def _nonadmitted_bundle_member(member: Mapping[str, Any]) -> dict[str, Any]:
         capabilities = {
             key: {
                 "state": "invalid" if key == "semantic_epochs" else "unavailable",
-                "reason_code": "invalid_source"
-                if key == "semantic_epochs"
-                else _NONADMITTED_CAPABILITY_REASONS["invalid"],
+                "reason_code": (
+                    "invalid_source"
+                    if key == "semantic_epochs"
+                    else _NONADMITTED_CAPABILITY_REASONS["invalid"]
+                ),
                 "detail": member["disposition_evidence"]["detail"],
                 "binding": None,
             }

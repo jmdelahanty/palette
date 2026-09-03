@@ -77,7 +77,6 @@ from fisheye.shared.zarr.manifest_digest import (
 )
 from fisheye.shared.zarr_io import open_zarr_root
 
-
 TAIL_TRACE_EXPORT_SCHEMA_ID = "palette.analytics_export.tail_trace_samples"
 TAIL_TRACE_EXPORT_SCHEMA_VERSION = 1
 TAIL_TRACE_SOURCE_BINDING_SCHEMA_ID = "palette.tail_trace_samples.source_binding"
@@ -183,6 +182,7 @@ class BoundTailTraceSources:
     tail_sample_s: np.ndarray
     reference_length_node: Any
     reference_validity_node: Any
+    subject_shape_publication: Any | None = None
 
 
 def _attrs(group: Any) -> dict[str, Any]:
@@ -771,11 +771,11 @@ def _read_exact_window(
     for path, (dtype, shape_spec) in declarations.items():
         node = _child(group, path)
         expected_full = tuple(
-            total_rows
-            if value == "rows"
-            else sample_count
-            if value == "samples"
-            else int(value)
+            (
+                total_rows
+                if value == "rows"
+                else sample_count if value == "samples" else int(value)
+            )
             for value in shape_spec
         )
         if (
@@ -877,6 +877,7 @@ def bind_tail_trace_sources(
     track_kinematics_run: str,
     track_scope: str,
     source_window_rows: int = 65_536,
+    prebound_track_source: Any | None = None,
 ) -> BoundTailTraceSources:
     """Bind exact tail/body/track authorities without publishing an export."""
 
@@ -941,13 +942,24 @@ def bind_tail_trace_sources(
     )
 
     recording_id = _recording_id(Path(zarr_path))
-    track_source = track_export._source_binding(
-        root,
-        zarr_path=Path(zarr_path),
-        recording_id=recording_id,
-        run_name=track_kinematics_run,
-        scope=track_scope,
-    )
+    track_source = prebound_track_source
+    if track_source is None:
+        track_source = track_export.bind_kinematics_samples_source(
+            root,
+            zarr_path=Path(zarr_path),
+            expected_recording_id=recording_id,
+            track_kinematics_run=track_kinematics_run,
+            track_scope=track_scope,
+        )
+    elif (
+        track_source.binding.get("recording_id") != recording_id
+        or track_source.binding.get("zarr_path") != str(Path(zarr_path).resolve())
+        or track_source.binding.get("run_name") != track_kinematics_run
+        or track_source.binding.get("scope") != track_scope
+    ):
+        raise ValueError(
+            "Prebound track source differs from the explicit tail dependency."
+        )
     track_index = _build_track_identity_index(
         track_source,
         source_window_rows=source_window_rows,
@@ -1033,6 +1045,7 @@ def bind_tail_trace_sources(
         binding=binding,
         tail_run=tail_run,
         subject_shape_run=shape_run,
+        subject_shape_publication=shape_publication,
         track_source=track_source,
         track_index=track_index,
         tail_sample_s=tail_sample_s.copy(),
@@ -1146,9 +1159,11 @@ def _source_lineage_sha256(
     )
 
 
-def _constant_columns(
+def tail_trace_constant_values(
     source: Mapping[str, Any], projection: Mapping[str, Any]
 ) -> dict[str, Any]:
+    """Return exact standalone provenance constants for one tail projection."""
+
     track = source["track_source_binding"]
     return {
         "export_schema_version": EXPORT_SCHEMA_VERSION,
@@ -1197,18 +1212,42 @@ def _arrow_batch(
     import pyarrow as pa
 
     count = int(np.asarray(columns["source_tail_row_index"]).shape[0])
-    constants = _constant_columns(source_binding, projection)
+    constants = tail_trace_constant_values(source_binding, projection)
     schema = exact_arrow_schema(TAIL_TRACE_SAMPLES_TABLE, metadata=_footer_metadata())
     arrays = [
         pa.array(
-            columns[field.name]
-            if field.name in columns
-            else [constants[field.name]] * count,
+            (
+                columns[field.name]
+                if field.name in columns
+                else [constants[field.name]] * count
+            ),
             type=field.type,
         )
         for field in schema
     ]
     return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def projected_tail_trace_sample_batch(
+    bound: BoundTailTraceSources,
+    *,
+    start_row: int,
+    stop_row: int,
+    projection: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Read one bounded tail window with the exact standalone column roster."""
+
+    columns = read_projected_tail_trace_window(
+        bound,
+        start_row=start_row,
+        stop_row=stop_row,
+    )
+    constants = tail_trace_constant_values(bound.binding, projection)
+    count = int(columns["source_tail_row_index"].shape[0])
+    return {
+        **{name: [value] * count for name, value in constants.items()},
+        **columns,
+    }
 
 
 def _write_streaming_parts(
@@ -1433,11 +1472,15 @@ def _validate_source_binding(source: Mapping[str, Any]) -> None:
         for path, (dtype, shape_spec) in declarations.items():
             record = inventory[path]
             expected_shape = [
-                body["tail_row_count"]
-                if value == "rows"
-                else body["source_tail_sample_count"]
-                if value == "samples"
-                else int(value)
+                (
+                    body["tail_row_count"]
+                    if value == "rows"
+                    else (
+                        body["source_tail_sample_count"]
+                        if value == "samples"
+                        else int(value)
+                    )
+                )
                 for value in shape_spec
             ]
             if (
@@ -1542,7 +1585,7 @@ def _decoded_part_validation(
     import pyarrow.parquet as pq
 
     hasher = _ProjectedPayloadHasher()
-    constants = _constant_columns(source, projection)
+    constants = tail_trace_constant_values(source, projection)
     sample_count = int(source["source_tail_sample_count"])
     expected_axis = np.full(sample_count, np.nan, dtype=np.float32)
     axis_seen = np.zeros(sample_count, dtype=bool)
@@ -1916,9 +1959,11 @@ __all__ = [
     "TailTrackIdentityIndex",
     "bind_tail_trace_sources",
     "export_tail_trace_samples",
+    "projected_tail_trace_sample_batch",
     "project_tail_trace_window",
     "read_projected_tail_trace_window",
     "tail_trace_parquet_policy",
+    "tail_trace_constant_values",
     "tail_trace_projection_contract",
     "validate_tail_trace_export_payload",
 ]

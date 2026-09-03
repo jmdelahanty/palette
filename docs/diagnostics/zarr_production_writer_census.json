@@ -69705,7 +69705,7 @@
     "parsed_writer_candidate_module_count": 235,
     "reader_required_array_declaration_count": 102,
     "resolved_writer_leaf_name_count": 630,
-    "scanned_python_module_count": 1675,
+    "scanned_python_module_count": 1680,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
@@ -69741,7 +69741,7 @@
     "writer_wrapper_call_site_count": 985
   },
   "wrapper_analysis": {
-    "function_definition_count": 6352,
+    "function_definition_count": 6360,
     "writer_function_count": 242,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",

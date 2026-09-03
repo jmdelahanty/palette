@@ -524,19 +524,33 @@ def bind_activity_spatial_sources(
     track_kinematics_run: str,
     track_scope: str,
     swim_bout_runs_by_track: Mapping[int, str],
+    prebound_track_source: Any | None = None,
 ) -> BoundActivitySpatialSources:
     """Bind one track authority and exactly one maintained bout run per track."""
 
-    track_source = track_export._source_binding(
-        root,
-        zarr_path=Path(zarr_path).expanduser().resolve(),
-        recording_id=str(recording_id),
-        run_name=safe_component(
-            track_kinematics_run,
-            label="track-kinematics run ID",
-        ),
-        scope=track_scope,
+    source_path = Path(zarr_path).expanduser().resolve()
+    run_name = safe_component(
+        track_kinematics_run,
+        label="track-kinematics run ID",
     )
+    track_source = prebound_track_source
+    if track_source is None:
+        track_source = track_export.bind_kinematics_samples_source(
+            root,
+            zarr_path=source_path,
+            expected_recording_id=str(recording_id),
+            track_kinematics_run=run_name,
+            track_scope=track_scope,
+        )
+    elif (
+        track_source.binding.get("recording_id") != str(recording_id)
+        or track_source.binding.get("zarr_path") != str(source_path)
+        or track_source.binding.get("run_name") != run_name
+        or track_source.binding.get("scope") != track_scope
+    ):
+        raise ValueError(
+            "Prebound track source differs from the explicit activity dependency."
+        )
     track_records = {
         int(record["track_id"]): record for record in track_source.binding["tracks"]
     }
@@ -569,7 +583,7 @@ def bind_activity_spatial_sources(
         "schema_id": ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_ID,
         "schema_version": ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_VERSION,
         "recording_id": str(recording_id),
-        "zarr_path": str(Path(zarr_path).expanduser().resolve()),
+        "zarr_path": str(source_path),
         "track_source_binding": track_source.binding,
         "swim_bout_runs_by_track": {
             str(track_id): bout_sources[track_id].binding
@@ -1122,15 +1136,19 @@ def _write_streaming_part(
             last_bin = last_frame // bin_frames
             effective_first_frame = max(
                 first_frame,
-                selected_frame_start
-                if selected_frame_start is not None
-                else first_frame,
+                (
+                    selected_frame_start
+                    if selected_frame_start is not None
+                    else first_frame
+                ),
             )
             effective_stop_frame = min(
                 last_frame + 1,
-                selected_frame_stop
-                if selected_frame_stop is not None
-                else last_frame + 1,
+                (
+                    selected_frame_stop
+                    if selected_frame_stop is not None
+                    else last_frame + 1
+                ),
             )
             if effective_first_frame < effective_stop_frame:
                 selected_first_bin = effective_first_frame // bin_frames
@@ -1519,9 +1537,7 @@ def _validate_decoded_rows(
         )
         effective_stop = min(
             int(last) + 1,
-            selected_frame_stop
-            if selected_frame_stop is not None
-            else int(last) + 1,
+            selected_frame_stop if selected_frame_stop is not None else int(last) + 1,
         )
         effective_spans[track_id] = (
             (effective_start, effective_stop)
@@ -1577,7 +1593,9 @@ def _validate_decoded_rows(
         expected_count = columns["expected_track_frame_count"][index]
         effective_span = effective_spans[track_id]
         if effective_span is None:
-            raise ValueError("Activity/spatial row lies outside its selected track span.")
+            raise ValueError(
+                "Activity/spatial row lies outside its selected track span."
+            )
         expected_from_contract = max(
             0,
             min(end, effective_span[1]) - max(start, effective_span[0]),
@@ -1835,12 +1853,12 @@ def export_activity_spatial_time_bins(
                 "single-track swim-bout run."
             )
         if single_track_swim_bout_run is not None:
-            prebound_track = track_export._source_binding(
+            prebound_track = track_export.bind_kinematics_samples_source(
                 root,
                 zarr_path=source_path,
-                recording_id=recording_id,
-                run_name=source_run,
-                scope=track_scope,
+                expected_recording_id=recording_id,
+                track_kinematics_run=source_run,
+                track_scope=track_scope,
             )
             track_records = prebound_track.binding["tracks"]
             if len(track_records) != 1:
@@ -1956,8 +1974,7 @@ def export_activity_spatial_time_bins(
             "schema_id": ACTIVITY_SPATIAL_EXPORT_SCHEMA_ID,
             "schema_version": (
                 ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION
-                if binning["schema_version"]
-                == ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION
+                if binning["schema_version"] == ACTIVITY_SPATIAL_BINNING_SCHEMA_VERSION
                 else ACTIVITY_SPATIAL_EXPORT_SCHEMA_VERSION_V4
             ),
             "source_binding": before.binding,

@@ -119,7 +119,7 @@ def _patch_provenance(monkeypatch) -> None:
         return SimpleNamespace(manifest=SimpleNamespace(record_sha256="9" * 64))
 
     monkeypatch.setattr(
-        tail_mod,
+        mod.tail_publication_mod,
         "publish_tail_kinematics_coordinate_surfaces",
         _fake_publish,
     )
@@ -901,7 +901,7 @@ def test_tail_failed_exact_receipt_rollback_never_restores_precopy_snapshot(
 
     monkeypatch.setattr(mod, "_validate_tail_run", validate)
     monkeypatch.setattr(
-        mod.tail_mod,
+        mod.tail_publication_mod,
         "publish_tail_kinematics_coordinate_surfaces",
         lambda *_args, **_kwargs: SimpleNamespace(
             manifest=SimpleNamespace(record_sha256="9" * 64)
