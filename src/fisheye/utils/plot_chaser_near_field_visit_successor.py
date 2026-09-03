@@ -145,6 +145,10 @@ def near_field_visit_plot_parameters(
                 "segmentation": "prohibited",
                 "interpolation": "prohibited",
                 "coordinate_convention": view.coordinate_convention,
+                "position_provider": {
+                    "provider_id": view.position_provider_id,
+                    "provider_digest": view.position_provider_digest,
+                },
                 "near_zone_radius_mm": view.near_zone_radius_mm,
                 "near_entry_radius_mm": view.near_entry_radius_mm,
                 "near_exit_radius_mm": view.near_exit_radius_mm,
@@ -401,7 +405,8 @@ def _trajectory_figure(
     )
     figure.suptitle(
         f"Exact near-field visit trajectories · {view.recording_id}\n"
-        "persisted membership and canonical samples · no interpolation or role inference",
+        f"position provider: {view.position_provider_id} · persisted membership and "
+        "canonical samples · no interpolation or role inference",
         fontsize=13,
     )
     return figure
@@ -481,7 +486,8 @@ def _distance_figure(
     )
     figure.suptitle(
         f"Exact near-field visit distance traces · {view.recording_id}\n"
-        "time origin is each visit's first retained sample; censored boundaries remain visible",
+        f"position provider: {view.position_provider_id} · time origin is each visit's "
+        "first retained sample; censored boundaries remain visible",
         fontsize=13,
     )
     return figure

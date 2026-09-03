@@ -447,6 +447,7 @@ def test_persisted_visit_view_and_static_render_use_exact_ragged_rows(
     assert len(view.visits) == 2
     assert view.panels[0].chaser_identity == "red"
     assert view.panels[0].behavior_role == "aggressive"
+    assert view.position_provider_id == "detection_bbox_centroid.v1"
     assert view.panels[0].total_visit_count == 2
     assert view.panels[1].total_visit_count == 0
     assert view.visits[0].visit_row_id == 0

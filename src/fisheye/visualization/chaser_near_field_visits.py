@@ -233,6 +233,8 @@ class NearFieldVisitTrajectoryView:
     source_run_path: str
     source_manifest_sha256: str
     source_scientific_payload_sha256: str
+    position_provider_id: str
+    position_provider_digest: str
     verification_mode: str
     validation_receipt_sha256: str | None
     near_zone_radius_mm: float
@@ -264,6 +266,8 @@ def _validate_manifest(
         body
     ):
         _fail("Near-field visit scientific payload digest is stale.")
+    if getattr(handle, "scientific_payload_sha256", None) != payload_digest:
+        _fail("Near-field visit outer and scientific payload digests disagree.")
     if scientific.get("scientific_schema") != {
         "schema_id": SCHEMA_ID,
         "schema_version": SCHEMA_VERSION,
@@ -314,6 +318,23 @@ def _validate_manifest(
         radial.get("scientific_payload_sha256"),
         field="radial scientific payload",
     )
+    fish_position = sources.get("fish_position")
+    position_provider = scientific.get("position_provider")
+    if (
+        not isinstance(fish_position, Mapping)
+        or type(fish_position.get("provider_id")) is not str
+        or not fish_position["provider_id"]
+        or not isinstance(position_provider, Mapping)
+        or position_provider.get("provider_id") != fish_position["provider_id"]
+        or position_provider.get("status") != "first_class_explicit_authority"
+        or position_provider.get("provider_selection") != "none"
+    ):
+        _fail("Near-field visit position-provider authority is invalid.")
+    provider_digest = _digest(
+        fish_position.get("provider_digest"), field="fish-position provider"
+    )
+    if position_provider.get("provider_digest") != provider_digest:
+        _fail("Near-field visit position-provider digests disagree.")
     coordinate = scientific.get("coordinate_conventions")
     if not isinstance(coordinate, Mapping) or coordinate.get("canonical") != (
         "per_sample_real_chaser_at_origin_arena_center_on_positive_x_"
@@ -738,6 +759,10 @@ def validated_near_field_visit_trajectory_view(
         source_run_path=handle.run_path,
         source_manifest_sha256=handle.manifest_sha256,
         source_scientific_payload_sha256=handle.scientific_payload_sha256,
+        position_provider_id=str(scientific["position_provider"]["provider_id"]),
+        position_provider_digest=str(
+            scientific["position_provider"]["provider_digest"]
+        ),
         verification_mode=handle.verification_mode,
         validation_receipt_sha256=handle.receipt_digest,
         near_zone_radius_mm=near_zone,
