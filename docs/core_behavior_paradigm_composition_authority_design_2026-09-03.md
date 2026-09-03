@@ -413,9 +413,18 @@ evidence; activation and the maintained loader require the sealed receipt pair;
 the direct archive CLI is fail-closed; and
 `scripts/check_tail_payload_receipt_access.py` prevents maintained code from
 reintroducing receipt-free loading, making receipt policy caller-selectable, or
-bypassing the atomic materializer. This checkpoint does not create the four
-Sleepyfish successors; that remains the next data-recovery action after
-merge-safe CI.
+bypassing the atomic materializer. The four Sleepyfish receipt-bearing tail
+successors were subsequently published from CI-tested commit
+`289e9ddc1f445ee44c30b9f25fa6ede924c24d2d` as the camera-specific
+`tail_kinematics_sleepyfish_2026_08_06_core_behavior_receipt_v011_289e9ddc_*`
+runs; direct and consolidated selector metadata agree for all four.
+
+Subject-shape publications follow the same maintained-consumption rule. Both
+supported payload profiles are receipt-bearing: v1 records the sealed result of
+the post-binding decoded scan, while v2 composes staged-transfer and final
+binding evidence. Profile coexistence does not authorize a receipt-free third
+path. Maintained loading, activation, and completed-publication validation must
+reject an absent or partial receipt pair before scientific array traversal.
 
 ## Resolver and adapter boundary
 
@@ -547,9 +556,10 @@ reselecting core motion/body/bout authority.
 - [x] Retire direct archive publication and reject receipt-free loaders,
       caller-selectable receipt policy, and low-level writer access with an
       independent CI ratchet.
-- [ ] Publish new receipt-bearing successors for the four receipt-free
+- [x] Publish new receipt-bearing successors for the four receipt-free
       Sleepyfish tail publications through the maintained atomic materializer;
-      never mutate the originals in place.
+      the four v011 successors were published from `289e9ddc` without mutating
+      the originals.
 - [ ] Keep the five scientific grains in separate normalized tables.
 - [ ] Route planning, sharding, publication, validation, and reading through
       the existing generic cohort engine.
@@ -650,9 +660,9 @@ A future composite implementation is acceptable only when:
 - a real sealed Phase-C publication remains readable by the new reader, an old
   reader fails closed on the new profile ID, and a real composite publication
   is readable through the unpatched generic reader;
-- receipt-backed tail loading performs no decoded hash reads while still
-  validating scientific descriptors, and receipt-free compatibility remains
-  exhaustive; and
+- receipt-backed tail and subject-shape loading performs no decoded hash reads
+  merely to re-prove payload identity, and receipt-free maintained loading
+  fails before scientific array traversal; and
 - required CI and a real selector-ineligible publication canary pass.
 
 ## Review record

@@ -3732,16 +3732,17 @@ def _load_subject_shape_payload_digest_evidence(
     run: Any,
     *,
     manifest_sha256: str,
-) -> Mapping[str, str] | None:
-    """Load receipt-backed digests, falling back only for historical artifacts."""
+) -> Mapping[str, str]:
+    """Load mandatory receipt-backed payload digests for a maintained publication."""
 
     raw_integrity = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR)
     raw_validation = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR)
     receipt_profile = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
     if raw_integrity is None and raw_validation is None:
-        if receipt_profile is not None:
-            _fail("Subject-shape receipt-profile publication lacks its receipts.")
-        return None
+        _fail(
+            "Maintained subject-shape loading requires a complete sealed payload "
+            "receipt pair; receipt-free publications are unsupported."
+        )
     if not is_supported_subject_shape_payload_receipt_profile(receipt_profile):
         _fail("Subject-shape payload receipts lack their exact profile marker.")
     if not isinstance(raw_integrity, Mapping) or not isinstance(
@@ -3857,8 +3858,6 @@ def deep_audit_subject_shape_payload_receipt(
         run,
         manifest_sha256=manifest.record_sha256,
     )
-    if digests is None:
-        _fail("Historical subject-shape publication lacks a payload receipt.")
     raw_integrity = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR)
     try:
         integrity = verify_payload_integrity_receipt(
@@ -4601,8 +4600,6 @@ def validate_sealed_subject_shape_publication_metadata(
         run,
         manifest_sha256=manifest.record_sha256,
     )
-    if payload_digests is None:
-        _fail("Metadata-only validation requires sealed payload receipts.")
     raw_integrity = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR)
     try:
         verify_payload_integrity_receipt(
@@ -4824,11 +4821,7 @@ def _load_subject_shape_publication(
     )
 
     def digest_scope():
-        return (
-            nullcontext()
-            if payload_digests is None
-            else _subject_shape_array_digest_scope(payload_digests)
-        )
+        return _subject_shape_array_digest_scope(payload_digests)
 
     component_names = tuple(str(value) for value in (run.attrs.get("component_names") or ()))
     source = load_exact_subject_shape_source(root, run)
@@ -5646,25 +5639,15 @@ def activate_subject_shape_coordinate_publication(
         parent = fresh_parent()
         _require_activation_state(parent, snapshot, overrides=overrides)
 
-        # Reconstruct the complete child while no parent selector has changed.
-        # The supplied proof is an ownership/intent receipt; this live reload
-        # establishes the exact child and source graph for this activation.
-        if is_supported_subject_shape_payload_receipt_profile(
-            run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
-        ):
-            fresh_proof = validate_sealed_subject_shape_publication_metadata(
-                root,
-                expected_path,
-                expected_selector_eligible=False,
-                expected_publication_owner=owner,
-            )
-        else:
-            fresh_proof = _load_subject_shape_publication(
-                root,
-                expected_path,
-                eligible=False,
-                expected_owner=owner,
-            )
+        # Revalidate the complete child's sealed receipt/metadata epoch while no
+        # parent selector has changed.  Receipt-free children are not eligible
+        # for activation and never enter the decoded scientific loader here.
+        fresh_proof = validate_sealed_subject_shape_publication_metadata(
+            root,
+            expected_path,
+            expected_selector_eligible=False,
+            expected_publication_owner=owner,
+        )
         if fresh_proof.manifest.record_sha256 != proof.manifest.record_sha256:
             _fail("Subject-shape publication changed before activation.")
 
@@ -5762,22 +5745,12 @@ def activate_subject_shape_coordinate_publication(
         # individual write above.
         restart_proof_verification()
         run = _node(root, expected_path, label="subject-shape activation child")
-        if is_supported_subject_shape_payload_receipt_profile(
-            run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
-        ):
-            final_proof = validate_sealed_subject_shape_publication_metadata(
-                root,
-                expected_path,
-                expected_selector_eligible=False,
-                expected_publication_owner=owner,
-            )
-        else:
-            final_proof = _load_subject_shape_publication(
-                root,
-                expected_path,
-                eligible=False,
-                expected_owner=owner,
-            )
+        final_proof = validate_sealed_subject_shape_publication_metadata(
+            root,
+            expected_path,
+            expected_selector_eligible=False,
+            expected_publication_owner=owner,
+        )
         if final_proof.manifest.record_sha256 != proof.manifest.record_sha256:
             _fail("Subject-shape publication changed during activation.")
         # Close the post-selector proof phase while the child remains
@@ -5949,22 +5922,12 @@ def commit_deferred_subject_shape_coordinate_activation(
         activation.snapshot,
         overrides=expected_overrides,
     )
-    if is_supported_subject_shape_payload_receipt_profile(
-        run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
-    ):
-        proof = validate_sealed_subject_shape_publication_metadata(
-            root,
-            expected_path,
-            expected_selector_eligible=False,
-            expected_publication_owner=activation.owner,
-        )
-    else:
-        proof = _load_subject_shape_publication(
-            root,
-            expected_path,
-            eligible=False,
-            expected_owner=activation.owner,
-        )
+    proof = validate_sealed_subject_shape_publication_metadata(
+        root,
+        expected_path,
+        expected_selector_eligible=False,
+        expected_publication_owner=activation.owner,
+    )
     if proof.manifest.record_sha256 != activation.manifest_sha256:
         _fail("Deferred subject-shape publication changed before commit.")
     parent = _node(

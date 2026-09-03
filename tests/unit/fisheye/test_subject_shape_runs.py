@@ -1134,10 +1134,17 @@ def test_subject_shape_candidate_repairs_failed_visibility_after_consolidation(
     )
     monkeypatch.setattr(
         materializer,
-        "load_completed_ineligible_subject_shape_coordinate_publication",
+        "validate_sealed_subject_shape_publication_metadata",
         lambda *args, **kwargs: SimpleNamespace(
-            row_identity=SimpleNamespace(leading_dimension=1),
+            row_count=1,
             manifest=SimpleNamespace(record_sha256="b" * 64),
+        ),
+    )
+    monkeypatch.setattr(
+        materializer,
+        "load_completed_ineligible_subject_shape_coordinate_publication",
+        lambda *args, **kwargs: pytest.fail(
+            "completed-publication validation used the decoded fallback"
         ),
     )
 
