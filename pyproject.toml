@@ -32,7 +32,7 @@ dependencies = [
   "tqdm",
   "click",
   "Flask>=3,<4",
-  "pydantic",
+  "pydantic>=2,<3",
   "hsluv",
   "networkx",
   "bokeh",
