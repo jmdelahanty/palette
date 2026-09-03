@@ -656,16 +656,39 @@ def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authori
     run.attrs[validation_attr] = original_validation
 
     integrity_attr = module.SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR
+    profile_attr = module.SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR
     original_integrity = copy.deepcopy(run.attrs[integrity_attr])
+    original_profile = run.attrs[profile_attr]
     del run.attrs[integrity_attr]
     del run.attrs[validation_attr]
-    with pytest.raises(SubjectShapeCoordinatePublicationError, match="lacks its receipts"):
-        load_persisted_subject_shape_coordinate_publication(
-            root,
-            "analysis/subject_shape_runs/shape_001",
+    with monkeypatch.context() as receipt_guard:
+        receipt_guard.setattr(
+            module,
+            "_iter_arrays",
+            lambda *_args, **_kwargs: pytest.fail(
+                "receipt-free load reached scientific array traversal"
+            ),
         )
+        with pytest.raises(
+            SubjectShapeCoordinatePublicationError,
+            match="complete sealed payload receipt pair",
+        ):
+            load_persisted_subject_shape_coordinate_publication(
+                root,
+                "analysis/subject_shape_runs/shape_001",
+            )
+        del run.attrs[profile_attr]
+        with pytest.raises(
+            SubjectShapeCoordinatePublicationError,
+            match="receipt-free publications are unsupported",
+        ):
+            load_persisted_subject_shape_coordinate_publication(
+                root,
+                "analysis/subject_shape_runs/shape_001",
+            )
     run.attrs[integrity_attr] = original_integrity
     run.attrs[validation_attr] = original_validation
+    run.attrs[profile_attr] = original_profile
     np.testing.assert_array_equal(run["instance_key"][:], refined["instance_key"][:])
     np.testing.assert_array_equal(
         run["source_crop_row_ids"][:],
@@ -1182,7 +1205,11 @@ def test_subject_shape_activation_baseexception_restores_selectors_and_eligibili
         reloads.append((args, kwargs))
         return proof
 
-    monkeypatch.setattr(module, "_load_subject_shape_publication", fresh_reload)
+    monkeypatch.setattr(
+        module,
+        "validate_sealed_subject_shape_publication_metadata",
+        fresh_reload,
+    )
 
     with pytest.raises(KeyboardInterrupt, match="final eligibility"):
         activate_subject_shape_coordinate_publication(
@@ -1198,7 +1225,11 @@ def test_subject_shape_activation_baseexception_restores_selectors_and_eligibili
     assert parent.attrs == {"latest": "old", "latest_complete": "old"}
     assert len(reloads) == 2
     assert all(
-        call[1] == {"eligible": False, "expected_owner": owner}
+        call[1]
+        == {
+            "expected_selector_eligible": False,
+            "expected_publication_owner": owner,
+        }
         for call in reloads
     )
 
@@ -1335,8 +1366,15 @@ def _patch_fake_activation(
     )
     monkeypatch.setattr(
         module,
-        "_load_subject_shape_publication",
+        "validate_sealed_subject_shape_publication_metadata",
         lambda *_args, **_kwargs: proof,
+    )
+    monkeypatch.setattr(
+        module,
+        "_load_subject_shape_publication",
+        lambda *_args, **_kwargs: pytest.fail(
+            "activation used the decoded publication fallback"
+        ),
     )
 
 
@@ -1386,7 +1424,7 @@ def test_subject_shape_activation_closes_fresh_proof_phases_before_mutation(
     )
     monkeypatch.setattr(
         module,
-        "_load_subject_shape_publication",
+        "validate_sealed_subject_shape_publication_metadata",
         lambda *_args, **_kwargs: events.append("load-proof") or proof,
     )
     monkeypatch.setattr(
@@ -1686,7 +1724,11 @@ def test_subject_shape_activation_preserves_alien_pending_receipt(
         parent.attrs["latest_pending"] = copy.deepcopy(alien)
         return proof
 
-    monkeypatch.setattr(module, "_load_subject_shape_publication", mutate_pending)
+    monkeypatch.setattr(
+        module,
+        "validate_sealed_subject_shape_publication_metadata",
+        mutate_pending,
+    )
     with pytest.raises(
         SubjectShapeCoordinatePublicationError,
         match="latest_pending",
