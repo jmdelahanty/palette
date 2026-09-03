@@ -9,6 +9,8 @@ the same analysis Zarr.
 
 Neither command resolves a scientific selector while executing a task.  Every
 publication remains selector-ineligible and no command writes the registry.
+Task schema v7 adds exact keypoint- and detection-provider near-field visit
+children, independent validation receipts, and receipt-bound static plots.
 """
 
 from __future__ import annotations
@@ -21,6 +23,11 @@ from pathlib import Path
 import subprocess
 from typing import Any, Mapping, Sequence
 
+from fisheye.analysis_workflows.chaser_near_field_visit_successor import (
+    MIN_VISIT_SAMPLE_COUNT as NEAR_FIELD_VISIT_MINIMUM_QUALITY_SAMPLE_COUNT,
+    SCHEMA_ID as NEAR_FIELD_VISIT_SCIENTIFIC_SCHEMA_ID,
+    SCHEMA_VERSION as NEAR_FIELD_VISIT_SCIENTIFIC_SCHEMA_VERSION,
+)
 from fisheye.analysis_workflows.eye_gaze_source_handle import (
     validate_gaze_convention_review_receipt,
 )
@@ -29,7 +36,7 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 TASK_SCHEMA_ID = "palette.composable_chaser_successor_cohort_task"
-TASK_SCHEMA_VERSION = 6
+TASK_SCHEMA_VERSION = 7
 RECEIPT_SCHEMA_ID = "palette.composable_chaser_successor_cohort_receipt"
 RECEIPT_SCHEMA_VERSION = 1
 
@@ -65,6 +72,23 @@ DETECTION_RADIAL_RUN = (
     "goodbatbadbat_chaser_radial_near_field_detection_bbox_centroid_20260825_"
     "exact_session_time_activity_orthogonal_v2"
 )
+KEYPOINT_NEAR_FIELD_VISIT_RUN = (
+    "goodbatbadbat_chaser_near_field_visits_keypoint_body_frame_20260903_v1"
+)
+DETECTION_NEAR_FIELD_VISIT_RUN = (
+    "goodbatbadbat_chaser_near_field_visits_detection_bbox_centroid_20260903_v1"
+)
+KEYPOINT_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME = (
+    "goodbatbadbat_chaser_near_field_visits_keypoint_body_frame_20260903_recipe_v1"
+)
+DETECTION_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME = (
+    "goodbatbadbat_chaser_near_field_visits_detection_bbox_centroid_20260903_recipe_v1"
+)
+NEAR_FIELD_VISIT_PROVIDER_POLICY = "both_exact_first_class_position_providers_v1"
+NEAR_FIELD_VISIT_RECEIPT_POLICY = (
+    "independent_exact_child_receipts_existing_projection_unchanged_v1"
+)
+NEAR_FIELD_VISIT_PLOT_RECIPE_ID = "persisted_exact_near_field_visit_trajectories_v1"
 SPATIAL_OCCUPANCY_RUN = (
     "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260827_"
     "body_frame_projection_v3"
@@ -195,20 +219,22 @@ def _load_eye_gaze_bindings(
     for index, raw_row in enumerate(rows):
         row = _mapping(raw_row, field=f"eye-gaze binding row {index}")
         if set(row) != expected_keys:
-            _fail(
-                f"Eye-gaze binding row {index} has missing or unexpected fields."
-            )
+            _fail(f"Eye-gaze binding row {index} has missing or unexpected fields.")
         recording_id = _text(
             row.get("recording_id"), field=f"eye-gaze row {index} recording_id"
         )
         if recording_id in frozen:
             _fail(f"Eye-gaze bindings duplicate recording {recording_id!r}.")
-        archive = Path(
-            _text(
-                row.get("analysis_zarr"),
-                field=f"eye-gaze row {index} analysis_zarr",
+        archive = (
+            Path(
+                _text(
+                    row.get("analysis_zarr"),
+                    field=f"eye-gaze row {index} analysis_zarr",
+                )
             )
-        ).expanduser().resolve()
+            .expanduser()
+            .resolve()
+        )
         run_name = _exact_name(
             row.get("eye_run_name"), field=f"eye-gaze row {index} eye_run_name"
         )
@@ -223,12 +249,16 @@ def _load_eye_gaze_bindings(
             archive / run_path,
             field=f"eye-gaze row {index} exact eye-angle run",
         )
-        receipt_path = Path(
-            _text(
-                row.get("eye_convention_receipt"),
-                field=f"eye-gaze row {index} convention receipt",
+        receipt_path = (
+            Path(
+                _text(
+                    row.get("eye_convention_receipt"),
+                    field=f"eye-gaze row {index} convention receipt",
+                )
             )
-        ).expanduser().resolve()
+            .expanduser()
+            .resolve()
+        )
         if not receipt_path.is_file():
             raise FileNotFoundError(
                 f"Eye-gaze convention receipt does not exist: {receipt_path}"
@@ -551,6 +581,8 @@ def _output_groups() -> tuple[str, ...]:
         f"analysis/chaser_escape_freeze_runs/{SUCCESSOR_RUN}",
         f"analysis/chaser_radial_near_field_runs/{KEYPOINT_RADIAL_RUN}",
         f"analysis/chaser_radial_near_field_runs/{DETECTION_RADIAL_RUN}",
+        (f"analysis/chaser_near_field_visits_runs/{KEYPOINT_NEAR_FIELD_VISIT_RUN}"),
+        (f"analysis/chaser_near_field_visits_runs/{DETECTION_NEAR_FIELD_VISIT_RUN}"),
         f"analysis/chaser_spatial_occupancy_runs/{SPATIAL_OCCUPANCY_RUN}",
     )
 
@@ -663,6 +695,19 @@ def _plan_entry(
         / "body_alignment_by_distance"
         / f"{BODY_ALIGNMENT_RECIPE_BUNDLE_NAME}_body_alignment_plot_receipt.json"
     )
+    visit_plot_dir = plot_dir / "near_field_visits"
+    near_field_visit_receipts = (
+        visit_plot_dir
+        / (
+            f"{KEYPOINT_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME}_"
+            "near_field_visit_plot_receipt.json"
+        ),
+        visit_plot_dir
+        / (
+            f"{DETECTION_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME}_"
+            "near_field_visit_plot_receipt.json"
+        ),
+    )
     if len(existing_outputs) == len(output_groups):
         status = (
             "complete"
@@ -671,6 +716,7 @@ def _plan_entry(
                 and dashboard_receipt.is_file()
                 and spatial_receipt.is_file()
                 and alignment_receipt.is_file()
+                and all(path.is_file() for path in near_field_visit_receipts)
             )
             else "plot_only"
         )
@@ -716,12 +762,27 @@ def _plan_entry(
                 "successors": SUCCESSOR_RUN,
                 "keypoint_radial": KEYPOINT_RADIAL_RUN,
                 "detection_radial": DETECTION_RADIAL_RUN,
+                "keypoint_near_field_visits": KEYPOINT_NEAR_FIELD_VISIT_RUN,
+                "detection_near_field_visits": DETECTION_NEAR_FIELD_VISIT_RUN,
+                "keypoint_near_field_visit_plot_bundle": (
+                    KEYPOINT_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME
+                ),
+                "detection_near_field_visit_plot_bundle": (
+                    DETECTION_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME
+                ),
                 "spatial_occupancy": SPATIAL_OCCUPANCY_RUN,
                 "detailed_bundle": DETAILED_BUNDLE_NAME,
             },
             "output_group_paths": list(output_groups),
             "existing_output_group_paths": existing_outputs,
             "plot_output_dir": str(plot_dir),
+            "near_field_visit_successor": {
+                "provider_policy": NEAR_FIELD_VISIT_PROVIDER_POLICY,
+                "receipt_policy": NEAR_FIELD_VISIT_RECEIPT_POLICY,
+                "minimum_quality_sample_count": (
+                    NEAR_FIELD_VISIT_MINIMUM_QUALITY_SAMPLE_COUNT
+                ),
+            },
         }
     )
 
@@ -757,6 +818,11 @@ def _build_cohort_task(
         "recording_order": "lexicographic_absolute_analysis_zarr_path_v1",
         "motion_bout_resolution": "ordered_exact_compatible_pair_v1",
         "body_frame_resolution": "exact_provider_motion_authority_v1",
+        "near_field_visit_provider_policy": NEAR_FIELD_VISIT_PROVIDER_POLICY,
+        "near_field_visit_receipt_policy": NEAR_FIELD_VISIT_RECEIPT_POLICY,
+        "near_field_visit_minimum_quality_sample_count": (
+            NEAR_FIELD_VISIT_MINIMUM_QUALITY_SAMPLE_COUNT
+        ),
         "selector_resolution_time": "planning_only",
         "execution_selector_resolution": False,
     }
@@ -847,6 +913,81 @@ def replan_cohort_task(
     )
 
 
+def _near_field_visit_configuration(
+    entry: Mapping[str, Any],
+    *,
+    required: bool,
+) -> dict[str, Any] | None:
+    raw_outputs = entry.get("output_run_names")
+    if raw_outputs is None and not required:
+        return None
+    outputs = _mapping(raw_outputs, field="output run names")
+    keys = (
+        "keypoint_near_field_visits",
+        "detection_near_field_visits",
+        "keypoint_near_field_visit_plot_bundle",
+        "detection_near_field_visit_plot_bundle",
+    )
+    present = tuple(key in outputs for key in keys)
+    if not any(present):
+        if required:
+            _fail("Cohort task lacks its required dual-provider near-field visits.")
+        return None
+    if not all(present):
+        _fail("Near-field visit outputs must bind both providers and plot bundles.")
+    policy = _mapping(
+        entry.get("near_field_visit_successor"),
+        field="near-field visit successor policy",
+    )
+    if policy.get("provider_policy") != NEAR_FIELD_VISIT_PROVIDER_POLICY:
+        _fail("Near-field visit provider policy is unsupported.")
+    if policy.get("receipt_policy") != NEAR_FIELD_VISIT_RECEIPT_POLICY:
+        _fail("Near-field visit receipt policy is unsupported.")
+    minimum = policy.get("minimum_quality_sample_count")
+    if minimum != NEAR_FIELD_VISIT_MINIMUM_QUALITY_SAMPLE_COUNT:
+        _fail("Near-field visit minimum quality sample count is unsupported.")
+    output_paths = entry.get("output_group_paths")
+    if not isinstance(output_paths, list) or any(
+        type(path) is not str for path in output_paths
+    ):
+        _fail("Cohort task output group paths are invalid.")
+    resolved: dict[str, Any] = {
+        "provider_policy": NEAR_FIELD_VISIT_PROVIDER_POLICY,
+        "receipt_policy": NEAR_FIELD_VISIT_RECEIPT_POLICY,
+        "minimum_quality_sample_count": minimum,
+    }
+    for provider in ("keypoint", "detection"):
+        run_name = _exact_name(
+            outputs[f"{provider}_near_field_visits"],
+            field=f"{provider} near-field visit run",
+        )
+        plot_bundle = _exact_name(
+            outputs[f"{provider}_near_field_visit_plot_bundle"],
+            field=f"{provider} near-field visit plot bundle",
+        )
+        resolved[f"{provider}_run"] = run_name
+        resolved[f"{provider}_plot_bundle"] = plot_bundle
+    if resolved["keypoint_run"] == resolved["detection_run"]:
+        _fail("Near-field visit provider runs must remain distinct.")
+    if resolved["keypoint_plot_bundle"] == resolved["detection_plot_bundle"]:
+        _fail("Near-field visit provider plot bundles must remain distinct.")
+    expected_visit_paths = {
+        (f"analysis/chaser_near_field_visits_runs/{resolved['keypoint_run']}"),
+        (f"analysis/chaser_near_field_visits_runs/{resolved['detection_run']}"),
+    }
+    observed_visit_paths = [
+        path
+        for path in output_paths
+        if path.startswith("analysis/chaser_near_field_visits_runs/")
+    ]
+    if (
+        len(observed_visit_paths) != len(expected_visit_paths)
+        or set(observed_visit_paths) != expected_visit_paths
+    ):
+        _fail("Cohort task near-field visit output paths are not exact.")
+    return resolved
+
+
 def load_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
     """Load and strictly validate one frozen task document."""
 
@@ -863,6 +1004,7 @@ def load_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
         3,
         4,
         5,
+        6,
         TASK_SCHEMA_VERSION,
     }:
         _fail("Cohort task schema is unsupported.")
@@ -882,12 +1024,23 @@ def load_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
         _fail("Cohort task indices are not a contiguous one-based axis.")
     if int(task.get("recording_count", -1)) != len(entries):
         _fail("Cohort task recording count is stale.")
-    entry_records = [
-        _mapping(entry, field="cohort entry") for entry in entries
-    ]
+    entry_records = [_mapping(entry, field="cohort entry") for entry in entries]
     selection_policy = _mapping(
         task.get("selection_policy"), field="cohort selection policy"
     )
+    schema_version = int(task["schema_version"])
+    if schema_version >= 7:
+        if (
+            selection_policy.get("near_field_visit_provider_policy")
+            != NEAR_FIELD_VISIT_PROVIDER_POLICY
+            or selection_policy.get("near_field_visit_receipt_policy")
+            != NEAR_FIELD_VISIT_RECEIPT_POLICY
+            or selection_policy.get("near_field_visit_minimum_quality_sample_count")
+            != NEAR_FIELD_VISIT_MINIMUM_QUALITY_SAMPLE_COUNT
+        ):
+            _fail("Cohort task near-field visit selection policy is invalid.")
+    for entry in entry_records:
+        _near_field_visit_configuration(entry, required=schema_version >= 7)
     gaze_resolution = selection_policy.get("eye_gaze_resolution")
     gaze_entries = [entry.get("eye_gaze") is not None for entry in entry_records]
     if gaze_resolution is None:
@@ -903,9 +1056,7 @@ def load_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
         if int(source_binding.get("row_count", -1)) != len(entry_records):
             _fail("Eye-gaze binding-source row count is stale.")
         _text(source_binding.get("path"), field="eye-gaze binding-source path")
-        _digest(
-            source_binding.get("sha256"), field="eye-gaze binding-source digest"
-        )
+        _digest(source_binding.get("sha256"), field="eye-gaze binding-source digest")
         for entry in entry_records:
             eye_gaze = _mapping(entry.get("eye_gaze"), field="eye-gaze binding")
             output_names = _mapping(
@@ -918,9 +1069,7 @@ def load_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
             output_paths = entry.get("output_group_paths")
             if not isinstance(output_paths, list) or expected_path not in output_paths:
                 _fail("Eye-gaze task lacks its exact successor output path.")
-            eye_run = _exact_name(
-                eye_gaze.get("run_name"), field="eye-gaze input run"
-            )
+            eye_run = _exact_name(eye_gaze.get("run_name"), field="eye-gaze input run")
             if eye_gaze.get("run_path") != f"analysis/eye_angle_runs/{eye_run}":
                 _fail("Eye-gaze task input run path is inconsistent.")
     return task
@@ -967,24 +1116,29 @@ def _revalidate_entry(entry: Mapping[str, Any]) -> None:
     eye_gaze_raw = entry.get("eye_gaze")
     if eye_gaze_raw is not None:
         eye_gaze = _mapping(eye_gaze_raw, field="eye-gaze binding")
-        if Path(
-            _text(eye_gaze.get("analysis_zarr"), field="eye-gaze analysis Zarr")
-        ).expanduser().resolve() != archive.resolve():
+        if (
+            Path(_text(eye_gaze.get("analysis_zarr"), field="eye-gaze analysis Zarr"))
+            .expanduser()
+            .resolve()
+            != archive.resolve()
+        ):
             _fail("Frozen eye-gaze archive differs from the cohort archive.")
-        run_name = _exact_name(
-            eye_gaze.get("run_name"), field="eye-gaze run name"
-        )
+        run_name = _exact_name(eye_gaze.get("run_name"), field="eye-gaze run name")
         run_path = _text(eye_gaze.get("run_path"), field="eye-gaze run path")
         if run_path != f"analysis/eye_angle_runs/{run_name}":
             _fail("Frozen eye-gaze run path does not match its exact run name.")
         if eye_gaze.get("channel_variant") not in {"raw", "smoothed"}:
             _fail("Frozen eye-gaze channel variant is unsupported.")
-        receipt_path = Path(
-            _text(
-                eye_gaze.get("convention_receipt_path"),
-                field="eye-gaze convention receipt path",
+        receipt_path = (
+            Path(
+                _text(
+                    eye_gaze.get("convention_receipt_path"),
+                    field="eye-gaze convention receipt path",
+                )
             )
-        ).expanduser().resolve()
+            .expanduser()
+            .resolve()
+        )
         if not receipt_path.is_file():
             _fail("Frozen eye-gaze convention receipt is absent.")
         expected_file_sha256 = _digest(
@@ -1023,7 +1177,7 @@ def successor_cohort_task(
     *,
     eye_gaze_bindings: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Create a receipt-bound plotting successor with optional reviewed gaze."""
+    """Create a receipt-bound plotting/visit successor with optional gaze."""
 
     previous = load_cohort_task(source)
     previous_digest = previous["task_sha256"]
@@ -1056,17 +1210,29 @@ def successor_cohort_task(
         output_names["epoch_behavior"] = EPOCH_BEHAVIOR_RUN
         output_names["body_alignment_by_distance"] = BODY_ALIGNMENT_RUN
         output_names["body_alignment_plot_bundle"] = BODY_ALIGNMENT_RECIPE_BUNDLE_NAME
+        output_names.update(
+            {
+                "keypoint_near_field_visits": KEYPOINT_NEAR_FIELD_VISIT_RUN,
+                "detection_near_field_visits": DETECTION_NEAR_FIELD_VISIT_RUN,
+                "keypoint_near_field_visit_plot_bundle": (
+                    KEYPOINT_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME
+                ),
+                "detection_near_field_visit_plot_bundle": (
+                    DETECTION_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME
+                ),
+            }
+        )
         archive = Path(_text(entry["analysis_zarr"], field="analysis Zarr"))
         recording_id = _text(entry["recording_id"], field="recording identity")
         if frozen_eye_gaze:
             eye_gaze = dict(frozen_eye_gaze[recording_id])
-            source_archive = Path(
-                _text(eye_gaze["analysis_zarr"], field="eye-gaze source archive")
-            ).expanduser().resolve()
+            source_archive = (
+                Path(_text(eye_gaze["analysis_zarr"], field="eye-gaze source archive"))
+                .expanduser()
+                .resolve()
+            )
             if source_archive != archive.resolve():
-                _fail(
-                    f"Eye-gaze binding archive differs for {recording_id!r}."
-                )
+                _fail(f"Eye-gaze binding archive differs for {recording_id!r}.")
             entry["eye_gaze"] = eye_gaze
         elif "eye_gaze" in entry:
             eye_gaze = dict(_mapping(entry["eye_gaze"], field="eye-gaze binding"))
@@ -1099,9 +1265,26 @@ def successor_cohort_task(
         output_paths = [
             str(path)
             for path in entry.get("output_group_paths", [])
-            if not str(path).startswith("analysis/chaser_spatial_occupancy_runs/")
+            if not str(path).startswith(
+                (
+                    "analysis/chaser_spatial_occupancy_runs/",
+                    "analysis/chaser_near_field_visits_runs/",
+                )
+            )
         ]
         output_paths.append(spatial_path)
+        output_paths.extend(
+            (
+                (
+                    "analysis/chaser_near_field_visits_runs/"
+                    f"{KEYPOINT_NEAR_FIELD_VISIT_RUN}"
+                ),
+                (
+                    "analysis/chaser_near_field_visits_runs/"
+                    f"{DETECTION_NEAR_FIELD_VISIT_RUN}"
+                ),
+            )
+        )
         if eye_gaze is not None:
             gaze_path = (
                 f"analysis/chaser_gaze_tracking_runs/{output_names['gaze_tracking']}"
@@ -1129,6 +1312,18 @@ def successor_cohort_task(
             plot_dir
             / "body_alignment_by_distance"
             / (f"{BODY_ALIGNMENT_RECIPE_BUNDLE_NAME}_body_alignment_plot_receipt.json"),
+            plot_dir
+            / "near_field_visits"
+            / (
+                f"{KEYPOINT_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME}_"
+                "near_field_visit_plot_receipt.json"
+            ),
+            plot_dir
+            / "near_field_visits"
+            / (
+                f"{DETECTION_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME}_"
+                "near_field_visit_plot_receipt.json"
+            ),
         )
         if len(existing_paths) == len(output_paths):
             status = (
@@ -1159,6 +1354,13 @@ def successor_cohort_task(
                     "mode": spatial_occupancy_mode,
                     "exact_run_name": spatial_occupancy_run,
                     "plot_bundle": SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME,
+                },
+                "near_field_visit_successor": {
+                    "provider_policy": NEAR_FIELD_VISIT_PROVIDER_POLICY,
+                    "receipt_policy": NEAR_FIELD_VISIT_RECEIPT_POLICY,
+                    "minimum_quality_sample_count": (
+                        NEAR_FIELD_VISIT_MINIMUM_QUALITY_SAMPLE_COUNT
+                    ),
                 },
                 "successor_of_entry_task_sha256": previous_digest,
             }
@@ -1207,6 +1409,11 @@ def successor_cohort_task(
                 "successor_of_task_sha256": previous_digest,
                 "relative_frame_validation": RELATIVE_FRAME_VALIDATION_MODE,
                 "plot_recipe_provenance": "self_contained_exact_parameters_v5",
+                "near_field_visit_provider_policy": (NEAR_FIELD_VISIT_PROVIDER_POLICY),
+                "near_field_visit_receipt_policy": NEAR_FIELD_VISIT_RECEIPT_POLICY,
+                "near_field_visit_minimum_quality_sample_count": (
+                    NEAR_FIELD_VISIT_MINIMUM_QUALITY_SAMPLE_COUNT
+                ),
                 **(
                     {
                         "eye_gaze_resolution": EYE_GAZE_BINDING_RESOLUTION,
@@ -1270,12 +1477,207 @@ def _existing_complete_output(
     return True
 
 
+def _existing_near_field_visit_output(
+    archive: Path,
+    *,
+    recording_id: str,
+    visit_run: str,
+    relative_frame_run: str,
+    semantic_selection_run: str,
+    radial_near_field_run: str,
+    minimum_quality_sample_count: int,
+) -> bool:
+    visit_path = f"analysis/chaser_near_field_visits_runs/{visit_run}"
+    if not _existing_complete_output(archive, visit_path, recording_id):
+        return False
+    visit_attrs, _metadata_sha = _zarr_attrs(
+        archive / visit_path,
+        field=f"existing near-field visit output {visit_path}",
+    )
+    publication, _publication_sha = _verified_record(
+        visit_attrs,
+        record_key="composable_chaser_successor_manifest",
+        digest_key="composable_chaser_successor_manifest_sha256",
+        field="near-field visit publication manifest",
+    )
+    publication_payload_sha = _digest(
+        publication.get("payload_digest"),
+        field="near-field visit publication payload digest",
+    )
+    if (
+        canonical_json_sha256(
+            {
+                key: value
+                for key, value in publication.items()
+                if key != "payload_digest"
+            }
+        )
+        != publication_payload_sha
+        or publication.get("successor_kind") != "chaser_near_field_visits"
+        or publication.get("run_name") != visit_run
+        or publication.get("run_path") != visit_path
+        or publication.get("recording_id") != recording_id
+        or publication.get("selector_eligible") is not False
+        or publication.get("selection") != "none"
+        or publication.get("production_authority") is not False
+        or publication.get("registry_update") is not False
+    ):
+        _fail("Existing near-field visit publication identity is incompatible.")
+    scientific = _mapping(
+        publication.get("scientific_manifest"),
+        field="near-field visit scientific manifest",
+    )
+    scientific_digest = _digest(
+        scientific.get("payload_digest"),
+        field="near-field visit scientific payload digest",
+    )
+    scientific_schema = _mapping(
+        scientific.get("scientific_schema"),
+        field="near-field visit scientific schema",
+    )
+    if (
+        canonical_json_sha256(
+            {key: value for key, value in scientific.items() if key != "payload_digest"}
+        )
+        != scientific_digest
+        or publication.get("scientific_payload_sha256") != scientific_digest
+        or scientific.get("recording_id") != recording_id
+        or scientific_schema
+        != {
+            "schema_id": NEAR_FIELD_VISIT_SCIENTIFIC_SCHEMA_ID,
+            "schema_version": NEAR_FIELD_VISIT_SCIENTIFIC_SCHEMA_VERSION,
+        }
+        or scientific.get("selector_eligible") is not False
+        or scientific.get("selection") != "none"
+        or scientific.get("production_authority") is not False
+        or scientific.get("registry_update") is not False
+    ):
+        _fail("Existing near-field visit scientific identity is stale.")
+
+    relative_path = f"analysis/chaser_relative_frame_runs/{relative_frame_run}"
+    relative_attrs, _relative_metadata_sha = _zarr_attrs(
+        archive / relative_path,
+        field="near-field visit relative-frame source",
+    )
+    _relative_manifest, relative_manifest_sha = _verified_record(
+        relative_attrs,
+        record_key="chaser_relative_frame_manifest",
+        digest_key="chaser_relative_frame_manifest_sha256",
+        field="near-field visit relative-frame source manifest",
+    )
+    semantic_path = (
+        f"analysis/protocol_semantic_chaser_selection_runs/{semantic_selection_run}"
+    )
+    semantic_attrs, _semantic_metadata_sha = _zarr_attrs(
+        archive / semantic_path,
+        field="near-field visit semantic-selection source",
+    )
+    _semantic_manifest, semantic_manifest_sha = _verified_record(
+        semantic_attrs,
+        record_key="protocol_semantic_chaser_selection_manifest",
+        digest_key="protocol_semantic_chaser_selection_manifest_sha256",
+        field="near-field visit semantic-selection source manifest",
+    )
+    radial_path = f"analysis/chaser_radial_near_field_runs/{radial_near_field_run}"
+    radial_attrs, _radial_metadata_sha = _zarr_attrs(
+        archive / radial_path,
+        field="near-field visit radial source",
+    )
+    radial_publication, radial_manifest_sha = _verified_record(
+        radial_attrs,
+        record_key="composable_chaser_successor_manifest",
+        digest_key="composable_chaser_successor_manifest_sha256",
+        field="near-field visit radial source manifest",
+    )
+    radial_publication_payload_sha = _digest(
+        radial_publication.get("payload_digest"),
+        field="near-field visit radial publication payload digest",
+    )
+    if (
+        canonical_json_sha256(
+            {
+                key: value
+                for key, value in radial_publication.items()
+                if key != "payload_digest"
+            }
+        )
+        != radial_publication_payload_sha
+    ):
+        _fail("Near-field visit radial publication source digest is stale.")
+    radial_scientific = _mapping(
+        radial_publication.get("scientific_manifest"),
+        field="near-field visit radial scientific manifest",
+    )
+    radial_payload_sha = _digest(
+        radial_publication.get("scientific_payload_sha256"),
+        field="near-field visit radial scientific payload digest",
+    )
+    radial_scientific_sha = _digest(
+        radial_scientific.get("payload_digest"),
+        field="near-field visit radial embedded scientific payload digest",
+    )
+    if (
+        canonical_json_sha256(
+            {
+                key: value
+                for key, value in radial_scientific.items()
+                if key != "payload_digest"
+            }
+        )
+        != radial_scientific_sha
+        or radial_scientific_sha != radial_payload_sha
+    ):
+        _fail("Near-field visit radial scientific source digest is stale.")
+    radial_sources = _mapping(
+        radial_scientific.get("sources"),
+        field="near-field visit radial scientific sources",
+    )
+    if radial_sources.get("relative_frame") != {
+        "run_path": relative_path,
+        "manifest_sha256": relative_manifest_sha,
+    }:
+        _fail("Near-field visit radial source uses another relative frame.")
+    if radial_sources.get("protocol_semantic_selection") != {
+        "run_path": semantic_path,
+        "manifest_sha256": semantic_manifest_sha,
+    }:
+        _fail("Near-field visit radial source uses another semantic selection.")
+    sources = _mapping(
+        scientific.get("sources"), field="near-field visit scientific sources"
+    )
+    if sources.get("relative_frame") != {
+        "run_path": relative_path,
+        "manifest_sha256": relative_manifest_sha,
+    }:
+        _fail("Existing near-field visit relative-frame binding is incompatible.")
+    if sources.get("protocol_semantic_selection") != {
+        "run_path": semantic_path,
+        "manifest_sha256": semantic_manifest_sha,
+    }:
+        _fail("Existing near-field visit semantic-selection binding is incompatible.")
+    if sources.get("radial_near_field") != {
+        "run_path": radial_path,
+        "manifest_sha256": radial_manifest_sha,
+        "scientific_payload_sha256": radial_payload_sha,
+    }:
+        _fail("Existing near-field visit radial binding is incompatible.")
+    if scientific.get("position_provider") != radial_scientific.get(
+        "position_provider"
+    ) or sources.get("fish_position") != radial_sources.get("fish_position"):
+        _fail("Existing near-field visit position-provider binding is incompatible.")
+    config = _mapping(scientific.get("config"), field="near-field visit config")
+    if config.get("minimum_quality_sample_count") != minimum_quality_sample_count:
+        _fail("Existing near-field visit quality policy is incompatible.")
+    return True
+
+
 def _validated_plot_receipt(
     path: Path,
     *,
     recording_id: str,
     require_self_contained_recipe: bool = False,
     expected_plot_recipe_id: str | None = None,
+    expected_source_run_path: str | None = None,
 ) -> bool:
     if not path.exists():
         return False
@@ -1294,6 +1696,12 @@ def _validated_plot_receipt(
         _fail(f"Plot receipt digest is stale: {path}")
     if receipt.get("recording_id") != recording_id:
         _fail(f"Plot receipt recording identity mismatch: {path}")
+    if expected_source_run_path is not None:
+        source = _mapping(receipt.get("source_binding"), field="plot source binding")
+        if source.get("run_path") != expected_source_run_path:
+            _fail(f"Plot receipt source run mismatch: {path}")
+        if receipt.get("run_name") != Path(expected_source_run_path).name:
+            _fail(f"Plot receipt source run-name mismatch: {path}")
     if (
         expected_plot_recipe_id is not None
         and receipt.get("plot_recipe_id") != expected_plot_recipe_id
@@ -1420,6 +1828,10 @@ def run_one(
         _fail("Copy backend must be python or rsync.")
     task = load_cohort_task(task_source)
     entry = _entry(task, task_index)
+    visit_configuration = _near_field_visit_configuration(
+        entry,
+        required=int(task["schema_version"]) >= 7,
+    )
     _revalidate_entry(entry)
     repo = Path(palette_repo).expanduser().resolve()
     commit = _repo_commit(repo, palette_commit)
@@ -1435,11 +1847,14 @@ def run_one(
     detailed_dir = plot_dir / "detailed"
     spatial_plot_dir = plot_dir / "spatial_occupancy"
     alignment_plot_dir = plot_dir / "body_alignment_by_distance"
+    visit_plot_dir = plot_dir / "near_field_visits"
     if apply:
         plot_dir.mkdir(parents=True, exist_ok=True)
         detailed_dir.mkdir(parents=True, exist_ok=True)
         spatial_plot_dir.mkdir(parents=True, exist_ok=True)
         alignment_plot_dir.mkdir(parents=True, exist_ok=True)
+        if visit_configuration is not None:
+            visit_plot_dir.mkdir(parents=True, exist_ok=True)
 
     outputs = _mapping(entry["output_run_names"], field="output run names")
     spatial_occupancy_run = _exact_name(
@@ -1911,10 +2326,7 @@ def run_one(
             exact_child_specs.append(
                 (
                     "gaze",
-                    (
-                        "analysis/chaser_gaze_tracking_runs/"
-                        f"{outputs['gaze_tracking']}"
-                    ),
+                    (f"analysis/chaser_gaze_tracking_runs/{outputs['gaze_tracking']}"),
                     "composable_chaser_successor_manifest",
                     "composable_chaser_successor_manifest_sha256",
                 )
@@ -1948,6 +2360,117 @@ def run_one(
                     apply=apply,
                 )
             )
+
+    if visit_configuration is not None:
+        for provider, relative_key, radial_key in (
+            ("keypoint", "keypoint_relative", "keypoint_radial"),
+            ("detection", "detection_relative", "detection_radial"),
+        ):
+            visit_run = visit_configuration[f"{provider}_run"]
+            visit_receipt_flags: tuple[object, ...] = ()
+            if receipt_bound_relative:
+                visit_receipt_flags = (
+                    "--relative-frame-validation-receipt",
+                    relative_receipts[provider],
+                    "--semantic-selection-validation-receipt",
+                    exact_child_receipts["semantic_selection"],
+                    "--radial-validation-receipt",
+                    exact_child_receipts[radial_key],
+                )
+            visit_stage = f"{provider}_near_field_visits"
+            visit_binding = {
+                "recording_id": recording_id,
+                "visit_run": visit_run,
+                "relative_frame_run": outputs[relative_key],
+                "semantic_selection_run": outputs["semantic_selection"],
+                "radial_near_field_run": outputs[radial_key],
+                "minimum_quality_sample_count": visit_configuration[
+                    "minimum_quality_sample_count"
+                ],
+            }
+            if _existing_near_field_visit_output(archive, **visit_binding):
+                stages.append(
+                    {
+                        "stage": visit_stage,
+                        "mode": "reused_exact_complete_output",
+                    }
+                )
+            else:
+                stages.append(
+                    _invoke(
+                        stage=visit_stage,
+                        command=_stage_command(
+                            py,
+                            (
+                                "fisheye.utils."
+                                "materialize_chaser_near_field_visit_successor"
+                            ),
+                            "--analysis-zarr",
+                            archive,
+                            "--run-name",
+                            visit_run,
+                            "--relative-frame-run",
+                            outputs[relative_key],
+                            "--semantic-selection-run",
+                            outputs["semantic_selection"],
+                            "--radial-near-field-run",
+                            outputs[radial_key],
+                            "--expected-recording-id",
+                            recording_id,
+                            *visit_receipt_flags,
+                            "--minimum-quality-sample-count",
+                            visit_configuration["minimum_quality_sample_count"],
+                            "--scratch-root",
+                            scratch / f"{provider}_near_field_visits",
+                            "--copy-backend",
+                            copy_backend,
+                            "--apply",
+                        ),
+                        log_dir=receipt_dir,
+                        apply=apply,
+                    )
+                )
+                if apply and not _existing_near_field_visit_output(
+                    archive, **visit_binding
+                ):
+                    _fail(
+                        f"Stage {visit_stage!r} did not produce its exact bound output."
+                    )
+            if receipt_bound_relative:
+                assert relative_receipt_dir is not None
+                visit_receipt = (
+                    relative_receipt_dir
+                    / f"{provider}_near_field_visits.exact_child_validation_receipt.json"
+                )
+                receipt_key = f"{provider}_near_field_visits"
+                exact_child_receipts[receipt_key] = visit_receipt
+                stages.append(
+                    _invoke(
+                        stage=f"{receipt_key}_exact_child_validation_receipt",
+                        command=_stage_command(
+                            py,
+                            (
+                                "fisheye.utils."
+                                "seal_exact_immutable_child_validation_receipt"
+                            ),
+                            archive,
+                            "--run-path",
+                            f"analysis/chaser_near_field_visits_runs/{visit_run}",
+                            "--manifest-attr",
+                            "composable_chaser_successor_manifest",
+                            "--manifest-digest-attr",
+                            "composable_chaser_successor_manifest_sha256",
+                            "--palette-commit",
+                            commit,
+                            "--output-json",
+                            visit_receipt,
+                            "--expected-recording-id",
+                            recording_id,
+                        ),
+                        log_dir=receipt_dir,
+                        apply=apply,
+                    )
+                )
 
     if "body_alignment_by_distance" in outputs:
         alignment_receipt_flags: tuple[object, ...] = ()
@@ -2112,6 +2635,8 @@ def run_one(
             if "gaze" in exact_child_receipts
             else EPOCH_ALIGNMENT_PROJECTION_RECEIPT_NAME
         )
+        # The visit successors retain independent lineage and receipts.  They
+        # intentionally do not widen the closed v7/v8 projection grammar.
         stages.append(
             _invoke(
                 stage="exact_chaser_projection_receipt",
@@ -2170,6 +2695,60 @@ def run_one(
                 apply=apply,
             )
         )
+
+    if visit_configuration is not None:
+        for provider in ("keypoint", "detection"):
+            visit_run = visit_configuration[f"{provider}_run"]
+            visit_bundle = visit_configuration[f"{provider}_plot_bundle"]
+            visit_plot_receipt = visit_plot_dir / (
+                f"{visit_bundle}_near_field_visit_plot_receipt.json"
+            )
+            if _validated_plot_receipt(
+                visit_plot_receipt,
+                recording_id=recording_id,
+                require_self_contained_recipe=receipt_bound_relative,
+                expected_plot_recipe_id=NEAR_FIELD_VISIT_PLOT_RECIPE_ID,
+                expected_source_run_path=(
+                    f"analysis/chaser_near_field_visits_runs/{visit_run}"
+                ),
+            ):
+                stages.append(
+                    {
+                        "stage": f"{provider}_near_field_visit_plots",
+                        "mode": "reused_exact_receipt",
+                    }
+                )
+            else:
+                stages.append(
+                    _invoke(
+                        stage=f"{provider}_near_field_visit_plots",
+                        command=_stage_command(
+                            py,
+                            "fisheye.utils.plot_chaser_near_field_visit_successor",
+                            archive,
+                            "--run-name",
+                            visit_run,
+                            "--bundle-name",
+                            visit_bundle,
+                            "--expected-recording-id",
+                            recording_id,
+                            "--output-dir",
+                            visit_plot_dir,
+                            *(
+                                (
+                                    "--source-validation-receipt",
+                                    exact_child_receipts[
+                                        f"{provider}_near_field_visits"
+                                    ],
+                                )
+                                if receipt_bound_relative
+                                else ()
+                            ),
+                        ),
+                        log_dir=receipt_dir,
+                        apply=apply,
+                    )
+                )
 
     if "body_alignment_by_distance" in outputs:
         alignment_plot_receipt = (
@@ -2397,7 +2976,7 @@ def _parser() -> argparse.ArgumentParser:
     replan_parser.add_argument("--output", type=Path, required=True)
     successor_parser = subparsers.add_parser(
         "successor",
-        help="derive the receipt-bound self-contained-plot task successor",
+        help="derive the receipt-bound visit and self-contained-plot task successor",
     )
     successor_parser.add_argument("task", type=Path)
     successor_parser.add_argument("--output", type=Path, required=True)

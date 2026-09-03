@@ -37,6 +37,7 @@ def run(
     relative_frame_run: str,
     semantic_selection_run: str,
     radial_near_field_run: str,
+    expected_recording_id: str | None = None,
     relative_frame_validation_receipt: str | Path | None = None,
     semantic_selection_validation_receipt: str | Path | None = None,
     radial_validation_receipt: str | Path | None = None,
@@ -50,6 +51,7 @@ def run(
         load_chaser_relative_frame_source_handle(
             archive,
             run_name=relative_frame_run,
+            expected_recording_id=expected_recording_id,
             use_consolidated=True,
         )
         if relative_frame_validation_receipt is None
@@ -58,6 +60,7 @@ def run(
             required_base_arrays=RELATIVE_FRAME_ARRAY_NAMES,
             collapsed_frame_arrays=RELATIVE_FRAME_COLLAPSED_ARRAY_NAMES,
             expected_analysis_zarr=archive,
+            expected_recording_id=expected_recording_id,
             expected_run_name=relative_frame_run,
         )
     )
@@ -121,6 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--relative-frame-run", required=True)
     parser.add_argument("--semantic-selection-run", required=True)
     parser.add_argument("--radial-near-field-run", required=True)
+    parser.add_argument("--expected-recording-id")
     parser.add_argument("--relative-frame-validation-receipt")
     parser.add_argument("--semantic-selection-validation-receipt")
     parser.add_argument("--radial-validation-receipt")
@@ -147,6 +151,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         relative_frame_run=args.relative_frame_run,
         semantic_selection_run=args.semantic_selection_run,
         radial_near_field_run=args.radial_near_field_run,
+        expected_recording_id=args.expected_recording_id,
         relative_frame_validation_receipt=(args.relative_frame_validation_receipt),
         semantic_selection_validation_receipt=(
             args.semantic_selection_validation_receipt
