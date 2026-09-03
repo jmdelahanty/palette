@@ -4,63 +4,23 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 import json
-import math
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-import matplotlib.patheffects as path_effects  # noqa: E402
 import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 from scipy.ndimage import gaussian_filter  # noqa: E402
 
-from fisheye.analysis.chaser_behavior import (  # noqa: E402
-    BEHAVIOR_CLASS_LABELS,
-    ConfiguredChaserBehavior,
-    resolve_configured_chaser_behaviors,
-)
-from fisheye.analysis.chaser_profiles import (  # noqa: E402
-    ChaserProtocolProfile,
-    default_chaser_protocol_profile_path,
-    load_chaser_protocol_profile,
-    resolve_protocol_payload_path,
-)
 from fisheye.shared.citrus_enums import load_event_types
-from fisheye.shared.directed_transform_chain import (  # noqa: E402
-    apply_bound_directed_transform_chain,
-)
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.refined_detect_resolution import resolve_detection_read_source
-from fisheye.shared.stimulus_coordinate_contract import (  # noqa: E402
-    load_bound_stimulus_coordinate_evidence,
-)
 from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
-
-CHASER_BEHAVIOR_MARKERS: Mapping[str, str] = {
-    "aggressive": "*",
-    "random_non_chasing": "D",
-    "inert": "o",
-    "unknown": "X",
-}
-
-
-def _unit_color_to_u8(value: float) -> int:
-    number = float(value)
-    if not np.isfinite(number) or not 0.0 <= number <= 1.0:
-        raise ValueError(f"Experimental chaser color channel is invalid: {value!r}.")
-    return int(round(number * 255.0))
-
-
-def _experimental_color_hex(rgba: Sequence[float]) -> str:
-    if len(rgba) != 4:
-        raise ValueError("Experimental chaser color must contain RGBA channels.")
-    channels = tuple(_unit_color_to_u8(float(value)) for value in rgba)
-    return "#{:02x}{:02x}{:02x}".format(*channels[:3])
 
 
 @dataclass(frozen=True)
@@ -75,41 +35,6 @@ class EpochWindow:
     @property
     def duration_s(self) -> float:
         return max(0.0, float(self.end_s) - float(self.start_s))
-
-
-@dataclass(frozen=True)
-class ChaserPositionMarker:
-    chaser_index: int
-    behavior_class_id: int
-    behavior_class: str
-    behavior_marker: str
-    experimental_color_rgba: tuple[float, float, float, float]
-    experimental_color_hex: str
-    camera_x_px: float
-    camera_y_px: float
-    sample_count: int
-    median_drift_px: float
-    max_drift_px: float
-
-
-@dataclass(frozen=True)
-class ChaserPositionOverlay:
-    window_label: str
-    effective_start_frame: int
-    effective_end_frame: int
-    stimulus_run: str
-    source_chaser_path: str
-    source_camera_id: str
-    source_camera_width: int
-    source_camera_height: int
-    coordinate_descriptor_sha256: str
-    frame_transform_manifest_ref: str
-    frame_transform_manifest_sha256: str
-    protocol_profile_id: str
-    protocol_profile_version: int
-    protocol_profile_sha256: str
-    post_settle_duration_s: float
-    markers: tuple[ChaserPositionMarker, ...]
 
 
 @dataclass(frozen=True)
@@ -131,7 +56,6 @@ class HeatmapResult:
     covered_frame_count: int
     coverage_pct: float
     heatmap: np.ndarray
-    chaser_overlay: Optional[ChaserPositionOverlay] = None
 
 
 def default_windows(
@@ -354,328 +278,6 @@ def resolve_stimulus_event_windows(
         event_frames.setdefault(name, frame)
 
     return build_chaser_event_windows(event_frames, fps=fps, total_frames=total_frames)
-
-
-def _load_protocol_payload(stimulus_group: zarr.Group) -> dict[str, Any]:
-    raw = stimulus_group.attrs.get("protocol_json")
-    if isinstance(raw, Mapping):
-        payload: Any = dict(raw)
-    elif raw is None:
-        payload = None
-    else:
-        try:
-            payload = json.loads(_decode_text_value(raw))
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ValueError("Stimulus protocol_json is not valid JSON.") from exc
-    if not isinstance(payload, dict):
-        raise ValueError(
-            "Stimulus run lacks a protocol_json object required for chaser labels."
-        )
-    return payload
-
-
-def _post_settle_duration_s(
-    profile: ChaserProtocolProfile,
-    protocol_payload: Mapping[str, Any],
-) -> float:
-    if profile.role_resolver_id != "configured_chaser_behavior_flags":
-        raise ValueError(
-            "Unsupported chaser role resolver for heatmap overlays: "
-            f"{profile.role_resolver_id!r}."
-        )
-    parameters = profile.analysis_parameters.get("chaser_quadrant_occupancy", {})
-    try:
-        fallback = max(
-            0.0,
-            float(parameters.get("post_settle_duration_fallback_s", 0.0)),
-        )
-    except (TypeError, ValueError):
-        fallback = 0.0
-    source_path = str(parameters.get("post_settle_duration_source") or "").strip()
-    if not source_path:
-        return fallback
-    value = resolve_protocol_payload_path(protocol_payload, source_path)
-    try:
-        return max(0.0, float(value))
-    except (TypeError, ValueError):
-        return fallback
-
-
-def compute_chaser_position_overlays(
-    *,
-    windows: Sequence[EpochWindow],
-    source_acquisition_frame_index: np.ndarray,
-    chaser_index: np.ndarray,
-    chaser_position_arena_xy: np.ndarray,
-    chaser_behavior_class_id: np.ndarray,
-    configured_behaviors: Sequence[ConfiguredChaserBehavior],
-    transform_chain: Any,
-    source_camera_width: int,
-    source_camera_height: int,
-    fps: float,
-    post_settle_duration_s: float,
-    stimulus_run: str,
-    source_chaser_path: str,
-    source_camera_id: str,
-    coordinate_descriptor_sha256: str,
-    frame_transform_manifest_ref: str,
-    frame_transform_manifest_sha256: str,
-    protocol_profile_id: str,
-    protocol_profile_version: int,
-    protocol_profile_sha256: str,
-) -> tuple[ChaserPositionOverlay, ...]:
-    frames = np.asarray(source_acquisition_frame_index, dtype=np.int64).reshape(-1)
-    indices = np.asarray(chaser_index, dtype=np.int64).reshape(-1)
-    positions = np.asarray(chaser_position_arena_xy, dtype=np.float64)
-    class_ids = np.asarray(chaser_behavior_class_id, dtype=np.int64).reshape(-1)
-    if positions.ndim != 2 or positions.shape[1] != 2:
-        raise ValueError("chaser_position_xy must have shape (row, 2).")
-    row_count = int(frames.shape[0])
-    if any(
-        value != row_count
-        for value in (indices.shape[0], positions.shape[0], class_ids.shape[0])
-    ):
-        raise ValueError("Canonical chaser arrays disagree on row count.")
-    if row_count == 0:
-        raise ValueError("Canonical chaser rowset is empty.")
-
-    behavior_by_index: dict[int, ConfiguredChaserBehavior] = {}
-    for behavior in configured_behaviors:
-        index = int(behavior.chaser_index)
-        if index in behavior_by_index:
-            raise ValueError(f"Protocol defines duplicate chaser index {index}.")
-        behavior_by_index[index] = behavior
-    if not behavior_by_index:
-        raise ValueError("Protocol does not define any chasers.")
-    observed_indices = {int(value) for value in np.unique(indices)}
-    configured_indices = set(behavior_by_index)
-    if observed_indices != configured_indices:
-        raise ValueError(
-            "Protocol and canonical chaser rowset disagree on chaser indices: "
-            f"protocol={sorted(configured_indices)}, observed={sorted(observed_indices)}."
-        )
-    for index, behavior in behavior_by_index.items():
-        observed_classes = {
-            int(value) for value in np.unique(class_ids[indices == index])
-        }
-        expected_class = int(behavior.behavior_class_id)
-        if observed_classes != {expected_class}:
-            raise ValueError(
-                f"Chaser {index} behavior classification disagrees with protocol: "
-                f"expected={expected_class}, observed={sorted(observed_classes)}."
-            )
-        expected_label = BEHAVIOR_CLASS_LABELS.get(expected_class)
-        if expected_label is None or str(behavior.behavior_class) != expected_label:
-            raise ValueError(
-                f"Chaser {index} uses unsupported behavior class {expected_class}."
-            )
-
-    if source_camera_width <= 0 or source_camera_height <= 0:
-        raise ValueError("Source-camera extent must be positive.")
-    if not np.isfinite(float(fps)) or float(fps) <= 0:
-        raise ValueError("Heatmap FPS must be positive.")
-
-    overlays: list[ChaserPositionOverlay] = []
-    for window in windows:
-        if window.label not in {"pre_event", "post_event"}:
-            continue
-        if window.start_frame is None or window.end_frame is None:
-            raise ValueError(
-                f"Chaser overlay window {window.label!r} lacks exact frame bounds."
-            )
-        effective_start = int(window.start_frame)
-        if window.label == "post_event":
-            effective_start += int(
-                math.ceil(max(0.0, float(post_settle_duration_s)) * float(fps))
-            )
-        effective_end = int(window.end_frame)
-        if effective_start > effective_end:
-            raise ValueError(
-                f"Post-settle trimming removed the full {window.label!r} window."
-            )
-
-        markers: list[ChaserPositionMarker] = []
-        for index in sorted(behavior_by_index):
-            behavior = behavior_by_index[index]
-            experimental_rgba = (
-                float(behavior.raw_color_rgba[0]),
-                float(behavior.raw_color_rgba[1]),
-                float(behavior.raw_color_rgba[2]),
-                float(behavior.raw_color_rgba[3]),
-            )
-            experimental_hex = _experimental_color_hex(experimental_rgba)
-            behavior_marker = CHASER_BEHAVIOR_MARKERS.get(
-                str(behavior.behavior_class),
-                CHASER_BEHAVIOR_MARKERS["unknown"],
-            )
-            selected = (
-                (indices == index)
-                & (frames >= effective_start)
-                & (frames <= effective_end)
-                & np.isfinite(positions).all(axis=1)
-            )
-            arena_samples = positions[selected]
-            if arena_samples.shape[0] == 0:
-                raise ValueError(
-                    f"No valid chaser {index} samples exist in {window.label!r}."
-                )
-            camera_samples = np.asarray(
-                apply_bound_directed_transform_chain(
-                    arena_samples,
-                    transform_chain,
-                ),
-                dtype=np.float64,
-            )
-            if camera_samples.shape != arena_samples.shape:
-                raise ValueError(
-                    "Arena-to-source-camera transform changed the chaser array shape."
-                )
-            if not np.isfinite(camera_samples).all():
-                raise ValueError(
-                    "Arena-to-source-camera transform produced non-finite chaser positions."
-                )
-            center = np.median(camera_samples, axis=0)
-            x_px = float(center[0])
-            y_px = float(center[1])
-            if not (
-                0.0 <= x_px < float(source_camera_width)
-                and 0.0 <= y_px < float(source_camera_height)
-            ):
-                raise ValueError(
-                    f"Chaser {index} {window.label!r} endpoint falls outside the "
-                    f"source-camera extent: ({x_px:g}, {y_px:g}) not within "
-                    f"{source_camera_width}x{source_camera_height}."
-                )
-            drift = np.linalg.norm(camera_samples - center.reshape(1, 2), axis=1)
-            markers.append(
-                ChaserPositionMarker(
-                    chaser_index=index,
-                    behavior_class_id=int(behavior.behavior_class_id),
-                    behavior_class=str(behavior.behavior_class),
-                    behavior_marker=behavior_marker,
-                    experimental_color_rgba=experimental_rgba,
-                    experimental_color_hex=experimental_hex,
-                    camera_x_px=x_px,
-                    camera_y_px=y_px,
-                    sample_count=int(camera_samples.shape[0]),
-                    median_drift_px=float(np.median(drift)),
-                    max_drift_px=float(np.max(drift)),
-                )
-            )
-        overlays.append(
-            ChaserPositionOverlay(
-                window_label=window.label,
-                effective_start_frame=effective_start,
-                effective_end_frame=effective_end,
-                stimulus_run=str(stimulus_run),
-                source_chaser_path=str(source_chaser_path),
-                source_camera_id=str(source_camera_id),
-                source_camera_width=int(source_camera_width),
-                source_camera_height=int(source_camera_height),
-                coordinate_descriptor_sha256=str(coordinate_descriptor_sha256),
-                frame_transform_manifest_ref=str(frame_transform_manifest_ref),
-                frame_transform_manifest_sha256=str(frame_transform_manifest_sha256),
-                protocol_profile_id=str(protocol_profile_id),
-                protocol_profile_version=int(protocol_profile_version),
-                protocol_profile_sha256=str(protocol_profile_sha256),
-                post_settle_duration_s=float(post_settle_duration_s),
-                markers=tuple(markers),
-            )
-        )
-    if {overlay.window_label for overlay in overlays} != {
-        "pre_event",
-        "post_event",
-    }:
-        raise ValueError(
-            "Behavior-labeled chaser overlays require both pre_event and post_event windows."
-        )
-    return tuple(overlays)
-
-
-def load_chaser_position_overlays(
-    root: zarr.Group,
-    *,
-    windows: Sequence[EpochWindow],
-    stimulus_run: Optional[str],
-    width: int,
-    height: int,
-    fps: float,
-    camera_id: Optional[str],
-) -> tuple[ChaserPositionOverlay, ...]:
-    resolved_run, stimulus_group = _resolve_stimulus_run(root, stimulus_run)
-    tracking = stimulus_group.get("tracking_data")
-    if tracking is None or "chaser_states" not in tracking:
-        raise ValueError(
-            f"Stimulus run {resolved_run!r} has no canonical chaser_states group."
-        )
-    chaser_group = tracking["chaser_states"]
-    required_arrays = (
-        "chaser_index",
-        "chaser_position_xy",
-        "chaser_behavior_class_id",
-    )
-    missing = [name for name in required_arrays if name not in chaser_group]
-    if missing:
-        raise ValueError(
-            f"Canonical chaser rowset is missing required arrays: {missing}."
-        )
-
-    evidence = load_bound_stimulus_coordinate_evidence(
-        stimulus_group,
-        chaser_group,
-        root_node=root,
-    )
-    acquisition = evidence.frame_transform.acquisition_frame.record
-    endpoint = evidence.frame_transform.source_camera_frame.endpoint
-    if int(endpoint.width) != int(width) or int(endpoint.height) != int(height):
-        raise ValueError(
-            "Chaser transform source-camera extent does not match the heatmap: "
-            f"transform={endpoint.width}x{endpoint.height}, heatmap={width}x{height}."
-        )
-    if camera_id is not None and str(camera_id) != str(acquisition.camera_id):
-        raise ValueError(
-            "Chaser transform camera does not match the heatmap camera: "
-            f"transform={acquisition.camera_id!r}, heatmap={camera_id!r}."
-        )
-
-    protocol_payload = _load_protocol_payload(stimulus_group)
-    configured = resolve_configured_chaser_behaviors(protocol_payload)
-    profile = load_chaser_protocol_profile(default_chaser_protocol_profile_path())
-    settle_duration_s = _post_settle_duration_s(profile, protocol_payload)
-    position_array = chaser_group["chaser_position_xy"]
-    descriptor_sha256 = str(
-        position_array.attrs.get("coordinate_descriptor_sha256") or ""
-    ).strip()
-    if len(descriptor_sha256) != 64:
-        raise ValueError(
-            "Canonical chaser_position_xy lacks its coordinate descriptor digest."
-        )
-    source_path = f"analysis/stimulus_runs/{resolved_run}/tracking_data/chaser_states"
-    manifest = evidence.frame_transform.manifest
-    return compute_chaser_position_overlays(
-        windows=windows,
-        source_acquisition_frame_index=evidence.source_acquisition_frame_index,
-        chaser_index=np.asarray(chaser_group["chaser_index"][:]),
-        chaser_position_arena_xy=np.asarray(position_array[:]),
-        chaser_behavior_class_id=np.asarray(
-            chaser_group["chaser_behavior_class_id"][:]
-        ),
-        configured_behaviors=configured,
-        transform_chain=evidence.frame_transform.transform_chain,
-        source_camera_width=int(width),
-        source_camera_height=int(height),
-        fps=float(fps),
-        post_settle_duration_s=float(settle_duration_s),
-        stimulus_run=resolved_run,
-        source_chaser_path=source_path,
-        source_camera_id=str(acquisition.camera_id),
-        coordinate_descriptor_sha256=descriptor_sha256,
-        frame_transform_manifest_ref=manifest.record_ref,
-        frame_transform_manifest_sha256=manifest.record_sha256,
-        protocol_profile_id=profile.profile_id,
-        protocol_profile_version=profile.profile_version,
-        protocol_profile_sha256=profile.sha256,
-    )
 
 
 def _open_root(zarr_path: Path) -> zarr.Group:
@@ -969,12 +571,7 @@ def build_heatmaps_for_archive(
     smooth_sigma: float,
     normalize: str,
     min_score: Optional[float],
-    overlay_chasers: bool = False,
 ) -> list[HeatmapResult]:
-    if overlay_chasers and not windows_from_stimulus:
-        raise ValueError(
-            "Behavior-labeled chaser overlays require --windows-from-stimulus."
-        )
     root = _open_root(zarr_path)
     group, source_path, source_kind = _resolve_detection_group(
         root,
@@ -1006,18 +603,6 @@ def build_heatmaps_for_archive(
     )
     arena_id = _attr_text(root.attrs, "arena_id")
     camera_id = _attr_text(root.attrs, "camera_id", "camera_serial")
-    overlays_by_window: dict[str, ChaserPositionOverlay] = {}
-    if overlay_chasers:
-        overlays = load_chaser_position_overlays(
-            root,
-            windows=resolved_windows,
-            stimulus_run=stimulus_run,
-            width=width,
-            height=height,
-            fps=fps,
-            camera_id=camera_id,
-        )
-        overlays_by_window = {overlay.window_label: overlay for overlay in overlays}
 
     results: list[HeatmapResult] = []
     for window in resolved_windows:
@@ -1054,7 +639,6 @@ def build_heatmaps_for_archive(
                 covered_frame_count=covered,
                 coverage_pct=coverage,
                 heatmap=heatmap,
-                chaser_overlay=overlays_by_window.get(window.label),
             )
         )
     return results
@@ -1072,45 +656,7 @@ def _window_title(window: EpochWindow) -> str:
     frame_text = ""
     if window.start_frame is not None and window.end_frame is not None:
         frame_text = f"\nframes {window.start_frame}-{window.end_frame}"
-    return f"{window.label.replace('_', ' ')}\n{window.start_s/60:.2f}-{window.end_s/60:.2f} min{frame_text}"
-
-
-def _render_chaser_position_overlay(
-    ax: Any,
-    overlay: ChaserPositionOverlay,
-) -> None:
-    for marker in overlay.markers:
-        ax.scatter(
-            [marker.camera_x_px],
-            [marker.camera_y_px],
-            s=150,
-            marker=marker.behavior_marker,
-            color=marker.experimental_color_hex,
-            edgecolor="white",
-            linewidth=1.6,
-            zorder=6,
-        )
-        label = (
-            f"{marker.behavior_class.replace('_', ' ')} chaser {marker.chaser_index}"
-        )
-        text = ax.annotate(
-            label,
-            xy=(marker.camera_x_px, marker.camera_y_px),
-            xytext=(8, 7),
-            textcoords="offset points",
-            ha="left",
-            va="bottom",
-            fontsize=8,
-            fontweight="bold",
-            color="white",
-            zorder=7,
-        )
-        text.set_path_effects(
-            [
-                path_effects.Stroke(linewidth=2.4, foreground="black"),
-                path_effects.Normal(),
-            ]
-        )
+    return f"{window.label.replace('_', ' ')}\n{window.start_s / 60:.2f}-{window.end_s / 60:.2f} min{frame_text}"
 
 
 def render_heatmap_panel(
@@ -1184,8 +730,6 @@ def render_heatmap_panel(
                 vmax=vmax,
                 interpolation="nearest",
             )
-            if item.chaser_overlay is not None:
-                _render_chaser_position_overlay(ax, item.chaser_overlay)
             if row_idx == 0:
                 ax.set_title(_window_title(item.window), fontsize=10)
             if col_idx == 0:
@@ -1257,11 +801,6 @@ def write_summary(
                     "detection_count": item.detection_count,
                     "covered_frame_count": item.covered_frame_count,
                     "coverage_pct": item.coverage_pct,
-                    "chaser_overlay": (
-                        asdict(item.chaser_overlay)
-                        if item.chaser_overlay is not None
-                        else None
-                    ),
                 }
             )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1308,14 +847,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--stimulus-run", help="Stimulus run name for --windows-from-stimulus."
     )
     parser.add_argument(
-        "--overlay-chasers",
-        action="store_true",
-        help=(
-            "Label canonical pre/post chaser positions by behavior using the "
-            "exact arena-to-source-camera transform. Requires --windows-from-stimulus."
-        ),
-    )
-    parser.add_argument(
         "--window",
         action="append",
         default=[],
@@ -1346,8 +877,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     if args.windows_from_stimulus and args.window:
         raise ValueError("--window cannot be combined with --windows-from-stimulus.")
-    if args.overlay_chasers and not args.windows_from_stimulus:
-        raise ValueError("--overlay-chasers requires --windows-from-stimulus.")
     windows = None
     if not args.windows_from_stimulus:
         windows = (
@@ -1373,7 +902,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             smooth_sigma=float(args.smooth_sigma),
             normalize=str(args.normalize),
             min_score=args.min_score,
-            overlay_chasers=bool(args.overlay_chasers),
         )
         for path in args.zarr
     ]

@@ -105,7 +105,7 @@ CHASER_PROVIDER = ProviderDefinition(
         AnalysisDefinition(
             "position_heatmap",
             "Position heatmap",
-            "Arena occupancy with optional chaser overlay.",
+            "Arena occupancy from the selected position authority.",
         ),
         AnalysisDefinition(
             "detection_occupancy",

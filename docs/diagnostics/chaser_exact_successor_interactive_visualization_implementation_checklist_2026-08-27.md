@@ -642,9 +642,10 @@ route.
 - [x] Add an aligned 4 mm display by exact 2 by 2 integer-count summation.
       Prove per-provider/per-epoch count conservation and recompute both
       normalized surfaces only with the persisted denominators.
-- [x] Expose four explicit modes: 2 mm robust, 2 mm full range, 4 mm robust,
-      and 4 mm full range. Keep 2 mm robust as the default and prohibit
-      interpolation or promotion of the 4 mm surface to scientific authority.
+- [x] For each persisted normalization, expose four explicit modes: 2 mm
+      robust, 2 mm full range, 4 mm robust, and 4 mm full range. Keep 4 mm
+      valid-in-arena robust as the default and prohibit interpolation or
+      promotion of the 4 mm surface to scientific authority.
 - [x] Add deterministic unit coverage for conservation, denominator mismatch,
       robust/full scale provenance, empty-difference fallback, exact hover
       counts, and all four Plotly controls.
@@ -659,6 +660,50 @@ route.
       the independent role glyph layer was visible on both provider rows.
 - [ ] Run required CI before merge or release. The live smoke is experimental
       read-only evidence and does not make the branch merge-ready.
+
+### Shared occupancy recipe and persistence correction — 2026-09-03
+
+- [x] Confirm that the completed scientific Zarrs persist canonical 2 mm
+      counts, both denominators and normalized surfaces, exact edges, and the
+      arena mask, but do not contain an exact-chaser `visualizations/` child.
+- [x] Remove the independently implemented static full-maximum/2 mm recipe.
+      Static Matplotlib, interactive Plotly, and catalog discovery now consume
+      one renderer-neutral display contract from
+      `fisheye.visualization.chaser_spatial_occupancy_display`.
+- [x] Make aligned 4 mm plus shared positive-bin p98 the one recommended
+      default. Retain 2 mm and full-range views only as explicit audit controls;
+      no legacy-default switch or implicit fallback exists.
+- [x] Advance the shared recipe to v5 and the static receipt to v4. Require the
+      static bundle to publish the recommended 4 mm/p98 PNG/PDF and its 4 mm
+      full-range PNG/PDF reference, each named by exact display-mode ID.
+- [x] Advance the cohort bundle name to `body_frame_projection_recipe_v4` and
+      require exact v5 recipe identity before reusing a plot receipt. Historical
+      receipts remain immutable evidence but cannot satisfy current reuse.
+- [x] Identify the existing exact pre/post location projection. It derives
+      median locations, sample counts, and drift from exact logged relative-frame
+      rows and independently binds protocol color, behavior-role glyph, and
+      chaser identity. The exact row-level positions, validity, occurrence,
+      identity, role, and epoch evidence are already persisted in the relative
+      successor; only this display-ready median/drift record currently lives in
+      generated figure metadata.
+- [x] Remove the selector-era `plot_detection_epoch_heatmaps --overlay-chasers`
+      option, implementation, metadata surface, and catalog promise. Generic
+      detection heatmaps remain available, but they can no longer manufacture a
+      competing chaser-location projection.
+- [ ] Publish a separate immutable recording-bound visualization component for
+      historical exact-chaser products using Palette's existing PNG/spec
+      artifact contract. Do not mutate completed scientific successors.
+- [ ] Persist the shared occupancy recipe and exact pre/post location records in
+      that component, bound to the exact composition/child receipts and source
+      manifests. Keep logged relative-frame positions as scientific authority;
+      the median location remains a display-only projection.
+- [ ] Route static occupancy overlays and Marimo through that same shared
+      location projection.
+- [x] Focused local regression surface passed outside the sandbox: 78 tests,
+      including rejection of the removed legacy overlay option.
+- [x] Run `scripts/py -m marimo check apps/marimo/palette_explorer.py` outside
+      the sandbox after the shared-recipe wiring.
+- [ ] Run every required CI check before merge or release.
 
 ### Independent relative-child receipt equivalence addendum — 2026-08-30
 
