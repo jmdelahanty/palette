@@ -437,6 +437,27 @@ successors before five-grain cohort admission.  This is a metadata-contract
 repair in the producer followed by normal immutable republication, not a
 receipt bypass or a new tail-loading profile.
 
+The camera-2010093 v012 successor canary then completed on
+`h06u26.int.janelia.org` in 193.56 seconds, published its exact ordinary array
+schema and payload receipt pair, passed registry finalization, and exposed a
+second boundary defect without weakening admission.  The tail-trace binder was
+still searching loose tail-run and archive-root FPS attributes even though the
+sealed subject-shape temporal authority already binds the canonical
+acquisition-camera record and its 30 Hz source-video metadata.  Consequently,
+the real five-grain resolver rejected the otherwise valid v012 source with
+`Tail trace export requires one positive finite source FPS.`
+
+Maintained tail-trace binding now has one rate-authority path: subject-shape
+publication → temporal authority → acquisition camera-frame record → sealed
+`source_video_metadata.fps`.  It requires the acquisition record reference and
+digest, requires the same recording identity, and compares that rate exactly
+with the track-kinematics publication.  Loose tail/root FPS probing has been
+removed rather than retained as fallback.  A regression supplies a conflicting
+root FPS and proves it is ignored, then removes the canonical temporal
+authority and proves binding fails closed.  This consumer repair makes the
+existing immutable v012 artifact consumable as published; it does not mutate or
+republish scientific data.
+
 Subject-shape publications follow the same maintained-consumption rule. Both
 supported payload profiles are receipt-bearing: v1 records the sealed result of
 the post-binding decoded scan, while v2 composes staged-transfer and final
@@ -564,10 +585,10 @@ reselecting core motion/body/bout authority.
 
 ### Track A — finish the complete core base
 
-- [ ] Finish the five-grain source resolver and recording-bundle schema.
-- [ ] Require one exact authority for every required core capability.
-- [ ] Seal the cross-grain join record and bind every capability to it.
-- [ ] Reuse one strict source binding within a recording to avoid repeated
+- [x] Finish the five-grain source resolver and recording-bundle schema.
+- [x] Require one exact authority for every required core capability.
+- [x] Seal the cross-grain join record and bind every capability to it.
+- [x] Reuse one strict source binding within a recording to avoid repeated
       whole-source validation.
 - [x] Make maintained tail publication, activation, loading, and core binding
       receipt-only; fail before decoded reads when evidence is absent or stale.

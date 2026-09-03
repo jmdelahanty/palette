@@ -292,17 +292,41 @@ def _tail_array_schema_adoption(run: Any) -> tuple[bool, Mapping[str, Any]]:
     }
 
 
-def _source_fps(root: Any, tail_attrs: Mapping[str, Any]) -> tuple[float, str]:
-    root_attrs = _attrs(root)
-    for owner, values in (("tail_run", tail_attrs), ("archive_root", root_attrs)):
-        for name in ("fps", "frame_rate", "source_video_fps", "video_fps"):
-            value = values.get(name)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                continue
-            rate = float(value)
-            if math.isfinite(rate) and rate > 0:
-                return rate, f"{owner}.attrs.{name}"
-    raise ValueError("Tail trace export requires one positive finite source FPS.")
+def _source_fps_from_subject_shape_authority(
+    publication: Any,
+    *,
+    expected_recording_id: str,
+) -> tuple[float, str]:
+    """Resolve FPS only through the sealed subject-shape temporal authority."""
+
+    temporal = getattr(publication, "temporal_authority", None)
+    acquisition = getattr(temporal, "acquisition_frame", None)
+    record = getattr(acquisition, "record", None)
+    metadata = getattr(record, "source_video_metadata", None)
+    if not isinstance(metadata, Mapping):
+        raise ValueError(
+            "Tail trace export requires canonical subject-shape acquisition authority."
+        )
+    if getattr(record, "recording_id", None) != expected_recording_id:
+        raise ValueError(
+            "Tail subject-shape acquisition authority binds another recording."
+        )
+    value = metadata.get("fps")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            "Tail subject-shape acquisition authority lacks exact source FPS."
+        )
+    rate = float(value)
+    if not math.isfinite(rate) or rate <= 0:
+        raise ValueError(
+            "Tail subject-shape acquisition authority FPS must be positive and finite."
+        )
+    record_ref = getattr(acquisition, "record_ref", None)
+    record_sha256 = getattr(acquisition, "record_sha256", None)
+    if not isinstance(record_ref, str) or not record_ref:
+        raise ValueError("Tail acquisition authority lacks its canonical record ref.")
+    _exact_sha256(record_sha256, label="tail acquisition authority record")
+    return rate, f"{record_ref}.source_video_metadata.fps"
 
 
 class _BoundedPayloadHasher:
@@ -968,7 +992,10 @@ def bind_tail_trace_sources(
         raise ValueError(
             "Tail source row count differs from valid track instance membership."
         )
-    source_fps, fps_source = _source_fps(root, tail_attrs)
+    source_fps, fps_source = _source_fps_from_subject_shape_authority(
+        shape_publication,
+        expected_recording_id=recording_id,
+    )
     track_fps = float(track_source.binding["source_sample_rate_hz"])
     if source_fps != track_fps:
         raise ValueError("Tail and track sources disagree on exact source FPS.")
