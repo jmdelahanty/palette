@@ -39,6 +39,35 @@ def _record(attrs: dict[str, object], key: str, value: dict[str, object]) -> Non
     attrs[f"{key}_sha256"] = canonical_json_sha256(value)
 
 
+def _self_digested(body: dict[str, object]) -> dict[str, object]:
+    return {**body, "payload_digest": canonical_json_sha256(body)}
+
+
+def _composable_manifest(
+    *,
+    successor_kind: str,
+    run_name: str,
+    run_path: str,
+    recording_id: str,
+    scientific: dict[str, object],
+) -> dict[str, object]:
+    return _self_digested(
+        {
+            "successor_kind": successor_kind,
+            "run_name": run_name,
+            "run_path": run_path,
+            "recording_id": recording_id,
+            "scientific_manifest": scientific,
+            "scientific_payload_sha256": scientific["payload_digest"],
+            "selector_eligible": False,
+            "selection": "none",
+            "production_authority": False,
+            "production_selector_activation": False,
+            "registry_update": False,
+        }
+    )
+
+
 def _fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     recording_id = "2026-08-10T17-20-55Z_arena_1_goodbatbadbat"
     recording = tmp_path / recording_id
@@ -304,6 +333,7 @@ def test_plan_freezes_exact_recording_inputs(tmp_path: Path) -> None:
     )
 
     assert task["recording_count"] == 1
+    assert task["schema_version"] == 7
     assert task["status_counts"] == {"ready": 1}
     assert task["runnable_task_indices"] == [1]
     assert cohort.load_cohort_task(task)["task_sha256"] == task["task_sha256"]
@@ -325,8 +355,29 @@ def test_plan_freezes_exact_recording_inputs(tmp_path: Path) -> None:
     assert entry["output_run_names"]["body_alignment_plot_bundle"] == (
         cohort.BODY_ALIGNMENT_RECIPE_BUNDLE_NAME
     )
-    assert entry["output_run_names"]["body_alignment_plot_bundle"].endswith(
-        "recipe_v2"
+    assert entry["output_run_names"]["body_alignment_plot_bundle"].endswith("recipe_v2")
+    assert entry["output_run_names"]["keypoint_near_field_visits"] == (
+        cohort.KEYPOINT_NEAR_FIELD_VISIT_RUN
+    )
+    assert entry["output_run_names"]["detection_near_field_visits"] == (
+        cohort.DETECTION_NEAR_FIELD_VISIT_RUN
+    )
+    assert entry["near_field_visit_successor"] == {
+        "provider_policy": cohort.NEAR_FIELD_VISIT_PROVIDER_POLICY,
+        "receipt_policy": cohort.NEAR_FIELD_VISIT_RECEIPT_POLICY,
+        "minimum_quality_sample_count": (
+            cohort.NEAR_FIELD_VISIT_MINIMUM_QUALITY_SAMPLE_COUNT
+        ),
+    }
+    assert (
+        f"analysis/chaser_near_field_visits_runs/"
+        f"{cohort.KEYPOINT_NEAR_FIELD_VISIT_RUN}" in entry["output_group_paths"]
+    )
+    assert task["selection_policy"]["near_field_visit_provider_policy"] == (
+        cohort.NEAR_FIELD_VISIT_PROVIDER_POLICY
+    )
+    assert task["selection_policy"]["near_field_visit_receipt_policy"] == (
+        cohort.NEAR_FIELD_VISIT_RECEIPT_POLICY
     )
     assert len(entry["input_group_bindings"]) == 8
     assert entry["existing_output_group_paths"] == []
@@ -408,10 +459,35 @@ def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> No
     assert entry["output_run_names"]["body_alignment_plot_bundle"] == (
         cohort.BODY_ALIGNMENT_RECIPE_BUNDLE_NAME
     )
+    assert entry["output_run_names"]["keypoint_near_field_visit_plot_bundle"] == (
+        cohort.KEYPOINT_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME
+    )
+    assert (
+        entry["output_run_names"]["detection_near_field_visit_plot_bundle"]
+        == cohort.DETECTION_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME
+    )
     assert successor["selection_policy"]["plot_recipe_provenance"] == (
         "self_contained_exact_parameters_v5"
     )
+    assert successor["selection_policy"]["near_field_visit_provider_policy"] == (
+        cohort.NEAR_FIELD_VISIT_PROVIDER_POLICY
+    )
     assert cohort.load_cohort_task(successor)["task_sha256"] == successor["task_sha256"]
+
+
+def test_task_rejects_partial_dual_provider_near_field_visit_outputs(
+    tmp_path: Path,
+) -> None:
+    _archive, _raw_h5, snapshot = _fixture(tmp_path)
+    task = cohort.plan_cohort_task(snapshot, operations_root=tmp_path / "operations")
+    task["entries"][0]["output_run_names"].pop("detection_near_field_visit_plot_bundle")
+    task["task_sha256"] = cohort._task_digest(task)
+
+    with pytest.raises(
+        cohort.ComposableChaserCohortError,
+        match="must bind both providers and plot bundles",
+    ):
+        cohort.load_cohort_task(task)
 
 
 def test_task_successor_reuses_existing_exact_spatial_science(tmp_path: Path) -> None:
@@ -491,7 +567,9 @@ def test_task_successor_freezes_reviewed_gaze_and_plans_exact_projection(
         receipt_root=tmp_path / "receipts",
         apply=False,
     )
-    gaze = next(stage for stage in result["stages"] if stage["stage"] == "gaze_tracking")
+    gaze = next(
+        stage for stage in result["stages"] if stage["stage"] == "gaze_tracking"
+    )
     assert gaze["command"][gaze["command"].index("--eye-run-name") + 1] == (
         "eye-angle-reviewed-v7"
     )
@@ -508,9 +586,7 @@ def test_task_successor_freezes_reviewed_gaze_and_plans_exact_projection(
     assert "--gaze-receipt" in projection["command"]
     assert (
         Path(
-            projection["command"][
-                projection["command"].index("--output-json") + 1
-            ]
+            projection["command"][projection["command"].index("--output-json") + 1]
         ).name
         == cohort.GAZE_EPOCH_ALIGNMENT_PROJECTION_RECEIPT_NAME
     )
@@ -617,8 +693,12 @@ def test_run_one_dry_run_renders_complete_serial_chain(tmp_path: Path) -> None:
         "composable_successors",
         "keypoint_radial_near_field",
         "detection_radial_near_field",
+        "keypoint_near_field_visits",
+        "detection_near_field_visits",
         "body_alignment_by_distance",
         "spatial_occupancy",
+        "keypoint_near_field_visit_plots",
+        "detection_near_field_visit_plots",
         "body_alignment_by_distance_plots",
         "spatial_occupancy_plots",
         "dashboard_plots",
@@ -659,6 +739,7 @@ def test_receipt_bound_successor_dry_run_passes_targeted_receipts(
         snapshot, operations_root=tmp_path / "operations"
     )
     task = cohort.successor_cohort_task(original)
+    entry = task["entries"][0]
     repo, commit = _clean_repo(tmp_path)
 
     result = cohort.run_one(
@@ -686,6 +767,8 @@ def test_receipt_bound_successor_dry_run_passes_targeted_receipts(
         "escape",
         "body_alignment_by_distance",
         "spatial_occupancy",
+        "keypoint_near_field_visits",
+        "detection_near_field_visits",
     ):
         assert f"{source}_exact_child_validation_receipt" in names
     projection_receipt = next(
@@ -695,6 +778,8 @@ def test_receipt_bound_successor_dry_run_passes_targeted_receipts(
     )
     assert "--epoch-behavior-receipt" in projection_receipt["command"]
     assert "--body-alignment-by-distance-receipt" in projection_receipt["command"]
+    assert "--keypoint-near-field-visits-receipt" not in projection_receipt["command"]
+    assert "--detection-near-field-visits-receipt" not in projection_receipt["command"]
     assert (
         Path(
             projection_receipt["command"][
@@ -765,6 +850,39 @@ def test_receipt_bound_successor_dry_run_passes_targeted_receipts(
     )
     assert "--source-validation-receipt" in alignment_plot["command"]
 
+    for provider in ("keypoint", "detection"):
+        visit = next(
+            stage
+            for stage in result["stages"]
+            if stage["stage"] == f"{provider}_near_field_visits"
+        )
+        for option in (
+            "--relative-frame-validation-receipt",
+            "--semantic-selection-validation-receipt",
+            "--radial-validation-receipt",
+            "--expected-recording-id",
+            "--minimum-quality-sample-count",
+        ):
+            assert option in visit["command"]
+        assert (
+            int(
+                visit["command"][
+                    visit["command"].index("--minimum-quality-sample-count") + 1
+                ]
+            )
+            == cohort.NEAR_FIELD_VISIT_MINIMUM_QUALITY_SAMPLE_COUNT
+        )
+        visit_plot = next(
+            stage
+            for stage in result["stages"]
+            if stage["stage"] == f"{provider}_near_field_visit_plots"
+        )
+        assert "--source-validation-receipt" in visit_plot["command"]
+        assert (
+            visit_plot["command"][visit_plot["command"].index("--bundle-name") + 1]
+            == entry["output_run_names"][f"{provider}_near_field_visit_plot_bundle"]
+        )
+
 
 def test_reused_plot_receipt_is_content_verified(tmp_path: Path) -> None:
     output = tmp_path / "figure.png"
@@ -790,6 +908,191 @@ def test_reused_plot_receipt_is_content_verified(tmp_path: Path) -> None:
     output.write_bytes(b"changed")
     with pytest.raises(cohort.ComposableChaserCohortError, match="differs"):
         cohort._validated_plot_receipt(receipt_path, recording_id="recording-1")
+
+
+def test_reused_visit_plot_receipt_requires_exact_source_run(tmp_path: Path) -> None:
+    output = tmp_path / "figure.png"
+    output.write_bytes(b"figure bytes")
+    receipt_path = tmp_path / "receipt.json"
+    receipt = {
+        "recording_id": "recording-1",
+        "run_name": "visits-a",
+        "source_binding": {
+            "run_path": "analysis/chaser_near_field_visits_runs/visits-a"
+        },
+        "selector_eligible": False,
+        "production_authority": False,
+        "registry_update": False,
+        "outputs": [
+            {
+                "path": str(output),
+                "sha256": cohort._sha256_file(output),
+                "size_bytes": output.stat().st_size,
+            }
+        ],
+    }
+    receipt["payload_sha256"] = canonical_json_sha256(receipt)
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    assert cohort._validated_plot_receipt(
+        receipt_path,
+        recording_id="recording-1",
+        expected_source_run_path=("analysis/chaser_near_field_visits_runs/visits-a"),
+    )
+    with pytest.raises(cohort.ComposableChaserCohortError, match="source run mismatch"):
+        cohort._validated_plot_receipt(
+            receipt_path,
+            recording_id="recording-1",
+            expected_source_run_path=(
+                "analysis/chaser_near_field_visits_runs/visits-b"
+            ),
+        )
+
+
+def test_existing_visit_science_requires_current_exact_source_bindings(
+    tmp_path: Path,
+) -> None:
+    archive, _raw_h5, snapshot = _fixture(tmp_path)
+    task = cohort.plan_cohort_task(snapshot, operations_root=tmp_path / "operations")
+    entry = task["entries"][0]
+    recording_id = entry["recording_id"]
+    outputs = entry["output_run_names"]
+    relative_path = (
+        f"analysis/chaser_relative_frame_runs/{outputs['keypoint_relative']}"
+    )
+    semantic_path = (
+        "analysis/protocol_semantic_chaser_selection_runs/"
+        f"{outputs['semantic_selection']}"
+    )
+    radial_path = f"analysis/chaser_radial_near_field_runs/{outputs['keypoint_radial']}"
+    visit_run = outputs["keypoint_near_field_visits"]
+    visit_path = f"analysis/chaser_near_field_visits_runs/{visit_run}"
+
+    relative_attrs: dict[str, object] = {}
+    _record(relative_attrs, "chaser_relative_frame_manifest", {"source": "relative"})
+    _write_group(archive / relative_path, relative_attrs)
+    semantic_attrs: dict[str, object] = {}
+    _record(
+        semantic_attrs,
+        "protocol_semantic_chaser_selection_manifest",
+        {"source": "semantic"},
+    )
+    _write_group(archive / semantic_path, semantic_attrs)
+    relative_sha = relative_attrs["chaser_relative_frame_manifest_sha256"]
+    semantic_sha = semantic_attrs["protocol_semantic_chaser_selection_manifest_sha256"]
+    provider = {
+        "provider_id": "keypoint_triad.v1",
+        "provider_digest": "a" * 64,
+    }
+    fish_position = {
+        **provider,
+        "coordinate_authority_id": "/coordinate@pixel_frame",
+    }
+    radial_scientific = _self_digested(
+        {
+            "position_provider": provider,
+            "sources": {
+                "relative_frame": {
+                    "run_path": relative_path,
+                    "manifest_sha256": relative_sha,
+                },
+                "protocol_semantic_selection": {
+                    "run_path": semantic_path,
+                    "manifest_sha256": semantic_sha,
+                },
+                "fish_position": fish_position,
+            },
+        }
+    )
+    radial_manifest = _composable_manifest(
+        successor_kind="chaser_radial_near_field",
+        run_name=outputs["keypoint_radial"],
+        run_path=radial_path,
+        recording_id=recording_id,
+        scientific=radial_scientific,
+    )
+    radial_attrs: dict[str, object] = {}
+    _record(radial_attrs, "composable_chaser_successor_manifest", radial_manifest)
+    _write_group(archive / radial_path, radial_attrs)
+
+    radial_sha = radial_attrs["composable_chaser_successor_manifest_sha256"]
+
+    def write_visit(relative_source_path: str) -> None:
+        scientific = _self_digested(
+            {
+                "scientific_schema": {
+                    "schema_id": cohort.NEAR_FIELD_VISIT_SCIENTIFIC_SCHEMA_ID,
+                    "schema_version": 1,
+                },
+                "recording_id": recording_id,
+                "sources": {
+                    "relative_frame": {
+                        "run_path": relative_source_path,
+                        "manifest_sha256": relative_sha,
+                    },
+                    "protocol_semantic_selection": {
+                        "run_path": semantic_path,
+                        "manifest_sha256": semantic_sha,
+                    },
+                    "radial_near_field": {
+                        "run_path": radial_path,
+                        "manifest_sha256": radial_sha,
+                        "scientific_payload_sha256": radial_scientific[
+                            "payload_digest"
+                        ],
+                    },
+                    "fish_position": fish_position,
+                },
+                "position_provider": provider,
+                "config": {
+                    "minimum_quality_sample_count": (
+                        cohort.NEAR_FIELD_VISIT_MINIMUM_QUALITY_SAMPLE_COUNT
+                    )
+                },
+                "selector_eligible": False,
+                "selection": "none",
+                "production_authority": False,
+                "registry_update": False,
+            }
+        )
+        publication = _composable_manifest(
+            successor_kind="chaser_near_field_visits",
+            run_name=visit_run,
+            run_path=visit_path,
+            recording_id=recording_id,
+            scientific=scientific,
+        )
+        attrs: dict[str, object] = {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+            "production_authority": False,
+            "registry_update": False,
+            "selection": "none",
+            "palette_run_name": visit_run,
+            "recording_id": recording_id,
+        }
+        _record(attrs, "composable_chaser_successor_manifest", publication)
+        _write_group(archive / visit_path, attrs)
+
+    binding = {
+        "recording_id": recording_id,
+        "visit_run": visit_run,
+        "relative_frame_run": outputs["keypoint_relative"],
+        "semantic_selection_run": outputs["semantic_selection"],
+        "radial_near_field_run": outputs["keypoint_radial"],
+        "minimum_quality_sample_count": (
+            cohort.NEAR_FIELD_VISIT_MINIMUM_QUALITY_SAMPLE_COUNT
+        ),
+    }
+    write_visit(relative_path)
+    assert cohort._existing_near_field_visit_output(archive, **binding)
+
+    write_visit("analysis/chaser_relative_frame_runs/wrong-provider")
+    with pytest.raises(
+        cohort.ComposableChaserCohortError,
+        match="relative-frame binding is incompatible",
+    ):
+        cohort._existing_near_field_visit_output(archive, **binding)
 
 
 def test_reused_detailed_receipt_requires_exact_recipe_identity(
