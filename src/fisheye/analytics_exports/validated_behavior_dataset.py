@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence
 
 from .validated_behavior_cohort import (
     read_validated_behavior_export_manifest,
@@ -13,6 +13,9 @@ from .validated_behavior_cohort import (
     validated_behavior_manifest_path,
 )
 from .validated_behavior_contracts import ValidatedBehaviorTableSpec
+
+if TYPE_CHECKING:
+    from .validated_behavior_product_catalog import ValidatedBehaviorProductHandle
 
 
 @dataclass(frozen=True)
@@ -239,6 +242,40 @@ class ValidatedBehaviorExportDataset:
             name=name,
             spec=self.table_specs[name],
             part_paths=selected_table_parts(self.root, self.manifest, name),
+        )
+
+    def products(
+        self, *, product_kind: str | None = None
+    ) -> tuple["ValidatedBehaviorProductHandle", ...]:
+        """Return manifest-selected co-located products for this exact export."""
+
+        from .validated_behavior_product_catalog import (
+            list_validated_behavior_products,
+        )
+
+        return list_validated_behavior_products(
+            self.root,
+            self.export_run_id,
+            product_kind=product_kind,
+        )
+
+    def product(
+        self,
+        *,
+        product_kind: str,
+        product_run_id: str | None = None,
+    ) -> "ValidatedBehaviorProductHandle":
+        """Resolve one exact or uniquely compatible co-located product."""
+
+        from .validated_behavior_product_catalog import (
+            resolve_validated_behavior_product,
+        )
+
+        return resolve_validated_behavior_product(
+            self.root,
+            self.export_run_id,
+            product_kind=product_kind,
+            product_run_id=product_run_id,
         )
 
 

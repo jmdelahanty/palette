@@ -22,6 +22,10 @@ def _():
     import marimo as mo
     import polars as pl
 
+    from fisheye.analytics_exports.validated_behavior_product_catalog import (
+        BEHAVIOR_DISTRIBUTION,
+        resolve_validated_behavior_product,
+    )
     from apps.marimo.components.validated_behavior_distributions import (
         distribution_dimension_options,
         distribution_metric_options,
@@ -41,6 +45,7 @@ def _():
     )
 
     return (
+        BEHAVIOR_DISTRIBUTION,
         COHORT_STATISTIC_LABELS,
         DEFAULT_DISPLAY_RANGE,
         DISPLAY_RANGE_LABELS,
@@ -56,27 +61,87 @@ def _():
         mo,
         os,
         pl,
+        resolve_validated_behavior_product,
         validated_behavior_distribution_figure,
         validated_behavior_motion_trace_figure,
     )
 
 
 @app.cell
-def _(Path, ValidatedBehaviorDistributionViewSource, mo, os):
+def _(
+    BEHAVIOR_DISTRIBUTION,
+    Path,
+    ValidatedBehaviorDistributionViewSource,
+    mo,
+    os,
+    resolve_validated_behavior_product,
+):
     cli_args = mo.cli_args()
     distribution_dir_raw = cli_args.get(
         "distribution-dir",
         os.environ.get("PALETTE_VALIDATED_BEHAVIOR_DISTRIBUTION_DIR"),
     )
-    if not distribution_dir_raw:
+    export_root_raw = cli_args.get(
+        "export-root",
+        os.environ.get("PALETTE_VALIDATED_BEHAVIOR_EXPORT_ROOT"),
+    )
+    export_run_id_raw = cli_args.get(
+        "source-export-run-id",
+        os.environ.get("PALETTE_VALIDATED_BEHAVIOR_EXPORT_RUN_ID"),
+    )
+    distribution_run_id_raw = cli_args.get(
+        "distribution-run-id",
+        os.environ.get("PALETTE_VALIDATED_BEHAVIOR_DISTRIBUTION_RUN_ID"),
+    )
+    if distribution_dir_raw and export_root_raw:
+        raise ValueError("Choose either --distribution-dir or --export-root, not both")
+    if not distribution_dir_raw and not export_root_raw:
         raise ValueError(
-            "Required CLI arg is missing. Run with: scripts/py -m marimo run "
-            "apps/marimo/validated_behavior_distribution_explorer.py -- "
-            "--distribution-dir <exact-generation>"
+            "Provide --distribution-dir <exact-generation>, or provide "
+            "--export-root <publication> with --source-export-run-id <exact-run>"
         )
-    distribution_dir = Path(str(distribution_dir_raw)).expanduser().resolve()
+    product_discovery = None
+    if export_root_raw:
+        if not export_run_id_raw:
+            raise ValueError("--export-root requires --source-export-run-id")
+        product_handle = resolve_validated_behavior_product(
+            Path(str(export_root_raw)).expanduser().resolve(),
+            str(export_run_id_raw),
+            product_kind=BEHAVIOR_DISTRIBUTION,
+            product_run_id=(
+                None
+                if distribution_run_id_raw is None
+                else str(distribution_run_id_raw)
+            ),
+        )
+        distribution_dir = product_handle.root
+        product_discovery = {
+            "mode": "export_product_catalog",
+            "source_export_run_id": str(export_run_id_raw),
+            "catalog_record_sha256": product_handle.catalog_record_sha256,
+            "product_run_id": product_handle.product_run_id,
+            "product_manifest_sha256": product_handle.manifest_record_sha256,
+        }
+    else:
+        if export_run_id_raw or distribution_run_id_raw:
+            raise ValueError("Export and distribution run IDs require --export-root")
+        distribution_dir = Path(str(distribution_dir_raw)).expanduser().resolve()
+        product_discovery = {
+            "mode": "direct_exact_distribution_path",
+            "source_export_run_id": None,
+            "catalog_record_sha256": None,
+            "product_run_id": None,
+            "product_manifest_sha256": None,
+        }
     distribution_source = ValidatedBehaviorDistributionViewSource.open(distribution_dir)
-    return distribution_dir, distribution_source
+    if product_discovery["product_manifest_sha256"] not in {
+        None,
+        distribution_source.cache_identity,
+    }:
+        raise ValueError(
+            "Catalog-selected distribution changed before payload validation"
+        )
+    return distribution_dir, distribution_source, product_discovery
 
 
 @app.cell
@@ -86,6 +151,7 @@ def _(
     distribution_metric_options,
     distribution_source,
     mo,
+    product_discovery,
 ):
     distribution_metrics = available_distribution_metrics(distribution_source)
     metric_label_to_id = distribution_metric_options(distribution_metrics)
@@ -121,7 +187,9 @@ def _(
             mo.md(
                 f"Distribution: `{distribution_source.distribution_run_id}`  \n"
                 f"Manifest: `{distribution_source.cache_identity}`  \n"
-                f"Path: `{distribution_dir}`"
+                f"Path: `{distribution_dir}`  \n"
+                f"Discovery: `{product_discovery['mode']}`  \n"
+                f"Catalog: `{product_discovery['catalog_record_sha256'] or 'direct path'}`"
             ),
             metric_picker,
         ]
