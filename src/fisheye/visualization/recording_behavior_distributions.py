@@ -137,10 +137,20 @@ def render_recording_behavior_distribution_figure(
         axis.set_visible(False)
 
     figure.suptitle(
-        f"{metric_label} · {view.weighting_id} weighted"
-        + ("" if metric_definition is None else f"\n{metric_definition}"),
+        f"{metric_label} · {view.weighting_id} weighted",
         fontsize=14,
+        y=0.985,
     )
+    if metric_definition is not None:
+        figure.text(
+            0.5,
+            0.915,
+            metric_definition,
+            ha="center",
+            va="top",
+            fontsize=9,
+            color="#555555",
+        )
     figure.text(
         0.5,
         0.012,
@@ -153,7 +163,9 @@ def render_recording_behavior_distribution_figure(
         fontsize=8,
         color="#555555",
     )
-    figure.tight_layout(rect=(0.0, 0.045, 1.0, 0.94))
+    figure.tight_layout(
+        rect=(0.0, 0.045, 1.0, 0.82 if metric_definition is not None else 0.94)
+    )
     return figure
 
 
