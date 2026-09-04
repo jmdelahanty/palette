@@ -591,9 +591,15 @@ def test_inter_bout_interval_label_reaches_cohort_figures_and_static_report(
     static = render_distribution_figure(payload)
     try:
         assert static._suptitle.get_text().startswith("Inter-bout interval (IBI)")
-        assert "Gap between consecutive canonical swim bouts" in (
+        assert "Gap between consecutive canonical swim bouts" not in (
             static._suptitle.get_text()
         )
+        assert any(
+            text.get_text() == "Gap between consecutive canonical swim bouts"
+            and text.get_position() == (0.5, 0.915)
+            for text in static.texts
+        )
+        assert static.subplotpars.top == pytest.approx(0.76)
         assert static._supxlabel.get_text() == "Inter-bout interval (IBI) (s)"
     finally:
         plt.close(static)

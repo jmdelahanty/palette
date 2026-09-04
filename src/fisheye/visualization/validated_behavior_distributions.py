@@ -323,7 +323,7 @@ def render_distribution_figure(
             unique_handles,
             unique_labels,
             loc="upper center",
-            bbox_to_anchor=(0.5, 0.885),
+            bbox_to_anchor=(0.5, 0.825 if metric_definition is not None else 0.885),
             ncols=min(4, len(unique_handles)),
             frameon=False,
         )
@@ -335,17 +335,32 @@ def render_distribution_figure(
     )
     figure.suptitle(
         f"{metric_label} · {str(payload['weighting_id']).title()} "
-        f"weighted{warning}{range_note}"
-        + ("" if metric_definition is None else f"\n{metric_definition}"),
+        f"weighted{warning}{range_note}",
         fontsize=15,
-        y=0.98,
+        y=0.985,
     )
+    if metric_definition is not None:
+        figure.text(
+            0.5,
+            0.915,
+            metric_definition,
+            ha="center",
+            va="top",
+            fontsize=9.5,
+            color="#555555",
+        )
     figure.supxlabel(f"{metric_label} ({metric['unit']})", y=0.085, fontsize=10)
     figure.subplots_adjust(
         left=0.055,
         right=0.99,
         bottom=0.19,
-        top=0.76 if show_legend else 0.84,
+        top=(
+            0.68
+            if show_legend and metric_definition is not None
+            else 0.76
+            if show_legend or metric_definition is not None
+            else 0.84
+        ),
         wspace=0.08,
     )
     _footer(figure, payload, cohort_statistic, display_range)
