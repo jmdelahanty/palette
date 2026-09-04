@@ -290,8 +290,46 @@ projection-contract schema v3:
 This is source-admission evidence, not publication evidence. It proves that
 the selected immutable track-kinematics publications already contain and bind
 the physical motion surfaces required by the v2 projection, so no upstream
-motion recomputation or scientific-Zarr migration is required. A
-selector-ineligible full publisher canary remains pending required CI.
+motion recomputation or scientific-Zarr migration is required.
+
+### First full publisher canary and frozen-contract correction (2026-09-04)
+
+The first selector-ineligible full publisher canary ran from CI-tested commit
+`9e3fdcfdf113f799759c3ecdcf11cf7ebd383a8f` in its immutable deployment
+worktree. The operation, bundle, and plan remain at:
+
+```text
+/groups/johnson/johnsonlab/jeremy/operations/
+  sleepyfish_validated_core_behavior_full_rate_core_motion_v2_20260904_v004/
+```
+
+The bundle record digest is
+`8049e4226d1189d49a324bc3191bb2cc4bcd37eec3fbcf015c02be6849228fa5`,
+the capability-matrix digest is
+`5e1e582229250ffb966d772328351eb9485f59c4b075d20266a4c513c632fbd5`,
+and the plan digest is
+`033a28a41f0cfe64a03c8507466bffef050cb1b5066b99436c123e725f6710a6`.
+All safety fields are false.
+
+LSF shard array `154008697` ran all four members concurrently; each failed
+closed after 164--200 seconds with the same error before any shard receipt or
+publication was created. Dependent finalizer `154008698` therefore did not
+publish:
+
+```text
+ValueError: Core-motion projection differs from the installed successor contract.
+```
+
+The scientific records were identical. Production bundle validation had
+recursively frozen JSON objects as read-only mappings and JSON arrays as
+tuples, while the adapter performed a shallow comparison against ordinary
+dictionaries and lists. Commit `d7cdb1da` corrects that representation
+boundary by recursively thawing only JSON containers before exact comparison;
+it does not coerce scalar values. A production-shaped regression proves that
+the frozen valid contract is accepted and that a nested semantic change still
+fails closed. The two focused export suites pass 44/44 locally. This correction
+still requires complete CI and a fresh immutable v005 deployment, bundle,
+plan, and canary; the failed v004 evidence will not be edited or reused.
 
 ## Composition contract
 
