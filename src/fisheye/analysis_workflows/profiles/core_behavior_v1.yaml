@@ -2,13 +2,13 @@ schema_id: palette.analysis_workflow
 schema_version: 1
 workflow_id: core_behavior_v1
 description: >-
-  Stimulus-independent core behavior workflow. Framewise Zarr arrays remain
-  authoritative; portable exports use configurable kinematic samples and
-  fixed activity/spatial time bins.
+  Stimulus-independent core behavior workflow. Core motion, eye, and tail
+  exports preserve every source frame; activity/spatial views use fixed time
+  bins. Explicit downstream profiles may derive lower-rate motion views.
 
 temporal_policy:
   kinematics:
-    sample_rate_hz: 10
+    resolution: framewise
   activity_spatial:
     bin_size_s: 5
   eye_traces:
@@ -129,7 +129,7 @@ nodes:
     depends_on: [track_kinematics]
     temporal_product: kinematics
     execution_policy: immutable_parquet_export
-    description: Portable sampled position, speed, heading, and validity rows.
+    description: Source-rate position, speed, heading, and validity rows.
 
   - id: activity_spatial_summaries
     kind: export

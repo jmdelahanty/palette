@@ -36,11 +36,12 @@ def _write_zarr_metadata(
     )
 
 
-def test_core_behavior_profile_declares_portable_and_framewise_resolutions() -> None:
+def test_core_behavior_profile_preserves_framewise_scientific_traces() -> None:
     workflow = load_analysis_workflow(default_core_behavior_profile_path())
 
     assert workflow.workflow_id == "core_behavior_v1"
-    assert workflow.temporal_policy.kinematics_sample_rate_hz == 10.0
+    assert workflow.temporal_policy.kinematics_resolution == "framewise"
+    assert workflow.temporal_policy.kinematics_sample_rate_hz is None
     assert workflow.temporal_policy.activity_spatial_bin_size_s == 5.0
     assert workflow.temporal_policy.eye_trace_resolution == "framewise"
     assert workflow.temporal_policy.tail_trace_resolution == "framewise"
@@ -133,7 +134,11 @@ def test_temporal_policy_allows_numeric_overrides_but_not_trace_downsampling() -
         activity_spatial_bin_size_s=2.5,
     )
 
-    assert policy.product_policy("kinematics")["sample_rate_hz"] == 20.0
+    assert policy.product_policy("kinematics") == {
+        "resolution": "sampled",
+        "sample_rate_hz": 20.0,
+        "source_authority": "framewise_zarr",
+    }
     assert policy.product_policy("activity_spatial")["bin_size_s"] == 2.5
     with pytest.raises(ValueError, match="eye_traces.resolution must remain"):
         TemporalPolicy(eye_trace_resolution="10_hz")
@@ -146,6 +151,27 @@ def test_temporal_policy_rejects_unknown_configuration_fields() -> None:
         TemporalPolicy.from_mapping({"kinematic": {"sample_rate_hz": 10}})
     with pytest.raises(ValueError, match="unknown temporal_policy.kinematics field"):
         TemporalPolicy.from_mapping({"kinematics": {"sample_hz": 10}})
+
+
+def test_temporal_policy_round_trips_framewise_and_historical_sampled_forms() -> None:
+    framewise = TemporalPolicy()
+    assert TemporalPolicy.from_mapping(framewise.to_dict()) == framewise
+    assert framewise.kinematics_export_rate_hz(source_sample_rate_hz=29.97) == (
+        29.97
+    )
+
+    sampled = TemporalPolicy.from_mapping(
+        {"kinematics": {"sample_rate_hz": 10}}
+    )
+    assert sampled.kinematics_resolution == "sampled"
+    assert sampled.kinematics_export_rate_hz(source_sample_rate_hz=30) == 10.0
+
+
+def test_framewise_temporal_policy_rejects_a_sampling_rate() -> None:
+    with pytest.raises(ValueError, match="must not declare sample_rate_hz"):
+        TemporalPolicy.from_mapping(
+            {"kinematics": {"resolution": "framewise", "sample_rate_hz": 10}}
+        )
 
 
 @pytest.mark.parametrize(
@@ -162,7 +188,13 @@ def test_temporal_policy_rejects_non_positive_or_non_finite_values(
     value: float,
 ) -> None:
     with pytest.raises(ValueError, match="positive finite"):
-        TemporalPolicy(**{field: value})
+        if field == "kinematics_sample_rate_hz":
+            TemporalPolicy(
+                kinematics_resolution="sampled",
+                kinematics_sample_rate_hz=value,
+            )
+        else:
+            TemporalPolicy(**{field: value})
 
 
 def test_targeted_plan_reuses_authority_and_schedules_only_dependency_closure() -> None:
@@ -206,8 +238,7 @@ def test_targeted_plan_reuses_authority_and_schedules_only_dependency_closure() 
     assert plan.node_by_id["refined_keypoints"].action == "reuse"
     assert plan.node_by_id["tracks"].action == "reuse"
     assert plan.node_by_id["kinematics_samples"].temporal_policy == {
-        "resolution": "sampled",
-        "sample_rate_hz": 10.0,
+        "resolution": "framewise",
         "source_authority": "framewise_zarr",
     }
 

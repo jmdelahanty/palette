@@ -186,13 +186,14 @@ bound to the selected trial authority.
   acceleration, angular motion, and provider/body/tracking row references
   (`src/fisheye/analytics_exports/validated_behavior_phase_b_contracts.py:78-149`).
   Its maintained Phase-C authority is provider-scope track kinematics. Core
-  `kinematics_samples` is a sampled standalone projection of an offline
-  track-kinematics publication
+  `kinematics_samples` is a source-rate standalone projection of an offline
+  track-kinematics publication; every source frame is retained by default
   (`src/fisheye/analytics_exports/contracts.py:339-397` and
   `src/fisheye/analysis_workflows/validated_behavior_source_admission.py:86-92`).
   The two are related projections, not aliases. A future composite publishes
   core `kinematics_samples` once and regenerates any required chaser relation
   against that selected authority.
+
 - `body_frame_samples` is one chaser/provider-oriented row per deduplicated
   acquisition frame with session-timestamp semantics
   (`src/fisheye/analytics_exports/validated_behavior_phase_b_contracts.py:303-336`).
@@ -210,6 +211,17 @@ bound to the selected trial authority.
   (`src/fisheye/analytics_exports/validated_behavior_adapters.py:1040-1105` and
   `src/fisheye/analytics_exports/validated_behavior_core_behavior_adapters.py:396-457`).
   They are **not presently proven to be the same bout authority**.
+
+### Full-rate core-motion decision
+
+The first sealed Sleepyfish five-grain generation used the earlier explicit
+10 Hz workflow policy. That immutable generation remains valid as a sampled
+query product, but it is not the full-rate colleague handoff. The maintained
+core workflow now defaults to all source frames and records the bound source
+rate with `sampling_stride_frames=1`. A lower-rate projection remains
+available only when a caller explicitly supplies a sampling rate. This changes
+neither the recording-local track-kinematics authority nor the shared
+`validated_behavior/v1` publication surface.
 
 ## Composition contract
 

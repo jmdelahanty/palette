@@ -469,8 +469,6 @@ def test_execution_renders_exact_kinematics_samples_export_boundary(
         "track_a",
         "--track-scope",
         "offline",
-        "--sample-rate-hz",
-        "10",
         "--output-root",
         str((tmp_path / "exports").resolve()),
         "--export-run-id",

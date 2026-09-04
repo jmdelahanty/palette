@@ -22,6 +22,8 @@ from fisheye.registry.stage_catalog import canonical_stage_id, get_stage_spec
 ANALYSIS_WORKFLOW_SCHEMA_ID = "palette.analysis_workflow"
 ANALYSIS_WORKFLOW_SCHEMA_VERSION = 1
 FRAMEWISE_RESOLUTION = "framewise"
+SAMPLED_RESOLUTION = "sampled"
+FRAMEWISE_ZARR_AUTHORITY = "framewise_zarr"
 NODE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 NODE_KINDS = frozenset({"prerequisite", "analysis", "visualization", "export"})
 TEMPORAL_PRODUCTS = frozenset(
@@ -52,27 +54,47 @@ def _string_tuple(value: object, *, label: str) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class TemporalPolicy:
-    """Portable temporal-resolution policy for analysis exports.
+    """Temporal-resolution policy for analysis exports.
 
-    Kinematics and summary bin sizes are configurable.  Eye and tail traces
-    are fixed to framewise resolution because downsampling those authorities
-    would discard the temporal signal needed by downstream analyses.
+    Core kinematics, eye, and tail traces default to framewise resolution.
+    Kinematics may be sampled only through an explicit rate override. Summary
+    bin sizes remain configurable.
     """
 
-    kinematics_sample_rate_hz: float = 10.0
+    kinematics_resolution: str = FRAMEWISE_RESOLUTION
+    kinematics_sample_rate_hz: float | None = None
     activity_spatial_bin_size_s: float = 5.0
     eye_trace_resolution: str = FRAMEWISE_RESOLUTION
     tail_trace_resolution: str = FRAMEWISE_RESOLUTION
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "kinematics_sample_rate_hz",
-            _positive_finite(
-                self.kinematics_sample_rate_hz,
-                label="kinematics.sample_rate_hz",
-            ),
-        )
+        kinematics_resolution = str(self.kinematics_resolution).strip().lower()
+        if kinematics_resolution not in {
+            FRAMEWISE_RESOLUTION,
+            SAMPLED_RESOLUTION,
+        }:
+            raise ValueError(
+                "kinematics.resolution must be 'framewise' or 'sampled'"
+            )
+        object.__setattr__(self, "kinematics_resolution", kinematics_resolution)
+        if kinematics_resolution == FRAMEWISE_RESOLUTION:
+            if self.kinematics_sample_rate_hz is not None:
+                raise ValueError(
+                    "framewise kinematics must not declare sample_rate_hz"
+                )
+        else:
+            if self.kinematics_sample_rate_hz is None:
+                raise ValueError(
+                    "sampled kinematics requires sample_rate_hz"
+                )
+            object.__setattr__(
+                self,
+                "kinematics_sample_rate_hz",
+                _positive_finite(
+                    self.kinematics_sample_rate_hz,
+                    label="kinematics.sample_rate_hz",
+                ),
+            )
         object.__setattr__(
             self,
             "activity_spatial_bin_size_s",
@@ -105,10 +127,14 @@ class TemporalPolicy:
 
         sections: dict[str, Mapping[str, Any]] = {}
         allowed_fields = {
-            "kinematics": {"sample_rate_hz"},
-            "activity_spatial": {"bin_size_s"},
-            "eye_traces": {"resolution"},
-            "tail_traces": {"resolution"},
+            "kinematics": {"resolution", "sample_rate_hz", "source_authority"},
+            "activity_spatial": {
+                "resolution",
+                "bin_size_s",
+                "source_authority",
+            },
+            "eye_traces": {"resolution", "source_authority"},
+            "tail_traces": {"resolution", "source_authority"},
         }
         for section_name, allowed in allowed_fields.items():
             section = data.get(section_name, {})
@@ -128,8 +154,31 @@ class TemporalPolicy:
         summaries = sections["activity_spatial"]
         eyes = sections["eye_traces"]
         tail = sections["tail_traces"]
+        for section_name, section in sections.items():
+            source_authority = section.get("source_authority")
+            if (
+                source_authority is not None
+                and source_authority != FRAMEWISE_ZARR_AUTHORITY
+            ):
+                raise ValueError(
+                    f"temporal_policy.{section_name}.source_authority must be "
+                    f"{FRAMEWISE_ZARR_AUTHORITY!r}"
+                )
+        kinematics_resolution = kinematics.get("resolution")
+        if kinematics_resolution is None:
+            kinematics_resolution = (
+                SAMPLED_RESOLUTION
+                if "sample_rate_hz" in kinematics
+                else FRAMEWISE_RESOLUTION
+            )
+        activity_resolution = summaries.get("resolution", "fixed_time_bins")
+        if activity_resolution != "fixed_time_bins":
+            raise ValueError(
+                "activity_spatial.resolution must be 'fixed_time_bins'"
+            )
         return cls(
-            kinematics_sample_rate_hz=kinematics.get("sample_rate_hz", 10.0),
+            kinematics_resolution=kinematics_resolution,
+            kinematics_sample_rate_hz=kinematics.get("sample_rate_hz"),
             activity_spatial_bin_size_s=summaries.get("bin_size_s", 5.0),
             eye_trace_resolution=eyes.get("resolution", FRAMEWISE_RESOLUTION),
             tail_trace_resolution=tail.get("resolution", FRAMEWISE_RESOLUTION),
@@ -143,6 +192,11 @@ class TemporalPolicy:
     ) -> "TemporalPolicy":
         return replace(
             self,
+            kinematics_resolution=(
+                self.kinematics_resolution
+                if kinematics_sample_rate_hz is None
+                else SAMPLED_RESOLUTION
+            ),
             kinematics_sample_rate_hz=(
                 self.kinematics_sample_rate_hz
                 if kinematics_sample_rate_hz is None
@@ -155,60 +209,70 @@ class TemporalPolicy:
             ),
         )
 
+    def kinematics_export_rate_hz(self, *, source_sample_rate_hz: float) -> float:
+        """Resolve the concrete rate recorded by a kinematics projection."""
+
+        source_rate = _positive_finite(
+            source_sample_rate_hz,
+            label="kinematics.source_sample_rate_hz",
+        )
+        if self.kinematics_resolution == FRAMEWISE_RESOLUTION:
+            return source_rate
+        if self.kinematics_sample_rate_hz is None:  # pragma: no cover - init guard
+            raise ValueError("sampled kinematics lacks sample_rate_hz")
+        return self.kinematics_sample_rate_hz
+
     def product_policy(self, product: str | None) -> Mapping[str, object]:
         if product is None:
             return MappingProxyType({})
         if product == "kinematics":
-            return MappingProxyType(
-                {
-                    "resolution": "sampled",
-                    "sample_rate_hz": self.kinematics_sample_rate_hz,
-                    "source_authority": "framewise_zarr",
-                }
-            )
+            policy: dict[str, object] = {
+                "resolution": self.kinematics_resolution,
+                "source_authority": FRAMEWISE_ZARR_AUTHORITY,
+            }
+            if self.kinematics_resolution == SAMPLED_RESOLUTION:
+                policy["sample_rate_hz"] = self.kinematics_sample_rate_hz
+            return MappingProxyType(policy)
         if product == "activity_spatial":
             return MappingProxyType(
                 {
                     "resolution": "fixed_time_bins",
                     "bin_size_s": self.activity_spatial_bin_size_s,
-                    "source_authority": "framewise_zarr",
+                    "source_authority": FRAMEWISE_ZARR_AUTHORITY,
                 }
             )
         if product == "eye_traces":
             return MappingProxyType(
                 {
                     "resolution": self.eye_trace_resolution,
-                    "source_authority": "framewise_zarr",
+                    "source_authority": FRAMEWISE_ZARR_AUTHORITY,
                 }
             )
         if product == "tail_traces":
             return MappingProxyType(
                 {
                     "resolution": self.tail_trace_resolution,
-                    "source_authority": "framewise_zarr",
+                    "source_authority": FRAMEWISE_ZARR_AUTHORITY,
                 }
             )
         raise KeyError(f"unknown temporal product: {product!r}")
 
     def to_dict(self) -> dict[str, object]:
+        kinematics = dict(self.product_policy("kinematics"))
         return {
-            "kinematics": {
-                "resolution": "sampled",
-                "sample_rate_hz": self.kinematics_sample_rate_hz,
-                "source_authority": "framewise_zarr",
-            },
+            "kinematics": kinematics,
             "activity_spatial": {
                 "resolution": "fixed_time_bins",
                 "bin_size_s": self.activity_spatial_bin_size_s,
-                "source_authority": "framewise_zarr",
+                "source_authority": FRAMEWISE_ZARR_AUTHORITY,
             },
             "eye_traces": {
                 "resolution": self.eye_trace_resolution,
-                "source_authority": "framewise_zarr",
+                "source_authority": FRAMEWISE_ZARR_AUTHORITY,
             },
             "tail_traces": {
                 "resolution": self.tail_trace_resolution,
-                "source_authority": "framewise_zarr",
+                "source_authority": FRAMEWISE_ZARR_AUTHORITY,
             },
         }
 

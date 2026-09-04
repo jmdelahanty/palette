@@ -74,10 +74,24 @@ def _execution_report(tmp_path: Path) -> tuple[Path, str, dict[str, object]]:
     recording_id = "recording-a"
     zarr_path = (tmp_path / f"{recording_id}_analysis.zarr").resolve()
     temporal_policy = {
-        "activity_spatial": {"resolution": "fixed_time_bins"},
-        "eye_traces": {"resolution": "framewise"},
-        "kinematics": {"resolution": "sampled", "sample_rate_hz": 10.0},
-        "tail_traces": {"resolution": "framewise"},
+        "activity_spatial": {
+            "resolution": "fixed_time_bins",
+            "bin_size_s": 5.0,
+            "source_authority": "framewise_zarr",
+        },
+        "eye_traces": {
+            "resolution": "framewise",
+            "source_authority": "framewise_zarr",
+        },
+        "kinematics": {
+            "resolution": "sampled",
+            "sample_rate_hz": 10.0,
+            "source_authority": "framewise_zarr",
+        },
+        "tail_traces": {
+            "resolution": "framewise",
+            "source_authority": "framewise_zarr",
+        },
     }
     workflow_nodes = [
         {
@@ -228,6 +242,49 @@ def test_completed_execution_report_is_typed_admission_not_name_authority(
     with pytest.raises(
         ValidatedBehaviorAdmissionError,
         match="artifact path is inexact",
+    ):
+        validate_core_behavior_execution_report(
+            report,
+            expected_analysis_zarr=zarr_path,
+            expected_recording_id=recording_id,
+        )
+
+
+def test_completed_execution_report_accepts_canonical_framewise_motion(
+    tmp_path: Path,
+) -> None:
+    zarr_path, recording_id, report = _execution_report(tmp_path)
+    temporal_policy = report["workflow"]["temporal_policy"]  # type: ignore[index]
+    temporal_policy["kinematics"] = {  # type: ignore[index]
+        "resolution": "framewise",
+        "source_authority": "framewise_zarr",
+    }
+    report["execution_plan"]["workflow_plan"]["temporal_policy"] = (  # type: ignore[index]
+        temporal_policy
+    )
+
+    validated = validate_core_behavior_execution_report(
+        report,
+        expected_analysis_zarr=zarr_path,
+        expected_recording_id=recording_id,
+    )
+
+    assert validated["temporal_policy"]["kinematics"] == {
+        "resolution": "framewise",
+        "source_authority": "framewise_zarr",
+    }
+
+
+def test_execution_report_rejects_implicit_or_ambiguous_motion_sampling(
+    tmp_path: Path,
+) -> None:
+    zarr_path, recording_id, report = _execution_report(tmp_path)
+    temporal_policy = report["workflow"]["temporal_policy"]  # type: ignore[index]
+    temporal_policy["kinematics"].pop("source_authority")  # type: ignore[index]
+
+    with pytest.raises(
+        ValidatedBehaviorAdmissionError,
+        match="temporal policy is not canonical",
     ):
         validate_core_behavior_execution_report(
             report,

@@ -154,7 +154,12 @@ def _print_human(payload: Mapping[str, object]) -> None:
         eyes = temporal.get("eye_traces")
         tail = temporal.get("tail_traces")
         if isinstance(kinematics, Mapping):
-            print(f"kinematics_sample_rate_hz: {kinematics.get('sample_rate_hz')}")
+            print(f"kinematics_resolution: {kinematics.get('resolution')}")
+            if "sample_rate_hz" in kinematics:
+                print(
+                    "kinematics_sample_rate_hz: "
+                    f"{kinematics.get('sample_rate_hz')}"
+                )
         if isinstance(summaries, Mapping):
             print(f"activity_spatial_bin_size_s: {summaries.get('bin_size_s')}")
         if isinstance(eyes, Mapping):
@@ -222,7 +227,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--kinematics-sample-rate-hz",
         type=float,
-        help="Override portable kinematic sampling rate (profile default: 10 Hz).",
+        help=(
+            "Explicitly downsample the framewise kinematic export to this rate; "
+            "the profile default preserves every source frame."
+        ),
     )
     parser.add_argument(
         "--activity-spatial-bin-size-s",
