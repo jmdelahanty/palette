@@ -87,7 +87,7 @@ def _html_document(
   <header>
     <h1>Validated behavior distributions</h1>
     <p>Report <code>{escape(report_run_id)}</code></p>
-    <p>Whole-session, pre, training, and post views. Default curves use equal recording weight.</p>
+    <p>Whole-session, pre, training, and post views. Default bars use equal recording weight.</p>
     <p>X-axis view: <strong>{escape(display_range_label)}</strong>. Central views retain complete
        bins and leave all tail evidence sealed in the source distribution.</p>
     <p>Distribution <code>{escape(distribution_run_id)}</code> · <code>{escape(distribution_digest)}</code></p>
@@ -319,7 +319,8 @@ def render_validated_behavior_distribution_report(
                 "scope_layout": "whole_pre_training_post_shared_axis_v1",
                 "pooled_observations": "not_used_in_default_report",
                 "role_style": "semantic_glyph_independent_protocol_color_policy",
-                "provider_style": "explicit_color_and_line_style",
+                "provider_style": "semantic_color_and_provider_bar_pattern_v1",
+                "histogram_rendering": "exact_bin_width_bars_v1",
                 "renderer_module_sha256": sha256_file(Path(__file__)),
                 "figure_module_sha256": sha256_file(
                     Path(render_distribution_figure.__code__.co_filename)
