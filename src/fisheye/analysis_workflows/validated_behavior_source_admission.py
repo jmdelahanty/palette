@@ -19,6 +19,8 @@ from fisheye.analysis_workflows.exact_chaser_projection_receipt import (
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
+from .contracts import TemporalPolicy
+
 EXACT_CHASER_ADMISSION_ROLE = "exact_chaser_projection"
 CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE = "core_behavior_workflow_execution"
 
@@ -269,6 +271,12 @@ def validate_core_behavior_execution_report(
         "tail_traces",
     }:
         _fail("Core-behavior workflow temporal-policy roster is inexact.")
+    try:
+        installed_temporal_policy = TemporalPolicy.from_mapping(temporal_policy)
+    except ValueError as exc:
+        _fail(f"Core-behavior workflow temporal policy is invalid: {exc}")
+    if _plain(temporal_policy) != installed_temporal_policy.to_dict():
+        _fail("Core-behavior workflow temporal policy is not canonical.")
 
     execution_plan = _mapping(report.get("execution_plan"), field="execution_plan")
     if (

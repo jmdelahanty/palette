@@ -1556,10 +1556,10 @@ def export_kinematics_samples(
     *,
     track_kinematics_run: str,
     track_scope: str,
-    requested_sample_rate_hz: float,
     output_root: str | Path,
     export_run_id: str,
     scratch_root: str | Path,
+    requested_sample_rate_hz: float | None = None,
     source_window_rows: int = 131_072,
     row_group_rows: int = 65_536,
     source_frame_start: int | None = None,
@@ -1604,9 +1604,14 @@ def export_kinematics_samples(
             track_kinematics_run=source_run,
             track_scope=track_scope,
         )
+    source_sample_rate_hz = float(before.binding["source_sample_rate_hz"])
     projection = kinematics_projection_contract(
-        source_sample_rate_hz=float(before.binding["source_sample_rate_hz"]),
-        requested_sample_rate_hz=float(requested_sample_rate_hz),
+        source_sample_rate_hz=source_sample_rate_hz,
+        requested_sample_rate_hz=(
+            source_sample_rate_hz
+            if requested_sample_rate_hz is None
+            else float(requested_sample_rate_hz)
+        ),
         source_frame_start=source_frame_start,
         source_frame_stop_exclusive=source_frame_stop_exclusive,
     )

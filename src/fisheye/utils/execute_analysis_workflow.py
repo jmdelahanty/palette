@@ -591,7 +591,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--execution-id", required=True)
     parser.add_argument("--num-workers", type=int, default=_default_num_workers())
-    parser.add_argument("--kinematics-sample-rate-hz", type=float)
+    parser.add_argument(
+        "--kinematics-sample-rate-hz",
+        type=float,
+        help=(
+            "Explicitly downsample kinematics; omission preserves every source "
+            "frame under the maintained core profile."
+        ),
+    )
     parser.add_argument("--activity-spatial-bin-size-s", type=float)
     parser.add_argument("--report", type=Path)
     parser.add_argument(

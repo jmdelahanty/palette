@@ -62,6 +62,7 @@ from .validated_behavior_cohort import (
     build_validated_behavior_bundle_set,
     validate_validated_behavior_bundle_set,
 )
+from .contracts import TemporalPolicy
 from .validated_behavior_cohort_adapters import (
     sha256_file,
     validate_membership_current_sources,
@@ -411,23 +412,24 @@ def bind_core_behavior_cohort_sources(
         shape=shape_binding,
     )
     join_sha = str(join["payload_sha256"])
-    temporal = _mapping(
-        _mapping(report["temporal_policy"], field_name="temporal_policy").get(
-            "kinematics"
-        ),
-        field_name="temporal_policy.kinematics",
+    try:
+        temporal_policy = TemporalPolicy.from_mapping(
+            _mapping(report["temporal_policy"], field_name="temporal_policy")
+        )
+    except ValueError as exc:  # pragma: no cover - admission validates first
+        _fail(f"Core-behavior report temporal policy is invalid: {exc}")
+    source_sample_rate_hz = float(track.binding["source_sample_rate_hz"])
+    requested_rate = temporal_policy.kinematics_export_rate_hz(
+        source_sample_rate_hz=source_sample_rate_hz
     )
-    requested_rate = temporal.get("sample_rate_hz")
-    if isinstance(requested_rate, bool) or not isinstance(requested_rate, (int, float)):
-        _fail("Core-behavior report lacks its requested kinematics sample rate.")
     capability_bindings: dict[str, Mapping[str, Any]] = {
         CROSS_GRAIN_JOIN_AUTHORITY: join,
         KINEMATICS_SAMPLES_CAPABILITY: _capability_binding(
             profile_id="kinematics_samples_v1",
             source_binding=track.binding,
             projection_contract=kinematics_projection_contract(
-                source_sample_rate_hz=float(track.binding["source_sample_rate_hz"]),
-                requested_sample_rate_hz=float(requested_rate),
+                source_sample_rate_hz=source_sample_rate_hz,
+                requested_sample_rate_hz=requested_rate,
             ),
             join_authority_sha256=join_sha,
         ),
