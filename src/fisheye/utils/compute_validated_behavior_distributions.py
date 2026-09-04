@@ -10,6 +10,12 @@ from typing import Sequence
 from fisheye.analytics_exports.validated_behavior_dataset import (
     ValidatedBehaviorExportDataset,
 )
+from fisheye.analytics_exports.validated_behavior_product_catalog import (
+    BEHAVIOR_DISTRIBUTION,
+    ValidatedBehaviorProductCatalogError,
+    canonical_validated_behavior_product_dir,
+    register_validated_behavior_product,
+)
 from fisheye.group_statistics.validated_behavior_distribution_specs import (
     distribution_metric_family_ids,
     distribution_metric_specs_for_families,
@@ -52,7 +58,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        help="New immutable output directory; existing paths are never overwritten.",
+        help=(
+            "Optional exact output directory. When omitted with --apply, publish "
+            "under the source export's co-located product namespace and append its "
+            "product catalog. Existing paths are never overwritten."
+        ),
     )
     parser.add_argument(
         "--apply",
@@ -85,9 +95,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     ]
     if missing:
         parser.error(f"the following arguments are required: {', '.join(missing)}")
-    if args.apply and args.output_dir is None:
-        parser.error("--apply requires --output-dir")
-
     specs = distribution_metric_specs_for_families(_csv(args.families))
     dataset = ValidatedBehaviorExportDataset.open(
         args.export_root,
@@ -111,14 +118,51 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"metric_specs\t{len(specs)}")
     for key, value in result.cohort_summary.items():
         print(f"{key}\t{value}")
+    canonical_output: Path | None
+    try:
+        canonical_output = canonical_validated_behavior_product_dir(
+            dataset.root,
+            BEHAVIOR_DISTRIBUTION,
+            config.distribution_run_id,
+        )
+    except ValidatedBehaviorProductCatalogError:
+        if args.output_dir is None:
+            raise
+        canonical_output = None
     if not args.apply:
+        if canonical_output is not None:
+            print(f"canonical_output_dir\t{canonical_output}")
+        if args.output_dir is not None:
+            print(f"explicit_output_dir\t{args.output_dir.expanduser().resolve()}")
         print("dry_run\ttrue")
-        print("pass --apply with --output-dir to write the immutable successor")
+        print(
+            "pass --apply to write and catalog the co-located immutable successor; "
+            "--output-dir retains an explicit uncataloged override"
+        )
         return 0
-    assert args.output_dir is not None
-    manifest = write_validated_behavior_distributions(result, args.output_dir)
+    assert canonical_output is not None or args.output_dir is not None
+    output_dir = (
+        args.output_dir.expanduser().resolve()
+        if args.output_dir is not None
+        else canonical_output
+    )
+    assert output_dir is not None
+    manifest = write_validated_behavior_distributions(result, output_dir)
     print(f"manifest\t{manifest['manifest_path']}")
     print(f"record_sha256\t{manifest['record_sha256']}")
+    if canonical_output is not None and output_dir == canonical_output:
+        catalog = register_validated_behavior_product(
+            dataset,
+            product_kind=BEHAVIOR_DISTRIBUTION,
+            product_root=output_dir,
+        )
+        print(f"catalog_manifest\t{catalog['catalog_manifest_path']}")
+        print(f"catalog_record_sha256\t{catalog['record_sha256']}")
+        print(f"catalog_generation_id\t{catalog['catalog_generation_id']}")
+        print(f"catalog_registered\ttrue")
+    else:
+        print("catalog_registered\tfalse")
+        print("catalog_reason\texplicit_noncanonical_output_dir")
     return 0
 
 
