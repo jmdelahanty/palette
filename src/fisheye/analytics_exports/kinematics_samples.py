@@ -483,6 +483,39 @@ def _recording_id(path: Path) -> str:
     return name
 
 
+def _plain_json_containers(
+    value: object,
+    *,
+    label: str,
+    path: str = "$",
+) -> object:
+    """Thaw validated immutable JSON containers without coercing scalars."""
+
+    if isinstance(value, Mapping):
+        normalized: dict[str, object] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError(
+                    f"{label} contains a non-string JSON object key at {path}."
+                )
+            normalized[key] = _plain_json_containers(
+                item,
+                label=label,
+                path=f"{path}.{key}",
+            )
+        return normalized
+    if isinstance(value, (list, tuple)):
+        return [
+            _plain_json_containers(
+                item,
+                label=label,
+                path=f"{path}[{index}]",
+            )
+            for index, item in enumerate(value)
+        ]
+    return value
+
+
 def _json_object(value: object, *, label: str) -> dict[str, Any]:
     if isinstance(value, str):
         try:
@@ -491,7 +524,11 @@ def _json_object(value: object, *, label: str) -> dict[str, Any]:
             raise ValueError(f"{label} is not strict JSON.") from exc
     if not isinstance(value, Mapping):
         raise ValueError(f"{label} must be one exact JSON object.")
-    normalized = json.loads(canonical_json_bytes(dict(value)).decode("utf-8"))
+    normalized = json.loads(
+        canonical_json_bytes(
+            _plain_json_containers(value, label=label),
+        ).decode("utf-8")
+    )
     if not isinstance(normalized, dict):  # pragma: no cover
         raise TypeError(f"{label} did not normalize to an object.")
     return normalized
@@ -1591,7 +1628,11 @@ def iter_projected_core_motion_sample_batches(
         requested_sample_rate_hz=float(projection.get("requested_sample_rate_hz")),
         arrow_schema_sha256=expected_arrow_schema_sha256,
     )
-    if dict(projection) != expected_projection:
+    normalized_projection = _json_object(
+        projection,
+        label="core-motion projection contract",
+    )
+    if normalized_projection != expected_projection:
         raise ValueError(
             "Core-motion projection differs from the installed successor contract."
         )

@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -396,6 +396,15 @@ def test_core_motion_projection_enters_the_generic_cohort_schema(
         arrow_schema_sha256=KINEMATICS_SAMPLES.payload_sha256,
     )
 
+    def freeze(value: Any) -> Any:
+        if isinstance(value, dict):
+            return MappingProxyType({key: freeze(item) for key, item in value.items()})
+        if isinstance(value, list):
+            return tuple(freeze(item) for item in value)
+        return value
+
+    frozen_projection = freeze(projection)
+
     class Context:
         export_profile_id = CORE_BEHAVIOR_EXPORT_PROFILE_ID
         row_group_rows = 1
@@ -404,7 +413,9 @@ def test_core_motion_projection_enters_the_generic_cohort_schema(
             self.bound = SimpleNamespace(track=bound)
 
         def capability_binding(self, _capability_id: str) -> dict[str, Any]:
-            return {"projection_contract": projection}
+            # Production bundle validation recursively freezes JSON arrays as
+            # tuples and objects as mapping proxies before projection.
+            return {"projection_contract": frozen_projection}
 
         def common_columns(self, count: int) -> dict[str, list[str]]:
             return {
@@ -436,6 +447,21 @@ def test_core_motion_projection_enters_the_generic_cohort_schema(
         expected_acceleration,
         equal_nan=True,
     )
+
+    tampered_projection = copy.deepcopy(projection)
+    tampered_projection["motion_semantics"][
+        "cumulative_path_distance_source"
+    ] = "movement/speed/filtered/cumulative_path_distance_mm"
+
+    class TamperedContext(Context):
+        def capability_binding(self, _capability_id: str) -> dict[str, Any]:
+            return {"projection_contract": freeze(tampered_projection)}
+
+    with pytest.raises(
+        ValueError,
+        match="differs from the installed successor contract",
+    ):
+        list(core_adapters._kinematics_samples(TamperedContext()).batches)
 
 
 def test_exact_source_binding_rejects_legacy_float64_publication(
