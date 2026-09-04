@@ -3,7 +3,7 @@
 <!-- decision-meta
 status: accepted-design-review-synthesized-current-implementation-partial
 created: 2026-09-03
-last_updated: 2026-09-03
+last_updated: 2026-09-04
 baseline_commit: 07db267c
 review_checkpoint_commit: afbc1d0d6af822ca7cc4e3b051cdd9bc981df80c
 review_method: six parallel read-only Luna xhigh audits plus primary-agent synthesis
@@ -252,7 +252,10 @@ surface:
 - installed export profiles fail closed if they contain both
   `kinematics_samples` and `provider_motion_samples`. A paradigm extension must
   join the selected core motion authority instead of installing a competing
-  motion projection.
+  motion projection; and
+- a real v2 profile writer-to-atomic-publisher-to-unpatched-lazy-reader
+  regression seals the installed profile boundary and verifies the new motion
+  fields without injecting table specs into the reader.
 
 This checkpoint does not reinterpret or mutate existing Phase-C exports. The
 chaser migration remains Track C/D work: subtract the overlapping provider
@@ -683,8 +686,9 @@ reselecting core motion/body/bout authority.
       the existing generic cohort engine.
 - [x] Prove that no new publisher, selector, manifest family, or CLI path was
       introduced.
-- [ ] Add real execution-report-to-resolver and generic-publisher boundary
-      tests.
+- [ ] Add a real execution-report-to-resolver boundary test.
+- [x] Add a real generic-writer-to-publisher-to-unpatched-reader boundary test
+      for the installed v2 profile.
 - [x] Run a read-only admission canary for all four Sleepyfish cameras.
 - [ ] Run required CI before merge, deployment, or production publication.
 
