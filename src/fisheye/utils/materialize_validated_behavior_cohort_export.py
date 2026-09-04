@@ -148,6 +148,7 @@ def _plan_command(args: argparse.Namespace) -> dict[str, Any]:
         "profile_id": profile.profile_id,
         "plan_path": str(target),
         "plan_sha256": value["plan_sha256"],
+        "finalization_evidence_profile_id": value["evidence_profile"]["profile_id"],
         "export_run_id": value["export_run_id"],
         "member_count": value["member_count"],
         "table_names": list(value["table_names"]),
@@ -162,7 +163,9 @@ def _read_plan_for_execution(
         profile_id_from_record(path, record_kind="export plan")
     )
     plan, _membership, _bundle_set = read_validated_behavior_export_plan(
-        path, table_specs=profile.table_specs
+        path,
+        table_specs=profile.table_specs,
+        require_current_evidence=True,
     )
     _require_clean_current_authority(plan["software_authority"])
     return plan, profile
@@ -183,6 +186,10 @@ def _shard_command(args: argparse.Namespace) -> dict[str, Any]:
         "recording_id": receipt["member"]["recording_id"],
         "receipt_path": receipt["receipt_path"],
         "record_sha256": receipt["record_sha256"],
+        "receipt_schema_version": receipt["schema_version"],
+        "semantic_validation_record_sha256": receipt["semantic_validation"][
+            "record_sha256"
+        ],
         "reused": receipt["reused"],
         "row_counts_by_table": {
             name: receipt["parts_by_table"][name]["row_count"]
@@ -228,7 +235,13 @@ def _finalize_command(args: argparse.Namespace) -> dict[str, Any]:
         "export_run_id": plan["export_run_id"],
         "manifest_path": manifest["manifest_path"],
         "record_sha256": manifest["record_sha256"],
+        "manifest_schema_version": manifest["schema_version"],
+        "validation_receipt_record_sha256": manifest["validation_receipt"][
+            "record_sha256"
+        ],
+        "transfer_receipt_record_sha256": manifest["transfer_receipt"]["record_sha256"],
         "row_counts_by_table": manifest["row_counts_by_table"],
+        "process_telemetry": manifest["process_telemetry"],
         "safety": manifest["safety"],
     }
 
@@ -251,6 +264,7 @@ def _validate_command(args: argparse.Namespace) -> dict[str, Any]:
         "validation_mode": "full" if args.full_part_hashes else "receipt",
         "export_run_id": manifest["export_run_id"],
         "record_sha256": manifest["record_sha256"],
+        "manifest_schema_version": manifest["schema_version"],
         "member_count": membership["member_count"],
         "bundle_state_counts": dict(bundle_set["state_counts"]),
         "row_counts_by_table": manifest["row_counts_by_table"],

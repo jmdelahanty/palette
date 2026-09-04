@@ -671,6 +671,13 @@ anatomical-forward/anatomical-left convention.
 Global validation must check foreign-key closure and primary-key uniqueness
 across all parts, not only inside each recording shard.
 
+That global proof may be composed from exact recording-owned shard receipts
+when the receipt contract seals row ownership, per-part key validity, every
+recording-scoped foreign-key result, the complete part roster, and the transfer
+into the immutable generation. It must not be inferred from bounds alone or
+from an unversioned status string. The measured receipt-composition contract is
+[`diagnostics/validated_behavior_receipt_composed_finalization_2026-09-04.md`](diagnostics/validated_behavior_receipt_composed_finalization_2026-09-04.md).
+
 ## Reader and consumer boundary
 
 Add a validated storage-facing API with the conceptual shape:
