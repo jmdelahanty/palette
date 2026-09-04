@@ -10,6 +10,7 @@ from apps.marimo.components.recording_behavior_distributions import (
     discover_recording_behavior_distribution_options,
     load_recording_behavior_distribution_handle,
     recording_behavior_distribution_figure,
+    recording_distribution_metric_options,
 )
 from fisheye.analysis_workflows.recording_behavior_distribution_storage import (
     load_recording_behavior_distribution_source_handle,
@@ -39,7 +40,12 @@ from fisheye.visualization.recording_behavior_distributions import (
 )
 
 
-def _write_fixture(archive: Path, *, run_name: str = "recording-distributions-v1"):
+def _write_fixture(
+    archive: Path,
+    *,
+    run_name: str = "recording-distributions-v1",
+    metric_id: str = "bout.duration_s",
+):
     scopes = (
         whole_session_scope(),
         frame_interval_scope(
@@ -66,7 +72,7 @@ def _write_fixture(archive: Path, *, run_name: str = "recording-distributions-v1
     spec = next(
         item
         for item in DEFAULT_RECORDING_DISTRIBUTION_METRICS
-        if item.metric_id == "bout.duration_s"
+        if item.metric_id == metric_id
     )
     values = np.asarray([0.01, 0.09], dtype=np.float64)
     identity = {
@@ -251,6 +257,38 @@ def test_renderers_preserve_variable_bin_edges(tmp_path: Path) -> None:
     assert np.allclose(
         [patch.get_width() for patch in static.axes[0].patches], right - left
     )
+
+
+def test_recording_renderers_use_inter_bout_interval_field_term(tmp_path: Path) -> None:
+    metric_id = "bout.inter_bout_interval_s"
+    handle = _write_fixture(
+        tmp_path / "analysis.zarr",
+        run_name="recording-ibi-v1",
+        metric_id=metric_id,
+    )
+    assert recording_distribution_metric_options(handle) == {
+        "Inter-bout interval (IBI)": metric_id
+    }
+    view = build_recording_behavior_distribution_view(
+        handle,
+        metric_id=metric_id,
+        weighting_id="event",
+    )
+    assert view.metric["interpretation"] == (
+        "Gap between consecutive canonical swim bouts"
+    )
+
+    interactive = recording_behavior_distribution_figure(view)
+    static = render_recording_behavior_distribution_figure(view)
+
+    interactive_title = interactive.to_plotly_json()["layout"]["title"]["text"]
+    assert interactive_title.startswith("Inter-bout interval (IBI)")
+    assert "Gap between consecutive canonical swim bouts" in interactive_title
+    assert static._suptitle.get_text().startswith("Inter-bout interval (IBI)")
+    assert "Gap between consecutive canonical swim bouts" in (
+        static._suptitle.get_text()
+    )
+    assert static.axes[0].get_xlabel() == "Inter-bout interval (IBI) (s)"
 
 
 def test_discovery_is_consolidated_and_selection_revalidates_exact_run(

@@ -433,6 +433,7 @@ def _(
 
 @app.cell
 def _(
+    distribution_metric_options,
     distribution_metrics,
     distribution_recording_ids,
     distribution_source,
@@ -443,10 +444,7 @@ def _(
         for metric in distribution_metrics
         if metric["source_surface"] == "provider_motion_samples"
     )
-    trace_metric_label_to_id = {
-        str(metric["interpretation"]): str(metric["metric_id"])
-        for metric in trace_metrics
-    }
+    trace_metric_label_to_id = distribution_metric_options(trace_metrics)
     recording_ids = distribution_recording_ids(distribution_source)
     trace_metric_picker = mo.ui.dropdown(
         options=list(trace_metric_label_to_id),

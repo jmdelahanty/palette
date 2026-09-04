@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 import json
-import math
 from typing import Any, Mapping
 
 import matplotlib
@@ -13,6 +12,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from fisheye.group_statistics.validated_behavior_distribution_specs import (
+    distribution_metric_display_text,
+)
 from fisheye.group_statistics.validated_behavior_distribution_views import (
     COHORT_STATISTIC_LABELS,
     DEFAULT_COHORT_STATISTIC,
@@ -151,6 +153,7 @@ def render_distribution_figure(
     metric = payload["metric"]
     recipe = payload["histogram_recipe"]
     assert isinstance(metric, Mapping) and isinstance(recipe, Mapping)
+    metric_label, metric_definition = distribution_metric_display_text(metric)
     rows = _selected_rows(
         payload,
         provider_role=provider_role,
@@ -331,14 +334,13 @@ def render_distribution_figure(
         else " · Central ≥99% x-view"
     )
     figure.suptitle(
-        f"{metric['interpretation']} · {str(payload['weighting_id']).title()} "
-        f"weighted{warning}{range_note}",
+        f"{metric_label} · {str(payload['weighting_id']).title()} "
+        f"weighted{warning}{range_note}"
+        + ("" if metric_definition is None else f"\n{metric_definition}"),
         fontsize=15,
         y=0.98,
     )
-    figure.supxlabel(
-        f"{metric['interpretation']} ({metric['unit']})", y=0.085, fontsize=10
-    )
+    figure.supxlabel(f"{metric_label} ({metric['unit']})", y=0.085, fontsize=10)
     figure.subplots_adjust(
         left=0.055,
         right=0.99,
@@ -356,6 +358,7 @@ def render_motion_trace_figure(payload: Mapping[str, object]) -> Any:
     validate_motion_trace_payload(payload)
     metric = payload["metric"]
     assert isinstance(metric, Mapping)
+    metric_label, metric_definition = distribution_metric_display_text(metric)
     points = _mapping_rows(payload, "points")
     x = [point["coordinate"] for point in points]
     y = [point["value"] for point in points]
@@ -364,10 +367,11 @@ def render_motion_trace_figure(payload: Mapping[str, object]) -> Any:
     axis.set_xlabel(
         "Acquisition frame ID" if payload["coordinate_id"] == "frame" else "Time (s)"
     )
-    axis.set_ylabel(f"{metric['interpretation']} ({metric['unit']})")
+    axis.set_ylabel(f"{metric_label} ({metric['unit']})")
     axis.set_title(
         f"{payload['recording_id']} · {payload['provider_role']} · "
         f"{payload['display_point_count']:,}/{payload['source_row_count']:,} display rows"
+        + ("" if metric_definition is None else f"\n{metric_definition}")
     )
     axis.grid(alpha=0.2, linewidth=0.7)
     axis.spines["top"].set_visible(False)

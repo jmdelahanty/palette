@@ -11,6 +11,9 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from fisheye.group_statistics.validated_behavior_distribution_specs import (
+    distribution_metric_display_text,
+)
 from fisheye.group_statistics.validated_behavior_distribution_views import (
     COHORT_STATISTIC_LABELS,
     DEFAULT_COHORT_STATISTIC,
@@ -37,7 +40,7 @@ def distribution_metric_options(
     result: dict[str, str] = {}
     for metric in metric_specs:
         metric_id = str(metric["metric_id"])
-        label = str(metric.get("interpretation") or metric_id)
+        label, _definition = distribution_metric_display_text(metric)
         if label in result:
             label = f"{label} [{metric_id}]"
         result[label] = metric_id
@@ -182,6 +185,7 @@ def validated_behavior_distribution_figure(
     metric = payload["metric"]
     recipe = payload["histogram_recipe"]
     assert isinstance(metric, Mapping) and isinstance(recipe, Mapping)
+    metric_label, metric_definition = distribution_metric_display_text(metric)
     rows = [
         row
         for row in _rows(payload, "cohort_rows")
@@ -371,10 +375,13 @@ def validated_behavior_distribution_figure(
             "of every displayed series; full tails remain in the sealed payload</sup>"
         )
     )
+    definition_note = (
+        "" if metric_definition is None else f"<br><sup>{metric_definition}</sup>"
+    )
     figure.update_layout(
         title=(
-            f"{metric['interpretation']} · {str(payload['weighting_id']).title()} "
-            f"weighted{warning}{range_note}"
+            f"{metric_label} · {str(payload['weighting_id']).title()} "
+            f"weighted{warning}{definition_note}{range_note}"
         ),
         template="plotly_white",
         height=520,
@@ -398,6 +405,7 @@ def validated_behavior_motion_trace_figure(
     validate_motion_trace_payload(payload)
     metric = payload["metric"]
     assert isinstance(metric, Mapping)
+    metric_label, metric_definition = distribution_metric_display_text(metric)
     points = _rows(payload, "points")
     figure = go.Figure(
         go.Scattergl(
@@ -418,8 +426,13 @@ def validated_behavior_motion_trace_figure(
     )
     figure.update_layout(
         title=(
-            f"{metric['interpretation']} · {payload['recording_id']} · "
+            f"{metric_label} · {payload['recording_id']} · "
             f"{payload['provider_role']}"
+            + (
+                ""
+                if metric_definition is None
+                else f"<br><sup>{metric_definition}</sup>"
+            )
         ),
         template="plotly_white",
         height=420,
