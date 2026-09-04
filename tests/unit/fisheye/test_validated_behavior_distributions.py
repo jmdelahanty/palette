@@ -52,9 +52,11 @@ from fisheye.group_statistics.validated_behavior_distributions import (
     write_validated_behavior_distributions,
 )
 from fisheye.visualization.validated_behavior_distributions import (
+    _series_style as _static_distribution_series_style,
     render_distribution_figure,
 )
 from apps.marimo.components.validated_behavior_distributions import (
+    _series_style as _interactive_distribution_series_style,
     validated_behavior_distribution_figure,
     validated_behavior_motion_trace_figure,
 )
@@ -507,12 +509,64 @@ def test_shared_payload_feeds_static_and_plotly_renderers(tmp_path: Path):
     try:
         static.canvas.draw()
         assert len(static.axes) == 4
+        whole_rows = sorted(
+            (
+                row
+                for row in payload["cohort_rows"]
+                if row["scope_id"] == "whole_session"
+            ),
+            key=lambda row: int(row["bin_index"]),
+        )
+        assert len(static.axes[0].patches) == len(whole_rows)
+        assert np.allclose(
+            [patch.get_x() for patch in static.axes[0].patches],
+            [row["bin_left"] for row in whole_rows],
+        )
+        assert np.allclose(
+            [patch.get_width() for patch in static.axes[0].patches],
+            [row["bin_right"] - row["bin_left"] for row in whole_rows],
+        )
     finally:
         plt.close(static)
     interactive = validated_behavior_distribution_figure(payload)
     rendered = interactive.to_plotly_json()
-    assert len(rendered["data"]) >= 4
+    bars = [trace for trace in rendered["data"] if trace["type"] == "bar"]
+    assert len(bars) == 4
+    assert rendered["layout"]["barmode"] == "overlay"
+    assert rendered["layout"]["bargap"] == 0
+    assert rendered["layout"]["meta"]["histogram_rendering"] == (
+        "exact_bin_width_bars_v1"
+    )
+    assert np.allclose(
+        bars[0]["x"], [row["bin_center"] for row in whole_rows]
+    )
+    assert np.allclose(
+        bars[0]["width"],
+        [row["bin_right"] - row["bin_left"] for row in whole_rows],
+    )
     assert "Mean recording fraction" in rendered["layout"]["yaxis"]["title"]["text"]
+
+
+def test_histogram_bar_styles_keep_protocol_color_role_and_provider_independent():
+    payload = {
+        "behavior_role_styles": {
+            "aggressive": {
+                "aggregate_color_css": "rgba(0,0,0,1)",
+                "aggregate_color_hex": "#000000",
+                "plotly_role_symbol": "star",
+                "matplotlib_role_marker": "*",
+            }
+        },
+        "provider_line_styles": {"detection": "dashed"},
+    }
+    group = {"provider_role": "detection", "behavior_role": "aggressive"}
+
+    assert _interactive_distribution_series_style(
+        payload, group, "whole_session"
+    ) == ("rgba(0,0,0,1)", "dash", "/", "star", "Detection · Aggressive")
+    assert _static_distribution_series_style(
+        payload, group, "whole_session"
+    ) == ("#000000", "--", "//", "*", "Detection · Aggressive")
 
 
 def test_central_display_range_retains_whole_bins_without_mutating_payload(
@@ -579,6 +633,12 @@ def test_static_distribution_report_is_atomic_and_digest_validated(tmp_path: Pat
     reopened = read_validated_behavior_distribution_report(report_dir)
     assert reopened["record_sha256"] == manifest["record_sha256"]
     assert reopened["schema_version"] == 2
+    assert reopened["renderer"]["histogram_rendering"] == (
+        "exact_bin_width_bars_v1"
+    )
+    assert reopened["renderer"]["provider_style"] == (
+        "semantic_color_and_provider_bar_pattern_v1"
+    )
     assert reopened["renderer"]["display_range_id"] == CENTRAL_99_RANGE
     assert len(reopened["artifacts"]) == 1
     assert reopened["artifacts"][0]["display_range"]["display_only"] is True

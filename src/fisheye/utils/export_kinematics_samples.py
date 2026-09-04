@@ -24,7 +24,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=("online", "offline"),
         default="offline",
     )
-    parser.add_argument("--sample-rate-hz", type=float, required=True)
+    parser.add_argument(
+        "--sample-rate-hz",
+        type=float,
+        help=(
+            "Explicitly derive a sampled portable projection. When omitted, "
+            "every source kinematics row is exported."
+        ),
+    )
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--export-run-id", required=True)
     parser.add_argument(

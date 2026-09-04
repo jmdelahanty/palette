@@ -42,13 +42,15 @@ def _role_style(payload: Mapping[str, object], role: str) -> Mapping[str, Any]:
 
 def _series_style(
     payload: Mapping[str, object], group: Mapping[str, Any], scope_id: str
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str | None, str]:
     provider = str(group.get("provider_role", ""))
     role = str(group.get("behavior_role", ""))
     if role:
         role_style = _role_style(payload, role)
         color = str(role_style.get("aggregate_color_hex", "#555555"))
-        marker = str(role_style.get("matplotlib_role_marker") or "o")
+        marker: str | None = str(
+            role_style.get("matplotlib_role_marker") or "o"
+        )
     elif provider:
         colors = payload.get("provider_colors", {})
         color = (
@@ -56,7 +58,7 @@ def _series_style(
             if isinstance(colors, Mapping)
             else "#555555"
         )
-        marker = "o"
+        marker = None
     else:
         colors = payload.get("scope_colors", {})
         color = (
@@ -64,7 +66,7 @@ def _series_style(
             if isinstance(colors, Mapping)
             else "#4C78A8"
         )
-        marker = "o"
+        marker = None
     styles = payload.get("provider_line_styles", {})
     named = (
         str(styles.get(provider, "solid"))
@@ -72,12 +74,13 @@ def _series_style(
         else "solid"
     )
     linestyle = {"solid": "-", "dashed": "--", "dotted": ":"}.get(named, "-")
+    hatch = {"solid": "", "dashed": "//", "dotted": ".."}.get(named, "")
     parts = []
     if provider:
         parts.append(provider.title())
     if role:
         parts.append(role.title())
-    return color, linestyle, marker, " · ".join(parts) or "All observations"
+    return color, linestyle, hatch, marker, " · ".join(parts) or "All observations"
 
 
 def _selected_rows(
@@ -164,6 +167,8 @@ def render_distribution_figure(
     by_scope_group: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
     for row in rows:
         by_scope_group[(str(row["scope_id"]), str(row["group_key_sha256"]))].append(row)
+    group_count = len({str(row["group_key_sha256"]) for row in rows})
+    bar_alpha = 0.78 if group_count == 1 else 0.42
 
     scopes = tuple(str(value) for value in payload["scope_order"])
     figure, axes = plt.subplots(
@@ -182,11 +187,14 @@ def render_distribution_figure(
                 continue
             ordered = sorted(series, key=lambda row: int(row["bin_index"]))
             group = json.loads(str(ordered[0]["group_key_json"]))
-            color, linestyle, marker, label = _series_style(payload, group, scope_id)
-            edges = np.asarray(
-                [float(ordered[0]["bin_left"])]
-                + [float(row["bin_right"]) for row in ordered],
-                dtype=np.float64,
+            color, linestyle, hatch, marker, label = _series_style(
+                payload, group, scope_id
+            )
+            left = np.asarray(
+                [float(row["bin_left"]) for row in ordered], dtype=np.float64
+            )
+            right = np.asarray(
+                [float(row["bin_right"]) for row in ordered], dtype=np.float64
             )
             values = np.asarray(
                 [
@@ -199,17 +207,22 @@ def render_distribution_figure(
                 ],
                 dtype=np.float64,
             )
-            axis.stairs(
+            axis.bar(
+                left,
                 values,
-                edges,
-                label="_nolegend_",
+                width=right - left,
+                align="edge",
                 color=color,
+                edgecolor=color,
+                linewidth=0.9,
                 linestyle=linestyle,
-                linewidth=1.8,
+                alpha=bar_alpha,
+                hatch=hatch,
+                label="_nolegend_" if marker is not None else label,
             )
             centers = np.asarray([float(row["bin_center"]) for row in ordered])
             finite = np.flatnonzero(np.isfinite(values))
-            if finite.size:
+            if marker is not None and finite.size:
                 marker_count = min(12, finite.size)
                 marker_indices = finite[
                     np.unique(
@@ -221,20 +234,25 @@ def render_distribution_figure(
                     values[marker_indices],
                     linestyle="none",
                     marker=marker,
-                    markersize=3.5,
+                    markersize=4.5,
+                    markerfacecolor=color,
+                    markeredgecolor="#ffffff",
+                    markeredgewidth=0.6,
                     color=color,
-                    alpha=0.85,
                 )
-            axis.plot(
-                [],
-                [],
-                color=color,
-                linestyle=linestyle,
-                marker=marker,
-                markersize=5,
-                linewidth=1.8,
-                label=label,
-            )
+                axis.plot(
+                    [],
+                    [],
+                    color=color,
+                    linestyle=linestyle,
+                    marker=marker,
+                    markerfacecolor=color,
+                    markeredgecolor="#ffffff",
+                    markeredgewidth=0.6,
+                    markersize=5,
+                    linewidth=1.8,
+                    label=label,
+                )
             if show_recording_iqr and cohort_statistic != "pooled_fraction":
                 lower = np.asarray(
                     [
@@ -279,6 +297,7 @@ def render_distribution_figure(
         )
         axis.set_title(f"{label}\n{n_text}", fontsize=11)
         axis.grid(axis="y", alpha=0.2, linewidth=0.7)
+        axis.set_axisbelow(True)
         axis.spines["top"].set_visible(False)
         axis.spines["right"].set_visible(False)
         if recipe.get("axis_scale") == "log10":

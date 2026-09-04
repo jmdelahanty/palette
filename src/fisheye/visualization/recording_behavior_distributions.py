@@ -51,12 +51,6 @@ def _style_roster(
     }
 
 
-def _edges(series: RecordingDistributionSeries) -> np.ndarray:
-    if not series.bin_left.size:
-        return np.asarray([], dtype=np.float64)
-    return np.concatenate((series.bin_left[:1], series.bin_right))
-
-
 def render_recording_behavior_distribution_figure(
     view: RecordingBehaviorDistributionView,
     *,
@@ -84,6 +78,7 @@ def render_recording_behavior_distribution_figure(
     )
     axes_flat = axes.reshape(-1)
     styles = _style_roster(view)
+    bar_alpha = 0.78 if len(styles) == 1 else 0.42
     by_scope: dict[str, list[RecordingDistributionSeries]] = defaultdict(list)
     for series in view.series:
         by_scope[series.scope_id].append(series)
@@ -96,15 +91,18 @@ def render_recording_behavior_distribution_figure(
                 (series.group_key_sha256, series.source_identity_key_sha256)
             ]
             values = series.fraction * (100.0 if probability_percent else 1.0)
-            edges = _edges(series)
-            if edges.size and np.any(np.isfinite(values)):
+            if series.bin_left.size and np.any(np.isfinite(values)):
                 finite_evidence = True
-                axis.stairs(
+                axis.bar(
+                    series.bin_left,
                     values,
-                    edges,
+                    width=series.bin_right - series.bin_left,
+                    align="edge",
                     color=color,
+                    edgecolor=color,
+                    alpha=bar_alpha,
                     linestyle=linestyle,
-                    linewidth=1.8,
+                    linewidth=0.9,
                     label=(
                         f"{series.label} "
                         f"(n={int(series.support['valid_count']):,})"
@@ -123,7 +121,9 @@ def render_recording_behavior_distribution_figure(
         axis.set_title(str(scope["scope_label"]))
         axis.set_xlabel(f"{view.metric['interpretation']} ({view.metric['unit']})")
         axis.set_ylabel("Probability per bin (%)" if probability_percent else "Fraction")
-        axis.grid(alpha=0.2)
+        axis.grid(axis="y", alpha=0.2)
+        axis.set_axisbelow(True)
+        axis.margins(x=0)
         if view.metric.get("axis_scale") == "log10":
             axis.set_xscale("log")
         handles, labels = axis.get_legend_handles_labels()

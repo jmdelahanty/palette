@@ -638,24 +638,39 @@ def _kinematics_samples_export_command(
             "scratch roots"
         )
     policy = context.node.temporal_policy
-    if (
-        set(policy) != {"resolution", "sample_rate_hz", "source_authority"}
-        or policy.get("resolution") != "sampled"
-        or policy.get("source_authority") != "framewise_zarr"
-    ):
+    resolution = policy.get("resolution")
+    if policy.get("source_authority") != "framewise_zarr":
         raise WorkflowExecutionError(
-            "kinematics-sample export requires the exact sampled framewise-Zarr "
-            "temporal policy"
+            "kinematics-sample export requires framewise-Zarr source authority"
         )
-    sample_rate = policy.get("sample_rate_hz")
-    if (
-        isinstance(sample_rate, bool)
-        or not isinstance(sample_rate, (int, float))
-        or not math.isfinite(float(sample_rate))
-        or float(sample_rate) <= 0
-    ):
+    if resolution == "framewise":
+        if set(policy) != {"resolution", "source_authority"}:
+            raise WorkflowExecutionError(
+                "framewise kinematics export has an inexact temporal policy"
+            )
+        sampling_args: tuple[str, ...] = ()
+    elif resolution == "sampled":
+        if set(policy) != {"resolution", "sample_rate_hz", "source_authority"}:
+            raise WorkflowExecutionError(
+                "sampled kinematics export has an inexact temporal policy"
+            )
+        sample_rate = policy.get("sample_rate_hz")
+        if (
+            isinstance(sample_rate, bool)
+            or not isinstance(sample_rate, (int, float))
+            or not math.isfinite(float(sample_rate))
+            or float(sample_rate) <= 0
+        ):
+            raise WorkflowExecutionError(
+                "sampled kinematics export requires a positive finite sample rate"
+            )
+        sampling_args = (
+            "--sample-rate-hz",
+            format(float(sample_rate), ".17g"),
+        )
+    else:
         raise WorkflowExecutionError(
-            "kinematics-sample export requires a positive finite sample rate"
+            "kinematics export resolution must be 'framewise' or 'sampled'"
         )
     command = _module_command(
         context,
@@ -667,8 +682,7 @@ def _kinematics_samples_export_command(
             context.dependency_run("track_kinematics"),
             "--track-scope",
             "offline",
-            "--sample-rate-hz",
-            format(float(sample_rate), ".17g"),
+            *sampling_args,
             "--output-root",
             str(context.export_root),
             "--export-run-id",

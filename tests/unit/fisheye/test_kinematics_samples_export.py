@@ -20,6 +20,7 @@ from fisheye.analytics_exports.runtime_telemetry import (
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.utils.export_kinematics_samples import build_arg_parser
 from fisheye.diagnostics.validate_kinematics_query_window_equivalence import (
     validate_kinematics_query_window_equivalence,
 )
@@ -103,6 +104,27 @@ def test_projection_contract_uses_global_acquisition_frame_stride() -> None:
     )
     assert clamped["sampling_stride_frames"] == 1
     assert clamped["nominal_sample_rate_hz"] == 5.0
+
+
+def test_cli_defaults_to_full_resolution_and_sampling_is_explicit() -> None:
+    required = [
+        "/tmp/recording_analysis.zarr",
+        "--track-kinematics-run",
+        "motion_physical",
+        "--output-root",
+        "/tmp/exports",
+        "--export-run-id",
+        "motion_export",
+        "--scratch-root",
+        "/tmp/scratch",
+    ]
+    default_args = build_arg_parser().parse_args(required)
+    sampled_args = build_arg_parser().parse_args(
+        [*required, "--sample-rate-hz", "10"]
+    )
+
+    assert default_args.sample_rate_hz is None
+    assert sampled_args.sample_rate_hz == 10.0
 
 
 def test_projection_contract_versions_exact_half_open_frame_range() -> None:
@@ -251,6 +273,30 @@ def test_kinematics_export_is_bounded_and_batch_boundary_independent(
     assert pq.ParquetFile(part).schema_arrow.field("speed_mm_s").type == (
         __import__("pyarrow").float32()
     )
+
+
+def test_kinematics_export_defaults_to_every_source_frame(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _eligible_source(monkeypatch)
+    result = mod.export_kinematics_samples(
+        tmp_path / "recording_analysis.zarr",
+        track_kinematics_run="motion_physical",
+        track_scope="offline",
+        output_root=tmp_path / "exports_full_rate",
+        export_run_id="full_rate_default",
+        scratch_root=tmp_path / "scratch_full_rate",
+        source_window_rows=1,
+        row_group_rows=1,
+    )
+
+    projection = result["kinematics_samples_export"]["projection_contract"]
+    assert projection["requested_sample_rate_hz"] == (
+        projection["source_sample_rate_hz"]
+    )
+    assert projection["sampling_stride_frames"] == 1
+    assert result["row_counts_by_table"] == {KINEMATICS_SAMPLES_TABLE: 2}
 
 
 def test_kinematics_export_persists_and_enforces_frame_window(
