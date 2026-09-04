@@ -331,6 +331,70 @@ fails closed. The two focused export suites pass 44/44 locally. This correction
 still requires complete CI and a fresh immutable v005 deployment, bundle,
 plan, and canary; the failed v004 evidence will not be edited or reused.
 
+### Successful replacement full publisher canary (2026-09-04)
+
+All required CI gates and all 16 non-GPU shards passed on runtime commit
+`4077579afc8cd29922b7d8cbe22f6178a9b7a154`. The deployment helper then
+created and locked the detached worktree below, verified its import root, and
+left the shared `/groups` checkout unchanged:
+
+```text
+/groups/johnson/johnsonlab/jeremy/gitrepos/palette-worktrees/
+  core-motion-authority-20260904-4077579a
+```
+
+The fresh v005 operation is:
+
+```text
+/groups/johnson/johnsonlab/jeremy/operations/
+  sleepyfish_validated_core_behavior_full_rate_core_motion_v2_20260904_v005/
+```
+
+Its bundle record digest is
+`3e8111a6b29c8d432331be0815498b0985f0af330c8ea77ac314fdcea4ba44aa`.
+Its capability-matrix digest remains exactly
+`5e1e582229250ffb966d772328351eb9485f59c4b075d20266a4c513c632fbd5`,
+proving that v004 and v005 selected the same scientific authorities. The new
+plan digest is
+`3ca8af2079892b255b0677b22f15e743c8ab38232da7688b5a092540cf250c8d`.
+
+LSF shard array `154008759` ran all four recordings concurrently on compute
+hosts and completed in 432--468 seconds per recording. Every stderr file is
+empty, and all four schema-v2 shard receipts passed semantic validation.
+Dependent finalizer `154008760` then completed in 48 seconds. Its internal
+telemetry records 5,882,107,589 bytes across 32 parts, 37.283 seconds for the
+necessary destination copy-and-hash pass, 0.097 seconds for receipt
+composition, 0.907 seconds for receipt-only precommit plus atomic commit, and
+38.779 seconds total.
+
+The manifest-last publication is `complete_selector_ineligible`, retains all
+six false safety fields, and has record digest
+`9e06161f8aa0f63f7154fc6e22f75191a6af00cbe13ad57fb593c662bb48c386`.
+Its transfer-receipt digest is
+`3e632a616b93f5c261cd9f102bf75ece3f79c0afa066a291187ddd73d3644a67`,
+and its validation-receipt digest is
+`7fa0a0fec0e85d3d668a939baaf4aed7228f7d44e619fcbf1a4819023cb1680a`.
+The generic unpatched reader reopened the publication in receipt mode and
+performed a bounded projection of the new speed, signed-acceleration, and
+cumulative-distance columns.
+
+The sealed row counts are:
+
+| Table | Rows |
+|---|---:|
+| `kinematics_samples` | 11,469,925 |
+| `subject_body_frame_samples` | 11,469,925 |
+| `eye_trace_samples` | 11,750,416 |
+| `tail_trace_samples` | 114,699,250 |
+| `canonical_swim_bouts` | 79,235 |
+| `recording_capabilities` | 24 |
+| `cohort_recordings` | 4 |
+| `recording_bundles` | 4 |
+
+This closes the core v2 writer-to-publisher-to-reader canary. It does not
+activate a selector, update a registry, mutate source Zarrs, or authorize the
+future chaser-composite profile described in Track C.
+
 ## Composition contract
 
 ### 1. One reusable core authority roster
@@ -728,7 +792,11 @@ reselecting core motion/body/bout authority.
 - [x] Add a real generic-writer-to-publisher-to-unpatched-reader boundary test
       for the installed v2 profile.
 - [x] Run a read-only admission canary for all four Sleepyfish cameras.
-- [ ] Run required CI before merge, deployment, or production publication.
+- [x] Run every required CI gate on runtime commit `4077579a` before its
+      detached deployment and selector-ineligible canary.
+- [x] Run and validate the real four-camera selector-ineligible v005
+      writer-to-publisher-to-unpatched-reader canary.
+- [ ] Run required CI on the final documentation head before merge.
 
 ### Track B — audit paradigm composition
 
