@@ -32,12 +32,25 @@ from fisheye.analytics_exports.validated_behavior_contracts import (
     validate_table_specs,
 )
 from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import (
+    CORE_BEHAVIOR_CAPABILITY_PROFILE_ID,
+    CORE_BEHAVIOR_CAPABILITY_PROFILE_ID_V1,
     CORE_BEHAVIOR_CAPABILITY_KEYS,
     CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+    CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1,
     CORE_BEHAVIOR_TABLE_SPECS,
+    CORE_BEHAVIOR_TABLE_SPECS_V1,
+    KINEMATICS_SAMPLES,
+    KINEMATICS_SAMPLES_V1,
 )
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.analytics_exports.validated_behavior_profiles import (
+    ValidatedBehaviorExportProfile,
+    ValidatedBehaviorProfileError,
+    _validated_profile_map,
     resolve_validated_behavior_profile,
+)
+from fisheye.analytics_exports.validated_behavior_phase_b_contracts import (
+    PHASE_B_TABLE_SPECS,
 )
 import fisheye.utils.materialize_validated_behavior_bundle_cohort as bundle_cli
 import fisheye.utils.materialize_validated_behavior_cohort_export as export_cli
@@ -212,6 +225,70 @@ def test_core_behavior_profile_uses_the_existing_cohort_surface() -> None:
     )
     assert EXPORT_PLAN_METHOD_ID == "closed_membership_recording_shard_plan_v2"
     assert EXPORT_METHOD_ID == "receipt_composed_manifest_selected_parquet_v2"
+
+
+def test_core_motion_successor_preserves_v1_profile_and_uses_explicit_semantics() -> (
+    None
+):
+    current = resolve_validated_behavior_profile(CORE_BEHAVIOR_EXPORT_PROFILE_ID)
+    v1 = resolve_validated_behavior_profile(CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1)
+
+    assert current.table_specs is CORE_BEHAVIOR_TABLE_SPECS
+    assert v1.table_specs is CORE_BEHAVIOR_TABLE_SPECS_V1
+    assert KINEMATICS_SAMPLES.schema_version == 2
+    assert KINEMATICS_SAMPLES_V1.schema_version == 1
+    current_fields = {field.name for field in KINEMATICS_SAMPLES.fields}
+    v1_fields = {field.name for field in KINEMATICS_SAMPLES_V1.fields}
+    assert {
+        "delta_frames",
+        "delta_seconds",
+        "speed_filtered_mm_s",
+        "speed_smoothed_mm_s",
+        "frame_path_distance_filtered_mm",
+        "frame_path_distance_smoothed_mm",
+        "signed_tangential_acceleration_mm_s2",
+        "smoothed_signed_tangential_acceleration_mm_s2",
+        "cumulative_smoothed_path_distance_mm",
+    }.issubset(current_fields)
+    assert "acceleration_mm_s2" not in current_fields
+    assert "signed_tangential_acceleration_mm_s2" not in v1_fields
+    assert "speed_mm_s" in v1_fields
+    assert KINEMATICS_SAMPLES_V1.payload_sha256 == (
+        "35f7b95cc2c46253365a8ae91dc88b886f2cde7b93f4a1e4a1581bd18be69505"
+    )
+    assert (
+        canonical_json_sha256(export_core._spec_records(CORE_BEHAVIOR_TABLE_SPECS_V1))
+        == "bbb9ababe1000bca3d19d1f4cca18403a422c20a019fd9b288dc52b89fc3b98d"
+    )
+
+
+def test_core_motion_successor_versions_capability_contract_with_export_profile() -> (
+    None
+):
+    current = core_behavior_capability_contract(CORE_BEHAVIOR_EXPORT_PROFILE_ID)
+    v1 = core_behavior_capability_contract(CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1)
+
+    assert current["profile_id"] == CORE_BEHAVIOR_CAPABILITY_PROFILE_ID
+    assert v1["profile_id"] == CORE_BEHAVIOR_CAPABILITY_PROFILE_ID_V1
+    assert current["record_sha256"] != v1["record_sha256"]
+    assert current["keys"] == v1["keys"]
+
+
+def test_installed_profile_gate_rejects_competing_motion_projections() -> None:
+    invalid_specs = {
+        **CORE_BEHAVIOR_TABLE_SPECS,
+        "provider_motion_samples": PHASE_B_TABLE_SPECS["provider_motion_samples"],
+    }
+    invalid = ValidatedBehaviorExportProfile(
+        profile_id="invalid_competing_motion",
+        table_specs=invalid_specs,
+        row_extractor_factory=lambda: {},
+    )
+    with pytest.raises(
+        ValidatedBehaviorProfileError,
+        match="competing core-motion projections",
+    ):
+        _validated_profile_map({invalid.profile_id: invalid})
 
 
 def test_completed_execution_report_is_typed_admission_not_name_authority(

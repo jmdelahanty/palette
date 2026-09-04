@@ -29,14 +29,21 @@ from .contracts import (
     TAIL_TRACE_SAMPLES_TABLE,
 )
 from .eye_trace_samples import iter_projected_eye_trace_batches
-from .kinematics_samples import iter_projected_kinematics_sample_batches
+from .kinematics_samples import (
+    iter_projected_core_motion_sample_batches,
+    iter_projected_kinematics_sample_batches,
+)
 from .tail_trace_samples import projected_tail_trace_sample_batch
 from .validated_behavior_cohort import ValidatedBehaviorBatchSource
 from .validated_behavior_core_behavior_contracts import (
     CANONICAL_SWIM_BOUTS_CAPABILITY,
     CORE_BEHAVIOR_CAPABILITY_KEYS,
+    CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+    CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1,
+    CORE_MOTION_KINEMATICS_PROJECTION_FIELDS,
     EYE_TRACE_CAPABILITY,
     KINEMATICS_SAMPLES_CAPABILITY,
+    KINEMATICS_SAMPLES,
     SUBJECT_BODY_FRAME_CAPABILITY,
     SUBJECT_BODY_FRAME_SAMPLES_TABLE,
     TAIL_TRACE_CAPABILITY,
@@ -93,10 +100,20 @@ class _CoreBehaviorContext:
         self.membership_member = membership_member
         self.bundle_member = bundle_member
         self.bundle = bundle
+        export_profile = _mapping(
+            plan.get("export_profile"), field="plan export_profile"
+        )
+        self.export_profile_id = str(export_profile.get("profile_id"))
+        if self.export_profile_id not in {
+            CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1,
+            CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+        }:
+            _fail("Core-behavior extractor received an unsupported export profile.")
         self.bound = bind_core_behavior_cohort_sources(
             bundle["path"],
             expected_analysis_zarr=membership_member["analysis_zarr"],
             expected_recording_id=membership_member["recording_id"],
+            export_profile_id=self.export_profile_id,
         )
         if (
             bundle.get("file_sha256") != self.bound.report_binding["file_sha256"]
@@ -207,11 +224,16 @@ def _cohortize_standalone_batches(
     *,
     table_name: str,
     batches: Iterable[Mapping[str, Any]],
+    source_fields: set[str] | None = None,
 ) -> Iterator[Mapping[str, Any]]:
-    source_fields = {field.name for field in ARROW_TABLE_CONTRACTS[table_name].fields}
+    expected_source_fields = (
+        {field.name for field in ARROW_TABLE_CONTRACTS[table_name].fields}
+        if source_fields is None
+        else set(source_fields)
+    )
     omitted = {"export_schema_version", "table_name", "recording_id"}
     for index, columns in enumerate(batches):
-        if set(columns) != source_fields:
+        if set(columns) != expected_source_fields:
             _fail(
                 f"{table_name}: standalone projection batch {index} has an "
                 "inexact field roster."
@@ -232,14 +254,27 @@ def _cohortize_standalone_batches(
 
 def _kinematics_samples(context: _CoreBehaviorContext) -> ValidatedBehaviorBatchSource:
     capability = context.capability_binding(KINEMATICS_SAMPLES_CAPABILITY)
-    batches = iter_projected_kinematics_sample_batches(
-        context.bound.track,
-        projection=capability["projection_contract"],
-        source_window_rows=context.row_group_rows,
-    )
+    source_fields: set[str] | None = None
+    if context.export_profile_id == CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1:
+        batches = iter_projected_kinematics_sample_batches(
+            context.bound.track,
+            projection=capability["projection_contract"],
+            source_window_rows=context.row_group_rows,
+        )
+    else:
+        batches = iter_projected_core_motion_sample_batches(
+            context.bound.track,
+            projection=capability["projection_contract"],
+            source_window_rows=context.row_group_rows,
+            expected_arrow_schema_sha256=KINEMATICS_SAMPLES.payload_sha256,
+        )
+        source_fields = {item.name for item in CORE_MOTION_KINEMATICS_PROJECTION_FIELDS}
     return _batch_source(
         _cohortize_standalone_batches(
-            context, table_name=KINEMATICS_SAMPLES_TABLE, batches=batches
+            context,
+            table_name=KINEMATICS_SAMPLES_TABLE,
+            batches=batches,
+            source_fields=source_fields,
         )
     )
 

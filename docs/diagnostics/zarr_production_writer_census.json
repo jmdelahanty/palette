@@ -69867,7 +69867,7 @@
     "writer_wrapper_call_site_count": 987
   },
   "wrapper_analysis": {
-    "function_definition_count": 6389,
+    "function_definition_count": 6393,
     "writer_function_count": 244,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",

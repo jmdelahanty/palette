@@ -3,13 +3,21 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pytest
 
 from fisheye.analytics_exports import kinematics_samples as mod
+from fisheye.analytics_exports import (
+    validated_behavior_core_behavior_adapters as core_adapters,
+)
 from fisheye.analytics_exports.contracts import KINEMATICS_SAMPLES_TABLE
+from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import (
+    CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+    KINEMATICS_SAMPLES,
+)
 from fisheye.analytics_exports.validation import (
     ExportValidationError,
     validate_export_run,
@@ -106,6 +114,58 @@ def test_projection_contract_uses_global_acquisition_frame_stride() -> None:
     assert clamped["nominal_sample_rate_hz"] == 5.0
 
 
+def test_core_motion_projection_binds_derivative_and_integral_semantics() -> None:
+    contract = mod.core_motion_projection_contract(
+        source_sample_rate_hz=700.0,
+        requested_sample_rate_hz=700.0,
+        arrow_schema_sha256=KINEMATICS_SAMPLES.payload_sha256,
+    )
+
+    assert contract["schema_version"] == mod.KINEMATICS_PROJECTION_SCHEMA_VERSION_V3
+    assert contract["projection_profile_id"] == mod.CORE_MOTION_PROJECTION_PROFILE_ID
+    assert contract["source_surface_profile_id"] == (
+        mod.CORE_MOTION_SOURCE_SURFACE_PROFILE_ID
+    )
+    assert contract["sampling_stride_frames"] == 1
+    assert contract["motion_semantics"] == {
+        "filtered_speed_source": "movement/speed/filtered/mm",
+        "filtered_path_increment_source": (
+            "movement/speed/filtered/frame_path_distance_mm"
+        ),
+        "smoothed_speed_source": "movement/speed/smoothed/mm",
+        "smoothed_path_increment_source": (
+            "movement/speed/smoothed/frame_path_distance_mm"
+        ),
+        "acceleration_source_speed_level": "speed_smoothed",
+        "signed_tangential_acceleration_source": (
+            "speed_derivatives/speed_smoothed/acceleration_mm"
+        ),
+        "smoothed_signed_tangential_acceleration_source": (
+            "speed_derivatives/speed_smoothed/smoothed_acceleration_mm"
+        ),
+        "acceleration_interpretation": (
+            "signed_first_difference_of_scalar_speed_divided_by_delta_seconds"
+        ),
+        "acceleration_is_vector_magnitude": False,
+        "cumulative_path_distance_source": "cumulative_path_distance_mm",
+        "cumulative_path_distance_definition": (
+            "per_track_cumsum_of_smoothed_frame_path_distance"
+        ),
+        "invalid_transition_distance_contribution": "zero",
+        "transition_anchor": "destination_track_sample",
+        "subsampling_semantics": (
+            "selected_rows_retain_source_frame_transition_values_and_cumulative_state"
+        ),
+    }
+    assert set(contract["source_logical_paths"]) == set(
+        mod._CORE_MOTION_SELECTED_SURFACES
+    )
+    assert contract["arrow_schema_sha256"] == KINEMATICS_SAMPLES.payload_sha256
+    assert contract["payload_sha256"] == canonical_json_sha256(
+        {key: value for key, value in contract.items() if key != "payload_sha256"}
+    )
+
+
 def test_cli_defaults_to_full_resolution_and_sampling_is_explicit() -> None:
     required = [
         "/tmp/recording_analysis.zarr",
@@ -119,9 +179,7 @@ def test_cli_defaults_to_full_resolution_and_sampling_is_explicit() -> None:
         "/tmp/scratch",
     ]
     default_args = build_arg_parser().parse_args(required)
-    sampled_args = build_arg_parser().parse_args(
-        [*required, "--sample-rate-hz", "10"]
-    )
+    sampled_args = build_arg_parser().parse_args([*required, "--sample-rate-hz", "10"])
 
     assert default_args.sample_rate_hz is None
     assert sampled_args.sample_rate_hz == 10.0
@@ -135,12 +193,8 @@ def test_projection_contract_versions_exact_half_open_frame_range() -> None:
         source_frame_stop_exclusive=200_000,
     )
 
-    assert contract["schema_version"] == (
-        mod.KINEMATICS_PROJECTION_SCHEMA_VERSION_V2
-    )
-    assert contract["frame_selection_policy"] == (
-        mod.KINEMATICS_FRAME_SELECTION_POLICY
-    )
+    assert contract["schema_version"] == (mod.KINEMATICS_PROJECTION_SCHEMA_VERSION_V2)
+    assert contract["frame_selection_policy"] == (mod.KINEMATICS_FRAME_SELECTION_POLICY)
     assert contract["source_frame_start"] == 0
     assert contract["source_frame_stop_exclusive"] == 200_000
     assert contract["payload_sha256"] == canonical_json_sha256(
@@ -201,6 +255,187 @@ def test_exact_source_binding_accepts_float32_and_rejects_float64_positions(
             run_name="motion_physical",
             scope="offline",
         )
+
+
+def test_core_motion_source_binding_and_projection_copy_exact_persisted_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root, _run, track = _eligible_source(monkeypatch)
+    bound = mod._source_binding(
+        root,
+        zarr_path=(tmp_path / "recording_analysis.zarr").resolve(),
+        recording_id="recording",
+        run_name="motion_physical",
+        scope="offline",
+        source_surface_profile_id=mod.CORE_MOTION_SOURCE_SURFACE_PROFILE_ID,
+    )
+    assert bound.binding["schema_version"] == (
+        mod.KINEMATICS_SOURCE_BINDING_SCHEMA_VERSION_V2
+    )
+    assert bound.binding["source_surface_profile_id"] == (
+        mod.CORE_MOTION_SOURCE_SURFACE_PROFILE_ID
+    )
+    assert set(bound.binding["tracks"][0]["selected_surfaces"]) == set(
+        mod._CORE_MOTION_SELECTED_SURFACES
+    )
+    with pytest.raises(ValueError, match="another source-surface profile"):
+        mod._validate_source_binding(bound.binding)
+    mod._validate_source_binding(
+        bound.binding,
+        expected_source_surface_profile_id=mod.CORE_MOTION_SOURCE_SURFACE_PROFILE_ID,
+    )
+
+    projection = mod.core_motion_projection_contract(
+        source_sample_rate_hz=1.0,
+        requested_sample_rate_hz=1.0,
+        arrow_schema_sha256=KINEMATICS_SAMPLES.payload_sha256,
+    )
+    batches = list(
+        mod.iter_projected_core_motion_sample_batches(
+            bound,
+            projection=projection,
+            source_window_rows=1,
+            expected_arrow_schema_sha256=KINEMATICS_SAMPLES.payload_sha256,
+        )
+    )
+    assert len(batches) == 2
+    projected = {
+        name: np.concatenate([np.asarray(batch[name]) for batch in batches])
+        for name in mod.CORE_MOTION_SCIENTIFIC_DTYPES
+    }
+    assert np.array_equal(
+        projected["speed_filtered_mm_s"],
+        track.children["movement"]
+        .children["speed"]
+        .children["filtered"]
+        .children["mm"]
+        .data,
+        equal_nan=True,
+    )
+    assert np.array_equal(
+        projected["speed_smoothed_mm_s"],
+        track.children["movement"]
+        .children["speed"]
+        .children["smoothed"]
+        .children["mm"]
+        .data,
+        equal_nan=True,
+    )
+    derivative = (
+        track.children["speed_derivatives"]
+        .children["speed_smoothed"]
+        .children["acceleration_mm"]
+        .data
+    )
+    assert np.array_equal(
+        projected["signed_tangential_acceleration_mm_s2"],
+        derivative,
+        equal_nan=True,
+    )
+    assert np.array_equal(
+        projected["cumulative_smoothed_path_distance_mm"],
+        track.children["cumulative_path_distance_mm"].data,
+    )
+    assert all(
+        value == "speed_smoothed"
+        for batch in batches
+        for value in batch["acceleration_source_speed_level"]
+    )
+
+
+def test_core_motion_projection_detects_tampered_derivative_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root, _run, track = _eligible_source(monkeypatch)
+    bound = mod._source_binding(
+        root,
+        zarr_path=(tmp_path / "recording_analysis.zarr").resolve(),
+        recording_id="recording",
+        run_name="motion_physical",
+        scope="offline",
+        source_surface_profile_id=mod.CORE_MOTION_SOURCE_SURFACE_PROFILE_ID,
+    )
+    projection = mod.core_motion_projection_contract(
+        source_sample_rate_hz=1.0,
+        requested_sample_rate_hz=1.0,
+        arrow_schema_sha256=KINEMATICS_SAMPLES.payload_sha256,
+    )
+    track.children["speed_derivatives"].children["speed_smoothed"].children[
+        "acceleration_mm"
+    ].data[1] = np.float32(1.0)
+
+    with pytest.raises(ValueError, match="payload differs from its publication"):
+        list(
+            mod.iter_projected_core_motion_sample_batches(
+                bound,
+                projection=projection,
+                source_window_rows=1,
+                expected_arrow_schema_sha256=KINEMATICS_SAMPLES.payload_sha256,
+            )
+        )
+
+
+def test_core_motion_projection_enters_the_generic_cohort_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root, _run, track = _eligible_source(monkeypatch)
+    bound = mod._source_binding(
+        root,
+        zarr_path=(tmp_path / "recording_analysis.zarr").resolve(),
+        recording_id="recording",
+        run_name="motion_physical",
+        scope="offline",
+        source_surface_profile_id=mod.CORE_MOTION_SOURCE_SURFACE_PROFILE_ID,
+    )
+    projection = mod.core_motion_projection_contract(
+        source_sample_rate_hz=1.0,
+        requested_sample_rate_hz=1.0,
+        arrow_schema_sha256=KINEMATICS_SAMPLES.payload_sha256,
+    )
+
+    class Context:
+        export_profile_id = CORE_BEHAVIOR_EXPORT_PROFILE_ID
+        row_group_rows = 1
+
+        def __init__(self) -> None:
+            self.bound = SimpleNamespace(track=bound)
+
+        def capability_binding(self, _capability_id: str) -> dict[str, Any]:
+            return {"projection_contract": projection}
+
+        def common_columns(self, count: int) -> dict[str, list[str]]:
+            return {
+                "export_run_id": ["export"] * count,
+                "recording_id": ["recording"] * count,
+                "membership_member_sha256": ["a" * 64] * count,
+                "bundle_set_member_sha256": ["b" * 64] * count,
+                "bundle_record_sha256": ["c" * 64] * count,
+                "cross_grain_join_authority_sha256": ["d" * 64] * count,
+            }
+
+    projected = core_adapters._kinematics_samples(Context())
+    batches = list(projected.batches)
+
+    assert projected.zero_row_reason is None
+    assert len(batches) == 2
+    assert all(
+        set(batch) == {field.name for field in KINEMATICS_SAMPLES.fields}
+        for batch in batches
+    )
+    expected_acceleration = (
+        track.children["speed_derivatives"]
+        .children["speed_smoothed"]
+        .children["acceleration_mm"]
+        .data[1:2]
+    )
+    assert np.array_equal(
+        np.asarray(batches[1]["signed_tangential_acceleration_mm_s2"]),
+        expected_acceleration,
+        equal_nan=True,
+    )
 
 
 def test_exact_source_binding_rejects_legacy_float64_publication(
@@ -360,9 +595,7 @@ def test_bounded_export_equals_exact_unbounded_frame_slice(
         full_export_run_id="kinematics_full",
         bounded_export_root=tmp_path / "exports_window",
         bounded_export_run_id="kinematics_window",
-        output=tmp_path
-        / "palette_benchmarks"
-        / "kinematics_window_equivalence.json",
+        output=tmp_path / "palette_benchmarks" / "kinematics_window_equivalence.json",
     )
 
     assert evidence["payload"]["status"] == "passed"

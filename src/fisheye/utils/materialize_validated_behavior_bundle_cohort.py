@@ -21,6 +21,7 @@ from fisheye.analysis_workflows.validated_behavior_cohort import (
 )
 from fisheye.analysis_workflows.core_behavior_cohort_adapter import (
     CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
+    CORE_BEHAVIOR_EXPORT_PROFILE_ID,
     build_bundle_set_from_core_behavior_execution_reports,
     validate_core_behavior_bundle_set_current_sources,
 )
@@ -439,9 +440,15 @@ def _bundle_set_command(args: argparse.Namespace) -> dict[str, Any]:
         membership_record_sha256=membership["record_sha256"],
     )
     output = args.output_json.expanduser().resolve()
+    existing_export_profile_id: str | None = None
     if output.exists():
         _, existing = _read_object(output, field="existing bundle set")
         created_at_utc = existing.get("created_at_utc")
+        existing_profile = existing.get("bundle_profile")
+        if isinstance(existing_profile, Mapping) and isinstance(
+            existing_profile.get("export_profile_id"), str
+        ):
+            existing_export_profile_id = str(existing_profile["export_profile_id"])
     else:
         created_at_utc = _utc_now()
     adapter_id = _bundle_adapter_for_membership(membership)
@@ -454,6 +461,9 @@ def _bundle_set_command(args: argparse.Namespace) -> dict[str, Any]:
             bundle_root=args.bundle_root,
             palette_commit=args.palette_commit,
             created_at_utc=created_at_utc,
+            export_profile_id=(
+                existing_export_profile_id or CORE_BEHAVIOR_EXPORT_PROFILE_ID
+            ),
         )
     else:
         requested = build_bundle_set_from_validated_recording_behavior_bundles(

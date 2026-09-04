@@ -223,6 +223,42 @@ available only when a caller explicitly supplies a sampling rate. This changes
 neither the recording-local track-kinematics authority nor the shared
 `validated_behavior/v1` publication surface.
 
+### Core-motion ownership implementation checkpoint (2026-09-04)
+
+The maintained five-grain core profile now owns the complete reusable physical
+motion projection. Its `kinematics_samples` v2 contract adds the persisted
+filtered and smoothed speed/path increments, signed tangential acceleration,
+smoothed signed tangential acceleration, transition deltas, and cumulative
+smoothed path distance. These values are copied from the selected
+track-kinematics authority; the export does not recompute them.
+
+The successor is deliberately a profile version, not a new publication
+surface:
+
+- new bundle sets default to `validated_core_behavior_five_grain_v2` on the
+  existing `validated_behavior/v1` planner, sharder, atomic publisher,
+  manifest, selector, validator, and reader;
+- immutable v1 bundle sets continue to resolve through
+  `validated_core_behavior_five_grain_v1`; its kinematics Arrow-contract digest
+  and complete table-spec digest are frozen by regression tests;
+- v2 source admission binds the exact persisted derivative and integral arrays
+  and their physical/temporal authority records, then verifies their sealed
+  array digests while those arrays are already resident for Parquet projection;
+- the acceleration field is named
+  `signed_tangential_acceleration_mm_s2` because it is the signed first
+  difference of scalar smoothed speed, not a vector-acceleration magnitude;
+- cumulative distance is explicitly the per-track cumulative sum of smoothed
+  frame-path increments, with invalid transitions contributing zero; and
+- installed export profiles fail closed if they contain both
+  `kinematics_samples` and `provider_motion_samples`. A paradigm extension must
+  join the selected core motion authority instead of installing a competing
+  motion projection.
+
+This checkpoint does not reinterpret or mutate existing Phase-C exports. The
+chaser migration remains Track C/D work: subtract the overlapping provider
+motion projection, rebind the retained paradigm relations to core row identity,
+and prove their foreign-key cardinality before publishing a composite profile.
+
 ## Composition contract
 
 ### 1. One reusable core authority roster
@@ -611,10 +647,10 @@ reselecting core motion/body/bout authority.
       Sleepyfish tail publications through the maintained atomic materializer;
       the four v011 successors were published from `289e9ddc` without mutating
       the originals.
-- [ ] Keep the five scientific grains in separate normalized tables.
-- [ ] Route planning, sharding, publication, validation, and reading through
+- [x] Keep the five scientific grains in separate normalized tables.
+- [x] Route planning, sharding, publication, validation, and reading through
       the existing generic cohort engine.
-- [ ] Prove that no new publisher, selector, manifest family, or CLI path was
+- [x] Prove that no new publisher, selector, manifest family, or CLI path was
       introduced.
 - [ ] Add real execution-report-to-resolver and generic-publisher boundary
       tests.
