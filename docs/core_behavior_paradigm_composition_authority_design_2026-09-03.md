@@ -259,6 +259,37 @@ chaser migration remains Track C/D work: subtract the overlapping provider
 motion projection, rebind the retained paradigm relations to core row identity,
 and prove their foreign-key cardinality before publishing a composite profile.
 
+### Core-motion all-camera admission checkpoint (2026-09-04)
+
+At `2026-09-04T20:55:00Z`, the new v2 core source resolver was run read-only
+against the four completed Sleepyfish execution reports below, using published
+consolidated metadata. The four checks ran concurrently on
+`delahantyj-ws1.hhmi.org`; they did not create a plan, write scratch data,
+mutate a Zarr, or change a selector.
+
+```text
+/groups/johnson/johnsonlab/jeremy/operations/
+  sleepyfish_validated_core_behavior_full_rate_20260904_v002/source_reports/
+```
+
+All four recordings passed. Each resolution selected export profile
+`validated_core_behavior_five_grain_v2`, motion surface
+`core_motion_physical_v2`, all 27 required persisted motion arrays, and
+projection-contract schema v3:
+
+| Recording | Admission time (s) |
+|---|---:|
+| `2026_08_06_19_13_35_cam2010093` | 114.282 |
+| `2026_08_06_19_13_35_cam2010094` | 113.993 |
+| `2026_08_06_19_13_35_cam2010095` | 114.516 |
+| `2026_08_06_19_13_35_cam2010096` | 114.053 |
+
+This is source-admission evidence, not publication evidence. It proves that
+the selected immutable track-kinematics publications already contain and bind
+the physical motion surfaces required by the v2 projection, so no upstream
+motion recomputation or scientific-Zarr migration is required. A
+selector-ineligible full publisher canary remains pending required CI.
+
 ## Composition contract
 
 ### 1. One reusable core authority roster
@@ -654,7 +685,7 @@ reselecting core motion/body/bout authority.
       introduced.
 - [ ] Add real execution-report-to-resolver and generic-publisher boundary
       tests.
-- [ ] Run a read-only admission canary for all four Sleepyfish cameras.
+- [x] Run a read-only admission canary for all four Sleepyfish cameras.
 - [ ] Run required CI before merge, deployment, or production publication.
 
 ### Track B — audit paradigm composition
