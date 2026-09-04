@@ -21,6 +21,7 @@ from fisheye.visualization.validated_behavior_distributions import (
     render_distribution_figure,
 )
 
+from .validated_behavior_distribution_specs import distribution_metric_display_text
 from .validated_behavior_distribution_views import (
     DEFAULT_COHORT_STATISTIC,
     DEFAULT_DISPLAY_RANGE,
@@ -227,6 +228,7 @@ def render_validated_behavior_distribution_report(
         artifacts: list[dict[str, object]] = []
         for metric_id in selected:
             metric = catalog[metric_id]
+            metric_label, metric_definition = distribution_metric_display_text(metric)
             for weighting_id in metric["weighting_ids"]:
                 payload = build_distribution_view_payload(
                     source, metric_id, str(weighting_id)
@@ -258,9 +260,14 @@ def render_validated_behavior_distribution_report(
                         "metric_id": metric_id,
                         "metric_family": metric["metric_family"],
                         "weighting_id": weighting_id,
-                        "label": metric["interpretation"],
+                        "label": metric_label,
                         "description": (
-                            f"{str(weighting_id).title()}-weighted whole-session and "
+                            (
+                                ""
+                                if metric_definition is None
+                                else f"{metric_definition}. "
+                            )
+                            + f"{str(weighting_id).title()}-weighted whole-session and "
                             "exact semantic-epoch distributions; "
                             f"{DISPLAY_RANGE_LABELS[display_range_id]} x-axis."
                         ),

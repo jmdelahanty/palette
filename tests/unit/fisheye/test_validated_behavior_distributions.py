@@ -13,6 +13,7 @@ from fisheye.group_statistics.validated_behavior_distribution_specs import (
     DEFAULT_DISTRIBUTION_METRICS,
     DistributionMetricSpec,
     SCOPE_ORDER,
+    distribution_metric_display_text,
     validate_distribution_metric_specs,
 )
 from fisheye.group_statistics.validated_behavior_distribution_report import (
@@ -57,6 +58,7 @@ from fisheye.visualization.validated_behavior_distributions import (
 )
 from apps.marimo.components.validated_behavior_distributions import (
     _series_style as _interactive_distribution_series_style,
+    distribution_metric_options,
     validated_behavior_distribution_figure,
     validated_behavior_motion_trace_figure,
 )
@@ -155,6 +157,31 @@ def test_default_distribution_registry_is_unique_and_declares_weighting():
     ).weighting_ids == ("frame", "time")
     with pytest.raises(ValueError, match="must be unique"):
         validate_distribution_metric_specs((_duration_spec(), _duration_spec()))
+
+
+def test_inter_bout_interval_display_name_does_not_mutate_sealed_metric_spec():
+    spec = next(
+        item
+        for item in DEFAULT_DISTRIBUTION_METRICS
+        if item.metric_id == "bout.inter_bout_interval_s"
+    )
+    metric = spec.to_dict()
+
+    assert spec.spec_sha256 == (
+        "d0ef605f727cf92bef20b0cb1681337736ebcafad870b8f635914bf645d96a93"
+    )
+    assert metric["interpretation"] == "Gap between consecutive canonical swim bouts"
+    assert distribution_metric_display_text(metric) == (
+        "Inter-bout interval (IBI)",
+        "Gap between consecutive canonical swim bouts",
+    )
+    assert distribution_metric_options((metric,)) == {
+        "Inter-bout interval (IBI)": "bout.inter_bout_interval_s"
+    }
+    assert distribution_metric_display_text(_duration_spec().to_dict()) == (
+        "Fixture duration",
+        None,
+    )
 
 
 def test_heading_reducer_matches_inclusive_wrapped_producer_rule():
@@ -304,9 +331,9 @@ def test_time_weighted_epoch_scope_rejects_boundary_crossing_transitions():
     assert masks["chaser_post"].tolist() == [False, False, False, False]
 
 
-def _fixture_reduction():
+def _fixture_reduction(spec: DistributionMetricSpec | None = None):
     source_digest = "a" * 64
-    spec = _duration_spec()
+    spec = _duration_spec() if spec is None else spec
     config = ValidatedBehaviorDistributionConfig(
         distribution_run_id="fixture-distributions-v1", metric_specs=(spec,)
     )
@@ -456,8 +483,10 @@ def test_frame_and_time_weighting_are_distinct_declared_reductions():
     assert time_first["mean_recording_fraction"] == pytest.approx(0.2)
 
 
-def _write_fixture_distribution(tmp_path: Path) -> Path:
-    config, recipes, support, sparse, cohort = _fixture_reduction()
+def _write_fixture_distribution(
+    tmp_path: Path, *, spec: DistributionMetricSpec | None = None
+) -> Path:
+    config, recipes, support, sparse, cohort = _fixture_reduction(spec)
     source_digest = "a" * 64
     result = ValidatedBehaviorDistributionResult(
         config=config,
@@ -545,6 +574,47 @@ def test_shared_payload_feeds_static_and_plotly_renderers(tmp_path: Path):
         [row["bin_right"] - row["bin_left"] for row in whole_rows],
     )
     assert "Mean recording fraction" in rendered["layout"]["yaxis"]["title"]["text"]
+
+
+def test_inter_bout_interval_label_reaches_cohort_figures_and_static_report(
+    tmp_path: Path,
+):
+    spec = next(
+        item
+        for item in DEFAULT_DISTRIBUTION_METRICS
+        if item.metric_id == "bout.inter_bout_interval_s"
+    )
+    target = _write_fixture_distribution(tmp_path, spec=spec)
+    source = ValidatedBehaviorDistributionViewSource.open(target)
+    payload = build_distribution_view_payload(source, spec.metric_id, "event")
+
+    static = render_distribution_figure(payload)
+    try:
+        assert static._suptitle.get_text().startswith("Inter-bout interval (IBI)")
+        assert "Gap between consecutive canonical swim bouts" in (
+            static._suptitle.get_text()
+        )
+        assert static._supxlabel.get_text() == "Inter-bout interval (IBI) (s)"
+    finally:
+        plt.close(static)
+    interactive = validated_behavior_distribution_figure(payload)
+    interactive_title = interactive.to_plotly_json()["layout"]["title"]["text"]
+    assert interactive_title.startswith("Inter-bout interval (IBI)")
+    assert "Gap between consecutive canonical swim bouts" in interactive_title
+
+    report_dir = tmp_path / "ibi-report"
+    manifest = render_validated_behavior_distribution_report(
+        source,
+        report_run_id="fixture-ibi-report-v1",
+        output_dir=report_dir,
+    )
+    artifact = manifest["artifacts"][0]
+    assert artifact["label"] == "Inter-bout interval (IBI)"
+    assert str(artifact["description"]).startswith(
+        "Gap between consecutive canonical swim bouts."
+    )
+    html = (report_dir / "index.html").read_text(encoding="utf-8")
+    assert "Inter-bout interval (IBI)" in html
 
 
 def test_histogram_bar_styles_keep_protocol_color_role_and_provider_independent():

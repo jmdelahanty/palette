@@ -20,6 +20,9 @@ from fisheye.analytics_exports.validated_behavior_product_catalog import (
 from fisheye.group_statistics.validated_behavior_distribution_report import (
     render_validated_behavior_distribution_report,
 )
+from fisheye.group_statistics.validated_behavior_distribution_specs import (
+    distribution_metric_display_text,
+)
 from fisheye.group_statistics.validated_behavior_distribution_views import (
     DEFAULT_DISPLAY_RANGE,
     DISPLAY_RANGE_LABELS,
@@ -83,9 +86,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     metrics = available_distribution_metrics(source)
     if args.list_metrics:
         for metric in metrics:
+            label, _definition = distribution_metric_display_text(metric)
             print(
                 f"{metric['metric_id']}\t{','.join(metric['weighting_ids'])}\t"
-                f"{metric['interpretation']}"
+                f"{label}"
             )
         return 0
     selected = _csv(args.metrics)

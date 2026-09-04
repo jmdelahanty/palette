@@ -26,6 +26,9 @@ from fisheye.group_statistics.recording_behavior_distribution_views import (
     available_recording_distribution_scopes,
     build_recording_behavior_distribution_view,
 )
+from fisheye.group_statistics.validated_behavior_distribution_specs import (
+    distribution_metric_display_text,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
@@ -177,7 +180,7 @@ def recording_distribution_metric_options(
     result: dict[str, str] = {}
     for row in available_recording_distribution_metrics(handle):
         metric_id = str(row["metric_id"])
-        label = str(row["interpretation"])
+        label, _definition = distribution_metric_display_text(row)
         if label in result:
             label = f"{label} [{metric_id}]"
         result[label] = metric_id
@@ -235,6 +238,7 @@ def recording_behavior_distribution_figure(
 
     if type(view) is not RecordingBehaviorDistributionView:
         raise TypeError("view must be one RecordingBehaviorDistributionView")
+    metric_label, metric_definition = distribution_metric_display_text(view.metric)
     scopes = tuple(sorted(view.scopes, key=lambda row: int(row["order"])))
     if not scopes or maximum_columns < 1:
         raise ValueError("A positive panel width and at least one scope are required.")
@@ -325,8 +329,12 @@ def recording_behavior_distribution_figure(
         )
     figure.update_layout(
         title=(
-            f"{view.metric['interpretation']} · {view.weighting_id} weighted · "
-            "persisted bins"
+            f"{metric_label} · {view.weighting_id} weighted · persisted bins"
+            + (
+                ""
+                if metric_definition is None
+                else f"<br><sup>{metric_definition}</sup>"
+            )
         ),
         height=max(440, 360 * rows),
         barmode="overlay",

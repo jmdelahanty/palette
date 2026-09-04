@@ -31,6 +31,38 @@ WEIGHTING_LABELS: Mapping[str, str] = MappingProxyType(
     }
 )
 
+# Presentation aliases are intentionally separate from ``interpretation``.
+# ``interpretation`` is sealed into each metric-spec digest and describes the
+# scientific quantity; changing a viewer label must not create a new analytic
+# recipe or invalidate an existing distribution publication.
+METRIC_DISPLAY_LABELS: Mapping[str, str] = MappingProxyType(
+    {
+        "bout.inter_bout_interval_s": "Inter-bout interval (IBI)",
+    }
+)
+
+
+def distribution_metric_display_text(
+    metric: Mapping[str, object],
+) -> tuple[str, str | None]:
+    """Return a stable display label and optional persisted definition."""
+
+    metric_id = metric.get("metric_id")
+    interpretation = metric.get("interpretation")
+    if type(metric_id) is not str or not metric_id or metric_id != metric_id.strip():
+        raise ValueError("Distribution metric display requires one exact metric ID")
+    if (
+        type(interpretation) is not str
+        or not interpretation
+        or interpretation != interpretation.strip()
+    ):
+        raise ValueError(
+            f"{metric_id}: distribution metric display requires an interpretation"
+        )
+    label = METRIC_DISPLAY_LABELS.get(metric_id, interpretation)
+    definition = interpretation if label != interpretation else None
+    return label, definition
+
 
 @dataclass(frozen=True, slots=True)
 class DistributionMetricSpec:
@@ -451,9 +483,11 @@ def distribution_metric_family_ids() -> tuple[str, ...]:
 __all__ = [
     "DEFAULT_DISTRIBUTION_METRICS",
     "DistributionMetricSpec",
+    "METRIC_DISPLAY_LABELS",
     "SCOPE_LABELS",
     "SCOPE_ORDER",
     "WEIGHTING_LABELS",
+    "distribution_metric_display_text",
     "distribution_metric_family_ids",
     "distribution_metric_specs_for_families",
     "validate_distribution_metric_specs",

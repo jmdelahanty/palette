@@ -16,6 +16,9 @@ from fisheye.group_statistics.recording_behavior_distribution_views import (
     RecordingBehaviorDistributionView,
     RecordingDistributionSeries,
 )
+from fisheye.group_statistics.validated_behavior_distribution_specs import (
+    distribution_metric_display_text,
+)
 
 
 PLOT_DPI = 170
@@ -61,6 +64,7 @@ def render_recording_behavior_distribution_figure(
 
     if type(view) is not RecordingBehaviorDistributionView:
         raise TypeError("view must be one RecordingBehaviorDistributionView")
+    metric_label, metric_definition = distribution_metric_display_text(view.metric)
     if maximum_columns < 1:
         raise ValueError("maximum_columns must be positive")
     scopes = tuple(sorted(view.scopes, key=lambda row: int(row["order"])))
@@ -119,7 +123,7 @@ def render_recording_behavior_distribution_figure(
                 color="#666666",
             )
         axis.set_title(str(scope["scope_label"]))
-        axis.set_xlabel(f"{view.metric['interpretation']} ({view.metric['unit']})")
+        axis.set_xlabel(f"{metric_label} ({view.metric['unit']})")
         axis.set_ylabel("Probability per bin (%)" if probability_percent else "Fraction")
         axis.grid(axis="y", alpha=0.2)
         axis.set_axisbelow(True)
@@ -133,7 +137,8 @@ def render_recording_behavior_distribution_figure(
         axis.set_visible(False)
 
     figure.suptitle(
-        f"{view.metric['interpretation']} · {view.weighting_id} weighted",
+        f"{metric_label} · {view.weighting_id} weighted"
+        + ("" if metric_definition is None else f"\n{metric_definition}"),
         fontsize=14,
     )
     figure.text(
