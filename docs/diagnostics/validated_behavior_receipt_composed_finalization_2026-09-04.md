@@ -1,6 +1,7 @@
 # Validated-behavior receipt-composed finalization — 2026-09-04
 
-Status: **approved implementation contract; implementation pending**.
+Status: **implemented and locally validated; production canary and required CI
+pending**.
 
 This document is a profile-specific application of
 [`publication_receipt_hashing_lifecycle_2026-08-29.md`](publication_receipt_hashing_lifecycle_2026-08-29.md)
@@ -362,57 +363,91 @@ The production-sized canary records wall/CPU/RSS/I/O telemetry separately.
 - [x] Inventory the current shard and upstream evidence.
 - [x] Define normal receipt composition, explicit deep audit, and fail-closed
       compatibility.
-- [ ] Add cross-links from the governing lifecycle and cohort design docs.
+- [x] Add cross-links from the governing lifecycle and cohort design docs.
 
 ### Phase 1 — Execution evidence versions
 
-- [ ] Version the plan evidence profile so old execution code rejects it.
-- [ ] Version the existing shard receipt family with explicit owner, PK, FK,
+- [x] Version the plan evidence profile so old execution code rejects it.
+- [x] Version the existing shard receipt family with explicit owner, PK, FK,
       and composability results.
-- [ ] Version the generation validation receipt and outer export envelope as
+- [x] Version the generation validation receipt and outer export envelope as
       needed for honest reader dispatch.
-- [ ] Keep logical table contracts, profile IDs, and the
+- [x] Keep logical table contracts, profile IDs, and the
       `validated_behavior/v1` storage surface unchanged.
-- [ ] Add v1/v2 reader dispatch and byte-for-byte v1 compatibility tests.
+- [x] Add v1/v2 reader dispatch and real-Parquet v1 compatibility tests.
 
 ### Phase 2 — Shard proof production
 
-- [ ] Produce one exact semantic proof per part and FK edge.
-- [ ] Bind every proof to exact source part hashes and table-spec identities.
-- [ ] Ensure the writer performs at most one post-write semantic validation.
-- [ ] Seal only after all tables and FK targets are present.
-- [ ] Reject missing/extra proof records and unknown proof methods.
+- [x] Produce one exact semantic proof per part and FK edge.
+- [x] Bind every proof to exact source part hashes and table-spec identities.
+- [x] Ensure the writer validates owner, required-field, and primary-key
+      semantics while values are resident and scans only non-prefix FK
+      relations after all parts exist.
+- [x] Seal only after all tables and FK targets are present.
+- [x] Reject missing/extra proof records and unknown proof methods.
 
 ### Phase 3 — Receipt-bound transfer and composition
 
-- [ ] Cache one validated plan/membership/bundle context per finalizer.
-- [ ] Copy each part and verify the destination digest once.
-- [ ] Emit an exact transfer receipt for all 32 part copies.
-- [ ] Compose row counts, owner closure, PK uniqueness, and FK closure without
+- [x] Cache one validated plan/membership/bundle context per finalizer.
+- [x] Copy each part and verify the destination digest once.
+- [x] Emit an exact transfer receipt for every part copy.
+- [x] Compose row counts, owner closure, PK uniqueness, and FK closure without
       payload decoding.
-- [ ] Freeze and validate staging ownership before commit.
-- [ ] Replace repeated `_global_validate_generation()` calls in normal
+- [x] Freeze and validate staged regular files before commit.
+- [x] Replace repeated `_global_validate_generation()` payload scans in normal
       finalization with receipt/inventory validation.
-- [ ] Preserve atomic generation rename, manifest-last CAS, and receipt-mode
+- [x] Preserve atomic generation rename, manifest-last CAS, and receipt-mode
       post-commit reopen.
 
 ### Phase 4 — Deep audit and tests
 
-- [ ] Make full owner validation bounded and fuse it with PK traversal.
-- [ ] Add the recording-prefix-only FK structural fast path.
-- [ ] Add hash/read/fallback call-count tests.
-- [ ] Add adversarial source, copy, staging, receipt, plan, and manifest tests.
-- [ ] Add writer-to-unpatched-reader and v1 archive compatibility boundaries.
-- [ ] Run focused tests outside the Codex sandbox with `scripts/py`.
+- [x] Make full owner validation bounded and fuse it with PK traversal.
+- [x] Add the recording-prefix-only FK structural fast path.
+- [x] Add hash/read/fallback call-count tests.
+- [x] Add adversarial source, copy, staging, receipt, plan, and manifest tests.
+- [x] Add writer-to-unpatched-reader and generated real-Parquet v1 archive
+      compatibility boundaries.
+- [x] Run focused tests outside the Codex sandbox with `scripts/py`.
 
 ### Phase 5 — Evidence and integration
 
-- [ ] Run a small deterministic receipt-composition smoke.
+- [x] Run a small deterministic receipt-composition smoke.
 - [ ] Run the four-camera production-sized selector-ineligible canary from a
       clean commit-pinned deployment.
 - [ ] Compare the canary with manifest counts and an explicit full audit.
-- [ ] Record phase telemetry and verify the five-minute acceptance gate.
+- [x] Add process-only phase telemetry outside the scientific manifest.
+- [ ] Record production phase telemetry and verify the five-minute acceptance
+      gate.
 - [ ] Require all CI checks to pass before merge or production use.
+
+## Local implementation evidence
+
+The implementation preserves the public planner/shard/finalize/validate CLI,
+the installed table profiles, and the `validated_behavior/v1` path. New
+records use plan v2, shard v2, export-manifest v2, and generation-validation
+receipt v2. Legacy v1 records retain their exact parsers, while current shard
+and finalize execution explicitly reject v1 plans.
+
+Focused validation on 2026-09-04 used the repository Python runtime outside
+the Codex sandbox:
+
+```text
+30 passed in tests/unit/fisheye/test_validated_behavior_cohort_export.py
+69 passed across generic, core-behavior, Phase A, Phase B, Phase C, and product-catalog suites
+```
+
+The no-decode regression replaces every decoded PK/FK helper with a failing
+sentinel during finalization and counts Parquet hashes. It proves that each
+destination part is hashed exactly once and receipt-mode reopen performs no
+Parquet hash or decoded relation scan.
+
+Backward compatibility was additionally checked against the existing full-rate
+Sleepyfish v1 publication. Receipt-mode validation completed in 7.6 seconds,
+retained manifest digest
+`1db73e5d5e8ccdd4e1fd01bb6f05eb8af6fa36c206ca66095408b6623f77d325`,
+and reproduced all eight table counts, including 114,699,250 tail-trace rows
+and 149,468,783 total rows. This was a read-only check; it did not mutate the
+publication.
 
 ## Code integration map
 
