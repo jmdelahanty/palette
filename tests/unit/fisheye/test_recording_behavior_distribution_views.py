@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -179,6 +180,18 @@ def test_static_and_interactive_renderers_consume_the_same_view(tmp_path: Path) 
 
     assert interactive.layout.meta["view_sha256"] == view.view_sha256
     assert interactive.layout.meta["viewer_rebinning"] == "prohibited"
+    assert interactive.layout.meta["histogram_rendering"] == (
+        "exact_bin_width_bars_v1"
+    )
+    assert interactive.layout.barmode == "overlay"
+    assert interactive.layout.bargap == 0
+    assert {trace.type for trace in interactive.data} == {"bar"}
+    assert len(interactive.data) == 2
+    assert np.allclose(interactive.data[0].x, view.series[0].bin_center)
+    assert np.allclose(
+        interactive.data[0].width,
+        view.series[0].bin_right - view.series[0].bin_left,
+    )
     assert [annotation.text for annotation in interactive.layout.annotations].count(
         "No valid evidence"
     ) == 1
@@ -188,6 +201,56 @@ def test_static_and_interactive_renderers_consume_the_same_view(tmp_path: Path) 
         "Custom 5–10 s",
         "Empty control",
     ]
+    assert len(static.axes[0].patches) == view.series[0].bin_left.size
+    assert np.allclose(
+        [patch.get_x() for patch in static.axes[0].patches],
+        view.series[0].bin_left,
+    )
+    assert np.allclose(
+        [patch.get_width() for patch in static.axes[0].patches],
+        view.series[0].bin_right - view.series[0].bin_left,
+    )
+
+
+def test_renderers_preserve_variable_bin_edges(tmp_path: Path) -> None:
+    handle = _write_fixture(tmp_path / "analysis.zarr")
+    view = build_recording_behavior_distribution_view(
+        handle,
+        metric_id="bout.duration_s",
+        weighting_id="event",
+        scope_ids=("whole_session",),
+    )
+    left = np.asarray([1.0, 2.0, 4.0])
+    right = np.asarray([2.0, 4.0, 8.0])
+    series = replace(
+        view.series[0],
+        grid_index=np.asarray([0, 1, 2]),
+        bin_left=left,
+        bin_right=right,
+        bin_center=(left + right) / 2.0,
+        bin_count=np.asarray([1, 0, 1]),
+        bin_weight=np.asarray([1.0, 0.0, 1.0]),
+        fraction=np.asarray([0.5, 0.0, 0.5]),
+    )
+    variable_view = replace(
+        view,
+        metric={**view.metric, "axis_scale": "log10"},
+        series=(series,),
+    )
+
+    interactive = recording_behavior_distribution_figure(variable_view)
+    static = render_recording_behavior_distribution_figure(variable_view)
+
+    assert interactive.layout.xaxis.type == "log"
+    assert np.allclose(interactive.data[0].x, [1.5, 3.0, 6.0])
+    assert np.allclose(interactive.data[0].width, [1.0, 2.0, 4.0])
+    assert static.axes[0].get_xscale() == "log"
+    assert np.allclose(
+        [patch.get_x() for patch in static.axes[0].patches], left
+    )
+    assert np.allclose(
+        [patch.get_width() for patch in static.axes[0].patches], right - left
+    )
 
 
 def test_discovery_is_consolidated_and_selection_revalidates_exact_run(

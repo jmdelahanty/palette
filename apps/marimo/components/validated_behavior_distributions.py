@@ -7,6 +7,7 @@ import json
 import math
 from typing import Any, Mapping
 
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -115,7 +116,7 @@ def distribution_provenance_rows(
 
 def _series_style(
     payload: Mapping[str, object], group: Mapping[str, Any], scope_id: str
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str | None, str]:
     provider = str(group.get("provider_role", ""))
     role = str(group.get("behavior_role", ""))
     if role:
@@ -126,7 +127,7 @@ def _series_style(
             else {}
         )
         color = str(style.get("aggregate_color_css", "#555555"))
-        symbol = str(style.get("plotly_role_symbol") or "circle")
+        symbol: str | None = str(style.get("plotly_role_symbol") or "circle")
     elif provider:
         colors = payload.get("provider_colors", {})
         color = (
@@ -134,7 +135,7 @@ def _series_style(
             if isinstance(colors, Mapping)
             else "#555555"
         )
-        symbol = "circle"
+        symbol = None
     else:
         colors = payload.get("scope_colors", {})
         color = (
@@ -142,14 +143,17 @@ def _series_style(
             if isinstance(colors, Mapping)
             else "#4C78A8"
         )
-        symbol = "circle"
+        symbol = None
     styles = payload.get("provider_line_styles", {})
     style = (
         str(styles.get(provider, "solid"))
         if provider and isinstance(styles, Mapping)
         else "solid"
     )
-    dash = {"solid": "solid", "dashed": "dash", "dotted": "dot"}.get(style, "solid")
+    dash = {"solid": "solid", "dashed": "dash", "dotted": "dot"}.get(
+        style, "solid"
+    )
+    pattern = {"solid": "", "dashed": "/", "dotted": "."}.get(style, "")
     label = " · ".join(
         value
         for value in (
@@ -158,7 +162,7 @@ def _series_style(
         )
         if value
     )
-    return color, dash, symbol, label or "All observations"
+    return color, dash, pattern, symbol, label or "All observations"
 
 
 def validated_behavior_distribution_figure(
@@ -207,6 +211,8 @@ def validated_behavior_distribution_figure(
     grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped[(str(row["scope_id"]), str(row["group_key_sha256"]))].append(row)
+    group_count = len({str(row["group_key_sha256"]) for row in rows})
+    bar_opacity = 0.78 if group_count == 1 else 0.42
     seen_labels: set[str] = set()
     for column, scope_id in enumerate(scopes, start=1):
         for (row_scope, _digest), series in sorted(grouped.items()):
@@ -214,10 +220,13 @@ def validated_behavior_distribution_figure(
                 continue
             ordered = sorted(series, key=lambda row: int(row["bin_index"]))
             group = json.loads(str(ordered[0]["group_key_json"]))
-            color, dash, symbol, label = _series_style(payload, group, scope_id)
-            edges = [float(ordered[0]["bin_left"])] + [
-                float(row["bin_right"]) for row in ordered
-            ]
+            color, dash, pattern, symbol, label = _series_style(
+                payload, group, scope_id
+            )
+            left = [float(row["bin_left"]) for row in ordered]
+            right = [float(row["bin_right"]) for row in ordered]
+            centers = [float(row["bin_center"]) for row in ordered]
+            widths = [end - start for start, end in zip(left, right, strict=True)]
             values = [
                 (
                     None
@@ -226,33 +235,31 @@ def validated_behavior_distribution_figure(
                 )
                 for row in ordered
             ]
-            stepped_values = values + [values[-1]]
             support = int(ordered[0]["finite_recording_count"])
             custom = [
                 [float(row["bin_left"]), float(row["bin_right"]), support]
                 for row in ordered
-            ] + [
-                [
-                    float(ordered[-1]["bin_left"]),
-                    float(ordered[-1]["bin_right"]),
-                    support,
-                ]
             ]
             showlegend = label not in seen_labels
             seen_labels.add(label)
             figure.add_trace(
-                go.Scatter(
-                    x=edges,
-                    y=stepped_values,
-                    mode="lines+markers",
-                    line={"color": color, "dash": dash, "width": 2, "shape": "hv"},
-                    marker={"color": color, "symbol": symbol, "size": 4},
+                go.Bar(
+                    x=centers,
+                    y=values,
+                    width=widths,
+                    opacity=bar_opacity,
+                    marker={
+                        "color": color,
+                        "line": {"color": color, "width": 1.0},
+                        "pattern": {"shape": pattern, "solidity": 0.25},
+                    },
                     name=label,
                     legendgroup=label,
-                    showlegend=showlegend,
+                    showlegend=showlegend and symbol is None,
                     customdata=custom,
                     hovertemplate=(
-                        "bin=[%{customdata[0]:.5g}, %{customdata[1]:.5g})"
+                        "bin left=%{customdata[0]:.5g}"
+                        "<br>bin right=%{customdata[1]:.5g}"
                         "<br>fraction=%{y:.4g}%"
                         "<br>finite recordings=%{customdata[2]}<extra>%{fullData.name}</extra>"
                     ),
@@ -260,8 +267,49 @@ def validated_behavior_distribution_figure(
                 row=1,
                 col=column,
             )
+            if symbol is not None:
+                finite = [
+                    index
+                    for index, value in enumerate(values)
+                    if value is not None and math.isfinite(value)
+                ]
+                marker_count = min(12, len(finite))
+                marker_indices = (
+                    []
+                    if marker_count == 0
+                    else [
+                        finite[index]
+                        for index in np.unique(
+                            np.linspace(
+                                0,
+                                len(finite) - 1,
+                                marker_count,
+                                dtype=np.int64,
+                            )
+                        )
+                    ]
+                )
+                figure.add_trace(
+                    go.Scatter(
+                        x=[centers[index] for index in marker_indices],
+                        y=[values[index] for index in marker_indices],
+                        mode="markers",
+                        marker={
+                            "color": color,
+                            "symbol": symbol,
+                            "size": 6,
+                            "line": {"color": "#ffffff", "width": 0.7},
+                        },
+                        line={"color": color, "dash": dash},
+                        name=label,
+                        legendgroup=label,
+                        showlegend=showlegend,
+                        hoverinfo="skip",
+                    ),
+                    row=1,
+                    col=column,
+                )
             if show_recording_iqr and cohort_statistic != "pooled_fraction":
-                centers = [float(row["bin_center"]) for row in ordered]
                 lower = [
                     (
                         None
@@ -330,10 +378,16 @@ def validated_behavior_distribution_figure(
         ),
         template="plotly_white",
         height=520,
+        barmode="overlay",
+        bargap=0,
+        bargroupgap=0,
         hovermode="closest",
         margin={"l": 60, "r": 25, "t": 90, "b": 60},
         legend={"title": {"text": "Provider · role"}, "orientation": "h"},
-        meta={"display_range": dict(display_range)},
+        meta={
+            "display_range": dict(display_range),
+            "histogram_rendering": "exact_bin_width_bars_v1",
+        },
     )
     return figure
 

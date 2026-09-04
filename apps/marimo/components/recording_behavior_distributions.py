@@ -57,7 +57,6 @@ _COLORS = (
     "#9D755D",
     "#BAB0AC",
 )
-_DASHES = ("solid", "dash", "dot", "dashdot")
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,13 +226,6 @@ def load_recording_behavior_distribution_projection(
     )
 
 
-def _step_coordinates(series: Any) -> tuple[np.ndarray, np.ndarray]:
-    if not series.bin_left.size:
-        return np.asarray([]), np.asarray([])
-    edges = np.concatenate((series.bin_left[:1], series.bin_right))
-    return np.repeat(edges, 2)[1:-1], np.repeat(series.fraction * 100.0, 2)
-
-
 def recording_behavior_distribution_figure(
     view: RecordingBehaviorDistributionView,
     *,
@@ -259,50 +251,37 @@ def recording_behavior_distribution_figure(
             for series in view.series
         }
     )
-    styles = {
-        identity: (
-            _COLORS[index % len(_COLORS)],
-            _DASHES[(index // len(_COLORS)) % len(_DASHES)],
-        )
+    colors = {
+        identity: _COLORS[index % len(_COLORS)]
         for index, identity in enumerate(identities)
     }
+    bar_opacity = 0.78 if len(identities) == 1 else 0.42
     shown: set[tuple[str, str]] = set()
     for panel_index, scope in enumerate(scopes):
         row_index = panel_index // columns + 1
         column_index = panel_index % columns + 1
+        finite_evidence = False
         for series in view.series:
             if series.scope_id != scope["scope_id"]:
                 continue
             identity = (series.group_key_sha256, series.source_identity_key_sha256)
-            color, dash = styles[identity]
-            x, y = _step_coordinates(series)
-            if x.size and np.any(np.isfinite(y)):
+            color = colors[identity]
+            values = series.fraction * 100.0
+            if series.bin_center.size and np.any(np.isfinite(values)):
+                finite_evidence = True
                 figure.add_trace(
-                    go.Scatter(
-                        x=x,
-                        y=y,
-                        mode="lines",
+                    go.Bar(
+                        x=series.bin_center,
+                        y=values,
+                        width=series.bin_right - series.bin_left,
                         name=series.label,
                         legendgroup="|".join(identity),
                         showlegend=identity not in shown,
-                        line={"color": color, "dash": dash, "width": 2},
-                        hovertemplate=(
-                            f"{series.label}<br>value=%{{x:.4g}}<br>"
-                            "probability=%{y:.4g}%<extra></extra>"
-                        ),
-                    ),
-                    row=row_index,
-                    col=column_index,
-                )
-                shown.add(identity)
-                figure.add_trace(
-                    go.Scatter(
-                        x=series.bin_center,
-                        y=series.fraction * 100.0,
-                        mode="markers",
-                        marker={"color": color, "size": 5, "opacity": 0.7},
-                        showlegend=False,
-                        legendgroup="|".join(identity),
+                        opacity=bar_opacity,
+                        marker={
+                            "color": color,
+                            "line": {"color": color, "width": 1.0},
+                        },
                         customdata=np.column_stack(
                             (
                                 series.bin_left,
@@ -312,7 +291,9 @@ def recording_behavior_distribution_figure(
                             )
                         ),
                         hovertemplate=(
-                            "[%{customdata[0]:.4g}, %{customdata[1]:.4g})"
+                            f"{series.label}"
+                            "<br>bin left=%{customdata[0]:.4g}"
+                            "<br>bin right=%{customdata[1]:.4g}"
                             "<br>count=%{customdata[2]:,.0f}"
                             "<br>weight=%{customdata[3]:.6g}"
                             "<br>probability=%{y:.4g}%<extra></extra>"
@@ -321,15 +302,16 @@ def recording_behavior_distribution_figure(
                     row=row_index,
                     col=column_index,
                 )
-            else:
-                figure.add_annotation(
-                    text="No valid evidence",
-                    x=0.5,
-                    y=0.5,
-                    xref=("x domain" if panel_index == 0 else f"x{panel_index + 1} domain"),
-                    yref=("y domain" if panel_index == 0 else f"y{panel_index + 1} domain"),
-                    showarrow=False,
-                )
+                shown.add(identity)
+        if not finite_evidence:
+            figure.add_annotation(
+                text="No valid evidence",
+                x=0.5,
+                y=0.5,
+                xref=("x domain" if panel_index == 0 else f"x{panel_index + 1} domain"),
+                yref=("y domain" if panel_index == 0 else f"y{panel_index + 1} domain"),
+                showarrow=False,
+            )
         figure.update_xaxes(
             title_text=f"{view.metric['unit']}",
             type="log" if view.metric.get("axis_scale") == "log10" else "linear",
@@ -347,6 +329,9 @@ def recording_behavior_distribution_figure(
             "persisted bins"
         ),
         height=max(440, 360 * rows),
+        barmode="overlay",
+        bargap=0,
+        bargroupgap=0,
         hovermode="closest",
         template="plotly_white",
         meta={
@@ -357,6 +342,7 @@ def recording_behavior_distribution_figure(
             "view_sha256": view.view_sha256,
             "viewer_rebinning": "prohibited",
             "viewer_clipping": "none",
+            "histogram_rendering": "exact_bin_width_bars_v1",
         },
     )
     return figure
