@@ -4,6 +4,10 @@ Status: **design decision and optimization contract**. This governs new work;
 existing publication families may require a compatibility migration before
 their redundant payload scans can be removed.
 
+The validated-behavior Parquet application and its measured production
+baseline are specified in
+[`validated_behavior_receipt_composed_finalization_2026-09-04.md`](validated_behavior_receipt_composed_finalization_2026-09-04.md).
+
 Legacy behavior was observed against Palette commit `bf058521`
 (`subject-shape-unbound-receipt-20260827-bf058521`). The receipt-v2
 implementation checkpoint is `e35714b0`.
