@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import time
 from typing import Any, Mapping, Sequence
 import uuid
 
@@ -49,26 +50,67 @@ from .validated_behavior_contracts import (
 )
 
 EXPORT_PLAN_SCHEMA_ID = "palette.analytics.validated_behavior_export_plan"
-EXPORT_PLAN_SCHEMA_VERSION = 1
-EXPORT_PLAN_METHOD_ID = "closed_membership_recording_shard_plan_v1"
+LEGACY_EXPORT_PLAN_SCHEMA_VERSION = 1
+LEGACY_EXPORT_PLAN_METHOD_ID = "closed_membership_recording_shard_plan_v1"
+EXPORT_PLAN_SCHEMA_VERSION = 2
+EXPORT_PLAN_METHOD_ID = "closed_membership_recording_shard_plan_v2"
 EXPORT_PLAN_STATUS = "planned_selector_ineligible"
 
+EVIDENCE_PROFILE_SCHEMA_ID = (
+    "palette.analytics.validated_behavior.finalization_evidence_profile"
+)
+EVIDENCE_PROFILE_SCHEMA_VERSION = 1
+EVIDENCE_PROFILE_ID = "receipt_composed_parquet_finalization_v2"
+
 SHARD_SCHEMA_ID = "palette.analytics.validated_behavior_export_shard"
-SHARD_SCHEMA_VERSION = 1
-SHARD_METHOD_ID = "recording_owned_exact_parquet_parts_v1"
+LEGACY_SHARD_SCHEMA_VERSION = 1
+LEGACY_SHARD_METHOD_ID = "recording_owned_exact_parquet_parts_v1"
+LEGACY_SHARD_VALIDATION_POLICY = "exact_inputs_parts_arrow_and_primary_keys_v1"
+SHARD_SCHEMA_VERSION = 2
+SHARD_METHOD_ID = "recording_owned_exact_parquet_parts_v2"
 SHARD_STATUS = "complete_validated"
-SHARD_VALIDATION_POLICY = "exact_inputs_parts_arrow_and_primary_keys_v1"
+SHARD_VALIDATION_POLICY = "exact_inputs_parts_and_semantic_proofs_v2"
+
+SHARD_SEMANTIC_SCHEMA_ID = "palette.analytics.validated_behavior_export_shard_semantics"
+SHARD_SEMANTIC_SCHEMA_VERSION = 1
+SHARD_SEMANTIC_METHOD_ID = "trusted_writer_exact_part_semantics_v1"
+SHARD_SEMANTIC_STATUS = "complete"
+
+TRANSFER_RECEIPT_SCHEMA_ID = (
+    "palette.analytics.validated_behavior_cohort_transfer_receipt"
+)
+TRANSFER_RECEIPT_SCHEMA_VERSION = 1
+TRANSFER_RECEIPT_METHOD_ID = "copy_then_destination_sha256_v1"
+TRANSFER_RECEIPT_STATUS = "complete"
+TRANSFER_VERIFICATION_POLICY = "one_destination_sha256_per_copied_part_v1"
 
 EXPORT_SCHEMA_ID = "palette.analytics.validated_behavior_cohort_export"
-EXPORT_SCHEMA_VERSION = 1
-EXPORT_METHOD_ID = "receipt_barrier_manifest_selected_parquet_v1"
+LEGACY_EXPORT_SCHEMA_VERSION = 1
+LEGACY_EXPORT_METHOD_ID = "receipt_barrier_manifest_selected_parquet_v1"
+EXPORT_SCHEMA_VERSION = 2
+EXPORT_METHOD_ID = "receipt_composed_manifest_selected_parquet_v2"
 EXPORT_STATUS = "complete_selector_ineligible"
 PUBLICATION_SCHEMA_ID = "palette.analytics.validated_behavior.publication"
 PUBLICATION_SCHEMA_VERSION = 1
 
 VALIDATION_RECEIPT_SCHEMA_ID = "palette.analytics.validated_behavior_cohort_validation"
-VALIDATION_RECEIPT_SCHEMA_VERSION = 1
-VALIDATION_POLICY = "manifest_selected_schema_key_foreign_key_inventory_v1"
+LEGACY_VALIDATION_RECEIPT_SCHEMA_VERSION = 1
+LEGACY_VALIDATION_POLICY = "manifest_selected_schema_key_foreign_key_inventory_v1"
+VALIDATION_RECEIPT_SCHEMA_VERSION = 2
+VALIDATION_POLICY = "receipt_composed_schema_key_foreign_key_inventory_v2"
+
+GENERATION_COMPOSITION_POLICY = (
+    "recording_partitioned_owner_primary_key_foreign_key_composition_v1"
+)
+FULL_AUDIT_MODE = "full_part_hashes_and_decoded_relations_v1"
+
+MUTATION_EXCLUSION_POLICY = {
+    "policy_id": "cooperative_read_only_regular_files_v1",
+    "trusted_storage_model": "trusted_palette_group_storage_v1",
+    "part_file_mode": "0444",
+    "receipt_file_mode": "0444",
+    "directory_mutation_detection": "closed_inventory_before_visibility_v1",
+}
 
 SAFETY = {
     "selector_eligible": False,
@@ -88,7 +130,7 @@ DEFAULT_EXPORT_PARAMETERS = {
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 _COMMIT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
-_PLAN_FIELDS = {
+_PLAN_FIELDS_V1 = {
     "schema_id",
     "schema_version",
     "method_id",
@@ -111,6 +153,7 @@ _PLAN_FIELDS = {
     "safety",
     "plan_sha256",
 }
+_PLAN_FIELDS_V2 = _PLAN_FIELDS_V1 | {"evidence_profile"}
 _SHARD_PART_FIELDS = {
     "path",
     "size_bytes",
@@ -122,12 +165,71 @@ _SHARD_PART_FIELDS = {
     "primary_key",
     "primary_key_bounds",
 }
+_SHARD_FIELDS_V1 = {
+    "schema_id",
+    "schema_version",
+    "method_id",
+    "status",
+    "export_run_id",
+    "export_plan",
+    "member",
+    "membership",
+    "bundle_set",
+    "requested_tables",
+    "table_coverage",
+    "parts_by_table",
+    "zero_row_reasons_by_table",
+    "parameters",
+    "validation_policy",
+    "software_authority",
+    "created_at_utc",
+    "safety",
+    "record_sha256",
+}
+_SHARD_FIELDS_V2 = _SHARD_FIELDS_V1 | {
+    "semantic_validation",
+    "mutation_exclusion",
+}
 _PUBLICATION_PART_FIELDS = _SHARD_PART_FIELDS | {
     "member_ordinal",
     "recording_id",
     "generation_path",
     "source_shard_record_sha256",
 }
+
+_MANIFEST_FIELDS_V1 = {
+    "schema_id",
+    "schema_version",
+    "method_id",
+    "status",
+    "export_run_id",
+    "export_plan",
+    "export_profile",
+    "membership",
+    "bundle_set",
+    "member_count",
+    "membership_state_counts",
+    "bundle_state_counts",
+    "capability_matrix_sha256",
+    "table_names",
+    "table_specs",
+    "table_coverage",
+    "arrow_schema_contracts",
+    "shard_receipts",
+    "shard_receipts_sha256",
+    "row_counts_by_table",
+    "parameters",
+    "analysis_unit_policy",
+    "acquisition_batch_policy",
+    "temporal_alignment_policy",
+    "publication",
+    "validation_receipt",
+    "software_authority",
+    "created_at_utc",
+    "safety",
+    "record_sha256",
+}
+_MANIFEST_FIELDS_V2 = _MANIFEST_FIELDS_V1 | {"transfer_receipt"}
 
 
 @dataclass(frozen=True)
@@ -257,6 +359,19 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def _freeze_regular_file(path: Path) -> None:
+    if path.is_symlink() or not path.is_file():
+        _fail(f"Cannot freeze absent or aliased file: {path}")
+    path.chmod(0o444)
+
+
+def _require_frozen_regular_file(path: Path, *, field: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        _fail(f"{field} is absent or aliased.")
+    if path.stat().st_mode & 0o777 != 0o444:
+        _fail(f"{field} is not cooperatively frozen read-only.")
+
+
 def _sealed(body: Mapping[str, Any], *, digest_field: str) -> dict[str, Any]:
     normalized = _plain(body)
     canonical_bytes(normalized)
@@ -375,6 +490,51 @@ def _validate_software(value: object) -> dict[str, str]:
 
 def _default_created_at() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _current_evidence_profile() -> dict[str, Any]:
+    body = {
+        "schema_id": EVIDENCE_PROFILE_SCHEMA_ID,
+        "schema_version": EVIDENCE_PROFILE_SCHEMA_VERSION,
+        "profile_id": EVIDENCE_PROFILE_ID,
+        "required_shard_receipt": {
+            "schema_id": SHARD_SCHEMA_ID,
+            "schema_version": SHARD_SCHEMA_VERSION,
+            "validation_policy": SHARD_VALIDATION_POLICY,
+            "semantic_schema_id": SHARD_SEMANTIC_SCHEMA_ID,
+            "semantic_schema_version": SHARD_SEMANTIC_SCHEMA_VERSION,
+            "semantic_method_id": SHARD_SEMANTIC_METHOD_ID,
+        },
+        "transfer_verification_policy": TRANSFER_VERIFICATION_POLICY,
+        "generation_composition_policy": GENERATION_COMPOSITION_POLICY,
+        "normal_finalization_payload_decoding": False,
+        "full_audit_mode": FULL_AUDIT_MODE,
+    }
+    return _sealed(body, digest_field="record_sha256")
+
+
+def _validate_evidence_profile(value: object) -> Mapping[str, Any]:
+    profile = _validate_self_digest(
+        _mapping(value, field="evidence_profile"),
+        digest_field="record_sha256",
+        field="Evidence profile",
+    )
+    expected = _current_evidence_profile()
+    if profile != expected:
+        _fail("Export-plan evidence profile is unsupported or incomplete.")
+    return profile
+
+
+def _require_current_plan_evidence(plan: Mapping[str, Any]) -> None:
+    if (
+        plan.get("schema_version") != EXPORT_PLAN_SCHEMA_VERSION
+        or plan.get("method_id") != EXPORT_PLAN_METHOD_ID
+    ):
+        _fail(
+            "Current execution requires a receipt-composed v2 export plan; "
+            "legacy plans remain read-only."
+        )
+    _validate_evidence_profile(plan.get("evidence_profile"))
 
 
 def _member_plan_record(
@@ -528,6 +688,7 @@ def build_validated_behavior_export_plan(
         "status": EXPORT_PLAN_STATUS,
         "export_run_id": safe_component(export_run_id, label="export run ID"),
         "export_profile": profile,
+        "evidence_profile": _current_evidence_profile(),
         "membership": _file_binding(membership_file, str(membership["record_sha256"])),
         "bundle_set": _file_binding(bundle_file, str(bundle_set["record_sha256"])),
         "member_count": len(members),
@@ -571,16 +732,26 @@ def validate_validated_behavior_export_plan(
         digest_field="plan_sha256",
         field="Export plan",
     )
-    if set(plan) != _PLAN_FIELDS:
+    schema_version = plan.get("schema_version")
+    if schema_version == LEGACY_EXPORT_PLAN_SCHEMA_VERSION:
+        required_fields = _PLAN_FIELDS_V1
+        expected_method = LEGACY_EXPORT_PLAN_METHOD_ID
+    elif schema_version == EXPORT_PLAN_SCHEMA_VERSION:
+        required_fields = _PLAN_FIELDS_V2
+        expected_method = EXPORT_PLAN_METHOD_ID
+    else:
+        _fail("Export-plan schema version is unsupported.")
+    if set(plan) != required_fields:
         _fail("Export-plan field set is inexact.")
     if (
         plan.get("schema_id") != EXPORT_PLAN_SCHEMA_ID
-        or plan.get("schema_version") != EXPORT_PLAN_SCHEMA_VERSION
-        or plan.get("method_id") != EXPORT_PLAN_METHOD_ID
+        or plan.get("method_id") != expected_method
         or plan.get("status") != EXPORT_PLAN_STATUS
         or plan.get("safety") != SAFETY
     ):
         _fail("Export-plan identity, method, status, or safety is invalid.")
+    if schema_version == EXPORT_PLAN_SCHEMA_VERSION:
+        _validate_evidence_profile(plan.get("evidence_profile"))
     safe_component(plan.get("export_run_id"), label="export run ID")
     table_names = validate_table_specs(table_specs)
     if plan.get("table_names") != list(table_names):
@@ -654,6 +825,7 @@ def read_validated_behavior_export_plan(
     path: str | Path,
     *,
     table_specs: Mapping[str, ValidatedBehaviorTableSpec] = CORE_TABLE_SPECS,
+    require_current_evidence: bool = False,
 ) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
     """Read a plan and revalidate its small exact input manifests."""
 
@@ -672,6 +844,8 @@ def read_validated_behavior_export_plan(
         bundle_set=bundle_set,
         table_specs=table_specs,
     )
+    if require_current_evidence:
+        _require_current_plan_evidence(plan)
     return plan, membership, bundle_set
 
 
@@ -806,13 +980,90 @@ def _core_rows(
     _fail(f"No installed core row producer exists for {table_name!r}.")
 
 
-def _primary_key_bounds(
-    rows: Sequence[Mapping[str, Any]], spec: ValidatedBehaviorTableSpec
-) -> dict[str, object] | None:
-    if not rows:
-        return None
-    keys = [tuple(row[name] for name in spec.contract.primary_key) for row in rows]
-    return {"minimum": list(min(keys)), "maximum": list(max(keys))}
+def _resident_row_semantics(
+    rows: Sequence[Mapping[str, Any]],
+    spec: ValidatedBehaviorTableSpec,
+    *,
+    export_run_id: str,
+    recording_id: str,
+) -> dict[str, Any]:
+    """Validate owner and primary-key semantics while extracted rows are resident."""
+
+    keys: list[tuple[Any, ...]] = []
+    previous: tuple[Any, ...] | None = None
+    for index, row in enumerate(rows):
+        if row["export_run_id"] != export_run_id or row["recording_id"] != recording_id:
+            _fail(f"{spec.table_name}: extracted row {index} differs from its owner.")
+        key = tuple(row[name] for name in spec.contract.primary_key)
+        if (
+            spec.primary_key_validation == "strictly_increasing_v1"
+            and previous is not None
+            and key <= previous
+        ):
+            _fail(f"{spec.table_name}: primary keys are not strictly increasing.")
+        previous = key
+        keys.append(key)
+    if spec.primary_key_validation == "unordered_unique_v1" and len(set(keys)) != len(
+        keys
+    ):
+        _fail(f"{spec.table_name}: shard contains a duplicate primary key.")
+    bounds = (
+        None if not keys else {"minimum": list(min(keys)), "maximum": list(max(keys))}
+    )
+    return {
+        "row_count": len(rows),
+        "primary_key_bounds": bounds,
+        "primary_key_distinct_count": len(keys),
+    }
+
+
+def _semantic_table_result(
+    *,
+    spec: ValidatedBehaviorTableSpec,
+    part: Mapping[str, Any],
+    export_run_id: str,
+    recording_id: str,
+    primary_key_distinct_count: int,
+) -> dict[str, Any]:
+    row_count = int(part["row_count"])
+    required_fields = [item.name for item in spec.contract.fields if not item.nullable]
+    return {
+        "table_name": spec.table_name,
+        "part_path": part["path"],
+        "part_file_sha256": part["file_sha256"],
+        "row_count": row_count,
+        "arrow_footer_validation": {
+            "schema_id": spec.contract.schema_id,
+            "schema_version": spec.contract.schema_version,
+            "schema_sha256": spec.contract.payload_sha256,
+            "status": "complete",
+        },
+        "required_field_validation": {
+            "fields": required_fields,
+            "observed_row_count": row_count,
+            "null_count": 0,
+            "method_id": "trusted_writer_resident_values_v1",
+            "status": "complete",
+        },
+        "row_owner_validation": {
+            "fields": ["export_run_id", "recording_id"],
+            "values": [export_run_id, recording_id],
+            "observed_row_count": row_count,
+            "mismatched_row_count": 0,
+            "method_id": "trusted_writer_resident_values_v1",
+            "status": "complete",
+        },
+        "primary_key_validation": {
+            "fields": list(spec.contract.primary_key),
+            "validation_mode": spec.primary_key_validation,
+            "observed_row_count": row_count,
+            "distinct_key_count": primary_key_distinct_count,
+            "duplicate_count": 0,
+            "bounds": _plain(part["primary_key_bounds"]),
+            "method_id": "trusted_writer_resident_values_v1",
+            "status": "complete",
+        },
+    }
 
 
 def _advance_ordered_key_summary(
@@ -821,6 +1072,7 @@ def _advance_ordered_key_summary(
     *,
     previous: tuple[Any, ...] | None,
     minimum: tuple[Any, ...] | None,
+    expected_owner: tuple[str, str] | None = None,
 ) -> tuple[tuple[Any, ...] | None, tuple[Any, ...] | None]:
     """Prove strict key order for one Arrow batch without retaining all keys."""
 
@@ -828,6 +1080,8 @@ def _advance_ordered_key_summary(
         return previous, minimum
     columns = [table.column(name).to_pylist() for name in spec.contract.primary_key]
     for key in zip(*columns, strict=True):
+        if expected_owner is not None and key[:2] != expected_owner:
+            _fail(f"{spec.table_name}: extracted batch differs from its owner.")
         if previous is not None and key <= previous:
             _fail(
                 f"{spec.table_name}: dense extractor primary keys are not strictly "
@@ -968,18 +1222,14 @@ def _validate_part(
     for key, value in expected.items():
         if metadata.get(key) != value:
             _fail(f"{spec.table_name}: Parquet provenance footer is invalid.")
-    if hash_bytes and parquet.metadata.num_rows:
-        identities = parquet.read(columns=["export_run_id", "recording_id"])
-        observed_runs = set(identities.column("export_run_id").to_pylist())
-        observed_recordings = set(identities.column("recording_id").to_pylist())
-        if observed_runs != {plan["export_run_id"]} or observed_recordings != {
-            member["recording_id"]
-        }:
-            _fail(f"{spec.table_name}: in-row shard identity differs from its owner.")
 
 
 def _observed_primary_key_summary(
-    part: Path, spec: ValidatedBehaviorTableSpec
+    part: Path,
+    spec: ValidatedBehaviorTableSpec,
+    *,
+    plan: Mapping[str, Any] | None = None,
+    member: Mapping[str, Any] | None = None,
 ) -> tuple[int, dict[str, object] | None]:
     import pyarrow.parquet as pq
 
@@ -994,6 +1244,18 @@ def _observed_primary_key_summary(
     for batch in parquet.iter_batches(columns=list(spec.contract.primary_key)):
         columns = [column.to_pylist() for column in batch.columns]
         for key in zip(*columns, strict=True):
+            if (
+                plan is not None
+                and member is not None
+                and key[:2]
+                != (
+                    plan["export_run_id"],
+                    member["recording_id"],
+                )
+            ):
+                _fail(
+                    f"{spec.table_name}: in-row shard identity differs from its owner."
+                )
             if seen is not None:
                 if key in seen:
                     _fail(f"{spec.table_name}: shard contains a duplicate primary key.")
@@ -1017,7 +1279,7 @@ def _observed_primary_key_summary(
 def _validate_shard_receipt(
     value: object,
     *,
-    shard_root: Path,
+    shard_root: Path | None,
     plan: Mapping[str, Any],
     member: Mapping[str, Any],
     table_specs: Mapping[str, ValidatedBehaviorTableSpec],
@@ -1028,35 +1290,24 @@ def _validate_shard_receipt(
         digest_field="record_sha256",
         field="Shard receipt",
     )
-    required = {
-        "schema_id",
-        "schema_version",
-        "method_id",
-        "status",
-        "export_run_id",
-        "export_plan",
-        "member",
-        "membership",
-        "bundle_set",
-        "requested_tables",
-        "table_coverage",
-        "parts_by_table",
-        "zero_row_reasons_by_table",
-        "parameters",
-        "validation_policy",
-        "software_authority",
-        "created_at_utc",
-        "safety",
-        "record_sha256",
-    }
+    schema_version = receipt.get("schema_version")
+    if schema_version == LEGACY_SHARD_SCHEMA_VERSION:
+        required = _SHARD_FIELDS_V1
+        expected_method = LEGACY_SHARD_METHOD_ID
+        expected_policy = LEGACY_SHARD_VALIDATION_POLICY
+    elif schema_version == SHARD_SCHEMA_VERSION:
+        required = _SHARD_FIELDS_V2
+        expected_method = SHARD_METHOD_ID
+        expected_policy = SHARD_VALIDATION_POLICY
+    else:
+        _fail("Shard receipt schema version is unsupported.")
     if set(receipt) != required:
         _fail("Shard receipt field set is inexact.")
     if (
         receipt.get("schema_id") != SHARD_SCHEMA_ID
-        or receipt.get("schema_version") != SHARD_SCHEMA_VERSION
-        or receipt.get("method_id") != SHARD_METHOD_ID
+        or receipt.get("method_id") != expected_method
         or receipt.get("status") != SHARD_STATUS
-        or receipt.get("validation_policy") != SHARD_VALIDATION_POLICY
+        or receipt.get("validation_policy") != expected_policy
         or receipt.get("safety") != SAFETY
     ):
         _fail(
@@ -1139,26 +1390,53 @@ def _validate_shard_receipt(
         ):
             _fail(f"{table_name}: part contract identity is invalid.")
         _digest(raw.get("file_sha256"), field=f"{table_name}.file_sha256")
-        _validate_part(
-            shard_root / expected_path,
-            raw,
-            spec=spec,
+        if shard_root is not None:
+            _validate_part(
+                shard_root / expected_path,
+                raw,
+                spec=spec,
+                plan=plan,
+                member=member,
+                hash_bytes=hash_parts,
+            )
+        if schema_version == LEGACY_SHARD_SCHEMA_VERSION:
+            if shard_root is None:
+                _fail("Legacy shard validation requires its physical shard root.")
+            key_count, key_bounds = _observed_primary_key_summary(
+                shard_root / expected_path,
+                spec,
+                plan=plan,
+                member=member,
+            )
+            if key_count != row_count or raw.get("primary_key_bounds") != key_bounds:
+                _fail(f"{table_name}: primary-key count or bounds are stale.")
+        else:
+            if shard_root is not None:
+                _require_frozen_regular_file(
+                    shard_root / expected_path, field=f"{table_name} shard part"
+                )
+    if schema_version == SHARD_SCHEMA_VERSION:
+        if receipt.get("mutation_exclusion") != MUTATION_EXCLUSION_POLICY:
+            _fail("Shard mutation-exclusion policy is invalid.")
+        _validate_shard_semantic_validation(
+            receipt.get("semantic_validation"),
             plan=plan,
             member=member,
-            hash_bytes=hash_parts,
+            table_specs=table_specs,
+            parts=parts,
         )
-        key_count, key_bounds = _observed_primary_key_summary(
-            shard_root / expected_path, spec
-        )
-        if key_count != row_count or raw.get("primary_key_bounds") != key_bounds:
-            _fail(f"{table_name}: primary-key count or bounds are stale.")
-    actual_files = {
-        path.relative_to(shard_root).as_posix()
-        for path in shard_root.rglob("*")
-        if path.is_file()
-    }
-    if actual_files != expected_files:
-        _fail("Shard directory contains files outside its closed inventory.")
+        if shard_root is not None:
+            _require_frozen_regular_file(
+                shard_root / "receipt.json", field="shard receipt"
+            )
+    if shard_root is not None:
+        actual_files = {
+            path.relative_to(shard_root).as_posix()
+            for path in shard_root.rglob("*")
+            if path.is_file()
+        }
+        if actual_files != expected_files:
+            _fail("Shard directory contains files outside its closed inventory.")
     _validate_software(receipt.get("software_authority"))
     _timestamp(receipt.get("created_at_utc"), field="created_at_utc")
     return receipt
@@ -1203,6 +1481,7 @@ def write_validated_behavior_recording_shard(
     plan, membership, bundle_set = read_validated_behavior_export_plan(
         plan_file, table_specs=table_specs
     )
+    _require_current_plan_evidence(plan)
     if (
         type(member_ordinal) is not int
         or not 1 <= member_ordinal <= plan["member_count"]
@@ -1219,7 +1498,7 @@ def write_validated_behavior_recording_shard(
             plan=plan,
             member=member,
             table_specs=table_specs,
-            hash_parts=True,
+            hash_parts=False,
         )
         return {**_plain(receipt), "receipt_path": str(final_receipt), "reused": True}
     stage = final_root.parent / f".{final_root.name}.{uuid.uuid4().hex}.tmp"
@@ -1228,6 +1507,7 @@ def write_validated_behavior_recording_shard(
     table_names = validate_table_specs(table_specs)
     try:
         parts: dict[str, dict[str, Any]] = {}
+        primary_key_distinct_counts: dict[str, int] = {}
         zero_reasons: dict[str, str | None] = {}
         for table_name in table_names:
             spec = table_specs[table_name]
@@ -1264,6 +1544,12 @@ def write_validated_behavior_recording_shard(
                         f"{table_name}: non-empty rows cannot carry a zero-row reason."
                     )
                 _validate_extracted_rows(rows, spec)
+                resident_semantics = _resident_row_semantics(
+                    rows,
+                    spec,
+                    export_run_id=str(plan["export_run_id"]),
+                    recording_id=str(member["recording_id"]),
+                )
             table_dir = stage / "tables" / table_name
             table_dir.mkdir(parents=True, exist_ok=False)
             part = table_dir / "part-00000.parquet"
@@ -1281,7 +1567,10 @@ def write_validated_behavior_recording_shard(
                     row_group_size=int(plan["parameters"]["effective_row_group_rows"]),
                 )
                 row_count = table.num_rows
-                key_bounds = _primary_key_bounds(rows, spec)
+                key_bounds = resident_semantics["primary_key_bounds"]
+                primary_key_distinct_count = int(
+                    resident_semantics["primary_key_distinct_count"]
+                )
             else:
                 if spec.primary_key_validation != "strictly_increasing_v1":
                     _fail(
@@ -1322,6 +1611,10 @@ def write_validated_behavior_recording_shard(
                             spec,
                             previous=previous_key,
                             minimum=minimum_key,
+                            expected_owner=(
+                                str(plan["export_run_id"]),
+                                str(member["recording_id"]),
+                            ),
                         )
                         if table.num_rows:
                             writer.write_table(
@@ -1351,6 +1644,7 @@ def write_validated_behavior_recording_shard(
                         "maximum": list(previous_key),
                     }
                 )
+                primary_key_distinct_count = row_count
             os.replace(temporary_part, part)
             parts[table_name] = _part_receipt(
                 part=part,
@@ -1359,7 +1653,16 @@ def write_validated_behavior_recording_shard(
                 spec=spec,
                 key_bounds=key_bounds,
             )
+            primary_key_distinct_counts[table_name] = primary_key_distinct_count
             zero_reasons[table_name] = zero_reason
+        semantic_validation = _build_shard_semantic_validation(
+            shard_root=stage,
+            plan=plan,
+            member=member,
+            table_specs=table_specs,
+            parts=parts,
+            primary_key_distinct_counts=primary_key_distinct_counts,
+        )
         body = {
             "schema_id": SHARD_SCHEMA_ID,
             "schema_version": SHARD_SCHEMA_VERSION,
@@ -1388,6 +1691,8 @@ def write_validated_behavior_recording_shard(
             "zero_row_reasons_by_table": zero_reasons,
             "parameters": plan["parameters"],
             "validation_policy": SHARD_VALIDATION_POLICY,
+            "semantic_validation": semantic_validation,
+            "mutation_exclusion": MUTATION_EXCLUSION_POLICY,
             "software_authority": plan["software_authority"],
             "created_at_utc": _timestamp(
                 created_at_utc or _default_created_at(), field="created_at_utc"
@@ -1396,13 +1701,16 @@ def write_validated_behavior_recording_shard(
         }
         receipt = _sealed(body, digest_field="record_sha256")
         _write_json(stage / "receipt.json", receipt)
+        for path in sorted(stage.rglob("*")):
+            if path.is_file():
+                _freeze_regular_file(path)
         _validate_shard_receipt(
             receipt,
             shard_root=stage,
             plan=plan,
             member=member,
             table_specs=table_specs,
-            hash_parts=True,
+            hash_parts=False,
         )
         final_root.parent.mkdir(parents=True, exist_ok=True)
         os.replace(stage, final_root)
@@ -1457,18 +1765,39 @@ def _safe_selected_path(root: Path, relative_text: object, *, field: str) -> Pat
     return resolved
 
 
+def _validate_published_v2_shard_evidence(
+    receipt: Mapping[str, Any],
+    *,
+    plan: Mapping[str, Any],
+    member: Mapping[str, Any],
+    table_specs: Mapping[str, ValidatedBehaviorTableSpec],
+) -> None:
+    validated = _validate_shard_receipt(
+        receipt,
+        shard_root=None,
+        plan=plan,
+        member=member,
+        table_specs=table_specs,
+        hash_parts=False,
+    )
+    if validated.get("schema_version") != SHARD_SCHEMA_VERSION:
+        _fail("Published receipt is not the required v2 shard evidence.")
+
+
 def _validate_published_shard_roster(
     generation_root: Path,
     *,
     generation_relative_path: str,
     plan: Mapping[str, Any],
     roster: object,
-) -> set[str]:
+    table_specs: Mapping[str, ValidatedBehaviorTableSpec] | None = None,
+) -> tuple[set[str], str | None]:
     entries = _list(roster, field="shard_receipts")
     if len(entries) != plan["member_count"]:
         _fail("Published shard-receipt roster does not close the member axis.")
     expected_files: set[str] = set()
     normalized_for_digest: list[dict[str, Any]] = []
+    semantic_digests: list[str] = []
     for member, raw in zip(plan["members"], entries, strict=True):
         entry = _mapping(raw, field="shard receipt roster entry")
         if set(entry) != {
@@ -1533,10 +1862,36 @@ def _validate_published_shard_roster(
             or receipt_member.get("recording_id") != recording_id
         ):
             _fail("Published shard receipt binds another plan or member.")
+        if receipt.get("schema_version") == SHARD_SCHEMA_VERSION:
+            if table_specs is None:
+                _fail("Published v2 shard evidence requires installed table specs.")
+            _validate_published_v2_shard_evidence(
+                receipt,
+                plan=plan,
+                member=member,
+                table_specs=table_specs,
+            )
+            _require_frozen_regular_file(receipt_path, field="published shard receipt")
+            semantic_digests.append(
+                _digest(
+                    _mapping(
+                        receipt.get("semantic_validation"),
+                        field="semantic_validation",
+                    ).get("record_sha256"),
+                    field="semantic_validation.record_sha256",
+                )
+            )
+        elif receipt.get("schema_version") != LEGACY_SHARD_SCHEMA_VERSION:
+            _fail("Published shard receipt schema version is unsupported.")
         normalized_for_digest.append(_plain(entry))
     if normalized_for_digest != _plain(entries):
         _fail("Published shard-receipt roster is not deterministically ordered.")
-    return expected_files
+    if semantic_digests and len(semantic_digests) != len(entries):
+        _fail("Published shard roster mixes legacy and receipt-composed evidence.")
+    return (
+        expected_files,
+        canonical_json_sha256(semantic_digests) if semantic_digests else None,
+    )
 
 
 def _part_relation_values(part: Path, fields: tuple[str, ...]) -> set[tuple[Any, ...]]:
@@ -1569,6 +1924,249 @@ def _part_foreign_key_is_closed(
     return True
 
 
+def _foreign_key_observation(
+    local_part: Path,
+    local_fields: tuple[str, ...],
+    target_part: Path,
+    target_fields: tuple[str, ...],
+) -> tuple[int, int, int]:
+    """Return local rows, target distinct keys, and unmatched local rows."""
+
+    import pyarrow.parquet as pq
+
+    target_values = _part_relation_values(target_part, target_fields)
+    local_rows = 0
+    unmatched = 0
+    parquet = pq.ParquetFile(local_part)
+    for batch in parquet.iter_batches(columns=list(local_fields)):
+        columns = [column.to_pylist() for column in batch.columns]
+        for key in zip(*columns, strict=True):
+            local_rows += 1
+            if key not in target_values:
+                unmatched += 1
+    return local_rows, len(target_values), unmatched
+
+
+def _build_shard_semantic_validation(
+    *,
+    shard_root: Path,
+    plan: Mapping[str, Any],
+    member: Mapping[str, Any],
+    table_specs: Mapping[str, ValidatedBehaviorTableSpec],
+    parts: Mapping[str, Mapping[str, Any]],
+    primary_key_distinct_counts: Mapping[str, int],
+) -> dict[str, Any]:
+    """Seal recording-local semantic proofs against exact part hashes."""
+
+    table_names = validate_table_specs(table_specs)
+    table_results = {
+        table_name: _semantic_table_result(
+            spec=table_specs[table_name],
+            part=parts[table_name],
+            export_run_id=str(plan["export_run_id"]),
+            recording_id=str(member["recording_id"]),
+            primary_key_distinct_count=int(primary_key_distinct_counts[table_name]),
+        )
+        for table_name in table_names
+    }
+    foreign_key_results: list[dict[str, Any]] = []
+    owner_fields = ("export_run_id", "recording_id")
+    for table_name in table_names:
+        spec = table_specs[table_name]
+        for local_fields, target_table, target_fields in spec.foreign_keys:
+            local_entry = parts[table_name]
+            target_entry = parts[target_table]
+            local_count = int(local_entry["row_count"])
+            target_count = int(target_entry["row_count"])
+            if (
+                tuple(local_fields) == owner_fields
+                and tuple(target_fields) == owner_fields
+            ):
+                target_distinct_count = 1 if target_count else 0
+                unmatched_count = 0 if local_count == 0 or target_count else local_count
+                method_id = "recording_owner_partition_implication_v1"
+            else:
+                (
+                    observed_local_count,
+                    target_distinct_count,
+                    unmatched_count,
+                ) = _foreign_key_observation(
+                    shard_root / str(local_entry["path"]),
+                    tuple(local_fields),
+                    shard_root / str(target_entry["path"]),
+                    tuple(target_fields),
+                )
+                if observed_local_count != local_count:
+                    _fail(f"{table_name}: foreign-key local row count is stale.")
+                method_id = "exact_recording_local_relation_scan_v1"
+            if unmatched_count:
+                _fail(f"{table_name}: foreign key to {target_table} is not closed.")
+            foreign_key_results.append(
+                {
+                    "local_table": table_name,
+                    "local_fields": list(local_fields),
+                    "target_table": target_table,
+                    "target_fields": list(target_fields),
+                    "local_part_file_sha256": local_entry["file_sha256"],
+                    "target_part_file_sha256": target_entry["file_sha256"],
+                    "local_row_count": local_count,
+                    "target_row_count": target_count,
+                    "target_distinct_key_count": target_distinct_count,
+                    "unmatched_count": unmatched_count,
+                    "method_id": method_id,
+                    "status": "complete",
+                }
+            )
+    body = {
+        "schema_id": SHARD_SEMANTIC_SCHEMA_ID,
+        "schema_version": SHARD_SEMANTIC_SCHEMA_VERSION,
+        "method_id": SHARD_SEMANTIC_METHOD_ID,
+        "status": SHARD_SEMANTIC_STATUS,
+        "partition_contract": {
+            "method_id": "one_part_per_member_table_recording_owner_v1",
+            "owner_fields": list(owner_fields),
+            "owner_values": [plan["export_run_id"], member["recording_id"]],
+            "table_count": len(table_names),
+            "part_count": len(table_names),
+            "status": "complete",
+        },
+        "table_results": table_results,
+        "foreign_key_results": foreign_key_results,
+        "foreign_key_result_count": len(foreign_key_results),
+    }
+    return _sealed(body, digest_field="record_sha256")
+
+
+def _validate_shard_semantic_validation(
+    value: object,
+    *,
+    plan: Mapping[str, Any],
+    member: Mapping[str, Any],
+    table_specs: Mapping[str, ValidatedBehaviorTableSpec],
+    parts: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    semantic = _validate_self_digest(
+        _mapping(value, field="semantic_validation"),
+        digest_field="record_sha256",
+        field="Shard semantic validation",
+    )
+    if set(semantic) != {
+        "schema_id",
+        "schema_version",
+        "method_id",
+        "status",
+        "partition_contract",
+        "table_results",
+        "foreign_key_results",
+        "foreign_key_result_count",
+        "record_sha256",
+    }:
+        _fail("Shard semantic-validation field set is inexact.")
+    if (
+        semantic.get("schema_id") != SHARD_SEMANTIC_SCHEMA_ID
+        or semantic.get("schema_version") != SHARD_SEMANTIC_SCHEMA_VERSION
+        or semantic.get("method_id") != SHARD_SEMANTIC_METHOD_ID
+        or semantic.get("status") != SHARD_SEMANTIC_STATUS
+    ):
+        _fail("Shard semantic-validation identity or status is invalid.")
+    table_names = validate_table_specs(table_specs)
+    expected_partition = {
+        "method_id": "one_part_per_member_table_recording_owner_v1",
+        "owner_fields": ["export_run_id", "recording_id"],
+        "owner_values": [plan["export_run_id"], member["recording_id"]],
+        "table_count": len(table_names),
+        "part_count": len(table_names),
+        "status": "complete",
+    }
+    if semantic.get("partition_contract") != expected_partition:
+        _fail("Shard semantic partition contract is invalid.")
+    table_results = _mapping(
+        semantic.get("table_results"), field="semantic table_results"
+    )
+    if set(table_results) != set(table_names):
+        _fail("Shard semantic table-result roster is incomplete.")
+    for table_name in table_names:
+        expected = _semantic_table_result(
+            spec=table_specs[table_name],
+            part=parts[table_name],
+            export_run_id=str(plan["export_run_id"]),
+            recording_id=str(member["recording_id"]),
+            primary_key_distinct_count=int(parts[table_name]["row_count"]),
+        )
+        if table_results[table_name] != expected:
+            _fail(f"{table_name}: semantic table proof is invalid or incomplete.")
+    raw_foreign_keys = _list(
+        semantic.get("foreign_key_results"), field="foreign_key_results"
+    )
+    expected_declarations = [
+        (table_name, tuple(local), target, tuple(target_fields))
+        for table_name in table_names
+        for local, target, target_fields in table_specs[table_name].foreign_keys
+    ]
+    if semantic.get("foreign_key_result_count") != len(raw_foreign_keys) or len(
+        raw_foreign_keys
+    ) != len(expected_declarations):
+        _fail("Shard foreign-key proof roster is incomplete.")
+    for index, (raw, declaration) in enumerate(
+        zip(raw_foreign_keys, expected_declarations, strict=True)
+    ):
+        proof = _mapping(raw, field=f"foreign_key_results[{index}]")
+        if set(proof) != {
+            "local_table",
+            "local_fields",
+            "target_table",
+            "target_fields",
+            "local_part_file_sha256",
+            "target_part_file_sha256",
+            "local_row_count",
+            "target_row_count",
+            "target_distinct_key_count",
+            "unmatched_count",
+            "method_id",
+            "status",
+        }:
+            _fail("Shard foreign-key proof field set is inexact.")
+        table_name, local_fields, target_table, target_fields = declaration
+        local_count = int(parts[table_name]["row_count"])
+        target_count = int(parts[target_table]["row_count"])
+        prefix_only = (
+            local_fields
+            == target_fields
+            == (
+                "export_run_id",
+                "recording_id",
+            )
+        )
+        expected_method = (
+            "recording_owner_partition_implication_v1"
+            if prefix_only
+            else "exact_recording_local_relation_scan_v1"
+        )
+        if (
+            proof.get("local_table") != table_name
+            or proof.get("local_fields") != list(local_fields)
+            or proof.get("target_table") != target_table
+            or proof.get("target_fields") != list(target_fields)
+            or proof.get("local_part_file_sha256") != parts[table_name]["file_sha256"]
+            or proof.get("target_part_file_sha256")
+            != parts[target_table]["file_sha256"]
+            or proof.get("local_row_count") != local_count
+            or proof.get("target_row_count") != target_count
+            or proof.get("unmatched_count") != 0
+            or proof.get("method_id") != expected_method
+            or proof.get("status") != "complete"
+        ):
+            _fail(f"{table_name}: foreign-key proof is invalid or incomplete.")
+        distinct = proof.get("target_distinct_key_count")
+        if type(distinct) is not int or not 0 <= distinct <= target_count:
+            _fail(f"{table_name}: foreign-key target cardinality is invalid.")
+        if prefix_only and distinct != (1 if target_count else 0):
+            _fail(f"{table_name}: recording-owner foreign-key proof is invalid.")
+        if local_count and target_count == 0:
+            _fail(f"{table_name}: foreign key to {target_table} is not closed.")
+    return semantic
+
+
 def _global_validate_generation(
     generation_root: Path,
     *,
@@ -1579,6 +2177,7 @@ def _global_validate_generation(
     hash_parts: bool,
     validate_keys: bool = True,
     additional_expected_files: set[str] | None = None,
+    require_frozen_files: bool = False,
 ) -> dict[str, Any]:
     table_names = validate_table_specs(table_specs)
     if set(inventory) != set(table_names):
@@ -1595,6 +2194,7 @@ def _global_validate_generation(
     ):
         _fail("Export plan member identities are not unique.")
     parts_by_table_ordinal: dict[str, dict[int, Path]] = {}
+    row_counts_by_table_ordinal: dict[str, dict[int, int]] = {}
     for table_name in table_names:
         spec = table_specs[table_name]
         count = 0
@@ -1605,6 +2205,7 @@ def _global_validate_generation(
         if observed_ordinals != expected_ordinals:
             _fail(f"{table_name}: publication part roster is not exact and ordered.")
         parts_by_ordinal: dict[int, Path] = {}
+        rows_by_ordinal: dict[int, int] = {}
         for entry in entries:
             if set(entry) != _PUBLICATION_PART_FIELDS:
                 _fail(f"{table_name}: publication part field set is inexact.")
@@ -1630,6 +2231,7 @@ def _global_validate_generation(
             relative_inside_generation = expected_inside_generation
             part = generation_root / relative_inside_generation
             parts_by_ordinal[ordinal] = part
+            rows_by_ordinal[ordinal] = int(entry["row_count"])
             expected_files.add(relative_inside_generation.as_posix())
             _validate_part(
                 part,
@@ -1639,8 +2241,15 @@ def _global_validate_generation(
                 member=member,
                 hash_bytes=hash_parts,
             )
+            if require_frozen_files:
+                _require_frozen_regular_file(part, field=f"{table_name} published part")
             if validate_keys:
-                part_key_count, part_bounds = _observed_primary_key_summary(part, spec)
+                part_key_count, part_bounds = _observed_primary_key_summary(
+                    part,
+                    spec,
+                    plan=plan,
+                    member=member,
+                )
                 if (
                     part_key_count != entry["row_count"]
                     or entry.get("primary_key_bounds") != part_bounds
@@ -1648,6 +2257,7 @@ def _global_validate_generation(
                     _fail(f"{table_name}: part primary-key bounds are stale.")
             count += int(entry["row_count"])
         parts_by_table_ordinal[table_name] = parts_by_ordinal
+        row_counts_by_table_ordinal[table_name] = rows_by_ordinal
         row_counts[table_name] = count
         # Parts are recording-owned, every row's recording identity is checked
         # against that owner, and plan recording IDs are unique. Once each part
@@ -1658,6 +2268,22 @@ def _global_validate_generation(
             spec = table_specs[table_name]
             for local_fields, target, target_fields in spec.foreign_keys:
                 for ordinal in expected_ordinals:
+                    if (
+                        tuple(local_fields)
+                        == tuple(target_fields)
+                        == (
+                            "export_run_id",
+                            "recording_id",
+                        )
+                    ):
+                        if (
+                            row_counts_by_table_ordinal[table_name][ordinal]
+                            and not row_counts_by_table_ordinal[target][ordinal]
+                        ):
+                            _fail(
+                                f"{table_name}: foreign key to {target} is not closed."
+                            )
+                        continue
                     target_values = _part_relation_values(
                         parts_by_table_ordinal[target][ordinal],
                         tuple(target_fields),
@@ -1690,12 +2316,194 @@ def _global_validate_generation(
     # serialized yet.  After it is written, it must be the sole non-table file.
     if actual_files not in (expected_files, expected_generation_files):
         _fail("Publication generation contains files outside its closed inventory.")
+    if require_frozen_files:
+        for relative_path in sorted(actual_files):
+            _require_frozen_regular_file(
+                generation_root / relative_path,
+                field=f"published generation file {relative_path}",
+            )
     return {
         "row_counts_by_table": row_counts,
         "primary_key_counts_by_table": primary_key_counts,
         "foreign_key_validation": "complete" if validate_keys else "receipt_bound",
         "inventory_file_count": part_file_count,
     }
+
+
+def _compose_generation_validation(
+    *,
+    plan: Mapping[str, Any],
+    shard_receipts: Sequence[Mapping[str, Any]],
+    table_specs: Mapping[str, ValidatedBehaviorTableSpec],
+) -> dict[str, Any]:
+    """Compose cohort closure from exact recording-partitioned shard proofs."""
+
+    table_names = validate_table_specs(table_specs)
+    if len(shard_receipts) != plan["member_count"]:
+        _fail("Receipt composition does not close the member axis.")
+    row_counts = {table_name: 0 for table_name in table_names}
+    foreign_key_proof_count = 0
+    for member, receipt in zip(plan["members"], shard_receipts, strict=True):
+        parts = _mapping(receipt.get("parts_by_table"), field="parts_by_table")
+        _validate_shard_semantic_validation(
+            receipt.get("semantic_validation"),
+            plan=plan,
+            member=member,
+            table_specs=table_specs,
+            parts=parts,
+        )
+        semantic = _mapping(
+            receipt.get("semantic_validation"), field="semantic_validation"
+        )
+        foreign_key_proof_count += int(semantic["foreign_key_result_count"])
+        for table_name in table_names:
+            row_counts[table_name] += int(parts[table_name]["row_count"])
+    if (
+        "cohort_recordings" in row_counts
+        and row_counts["cohort_recordings"] != plan["member_count"]
+    ):
+        _fail("cohort_recordings does not close the parent roster.")
+    if (
+        "recording_bundles" in row_counts
+        and row_counts["recording_bundles"] != plan["member_count"]
+    ):
+        _fail("recording_bundles does not close the parent roster.")
+    return {
+        "row_counts_by_table": row_counts,
+        "primary_key_counts_by_table": dict(row_counts),
+        "owner_validation": "complete_receipt_composed",
+        "foreign_key_validation": "complete_receipt_composed",
+        "inventory_file_count": len(table_names) * int(plan["member_count"]),
+        "shard_receipt_count": len(shard_receipts),
+        "semantic_table_proof_count": len(table_names) * len(shard_receipts),
+        "foreign_key_proof_count": foreign_key_proof_count,
+        "composition_policy": GENERATION_COMPOSITION_POLICY,
+    }
+
+
+def _validate_transfer_receipt(
+    value: object,
+    *,
+    plan: Mapping[str, Any],
+    generation_id: str,
+    generation_path: str,
+    inventory: Mapping[str, Sequence[Mapping[str, Any]]],
+    shard_receipts_sha256: str,
+    receipt_path: Path,
+    binding: object | None = None,
+) -> Mapping[str, Any]:
+    receipt = _validate_self_digest(
+        _mapping(value, field="transfer receipt"),
+        digest_field="record_sha256",
+        field="Transfer receipt",
+    )
+    if set(receipt) != {
+        "schema_id",
+        "schema_version",
+        "method_id",
+        "status",
+        "export_run_id",
+        "export_plan_sha256",
+        "generation_id",
+        "generation_path",
+        "staging_attempt_id",
+        "shard_receipts_sha256",
+        "part_inventory_sha256",
+        "transfer_verification_policy",
+        "part_count",
+        "transfers",
+        "software_authority",
+        "verified_at_utc",
+        "safety",
+        "record_sha256",
+    }:
+        _fail("Transfer-receipt field set is inexact.")
+    if (
+        receipt.get("schema_id") != TRANSFER_RECEIPT_SCHEMA_ID
+        or receipt.get("schema_version") != TRANSFER_RECEIPT_SCHEMA_VERSION
+        or receipt.get("method_id") != TRANSFER_RECEIPT_METHOD_ID
+        or receipt.get("status") != TRANSFER_RECEIPT_STATUS
+        or receipt.get("transfer_verification_policy") != TRANSFER_VERIFICATION_POLICY
+        or receipt.get("safety") != SAFETY
+    ):
+        _fail("Transfer-receipt identity, status, policy, or safety is invalid.")
+    safe_component(receipt.get("staging_attempt_id"), label="staging attempt ID")
+    inventory_sha = canonical_json_sha256(_plain(inventory))
+    if (
+        receipt.get("export_run_id") != plan["export_run_id"]
+        or receipt.get("export_plan_sha256") != plan["plan_sha256"]
+        or receipt.get("generation_id") != generation_id
+        or receipt.get("generation_path") != generation_path
+        or receipt.get("shard_receipts_sha256") != shard_receipts_sha256
+        or receipt.get("part_inventory_sha256") != inventory_sha
+        or receipt.get("software_authority") != plan["software_authority"]
+    ):
+        _fail("Transfer receipt binds another plan, roster, or generation.")
+    transfers = _list(receipt.get("transfers"), field="transfers")
+    expected_entries = [
+        (table_name, entry)
+        for table_name in sorted(inventory)
+        for entry in inventory[table_name]
+    ]
+    if receipt.get("part_count") != len(transfers) or len(transfers) != len(
+        expected_entries
+    ):
+        _fail("Transfer receipt does not close the part inventory.")
+    transfer_fields = {
+        "table_name",
+        "member_ordinal",
+        "recording_id",
+        "source_shard_record_sha256",
+        "source_part_path",
+        "source_part_file_sha256",
+        "source_size_bytes",
+        "destination_path",
+        "observed_size_bytes",
+        "observed_file_sha256",
+        "method_id",
+        "status",
+    }
+    for index, (raw, (table_name, entry)) in enumerate(
+        zip(transfers, expected_entries, strict=True)
+    ):
+        transfer = _mapping(raw, field=f"transfers[{index}]")
+        if set(transfer) != transfer_fields:
+            _fail("Transfer entry field set is inexact.")
+        if (
+            transfer.get("table_name") != table_name
+            or transfer.get("member_ordinal") != entry["member_ordinal"]
+            or transfer.get("recording_id") != entry["recording_id"]
+            or transfer.get("source_shard_record_sha256")
+            != entry["source_shard_record_sha256"]
+            or transfer.get("source_part_path")
+            != f"tables/{table_name}/part-00000.parquet"
+            or transfer.get("source_part_file_sha256") != entry["file_sha256"]
+            or transfer.get("source_size_bytes") != entry["size_bytes"]
+            or transfer.get("destination_path") != entry["path"]
+            or transfer.get("observed_size_bytes") != entry["size_bytes"]
+            or transfer.get("observed_file_sha256") != entry["file_sha256"]
+            or transfer.get("method_id") != TRANSFER_RECEIPT_METHOD_ID
+            or transfer.get("status") != "complete"
+        ):
+            _fail("Transfer entry is stale, incomplete, or out of order.")
+    if binding is not None:
+        bound = _mapping(binding, field="transfer_receipt")
+        if set(bound) != {"path", "size_bytes", "file_sha256", "record_sha256"}:
+            _fail("Transfer-receipt file binding is inexact.")
+        expected_binding_path = (
+            Path(generation_path) / "validation" / "transfer_receipt.json"
+        ).as_posix()
+        if (
+            bound.get("path") != expected_binding_path
+            or bound.get("record_sha256") != receipt["record_sha256"]
+            or type(bound.get("size_bytes")) is not int
+            or bound.get("size_bytes") != receipt_path.stat().st_size
+            or bound.get("file_sha256") != sha256_file(receipt_path)
+        ):
+            _fail("Transfer-receipt file binding is stale.")
+    _validate_software(receipt.get("software_authority"))
+    _timestamp(receipt.get("verified_at_utc"), field="verified_at_utc")
+    return receipt
 
 
 def publish_validated_behavior_cohort(
@@ -1707,10 +2515,12 @@ def publish_validated_behavior_cohort(
 ) -> dict[str, Any]:
     """Fan in every exact shard and commit one immutable manifest last."""
 
+    operation_started = time.perf_counter()
     plan_file = Path(plan_path).expanduser().resolve()
     plan, membership, bundle_set = read_validated_behavior_export_plan(
         plan_file, table_specs=table_specs
     )
+    _require_current_plan_evidence(plan)
     table_names = validate_table_specs(table_specs)
     shard_receipts: list[tuple[Path, Mapping[str, Any]]] = []
     for member in plan["members"]:
@@ -1720,15 +2530,20 @@ def publish_validated_behavior_cohort(
             plan=plan,
             member=member,
             table_specs=table_specs,
-            hash_parts=True,
+            hash_parts=False,
         )
         shard_receipts.append((path, receipt))
+    shard_receipts_validated_at = time.perf_counter()
     publication_root = _absolute_path(
         plan.get("publication_root"), field="publication_root"
     )
     run_id = str(plan["export_run_id"])
     generation = safe_component(
         generation_id or uuid.uuid4().hex, label="generation ID"
+    )
+    staging_attempt_id = uuid.uuid4().hex
+    validated_at = _timestamp(
+        created_at_utc or _default_created_at(), field="validated_at_utc"
     )
     generation_relative = _generation_relative_path(run_id, generation)
     final_generation = publication_root / generation_relative
@@ -1751,6 +2566,7 @@ def publish_validated_behavior_cohort(
     try:
         inventory: dict[str, list[dict[str, Any]]] = {name: [] for name in table_names}
         shard_roster: list[dict[str, Any]] = []
+        transfers: list[dict[str, Any]] = []
         for member, (receipt_path, receipt) in zip(
             plan["members"], shard_receipts, strict=True
         ):
@@ -1762,6 +2578,7 @@ def publish_validated_behavior_cohort(
             published_receipt = stage / receipt_inside_generation
             published_receipt.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(receipt_path, published_receipt)
+            _freeze_regular_file(published_receipt)
             shard_roster.append(
                 {
                     "member_ordinal": member["ordinal"],
@@ -1787,6 +2604,16 @@ def publish_validated_behavior_cohort(
                 target = stage / relative_inside_generation
                 target.parent.mkdir(parents=True, exist_ok=False)
                 shutil.copyfile(source, target)
+                observed_size = target.stat().st_size
+                observed_sha256 = sha256_file(target)
+                if (
+                    observed_size != source_entry["size_bytes"]
+                    or observed_sha256 != source_entry["file_sha256"]
+                ):
+                    _fail(
+                        f"{table_name}: destination bytes differ from the sealed "
+                        "source-part receipt."
+                    )
                 final_relative = (
                     generation_relative / relative_inside_generation
                 ).as_posix()
@@ -1800,44 +2627,121 @@ def publish_validated_behavior_cohort(
                         "source_shard_record_sha256": receipt["record_sha256"],
                     }
                 )
-        shard_roster_files = _validate_published_shard_roster(
-            stage,
-            generation_relative_path=generation_relative.as_posix(),
-            plan=plan,
-            roster=shard_roster,
-        )
-        validation = _global_validate_generation(
-            stage,
-            generation_relative_path=generation_relative.as_posix(),
-            plan=plan,
-            inventory=inventory,
-            table_specs=table_specs,
-            hash_parts=True,
-            additional_expected_files=shard_roster_files,
+                transfers.append(
+                    {
+                        "table_name": table_name,
+                        "member_ordinal": member["ordinal"],
+                        "recording_id": member["recording_id"],
+                        "source_shard_record_sha256": receipt["record_sha256"],
+                        "source_part_path": source_entry["path"],
+                        "source_part_file_sha256": source_entry["file_sha256"],
+                        "source_size_bytes": source_entry["size_bytes"],
+                        "destination_path": final_relative,
+                        "observed_size_bytes": observed_size,
+                        "observed_file_sha256": observed_sha256,
+                        "method_id": TRANSFER_RECEIPT_METHOD_ID,
+                        "status": "complete",
+                    }
+                )
+                _freeze_regular_file(target)
+        transfer_completed_at = time.perf_counter()
+        shard_roster_files, published_semantic_roster_sha = (
+            _validate_published_shard_roster(
+                stage,
+                generation_relative_path=generation_relative.as_posix(),
+                plan=plan,
+                roster=shard_roster,
+                table_specs=table_specs,
+            )
         )
         inventory_sha = canonical_json_sha256(inventory)
         roster_sha = canonical_json_sha256(shard_roster)
+        transfers.sort(
+            key=lambda item: (
+                table_names.index(str(item["table_name"])),
+                int(item["member_ordinal"]),
+            )
+        )
+        transfer_body = {
+            "schema_id": TRANSFER_RECEIPT_SCHEMA_ID,
+            "schema_version": TRANSFER_RECEIPT_SCHEMA_VERSION,
+            "method_id": TRANSFER_RECEIPT_METHOD_ID,
+            "status": TRANSFER_RECEIPT_STATUS,
+            "export_run_id": run_id,
+            "export_plan_sha256": plan["plan_sha256"],
+            "generation_id": generation,
+            "generation_path": generation_relative.as_posix(),
+            "staging_attempt_id": staging_attempt_id,
+            "shard_receipts_sha256": roster_sha,
+            "part_inventory_sha256": inventory_sha,
+            "transfer_verification_policy": TRANSFER_VERIFICATION_POLICY,
+            "part_count": len(transfers),
+            "transfers": transfers,
+            "software_authority": plan["software_authority"],
+            "verified_at_utc": validated_at,
+            "safety": SAFETY,
+        }
+        transfer_receipt = _sealed(transfer_body, digest_field="record_sha256")
+        transfer_stage_path = stage / "validation" / "transfer_receipt.json"
+        _write_json(transfer_stage_path, transfer_receipt)
+        transfer_relative = (
+            generation_relative / "validation" / "transfer_receipt.json"
+        ).as_posix()
+        transfer_binding = {
+            "path": transfer_relative,
+            "size_bytes": transfer_stage_path.stat().st_size,
+            "file_sha256": sha256_file(transfer_stage_path),
+            "record_sha256": transfer_receipt["record_sha256"],
+        }
+        _freeze_regular_file(transfer_stage_path)
+        _validate_transfer_receipt(
+            transfer_receipt,
+            plan=plan,
+            generation_id=generation,
+            generation_path=generation_relative.as_posix(),
+            inventory=inventory,
+            shard_receipts_sha256=roster_sha,
+            receipt_path=transfer_stage_path,
+            binding=transfer_binding,
+        )
+        validation = _compose_generation_validation(
+            plan=plan,
+            shard_receipts=[receipt for _path, receipt in shard_receipts],
+            table_specs=table_specs,
+        )
+        semantic_roster_sha = canonical_json_sha256(
+            [
+                receipt["semantic_validation"]["record_sha256"]
+                for _path, receipt in shard_receipts
+            ]
+        )
+        if published_semantic_roster_sha != semantic_roster_sha:
+            _fail("Published shard semantic-proof roster digest is stale.")
         validation_body = {
             "schema_id": VALIDATION_RECEIPT_SCHEMA_ID,
             "schema_version": VALIDATION_RECEIPT_SCHEMA_VERSION,
-            "status": "complete",
+            "status": "complete_receipt_composed_v2",
             "export_run_id": run_id,
             "export_plan_sha256": plan["plan_sha256"],
             "generation_id": generation,
             "generation_path": generation_relative.as_posix(),
             "part_inventory_sha256": inventory_sha,
             "shard_receipts_sha256": roster_sha,
+            "shard_semantic_proofs_sha256": semantic_roster_sha,
+            "transfer_receipt_sha256": transfer_receipt["record_sha256"],
+            "staging_attempt_id": staging_attempt_id,
+            "generation_composition_policy": GENERATION_COMPOSITION_POLICY,
+            "mutation_exclusion": MUTATION_EXCLUSION_POLICY,
             "validation_policy": VALIDATION_POLICY,
             "validation_result": validation,
             "software_authority": plan["software_authority"],
-            "validated_at_utc": _timestamp(
-                created_at_utc or _default_created_at(), field="validated_at_utc"
-            ),
+            "validated_at_utc": validated_at,
             "safety": SAFETY,
         }
         validation_receipt = _sealed(validation_body, digest_field="record_sha256")
         validation_stage_path = stage / "validation" / "receipt.json"
         _write_json(validation_stage_path, validation_receipt)
+        _freeze_regular_file(validation_stage_path)
         validation_relative = (
             generation_relative / "validation" / "receipt.json"
         ).as_posix()
@@ -1882,6 +2786,7 @@ def publish_validated_behavior_cohort(
                 membership["temporal_alignment_policy"]
             ),
             "publication": publication,
+            "transfer_receipt": transfer_binding,
             "validation_receipt": {
                 "path": validation_relative,
                 "size_bytes": validation_stage_path.stat().st_size,
@@ -1893,6 +2798,10 @@ def publish_validated_behavior_cohort(
             "safety": SAFETY,
         }
         manifest = _sealed(body, digest_field="record_sha256")
+        receipts_composed_at = time.perf_counter()
+        receipt_inventory_files = shard_roster_files | {
+            "validation/transfer_receipt.json"
+        }
 
         def validate_staging() -> None:
             _validate_plan_file_binding(manifest["export_plan"], expected_plan=plan)
@@ -1909,15 +2818,28 @@ def publish_validated_behavior_cohort(
                 plan=plan,
                 inventory=inventory,
                 table_specs=table_specs,
-                hash_parts=True,
-                additional_expected_files=shard_roster_files,
+                hash_parts=False,
+                validate_keys=False,
+                additional_expected_files=receipt_inventory_files,
+                require_frozen_files=True,
             )
-            if observed != validation:
-                _fail("Staged global validation result changed before commit.")
+            if observed["row_counts_by_table"] != validation["row_counts_by_table"]:
+                _fail("Staged row-count inventory changed before commit.")
+            _validate_transfer_receipt(
+                transfer_receipt,
+                plan=plan,
+                generation_id=generation,
+                generation_path=generation_relative.as_posix(),
+                inventory=inventory,
+                shard_receipts_sha256=roster_sha,
+                receipt_path=transfer_stage_path,
+                binding=manifest["transfer_receipt"],
+            )
             _validate_validation_receipt(
                 validation_receipt,
                 manifest=manifest,
                 receipt_path=validation_stage_path,
+                transfer_receipt=transfer_receipt,
             )
 
         commit_validated_immutable_generation(
@@ -1930,11 +2852,35 @@ def publish_validated_behavior_cohort(
             lock_directory=publication_root / "validated_behavior" / "v1" / ".locks",
             validate_staging=validate_staging,
         )
+        committed_at = time.perf_counter()
     except Exception:
         if stage.exists():
             shutil.rmtree(stage)
         raise
-    return {**manifest, "manifest_path": str(manifest_path)}
+    return {
+        **manifest,
+        "manifest_path": str(manifest_path),
+        "process_telemetry": {
+            "policy_id": "validated_behavior_finalize_process_telemetry_v1",
+            "source_shard_receipt_validation_seconds": round(
+                shard_receipts_validated_at - operation_started, 6
+            ),
+            "destination_copy_and_hash_seconds": round(
+                transfer_completed_at - shard_receipts_validated_at, 6
+            ),
+            "receipt_composition_seconds": round(
+                receipts_composed_at - transfer_completed_at, 6
+            ),
+            "receipt_only_precommit_and_atomic_commit_seconds": round(
+                committed_at - receipts_composed_at, 6
+            ),
+            "total_seconds": round(committed_at - operation_started, 6),
+            "copied_part_count": len(transfers),
+            "copied_size_bytes": sum(
+                int(entry["observed_size_bytes"]) for entry in transfers
+            ),
+        },
+    }
 
 
 def _validate_validation_receipt(
@@ -1942,6 +2888,7 @@ def _validate_validation_receipt(
     *,
     manifest: Mapping[str, Any],
     receipt_path: Path,
+    transfer_receipt: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any]:
     receipt = _validate_self_digest(
         _mapping(value, field="validation receipt"),
@@ -1949,7 +2896,7 @@ def _validate_validation_receipt(
         field="Validation receipt",
     )
     binding = _mapping(manifest.get("validation_receipt"), field="validation_receipt")
-    if set(receipt) != {
+    fields_v1 = {
         "schema_id",
         "schema_version",
         "status",
@@ -1965,15 +2912,40 @@ def _validate_validation_receipt(
         "validated_at_utc",
         "safety",
         "record_sha256",
-    }:
+    }
+    fields_v2 = fields_v1 | {
+        "shard_semantic_proofs_sha256",
+        "transfer_receipt_sha256",
+        "staging_attempt_id",
+        "generation_composition_policy",
+        "mutation_exclusion",
+    }
+    schema_version = receipt.get("schema_version")
+    if schema_version == LEGACY_VALIDATION_RECEIPT_SCHEMA_VERSION:
+        required_fields = fields_v1
+        expected_status = "complete"
+        expected_policy = LEGACY_VALIDATION_POLICY
+    elif schema_version == VALIDATION_RECEIPT_SCHEMA_VERSION:
+        required_fields = fields_v2
+        expected_status = "complete_receipt_composed_v2"
+        expected_policy = VALIDATION_POLICY
+    else:
+        _fail("Validation-receipt schema version is unsupported.")
+    expected_manifest_version = (
+        LEGACY_EXPORT_SCHEMA_VERSION
+        if schema_version == LEGACY_VALIDATION_RECEIPT_SCHEMA_VERSION
+        else EXPORT_SCHEMA_VERSION
+    )
+    if manifest.get("schema_version") != expected_manifest_version:
+        _fail("Validation receipt and export manifest versions are incompatible.")
+    if set(receipt) != required_fields:
         _fail("Validation-receipt field set is inexact.")
     if set(binding) != {"path", "size_bytes", "file_sha256", "record_sha256"}:
         _fail("Validation-receipt file binding is inexact.")
     if (
         receipt.get("schema_id") != VALIDATION_RECEIPT_SCHEMA_ID
-        or receipt.get("schema_version") != VALIDATION_RECEIPT_SCHEMA_VERSION
-        or receipt.get("status") != "complete"
-        or receipt.get("validation_policy") != VALIDATION_POLICY
+        or receipt.get("status") != expected_status
+        or receipt.get("validation_policy") != expected_policy
         or receipt.get("safety") != SAFETY
     ):
         _fail("Validation-receipt identity, status, policy, or safety is invalid.")
@@ -1988,12 +2960,25 @@ def _validate_validation_receipt(
     ):
         _fail("Validation receipt binds another plan, shard roster, or generation.")
     result = _mapping(receipt.get("validation_result"), field="validation_result")
-    if set(result) != {
+    result_fields_v1 = {
         "row_counts_by_table",
         "primary_key_counts_by_table",
         "foreign_key_validation",
         "inventory_file_count",
-    }:
+    }
+    result_fields_v2 = result_fields_v1 | {
+        "owner_validation",
+        "shard_receipt_count",
+        "semantic_table_proof_count",
+        "foreign_key_proof_count",
+        "composition_policy",
+    }
+    expected_result_fields = (
+        result_fields_v1
+        if schema_version == LEGACY_VALIDATION_RECEIPT_SCHEMA_VERSION
+        else result_fields_v2
+    )
+    if set(result) != expected_result_fields:
         _fail("Validation result field set is inexact.")
     row_counts = _mapping(
         result.get("row_counts_by_table"), field="validation row counts"
@@ -2006,14 +2991,54 @@ def _validate_validation_receipt(
         manifest["publication"].get("parts_by_table"), field="parts_by_table"
     )
     expected_inventory_files = sum(len(entries) for entries in inventory.values())
-    if (
+    common_result_invalid = (
         row_counts != manifest["row_counts_by_table"]
         or key_counts != row_counts
-        or result.get("foreign_key_validation") != "complete"
         or result.get("inventory_file_count") != expected_inventory_files
         or receipt.get("software_authority") != manifest["software_authority"]
         or receipt.get("validated_at_utc") != manifest["created_at_utc"]
-    ):
+    )
+    if schema_version == LEGACY_VALIDATION_RECEIPT_SCHEMA_VERSION:
+        result_invalid = (
+            common_result_invalid or result.get("foreign_key_validation") != "complete"
+        )
+    else:
+        transfer_binding = _mapping(
+            manifest.get("transfer_receipt"), field="transfer_receipt"
+        )
+        if transfer_receipt is None:
+            _fail("Receipt-composed validation requires its transfer receipt.")
+        member_count = int(manifest["member_count"])
+        table_count = len(inventory)
+        foreign_key_count = sum(
+            len(_mapping(spec, field="table spec").get("foreign_keys", []))
+            for spec in _mapping(manifest["table_specs"], field="table_specs").values()
+        )
+        _digest(
+            receipt.get("shard_semantic_proofs_sha256"),
+            field="shard_semantic_proofs_sha256",
+        )
+        result_invalid = (
+            common_result_invalid
+            or result.get("owner_validation") != "complete_receipt_composed"
+            or result.get("foreign_key_validation") != "complete_receipt_composed"
+            or result.get("shard_receipt_count") != member_count
+            or result.get("semantic_table_proof_count") != member_count * table_count
+            or result.get("foreign_key_proof_count") != member_count * foreign_key_count
+            or result.get("composition_policy") != GENERATION_COMPOSITION_POLICY
+            or receipt.get("transfer_receipt_sha256")
+            != transfer_binding.get("record_sha256")
+            or receipt.get("staging_attempt_id") is None
+            or receipt.get("staging_attempt_id")
+            != transfer_receipt.get("staging_attempt_id")
+            or receipt.get("transfer_receipt_sha256")
+            != transfer_receipt.get("record_sha256")
+            or receipt.get("generation_composition_policy")
+            != GENERATION_COMPOSITION_POLICY
+            or receipt.get("mutation_exclusion") != MUTATION_EXCLUSION_POLICY
+        )
+        safe_component(receipt.get("staging_attempt_id"), label="staging attempt ID")
+    if result_invalid:
         _fail("Validation result, software, or timestamp differs from the manifest.")
     if (
         binding.get("record_sha256") != receipt["record_sha256"]
@@ -2022,6 +3047,10 @@ def _validate_validation_receipt(
         or binding.get("file_sha256") != sha256_file(receipt_path)
     ):
         _fail("Validation-receipt file binding is stale.")
+    if schema_version == VALIDATION_RECEIPT_SCHEMA_VERSION:
+        _require_frozen_regular_file(
+            receipt_path, field="generation validation receipt"
+        )
     _validate_software(receipt.get("software_authority"))
     _timestamp(receipt.get("validated_at_utc"), field="validated_at_utc")
     return receipt
@@ -2050,44 +3079,20 @@ def read_validated_behavior_export_manifest(
     manifest = _validate_self_digest(
         raw, digest_field="record_sha256", field="Export manifest"
     )
-    required = {
-        "schema_id",
-        "schema_version",
-        "method_id",
-        "status",
-        "export_run_id",
-        "export_plan",
-        "export_profile",
-        "membership",
-        "bundle_set",
-        "member_count",
-        "membership_state_counts",
-        "bundle_state_counts",
-        "capability_matrix_sha256",
-        "table_names",
-        "table_specs",
-        "table_coverage",
-        "arrow_schema_contracts",
-        "shard_receipts",
-        "shard_receipts_sha256",
-        "row_counts_by_table",
-        "parameters",
-        "analysis_unit_policy",
-        "acquisition_batch_policy",
-        "temporal_alignment_policy",
-        "publication",
-        "validation_receipt",
-        "software_authority",
-        "created_at_utc",
-        "safety",
-        "record_sha256",
-    }
+    schema_version = manifest.get("schema_version")
+    if schema_version == LEGACY_EXPORT_SCHEMA_VERSION:
+        required = _MANIFEST_FIELDS_V1
+        expected_method = LEGACY_EXPORT_METHOD_ID
+    elif schema_version == EXPORT_SCHEMA_VERSION:
+        required = _MANIFEST_FIELDS_V2
+        expected_method = EXPORT_METHOD_ID
+    else:
+        _fail("Export manifest schema version is unsupported.")
     if set(manifest) != required:
         _fail("Export manifest field set is inexact.")
     if (
         manifest.get("schema_id") != EXPORT_SCHEMA_ID
-        or manifest.get("schema_version") != EXPORT_SCHEMA_VERSION
-        or manifest.get("method_id") != EXPORT_METHOD_ID
+        or manifest.get("method_id") != expected_method
         or manifest.get("status") != EXPORT_STATUS
         or manifest.get("export_run_id") != export_run_id
         or manifest.get("safety") != SAFETY
@@ -2107,8 +3112,14 @@ def read_validated_behavior_export_manifest(
     plan, plan_membership, plan_bundle_set = read_validated_behavior_export_plan(
         plan_path, table_specs=table_specs
     )
+    expected_plan_version = (
+        LEGACY_EXPORT_PLAN_SCHEMA_VERSION
+        if schema_version == LEGACY_EXPORT_SCHEMA_VERSION
+        else EXPORT_PLAN_SCHEMA_VERSION
+    )
     if (
         plan["plan_sha256"] != plan_binding["plan_sha256"]
+        or plan.get("schema_version") != expected_plan_version
         or plan_membership["record_sha256"] != membership["record_sha256"]
         or plan_bundle_set["record_sha256"] != bundle_set["record_sha256"]
         or manifest.get("membership") != plan["membership"]
@@ -2180,6 +3191,33 @@ def read_validated_behavior_export_manifest(
     )
     if not generation_root.is_dir() or generation_root.is_symlink():
         _fail("Selected immutable generation is absent or aliased.")
+    inventory = _mapping(publication.get("parts_by_table"), field="parts_by_table")
+    transfer_expected_files: set[str] = set()
+    validated_transfer_receipt: Mapping[str, Any] | None = None
+    if schema_version == EXPORT_SCHEMA_VERSION:
+        transfer_binding = _mapping(
+            manifest.get("transfer_receipt"), field="transfer_receipt"
+        )
+        transfer_path = _safe_selected_path(
+            publication_root,
+            transfer_binding.get("path"),
+            field="transfer_receipt.path",
+        )
+        _transfer_path, transfer_raw = _strict_object(
+            transfer_path, field="transfer receipt"
+        )
+        validated_transfer_receipt = _validate_transfer_receipt(
+            transfer_raw,
+            plan=plan,
+            generation_id=generation_id,
+            generation_path=expected_generation_relative,
+            inventory=inventory,
+            shard_receipts_sha256=str(manifest["shard_receipts_sha256"]),
+            receipt_path=transfer_path,
+            binding=transfer_binding,
+        )
+        _require_frozen_regular_file(transfer_path, field="generation transfer receipt")
+        transfer_expected_files.add("validation/transfer_receipt.json")
     validation_binding = _mapping(
         manifest.get("validation_receipt"), field="validation_receipt"
     )
@@ -2191,27 +3229,36 @@ def read_validated_behavior_export_manifest(
     _receipt_path, validation_raw = _strict_object(
         validation_path, field="validation receipt"
     )
-    _validate_validation_receipt(
-        validation_raw, manifest=manifest, receipt_path=validation_path
+    validated_receipt = _validate_validation_receipt(
+        validation_raw,
+        manifest=manifest,
+        receipt_path=validation_path,
+        transfer_receipt=(validated_transfer_receipt),
     )
     shard_roster = _list(manifest.get("shard_receipts"), field="shard_receipts")
     if canonical_json_sha256(shard_roster) != manifest.get("shard_receipts_sha256"):
         _fail("Export manifest shard-receipt roster digest is stale.")
-    shard_roster_files = _validate_published_shard_roster(
+    shard_roster_files, semantic_roster_sha = _validate_published_shard_roster(
         generation_root,
         generation_relative_path=expected_generation_relative,
         plan=plan,
         roster=shard_roster,
+        table_specs=(table_specs if schema_version == EXPORT_SCHEMA_VERSION else None),
     )
+    if schema_version == EXPORT_SCHEMA_VERSION and (
+        semantic_roster_sha != validated_receipt.get("shard_semantic_proofs_sha256")
+    ):
+        _fail("Validation receipt binds another shard semantic-proof roster.")
     observed = _global_validate_generation(
         generation_root,
         generation_relative_path=expected_generation_relative,
         plan=plan,
-        inventory=_mapping(publication.get("parts_by_table"), field="parts_by_table"),
+        inventory=inventory,
         table_specs=table_specs,
         hash_parts=validate_parts == "full",
         validate_keys=validate_parts == "full",
-        additional_expected_files=shard_roster_files,
+        additional_expected_files=shard_roster_files | transfer_expected_files,
+        require_frozen_files=(schema_version == EXPORT_SCHEMA_VERSION),
     )
     if observed["row_counts_by_table"] != manifest["row_counts_by_table"]:
         _fail("Selected generation row counts differ from its manifest.")

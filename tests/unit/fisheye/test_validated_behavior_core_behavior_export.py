@@ -210,8 +210,8 @@ def test_core_behavior_profile_uses_the_existing_cohort_surface() -> None:
         / "manifests"
         / "export_run_id=core-behavior-test.json"
     )
-    assert EXPORT_PLAN_METHOD_ID == "closed_membership_recording_shard_plan_v1"
-    assert EXPORT_METHOD_ID == "receipt_barrier_manifest_selected_parquet_v1"
+    assert EXPORT_PLAN_METHOD_ID == "closed_membership_recording_shard_plan_v2"
+    assert EXPORT_METHOD_ID == "receipt_composed_manifest_selected_parquet_v2"
 
 
 def test_completed_execution_report_is_typed_admission_not_name_authority(
@@ -372,7 +372,13 @@ def test_core_behavior_finalize_routes_through_the_generic_publisher(
                 )
             ),
             "record_sha256": "a" * 64,
+            "schema_version": 2,
+            "validation_receipt": {"record_sha256": "b" * 64},
+            "transfer_receipt": {"record_sha256": "c" * 64},
             "row_counts_by_table": {},
+            "process_telemetry": {
+                "policy_id": "validated_behavior_finalize_process_telemetry_v1"
+            },
             "safety": {"selector_eligible": False},
         }
 
