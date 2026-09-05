@@ -1,7 +1,9 @@
 # Validated-behavior receipt-composed finalization — 2026-09-04
 
-Status: **implemented and locally validated; production canary and required CI
-pending**.
+Status: **accepted**. Required CI passed, PR #132 merged as
+`916f9d61f84a41eca718ccc42142510a8a072912`, and the production-sized
+selector-ineligible canary passed both receipt-mode and independent full
+validation.
 
 This document is a profile-specific application of
 [`publication_receipt_hashing_lifecycle_2026-08-29.md`](publication_receipt_hashing_lifecycle_2026-08-29.md)
@@ -412,13 +414,73 @@ The production-sized canary records wall/CPU/RSS/I/O telemetry separately.
 ### Phase 5 — Evidence and integration
 
 - [x] Run a small deterministic receipt-composition smoke.
-- [ ] Run the four-camera production-sized selector-ineligible canary from a
+- [x] Run the four-camera production-sized selector-ineligible canary from a
       clean commit-pinned deployment.
-- [ ] Compare the canary with manifest counts and an explicit full audit.
+- [x] Compare the canary with manifest counts and an explicit full audit.
 - [x] Add process-only phase telemetry outside the scientific manifest.
-- [ ] Record production phase telemetry and verify the five-minute acceptance
+- [x] Record production phase telemetry and verify the five-minute acceptance
       gate.
-- [ ] Require all CI checks to pass before merge or production use.
+- [x] Require all CI checks to pass before merge or production use.
+
+## Production canary evidence
+
+PR #132 passed every required CI check, including all 16 non-GPU test shards,
+before it merged. The canary then used the exact merged commit through the
+locked deployment:
+
+- deployment:
+  `/groups/johnson/johnsonlab/jeremy/gitrepos/palette-worktrees/validated-behavior-receipt-v2-canary-20260904-916f9d61`;
+- operation:
+  `/groups/johnson/johnsonlab/jeremy/operations/sleepyfish_validated_core_behavior_full_rate_receipt_v2_canary_20260904_v003`;
+- export run:
+  `sleepyfish-core-fullrate-receipt-v2-canary-20260904-v003`;
+- plan SHA-256:
+  `b2dc03e843606e443d57c8bccf760e9ec16747764f1bd78d4fc0d3ad13fa24f3`;
+- shard array: LSF `153998899`;
+- receipt-composed finalizer: LSF `153998900`; and
+- independent full audit: LSF `153998916`.
+
+The plan used schema v2 and evidence profile
+`receipt_composed_parquet_finalization_v2`. Its safety record kept
+`selector_eligible`, `selector_activation`, `production_authority`, registry
+updates, source mutation, and Zarr mutation false. The deployment helper
+verified the exact import root and commit while leaving the shared checkout
+unchanged.
+
+All four recording shards completed successfully in parallel. Individual wall
+times were 430--484 seconds and peak RSS was 2,122--2,212 MB. Each emitted a
+schema-v2 semantic receipt before the dependent finalizer became runnable.
+
+The finalizer published 32 Parquet parts totaling 5,860,547,208 bytes. Its
+process telemetry was:
+
+| Phase | Elapsed |
+|---|---:|
+| Source-shard receipt validation | 0.517 s |
+| Destination copy plus one hash per part | 38.063 s |
+| Receipt composition | 0.103 s |
+| Receipt-only precommit and atomic commit | 0.855 s |
+| Instrumented finalization total | 39.539 s |
+
+LSF measured 50 seconds wall time, 27.99 CPU-seconds, and 197 MB peak RSS for
+the finalizer. The v1 baseline required 2,258 seconds and 9,958 MB, so the
+normal fan-in became approximately 45 times faster while reducing peak memory
+by approximately 98 percent. End-to-end shard-plus-finalizer wall time fell
+from approximately 49 minutes to approximately 9 minutes.
+
+Receipt-mode reopen returned manifest record SHA-256
+`44302ec640a5a1edfd39900dc7998aec0fa2e168c42c399a8ca8090a392066ec` and
+validation-receipt record SHA-256
+`68474a7bf73416686ca8a1c887193ab69a695ec40546c2121c29df2ddf6b5722`.
+Every published Parquet part was frozen mode `0444`.
+
+The separately submitted `--full-part-hashes` audit decoded and hashed the
+published generation independently. It completed successfully in 370 seconds
+with 365 MB peak RSS, 365.37 CPU-seconds, 92.76 percent average CPU efficiency,
+and empty stderr. It returned the same manifest digest, safety record, bundle
+states, and all eight table row counts as receipt mode. Those row counts also
+exactly matched the v1 scientific baseline, including 114,699,250 tail-trace
+rows and 149,468,783 rows overall.
 
 ## Local implementation evidence
 
