@@ -38,7 +38,18 @@ from fisheye.analysis.chaser_epoch_behavior_summary import (
 from fisheye.analysis.swim_bout_frame_axis import canonical_frame_axis_sha256
 from fisheye.analysis.swim_bout_io import (
     SwimBoutTables,
+    load_default_swim_bout_tables,
     load_exact_selector_ineligible_default_swim_bout_tables,
+)
+from fisheye.analysis_workflows.core_authority_roster import (
+    bind_core_motion_and_bouts_from_roster,
+    read_core_authority_roster,
+    selected_core_track_id_from_roster,
+    validate_core_authority_roster,
+)
+from fisheye.analysis_workflows.core_motion_source_handle import (
+    bind_core_motion_track_source_handle,
+    core_motion_dependency_record,
 )
 from fisheye.analysis_workflows.provider_analysis_bindings import (
     build_provider_analysis_offer,
@@ -55,6 +66,11 @@ from fisheye.analysis_workflows.provider_analysis_offers import (
 from fisheye.analysis_workflows.provider_track_motion_source_handle import (
     ProviderTrackMotionSourceHandle,
     load_provider_track_motion_source_handle,
+)
+from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import (
+    CANONICAL_SWIM_BOUTS_CAPABILITY,
+    CROSS_GRAIN_JOIN_AUTHORITY,
+    KINEMATICS_SAMPLES_CAPABILITY,
 )
 from fisheye.analysis_workflows.protocol_semantic_chaser_selection_publication import (
     ProtocolSemanticChaserSelectionSourceHandle,
@@ -97,14 +113,15 @@ from fisheye.shared.zarr_run_completion import (
     require_runs_parent,
 )
 
-
 PARENT_PATH = "analysis/stimulus_epoch_behavior_summary_runs"
 SCHEMA_ID = "palette.stimulus_epoch_behavior_summary"
 LEGACY_SCHEMA_VERSION = 1
 SEMANTIC_SCHEMA_VERSION = 2
+CORE_SEMANTIC_SCHEMA_VERSION = 3
 METHOD_ID = "provider_epoch_motion_bouts"
 LEGACY_METHOD_VERSION = 1
 SEMANTIC_METHOD_VERSION = 2
+CORE_SEMANTIC_METHOD_VERSION = 3
 ANALYSIS_CLASS_ID = "stimulus_epoch_motion_bout_summary"
 ANALYSIS_CLASS_VERSION = 1
 LEGACY_MATERIALIZATION_SCHEMA_ID = (
@@ -125,6 +142,12 @@ LEGACY_EPOCH_BINDING_MODE = "exact_epoch_selection_v1"
 SEMANTIC_EPOCH_BINDING_MODE = "protocol_semantic_selection_v2"
 DEFAULT_SPEED_LEVEL = "filtered"
 SUPPORTED_SPEED_LEVELS = ("raw", "filtered", "smoothed", "averaged")
+CORE_EPOCH_BEHAVIOR_CONSUMER_ID = "goodbatbadbat.epoch_behavior_summary_v1"
+CORE_EPOCH_REQUIRED_CAPABILITIES = (
+    CROSS_GRAIN_JOIN_AUTHORITY,
+    KINEMATICS_SAMPLES_CAPABILITY,
+    CANONICAL_SWIM_BOUTS_CAPABILITY,
+)
 _SELECTOR_ATTRS = (
     "latest",
     "latest_complete",
@@ -179,6 +202,7 @@ class ProviderEpochBehaviorSummaryPlan:
     swim_bout_run_name: str
     track_id: int
     speed_level: str
+    core_authority_roster: Mapping[str, Any] | None
     result: ProviderEpochBehaviorSummaryResult
     parent_selector_attrs: Mapping[str, Any]
 
@@ -217,6 +241,11 @@ class ProviderEpochBehaviorSummaryPlan:
             "swim_bout_run_name": self.swim_bout_run_name,
             "track_id": self.track_id,
             "speed_level": self.speed_level,
+            "core_authority_roster_sha256": (
+                self.core_authority_roster["record_sha256"]
+                if self.core_authority_roster is not None
+                else None
+            ),
             "analysis_offer_sha256": self.result.analysis_offer_sha256,
             "epoch_count": int(self.result.per_epoch_fish.shape[0]),
             "bout_count": int(self.result.per_epoch_bouts.shape[0]),
@@ -277,7 +306,13 @@ def _source_bindings_sha256(value: Mapping[str, Any]) -> str:
     return canonical_json_sha256(json_attr_safe(dict(value)))
 
 
-def _fps_from_motion(provider: ProviderTrackMotionSourceHandle) -> float:
+def _fps_from_motion(provider: Any) -> float:
+    from fisheye.analysis_workflows.core_motion_source_handle import (
+        CoreMotionTrackSourceHandle,
+    )
+
+    if type(provider) is CoreMotionTrackSourceHandle:
+        return float(provider.source_sample_rate_hz)
     parameters = provider.computation_record.get("parameters")
     if not isinstance(parameters, Mapping):
         raise ProviderEpochBehaviorSummaryError(
@@ -293,10 +328,20 @@ def _fps_from_motion(provider: ProviderTrackMotionSourceHandle) -> float:
 
 
 def _track_slice(
-    provider: ProviderTrackMotionSourceHandle,
+    provider: Any,
     *,
     track_id: int,
 ) -> slice:
+    from fisheye.analysis_workflows.core_motion_source_handle import (
+        CoreMotionTrackSourceHandle,
+    )
+
+    if type(provider) is CoreMotionTrackSourceHandle:
+        if provider.track_id != track_id:
+            raise ProviderEpochBehaviorSummaryError(
+                f"Core-motion track_id {track_id!r} does not match its handle."
+            )
+        return slice(0, provider.sample_count)
     ids = np.asarray(provider.track_ids, dtype=np.int64).reshape(-1)
     offsets = np.asarray(provider.track_row_offsets, dtype=np.int64).reshape(-1)
     matches = np.flatnonzero(ids == int(track_id))
@@ -313,10 +358,17 @@ def _track_slice(
 
 
 def _track_adapter(
-    provider: ProviderTrackMotionSourceHandle,
+    provider: Any,
     *,
     rows: slice,
+    speed_level: str,
 ) -> Any:
+    from fisheye.analysis_workflows.core_motion_source_handle import (
+        CoreMotionTrackSourceHandle,
+    )
+
+    core_mode = type(provider) is CoreMotionTrackSourceHandle
+
     def values(path: str, *, dtype: Any = np.float64) -> np.ndarray:
         try:
             return np.asarray(provider.array(path)[rows], dtype=dtype)
@@ -325,18 +377,36 @@ def _track_adapter(
                 f"Provider-motion physical array {path!r} is required."
             ) from exc
 
+    path_level = (
+        speed_level if speed_level in {"raw", "filtered", "smoothed"} else "smoothed"
+    )
+    if core_mode:
+        speed_path = {
+            "filtered": "movement/speed/filtered/mm",
+            "smoothed": "movement/speed/smoothed/mm",
+        }.get(speed_level)
+        path_distance = {
+            "filtered": "movement/speed/filtered/frame_path_distance_mm",
+            "smoothed": "movement/speed/smoothed/frame_path_distance_mm",
+        }.get(path_level)
+        if speed_path is None or path_distance is None:
+            raise ProviderEpochBehaviorSummaryError(
+                "Core epoch summaries support filtered or smoothed physical speed."
+            )
+        linear_valid_path = "sample_valid"
+        angular_valid_path = "heading_usable"
+    else:
+        speed_path = f"speed_{speed_level}_mm"
+        path_distance = f"frame_path_distance_{path_level}_mm"
+        linear_valid_path = "linear_sample_valid"
+        angular_valid_path = "angular_sample_valid"
     return SimpleNamespace(
         frame_indices=values("source_acquisition_frame_index", dtype=np.int64),
-        linear_sample_valid=values("linear_sample_valid", dtype=bool),
-        sample_valid=values("angular_sample_valid", dtype=bool),
+        linear_sample_valid=values(linear_valid_path, dtype=bool),
+        sample_valid=values(angular_valid_path, dtype=bool),
         transition_valid=values("transition_valid", dtype=bool),
-        speed_mm_by_level={
-            level: values(f"speed_{level}_mm") for level in SUPPORTED_SPEED_LEVELS
-        },
-        frame_path_distance_mm_by_level={
-            level: values(f"frame_path_distance_{level}_mm")
-            for level in ("raw", "filtered", "smoothed")
-        },
+        speed_mm_by_level={speed_level: values(speed_path)},
+        frame_path_distance_mm_by_level={path_level: values(path_distance)},
         smoothed_heading_degrees=values("smoothed_heading_degrees"),
         heading_degrees=values("heading_degrees"),
     )
@@ -999,29 +1069,69 @@ def _compute_result(
     swim_bout_run_name: str,
     track_id: int,
     speed_level: str,
+    core_authority_roster: Mapping[str, Any] | None = None,
 ) -> ProviderEpochBehaviorSummaryResult:
     selection = resolve_exact_stimulus_epoch_selection(
         source_zarr,
         run_name=epoch_run_name,
     )
-    provider = load_provider_track_motion_source_handle(
-        source_zarr,
-        motion_run_path,
-        use_consolidated=True,
-        require_authoritative_timing=False,
-    )
+    core_mode = core_authority_roster is not None
+    if core_mode:
+        bound = bind_core_motion_and_bouts_from_roster(core_authority_roster)
+        provider = bind_core_motion_track_source_handle(
+            bound,
+            consumer_id=CORE_EPOCH_BEHAVIOR_CONSUMER_ID,
+            required_capabilities=CORE_EPOCH_REQUIRED_CAPABILITIES,
+            track_id=track_id,
+        )
+        if provider.run_path != motion_run_path:
+            raise ProviderEpochBehaviorSummaryError(
+                "Core roster and requested motion run path disagree."
+            )
+    else:
+        provider = load_provider_track_motion_source_handle(
+            source_zarr,
+            motion_run_path,
+            use_consolidated=True,
+            require_authoritative_timing=False,
+        )
     rows = _track_slice(provider, track_id=track_id)
     root = open_zarr_root(source_zarr, mode="r", use_consolidated=True)
-    swim_tables = load_exact_selector_ineligible_default_swim_bout_tables(
-        root,
-        run_name=swim_bout_run_name,
-    )
-    swim_binding, swim_lineage, frame_sha256 = _swim_bout_binding(
-        swim_tables,
-        provider=provider,
-        rows=rows,
-        track_id=track_id,
-    )
+    if core_mode:
+        bout_source = provider.canonical_bout_source
+        if bout_source.binding["run_name"] != swim_bout_run_name:
+            raise ProviderEpochBehaviorSummaryError(
+                "Core roster and requested swim-bout run disagree."
+            )
+        swim_tables = load_default_swim_bout_tables(
+            root,
+            run_name=swim_bout_run_name,
+            legacy_compatibility=False,
+        )
+        if (
+            swim_tables.run_path != bout_source.binding["run_path"]
+            or swim_tables.candidate.candidate_id != bout_source.binding["candidate_id"]
+            or swim_tables.signal.signal_id != bout_source.binding["signal_id"]
+            or array_values_sha256(swim_tables.bouts)
+            != bout_source.binding["bout_content_sha256"]
+        ):
+            raise ProviderEpochBehaviorSummaryError(
+                "Core swim-bout tables differ from the roster-selected event source."
+            )
+        swim_binding = dict(bout_source.binding)
+        swim_lineage = str(bout_source.binding["payload_sha256"])
+        frame_sha256 = str(bout_source.binding["frame_axis_content_sha256"])
+    else:
+        swim_tables = load_exact_selector_ineligible_default_swim_bout_tables(
+            root,
+            run_name=swim_bout_run_name,
+        )
+        swim_binding, swim_lineage, frame_sha256 = _swim_bout_binding(
+            swim_tables,
+            provider=provider,
+            rows=rows,
+            track_id=track_id,
+        )
     fps = _fps_from_motion(provider)
     if not math.isclose(fps, selection.fps, rel_tol=0.0, abs_tol=1e-12):
         raise ProviderEpochBehaviorSummaryError(
@@ -1034,7 +1144,6 @@ def _compute_result(
         raise ProviderEpochBehaviorSummaryError(
             "Swim-bout and provider-motion FPS disagree."
         )
-    motion_identity = provider_motion_identity(provider)
     temporal_identity = temporal_selection_identity(selection)
     semantic_handle: ProtocolSemanticChaserSelectionSourceHandle | None = None
     semantic_binding: dict[str, Any] | None = None
@@ -1051,30 +1160,51 @@ def _compute_result(
             selection,
             semantic_binding,
         )
-        schema_version = SEMANTIC_SCHEMA_VERSION
-        method_version = SEMANTIC_METHOD_VERSION
+        schema_version = (
+            CORE_SEMANTIC_SCHEMA_VERSION if core_mode else SEMANTIC_SCHEMA_VERSION
+        )
+        method_version = (
+            CORE_SEMANTIC_METHOD_VERSION if core_mode else SEMANTIC_METHOD_VERSION
+        )
         epoch_binding_mode = SEMANTIC_EPOCH_BINDING_MODE
     else:
         windows = _windows(selection)
         schema_version = LEGACY_SCHEMA_VERSION
         method_version = LEGACY_METHOD_VERSION
         epoch_binding_mode = LEGACY_EPOCH_BINDING_MODE
-    offer = build_provider_analysis_offer(
-        analysis_class_id=ANALYSIS_CLASS_ID,
-        analysis_class_version=ANALYSIS_CLASS_VERSION,
-        computation_id=METHOD_ID,
-        computation_version=method_version,
-        temporal_selection=temporal_identity,
-        provider_requirements=ProviderRequirements(motion=motion_identity),
-    )
-    if offer.scientific_readiness is not ScientificReadiness.READY:
-        raise ProviderEpochBehaviorSummaryError(
-            "Provider epoch behavior summary is not scientifically ready: "
-            f"{offer.scientific_readiness.value}."
+    if core_mode:
+        core_dependency = dict(core_motion_dependency_record(provider))
+        offer_record = {
+            "schema_id": "palette.core_epoch_behavior_summary.analysis_offer",
+            "schema_version": 1,
+            "analysis_class_id": ANALYSIS_CLASS_ID,
+            "analysis_class_version": ANALYSIS_CLASS_VERSION,
+            "computation_id": METHOD_ID,
+            "computation_version": method_version,
+            "scientific_readiness": "ready",
+            "temporal_selection_sha256": temporal_identity.sha256,
+            "core_motion_dependency": core_dependency,
+        }
+        offer_sha256 = canonical_json_sha256(offer_record)
+    else:
+        motion_identity = provider_motion_identity(provider)
+        offer = build_provider_analysis_offer(
+            analysis_class_id=ANALYSIS_CLASS_ID,
+            analysis_class_version=ANALYSIS_CLASS_VERSION,
+            computation_id=METHOD_ID,
+            computation_version=method_version,
+            temporal_selection=temporal_identity,
+            provider_requirements=ProviderRequirements(motion=motion_identity),
         )
-    offer_record = offer.record
-    offer_sha256 = offer.sha256
-    track = _track_adapter(provider, rows=rows)
+        if offer.scientific_readiness is not ScientificReadiness.READY:
+            raise ProviderEpochBehaviorSummaryError(
+                "Provider epoch behavior summary is not scientifically ready: "
+                f"{offer.scientific_readiness.value}."
+            )
+        offer_record = offer.record
+        offer_sha256 = offer.sha256
+        core_dependency = None
+    track = _track_adapter(provider, rows=rows, speed_level=speed_level)
     per_epoch_fish = _make_per_epoch_fish(
         windows=windows,
         track=track,
@@ -1125,14 +1255,20 @@ def _compute_result(
             "record": selection.selection_record,
             "sha256": selection.selection_digest,
         },
-        "provider_motion": {
-            "run_path": provider.run_path,
-            "manifest_sha256": provider.provider_manifest_sha256,
-            "verification_digest": provider.verification_digest,
-            "track_id": int(track_id),
-            "track_row_start": int(rows.start or 0),
-            "track_row_stop": int(rows.stop or 0),
-        },
+        **(
+            {"core_motion": core_dependency}
+            if core_dependency is not None
+            else {
+                "provider_motion": {
+                    "run_path": provider.run_path,
+                    "manifest_sha256": provider.provider_manifest_sha256,
+                    "verification_digest": provider.verification_digest,
+                    "track_id": int(track_id),
+                    "track_row_start": int(rows.start or 0),
+                    "track_row_stop": int(rows.stop or 0),
+                }
+            }
+        ),
         "swim_bouts": swim_binding,
         **(
             {"protocol_semantic_selection": semantic_binding}
@@ -1160,8 +1296,16 @@ def _compute_result(
             semantic_handle.manifest_sha256 if semantic_handle is not None else None
         ),
         motion_run_path=provider.run_path,
-        motion_manifest_sha256=provider.provider_manifest_sha256,
-        motion_verification_digest=provider.verification_digest,
+        motion_manifest_sha256=(
+            provider.source_manifest_sha256
+            if core_mode
+            else provider.provider_manifest_sha256
+        ),
+        motion_verification_digest=(
+            provider.source_binding_sha256
+            if core_mode
+            else provider.verification_digest
+        ),
         swim_bout_run_name=swim_tables.run_name,
         swim_bout_run_path=swim_tables.run_path,
         swim_bout_lineage_hash=swim_lineage,
@@ -1185,10 +1329,12 @@ def build_provider_epoch_behavior_summary_plan(
     run_name: str,
     epoch_run_name: str,
     protocol_semantic_selection_run_name: str | None = None,
-    motion_run: str,
-    swim_bout_run_name: str,
+    motion_run: str | None = None,
+    swim_bout_run_name: str | None = None,
     track_id: int = 0,
     speed_level: str = DEFAULT_SPEED_LEVEL,
+    core_authority_roster: Mapping[str, Any] | None = None,
+    core_track_id: int | None = None,
 ) -> ProviderEpochBehaviorSummaryPlan:
     source = Path(source_zarr).expanduser().resolve()
     scratch = Path(scratch_root).expanduser().resolve()
@@ -1208,8 +1354,50 @@ def build_provider_epoch_behavior_summary_plan(
         if protocol_semantic_selection_run_name is not None
         else None
     )
-    bout = _safe_name(swim_bout_run_name, label="swim-bout run")
-    motion_path = _motion_run_path(motion_run)
+    core_mode = core_authority_roster is not None or core_track_id is not None
+    if core_mode:
+        if core_authority_roster is None or core_track_id is None:
+            raise ProviderEpochBehaviorSummaryError(
+                "Core mode requires one exact roster and explicit track ID."
+            )
+        if motion_run is not None or swim_bout_run_name is not None:
+            raise ProviderEpochBehaviorSummaryError(
+                "Core mode cannot accept independent motion or swim-bout inputs."
+            )
+        roster = validate_core_authority_roster(core_authority_roster)
+        selected_track_id = selected_core_track_id_from_roster(roster)
+        if core_track_id != selected_track_id:
+            raise ProviderEpochBehaviorSummaryError(
+                "Core track ID differs from the roster-selected motion/bout track."
+            )
+        track_id = selected_track_id
+        capabilities = roster["capability_bindings"]
+        motion_path = str(
+            capabilities[KINEMATICS_SAMPLES_CAPABILITY]["source_binding"]["run_path"]
+        )
+        bout_path = str(
+            capabilities[CANONICAL_SWIM_BOUTS_CAPABILITY]["source_binding"]["run_path"]
+        )
+        bout_prefix = "analysis/swim_bout_runs/"
+        if (
+            not bout_path.startswith(bout_prefix)
+            or "/" in bout_path[len(bout_prefix) :]
+        ):
+            raise ProviderEpochBehaviorSummaryError(
+                "Core roster swim-bout path is not one exact run."
+            )
+        bout = _safe_name(
+            bout_path[len(bout_prefix) :],
+            label="core swim-bout run",
+        )
+    else:
+        roster = None
+        if motion_run is None or swim_bout_run_name is None:
+            raise ProviderEpochBehaviorSummaryError(
+                "Legacy provider mode requires exact motion and swim-bout runs."
+            )
+        bout = _safe_name(swim_bout_run_name, label="swim-bout run")
+        motion_path = _motion_run_path(motion_run)
     if type(track_id) is not int or track_id < 0:
         raise ProviderEpochBehaviorSummaryError(
             "track_id must be one nonnegative exact integer."
@@ -1223,6 +1411,10 @@ def build_provider_epoch_behavior_summary_plan(
         raise ProviderEpochBehaviorSummaryError(
             "Semantic-v2 publication rejects raw speed; choose filtered, "
             "smoothed, or averaged physical speed."
+        )
+    if core_mode and semantic is None:
+        raise ProviderEpochBehaviorSummaryError(
+            "Core epoch behavior requires the protocol-semantic selection profile."
         )
     local = scratch / "provider-epoch-behavior-summary.zarr"
     target = source.joinpath(*f"{PARENT_PATH}/{run}".split("/"))
@@ -1239,6 +1431,7 @@ def build_provider_epoch_behavior_summary_plan(
         swim_bout_run_name=bout,
         track_id=track_id,
         speed_level=level,
+        core_authority_roster=roster,
     )
     return ProviderEpochBehaviorSummaryPlan(
         source_zarr=source,
@@ -1251,6 +1444,7 @@ def build_provider_epoch_behavior_summary_plan(
         swim_bout_run_name=bout,
         track_id=track_id,
         speed_level=level,
+        core_authority_roster=roster,
         result=result,
         parent_selector_attrs=MappingProxyType(_selector_snapshot(parent)),
     )
@@ -1520,10 +1714,12 @@ def materialize_provider_epoch_behavior_summary(
     run_name: str,
     epoch_run_name: str,
     protocol_semantic_selection_run_name: str | None = None,
-    motion_run: str,
-    swim_bout_run_name: str,
+    motion_run: str | None = None,
+    swim_bout_run_name: str | None = None,
     track_id: int = 0,
     speed_level: str = DEFAULT_SPEED_LEVEL,
+    core_authority_roster: Mapping[str, Any] | None = None,
+    core_track_id: int | None = None,
     copy_backend: str = "rsync",
     apply: bool = False,
     keep_scratch: bool = False,
@@ -1538,6 +1734,8 @@ def materialize_provider_epoch_behavior_summary(
         swim_bout_run_name=swim_bout_run_name,
         track_id=track_id,
         speed_level=speed_level,
+        core_authority_roster=core_authority_roster,
+        core_track_id=core_track_id,
     )
     result: dict[str, Any] = {"status": "planned", "plan": plan.to_json()}
     if not apply:
@@ -1568,6 +1766,7 @@ def materialize_provider_epoch_behavior_summary(
             swim_bout_run_name=plan.swim_bout_run_name,
             track_id=plan.track_id,
             speed_level=plan.speed_level,
+            core_authority_roster=plan.core_authority_roster,
         )
         if (
             refreshed.analysis_offer_sha256 != plan.result.analysis_offer_sha256
@@ -1735,9 +1934,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--epoch-run", required=True)
     parser.add_argument("--protocol-semantic-selection-run")
-    parser.add_argument("--motion-run", required=True)
-    parser.add_argument("--swim-bout-run", required=True)
+    parser.add_argument("--motion-run")
+    parser.add_argument("--swim-bout-run")
     parser.add_argument("--track-id", type=int, default=0)
+    parser.add_argument("--core-authority-roster", type=Path)
+    parser.add_argument("--expected-core-authority-roster-sha256")
+    parser.add_argument("--core-track-id", type=int)
     parser.add_argument(
         "--speed-level",
         choices=SUPPORTED_SPEED_LEVELS,
@@ -1753,6 +1955,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
+    core_arguments = (
+        args.core_authority_roster,
+        args.expected_core_authority_roster_sha256,
+        args.core_track_id,
+    )
+    if any(value is not None for value in core_arguments):
+        if any(value is None for value in core_arguments):
+            raise ProviderEpochBehaviorSummaryError(
+                "Core mode requires roster path, expected digest, and track ID."
+            )
+        core_roster = read_core_authority_roster(
+            args.core_authority_roster,
+            expected_record_sha256=args.expected_core_authority_roster_sha256,
+        )
+    else:
+        core_roster = None
     payload = materialize_provider_epoch_behavior_summary(
         args.zarr_path,
         scratch_root=args.scratch_root or _default_scratch(args.run_name),
@@ -1763,6 +1981,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         swim_bout_run_name=args.swim_bout_run,
         track_id=args.track_id,
         speed_level=args.speed_level,
+        core_authority_roster=core_roster,
+        core_track_id=args.core_track_id,
         copy_backend=args.copy_backend,
         apply=args.apply,
         keep_scratch=args.keep_scratch,

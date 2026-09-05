@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
-from typing import Mapping
 from typing import Sequence
 
+from fisheye.analysis_workflows.core_authority_roster import (
+    read_core_authority_roster,
+)
 from fisheye.analysis_workflows.core_chaser_relative_frame_adapter import (
     prepare_core_proxy_chaser_relative_frame,
 )
@@ -99,13 +100,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             raise ValueError(
                 "Core mode cannot accept a legacy body-frame run or fallback."
             )
-        roster_path = args.core_authority_roster.expanduser().resolve()
-        raw_roster = json.loads(roster_path.read_text(encoding="utf-8"))
-        if not isinstance(raw_roster, Mapping):
-            raise ValueError("Core-authority roster JSON must contain one object.")
-        roster = dict(raw_roster)
-        if roster.get("record_sha256") != args.expected_core_authority_roster_sha256:
-            raise ValueError("Core-authority roster digest differs from the task.")
+        roster = read_core_authority_roster(
+            args.core_authority_roster,
+            expected_record_sha256=args.expected_core_authority_roster_sha256,
+        )
         bound = prepare_core_proxy_chaser_relative_frame(
             archive,
             core_authority_roster=roster,

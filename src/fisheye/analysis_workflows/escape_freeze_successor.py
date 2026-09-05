@@ -22,13 +22,15 @@ import numpy as np
 from fisheye.analysis_workflows.controller_trial_successor import (
     PreparedControllerTrials,
 )
+from fisheye.analysis_workflows.core_motion_source_handle import (
+    validate_core_motion_dependency_record,
+)
 from fisheye.analysis_workflows.generalized_bout_response_successor import (
     PreparedGeneralizedBoutResponse,
     exact_provider_frame_projection,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
-
 
 SCHEMA_ID = "palette.analysis.chaser_escape_freeze"
 SCHEMA_VERSION = 2
@@ -58,6 +60,14 @@ def _readonly(value: Any) -> np.ndarray:
     result = np.array(value, copy=True, order="C")
     result.setflags(write=False)
     return result
+
+
+def _plain(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain(item) for item in value]
+    return value
 
 
 def _text(value: object, *, name: str) -> str:
@@ -95,7 +105,9 @@ def _float_vector(value: Any, *, name: str, size: int) -> np.ndarray:
 
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+        return MappingProxyType(
+            {str(key): _freeze(item) for key, item in value.items()}
+        )
     if isinstance(value, list):
         return tuple(_freeze(item) for item in value)
     return value
@@ -120,6 +132,7 @@ class EscapeFreezeInput:
     chaser_identity_code: np.ndarray
     distance_mm: np.ndarray
     distance_valid: np.ndarray
+    source_core_authority: Mapping[str, Any] | None = None
     escape_speed_threshold_mm_s: float = 20.0
     high_turn_threshold_deg: float = 45.0
     freeze_speed_threshold_mm_s: float = 2.0
@@ -165,7 +178,9 @@ def _positive_finite(value: object, *, name: str, allow_zero: bool = False) -> f
         _fail(f"{name} must be one finite number.")
     result = float(value)
     if not math.isfinite(result) or (result < 0 if allow_zero else result <= 0):
-        _fail(f"{name} must be {'non-negative' if allow_zero else 'positive'} and finite.")
+        _fail(
+            f"{name} must be {'non-negative' if allow_zero else 'positive'} and finite."
+        )
     return result
 
 
@@ -187,19 +202,25 @@ def prepare_escape_freeze_successor(source: EscapeFreezeInput) -> PreparedEscape
         or source.bout_response.recording_id != recording_id
     ):
         _fail("Escape/freeze sources belong to different recordings.")
-    if source.controller_trials.payload_digest != source.bout_response.manifest[
-        "sources"
-    ]["controller_trial_payload_sha256"]:
+    if (
+        source.controller_trials.payload_digest
+        != source.bout_response.manifest["sources"]["controller_trial_payload_sha256"]
+    ):
         _fail("Bout-response controller-trial binding is stale.")
     if type(source.n_frames) is not int or source.n_frames < 0:
         _fail("n_frames must be one non-negative exact integer.")
     if type(source.n_chasers) is not int or source.n_chasers <= 0:
         _fail("n_chasers must be one positive exact integer.")
     projection = source.source_motion_frame_projection
+    projection_schema = (
+        projection.get("schema_id") if isinstance(projection, Mapping) else None
+    )
     if (
-        not isinstance(projection, Mapping)
-        or projection.get("schema_id")
-        != "palette.provider_motion.relative_frame_projection"
+        projection_schema
+        not in {
+            "palette.provider_motion.relative_frame_projection",
+            "palette.core_motion.relative_frame_projection",
+        }
         or projection.get("schema_version") != 1
         or projection.get("join_policy")
         != "left_join_missing_provider_rows_invalid_no_interpolation"
@@ -207,6 +228,31 @@ def prepare_escape_freeze_successor(source: EscapeFreezeInput) -> PreparedEscape
         or projection.get("fallback") != "prohibited"
     ):
         _fail("source_motion_frame_projection is absent, malformed, or permissive.")
+    core_authority: dict[str, Any] | None = None
+    if source.source_core_authority is not None:
+        try:
+            core_authority = dict(
+                validate_core_motion_dependency_record(source.source_core_authority)
+            )
+        except (TypeError, ValueError) as exc:
+            _fail(f"Core motion dependency record is invalid: {exc}")
+        if (
+            projection_schema != "palette.core_motion.relative_frame_projection"
+            or core_authority.get("recording_id") != recording_id
+            or core_authority.get("motion_run_path") != source.source_motion_run_path
+            or core_authority.get("motion_manifest_sha256")
+            != source.source_motion_manifest_sha256
+            or core_authority.get("core_authority_roster_sha256")
+            != projection.get("core_authority_roster_sha256")
+        ):
+            _fail("Core motion dependency record is absent, stale, or inconsistent.")
+        response_core = source.bout_response.manifest["sources"].get("core_authority")
+        if not isinstance(response_core, Mapping) or _plain(response_core) != _plain(
+            core_authority
+        ):
+            _fail("Escape/freeze and bout-response core authorities differ.")
+    elif projection_schema == "palette.core_motion.relative_frame_projection":
+        _fail("Core motion projection lacks its sealed authority dependency.")
     if (
         source.controller_trials.n_frames != source.n_frames
         or source.controller_trials.n_chasers != source.n_chasers
@@ -334,9 +380,7 @@ def prepare_escape_freeze_successor(source: EscapeFreezeInput) -> PreparedEscape
         "event_bout_row_id": np.asarray(bout["bout_row_id"], dtype=np.int64)[
             event_source_rows
         ],
-        "event_bout_id": np.asarray(bout["bout_id"], dtype=np.int64)[
-            event_source_rows
-        ],
+        "event_bout_id": np.asarray(bout["bout_id"], dtype=np.int64)[event_source_rows],
         "event_controller_trial_row_id": event_trial.astype(np.int64),
         "event_chaser_identity_code": np.asarray(
             bout["chaser_identity_code"], dtype=np.uint16
@@ -405,18 +449,16 @@ def prepare_escape_freeze_successor(source: EscapeFreezeInput) -> PreparedEscape
             dtype=np.int64,
         )
         if post_frames.size:
-            post_frames = post_frames[
-                dense_trial[post_frames, c] == trial_row
-            ]
+            post_frames = post_frames[dense_trial[post_frames, c] == trial_row]
         usable = (
             post_frames[distance_valid[post_frames, c]]
             if post_frames.size
             else np.zeros(0, dtype=np.int64)
         )
         if usable.size == 0:
-            event_arrays["event_trace_exclusion_reason_code"][event] = (
-                TRACE_REASON_NO_POST_EVENT_DISTANCE
-            )
+            event_arrays["event_trace_exclusion_reason_code"][
+                event
+            ] = TRACE_REASON_NO_POST_EVENT_DISTANCE
             continue
         event_arrays["event_trace_valid"][event] = True
         event_arrays["event_trace_exclusion_reason_code"][event] = TRACE_REASON_VALID
@@ -444,9 +486,7 @@ def prepare_escape_freeze_successor(source: EscapeFreezeInput) -> PreparedEscape
         "trial_gap_fraction": np.asarray(
             trials["gap_fraction"], dtype=np.float64
         ).copy(),
-        "trial_logged_active_id_unavailable_count": np.zeros(
-            n_trials, dtype=np.int64
-        ),
+        "trial_logged_active_id_unavailable_count": np.zeros(n_trials, dtype=np.int64),
         "trial_trigger_acquisition_frame_id": trial_trigger_id.copy(),
         "trial_trigger_distance_mm": np.full(n_trials, np.nan, dtype=np.float32),
         "trial_valid_time_s": np.zeros(n_trials, dtype=np.float64),
@@ -636,6 +676,9 @@ def prepare_escape_freeze_successor(source: EscapeFreezeInput) -> PreparedEscape
             },
             "controller_trial_payload_sha256": source.controller_trials.payload_digest,
             "bout_response_payload_sha256": source.bout_response.payload_digest,
+            **(
+                {"core_authority": core_authority} if core_authority is not None else {}
+            ),
         },
         "parameters": {
             "escape_speed_threshold_mm_s": escape_threshold,
@@ -721,6 +764,13 @@ def escape_freeze_input_from_handles(
     from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
         ChaserRelativeFrameSourceHandle,
     )
+    from fisheye.analysis_workflows.core_motion_source_handle import (
+        CoreMotionTrackSourceHandle,
+        core_motion_dependency_record,
+    )
+    from fisheye.analysis_workflows.generalized_bout_response_successor import (
+        exact_core_motion_frame_projection,
+    )
     from fisheye.analysis_workflows.materializers.provider_epoch_behavior_summary import (
         SUPPORTED_SPEED_LEVELS,
         _track_slice,
@@ -731,8 +781,12 @@ def escape_freeze_input_from_handles(
 
     if type(relative_frame) is not ChaserRelativeFrameSourceHandle:
         raise TypeError("relative_frame must be a strict loader-minted handle.")
-    if type(provider_motion) is not ProviderTrackMotionSourceHandle:
-        raise TypeError("provider_motion must be a strict loader-minted handle.")
+    provider_mode = type(provider_motion) is ProviderTrackMotionSourceHandle
+    core_mode = type(provider_motion) is CoreMotionTrackSourceHandle
+    if not provider_mode and not core_mode:
+        raise TypeError(
+            "provider_motion must be one strict provider or core motion handle."
+        )
     if type(controller_trials) is not PreparedControllerTrials:
         raise TypeError("controller_trials must be one prepared exact successor.")
     if type(bout_response) is not PreparedGeneralizedBoutResponse:
@@ -742,7 +796,10 @@ def escape_freeze_input_from_handles(
     if type(speed_level) is not str or speed_level not in SUPPORTED_SPEED_LEVELS:
         _fail(f"speed_level must be one of {SUPPORTED_SPEED_LEVELS!r}.")
     relative_frame.assert_current()
-    provider_motion.assert_current()
+    if provider_mode:
+        provider_motion.assert_current()
+    else:
+        provider_motion.assert_verified()
     if relative_frame.analysis_zarr_path != provider_motion.analysis_zarr_path:
         _fail("Escape/freeze sources do not belong to one exact archive.")
     if not (
@@ -764,15 +821,46 @@ def escape_freeze_input_from_handles(
         or relative_source["manifest_sha256"] != relative_frame.manifest_sha256
         or motion_source["run_path"] != provider_motion.run_path
         or motion_source["manifest_sha256"]
-        != provider_motion.provider_manifest_sha256
+        != (
+            provider_motion.provider_manifest_sha256
+            if provider_mode
+            else provider_motion.source_manifest_sha256
+        )
         or bout_response.manifest["sources"]["controller_trial_payload_sha256"]
         != controller_trials.payload_digest
     ):
         _fail("Escape/freeze dependency binding is stale or mixed across sources.")
-    rows = _track_slice(provider_motion, track_id=track_id)
-    provider_frames = np.asarray(
-        provider_motion.source_acquisition_frame_index[rows], dtype=np.int64
-    )
+    if core_mode:
+        core_envelope = relative_frame.context.get("core_authority")
+        core_record = (
+            core_envelope.get("record") if isinstance(core_envelope, Mapping) else None
+        )
+        response_core = bout_response.manifest["sources"].get("core_authority")
+        if (
+            not isinstance(core_record, Mapping)
+            or not isinstance(response_core, Mapping)
+            or core_record.get("core_authority_roster_sha256")
+            != provider_motion.core_authority_roster_sha256
+            or response_core.get("core_authority_roster_sha256")
+            != provider_motion.core_authority_roster_sha256
+            or core_record.get("core_motion", {}).get("track_id")
+            != provider_motion.track_id
+            or provider_motion.track_id != track_id
+        ):
+            _fail("Escape/freeze dependencies bind different core authority.")
+    if provider_mode:
+        rows = _track_slice(provider_motion, track_id=track_id)
+        provider_frames = np.asarray(
+            provider_motion.source_acquisition_frame_index[rows], dtype=np.int64
+        )
+        motion_manifest_sha256 = provider_motion.provider_manifest_sha256
+    else:
+        rows = slice(0, provider_motion.sample_count)
+        provider_frames = np.asarray(
+            provider_motion.array("source_acquisition_frame_index"),
+            dtype=np.int64,
+        )
+        motion_manifest_sha256 = provider_motion.source_manifest_sha256
     acquisition_matrix = relative_frame.base_frame_chaser("acquisition_frame_id")
     timestamp_matrix = relative_frame.base_frame_chaser("timestamp_ns")
     timestamp_valid_matrix = relative_frame.base_frame_chaser("timestamp_valid")
@@ -783,17 +871,43 @@ def escape_freeze_input_from_handles(
     ):
         _fail("Relative-frame acquisition/timing evidence differs across chasers.")
     relative_frames = np.asarray(acquisition_matrix[:, 0], dtype=np.int64)
-    provider_rows_by_relative, provider_present, provider_projection = (
-        exact_provider_frame_projection(provider_frames, relative_frames)
-    )
+    if provider_mode:
+        provider_rows_by_relative, provider_present, provider_projection = (
+            exact_provider_frame_projection(provider_frames, relative_frames)
+        )
+    else:
+        provider_rows_by_relative, provider_present, provider_projection = (
+            exact_core_motion_frame_projection(
+                provider_frames,
+                relative_frames,
+                core_authority_roster_sha256=(
+                    provider_motion.core_authority_roster_sha256
+                ),
+            )
+        )
     try:
-        source_speed = np.asarray(
-            provider_motion.array(f"speed_{speed_level}_mm")[rows],
-            dtype=np.float64,
-        )
-        source_linear_valid = np.asarray(
-            provider_motion.array("linear_sample_valid")[rows], dtype=bool
-        )
+        if provider_mode:
+            source_speed = np.asarray(
+                provider_motion.array(f"speed_{speed_level}_mm")[rows],
+                dtype=np.float64,
+            )
+            source_linear_valid = np.asarray(
+                provider_motion.array("linear_sample_valid")[rows], dtype=bool
+            )
+        else:
+            core_speed_path = {
+                "filtered": "movement/speed/filtered/mm",
+                "smoothed": "movement/speed/smoothed/mm",
+            }.get(speed_level)
+            if core_speed_path is None:
+                _fail("Core motion supports only filtered or smoothed physical speed.")
+            source_speed = np.asarray(
+                provider_motion.array(core_speed_path),
+                dtype=np.float64,
+            )
+            source_linear_valid = np.asarray(
+                provider_motion.array("sample_valid"), dtype=bool
+            )
     except KeyError as exc:
         raise EscapeFreezeSuccessorError(
             f"Provider motion lacks required speed level {speed_level!r}."
@@ -812,7 +926,7 @@ def escape_freeze_input_from_handles(
     return EscapeFreezeInput(
         recording_id=relative_frame.recording_id,
         source_motion_run_path=provider_motion.run_path,
-        source_motion_manifest_sha256=provider_motion.provider_manifest_sha256,
+        source_motion_manifest_sha256=motion_manifest_sha256,
         source_speed_level=speed_level,
         source_motion_frame_projection=provider_projection,
         controller_trials=controller_trials,
@@ -821,9 +935,7 @@ def escape_freeze_input_from_handles(
         n_chasers=relative_frame.n_chasers,
         acquisition_frame_id_by_frame=relative_frames,
         timestamp_ns_by_frame=np.asarray(timestamp_matrix[:, 0], dtype=np.int64),
-        timestamp_valid_by_frame=np.asarray(
-            timestamp_valid_matrix[:, 0], dtype=bool
-        ),
+        timestamp_valid_by_frame=np.asarray(timestamp_valid_matrix[:, 0], dtype=bool),
         speed_mm_s_by_frame=speed,
         speed_valid_by_frame=linear_valid & np.isfinite(speed),
         chaser_identity_code=relative_frame.base_array("chaser_identity_code"),
@@ -832,6 +944,9 @@ def escape_freeze_input_from_handles(
             dtype=np.float64,
         ),
         distance_valid=relative_frame.base_array("relative_physical_valid"),
+        source_core_authority=(
+            core_motion_dependency_record(provider_motion) if core_mode else None
+        ),
         escape_speed_threshold_mm_s=escape_speed_threshold_mm_s,
         high_turn_threshold_deg=high_turn_threshold_deg,
         freeze_speed_threshold_mm_s=freeze_speed_threshold_mm_s,

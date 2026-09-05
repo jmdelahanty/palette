@@ -46,6 +46,11 @@ def test_core_mode_uses_only_core_preparation(monkeypatch, tmp_path) -> None:
         calls.append({"positional": positional, "keywords": keywords})
         return bound
 
+    monkeypatch.setattr(
+        cli,
+        "read_core_authority_roster",
+        lambda *args, **kwargs: {"record_sha256": "a" * 64},
+    )
     monkeypatch.setattr(cli, "prepare_core_proxy_chaser_relative_frame", core_prepare)
     monkeypatch.setattr(
         cli,
@@ -71,6 +76,11 @@ def test_core_mode_never_falls_back_after_failure(monkeypatch, tmp_path) -> None
     args = _core_args(tmp_path)
     monkeypatch.setattr(
         cli,
+        "read_core_authority_roster",
+        lambda *args, **kwargs: {"record_sha256": "a" * 64},
+    )
+    monkeypatch.setattr(
+        cli,
         "prepare_core_proxy_chaser_relative_frame",
         lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("core blocked")),
     )
@@ -89,6 +99,11 @@ def test_core_mode_rejects_legacy_body_argument_before_reading(
 ) -> None:
     args = _core_args(tmp_path)
     args.body_frame_run = "legacy-body"
+    monkeypatch.setattr(
+        cli,
+        "read_core_authority_roster",
+        lambda *args, **kwargs: pytest.fail("roster must not be read"),
+    )
     monkeypatch.setattr(
         cli,
         "prepare_core_proxy_chaser_relative_frame",

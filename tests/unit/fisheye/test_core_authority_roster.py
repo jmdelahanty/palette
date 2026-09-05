@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ from fisheye.analysis_workflows.core_authority_roster import (
     build_core_authority_roster,
     build_subject_body_frame_source_binding,
     compare_bout_authority_identities,
+    selected_core_track_id_from_roster,
     validate_bout_authority_identity,
     validate_core_authority_consumption_receipt,
     validate_core_authority_roster,
@@ -32,7 +34,9 @@ from fisheye.analysis_workflows.core_motion_source_handle import (
     CoreMotionSourceHandleError,
     CoreMotionTrackSourceHandle,
     bind_core_motion_track_source_handle,
+    core_motion_dependency_record,
     require_core_motion_track_source_handle,
+    validate_core_motion_dependency_record,
 )
 from fisheye.analysis_workflows.core_subject_body_frame_source_handle import (
     CoreSubjectBodyFrameSourceHandle,
@@ -156,6 +160,28 @@ def test_core_authority_roster_rejects_nested_tamper(tmp_path: Path) -> None:
         validate_core_authority_roster(tampered)
 
 
+def test_shared_roster_reader_requires_the_frozen_digest(tmp_path: Path) -> None:
+    roster = build_core_authority_roster(
+        recording_id="recording-a",
+        analysis_zarr=tmp_path / "recording-a.zarr",
+        execution_report_binding=_report_binding(tmp_path),
+        capability_bindings=_capability_bindings(tmp_path),
+    )
+    path = tmp_path / "core-authority-roster.json"
+    path.write_text(json.dumps(roster), encoding="utf-8")
+
+    observed = roster_module.read_core_authority_roster(
+        path,
+        expected_record_sha256=roster["record_sha256"],
+    )
+    assert observed["record_sha256"] == roster["record_sha256"]
+    with pytest.raises(CoreAuthorityRosterError, match="differs from the frozen task"):
+        roster_module.read_core_authority_roster(
+            path,
+            expected_record_sha256="f" * 64,
+        )
+
+
 def test_paradigm_consumption_receipt_names_one_roster_and_track(
     tmp_path: Path,
 ) -> None:
@@ -219,6 +245,65 @@ def test_paradigm_consumption_receipt_rejects_missing_join_authority(
             required_capabilities=("kinematics_samples",),
             selected_track_id=0,
         )
+
+
+def test_selected_core_track_is_derived_from_matching_motion_and_bout_authority(
+    tmp_path: Path,
+) -> None:
+    capabilities = _capability_bindings(tmp_path)
+    capabilities["kinematics_samples"]["profile_id"] = "core_motion_physical_v2"
+    capabilities["kinematics_samples"]["source_binding"] = _sealed(
+        schema_id="fixture.kinematics_samples.source",
+        schema_version=2,
+        recording_id="recording-a",
+        zarr_path=str((tmp_path / "recording-a.zarr").resolve()),
+        tracks=[{"track_id": 7}],
+    )
+    capabilities["canonical_swim_bouts"]["source_binding"] = _sealed(
+        schema_id="fixture.canonical_swim_bouts.source",
+        schema_version=1,
+        recording_id="recording-a",
+        zarr_path=str((tmp_path / "recording-a.zarr").resolve()),
+        track_id=7,
+    )
+    roster = build_core_authority_roster(
+        recording_id="recording-a",
+        analysis_zarr=tmp_path / "recording-a.zarr",
+        execution_report_binding=_report_binding(tmp_path),
+        capability_bindings=capabilities,
+    )
+
+    assert selected_core_track_id_from_roster(roster) == 7
+
+
+def test_selected_core_track_rejects_multiple_or_mismatched_motion_tracks(
+    tmp_path: Path,
+) -> None:
+    capabilities = _capability_bindings(tmp_path)
+    capabilities["kinematics_samples"]["profile_id"] = "core_motion_physical_v2"
+    capabilities["kinematics_samples"]["source_binding"] = _sealed(
+        schema_id="fixture.kinematics_samples.source",
+        schema_version=2,
+        recording_id="recording-a",
+        zarr_path=str((tmp_path / "recording-a.zarr").resolve()),
+        tracks=[{"track_id": 7}, {"track_id": 9}],
+    )
+    capabilities["canonical_swim_bouts"]["source_binding"] = _sealed(
+        schema_id="fixture.canonical_swim_bouts.source",
+        schema_version=1,
+        recording_id="recording-a",
+        zarr_path=str((tmp_path / "recording-a.zarr").resolve()),
+        track_id=7,
+    )
+    roster = build_core_authority_roster(
+        recording_id="recording-a",
+        analysis_zarr=tmp_path / "recording-a.zarr",
+        execution_report_binding=_report_binding(tmp_path),
+        capability_bindings=capabilities,
+    )
+
+    with pytest.raises(CoreAuthorityRosterError, match="exactly one motion track"):
+        selected_core_track_id_from_roster(roster)
 
 
 def test_core_roster_is_recovered_from_one_complete_generic_bundle_member(
@@ -285,6 +370,7 @@ def _bout_identity(
     motion_scope: str = "offline",
     motion_run_path: str = "analysis/track_kinematics_runs/offline/motion-a",
     motion_manifest_sha256: str = "c" * 64,
+    track_id: int = 0,
     events: np.ndarray | None = None,
 ):
     frame_axis = np.asarray([11, 12, 13], dtype=np.int64)
@@ -311,7 +397,7 @@ def _bout_identity(
         motion_run_path=motion_run_path,
         motion_manifest_sha256=motion_manifest_sha256,
         motion_verification_sha256="e" * 64,
-        track_id=0,
+        track_id=track_id,
         track_row_start=0,
         track_row_stop=3,
         source_sample_rate_hz=30.0,
@@ -576,6 +662,13 @@ def _bound_core_motion(
     frames = np.asarray([11, 12, 13], dtype=np.int64)
     positions = np.asarray([[1.0, 2.0], [2.0, 3.0], [4.0, 5.0]], dtype=np.float32)
     transition_valid = np.asarray([False, True, True], dtype=bool)
+    filtered_speed = np.asarray([np.nan, 10.0, 12.0], dtype=np.float32)
+    filtered_path = np.asarray([np.nan, 0.3, 0.4], dtype=np.float32)
+    smoothed_speed = np.asarray([np.nan, 9.0, 11.0], dtype=np.float32)
+    smoothed_path = np.asarray([np.nan, 0.25, 0.35], dtype=np.float32)
+    heading = np.asarray([0.0, 10.0, 20.0], dtype=np.float32)
+    smoothed_heading = np.asarray([0.0, 9.0, 19.0], dtype=np.float32)
+    heading_usable = np.ones(3, dtype=bool)
     source_instances = np.zeros(
         frames.size,
         dtype=np.dtype([("valid", "?"), ("instance_key", "<u8")]),
@@ -617,6 +710,34 @@ def _bound_core_motion(
             ],
             "itemsize": source_instances.dtype.itemsize,
         },
+        "movement/speed/filtered/mm": {
+            "shape": list(filtered_speed.shape),
+            "dtype": filtered_speed.dtype.str,
+        },
+        "movement/speed/filtered/frame_path_distance_mm": {
+            "shape": list(filtered_path.shape),
+            "dtype": filtered_path.dtype.str,
+        },
+        "movement/speed/smoothed/mm": {
+            "shape": list(smoothed_speed.shape),
+            "dtype": smoothed_speed.dtype.str,
+        },
+        "movement/speed/smoothed/frame_path_distance_mm": {
+            "shape": list(smoothed_path.shape),
+            "dtype": smoothed_path.dtype.str,
+        },
+        "heading_degrees": {
+            "shape": list(heading.shape),
+            "dtype": heading.dtype.str,
+        },
+        "smoothed_heading_degrees": {
+            "shape": list(smoothed_heading.shape),
+            "dtype": smoothed_heading.dtype.str,
+        },
+        "heading_usable": {
+            "shape": list(heading_usable.shape),
+            "dtype": heading_usable.dtype.str,
+        },
     }
     capabilities = _capability_bindings(tmp_path)
     motion_source = _sealed(
@@ -648,6 +769,16 @@ def _bound_core_motion(
             "payload_sha256"
         ],
     }
+    bout_source_binding = _sealed(
+        schema_id="fixture.canonical_swim_bouts.source",
+        schema_version=1,
+        recording_id="recording-a",
+        zarr_path=str((tmp_path / "recording-a.zarr").resolve()),
+        run_path="analysis/swim_bout_runs/bouts-a",
+        run_name="bouts-a",
+        track_id=7,
+    )
+    capabilities["canonical_swim_bouts"]["source_binding"] = bout_source_binding
     if body_publication is None:
         body_publication = _body_publication()
     capabilities[SUBJECT_BODY_FRAME_CAPABILITY] = {
@@ -674,6 +805,21 @@ def _bound_core_motion(
         "sample_valid": _FakeArray(np.ones(3, dtype=bool)),
         "position_finite": _FakeArray(np.ones(3, dtype=bool)),
         "source_instance_key": _FakeArray(source_instances),
+        "movement": {
+            "speed": {
+                "filtered": {
+                    "mm": _FakeArray(filtered_speed),
+                    "frame_path_distance_mm": _FakeArray(filtered_path),
+                },
+                "smoothed": {
+                    "mm": _FakeArray(smoothed_speed),
+                    "frame_path_distance_mm": _FakeArray(smoothed_path),
+                },
+            }
+        },
+        "heading_degrees": _FakeArray(heading),
+        "smoothed_heading_degrees": _FakeArray(smoothed_heading),
+        "heading_usable": _FakeArray(heading_usable),
     }
     return BoundCoreMotionAndBouts(
         _verification_seal=roster_module._BOUND_CORE_MOTION_SEAL,
@@ -683,8 +829,10 @@ def _bound_core_motion(
             binding=motion_source,
             run_group={"tracks": {"id_7": track_group}},
         ),
-        bouts=SimpleNamespace(),
-        bout_identities={7: _bout_identity(tmp_path)},
+        bouts=SimpleNamespace(
+            bout_sources={7: SimpleNamespace(binding=bout_source_binding)}
+        ),
+        bout_identities={7: _bout_identity(tmp_path, track_id=7)},
     )
 
 
@@ -713,8 +861,51 @@ def test_core_motion_handle_is_resolver_minted_and_receipt_bound(
     assert np.array_equal(handle.frame_indices, np.asarray([11, 12, 13]))
     assert handle.positions_mm.flags.writeable is False
     assert handle.consumption_receipt["selected_track_id"] == 7
+    dependency = core_motion_dependency_record(handle)
+    assert dependency["core_authority_roster_sha256"] == bound.roster_sha256
+    assert dependency["motion_run_path"] == handle.run_path
+    assert dependency["swim_bout_run_path"] == "analysis/swim_bout_runs/bouts-a"
+    assert dependency["track_id"] == 7
+    assert (
+        validate_core_motion_dependency_record(
+            dependency,
+            roster=bound.roster,
+        )["record_sha256"]
+        == dependency["record_sha256"]
+    )
     with pytest.raises(KeyError, match="not selected"):
         handle.array("latest")
+
+
+def test_core_motion_dependency_rejects_self_consistent_incomplete_receipt(
+    tmp_path: Path,
+) -> None:
+    bound = _bound_core_motion(tmp_path)
+    handle = bind_core_motion_track_source_handle(
+        bound,
+        consumer_id="goodbatbadbat.chaser_extension_v1",
+        required_capabilities=(
+            CROSS_GRAIN_JOIN_AUTHORITY,
+            "kinematics_samples",
+            "canonical_swim_bouts",
+        ),
+        track_id=7,
+    )
+    dependency = deepcopy(dict(core_motion_dependency_record(handle)))
+    receipt = dependency["core_authority_consumption_receipt"]
+    receipt["required_capabilities"].remove("canonical_swim_bouts")
+    receipt["capability_binding_digests"].pop("canonical_swim_bouts")
+    receipt_body = {
+        key: value for key, value in receipt.items() if key != "record_sha256"
+    }
+    receipt["record_sha256"] = canonical_json_sha256(receipt_body)
+    dependency_body = {
+        key: value for key, value in dependency.items() if key != "record_sha256"
+    }
+    dependency["record_sha256"] = canonical_json_sha256(dependency_body)
+
+    with pytest.raises(CoreMotionSourceHandleError, match="stale or incomplete"):
+        validate_core_motion_dependency_record(dependency)
 
 
 def test_core_motion_handle_rejects_implicit_or_mismatched_track(

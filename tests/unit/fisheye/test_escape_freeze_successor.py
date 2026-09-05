@@ -17,7 +17,12 @@ from fisheye.analysis_workflows.escape_freeze_successor import (
     EscapeFreezeSuccessorError,
     prepare_escape_freeze_successor,
 )
+from fisheye.analysis_workflows.core_motion_source_handle import (
+    bind_core_motion_track_source_handle,
+    core_motion_dependency_record,
+)
 from fisheye.analysis_workflows.generalized_bout_response_successor import (
+    exact_core_motion_frame_projection,
     prepare_generalized_bout_response_successor,
 )
 from tests.unit.fisheye.test_generalized_bout_response_successor import (
@@ -127,9 +132,7 @@ def test_speed_escape_high_turn_and_recapture_are_separate_exact_facts() -> None
     assert result.array("trial_logged_active_id_unavailable_count").tolist() == [0]
     assert result.array("trial_valid_time_s").tolist() == [4.0]
     assert result.array("trial_escape_event_rate_per_min").tolist() == [15.0]
-    assert result.array("trial_response_class_code").tolist() == [
-        RESPONSE_CLASS_ESCAPE
-    ]
+    assert result.array("trial_response_class_code").tolist() == [RESPONSE_CLASS_ESCAPE]
     assert result.manifest["policy"]["high_turn_tier"].startswith("optional")
     assert result.manifest["selector_eligible"] is False
 
@@ -143,9 +146,7 @@ def test_freeze_candidate_requires_no_speed_escape_and_coverage() -> None:
     assert result.array("trial_freeze_valid_fraction").tolist() == [1.0]
     assert result.array("trial_freeze_low_speed_fraction").tolist() == [1.0]
     assert result.array("trial_freeze_candidate").tolist() == [True]
-    assert result.array("trial_response_class_code").tolist() == [
-        RESPONSE_CLASS_FREEZE
-    ]
+    assert result.array("trial_response_class_code").tolist() == [RESPONSE_CLASS_FREEZE]
 
 
 def test_event_count_survives_unusable_recapture_trace() -> None:
@@ -165,9 +166,88 @@ def test_stale_controller_binding_is_rejected() -> None:
     source = _source()
     other_controller = replace(
         source.controller_trials,
-        manifest={**dict(source.controller_trials.manifest), "payload_digest": "f" * 64},
+        manifest={
+            **dict(source.controller_trials.manifest),
+            "payload_digest": "f" * 64,
+        },
     )
     with pytest.raises(EscapeFreezeSuccessorError, match="binding is stale"):
         prepare_escape_freeze_successor(
             replace(source, controller_trials=other_controller)
+        )
+
+
+def test_core_escape_requires_same_dependency_as_bout_response(tmp_path) -> None:
+    from tests.unit.fisheye.test_core_authority_roster import _bound_core_motion
+
+    provider_source = _source()
+    bound = _bound_core_motion(tmp_path)
+    handle = bind_core_motion_track_source_handle(
+        bound,
+        consumer_id="goodbatbadbat.composable_chaser_successors_v1",
+        required_capabilities=(
+            "cross_grain_join_authority",
+            "kinematics_samples",
+            "canonical_swim_bouts",
+        ),
+        track_id=7,
+    )
+    _rows, _present, projection = exact_core_motion_frame_projection(
+        np.arange(100, 105, dtype=np.int64),
+        np.arange(100, 105, dtype=np.int64),
+        core_authority_roster_sha256=handle.core_authority_roster_sha256,
+    )
+    dependency = core_motion_dependency_record(handle)
+    controller = replace(
+        provider_source.controller_trials,
+        recording_id=handle.recording_id,
+    )
+    bout_input = replace(
+        _bout_source(),
+        recording_id=handle.recording_id,
+        source_controller_trial_payload_sha256=controller.payload_digest,
+        controller_trial_row_id=controller.array("trial_row_id_by_source_row"),
+        controller_trial_envelope_row_id=controller.array(
+            "trial_envelope_row_id_by_source_row"
+        ),
+        controller_trial_gap_reason_code=controller.array(
+            "trial_gap_reason_code_by_source_row"
+        ),
+        source_motion_run_path=handle.run_path,
+        source_motion_manifest_sha256=handle.source_manifest_sha256,
+        source_swim_bout_run_path=dependency["swim_bout_run_path"],
+        source_swim_bout_lineage_sha256=dependency["swim_bout_source_binding_sha256"],
+        source_motion_frame_projection=projection,
+        source_core_authority=dependency,
+    )
+    core_bout = prepare_generalized_bout_response_successor(bout_input)
+    core_source = replace(
+        provider_source,
+        recording_id=handle.recording_id,
+        controller_trials=controller,
+        source_motion_run_path=handle.run_path,
+        source_motion_manifest_sha256=handle.source_manifest_sha256,
+        source_motion_frame_projection=projection,
+        bout_response=core_bout,
+        source_core_authority=dependency,
+    )
+
+    result = prepare_escape_freeze_successor(core_source)
+
+    assert (
+        result.manifest["sources"]["core_authority"]["record_sha256"]
+        == dependency["record_sha256"]
+    )
+    with pytest.raises(
+        EscapeFreezeSuccessorError,
+        match="bout-response core authorities differ",
+    ):
+        prepare_escape_freeze_successor(
+            replace(
+                core_source,
+                bout_response=replace(
+                    provider_source.bout_response,
+                    recording_id=handle.recording_id,
+                ),
+            )
         )

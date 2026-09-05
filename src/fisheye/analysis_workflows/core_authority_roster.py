@@ -14,6 +14,7 @@ normalized authority record, including the selected event payload.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import re
 from types import MappingProxyType
@@ -31,6 +32,7 @@ from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import
     CANONICAL_SWIM_BOUTS_CAPABILITY,
     CORE_BEHAVIOR_CAPABILITY_KEYS,
     CROSS_GRAIN_JOIN_AUTHORITY,
+    KINEMATICS_SAMPLES_CAPABILITY,
     SUBJECT_BODY_FRAME_CAPABILITY,
     SUBJECT_BODY_FRAME_SOURCE_PROFILE_ID,
 )
@@ -411,6 +413,84 @@ def validate_core_authority_roster(value: object) -> Mapping[str, Any]:
     if rebuilt != record:
         _fail("Core authority roster does not normalize to its sealed identity.")
     return MappingProxyType(record)
+
+
+def read_core_authority_roster(
+    path: str | Path,
+    *,
+    expected_record_sha256: str,
+) -> Mapping[str, Any]:
+    """Read one exact persisted roster through the shared validator."""
+
+    source = Path(path).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"Core-authority roster does not exist: {source}")
+    try:
+        value = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CoreAuthorityRosterError(
+            f"Cannot read strict core-authority roster JSON from {source}: {exc}"
+        ) from exc
+    roster = validate_core_authority_roster(value)
+    expected = _digest(
+        expected_record_sha256,
+        label="expected core-authority roster digest",
+    )
+    if roster["record_sha256"] != expected:
+        _fail("Core-authority roster digest differs from the frozen task.")
+    return roster
+
+
+def selected_core_track_id_from_roster(value: object) -> int:
+    """Return the sole motion/bout track selected by one validated roster.
+
+    The full-rate core profile currently binds one canonical swim-bout source.
+    A paradigm planner may therefore derive its track identity from that
+    authority only when the motion inventory contains exactly that same sole
+    track.  This is a static plan-time projection; execution still reopens the
+    roster through :func:`bind_core_motion_and_bouts_from_roster`.
+    """
+
+    roster = validate_core_authority_roster(value)
+    capabilities = roster["capability_bindings"]
+    motion = _mapping(
+        capabilities[KINEMATICS_SAMPLES_CAPABILITY],
+        label="core motion capability",
+    )
+    if motion.get("profile_id") != CORE_MOTION_SOURCE_SURFACE_PROFILE_ID:
+        _fail("Paradigm motion consumers require the complete core-motion v2 profile.")
+    motion_source = _mapping(
+        motion.get("source_binding"),
+        label="core motion source binding",
+    )
+    raw_tracks = motion_source.get("tracks")
+    if not isinstance(raw_tracks, list):
+        _fail("Core motion source has no closed track inventory.")
+    track_ids = tuple(
+        _int(
+            _mapping(record, label="core motion track record").get("track_id"),
+            label="core motion track ID",
+        )
+        for record in raw_tracks
+    )
+    bouts = _mapping(
+        capabilities[CANONICAL_SWIM_BOUTS_CAPABILITY],
+        label="canonical swim-bout capability",
+    )
+    bout_source = _mapping(
+        bouts.get("source_binding"),
+        label="canonical swim-bout source binding",
+    )
+    selected = _int(
+        bout_source.get("track_id"),
+        label="canonical swim-bout track ID",
+    )
+    if track_ids != (selected,):
+        _fail(
+            "The core roster must bind exactly one motion track and the same "
+            "canonical swim-bout track before a paradigm planner can select it."
+        )
+    return selected
 
 
 @dataclass(frozen=True)
@@ -1185,6 +1265,8 @@ __all__ = [
     "build_subject_body_frame_source_binding",
     "compare_bout_authority_identities",
     "core_roster_bout_identity",
+    "read_core_authority_roster",
+    "selected_core_track_id_from_roster",
     "validate_bout_authority_identity",
     "validate_core_authority_consumption_receipt",
     "validate_core_authority_roster",
