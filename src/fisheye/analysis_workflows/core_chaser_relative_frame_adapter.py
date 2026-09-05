@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -43,13 +44,21 @@ from .chaser_relative_frame_storage import (
     ChaserRelativeFramePublicationContext,
     PreparedChaserRelativeFrame,
     prepare_chaser_relative_frame,
+    validate_prepared_chaser_relative_frame,
 )
+from .chaser_proxy_relative_frame_adapter import (
+    PreparedProxyRelativeFrame,
+    prepare_proxy_relative_frame,
+)
+from .core_authority_roster import bind_core_motion_and_bouts_from_roster
 from .core_motion_source_handle import (
     CoreMotionTrackSourceHandle,
+    bind_core_motion_track_source_handle,
     require_core_motion_track_source_handle,
 )
 from .core_subject_body_frame_source_handle import (
     CoreSubjectBodyFrameSourceHandle,
+    bind_core_subject_body_frame_source_handle,
     require_core_subject_body_frame_source_handle,
 )
 from .provider_recording_timing_authority import (
@@ -182,15 +191,14 @@ def _project_core_body_frame(
     """Join canonical body observations by exact frame and instance identity."""
 
     source_instances = np.asarray(core.array("source_instance_key"))
-    if (
-        source_instances.shape != (core.sample_count,)
-        or source_instances.dtype.names != ("valid", "instance_key")
-    ):
+    if source_instances.shape != (
+        core.sample_count,
+    ) or source_instances.dtype.names != ("valid", "instance_key"):
         _fail("Core track has no canonical nullable source-instance identity.")
     query_valid = np.asarray(source_instances["valid"], dtype=bool)[core_rows]
-    query_instances = np.asarray(
-        source_instances["instance_key"], dtype=np.uint64
-    )[core_rows]
+    query_instances = np.asarray(source_instances["instance_key"], dtype=np.uint64)[
+        core_rows
+    ]
     if np.any((~query_valid) & (query_instances != 0)):
         _fail("Core track nullable instance keys violate canonical zero fill.")
 
@@ -299,9 +307,7 @@ def _project_core_body_frame(
             "source_acquisition_frame_index",
             "source_instance_key",
         ],
-        "cardinality": (
-            "zero_or_one_motion_row_to_zero_or_one_body_observation"
-        ),
+        "cardinality": ("zero_or_one_motion_row_to_zero_or_one_body_observation"),
         "requires_source_instance_key_valid": True,
         "source_acquisition_frame_sha256": array_values_sha256(source_frames),
         "source_instance_key_sha256": array_values_sha256(source_instances),
@@ -310,9 +316,7 @@ def _project_core_body_frame(
         ),
         "query_instance_key_sha256": array_values_sha256(query_instances),
         "query_instance_key_valid_sha256": array_values_sha256(query_valid),
-        "projected_body_source_row_index_sha256": array_values_sha256(
-            body_source_rows
-        ),
+        "projected_body_source_row_index_sha256": array_values_sha256(body_source_rows),
         "source_body_row_count": body.row_count,
         "relative_frame_count": int(query_keys.size),
         "query_instance_key_invalid_count": int(np.count_nonzero(~query_valid)),
@@ -328,6 +332,139 @@ def _project_core_body_frame(
         "neighboring_body_frame_fallback": "prohibited",
     }
     return projected, projection_record
+
+
+@dataclass(frozen=True)
+class _ChaserFactsView:
+    """Validated chaser-only facts from a persisted or transient carrier."""
+
+    analysis_zarr_path: Path
+    run_path: str
+    recording_id: str
+    selector_eligible: bool
+    n_frames: int
+    n_chasers: int
+    n_rows: int
+    run_manifest: Mapping[str, Any]
+    source_authorities: Mapping[str, Any]
+    context: Mapping[str, Any]
+    identity_registries: Mapping[str, Any]
+    base_arrays: Mapping[str, np.ndarray]
+    manifest_sha256: str
+    verification_digest: str
+
+    def base_frame_chaser(self, name: str) -> np.ndarray:
+        try:
+            values = np.asarray(self.base_arrays[name])
+        except KeyError as exc:
+            raise CoreChaserRelativeFrameAdapterError(
+                f"Chaser facts lack required array {name!r}."
+            ) from exc
+        if values.ndim == 0 or values.shape[0] != self.n_rows:
+            _fail(f"Chaser facts array has another flat row axis: {name!r}.")
+        return values.reshape((self.n_frames, self.n_chasers) + values.shape[1:])
+
+
+def _facts_from_persisted_source(
+    source: ChaserRelativeFrameSourceHandle,
+) -> _ChaserFactsView:
+    chaser = require_chaser_relative_frame_source_handle(source)
+    return _ChaserFactsView(
+        analysis_zarr_path=chaser.analysis_zarr_path,
+        run_path=chaser.run_path,
+        recording_id=chaser.recording_id,
+        selector_eligible=chaser.selector_eligible,
+        n_frames=chaser.n_frames,
+        n_chasers=chaser.n_chasers,
+        n_rows=chaser.n_rows,
+        run_manifest=chaser.run_manifest,
+        source_authorities=chaser.source_authorities,
+        context=chaser.context,
+        identity_registries=chaser.identity_registries,
+        base_arrays=chaser.base_arrays,
+        manifest_sha256=chaser.manifest_sha256,
+        verification_digest=chaser.verification_digest,
+    )
+
+
+def _facts_from_prepared_proxy(
+    source: PreparedProxyRelativeFrame,
+    *,
+    analysis_zarr: str | Path,
+) -> _ChaserFactsView:
+    if type(source) is not PreparedProxyRelativeFrame:
+        raise TypeError("source must be one validated PreparedProxyRelativeFrame.")
+    prepared = source.prepared
+    validation = validate_prepared_chaser_relative_frame(prepared)
+    if prepared.body_arrays is not None or any(
+        value is not None
+        for value in (
+            source.body_frame_run_path,
+            source.body_frame_manifest_sha256,
+            source.body_frame_projection_sha256,
+            source.body_frame_projection_record,
+        )
+    ):
+        _fail("A transient proxy carrier must omit legacy body-frame geometry.")
+    manifest = _mapping(prepared.manifest, label="prepared proxy manifest")
+    context = _mapping(manifest.get("context"), label="prepared proxy context")
+    publication = _context_record(
+        context,
+        "acquisition_projection_publication",
+    )
+    assert publication is not None
+    expected_proxy = {
+        "run_path": source.proxy_run_path,
+        "manifest_sha256": source.proxy_manifest_sha256,
+    }
+    observed_proxy = {
+        "run_path": publication.get("run_path"),
+        "manifest_sha256": publication.get("manifest_sha256"),
+    }
+    if observed_proxy != expected_proxy:
+        _fail("Prepared proxy facts bind another proxy publication.")
+    if (
+        validation.get("payload_digest") != prepared.payload_digest
+        or manifest.get("selector_eligible") is not False
+        or manifest.get("selection") != "none"
+    ):
+        _fail("Prepared proxy facts are not one validated selector-ineligible payload.")
+    dimensions = _mapping(manifest.get("dimensions"), label="prepared proxy dimensions")
+    n_frames = dimensions.get("n_frames")
+    n_chasers = dimensions.get("n_chasers")
+    n_rows = dimensions.get("n_rows")
+    if (
+        type(n_frames) is not int
+        or type(n_chasers) is not int
+        or type(n_rows) is not int
+        or n_frames < 0
+        or n_chasers <= 0
+        or n_rows != n_frames * n_chasers
+        or n_rows != prepared.dimensions.n_rows
+    ):
+        _fail("Prepared proxy frame/chaser dimensions are inconsistent.")
+    return _ChaserFactsView(
+        analysis_zarr_path=Path(analysis_zarr).expanduser().resolve(),
+        run_path=source.proxy_run_path,
+        recording_id=str(manifest["recording_id"]),
+        selector_eligible=False,
+        n_frames=n_frames,
+        n_chasers=n_chasers,
+        n_rows=n_rows,
+        run_manifest=manifest,
+        source_authorities=_mapping(
+            manifest.get("source_authorities"),
+            label="prepared proxy source authorities",
+        ),
+        context=context,
+        identity_registries=_mapping(
+            manifest.get("identity_registries"),
+            label="prepared proxy identity registries",
+        ),
+        base_arrays=prepared.base_arrays,
+        manifest_sha256=source.proxy_manifest_sha256,
+        verification_digest=prepared.payload_digest,
+    )
 
 
 @dataclass(frozen=True)
@@ -354,16 +491,15 @@ class PreparedCoreChaserRelativeFrame:
         }
 
 
-def prepare_core_chaser_relative_frame(
+def _prepare_core_chaser_relative_frame(
     core_motion: CoreMotionTrackSourceHandle,
     core_body_frame: CoreSubjectBodyFrameSourceHandle,
-    chaser_source: ChaserRelativeFrameSourceHandle,
+    chaser: _ChaserFactsView,
 ) -> PreparedCoreChaserRelativeFrame:
-    """Prepare a core-bound candidate for the existing relative-frame publisher."""
+    """Prepare a core-bound candidate from one validated chaser-facts view."""
 
     core = require_core_motion_track_source_handle(core_motion)
     body = require_core_subject_body_frame_source_handle(core_body_frame)
-    chaser = require_chaser_relative_frame_source_handle(chaser_source)
     if chaser.selector_eligible is not False:
         _fail("Core rebinding requires one exact selector-ineligible chaser source.")
     if core.analysis_zarr_path != chaser.analysis_zarr_path:
@@ -373,8 +509,7 @@ def prepare_core_chaser_relative_frame(
     if (
         body.analysis_zarr_path != core.analysis_zarr_path
         or body.recording_id != core.recording_id
-        or body.core_authority_roster_sha256
-        != core.core_authority_roster_sha256
+        or body.core_authority_roster_sha256 != core.core_authority_roster_sha256
     ):
         _fail("Core motion and subject body frame bind different authority rosters.")
     if body.consumption_receipt != core.consumption_receipt:
@@ -772,6 +907,105 @@ def prepare_core_chaser_relative_frame(
     )
 
 
+def prepare_core_chaser_relative_frame(
+    core_motion: CoreMotionTrackSourceHandle,
+    core_body_frame: CoreSubjectBodyFrameSourceHandle,
+    chaser_source: ChaserRelativeFrameSourceHandle,
+) -> PreparedCoreChaserRelativeFrame:
+    """Rebind one already-published chaser carrier to selected core authority."""
+
+    return _prepare_core_chaser_relative_frame(
+        core_motion,
+        core_body_frame,
+        _facts_from_persisted_source(chaser_source),
+    )
+
+
+def prepare_core_chaser_relative_frame_from_proxy(
+    core_motion: CoreMotionTrackSourceHandle,
+    core_body_frame: CoreSubjectBodyFrameSourceHandle,
+    proxy_source: PreparedProxyRelativeFrame,
+    *,
+    analysis_zarr: str | Path,
+) -> PreparedCoreChaserRelativeFrame:
+    """Publish core-bound geometry directly from transient proxy chaser facts.
+
+    The ordinary proxy adapter performs the established chaser coordinate and
+    controller-state extraction in memory, without publishing its historical
+    fish/body result.  This boundary consumes only those chaser facts and
+    substitutes the roster-selected motion and body authorities before the one
+    existing relative-frame publisher is invoked.
+    """
+
+    return _prepare_core_chaser_relative_frame(
+        core_motion,
+        core_body_frame,
+        _facts_from_prepared_proxy(proxy_source, analysis_zarr=analysis_zarr),
+    )
+
+
+def prepare_core_proxy_chaser_relative_frame(
+    analysis_zarr: str | Path,
+    *,
+    core_authority_roster: Mapping[str, Any],
+    core_track_id: int,
+    proxy_run_name: str,
+    analysis_profile_path: str | Path,
+    expected_recording_id: str | None = None,
+    expected_proxy_manifest_sha256: str | None = None,
+    expected_subject_metadata_sha256: str | None = None,
+    expected_timing_authority_sha256: str | None = None,
+) -> PreparedCoreChaserRelativeFrame:
+    """Resolve core and proxy sources, then prepare one canonical candidate.
+
+    Proxy coordinate/controller extraction remains in memory. Only the final
+    core-bound payload reaches the existing atomic relative-frame publisher.
+    """
+
+    archive = Path(analysis_zarr).expanduser().resolve()
+    bound = bind_core_motion_and_bouts_from_roster(core_authority_roster)
+    if Path(bound.roster["analysis_zarr"]) != archive:
+        _fail("Core authority roster belongs to another analysis Zarr.")
+    if (
+        expected_recording_id is not None
+        and bound.roster["recording_id"] != expected_recording_id
+    ):
+        _fail("Core authority roster belongs to another requested recording.")
+    required_capabilities = (
+        CROSS_GRAIN_JOIN_AUTHORITY,
+        KINEMATICS_SAMPLES_CAPABILITY,
+        SUBJECT_BODY_FRAME_CAPABILITY,
+    )
+    motion = bind_core_motion_track_source_handle(
+        bound,
+        consumer_id=CORE_CHASER_RELATIVE_CONSUMER_ID,
+        required_capabilities=required_capabilities,
+        track_id=core_track_id,
+    )
+    body = bind_core_subject_body_frame_source_handle(
+        bound,
+        consumer_id=CORE_CHASER_RELATIVE_CONSUMER_ID,
+        required_capabilities=required_capabilities,
+        track_id=core_track_id,
+    )
+    proxy = prepare_proxy_relative_frame(
+        archive,
+        proxy_run_name=proxy_run_name,
+        analysis_profile_path=analysis_profile_path,
+        expected_recording_id=expected_recording_id,
+        expected_proxy_manifest_sha256=expected_proxy_manifest_sha256,
+        expected_subject_metadata_sha256=expected_subject_metadata_sha256,
+        expected_timing_authority_sha256=expected_timing_authority_sha256,
+        body_frame_run_name=None,
+    )
+    return prepare_core_chaser_relative_frame_from_proxy(
+        motion,
+        body,
+        proxy,
+        analysis_zarr=archive,
+    )
+
+
 __all__ = [
     "CORE_CHASER_RELATIVE_ADAPTER_SCHEMA_ID",
     "CORE_CHASER_RELATIVE_CONSUMER_ID",
@@ -779,4 +1013,6 @@ __all__ = [
     "CoreChaserRelativeFrameAdapterError",
     "PreparedCoreChaserRelativeFrame",
     "prepare_core_chaser_relative_frame",
+    "prepare_core_chaser_relative_frame_from_proxy",
+    "prepare_core_proxy_chaser_relative_frame",
 ]

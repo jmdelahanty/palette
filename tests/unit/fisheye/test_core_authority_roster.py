@@ -8,6 +8,9 @@ import numpy as np
 import pytest
 
 from fisheye.analysis_workflows import core_authority_roster as roster_module
+from fisheye.analysis_workflows import (
+    core_behavior_cohort_adapter as core_cohort_module,
+)
 from fisheye.analysis_workflows.core_authority_roster import (
     BoundCoreMotionAndBouts,
     CoreAuthorityRosterError,
@@ -20,6 +23,10 @@ from fisheye.analysis_workflows.core_authority_roster import (
     validate_bout_authority_identity,
     validate_core_authority_consumption_receipt,
     validate_core_authority_roster,
+)
+from fisheye.analysis_workflows.core_behavior_cohort_adapter import (
+    core_authority_roster_from_bundle_set_member,
+    core_behavior_capability_contract,
 )
 from fisheye.analysis_workflows.core_motion_source_handle import (
     CoreMotionSourceHandleError,
@@ -214,6 +221,64 @@ def test_paradigm_consumption_receipt_rejects_missing_join_authority(
         )
 
 
+def test_core_roster_is_recovered_from_one_complete_generic_bundle_member(
+    tmp_path: Path,
+) -> None:
+    capabilities = _capability_bindings(tmp_path)
+    capabilities["kinematics_samples"]["source_binding"] = _sealed(
+        schema_id="fixture.kinematics_samples.source",
+        schema_version=2,
+        recording_id="recording-a",
+        zarr_path=str((tmp_path / "recording-a.zarr").resolve()),
+        tracks=[{"track_id": 7}],
+    )
+    receipt = _report_binding(tmp_path)
+    contract = core_behavior_capability_contract()
+    bundle_set = {
+        "bundle_profile": core_cohort_module._bundle_profile(
+            contract,
+            export_profile_id="validated_core_behavior_five_grain_v2",
+        ),
+        "capability_contract": contract,
+    }
+    capability_records = {
+        key: {
+            "state": "complete",
+            "reason_code": None,
+            "detail": None,
+            "binding": value,
+        }
+        for key, value in capabilities.items()
+    }
+    inventory = {
+        "execution_report": receipt,
+        "capability_bindings": capabilities,
+    }
+    member = {
+        "recording_id": "recording-a",
+        "analysis_zarr": str((tmp_path / "recording-a.zarr").resolve()),
+        "bundle_state": "complete",
+        "reason_code": None,
+        "bundle": {
+            "receipt_bindings": [receipt],
+            "binding_inventory_sha256": canonical_json_sha256(inventory),
+        },
+        "capabilities": capability_records,
+    }
+
+    roster = core_authority_roster_from_bundle_set_member(bundle_set, member)
+
+    assert (
+        roster["record_sha256"]
+        == build_core_authority_roster(
+            recording_id="recording-a",
+            analysis_zarr=tmp_path / "recording-a.zarr",
+            execution_report_binding=receipt,
+            capability_bindings=capabilities,
+        )["record_sha256"]
+    )
+
+
 def _bout_identity(
     tmp_path: Path,
     *,
@@ -399,7 +464,9 @@ class _FakeArray:
 
 
 class _FakeGroup(dict[str, object]):
-    def __init__(self, values: dict[str, object], *, attrs: dict[str, object] | None = None):
+    def __init__(
+        self, values: dict[str, object], *, attrs: dict[str, object] | None = None
+    ):
         super().__init__(values)
         self.attrs = {} if attrs is None else attrs
 

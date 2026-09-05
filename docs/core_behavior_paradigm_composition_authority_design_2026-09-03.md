@@ -481,8 +481,28 @@ therefore remains explicitly incomplete. It must switch atomically to the
 roster-selected motion, body, bout, and explicit track identities; the old body
 authority is not a fallback during that migration.
 
-Focused workstation validation passed 18/18 core-roster/adapter tests and
-16/16 existing chaser materializer/proxy tests. A real
+The third tranche removes the need to publish that historical intermediate in
+new core-bound work. The established proxy coordinate/controller extractor can
+now hand its validated chaser-only facts directly, in memory, to the core-bound
+adapter. Its transient fish/body calculations are ignored and are never
+published; the final payload substitutes only roster-selected motion and body
+before entering the same existing atomic `chaser_relative_frame` publisher.
+The existing materializer CLI exposes this as an explicit all-or-none core
+mode requiring an exact roster file, expected roster digest, and explicit track
+ID. Core-mode failure propagates and cannot fall back to proxy fish/body
+authority; supplying a legacy body-frame run in core mode is rejected before
+source preparation.
+
+Static admission also has one shared conversion from a generic, already
+validated full-rate core bundle member to its sealed authority roster. The
+conversion checks the installed profile and capability contract, complete
+six-capability closure, exact execution-report receipt, and binding-inventory
+digest. It reuses the roster builder rather than giving the maintained planner
+another authority grammar. Dynamic execution must still reopen that roster
+through the shared resolver before any dependent scratch write.
+
+Focused workstation validation passed 65/65 core-roster, chaser storage/source,
+proxy-adapter, and core-mode CLI tests. A real
 prepared-writer-to-atomic-materializer-to-unpatched-source-handle regression
 also proves that the optional roster context survives the existing publication
 surface with its digest intact.

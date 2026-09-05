@@ -651,6 +651,71 @@ def build_bundle_set_from_core_behavior_execution_reports(
     )
 
 
+def core_authority_roster_from_bundle_set_member(
+    bundle_set: Mapping[str, Any],
+    member: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Recover one sealed roster from an already-validated core bundle member.
+
+    This is static capability admission: it consumes only the generic sealed
+    bundle-set records and does not reopen scientific arrays. Dynamic execution
+    must pass the result to the shared roster resolver before a dependent node
+    can write scratch state.
+    """
+
+    source = _mapping(bundle_set, field_name="core bundle set")
+    profile = _mapping(source.get("bundle_profile"), field_name="bundle profile")
+    contract = core_behavior_capability_contract(CORE_BEHAVIOR_EXPORT_PROFILE_ID)
+    if _plain(profile) != _bundle_profile(
+        contract,
+        export_profile_id=CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+    ) or _plain(source.get("capability_contract")) != _plain(contract):
+        _fail("Bundle set is not the installed full-rate core-behavior profile.")
+
+    item = _mapping(member, field_name="core bundle-set member")
+    if item.get("bundle_state") != "complete" or item.get("reason_code") is not None:
+        _fail("A paradigm dependency requires one complete core bundle member.")
+    bundle = _mapping(item.get("bundle"), field_name="core member bundle")
+    receipts = list(bundle.get("receipt_bindings") or ())
+    if (
+        len(receipts) != 1
+        or receipts[0].get("role") != CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE
+    ):
+        _fail("Core member lacks one exact execution-report admission receipt.")
+    capabilities = _mapping(
+        item.get("capabilities"),
+        field_name="core member capabilities",
+    )
+    if set(capabilities) != set(CORE_BEHAVIOR_CAPABILITY_KEYS):
+        _fail("Core member capability roster is not closed.")
+    bindings: dict[str, Mapping[str, Any]] = {}
+    for capability in CORE_BEHAVIOR_CAPABILITY_KEYS:
+        record = _mapping(
+            capabilities[capability],
+            field_name=f"core capability {capability}",
+        )
+        if (
+            record.get("state") != "complete"
+            or record.get("reason_code") is not None
+            or record.get("detail") is not None
+            or not isinstance(record.get("binding"), Mapping)
+        ):
+            _fail(f"Core capability {capability!r} is not completely admitted.")
+        bindings[capability] = record["binding"]
+    inventory = {
+        "execution_report": _plain(receipts[0]),
+        "capability_bindings": _plain(bindings),
+    }
+    if canonical_json_sha256(inventory) != bundle.get("binding_inventory_sha256"):
+        _fail("Core member binding inventory digest is stale.")
+    return build_core_authority_roster(
+        recording_id=str(item["recording_id"]),
+        analysis_zarr=str(item["analysis_zarr"]),
+        execution_report_binding=receipts[0],
+        capability_bindings=bindings,
+    )
+
+
 def validate_core_behavior_bundle_set_current_sources(
     value: object,
     *,
@@ -711,6 +776,7 @@ __all__ = [
     "build_bundle_set_from_core_behavior_execution_reports",
     "canonical_swim_bout_projection_contract",
     "core_behavior_capability_contract",
+    "core_authority_roster_from_bundle_set_member",
     "subject_body_frame_projection_contract",
     "validate_core_behavior_bundle_set_current_sources",
 ]
