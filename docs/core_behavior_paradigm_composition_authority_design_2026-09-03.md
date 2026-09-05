@@ -6,6 +6,7 @@ created: 2026-09-03
 last_updated: 2026-09-05
 baseline_commit: 07db267c
 review_checkpoint_commit: afbc1d0d6af822ca7cc4e3b051cdd9bc981df80c
+composite_checkpoint_commit: 2ae7701e
 review_method: six parallel read-only Luna xhigh audits plus primary-agent synthesis
 scope: singular core-behavior authority selection, normalized validated-behavior
   exports, and chaser/moving-grating/other paradigm extensions
@@ -576,8 +577,54 @@ the shared source validator and pass the exact expected roster into reusable
 output checks, while each maintained transitive successor must project and seal
 the shared dependency. Focused workstation validation passes 160/160 tests
 across the roster/resolver, planner, ratchet, direct successors, and downstream
-analytics. Required repository CI has not yet run, and the composite export
-profile and cross-table foreign-key contract remain Track-C work.
+analytics. At that checkpoint, required repository CI had not run and the
+composite export profile and cross-table foreign-key contract remained Track-C
+work; the next checkpoint records their implementation.
+
+### Core-plus-chaser composite export checkpoint (2026-09-05)
+
+Commit `2ae7701e` installs the first composite profile without adding a cohort
+publisher, selector, manifest family, dataset layout, or reader. The profile is
+`validated_core_behavior_chaser_v1` on the existing
+`validated_behavior/v1` surface. It contains 30 tables and 27 scientific row
+projectors: the complete five-grain core suite plus the collision-checked
+chaser-only subtraction of Phase C.
+
+The per-recording composition envelope requires exactly two typed admissions:
+one complete core-workflow execution report and one exact-chaser projection
+receipt. It resolves both through their existing shared binders, requires
+full-rate core motion (`sampling_stride_frames=1`), and proves that every
+maintained chaser child names the selected core roster, track, motion, body, and
+bout identities. The old Phase-C-compatible bundle continues to use the same
+shared exact-chaser receipt resolver; no second child-receipt grammar was
+created. The existing per-recording bundle CLI and generic cohort CLI dispatch
+from the typed admission roles rather than adding a composite publisher CLI.
+
+Composition omits `provider_motion_samples`, `body_frame_samples`, the Phase-C
+`canonical_swim_bouts`, and their support projections. Core
+`kinematics_samples`, `subject_body_frame_samples`, and
+`canonical_swim_bouts` are emitted once. Chaser-relative rows bind the selected
+core motion row with a declared foreign key. Body-relative rows preserve the
+existing explicit `body_source_row_id=-1` failure evidence while projecting
+only valid observations into a nullable foreign key to
+`subject_body_frame_samples`; null keys are unconstrained using ordinary
+relational foreign-key semantics, while every present key must close exactly.
+
+The normalized bout comparator remains available for explicit migration or
+comparison work, but the maintained composite does not admit a second legacy
+bout table that would need deduplication. Its generalized bout, escape/freeze,
+and epoch descendants instead retain the selected core motion-and-bout
+dependency directly. This is stronger than claiming equality between two bout
+authorities from similar-looking rows.
+
+Focused workstation validation passes 93/93 composite, core, Phase-B,
+Phase-C, bundle, generic-writer, atomic-publisher, and lazy-reader tests. Both
+the core-only and composite profiles pass a real generic shard writer ->
+receipt-composed publisher -> unpatched installed-profile reader round trip.
+Import boundaries, the paradigm-authority ratchet, the tail-receipt ratchet,
+the Zarr-open-mode ratchet, and observed-metadata-literal checks also pass.
+Required repository CI and a real selector-ineligible composite canary remain
+pending; no production publication or selector changed at this checkpoint.
 
 ## Composition contract
 
@@ -1009,29 +1056,34 @@ inference from this static audit.
 
 ### Track C — implement a composite only after Track B
 
-- [ ] Register one explicit composite profile on `validated_behavior/v1`.
-- [ ] Add one composite bundle adapter requiring exactly one core receipt plus
+- [x] Register one explicit composite profile on `validated_behavior/v1`.
+- [x] Add one composite bundle adapter requiring exactly one core receipt plus
       a closed set of supported extension receipts per admitted member.
 - [x] Derive and seal `core_authority_roster_sha256` from the normalized core
       capability bindings.
-- [ ] Require every extension publication to name the selected roster digest.
-- [ ] Compose the complete core specs with paradigm-only extension specs using
+- [x] Require every extension publication to name the selected roster digest.
+- [x] Compose the complete core specs with paradigm-only extension specs using
       a collision-checking helper rather than dictionary overwrite.
 - [x] Implement normalized `BoutAuthorityIdentity` comparison.
-- [ ] Wire bout equality to deduplicate one table and make mismatch or missing
-      proof a typed authority conflict before scratch writes.
-- [ ] Reject duplicate table names and competing authority bindings at plan
+- [x] Publish only the roster-selected core bout table; require the maintained
+      chaser descendants to bind that exact bout dependency, so no second bout
+      authority reaches composition. Retain the normalized comparator for
+      explicit legacy migration/comparison rather than invoking it on an
+      unselected source.
+- [x] Reject duplicate table names and competing authority bindings at plan
       time.
-- [ ] Add exact foreign-key/cardinality contracts from paradigm rows to core
+- [x] Add exact foreign-key/cardinality contracts from paradigm rows to core
       rows.
-- [ ] Reproject chaser motion/body relationships against selected core rows;
+- [x] Reproject chaser motion/body relationships against selected core rows;
       do not copy `provider_motion_samples` or `body_frame_samples` into the
       composite as competing core facts.
-- [ ] Preserve manifest schema v1 and the generic publisher/reader; use a new
-      installed profile ID rather than changing Phase C in place.
-- [ ] Add real writer-to-unpatched-reader boundary coverage.
+- [x] Preserve the existing `validated_behavior/v1` manifest family and generic
+      publisher/reader; use a new installed profile ID rather than changing
+      Phase C in place.
+- [x] Add real writer-to-unpatched-reader boundary coverage.
 - [ ] Prove one representative legacy/core bout pair equal or conflict through
-      the normalized comparator.
+      the normalized comparator. This is migration evidence, not an admission
+      prerequisite for the maintained direct-core composite.
 - [ ] Validate one selector-ineligible canary before any maintained use.
 
 ### Track D — migrate maintained paradigm consumers
