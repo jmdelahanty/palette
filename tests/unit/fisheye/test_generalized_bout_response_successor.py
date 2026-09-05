@@ -14,8 +14,13 @@ from fisheye.analysis_workflows.generalized_bout_response_successor import (
     GeneralizedBoutResponseInput,
     GeneralizedBoutResponseSuccessorError,
     ROLE_CODES,
+    exact_core_motion_frame_projection,
     exact_provider_frame_projection,
     prepare_generalized_bout_response_successor,
+)
+from fisheye.analysis_workflows.core_motion_source_handle import (
+    bind_core_motion_track_source_handle,
+    core_motion_dependency_record,
 )
 
 
@@ -69,9 +74,7 @@ def _source(*, body: bool = True) -> GeneralizedBoutResponseInput:
         distance_mm=np.asarray([10.0, 8.0, 12.0, 20.0, 30.0], dtype=np.float32),
         distance_valid=np.ones(n_frames, dtype=bool),
         controller_trial_row_id=np.asarray([0, 0, 0, -1, -1], dtype=np.int64),
-        controller_trial_envelope_row_id=np.asarray(
-            [0, 0, 0, -1, -1], dtype=np.int64
-        ),
+        controller_trial_envelope_row_id=np.asarray([0, 0, 0, -1, -1], dtype=np.int64),
         controller_trial_gap_reason_code=np.zeros(n_frames, dtype=np.uint8),
         bout_id=np.asarray([101, 102], dtype=np.int64),
         bout_start_acquisition_frame_id=np.asarray([101, 103], dtype=np.int64),
@@ -107,6 +110,58 @@ def test_exact_provider_projection_rejects_nonunique_axes() -> None:
         exact_provider_frame_projection(
             np.asarray([100, 100], dtype=np.int64),
             np.asarray([100], dtype=np.int64),
+        )
+
+
+def test_core_motion_projection_requires_and_persists_one_sealed_dependency(
+    tmp_path,
+) -> None:
+    from tests.unit.fisheye.test_core_authority_roster import _bound_core_motion
+
+    bound = _bound_core_motion(tmp_path)
+    handle = bind_core_motion_track_source_handle(
+        bound,
+        consumer_id="goodbatbadbat.composable_chaser_successors_v1",
+        required_capabilities=(
+            "cross_grain_join_authority",
+            "kinematics_samples",
+            "canonical_swim_bouts",
+        ),
+        track_id=7,
+    )
+    _rows, _present, projection = exact_core_motion_frame_projection(
+        np.arange(100, 105, dtype=np.int64),
+        np.arange(100, 105, dtype=np.int64),
+        core_authority_roster_sha256=handle.core_authority_roster_sha256,
+    )
+    dependency = core_motion_dependency_record(handle)
+    source = replace(
+        _source(),
+        recording_id=handle.recording_id,
+        source_motion_run_path=handle.run_path,
+        source_motion_manifest_sha256=handle.source_manifest_sha256,
+        source_swim_bout_run_path=dependency["swim_bout_run_path"],
+        source_swim_bout_lineage_sha256=dependency["swim_bout_source_binding_sha256"],
+        source_motion_frame_projection=projection,
+        source_core_authority=dependency,
+    )
+
+    result = prepare_generalized_bout_response_successor(source)
+
+    assert (
+        result.manifest["sources"]["core_authority"]["record_sha256"]
+        == dependency["record_sha256"]
+    )
+    assert (
+        result.manifest["sources"]["core_authority"]["core_authority_roster_sha256"]
+        == handle.core_authority_roster_sha256
+    )
+    with pytest.raises(
+        GeneralizedBoutResponseSuccessorError,
+        match="lacks its sealed authority dependency",
+    ):
+        prepare_generalized_bout_response_successor(
+            replace(source, source_core_authority=None)
         )
 
 
@@ -199,7 +254,9 @@ def test_bout_on_trial_gap_retains_envelope_and_gap_reason_without_attachment() 
 
 def test_duplicate_bout_ids_are_rejected_as_signal_duplication() -> None:
     source = _source()
-    with pytest.raises(GeneralizedBoutResponseSuccessorError, match="duplicate bout IDs"):
+    with pytest.raises(
+        GeneralizedBoutResponseSuccessorError, match="duplicate bout IDs"
+    ):
         prepare_generalized_bout_response_successor(
             replace(source, bout_id=np.asarray([101, 101], dtype=np.int64))
         )
@@ -207,7 +264,9 @@ def test_duplicate_bout_ids_are_rejected_as_signal_duplication() -> None:
 
 def test_partial_body_extension_is_rejected() -> None:
     source = _source()
-    with pytest.raises(GeneralizedBoutResponseSuccessorError, match="all present or all absent"):
+    with pytest.raises(
+        GeneralizedBoutResponseSuccessorError, match="all present or all absent"
+    ):
         prepare_generalized_bout_response_successor(
             replace(source, chaser_bearing_valid=None)
         )

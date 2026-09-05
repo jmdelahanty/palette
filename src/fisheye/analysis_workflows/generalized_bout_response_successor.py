@@ -28,9 +28,14 @@ from fisheye.analysis_workflows.controller_trial_successor import (
     TRIAL_GAP_REASON_TRIAL_ID_MISMATCH,
     semantic_role_codes_from_handles as _semantic_role_codes_from_handles,
 )
+from fisheye.analysis_workflows.core_motion_source_handle import (
+    validate_core_motion_dependency_record,
+)
+from fisheye.analysis_workflows.core_paradigm_authority import (
+    core_paradigm_dependency_from_relative_frame,
+)
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
-
 
 SCHEMA_ID = "palette.analysis.generalized_chaser_bout_response"
 SCHEMA_VERSION = 1
@@ -112,7 +117,9 @@ def _plain(value: Any) -> Any:
 
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+        return MappingProxyType(
+            {str(key): _freeze(item) for key, item in value.items()}
+        )
     if isinstance(value, list):
         return tuple(_freeze(item) for item in value)
     return value
@@ -157,6 +164,7 @@ class GeneralizedBoutResponseInput:
     bout_duration_s: np.ndarray
     bout_path_length_mm: np.ndarray
     bout_net_displacement_mm: np.ndarray
+    source_core_authority: Mapping[str, Any] | None = None
     body_heading_deg_by_frame: np.ndarray | None = None
     body_heading_valid_by_frame: np.ndarray | None = None
     chaser_bearing_deg: np.ndarray | None = None
@@ -177,7 +185,9 @@ class PreparedGeneralizedBoutResponse:
         try:
             return self.arrays[name]
         except KeyError as exc:
-            raise KeyError(f"Unknown generalized bout-response array {name!r}.") from exc
+            raise KeyError(
+                f"Unknown generalized bout-response array {name!r}."
+            ) from exc
 
     @property
     def payload_digest(self) -> str:
@@ -245,6 +255,44 @@ def exact_provider_frame_projection(
         "relative_frame_ids_sha256": array_values_sha256(relative),
         "provider_row_index_by_relative_frame_sha256": array_values_sha256(rows),
         "provider_frame_present_sha256": array_values_sha256(present),
+        "fallback": "prohibited",
+    }
+    return rows, present, record
+
+
+def exact_core_motion_frame_projection(
+    motion_frame_ids: np.ndarray,
+    relative_frame_ids: np.ndarray,
+    *,
+    core_authority_roster_sha256: str,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Build the same exact join with an explicit core-motion authority."""
+
+    rows, present, provider_record = exact_provider_frame_projection(
+        motion_frame_ids,
+        relative_frame_ids,
+    )
+    roster_sha256 = _digest(
+        core_authority_roster_sha256,
+        name="core_authority_roster_sha256",
+    )
+    record = {
+        "schema_id": "palette.core_motion.relative_frame_projection",
+        "schema_version": 1,
+        "join_key": provider_record["join_key"],
+        "join_policy": provider_record["join_policy"],
+        "motion_frame_count": provider_record["provider_frame_count"],
+        "relative_frame_count": provider_record["relative_frame_count"],
+        "matched_relative_frame_count": provider_record["matched_relative_frame_count"],
+        "missing_relative_frame_count": provider_record["missing_relative_frame_count"],
+        "motion_only_frame_count": provider_record["provider_only_frame_count"],
+        "motion_frame_ids_sha256": provider_record["provider_frame_ids_sha256"],
+        "relative_frame_ids_sha256": provider_record["relative_frame_ids_sha256"],
+        "motion_row_index_by_relative_frame_sha256": provider_record[
+            "provider_row_index_by_relative_frame_sha256"
+        ],
+        "motion_frame_present_sha256": provider_record["provider_frame_present_sha256"],
+        "core_authority_roster_sha256": roster_sha256,
         "fallback": "prohibited",
     }
     return rows, present, record
@@ -376,10 +424,15 @@ def prepare_generalized_bout_response_successor(
     if type(source.n_chasers) is not int or source.n_chasers <= 0:
         _fail("n_chasers must be one positive exact integer.")
     projection = _plain(source.source_motion_frame_projection)
+    projection_schema = (
+        projection.get("schema_id") if isinstance(projection, Mapping) else None
+    )
     if (
-        not isinstance(projection, dict)
-        or projection.get("schema_id")
-        != "palette.provider_motion.relative_frame_projection"
+        projection_schema
+        not in {
+            "palette.provider_motion.relative_frame_projection",
+            "palette.core_motion.relative_frame_projection",
+        }
         or projection.get("schema_version") != 1
         or projection.get("join_policy")
         != "left_join_missing_provider_rows_invalid_no_interpolation"
@@ -387,6 +440,30 @@ def prepare_generalized_bout_response_successor(
         or projection.get("fallback") != "prohibited"
     ):
         _fail("source_motion_frame_projection is absent, malformed, or permissive.")
+    core_authority: dict[str, Any] | None = None
+    if source.source_core_authority is not None:
+        try:
+            core_authority = dict(
+                validate_core_motion_dependency_record(source.source_core_authority)
+            )
+        except (TypeError, ValueError) as exc:
+            _fail(f"Core motion dependency record is invalid: {exc}")
+        if (
+            projection_schema != "palette.core_motion.relative_frame_projection"
+            or core_authority.get("recording_id") != recording_id
+            or core_authority.get("motion_run_path") != source.source_motion_run_path
+            or core_authority.get("motion_manifest_sha256")
+            != source.source_motion_manifest_sha256
+            or core_authority.get("swim_bout_run_path")
+            != source.source_swim_bout_run_path
+            or core_authority.get("swim_bout_source_binding_sha256")
+            != source.source_swim_bout_lineage_sha256
+            or core_authority.get("core_authority_roster_sha256")
+            != projection.get("core_authority_roster_sha256")
+        ):
+            _fail("Core motion dependency record is absent, stale, or inconsistent.")
+    elif projection_schema == "palette.core_motion.relative_frame_projection":
+        _fail("Core motion projection lacks its sealed authority dependency.")
     n_frames, n_chasers = source.n_frames, source.n_chasers
     n_rows = n_frames * n_chasers
     frame_ids = _vector(
@@ -431,9 +508,7 @@ def prepare_generalized_bout_response_successor(
     if n_frames and np.any(chaser_matrix != chaser_matrix[:1, :]):
         _fail("Chaser identity changed along the fixed chaser axis.")
     chaser_codes = (
-        chaser_matrix[0]
-        if n_frames
-        else np.arange(1, n_chasers + 1, dtype=np.uint16)
+        chaser_matrix[0] if n_frames else np.arange(1, n_chasers + 1, dtype=np.uint16)
     )
     if np.unique(chaser_codes).size != n_chasers:
         _fail("Chaser identity codes are duplicated.")
@@ -534,8 +609,12 @@ def prepare_generalized_bout_response_successor(
         _fail("distance_bin_edges_mm must be one strictly increasing vector.")
 
     lookup = _frame_lookup(frame_ids)
-    start_row = np.asarray([lookup.get(int(value), -1) for value in start_ids], dtype=np.int64)
-    end_row = np.asarray([lookup.get(int(value), -1) for value in end_ids], dtype=np.int64)
+    start_row = np.asarray(
+        [lookup.get(int(value), -1) for value in start_ids], dtype=np.int64
+    )
+    end_row = np.asarray(
+        [lookup.get(int(value), -1) for value in end_ids], dtype=np.int64
+    )
     frame_available = (start_row >= 0) & (end_row >= 0)
     role = np.zeros(n_bouts, dtype=np.uint8)
     role[frame_available] = roles[start_row[frame_available]]
@@ -568,9 +647,7 @@ def prepare_generalized_bout_response_successor(
         pair_trial_envelope[row] = trial_envelope_by_row[f0, c]
         pair_trial_gap_reason[row] = trial_gap_reason_by_row[f0, c]
         base_valid[row] = (
-            pair_role[row] != 0
-            and distance_valid[f0, c]
-            and distance_valid[f1, c]
+            pair_role[row] != 0 and distance_valid[f0, c] and distance_valid[f1, c]
         )
     pair_delta = pair_distance_end - pair_distance_onset
     reason = np.full(
@@ -582,9 +659,9 @@ def prepare_generalized_bout_response_successor(
     reason[pair_frame_available & (pair_role == 0)] = (
         ATTACHMENT_REASON_OUTSIDE_SEMANTIC_SELECTION
     )
-    reason[
-        pair_frame_available & (pair_role != 0) & (pair_trial < 0)
-    ] = ATTACHMENT_REASON_TRIAL_UNAVAILABLE
+    reason[pair_frame_available & (pair_role != 0) & (pair_trial < 0)] = (
+        ATTACHMENT_REASON_TRIAL_UNAVAILABLE
+    )
 
     body_present = all(
         value is not None
@@ -659,9 +736,8 @@ def prepare_generalized_bout_response_successor(
             and np.isfinite(pair_bearing[row])
         )
     turn_toward = np.zeros(pair_count, dtype=bool)
-    turn_toward[directed_valid] = (
-        np.sign(pair_turn[directed_valid])
-        == np.sign(pair_bearing[directed_valid])
+    turn_toward[directed_valid] = np.sign(pair_turn[directed_valid]) == np.sign(
+        pair_bearing[directed_valid]
     )
 
     arrays: dict[str, np.ndarray] = {
@@ -669,7 +745,9 @@ def prepare_generalized_bout_response_successor(
         "bout_row_id": pair_bout_index,
         "bout_id": np.repeat(bout_id, n_chasers),
         "chaser_identity_code": pair_chaser_code,
-        "source_signal_id": np.full(pair_count, source.source_signal_id, dtype=np.int32),
+        "source_signal_id": np.full(
+            pair_count, source.source_signal_id, dtype=np.int32
+        ),
         "start_acquisition_frame_id": np.repeat(start_ids, n_chasers),
         "end_acquisition_frame_id": np.repeat(end_ids, n_chasers),
         "semantic_role_code": pair_role,
@@ -749,6 +827,9 @@ def prepare_generalized_bout_response_successor(
             "controller_trial_payload_sha256": (
                 source.source_controller_trial_payload_sha256
             ),
+            **(
+                {"core_authority": core_authority} if core_authority is not None else {}
+            ),
         },
         "dimensions": {
             "n_frames": n_frames,
@@ -825,10 +906,10 @@ def generalized_bout_response_input_from_handles(
 ) -> GeneralizedBoutResponseInput:
     """Bind exact archive handles into the generalized successor input.
 
-    The swim-bout source must be an explicitly named complete
-    selector-ineligible v8 candidate already sealed to this provider-motion
-    track.  Direct and consolidated reads must yield the same selected bout
-    table and binding.
+    Legacy provider mode requires an explicitly named selector-ineligible bout
+    candidate. Core mode consumes only the bout source already selected and
+    validated by the motion handle's roster receipt; it performs no fallback or
+    second selector resolution.
     """
 
     from fisheye.analysis.swim_bout_io import (
@@ -836,6 +917,10 @@ def generalized_bout_response_input_from_handles(
     )
     from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
         ChaserRelativeFrameSourceHandle,
+    )
+    from fisheye.analysis_workflows.core_motion_source_handle import (
+        CoreMotionTrackSourceHandle,
+        core_motion_dependency_record,
     )
     from fisheye.analysis_workflows.materializers.provider_epoch_behavior_summary import (
         _swim_bout_binding,
@@ -853,8 +938,12 @@ def generalized_bout_response_input_from_handles(
         raise TypeError("relative_frame must be a strict loader-minted handle.")
     if type(semantic_selection) is not ProtocolSemanticChaserSelectionSourceHandle:
         raise TypeError("semantic_selection must be a strict loader-minted handle.")
-    if type(provider_motion) is not ProviderTrackMotionSourceHandle:
-        raise TypeError("provider_motion must be a strict loader-minted handle.")
+    provider_mode = type(provider_motion) is ProviderTrackMotionSourceHandle
+    core_mode = type(provider_motion) is CoreMotionTrackSourceHandle
+    if not provider_mode and not core_mode:
+        raise TypeError(
+            "provider_motion must be one strict provider or core motion handle."
+        )
     if type(controller_trials) is not PreparedControllerTrials:
         raise TypeError("controller_trials must be one prepared exact successor.")
     if type(swim_bout_run_name) is not str or not swim_bout_run_name.strip():
@@ -863,11 +952,17 @@ def generalized_bout_response_input_from_handles(
         _fail("track_id must be one non-negative exact integer.")
     if type(include_body_extension) is not bool:
         _fail("include_body_extension must be the exact boolean.")
-    relative_frame.assert_current()
+    relative_core_authority = core_paradigm_dependency_from_relative_frame(
+        relative_frame
+    )
     semantic_selection.assert_current()
-    provider_motion.assert_current()
+    if provider_mode:
+        provider_motion.assert_current()
+    else:
+        provider_motion.assert_verified()
     if not (
-        relative_frame.analysis_zarr_path == provider_motion.analysis_zarr_path
+        relative_frame.analysis_zarr_path
+        == provider_motion.analysis_zarr_path
         == semantic_selection.analysis_zarr
     ):
         _fail("Successor sources do not belong to one exact analysis archive.")
@@ -877,6 +972,32 @@ def generalized_bout_response_input_from_handles(
         == controller_trials.recording_id
     ):
         _fail("Successor sources belong to different recordings.")
+    if core_mode != (relative_core_authority is not None):
+        _fail("Relative-frame and motion sources mix core and legacy authorities.")
+    controller_core_authority = controller_trials.manifest.get("core_authority")
+    if _plain(controller_core_authority) != _plain(relative_core_authority):
+        _fail("Controller trials and relative frame bind different core authorities.")
+    if core_mode:
+        core_envelope = relative_frame.context.get("core_authority")
+        core_record = (
+            core_envelope.get("record") if isinstance(core_envelope, Mapping) else None
+        )
+        core_motion_record = (
+            core_record.get("core_motion") if isinstance(core_record, Mapping) else None
+        )
+        if (
+            not isinstance(core_motion_record, Mapping)
+            or core_record.get("core_authority_roster_sha256")
+            != provider_motion.core_authority_roster_sha256
+            or core_motion_record.get("run_path") != provider_motion.run_path
+            or core_motion_record.get("source_manifest_sha256")
+            != provider_motion.source_manifest_sha256
+            or core_motion_record.get("track_id") != provider_motion.track_id
+            or relative_core_authority["core_authority_roster_sha256"]
+            != provider_motion.core_authority_roster_sha256
+            or relative_core_authority["selected_track_id"] != provider_motion.track_id
+        ):
+            _fail("Relative frame and motion handle bind different core authority.")
     if relative_frame.run_manifest.get("scale_policy", {}).get("unit") != "mm":
         _fail("Chaser-relative physical distance is not explicitly in millimeters.")
     if (
@@ -889,55 +1010,95 @@ def generalized_bout_response_input_from_handles(
     ):
         _fail("Controller-trial dependency is not bound to the exact input handles.")
 
-    rows = _track_slice(provider_motion, track_id=track_id)
-    provider_frames = np.asarray(
-        provider_motion.source_acquisition_frame_index[rows], dtype=np.int64
-    )
+    if provider_mode:
+        rows = _track_slice(provider_motion, track_id=track_id)
+        provider_frames = np.asarray(
+            provider_motion.source_acquisition_frame_index[rows], dtype=np.int64
+        )
+        motion_manifest_sha256 = provider_motion.provider_manifest_sha256
+    else:
+        if provider_motion.track_id != track_id:
+            _fail("Core motion handle and requested track identities differ.")
+        rows = slice(0, provider_motion.sample_count)
+        provider_frames = np.asarray(
+            provider_motion.array("source_acquisition_frame_index"),
+            dtype=np.int64,
+        )
+        motion_manifest_sha256 = provider_motion.source_manifest_sha256
     relative_frames_matrix = relative_frame.base_frame_chaser("acquisition_frame_id")
     relative_frames = (
         np.asarray(relative_frames_matrix[:, 0], dtype=np.int64)
         if relative_frame.n_frames
         else np.asarray([], dtype=np.int64)
     )
-    provider_rows_by_relative, provider_present, provider_projection = (
-        exact_provider_frame_projection(provider_frames, relative_frames)
-    )
+    if provider_mode:
+        provider_rows_by_relative, provider_present, provider_projection = (
+            exact_provider_frame_projection(provider_frames, relative_frames)
+        )
+    else:
+        provider_rows_by_relative, provider_present, provider_projection = (
+            exact_core_motion_frame_projection(
+                provider_frames,
+                relative_frames,
+                core_authority_roster_sha256=(
+                    provider_motion.core_authority_roster_sha256
+                ),
+            )
+        )
 
     archive = relative_frame.analysis_zarr_path
-    root_consolidated = open_zarr_root(archive, mode="r", use_consolidated=True)
-    root_direct = open_zarr_root(archive, mode="r", use_consolidated=False)
-    try:
-        tables = load_exact_selector_ineligible_default_swim_bout_tables(
-            root_consolidated, run_name=swim_bout_run_name
-        )
-        direct_tables = load_exact_selector_ineligible_default_swim_bout_tables(
-            root_direct, run_name=swim_bout_run_name
-        )
-        binding, lineage_hash, _frame_hash = _swim_bout_binding(
-            tables,
-            provider=provider_motion,
-            rows=rows,
-            track_id=track_id,
-        )
-        direct_binding, direct_lineage_hash, _direct_frame_hash = _swim_bout_binding(
-            direct_tables,
-            provider=provider_motion,
-            rows=rows,
-            track_id=track_id,
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise GeneralizedBoutResponseSuccessorError(
-            f"Exact swim-bout source validation failed: {exc}"
-        ) from exc
-    if (
-        binding != direct_binding
-        or lineage_hash != direct_lineage_hash
-        or array_values_sha256(tables.bouts)
-        != array_values_sha256(direct_tables.bouts)
-    ):
-        _fail("Swim-bout direct and consolidated selections differ.")
-
-    bouts = np.asarray(tables.bouts)
+    core_authority: Mapping[str, Any] | None = None
+    if provider_mode:
+        root_consolidated = open_zarr_root(archive, mode="r", use_consolidated=True)
+        root_direct = open_zarr_root(archive, mode="r", use_consolidated=False)
+        try:
+            tables = load_exact_selector_ineligible_default_swim_bout_tables(
+                root_consolidated, run_name=swim_bout_run_name
+            )
+            direct_tables = load_exact_selector_ineligible_default_swim_bout_tables(
+                root_direct, run_name=swim_bout_run_name
+            )
+            binding, lineage_hash, _frame_hash = _swim_bout_binding(
+                tables,
+                provider=provider_motion,
+                rows=rows,
+                track_id=track_id,
+            )
+            direct_binding, direct_lineage_hash, _direct_frame_hash = (
+                _swim_bout_binding(
+                    direct_tables,
+                    provider=provider_motion,
+                    rows=rows,
+                    track_id=track_id,
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GeneralizedBoutResponseSuccessorError(
+                f"Exact swim-bout source validation failed: {exc}"
+            ) from exc
+        if (
+            binding != direct_binding
+            or lineage_hash != direct_lineage_hash
+            or array_values_sha256(tables.bouts)
+            != array_values_sha256(direct_tables.bouts)
+        ):
+            _fail("Swim-bout direct and consolidated selections differ.")
+        bouts = np.asarray(tables.bouts)
+        signal = tables.signal
+        bout_run_path = str(binding["run_path"])
+    else:
+        if (
+            swim_bout_run_name
+            != provider_motion.canonical_bout_source.binding["run_name"]
+        ):
+            _fail("Requested swim-bout run differs from the core authority roster.")
+        bout_source = provider_motion.canonical_bout_source
+        bouts = np.asarray(bout_source.events.bouts)
+        signal = bout_source.events.signal
+        binding = bout_source.binding
+        lineage_hash = str(binding["payload_sha256"])
+        bout_run_path = str(binding["run_path"])
+        core_authority = core_motion_dependency_record(provider_motion)
     names = set(bouts.dtype.names or ())
     required_fields = {
         "bout_id",
@@ -998,11 +1159,11 @@ def generalized_bout_response_input_from_handles(
         source_relative_frame_run_path=relative_frame.run_path,
         source_relative_frame_manifest_sha256=relative_frame.manifest_sha256,
         source_motion_run_path=provider_motion.run_path,
-        source_motion_manifest_sha256=provider_motion.provider_manifest_sha256,
-        source_swim_bout_run_path=str(binding["run_path"]),
+        source_motion_manifest_sha256=motion_manifest_sha256,
+        source_swim_bout_run_path=bout_run_path,
         source_swim_bout_lineage_sha256=lineage_hash,
-        source_signal_id=int(tables.signal.signal_id),
-        source_signal_level=str(tables.signal.speed_level),
+        source_signal_id=int(signal.signal_id),
+        source_signal_level=str(signal.speed_level),
         source_semantic_selection_manifest_sha256=semantic_selection.manifest_sha256,
         source_controller_trial_payload_sha256=controller_trials.payload_digest,
         source_motion_frame_projection=provider_projection,
@@ -1018,9 +1179,7 @@ def generalized_bout_response_input_from_handles(
             relative_frame.base_array("relative_distance_physical"), dtype=np.float64
         ),
         distance_valid=relative_frame.base_array("relative_physical_valid"),
-        controller_trial_row_id=controller_trials.array(
-            "trial_row_id_by_source_row"
-        ),
+        controller_trial_row_id=controller_trials.array("trial_row_id_by_source_row"),
         controller_trial_envelope_row_id=controller_trials.array(
             "trial_envelope_row_id_by_source_row"
         ),
@@ -1041,6 +1200,7 @@ def generalized_bout_response_input_from_handles(
         bout_net_displacement_mm=np.asarray(
             bouts["net_displacement_mm"], dtype=np.float64
         ),
+        source_core_authority=core_authority,
         body_heading_deg_by_frame=body_heading,
         body_heading_valid_by_frame=body_heading_valid,
         chaser_bearing_deg=bearing,
@@ -1079,6 +1239,7 @@ __all__ = [
     "GeneralizedBoutResponseInput",
     "GeneralizedBoutResponseSuccessorError",
     "PreparedGeneralizedBoutResponse",
+    "exact_core_motion_frame_projection",
     "exact_provider_frame_projection",
     "generalized_bout_response_input_from_handles",
     "prepare_generalized_bout_response_successor",

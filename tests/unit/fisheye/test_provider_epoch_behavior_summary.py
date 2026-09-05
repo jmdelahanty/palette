@@ -14,7 +14,11 @@ from fisheye.analysis_workflows.materializers.provider_epoch_behavior_summary im
     _safe_name,
     _source_bindings_sha256,
     _swim_bout_binding,
+    _track_adapter,
     _windows_from_protocol_semantic_binding,
+)
+from fisheye.analysis_workflows.core_motion_source_handle import (
+    bind_core_motion_track_source_handle,
 )
 from fisheye.analysis_workflows.protocol_semantic_chaser_selection import (
     CHASER_WINDOW_ROLES,
@@ -256,6 +260,41 @@ def test_provider_epoch_summary_uses_valid_tracked_time_and_motion_validity() ->
     assert int(row["inter_bout_interval_count"]) == 1
     assert float(row["inter_bout_interval_rate_per_min"]) == 120.0
     assert row["rate_denominator"].rstrip(b"\x00") == b"valid_tracked_duration_s"
+
+
+def test_core_epoch_adapter_reads_only_roster_selected_physical_surfaces(
+    tmp_path,
+) -> None:
+    from tests.unit.fisheye.test_core_authority_roster import _bound_core_motion
+
+    bound = _bound_core_motion(tmp_path)
+    handle = bind_core_motion_track_source_handle(
+        bound,
+        consumer_id="goodbatbadbat.epoch_behavior_summary_v1",
+        required_capabilities=(
+            "cross_grain_join_authority",
+            "kinematics_samples",
+            "canonical_swim_bouts",
+        ),
+        track_id=7,
+    )
+
+    track = _track_adapter(
+        handle,
+        rows=slice(0, handle.sample_count),
+        speed_level="filtered",
+    )
+
+    assert track.frame_indices.tolist() == [11, 12, 13]
+    np.testing.assert_allclose(
+        track.speed_mm_by_level["filtered"][1:],
+        [10.0, 12.0],
+    )
+    np.testing.assert_allclose(
+        track.frame_path_distance_mm_by_level["filtered"][1:],
+        [0.3, 0.4],
+    )
+    assert track.sample_valid.tolist() == [True, True, True]
 
 
 def test_provider_epoch_bout_facts_bind_the_selected_track() -> None:

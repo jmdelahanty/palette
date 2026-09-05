@@ -19,6 +19,13 @@ from pathlib import Path
 import re
 from typing import Any, Callable, Mapping, Sequence
 
+from fisheye.analysis_workflows.core_authority_roster import (
+    bind_core_motion_and_bouts_from_roster,
+    read_core_authority_roster,
+)
+from fisheye.analysis_workflows.core_motion_source_handle import (
+    bind_core_motion_track_source_handle,
+)
 from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
     load_chaser_relative_frame_source_handle,
 )
@@ -48,6 +55,11 @@ from fisheye.analysis_workflows.protocol_semantic_chaser_selection_publication i
 from fisheye.analysis_workflows.provider_track_motion_source_handle import (
     load_provider_track_motion_source_handle,
 )
+from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import (
+    CANONICAL_SWIM_BOUTS_CAPABILITY,
+    CROSS_GRAIN_JOIN_AUTHORITY,
+    KINEMATICS_SAMPLES_CAPABILITY,
+)
 from fisheye.shared.json_safety import write_json_atomic
 
 REPORT_SCHEMA_ID = "palette.analysis.composable_chaser_successor.operator_report"
@@ -65,6 +77,12 @@ MODULE_DEPENDENCIES: Mapping[str, tuple[str, ...]] = {
     ESCAPE_FREEZE: (CONTROLLER, BOUT_RESPONSE),
     GAZE_TRACKING: (),
 }
+CORE_SUCCESSOR_CONSUMER_ID = "goodbatbadbat.composable_chaser_successors_v1"
+CORE_SUCCESSOR_REQUIRED_CAPABILITIES = (
+    CROSS_GRAIN_JOIN_AUTHORITY,
+    KINEMATICS_SAMPLES_CAPABILITY,
+    CANONICAL_SWIM_BOUTS_CAPABILITY,
+)
 _RUN_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _FORBIDDEN_RUN_NAMES = frozenset(
     {"latest", "current", "selected", "authoritative", "default"}
@@ -220,6 +238,8 @@ def run_composable_chaser_successors(
     provider_motion_run_path: str | None,
     swim_bout_run_name: str | None,
     track_id: int = 0,
+    core_authority_roster: Mapping[str, Any] | None = None,
+    core_track_id: int | None = None,
     expected_recording_id: str | None = None,
     eye_run_name: str | None = None,
     eye_convention_receipt: Mapping[str, Any] | None = None,
@@ -249,6 +269,21 @@ def run_composable_chaser_successors(
 
     sources: dict[str, dict[str, Any]] = {}
     handles: dict[str, Any | None] = {}
+    core_mode = core_authority_roster is not None or core_track_id is not None
+    if core_mode:
+        if core_authority_roster is None or core_track_id is None:
+            raise ComposableChaserSuccessorOperatorError(
+                "Core mode requires both one exact roster and one explicit track ID."
+            )
+        if provider_motion_run_path is not None or swim_bout_run_name is not None:
+            raise ComposableChaserSuccessorOperatorError(
+                "Core mode cannot accept provider-motion or independent bout inputs."
+            )
+        if type(core_track_id) is not int or core_track_id < 0:
+            raise ComposableChaserSuccessorOperatorError(
+                "core_track_id must be one nonnegative exact integer."
+            )
+        track_id = core_track_id
 
     if relative_frame_run is None:
         handles["relative_frame"], sources["relative_frame"] = _missing_operator_source(
@@ -288,7 +323,44 @@ def run_composable_chaser_successors(
         )
 
     if BOUT_RESPONSE in needed or ESCAPE_FREEZE in needed:
-        if provider_motion_run_path is None:
+        if core_mode:
+            assert core_authority_roster is not None
+
+            def bind_core_motion() -> Any:
+                bound = bind_core_motion_and_bouts_from_roster(core_authority_roster)
+                return bind_core_motion_track_source_handle(
+                    bound,
+                    consumer_id=CORE_SUCCESSOR_CONSUMER_ID,
+                    required_capabilities=CORE_SUCCESSOR_REQUIRED_CAPABILITIES,
+                    track_id=track_id,
+                )
+
+            handles["motion"], sources["core_motion"] = _attempt_source(
+                source_id="core_motion",
+                loader=bind_core_motion,
+            )
+            if handles["motion"] is None:
+                sources["swim_bouts"] = {
+                    "source_id": "swim_bouts",
+                    "status": "blocked",
+                    "reason_code": "core_motion_source_unavailable",
+                }
+                selected_swim_bout_run_name = None
+            else:
+                bout = handles["motion"].canonical_bout_source
+                selected_swim_bout_run_name = str(bout.binding["run_name"])
+                sources["swim_bouts"] = {
+                    "source_id": "swim_bouts",
+                    "status": "ready",
+                    "run_name": selected_swim_bout_run_name,
+                    "run_path": bout.binding["run_path"],
+                    "source_binding_sha256": bout.binding["payload_sha256"],
+                    "track_id": track_id,
+                    "core_authority_roster_sha256": handles[
+                        "motion"
+                    ].core_authority_roster_sha256,
+                }
+        elif provider_motion_run_path is None:
             handles["provider_motion"], sources["provider_motion"] = (
                 _missing_operator_source(
                     "provider_motion",
@@ -299,6 +371,8 @@ def run_composable_chaser_successors(
                     ),
                 )
             )
+            handles["motion"] = None
+            selected_swim_bout_run_name = swim_bout_run_name
         else:
             handles["provider_motion"], sources["provider_motion"] = _attempt_source(
                 source_id="provider_motion",
@@ -308,13 +382,15 @@ def run_composable_chaser_successors(
                     use_consolidated=True,
                 ),
             )
-        if swim_bout_run_name is None:
+            handles["motion"] = handles["provider_motion"]
+            selected_swim_bout_run_name = swim_bout_run_name
+        if not core_mode and swim_bout_run_name is None:
             sources["swim_bouts"] = {
                 "source_id": "swim_bouts",
                 "status": "blocked",
                 "reason_code": "missing_operator_argument",
             }
-        else:
+        elif not core_mode:
             sources["swim_bouts"] = {
                 "source_id": "swim_bouts",
                 "status": "deferred_to_exact_adapter",
@@ -406,10 +482,10 @@ def run_composable_chaser_successors(
             elif module_id == BOUT_RESPONSE:
                 if source_block(
                     module_id,
-                    ("relative_frame", "semantic_selection", "provider_motion"),
+                    ("relative_frame", "semantic_selection", "motion"),
                 ):
                     continue
-                if swim_bout_run_name is None:
+                if selected_swim_bout_run_name is None:
                     module_records[module_id] = _blocked_module(
                         module_id,
                         reason_code="missing_operator_argument",
@@ -420,17 +496,17 @@ def run_composable_chaser_successors(
                     handles["relative_frame"],
                     handles["semantic_selection"],
                     prepared[CONTROLLER],
-                    handles["provider_motion"],
-                    swim_bout_run_name=swim_bout_run_name,
+                    handles["motion"],
+                    swim_bout_run_name=selected_swim_bout_run_name,
                     track_id=track_id,
                     include_body_extension=include_body_extension,
                 )
             elif module_id == ESCAPE_FREEZE:
-                if source_block(module_id, ("relative_frame", "provider_motion")):
+                if source_block(module_id, ("relative_frame", "motion")):
                     continue
                 result = prepare_escape_freeze_successor_from_handles(
                     handles["relative_frame"],
-                    handles["provider_motion"],
+                    handles["motion"],
                     prepared[CONTROLLER],
                     prepared[BOUT_RESPONSE],
                     track_id=track_id,
@@ -608,6 +684,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider-motion-run-path")
     parser.add_argument("--swim-bout-run-name")
     parser.add_argument("--track-id", type=int, default=0)
+    parser.add_argument("--core-authority-roster", type=Path)
+    parser.add_argument("--expected-core-authority-roster-sha256")
+    parser.add_argument("--core-track-id", type=int)
     parser.add_argument("--eye-run-name")
     parser.add_argument("--radial-run-name")
     parser.add_argument("--eye-convention-receipt", type=Path)
@@ -645,6 +724,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    core_arguments = (
+        args.core_authority_roster,
+        args.expected_core_authority_roster_sha256,
+        args.core_track_id,
+    )
+    if any(value is not None for value in core_arguments):
+        if any(value is None for value in core_arguments):
+            raise ComposableChaserSuccessorOperatorError(
+                "Core mode requires roster path, expected digest, and track ID."
+            )
+        core_roster = read_core_authority_roster(
+            args.core_authority_roster,
+            expected_record_sha256=args.expected_core_authority_roster_sha256,
+        )
+    else:
+        core_roster = None
     result = run_composable_chaser_successors(
         args.analysis_zarr,
         run_name=args.run_name,
@@ -653,6 +748,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         provider_motion_run_path=args.provider_motion_run_path,
         swim_bout_run_name=args.swim_bout_run_name,
         track_id=args.track_id,
+        core_authority_roster=core_roster,
+        core_track_id=args.core_track_id,
         expected_recording_id=args.expected_recording_id,
         eye_run_name=args.eye_run_name,
         eye_convention_receipt=_receipt(args.eye_convention_receipt),

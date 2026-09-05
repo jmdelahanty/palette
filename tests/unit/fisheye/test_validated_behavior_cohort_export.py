@@ -702,6 +702,56 @@ def test_receipt_composed_finalizer_hashes_each_destination_once_without_decodin
     assert parquet_hashes == []
 
 
+def test_nullable_foreign_key_ignores_only_rows_with_a_null_key_component(
+    tmp_path: Path,
+) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    target = tmp_path / "target.parquet"
+    local = tmp_path / "local.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "recording_id": ["recording-a", "recording-a"],
+                "row_id": [7, 9],
+            }
+        ),
+        target,
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "recording_id": ["recording-a", "recording-a", "recording-a"],
+                "row_id": pa.array([7, None, 9], type=pa.int64()),
+            }
+        ),
+        local,
+    )
+
+    assert cohort_export._foreign_key_observation(  # noqa: SLF001
+        local,
+        ("recording_id", "row_id"),
+        target,
+        ("recording_id", "row_id"),
+    ) == (3, 2, 0)
+    assert cohort_export._part_foreign_key_is_closed(  # noqa: SLF001
+        local,
+        ("recording_id", "row_id"),
+        {("recording-a", 7), ("recording-a", 9)},
+    )
+
+    pq.write_table(
+        pa.table({"recording_id": ["recording-a"], "row_id": [8]}),
+        local,
+    )
+    assert not cohort_export._part_foreign_key_is_closed(  # noqa: SLF001
+        local,
+        ("recording_id", "row_id"),
+        {("recording-a", 7), ("recording-a", 9)},
+    )
+
+
 def test_invalid_v2_semantic_proof_blocks_without_payload_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

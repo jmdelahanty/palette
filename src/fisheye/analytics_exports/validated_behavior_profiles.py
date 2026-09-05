@@ -26,6 +26,13 @@ from .validated_behavior_core_behavior_contracts import (
     CORE_BEHAVIOR_TABLE_SPECS,
     CORE_BEHAVIOR_TABLE_SPECS_V1,
 )
+from .validated_behavior_core_chaser_adapters import (
+    build_core_chaser_row_extractors,
+)
+from .validated_behavior_core_chaser_contracts import (
+    CORE_CHASER_EXPORT_PROFILE_ID,
+    CORE_CHASER_TABLE_SPECS,
+)
 from .validated_behavior_phase_a_contracts import (
     PHASE_A_PROFILE_ID,
     PHASE_A_TABLE_SPECS,
@@ -113,6 +120,11 @@ INSTALLED_VALIDATED_BEHAVIOR_PROFILES: Mapping[str, ValidatedBehaviorExportProfi
                 profile_id=CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1,
                 table_specs=CORE_BEHAVIOR_TABLE_SPECS_V1,
                 row_extractor_factory=build_core_behavior_row_extractors,
+            ),
+            CORE_CHASER_EXPORT_PROFILE_ID: ValidatedBehaviorExportProfile(
+                profile_id=CORE_CHASER_EXPORT_PROFILE_ID,
+                table_specs=CORE_CHASER_TABLE_SPECS,
+                row_extractor_factory=build_core_chaser_row_extractors,
             ),
             PHASE_A_PROFILE_ID: ValidatedBehaviorExportProfile(
                 profile_id=PHASE_A_PROFILE_ID,

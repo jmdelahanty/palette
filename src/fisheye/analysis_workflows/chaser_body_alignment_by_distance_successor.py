@@ -21,9 +21,12 @@ from fisheye.analysis.provider_chaser_position_suite import PositionSuiteEpoch
 from fisheye.analysis_workflows.protocol_semantic_chaser_selection import (
     CHASER_WINDOW_ROLES,
 )
+from fisheye.analysis_workflows.core_paradigm_authority import (
+    core_paradigm_dependency_from_relative_frame,
+    validate_core_paradigm_source_dependency,
+)
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
-
 
 SCHEMA_ID = "palette.chaser.body_alignment_by_distance"
 SCHEMA_VERSION = 1
@@ -201,6 +204,7 @@ class ChaserBodyAlignmentByDistanceInput:
     relative_frame_verification_mode: str = "direct_deep_audit"
     relative_frame_validation_receipt_sha256: str | None = None
     distance_bin_width_mm: float = DISTANCE_BIN_WIDTH_MM
+    core_authority_dependency: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +328,15 @@ def prepare_chaser_body_alignment_by_distance_successor(
         inputs.semantic_selection_manifest_sha256,
         field="semantic selection manifest digest",
     )
+    try:
+        core_authority = validate_core_paradigm_source_dependency(
+            inputs.core_authority_dependency,
+            recording_id=recording_id,
+            source_relative_frame_run_path=relative_path,
+            source_relative_frame_manifest_sha256=relative_digest,
+        )
+    except (TypeError, ValueError) as exc:
+        _fail(f"Core-authority dependency is invalid: {exc}")
     n_frames = int(inputs.n_frames)
     n_chasers = int(inputs.n_chasers)
     if n_frames <= 0 or n_chasers <= 0:
@@ -634,15 +647,15 @@ def prepare_chaser_body_alignment_by_distance_successor(
                     "summary_epoch_distance_valid_row_count": distance_valid_count,
                     "summary_epoch_distance_invalid_row_count": distance_invalid_count,
                     "summary_epoch_distance_invalid_body_valid_row_count": distance_invalid_body_valid_count,
-                    "summary_mean_alignment_cos": float(np.mean(alignment_values))
-                    if joint_count
-                    else math.nan,
+                    "summary_mean_alignment_cos": (
+                        float(np.mean(alignment_values)) if joint_count else math.nan
+                    ),
                     "summary_alignment_cos_p25": align_q25,
                     "summary_alignment_cos_p50": align_q50,
                     "summary_alignment_cos_p75": align_q75,
-                    "summary_mean_abs_bearing_deg": float(np.mean(abs_bearing))
-                    if joint_count
-                    else math.nan,
+                    "summary_mean_abs_bearing_deg": (
+                        float(np.mean(abs_bearing)) if joint_count else math.nan
+                    ),
                     "summary_abs_bearing_p25_deg": abs_q25,
                     "summary_abs_bearing_p50_deg": abs_q50,
                     "summary_abs_bearing_p75_deg": abs_q75,
@@ -779,6 +792,11 @@ def prepare_chaser_body_alignment_by_distance_successor(
         "scientific_schema": {"schema_id": SCHEMA_ID, "schema_version": SCHEMA_VERSION},
         "method_id": METHOD_ID,
         "recording_id": recording_id,
+        **(
+            {"core_authority": _plain(core_authority)}
+            if core_authority is not None
+            else {}
+        ),
         "dimensions": {
             "n_frames": n_frames,
             "n_chasers": n_chasers,
@@ -899,7 +917,7 @@ def chaser_body_alignment_input_from_handles(
         raise TypeError("relative must be one strict relative-frame handle.")
     if type(semantic_selection) is not ProtocolSemanticChaserSelectionSourceHandle:
         raise TypeError("semantic_selection must be one strict semantic handle.")
-    relative.assert_current()
+    core_authority = core_paradigm_dependency_from_relative_frame(relative)
     semantic_selection.assert_current()
     if relative.recording_id != semantic_selection.recording_id:
         _fail("Body-alignment sources belong to different recordings.")
@@ -985,6 +1003,7 @@ def chaser_body_alignment_input_from_handles(
             else manifest.get("identity_registries", {})
         ),
         scale_policy=scale,
+        core_authority_dependency=core_authority,
         relative_frame_verification_mode=verification_mode,
         relative_frame_validation_receipt_sha256=receipt_digest,
         distance_bin_width_mm=distance_bin_width_mm,

@@ -7,11 +7,18 @@ import json
 from pathlib import Path
 from typing import Sequence
 
+from fisheye.analysis_workflows.core_chaser_composite_bundle import (
+    CORE_CHASER_BUNDLE_ADAPTER_ID,
+    ensure_core_chaser_composite_bundle,
+)
 from fisheye.analysis_workflows.validated_recording_behavior_bundle import (
     CAPABILITY_KEYS,
     CAPABILITY_STATES,
     REASON_CODES_BY_STATE,
     ensure_validated_recording_behavior_bundle,
+)
+from fisheye.analysis_workflows.validated_behavior_cohort_adapters import (
+    RECORDING_BUNDLE_ADAPTER_ID,
 )
 
 
@@ -44,6 +51,14 @@ def _capability_disposition(value: str) -> tuple[str, dict[str, object]]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--projection-receipt", type=Path, required=True)
+    parser.add_argument(
+        "--core-execution-report",
+        type=Path,
+        help=(
+            "When supplied, bind the exact chaser projection to this selected "
+            "core-behavior execution report instead of creating a Phase-C bundle."
+        ),
+    )
     parser.add_argument("--palette-commit", required=True)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--expected-analysis-zarr", type=Path)
@@ -71,14 +86,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"Duplicate --absent-capability declaration for {capability!r}."
             )
         dispositions[capability] = record
-    result = ensure_validated_recording_behavior_bundle(
-        args.projection_receipt,
-        absent_capability_dispositions=dispositions,
-        palette_commit=args.palette_commit,
-        output_json=args.output_json,
-        expected_analysis_zarr=args.expected_analysis_zarr,
-        expected_recording_id=args.expected_recording_id,
-    )
+    if args.core_execution_report is not None:
+        if dispositions:
+            raise SystemExit(
+                "--absent-capability cannot reinterpret a core-plus-chaser bundle."
+            )
+        if args.expected_analysis_zarr is None or args.expected_recording_id is None:
+            raise SystemExit(
+                "Core-plus-chaser composition requires --expected-analysis-zarr "
+                "and --expected-recording-id."
+            )
+        result = ensure_core_chaser_composite_bundle(
+            args.core_execution_report,
+            args.projection_receipt,
+            palette_commit=args.palette_commit,
+            output_json=args.output_json,
+            expected_analysis_zarr=args.expected_analysis_zarr,
+            expected_recording_id=args.expected_recording_id,
+        )
+        adapter_id = CORE_CHASER_BUNDLE_ADAPTER_ID
+    else:
+        result = ensure_validated_recording_behavior_bundle(
+            args.projection_receipt,
+            absent_capability_dispositions=dispositions,
+            palette_commit=args.palette_commit,
+            output_json=args.output_json,
+            expected_analysis_zarr=args.expected_analysis_zarr,
+            expected_recording_id=args.expected_recording_id,
+        )
+        adapter_id = RECORDING_BUNDLE_ADAPTER_ID
     capabilities = result["capabilities"]
     summary = {
         "status": result["status"],
@@ -86,6 +122,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "bundle_path": result["bundle_path"],
         "recording_id": result["recording_id"],
         "record_sha256": result["record_sha256"],
+        "bundle_adapter_id": adapter_id,
         "complete_capabilities": sorted(
             key for key, value in capabilities.items() if value["state"] == "complete"
         ),

@@ -42,6 +42,7 @@ CORE_BEHAVIOR_EXPORT_PROFILE_ID = "validated_core_behavior_five_grain_v2"
 CROSS_GRAIN_JOIN_AUTHORITY = "cross_grain_join_authority"
 KINEMATICS_SAMPLES_CAPABILITY = "kinematics_samples"
 SUBJECT_BODY_FRAME_CAPABILITY = "subject_body_frame_samples"
+SUBJECT_BODY_FRAME_SOURCE_PROFILE_ID = "subject_body_frame_samples_v1"
 EYE_TRACE_CAPABILITY = "eye_trace_samples"
 TAIL_TRACE_CAPABILITY = "tail_trace_samples"
 CANONICAL_SWIM_BOUTS_CAPABILITY = "canonical_swim_bouts"
@@ -345,6 +346,7 @@ __all__ = [
     "KINEMATICS_SAMPLES_V1",
     "CROSS_GRAIN_JOIN_AUTHORITY",
     "SUBJECT_BODY_FRAME_CAPABILITY",
+    "SUBJECT_BODY_FRAME_SOURCE_PROFILE_ID",
     "SUBJECT_BODY_FRAME_SAMPLES",
     "SUBJECT_BODY_FRAME_SAMPLES_TABLE",
     "TAIL_TRACE_SAMPLES",

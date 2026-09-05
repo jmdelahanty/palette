@@ -3,9 +3,10 @@
 <!-- decision-meta
 status: accepted-design-review-synthesized-current-implementation-partial
 created: 2026-09-03
-last_updated: 2026-09-04
+last_updated: 2026-09-05
 baseline_commit: 07db267c
 review_checkpoint_commit: afbc1d0d6af822ca7cc4e3b051cdd9bc981df80c
+composite_checkpoint_commit: 2ae7701e
 review_method: six parallel read-only Luna xhigh audits plus primary-agent synthesis
 scope: singular core-behavior authority selection, normalized validated-behavior
   exports, and chaser/moving-grating/other paradigm extensions
@@ -394,6 +395,262 @@ The sealed row counts are:
 This closes the core v2 writer-to-publisher-to-reader canary. It does not
 activate a selector, update a registry, mutate source Zarrs, or authorize the
 future chaser-composite profile described in Track C.
+
+### Core-authority roster implementation checkpoint (2026-09-05)
+
+Implementation started from merged `main` commit
+`68f7b7a7cff64f2483df2b39c135dcb369ca82ea`. The first tranche adds the shared
+authority boundary required before any composite profile is installed:
+
+- `build_core_authority_roster()` seals the exact six-capability map already
+  produced by `bind_core_behavior_cohort_sources()`, including the execution
+  receipt and cross-grain join authority. It does not rediscover a selector or
+  introduce another publisher;
+- the bound core source now exposes that roster and one normalized
+  `BoutAuthorityIdentity` constructed from the strict selected bout source;
+- `bind_core_motion_and_bouts_from_roster()` reopens only the exact motion and
+  bout dependency closure through the same strict binders. It rejects a stale
+  roster/source mismatch and does not open unrelated eye or tail sources;
+- `CoreMotionTrackSourceHandle` exposes only the roster-selected track and its
+  declared motion arrays. It requires an explicit track ID and a sealed
+  consumption receipt; selector names, fallback paths, and implicit track zero
+  are not representable at this boundary;
+- a sealed downstream consumption receipt names the roster digest, required
+  capabilities, and exact selected track. The cross-grain join authority is
+  mandatory, so a paradigm producer cannot bind motion by frame number alone;
+- the bout comparator returns `equal`, `conflict`, or `not_proven`. Equality
+  includes publication, motion, row bounds, FPS/frame axis, candidate/signal,
+  selected-event dtype/count/content, and binding identity; identical event
+  bytes do not erase a conflicting motion authority; and
+- `compose_disjoint_table_specs()` rejects a table collision before inserting
+  either component into a combined map, closing the dictionary-overwrite hole.
+
+The focused authority/core-export/chaser-planner suites pass 39/39 on the
+workstation. A
+read-only real-source resolution of Sleepyfish camera 2010093 through the
+ordinary unpatched core resolver completed in 35.312 seconds and produced core
+roster digest
+`2046ca97d8439483e4f752f00f27b5deef4bea21c0980306297206989d036dbc`
+and bout-identity digest
+`430b2e6c19e84589a99b718f414a0784b8299dd0b3658c5371ae5c0cf14031a8`.
+Reopening only the receipt-selected motion/bout dependency closure from that
+roster completed in 6.717 seconds and returned exact selected track `0`. Both
+reads used consolidated metadata and performed no writes.
+
+This checkpoint deliberately does **not** install the composite profile or
+reinterpret existing Phase-C products. The current Phase-C chaser facts remain
+provider-motion/body/bout-bound; they must be reprojected against the selected
+core roster before admission. Until that migration is complete, composition
+must fail closed rather than treating equal-looking motion columns or event
+rows as shared authority.
+
+### Core-bound chaser-relative foundation checkpoint (2026-09-05)
+
+The first chaser re-projection boundary now feeds the existing
+`chaser_relative_frame` computation, prepared-candidate schema, atomic Zarr
+materializer, and strict source handle. It does not define a new run family,
+publisher, selector, or export table. The existing manifest context gained one
+optional digest-enveloped `core_authority` record; old publications remain
+readable unchanged, while a core-bound candidate seals the selected roster,
+consumption receipt, exact track, source chaser publication, and row join.
+
+This boundary deliberately consumes an existing chaser-relative publication
+only for chaser positions, identities, occurrence, trials, timestamps, and
+controller evidence. Its historical fish-position and body-frame authorities
+are stamped `not_used_core_roster_selected_instead`. Fish positions come from
+the roster-selected core track and every chaser frame must resolve exactly one
+row of that track; missing frames, coordinate conflicts, timing conflicts, or
+physical-scale conflicts fail before preparation. The relative result contains
+no speed, acceleration, cumulative-distance, or other repeated core-motion
+fact. Its pixel-space fish position is a bounded re-expression of selected
+`positions_mm` under the exact shared physical-scale authority.
+
+The second tranche binds the roster-selected `subject_body_frame_samples`
+capability through the ordinary strict subject-shape loader and mints a
+receipt-bound process-local body handle. Chaser rows join to body observations
+only by the declared `(recording_id, source_acquisition_frame_index,
+source_instance_key)` key. A missing observation remains explicit `-1`/NaN
+evidence, duplicate compound keys fail closed, and interpolation, neighboring
+body frames, motion-heading substitution, and the historical chaser body
+authority are all prohibited. Motion and body handles must carry the identical
+consumer/capability/track receipt from one roster. The existing body extension
+and publisher carry the result; no second body schema or publication surface
+was introduced.
+
+The maintained planner still uses `MOTION_BOUT_PAIRS` at this checkpoint and
+therefore remains explicitly incomplete. It must switch atomically to the
+roster-selected motion, body, bout, and explicit track identities; the old body
+authority is not a fallback during that migration.
+
+The third tranche removes the need to publish that historical intermediate in
+new core-bound work. The established proxy coordinate/controller extractor can
+now hand its validated chaser-only facts directly, in memory, to the core-bound
+adapter. Its transient fish/body calculations are ignored and are never
+published; the final payload substitutes only roster-selected motion and body
+before entering the same existing atomic `chaser_relative_frame` publisher.
+The existing materializer CLI exposes this as an explicit all-or-none core
+mode requiring an exact roster file, expected roster digest, and explicit track
+ID. Core-mode failure propagates and cannot fall back to proxy fish/body
+authority; supplying a legacy body-frame run in core mode is rejected before
+source preparation.
+
+Static admission also has one shared conversion from a generic, already
+validated full-rate core bundle member to its sealed authority roster. The
+conversion checks the installed profile and capability contract, complete
+six-capability closure, exact execution-report receipt, and binding-inventory
+digest. It reuses the roster builder rather than giving the maintained planner
+another authority grammar. Dynamic execution must still reopen that roster
+through the shared resolver before any dependent scratch write.
+
+Focused workstation validation passed 65/65 core-roster, chaser storage/source,
+proxy-adapter, and core-mode CLI tests. A real
+prepared-writer-to-atomic-materializer-to-unpatched-source-handle regression
+also proves that the optional roster context survives the existing publication
+surface with its digest intact.
+
+### Maintained chaser planner migration checkpoint (2026-09-05)
+
+The maintained GoodBatBadBat cohort planner now freezes task schema v8 from one
+exact generic core-bundle set. Static planning selects the exact bundle member,
+derives its roster through the shared core-bundle adapter, derives the sole
+motion/bout track from that roster, and seals a consumer receipt. It no longer
+contains `MOTION_BOUT_PAIRS`, `matches[0]` pair precedence, a provider-derived
+body-frame choice, or implicit track zero. Historical task schemas remain
+readable but cannot execute or mint a canonical successor.
+
+Execution reopens the exact bundle-set and membership files and reconstructs
+the frozen roster binding before creating scratch or receipt directories. The
+epoch summary, relative-frame materializer, generalized bout response, and
+escape/freeze chain receive the roster path, expected digest, and selected
+track as an all-or-none input. Core-mode failure cannot fall back to the legacy
+provider-motion or independent swim-bout inputs. A shared motion dependency
+record validates the complete capability-digest roster and seals the selected
+motion and bout publications into each motion-dependent scientific manifest.
+
+`scripts/check_paradigm_core_authority_access.py` is wired into CI and rejects
+reintroduction of the retired pair resolver, provider-motion/bout CLI
+selection, or literal track zero in this maintained planner. It also requires
+the static and dynamic shared resolver calls and the three frozen core CLI
+arguments. Focused workstation validation passes 85/85 tests across the core
+roster, proxy/relative adapter, maintained planner, composable operator, epoch
+summary, generalized bout response, escape/freeze, handle adapters, and the new
+ratchet.
+
+This checkpoint is still intentionally incomplete. Before the branch is
+merge-ready, every transitive chaser publication and reusable-output gate must
+prove the same roster digest explicitly, the composite export profile and
+foreign-key contracts remain Track-C work, and required CI has not yet run.
+
+### Transitive chaser authority and reuse checkpoint (2026-09-05)
+
+The maintained chaser dependency closure now carries one compact sealed
+`palette.core_behavior.paradigm_relative_frame_dependency` record derived from
+the already-validated `ChaserRelativeFrameSourceHandle`. This is a projection
+of the shared resolver result, not another authority selector or artifact
+grammar. The projection verifies the full core binding, exact consumption
+receipt, recording/archive identity, selected track, motion and body source
+bindings, chaser source, pixel-space conversion, and analysis profile before
+sealing the smaller downstream record.
+
+Controller trials, radial/near-field products, body alignment, gaze tracking,
+generalized bout response, and escape/freeze now preserve that exact dependency.
+Spatial occupancy requires its two providers to be either both legacy or both
+core-bound; two core-bound providers must name the same roster, receipt, track,
+motion binding, and body binding. Mixed core/legacy motion is rejected, and a
+dependent producer cannot select or substitute another core source.
+
+Reusable-output discovery is now authority-aware. For each core-bound stage,
+the executor requires a digest-validated publication manifest containing the
+exact frozen `core_authority_roster_sha256`; an absent, malformed, or different
+claim blocks reuse. Near-field visits additionally prove exact relative-frame
+and radial-child bindings. This is a cheap immutable-identity gate, not a
+replacement for dynamic resolver admission.
+
+Planning can no longer mark a task complete from existing paths and plot
+receipts. Even when every expected output exists, the task remains runnable as
+`validation_only`, causing `run-one` to reopen the frozen bundle selection and
+validate each reusable output before any scratch write. Thus path presence is
+only a reuse candidate, never authority evidence.
+
+The CI ratchet now checks both sides of this boundary: the planner must invoke
+the shared source validator and pass the exact expected roster into reusable
+output checks, while each maintained transitive successor must project and seal
+the shared dependency. Focused workstation validation passes 160/160 tests
+across the roster/resolver, planner, ratchet, direct successors, and downstream
+analytics. At that checkpoint, required repository CI had not run and the
+composite export profile and cross-table foreign-key contract remained Track-C
+work; the next checkpoint records their implementation.
+
+### Core-plus-chaser composite export checkpoint (2026-09-05)
+
+Commit `2ae7701e` installs the first composite profile without adding a cohort
+publisher, selector, manifest family, dataset layout, or reader. The profile is
+`validated_core_behavior_chaser_v1` on the existing
+`validated_behavior/v1` surface. It contains 30 tables and 27 scientific row
+projectors: the complete five-grain core suite plus the collision-checked
+chaser-only subtraction of Phase C.
+
+The per-recording composition envelope requires exactly two typed admissions:
+one complete core-workflow execution report and one exact-chaser projection
+receipt. It resolves both through their existing shared binders, requires
+full-rate core motion (`sampling_stride_frames=1`), and proves that every
+maintained chaser child names the selected core roster, track, motion, body, and
+bout identities. The old Phase-C-compatible bundle continues to use the same
+shared exact-chaser receipt resolver; no second child-receipt grammar was
+created. The existing per-recording bundle CLI and generic cohort CLI dispatch
+from the typed admission roles rather than adding a composite publisher CLI.
+
+Composition omits `provider_motion_samples`, `body_frame_samples`, the Phase-C
+`canonical_swim_bouts`, and their support projections. Core
+`kinematics_samples`, `subject_body_frame_samples`, and
+`canonical_swim_bouts` are emitted once. Chaser-relative rows bind the selected
+core motion row with a declared foreign key. Body-relative rows preserve the
+existing explicit `body_source_row_id=-1` failure evidence while projecting
+only valid observations into a nullable foreign key to
+`subject_body_frame_samples`; null keys are unconstrained using ordinary
+relational foreign-key semantics, while every present key must close exactly.
+
+The normalized bout comparator remains available for explicit migration or
+comparison work, but the maintained composite does not admit a second legacy
+bout table that would need deduplication. Its generalized bout, escape/freeze,
+and epoch descendants instead retain the selected core motion-and-bout
+dependency directly. This is stronger than claiming equality between two bout
+authorities from similar-looking rows.
+
+Focused workstation validation passes 93/93 composite, core, Phase-B,
+Phase-C, bundle, generic-writer, atomic-publisher, and lazy-reader tests. Both
+the core-only and composite profiles pass a real generic shard writer ->
+receipt-composed publisher -> unpatched installed-profile reader round trip.
+Import boundaries, the paradigm-authority ratchet, the tail-receipt ratchet,
+the Zarr-open-mode ratchet, and observed-metadata-literal checks also pass.
+Required repository CI and a real selector-ineligible composite canary remain
+pending; no production publication or selector changed at this checkpoint.
+
+### Read-only GoodBatBadBat admission checkpoint (2026-09-05)
+
+A read-only archive check exercised the new planner against the completed
+84-recording Phase-C bundle set. The bundle is valid under its published
+`validated_recording_behavior_bundle_v1` profile, but the core roster resolver
+rejected it before planning with `Bundle set is not the installed full-rate
+core-behavior profile.` No plan file or operation state was created. This is
+the intended fail-closed result: completion, recording membership, and the
+presence of motion/body/bout tables cannot relabel a provider-bound Phase-C
+bundle as core authority.
+
+The same check inspected the maintained core-workflow availability for the
+first eight GoodBatBadBat recordings. All eight have no stable admitted
+`refined_subject_masks` selection; consequently `subject_shape` and
+`tail_kinematics` are unavailable to the full core workflow. The first
+recording does contain complete selector-ineligible subject-shape and eye-angle
+candidates, but exact paths and completion state are not authority admission.
+The planner correctly leaves them blocked.
+
+Therefore the positive composite canary requires a newly admitted full-rate
+core execution report and core-bound chaser successors. It must not be obtained
+by reinterpreting the historical Phase-C bundle, forcing availability, or
+making a selector-ineligible prerequisite silently consumable. No source
+selector, scientific Zarr, registry, shared checkout, or production publication
+was changed by this audit.
 
 ## Composition contract
 
@@ -825,40 +1082,49 @@ inference from this static audit.
 
 ### Track C — implement a composite only after Track B
 
-- [ ] Register one explicit composite profile on `validated_behavior/v1`.
-- [ ] Add one composite bundle adapter requiring exactly one core receipt plus
+- [x] Register one explicit composite profile on `validated_behavior/v1`.
+- [x] Add one composite bundle adapter requiring exactly one core receipt plus
       a closed set of supported extension receipts per admitted member.
-- [ ] Derive and seal `core_authority_roster_sha256` from the normalized core
-      capability bindings; require every extension to name it.
-- [ ] Compose the complete core specs with paradigm-only extension specs using
+- [x] Derive and seal `core_authority_roster_sha256` from the normalized core
+      capability bindings.
+- [x] Require every extension publication to name the selected roster digest.
+- [x] Compose the complete core specs with paradigm-only extension specs using
       a collision-checking helper rather than dictionary overwrite.
-- [ ] Implement normalized `BoutAuthorityIdentity` comparison. Equal identities
-      deduplicate to one table; mismatch or missing proof returns a typed
-      authority conflict before scratch writes.
-- [ ] Reject duplicate table names and competing authority bindings at plan
+- [x] Implement normalized `BoutAuthorityIdentity` comparison.
+- [x] Publish only the roster-selected core bout table; require the maintained
+      chaser descendants to bind that exact bout dependency, so no second bout
+      authority reaches composition. Retain the normalized comparator for
+      explicit legacy migration/comparison rather than invoking it on an
+      unselected source.
+- [x] Reject duplicate table names and competing authority bindings at plan
       time.
-- [ ] Add exact foreign-key/cardinality contracts from paradigm rows to core
+- [x] Add exact foreign-key/cardinality contracts from paradigm rows to core
       rows.
-- [ ] Reproject chaser motion/body relationships against selected core rows;
+- [x] Reproject chaser motion/body relationships against selected core rows;
       do not copy `provider_motion_samples` or `body_frame_samples` into the
       composite as competing core facts.
-- [ ] Preserve manifest schema v1 and the generic publisher/reader; use a new
-      installed profile ID rather than changing Phase C in place.
-- [ ] Add real writer-to-unpatched-reader boundary coverage.
+- [x] Preserve the existing `validated_behavior/v1` manifest family and generic
+      publisher/reader; use a new installed profile ID rather than changing
+      Phase C in place.
+- [x] Add real writer-to-unpatched-reader boundary coverage.
 - [ ] Prove one representative legacy/core bout pair equal or conflict through
-      the normalized comparator.
+      the normalized comparator. This is migration evidence, not an admission
+      prerequisite for the maintained direct-core composite.
 - [ ] Validate one selector-ineligible canary before any maintained use.
 
 ### Track D — migrate maintained paradigm consumers
 
-- [ ] Replace composable chaser `MOTION_BOUT_PAIRS`/`matches[0]` authority
+- [x] Replace composable chaser `MOTION_BOUT_PAIRS`/`matches[0]` authority
       selection with the persisted core roster.
-- [ ] Make chaser body-relative, bout-response, epoch, escape/freeze,
+- [x] Make chaser body-relative, bout-response, epoch, escape/freeze,
       occupancy, and response products consume selected core identities.
+      Direct and transitive publications now preserve the exact sealed roster
+      dependency; paired-provider products require one common identity.
 - [ ] Add the core-roster dependency to shared stimulus response so moving
       grating, concentric/radial OMR, and looming cannot resolve independent
       latest motion or bout runs.
-- [ ] Remove implicit `track_id=0` from maintained composite dependency paths;
+- [x] Remove implicit `track_id=0` from the maintained chaser composite
+      dependency path;
       require the selected track identity and cardinality.
 - [ ] Point activity/spatial bins and classifier-specific extensions at the
       shared roster while retaining their genuinely distinct output grains.

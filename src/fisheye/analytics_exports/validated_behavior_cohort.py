@@ -1919,7 +1919,11 @@ def _part_foreign_key_is_closed(
     parquet = pq.ParquetFile(local_part)
     for batch in parquet.iter_batches(columns=list(local_fields)):
         columns = [column.to_pylist() for column in batch.columns]
-        if any(key not in target_values for key in zip(*columns, strict=True)):
+        if any(
+            key not in target_values
+            for key in zip(*columns, strict=True)
+            if all(value is not None for value in key)
+        ):
             return False
     return True
 
@@ -1942,7 +1946,11 @@ def _foreign_key_observation(
         columns = [column.to_pylist() for column in batch.columns]
         for key in zip(*columns, strict=True):
             local_rows += 1
-            if key not in target_values:
+            # Match ordinary relational foreign-key semantics: a nullable
+            # local relation is constrained only when every key component is
+            # present.  The Arrow contract remains responsible for declaring
+            # exactly which local fields may be null.
+            if all(value is not None for value in key) and key not in target_values:
                 unmatched += 1
     return local_rows, len(target_values), unmatched
 

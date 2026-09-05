@@ -5,15 +5,39 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import hashlib
 
 import pytest
 
 from fisheye.analysis_workflows.eye_gaze_source_handle import (
     build_gaze_convention_review_receipt,
 )
+from fisheye.analysis_workflows import core_behavior_cohort_adapter as core_adapter
+from fisheye.analysis_workflows.core_behavior_cohort_adapter import (
+    CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
+    CORE_BEHAVIOR_BUNDLE_METHOD_ID,
+    CORE_BEHAVIOR_BUNDLE_STATUS,
+    core_behavior_capability_contract,
+)
+from fisheye.analysis_workflows.validated_behavior_cohort import (
+    build_validated_behavior_bundle_set,
+    build_validated_behavior_cohort_membership,
+    policy_envelope,
+)
+from fisheye.analytics_exports.kinematics_samples import (
+    CORE_MOTION_SOURCE_SURFACE_PROFILE_ID,
+)
+from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import (
+    CANONICAL_SWIM_BOUTS_CAPABILITY,
+    CORE_BEHAVIOR_CAPABILITY_KEYS,
+    CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+    CROSS_GRAIN_JOIN_AUTHORITY,
+    KINEMATICS_SAMPLES_CAPABILITY,
+    SUBJECT_BODY_FRAME_CAPABILITY,
+    SUBJECT_BODY_FRAME_SOURCE_PROFILE_ID,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.utils import materialize_composable_chaser_successor_cohort as cohort
-
 
 REPO = Path(__file__).resolve().parents[3]
 SUBMIT_SCRIPT = REPO / "scripts/submit_composable_chaser_successors_bsub.sh"
@@ -41,6 +65,222 @@ def _record(attrs: dict[str, object], key: str, value: dict[str, object]) -> Non
 
 def _self_digested(body: dict[str, object]) -> dict[str, object]:
     return {**body, "payload_digest": canonical_json_sha256(body)}
+
+
+def _sealed(**body: object) -> dict[str, object]:
+    return {**body, "payload_sha256": canonical_json_sha256(body)}
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_core_bundle_set(
+    tmp_path: Path,
+    *,
+    archive: Path,
+    recording_id: str,
+) -> Path:
+    receipt_root = tmp_path / "core-receipts"
+    bundle_root = tmp_path / "core-bundles"
+    receipt_root.mkdir()
+    bundle_root.mkdir()
+    source_path = tmp_path / "core-source-membership.json"
+    source_member = {"recording_id": recording_id}
+    source_path.write_text(json.dumps({"members": [source_member]}), encoding="utf-8")
+    report_path = receipt_root / "execution-report.json"
+    report_path.write_text(json.dumps({"status": "complete"}), encoding="utf-8")
+    decision_path = tmp_path / "core-analysis-unit-decision.md"
+    decision_path.write_text("one recording is one analysis unit\n", encoding="utf-8")
+    report_binding = {
+        "role": "core_behavior_workflow_execution",
+        "path": str(report_path.resolve()),
+        "file_sha256": _file_sha256(report_path),
+        "record_sha256": canonical_json_sha256({"fixture": "execution-report"}),
+        "schema_id": "palette.analysis_workflow_execution",
+        "schema_version": 3,
+    }
+    membership = build_validated_behavior_cohort_membership(
+        membership_id="chaser-core-authority-fixture-v1",
+        source_membership={
+            "adapter_id": "chaser_core_authority_fixture_v1",
+            "schema_id": "fixture.chaser_membership",
+            "schema_version": 1,
+            "profile": "chaser_core_authority_fixture_v1",
+            "path": str(source_path.resolve()),
+            "file_sha256": _file_sha256(source_path),
+            "record_sha256": canonical_json_sha256({"fixture": "membership"}),
+            "member_count": 1,
+            "source_members_sha256": canonical_json_sha256(
+                [canonical_json_sha256(source_member)]
+            ),
+        },
+        members=[
+            {
+                "source_ordinal": 1,
+                "dataset_id": "fixture-dataset",
+                "recording_id": recording_id,
+                "analysis_zarr": str(archive.resolve()),
+                "protocol_names": ["goodbatbadbat"],
+                "protocol_hashes": ["a" * 64],
+                "source_member_sha256": canonical_json_sha256(source_member),
+                "source_subject_ids": ["capture-subject-fixture"],
+                "source_subject_identity_status": "capture_time_non_authoritative",
+                "acquisition_batch_id": None,
+                "acquisition_batch_identity_status": "missing_historical_not_inferred",
+                "analysis_unit_kind": "recording",
+                "analysis_unit_id": recording_id,
+                "membership_state": "admitted",
+                "reason_code": None,
+                "disposition_evidence": {
+                    "evidence_type": "fixture_decision_v1",
+                    "detail": "exact fixture authority accepted",
+                    "path": None,
+                    "file_sha256": None,
+                    "record_sha256": None,
+                },
+                "admission_receipts": [report_binding],
+            }
+        ],
+        analysis_zarr_root=tmp_path,
+        admission_receipt_root=receipt_root,
+        analysis_unit_policy=policy_envelope(
+            {
+                "policy_id": "recording_scoped_fixture_v1",
+                "analysis_unit_kind": "recording",
+                "member_id_field": "recording_id",
+                "decision_evidence": {
+                    "path": str(decision_path.resolve()),
+                    "file_sha256": _file_sha256(decision_path),
+                },
+            }
+        ),
+        acquisition_batch_policy=policy_envelope(
+            {
+                "policy_id": "missing_batch_fixture_v1",
+                "missing_identity_status": "missing_historical_not_inferred",
+                "authoritative_identity_status": "authoritative",
+                "inference_allowed": False,
+            }
+        ),
+        temporal_alignment_policy=policy_envelope(
+            {
+                "policy_id": "exact_frame_fixture_v1",
+                "temporal_alignment_requirement": "exact_acquisition_frame",
+            }
+        ),
+        palette_commit="b" * 40,
+        created_at_utc="2026-09-05T12:00:00Z",
+    )
+    membership_path = tmp_path / "core-membership.json"
+    membership_path.write_text(json.dumps(membership, sort_keys=True), encoding="utf-8")
+
+    join = _sealed(
+        schema_id="palette.validated_behavior.cross_grain_join_authority",
+        schema_version=1,
+        recording_id=recording_id,
+        camera_id="2010093",
+        source_total_frames=100,
+        source_sample_rate_hz=30.0,
+        acquisition_camera_frame_ref="/metadata/acquisition_camera_frame",
+        acquisition_camera_frame_sha256="c" * 64,
+        source_video_metadata_sha256="d" * 64,
+    )
+    join_sha = join["payload_sha256"]
+    capabilities: dict[str, object] = {}
+    for capability in CORE_BEHAVIOR_CAPABILITY_KEYS:
+        if capability == CROSS_GRAIN_JOIN_AUTHORITY:
+            binding: object = join
+        else:
+            profile_id = f"{capability}_v1"
+            source_values: dict[str, object] = {
+                "schema_id": f"fixture.{capability}.source",
+                "schema_version": 1,
+                "recording_id": recording_id,
+                "zarr_path": str(archive.resolve()),
+            }
+            if capability == KINEMATICS_SAMPLES_CAPABILITY:
+                profile_id = CORE_MOTION_SOURCE_SURFACE_PROFILE_ID
+                source_values.update(
+                    {
+                        "schema_version": 2,
+                        "run_path": "analysis/track_kinematics_runs/offline/core-motion",
+                        "tracks": [{"track_id": 7}],
+                    }
+                )
+            elif capability == SUBJECT_BODY_FRAME_CAPABILITY:
+                profile_id = SUBJECT_BODY_FRAME_SOURCE_PROFILE_ID
+                source_values["run_path"] = "analysis/subject_shape_runs/core-body"
+            elif capability == CANONICAL_SWIM_BOUTS_CAPABILITY:
+                source_values.update(
+                    {
+                        "run_path": "analysis/swim_bout_runs/core-bouts",
+                        "track_id": 7,
+                    }
+                )
+            binding = {
+                "profile_id": profile_id,
+                "source_binding": _sealed(**source_values),
+                "projection_contract": _sealed(
+                    schema_id=f"fixture.{capability}.projection",
+                    schema_version=1,
+                ),
+                "join_authority_sha256": join_sha,
+            }
+        capabilities[capability] = {
+            "state": "complete",
+            "reason_code": None,
+            "detail": None,
+            "binding": binding,
+        }
+    capability_bindings = {key: value["binding"] for key, value in capabilities.items()}
+    inventory = {
+        "execution_report": report_binding,
+        "capability_bindings": capability_bindings,
+    }
+    bundle_path = bundle_root / "recording.bundle.json"
+    bundle_path.write_text(json.dumps({"status": "complete"}), encoding="utf-8")
+    contract = core_behavior_capability_contract()
+    bundle_set = build_validated_behavior_bundle_set(
+        bundle_set_id="chaser-core-authority-fixture-v1",
+        membership=membership,
+        membership_path=membership_path,
+        membership_file_sha256=_file_sha256(membership_path),
+        bundle_root=bundle_root,
+        bundle_profile=core_adapter._bundle_profile(
+            contract,
+            export_profile_id=CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+        ),
+        capability_contract=contract,
+        members=[
+            {
+                "recording_id": recording_id,
+                "bundle_state": "complete",
+                "reason_code": None,
+                "bundle": {
+                    "adapter_id": CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
+                    "path": str(bundle_path.resolve()),
+                    "file_sha256": _file_sha256(bundle_path),
+                    "record_sha256": canonical_json_sha256({"fixture": "bundle"}),
+                    "schema_id": "palette.analysis_workflow_execution",
+                    "schema_version": 3,
+                    "method_id": CORE_BEHAVIOR_BUNDLE_METHOD_ID,
+                    "status": CORE_BEHAVIOR_BUNDLE_STATUS,
+                    "receipt_bindings": [report_binding],
+                    "binding_inventory_sha256": canonical_json_sha256(inventory),
+                },
+                "capabilities": capabilities,
+            }
+        ],
+        palette_commit="b" * 40,
+        created_at_utc="2026-09-05T12:00:00Z",
+    )
+    bundle_set_path = tmp_path / "core-bundle-set.json"
+    bundle_set_path.write_text(
+        json.dumps(bundle_set, sort_keys=True),
+        encoding="utf-8",
+    )
+    return bundle_set_path
 
 
 def _composable_manifest(
@@ -143,64 +383,6 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
             attrs,
         )
 
-    motion_run, bout_run = cohort.MOTION_BOUT_PAIRS[0]
-    body_run = "body-frame-v1"
-    body_run_path = f"analysis/body_frame_runs/{body_run}"
-    body_payload = {
-        "run_id": body_run,
-        "stage": "body_frame",
-        "publication": {
-            "completion_status": "complete",
-            "stage_selector_eligible": False,
-        },
-    }
-    body_manifest_sha = canonical_json_sha256(body_payload)
-    _write_group(
-        archive / body_run_path,
-        {
-            "run_manifest": {
-                "schema_id": "palette.body_frame.run_manifest",
-                "schema_version": 1,
-                "payload": body_payload,
-                "payload_digest": body_manifest_sha,
-            }
-        },
-    )
-    motion_authority = {
-        "schema_id": "palette.position_body_frame_motion_source_authority",
-        "schema_version": 1,
-        "recording_id": recording_id,
-        "body_frame_source": {
-            "run_path": body_run_path,
-            "manifest_sha256": body_manifest_sha,
-        },
-    }
-    motion_payload = {
-        "source_authority": {
-            "record": motion_authority,
-            "sha256": canonical_json_sha256(motion_authority),
-        }
-    }
-    motion_manifest_sha = canonical_json_sha256(motion_payload)
-    motion_attrs: dict[str, object] = {
-        "recording_id": recording_id,
-        "provider_track_motion_manifest": {
-            "schema_id": "palette.provider_track_motion_run_manifest",
-            "schema_version": 1,
-            "payload": motion_payload,
-            "payload_digest": motion_manifest_sha,
-        },
-        "provider_track_motion_manifest_sha256": motion_manifest_sha,
-    }
-    _write_group(
-        archive / "analysis/track_kinematics_runs/provider" / motion_run,
-        motion_attrs,
-    )
-    _write_group(
-        archive / "analysis/swim_bout_runs" / bout_run,
-        {"recording_id": recording_id},
-    )
-
     snapshot = tmp_path / "registry.json"
     snapshot.write_text(
         json.dumps(
@@ -218,7 +400,20 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
         ),
         encoding="utf-8",
     )
+    _write_core_bundle_set(
+        tmp_path,
+        archive=archive,
+        recording_id=recording_id,
+    )
     return archive, raw_h5, snapshot
+
+
+def _plan(snapshot: Path, *, operations_root: Path) -> dict[str, object]:
+    return cohort.plan_cohort_task(
+        snapshot,
+        operations_root=operations_root,
+        core_bundle_set=snapshot.parent / "core-bundle-set.json",
+    )
 
 
 def _clean_repo(tmp_path: Path) -> tuple[Path, str]:
@@ -327,13 +522,13 @@ def _eye_gaze_bindings(
 
 def test_plan_freezes_exact_recording_inputs(tmp_path: Path) -> None:
     _archive, _raw_h5, snapshot = _fixture(tmp_path)
-    task = cohort.plan_cohort_task(
+    task = _plan(
         snapshot,
         operations_root=tmp_path / "operations",
     )
 
     assert task["recording_count"] == 1
-    assert task["schema_version"] == 7
+    assert task["schema_version"] == 8
     assert task["status_counts"] == {"ready": 1}
     assert task["runnable_task_indices"] == [1]
     assert cohort.load_cohort_task(task)["task_sha256"] == task["task_sha256"]
@@ -341,13 +536,13 @@ def test_plan_freezes_exact_recording_inputs(tmp_path: Path) -> None:
     assert entry["canonical_stimulus_run"] == "stimulus_canonical_v1_fixture"
     assert entry["keypoint_proxy"]["run_name"] == cohort.KEYPOINT_PROXY_RUN
     assert entry["detection_proxy"]["run_name"] == cohort.DETECTION_PROXY_RUN
-    assert entry["motion_and_bouts"]["motion_run_path"].endswith(
-        cohort.MOTION_BOUT_PAIRS[0][0]
+    assert entry["core_authority"]["admission_state"] == ("static_capability_admitted")
+    assert entry["core_authority"]["selected_track_id"] == 7
+    assert (
+        entry["core_authority"]["core_authority_roster_sha256"]
+        == entry["core_authority"]["core_authority_roster"]["record_sha256"]
     )
-    assert entry["motion_and_bouts"]["body_frame_run_name"] == "body-frame-v1"
-    assert entry["motion_and_bouts"]["body_frame_resolution"] == (
-        "exact_provider_motion_authority_v1"
-    )
+    assert "motion_and_bouts" not in entry
     assert entry["output_run_names"]["epoch_behavior"] == cohort.EPOCH_BEHAVIOR_RUN
     assert entry["output_run_names"]["body_alignment_by_distance"] == (
         cohort.BODY_ALIGNMENT_RUN
@@ -355,7 +550,7 @@ def test_plan_freezes_exact_recording_inputs(tmp_path: Path) -> None:
     assert entry["output_run_names"]["body_alignment_plot_bundle"] == (
         cohort.BODY_ALIGNMENT_RECIPE_BUNDLE_NAME
     )
-    assert entry["output_run_names"]["body_alignment_plot_bundle"].endswith("recipe_v2")
+    assert entry["output_run_names"]["body_alignment_plot_bundle"].endswith("recipe_v1")
     assert entry["output_run_names"]["keypoint_near_field_visits"] == (
         cohort.KEYPOINT_NEAR_FIELD_VISIT_RUN
     )
@@ -379,27 +574,138 @@ def test_plan_freezes_exact_recording_inputs(tmp_path: Path) -> None:
     assert task["selection_policy"]["near_field_visit_receipt_policy"] == (
         cohort.NEAR_FIELD_VISIT_RECEIPT_POLICY
     )
-    assert len(entry["input_group_bindings"]) == 8
+    assert len(entry["input_group_bindings"]) == 5
+    assert task["selection_policy"]["core_authority_resolution"] == (
+        cohort.CORE_BUNDLE_SELECTION_POLICY
+    )
     assert entry["existing_output_group_paths"] == []
     assert task["safety"] == cohort.EXPECTED_SAFETY
 
 
+def test_existing_outputs_remain_runnable_for_dynamic_admission(
+    tmp_path: Path,
+) -> None:
+    archive, _raw_h5, snapshot = _fixture(tmp_path)
+    operations_root = tmp_path / "operations"
+    initial = _plan(snapshot, operations_root=operations_root)
+    entry = initial["entries"][0]
+    recording_id = entry["recording_id"]
+    roster_sha256 = entry["core_authority"]["core_authority_roster_sha256"]
+
+    for group_path in cohort._output_groups():
+        run_name = Path(group_path).name
+        attrs: dict[str, object] = {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+            "production_authority": False,
+            "registry_update": False,
+            "selection": "none",
+            "palette_run_name": run_name,
+            "recording_id": recording_id,
+        }
+        _record(
+            attrs,
+            "fixture_manifest",
+            {
+                "recording_id": recording_id,
+                "run_name": run_name,
+                "core_authority": {
+                    "core_authority_roster_sha256": roster_sha256,
+                },
+            },
+        )
+        _write_group(archive / group_path, attrs)
+
+    plot_dir = Path(entry["plot_output_dir"])
+    plot_receipts = {
+        plot_dir / f"{cohort.SUCCESSOR_RUN}_plot_receipt.json",
+        plot_dir / f"{cohort.DASHBOARD_RECIPE_BUNDLE_NAME}_plot_receipt.json",
+        plot_dir / "detailed" / f"{cohort.DETAILED_BUNDLE_NAME}_receipt.json",
+        plot_dir / "detailed" / f"{cohort.DETAILED_RECIPE_BUNDLE_NAME}_receipt.json",
+        plot_dir
+        / "spatial_occupancy"
+        / (f"{cohort.SPATIAL_OCCUPANCY_RUN}_" "spatial_occupancy_plot_receipt.json"),
+        plot_dir
+        / "spatial_occupancy"
+        / (
+            f"{cohort.SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME}_"
+            "spatial_occupancy_plot_receipt.json"
+        ),
+        plot_dir
+        / "body_alignment_by_distance"
+        / (
+            f"{cohort.BODY_ALIGNMENT_RECIPE_BUNDLE_NAME}_"
+            "body_alignment_plot_receipt.json"
+        ),
+        plot_dir
+        / "near_field_visits"
+        / (
+            f"{cohort.KEYPOINT_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME}_"
+            "near_field_visit_plot_receipt.json"
+        ),
+        plot_dir
+        / "near_field_visits"
+        / (
+            f"{cohort.DETECTION_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME}_"
+            "near_field_visit_plot_receipt.json"
+        ),
+    }
+    for receipt in plot_receipts:
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text("{}", encoding="utf-8")
+
+    replanned = _plan(snapshot, operations_root=operations_root)
+    assert replanned["status_counts"] == {"validation_only": 1}
+    assert replanned["runnable_task_indices"] == [1]
+
+    successor = cohort.successor_cohort_task(replanned)
+    assert successor["status_counts"] == {"validation_only": 1}
+    assert successor["runnable_task_indices"] == [1]
+
+
 def test_task_digest_rejects_mutation(tmp_path: Path) -> None:
     _archive, _raw_h5, snapshot = _fixture(tmp_path)
-    task = cohort.plan_cohort_task(snapshot, operations_root=tmp_path / "operations")
+    task = _plan(snapshot, operations_root=tmp_path / "operations")
     task["entries"][0]["recording_id"] = "changed"
 
     with pytest.raises(cohort.ComposableChaserCohortError, match="digest is stale"):
         cohort.load_cohort_task(task)
 
 
+def test_execution_revalidates_core_bundle_before_scratch_creation(
+    tmp_path: Path,
+) -> None:
+    _archive, _raw_h5, snapshot = _fixture(tmp_path)
+    task = _plan(snapshot, operations_root=tmp_path / "operations")
+    bundle_set = snapshot.parent / "core-bundle-set.json"
+    bundle_set.write_text(
+        bundle_set.read_text(encoding="utf-8") + "\n", encoding="utf-8"
+    )
+    repo, commit = _clean_repo(tmp_path)
+
+    with pytest.raises(
+        cohort.ComposableChaserCohortError,
+        match="bundle-set or membership file changed",
+    ):
+        cohort.run_one(
+            task,
+            task_index=1,
+            palette_repo=repo,
+            palette_commit=commit,
+            scratch_root=tmp_path / "scratch",
+            receipt_root=tmp_path / "receipts",
+            apply=True,
+        )
+
+    assert not (tmp_path / "scratch").exists()
+    assert not (tmp_path / "receipts").exists()
+
+
 def test_replan_freezes_versioned_body_successor_from_prior_recording_set(
     tmp_path: Path,
 ) -> None:
     _archive, _raw_h5, snapshot = _fixture(tmp_path)
-    original = cohort.plan_cohort_task(
-        snapshot, operations_root=tmp_path / "old-operations"
-    )
+    original = _plan(snapshot, operations_root=tmp_path / "old-operations")
 
     replanned = cohort.replan_cohort_task(
         original,
@@ -411,23 +717,21 @@ def test_replan_freezes_versioned_body_successor_from_prior_recording_set(
         replanned["selection_policy"]["successor_of_task_sha256"]
         == original["task_sha256"]
     )
-    assert replanned["selection_policy"]["body_frame_resolution"] == (
-        "exact_provider_motion_authority_v1"
+    assert replanned["selection_policy"]["core_authority_resolution"] == (
+        cohort.CORE_BUNDLE_SELECTION_POLICY
     )
     entry = replanned["entries"][0]
     assert entry["output_run_names"]["keypoint_relative"] == (
         cohort.KEYPOINT_RELATIVE_RUN
     )
-    assert entry["motion_and_bouts"]["body_frame_run_name"] == "body-frame-v1"
-    assert len(entry["input_group_bindings"]) == 8
+    assert entry["core_authority"]["selected_track_id"] == 7
+    assert len(entry["input_group_bindings"]) == 5
     assert cohort.load_cohort_task(replanned)["task_sha256"] == replanned["task_sha256"]
 
 
 def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> None:
     _archive, _raw_h5, snapshot = _fixture(tmp_path)
-    original = cohort.plan_cohort_task(
-        snapshot, operations_root=tmp_path / "operations"
-    )
+    original = _plan(snapshot, operations_root=tmp_path / "operations")
     successor = cohort.successor_cohort_task(original)
 
     assert successor["schema_version"] == cohort.TASK_SCHEMA_VERSION
@@ -454,7 +758,7 @@ def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> No
     assert entry["output_run_names"]["detailed_bundle"] == (
         cohort.DETAILED_RECIPE_BUNDLE_NAME
     )
-    assert entry["output_run_names"]["detailed_bundle"].endswith("recipe_v7")
+    assert entry["output_run_names"]["detailed_bundle"].endswith("recipe_v1")
     assert entry["output_run_names"]["epoch_behavior"] == cohort.EPOCH_BEHAVIOR_RUN
     assert entry["output_run_names"]["body_alignment_plot_bundle"] == (
         cohort.BODY_ALIGNMENT_RECIPE_BUNDLE_NAME
@@ -479,7 +783,7 @@ def test_task_rejects_partial_dual_provider_near_field_visit_outputs(
     tmp_path: Path,
 ) -> None:
     _archive, _raw_h5, snapshot = _fixture(tmp_path)
-    task = cohort.plan_cohort_task(snapshot, operations_root=tmp_path / "operations")
+    task = _plan(snapshot, operations_root=tmp_path / "operations")
     task["entries"][0]["output_run_names"].pop("detection_near_field_visit_plot_bundle")
     task["task_sha256"] = cohort._task_digest(task)
 
@@ -492,23 +796,36 @@ def test_task_rejects_partial_dual_provider_near_field_visit_outputs(
 
 def test_task_successor_reuses_existing_exact_spatial_science(tmp_path: Path) -> None:
     archive, _raw_h5, snapshot = _fixture(tmp_path)
-    original = cohort.plan_cohort_task(
-        snapshot, operations_root=tmp_path / "operations"
-    )
+    original = _plan(snapshot, operations_root=tmp_path / "operations")
     recording_id = original["entries"][0]["recording_id"]
+    core_roster_sha256 = original["entries"][0]["core_authority"][
+        "core_authority_roster_sha256"
+    ]
+    attrs: dict[str, object] = {
+        "palette_run_completion_status": "complete",
+        "stage_selector_eligible": False,
+        "production_authority": False,
+        "registry_update": False,
+        "selection": "none",
+        "palette_run_name": cohort.SPATIAL_OCCUPANCY_RUN,
+        "recording_id": recording_id,
+    }
+    _record(
+        attrs,
+        "composable_chaser_successor_manifest",
+        {
+            "recording_id": recording_id,
+            "run_name": cohort.SPATIAL_OCCUPANCY_RUN,
+            "core_authority": {
+                "core_authority_roster_sha256": core_roster_sha256,
+            },
+        },
+    )
     _write_group(
         archive
         / "analysis/chaser_spatial_occupancy_runs"
         / cohort.SPATIAL_OCCUPANCY_RUN,
-        {
-            "palette_run_completion_status": "complete",
-            "stage_selector_eligible": False,
-            "production_authority": False,
-            "registry_update": False,
-            "selection": "none",
-            "palette_run_name": cohort.SPATIAL_OCCUPANCY_RUN,
-            "recording_id": recording_id,
-        },
+        attrs,
     )
 
     successor = cohort.successor_cohort_task(original)
@@ -524,13 +841,71 @@ def test_task_successor_reuses_existing_exact_spatial_science(tmp_path: Path) ->
     }
 
 
+def test_task_successor_rejects_completed_spatial_science_without_exact_core_roster(
+    tmp_path: Path,
+) -> None:
+    archive, _raw_h5, snapshot = _fixture(tmp_path)
+    original = _plan(snapshot, operations_root=tmp_path / "operations")
+    recording_id = original["entries"][0]["recording_id"]
+    attrs: dict[str, object] = {
+        "palette_run_completion_status": "complete",
+        "stage_selector_eligible": False,
+        "production_authority": False,
+        "registry_update": False,
+        "selection": "none",
+        "palette_run_name": cohort.SPATIAL_OCCUPANCY_RUN,
+        "recording_id": recording_id,
+    }
+    _record(
+        attrs,
+        "composable_chaser_successor_manifest",
+        {
+            "recording_id": recording_id,
+            "run_name": cohort.SPATIAL_OCCUPANCY_RUN,
+        },
+    )
+    _write_group(
+        archive
+        / "analysis/chaser_spatial_occupancy_runs"
+        / cohort.SPATIAL_OCCUPANCY_RUN,
+        attrs,
+    )
+
+    with pytest.raises(
+        cohort.ComposableChaserCohortError,
+        match="no sealed core-authority roster",
+    ):
+        cohort.successor_cohort_task(original)
+
+    _record(
+        attrs,
+        "composable_chaser_successor_manifest",
+        {
+            "recording_id": recording_id,
+            "run_name": cohort.SPATIAL_OCCUPANCY_RUN,
+            "core_authority": {
+                "core_authority_roster_sha256": "f" * 64,
+            },
+        },
+    )
+    _write_group(
+        archive
+        / "analysis/chaser_spatial_occupancy_runs"
+        / cohort.SPATIAL_OCCUPANCY_RUN,
+        attrs,
+    )
+    with pytest.raises(
+        cohort.ComposableChaserCohortError,
+        match="binds another core-authority roster",
+    ):
+        cohort.successor_cohort_task(original)
+
+
 def test_task_successor_freezes_reviewed_gaze_and_plans_exact_projection(
     tmp_path: Path,
 ) -> None:
     archive, _raw_h5, snapshot = _fixture(tmp_path)
-    original = cohort.plan_cohort_task(
-        snapshot, operations_root=tmp_path / "operations"
-    )
+    original = _plan(snapshot, operations_root=tmp_path / "operations")
     recording_id = original["entries"][0]["recording_id"]
     bindings, _receipt = _eye_gaze_bindings(
         tmp_path,
@@ -550,7 +925,7 @@ def test_task_successor_freezes_reviewed_gaze_and_plans_exact_projection(
         f"analysis/chaser_gaze_tracking_runs/{cohort.SUCCESSOR_RUN}"
         in entry["output_group_paths"]
     )
-    assert len(entry["input_group_bindings"]) == 9
+    assert len(entry["input_group_bindings"]) == 6
     assert task["selection_policy"]["eye_gaze_resolution"] == (
         cohort.EYE_GAZE_BINDING_RESOLUTION
     )
@@ -594,9 +969,7 @@ def test_task_successor_freezes_reviewed_gaze_and_plans_exact_projection(
 
 def test_gaze_successor_rejects_changed_convention_receipt(tmp_path: Path) -> None:
     archive, _raw_h5, snapshot = _fixture(tmp_path)
-    original = cohort.plan_cohort_task(
-        snapshot, operations_root=tmp_path / "operations"
-    )
+    original = _plan(snapshot, operations_root=tmp_path / "operations")
     recording_id = original["entries"][0]["recording_id"]
     bindings, receipt = _eye_gaze_bindings(
         tmp_path,
@@ -625,9 +998,7 @@ def test_gaze_successor_rejects_changed_convention_receipt(tmp_path: Path) -> No
 
 def test_gaze_task_rejects_missing_cohort_resolution_policy(tmp_path: Path) -> None:
     archive, _raw_h5, snapshot = _fixture(tmp_path)
-    original = cohort.plan_cohort_task(
-        snapshot, operations_root=tmp_path / "operations"
-    )
+    original = _plan(snapshot, operations_root=tmp_path / "operations")
     recording_id = original["entries"][0]["recording_id"]
     bindings, _receipt = _eye_gaze_bindings(
         tmp_path,
@@ -650,9 +1021,14 @@ def test_gaze_task_rejects_missing_cohort_resolution_policy(tmp_path: Path) -> N
 
 def test_run_one_rejects_changed_frozen_input_metadata(tmp_path: Path) -> None:
     archive, _raw_h5, snapshot = _fixture(tmp_path)
-    task = cohort.plan_cohort_task(snapshot, operations_root=tmp_path / "operations")
-    motion_path = Path(task["entries"][0]["motion_and_bouts"]["motion_run_path"])
-    (archive / motion_path / "zarr.json").write_text("{}", encoding="utf-8")
+    task = _plan(snapshot, operations_root=tmp_path / "operations")
+    proxy_path = (
+        archive
+        / "analysis/chaser_input_provenance_proxy_runs"
+        / cohort.KEYPOINT_PROXY_RUN
+        / "zarr.json"
+    )
+    proxy_path.write_text("{}", encoding="utf-8")
 
     with pytest.raises(cohort.ComposableChaserCohortError, match="metadata changed"):
         cohort.run_one(
@@ -667,7 +1043,7 @@ def test_run_one_rejects_changed_frozen_input_metadata(tmp_path: Path) -> None:
 
 def test_run_one_dry_run_renders_complete_serial_chain(tmp_path: Path) -> None:
     _archive, _raw_h5, snapshot = _fixture(tmp_path)
-    task = cohort.plan_cohort_task(snapshot, operations_root=tmp_path / "operations")
+    task = _plan(snapshot, operations_root=tmp_path / "operations")
     repo, commit = _clean_repo(tmp_path)
 
     result = cohort.run_one(
@@ -718,13 +1094,14 @@ def test_run_one_dry_run_renders_complete_serial_chain(tmp_path: Path) -> None:
     successors = next(
         stage for stage in result["stages"] if stage["stage"] == "composable_successors"
     )
-    assert (
-        keypoint_relative["command"][
-            keypoint_relative["command"].index("--body-frame-run") + 1
-        ]
-        == "body-frame-v1"
-    )
+    assert "--body-frame-run" not in keypoint_relative["command"]
     assert "--body-frame-run" not in detection_relative["command"]
+    assert "--core-authority-roster" in keypoint_relative["command"]
+    assert "--core-authority-roster" in detection_relative["command"]
+    assert "--core-track-id" in successors["command"]
+    assert "--provider-motion-run-path" not in successors["command"]
+    assert "--swim-bout-run-name" not in successors["command"]
+    assert "--track-id" not in successors["command"]
     assert "--no-body-extension" not in successors["command"]
     assert result["safety"] == cohort.EXPECTED_SAFETY
     assert not (tmp_path / "scratch").exists()
@@ -735,9 +1112,7 @@ def test_receipt_bound_successor_dry_run_passes_targeted_receipts(
     tmp_path: Path,
 ) -> None:
     _archive, _raw_h5, snapshot = _fixture(tmp_path)
-    original = cohort.plan_cohort_task(
-        snapshot, operations_root=tmp_path / "operations"
-    )
+    original = _plan(snapshot, operations_root=tmp_path / "operations")
     task = cohort.successor_cohort_task(original)
     entry = task["entries"][0]
     repo, commit = _clean_repo(tmp_path)
@@ -953,7 +1328,7 @@ def test_existing_visit_science_requires_current_exact_source_bindings(
     tmp_path: Path,
 ) -> None:
     archive, _raw_h5, snapshot = _fixture(tmp_path)
-    task = cohort.plan_cohort_task(snapshot, operations_root=tmp_path / "operations")
+    task = _plan(snapshot, operations_root=tmp_path / "operations")
     entry = task["entries"][0]
     recording_id = entry["recording_id"]
     outputs = entry["output_run_names"]
@@ -1132,7 +1507,7 @@ def test_bsub_submitter_renders_pinned_array_without_submission(
     tmp_path: Path,
 ) -> None:
     _archive, _raw_h5, snapshot = _fixture(tmp_path)
-    task = cohort.plan_cohort_task(snapshot, operations_root=tmp_path / "operations")
+    task = _plan(snapshot, operations_root=tmp_path / "operations")
     task_path = tmp_path / "task.json"
     task_path.write_text(json.dumps(task), encoding="utf-8")
     repo, commit = _clean_repo(tmp_path)
