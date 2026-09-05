@@ -77,6 +77,12 @@ class CoreMotionTrackSourceHandle:
         object.__setattr__(self, "_verification_seal", _HANDLE_SEAL)
 
     @property
+    def core_authority_roster(self) -> Mapping[str, Any]:
+        """Return the exact validated roster from which this handle was minted."""
+
+        return self._bound.roster
+
+    @property
     def frame_indices(self) -> np.ndarray:
         return self.array("source_acquisition_frame_index")
 

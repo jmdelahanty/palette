@@ -26,6 +26,17 @@ from fisheye.analysis_workflows.core_motion_source_handle import (
     bind_core_motion_track_source_handle,
     require_core_motion_track_source_handle,
 )
+from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
+    ChaserRelativeFrameSourceHandle,
+)
+from fisheye.analysis_workflows.chaser_relative_frame_storage import (
+    validate_prepared_chaser_relative_frame,
+)
+from fisheye.analysis_workflows.core_chaser_relative_frame_adapter import (
+    CORE_CHASER_RELATIVE_CONSUMER_ID,
+    CoreChaserRelativeFrameAdapterError,
+    prepare_core_chaser_relative_frame,
+)
 from fisheye.analytics_exports.validated_behavior_contracts import (
     CORE_TABLE_SPECS,
     compose_disjoint_table_specs,
@@ -47,6 +58,10 @@ def _capability_bindings(tmp_path: Path) -> dict[str, object]:
         schema_version=1,
         recording_id="recording-a",
         camera_id="camera-a",
+        source_total_frames=100,
+        acquisition_camera_frame_ref="/metadata/acquisition_camera_frame",
+        acquisition_camera_frame_sha256="8" * 64,
+        source_video_metadata_sha256="7" * 64,
     )
     join_sha = str(join["payload_sha256"])
     bindings: dict[str, object] = {CROSS_GRAIN_JOIN_AUTHORITY: join}
@@ -382,10 +397,19 @@ def _bound_core_motion(tmp_path: Path) -> BoundCoreMotionAndBouts:
         "positions_mm": {
             "shape": list(positions.shape),
             "dtype": positions.dtype.str,
+            "physical_authority_sha256": "9" * 64,
         },
         "transition_valid": {
             "shape": list(transition_valid.shape),
             "dtype": transition_valid.dtype.str,
+        },
+        "sample_valid": {
+            "shape": [3],
+            "dtype": np.dtype(bool).str,
+        },
+        "position_finite": {
+            "shape": [3],
+            "dtype": np.dtype(bool).str,
         },
     }
     capabilities = _capability_bindings(tmp_path)
@@ -428,6 +452,8 @@ def _bound_core_motion(tmp_path: Path) -> BoundCoreMotionAndBouts:
         "source_acquisition_frame_index": _FakeArray(frames),
         "positions_mm": _FakeArray(positions),
         "transition_valid": _FakeArray(transition_valid),
+        "sample_valid": _FakeArray(np.ones(3, dtype=bool)),
+        "position_finite": _FakeArray(np.ones(3, dtype=bool)),
     }
     return BoundCoreMotionAndBouts(
         _verification_seal=roster_module._BOUND_CORE_MOTION_SEAL,
@@ -487,3 +513,289 @@ def test_core_motion_handle_rejects_implicit_or_mismatched_track(
                 ),
                 track_id=track_id,
             )
+
+
+def _core_chaser_motion_handle(tmp_path: Path) -> CoreMotionTrackSourceHandle:
+    return bind_core_motion_track_source_handle(
+        _bound_core_motion(tmp_path),
+        consumer_id=CORE_CHASER_RELATIVE_CONSUMER_ID,
+        required_capabilities=(
+            CROSS_GRAIN_JOIN_AUTHORITY,
+            "kinematics_samples",
+        ),
+        track_id=7,
+    )
+
+
+def _chaser_source(tmp_path: Path) -> ChaserRelativeFrameSourceHandle:
+    n_frames = 3
+    n_chasers = 2
+    frames = np.repeat(np.asarray([11, 12, 13], dtype=np.int64), n_chasers)
+    controller = {
+        "schema_id": "fixture.controller_state",
+        "schema_version": 1,
+        "recording_id": "recording-a",
+        "session_timestamp_authority": {
+            "recording_timing_authority_sha256": "6" * 64,
+        },
+    }
+    chaser_authority = {
+        "recording_id": "recording-a",
+        "source_authority_id": "analysis/chaser_input/source-a",
+        "source_digest": "a" * 64,
+        "provider_id": "chaser-provider-a",
+        "provider_digest": "b" * 64,
+        "coordinate_authority_id": "/metadata/acquisition_camera_frame",
+        "scale_authority_id": "/analysis/calibration/physical",
+        "timing_authority_id": "analysis/chaser/timestamp_ns",
+        "row_axis_authority_id": "analysis/chaser/frame_axis",
+        "row_axis_authority_digest": "c" * 64,
+    }
+    manifest = {
+        "coordinate_policy": {
+            "policy_id": "source_camera_y_down_v1",
+            "coordinate_authority_id": "/metadata/acquisition_camera_frame",
+            "coordinate_frame": "source_camera_continuous_pixel_xy",
+            "origin": "top_left",
+            "x_axis_direction": "right",
+            "y_axis_direction": "down",
+        },
+        "scale_policy": {
+            "policy_id": "source_camera_scale_v1",
+            "scale_authority_id": "/analysis/calibration/physical",
+            "scale_digest": "9" * 64,
+            "pixels_per_unit": 2.0,
+            "unit": "mm",
+        },
+        "timing_policy": {
+            "policy_id": "acquisition_camera_timing_v1",
+            "timing_authority_id": "analysis/chaser/timestamp_ns",
+            "timing_digest": "6" * 64,
+            "frame_key_name": "acquisition_frame_id",
+            "track_sample_key_name": "track_sample_id",
+            "timestamp_field": "timestamp_ns",
+        },
+    }
+    arrays = {
+        "acquisition_frame_id": frames,
+        "timestamp_ns": np.repeat(
+            np.asarray([100, 200, 300], dtype=np.int64), n_chasers
+        ),
+        "timestamp_valid": np.ones(6, dtype=bool),
+        "chaser_position_xy_px": np.asarray(
+            [
+                [4.0, 6.0],
+                [6.0, 8.0],
+                [6.0, 8.0],
+                [8.0, 10.0],
+                [10.0, 12.0],
+                [12.0, 14.0],
+            ],
+            dtype=np.float32,
+        ),
+        "chaser_position_valid": np.ones(6, dtype=bool),
+        "selection_member": np.ones(6, dtype=bool),
+        "chaser_occurrence_member": np.ones(6, dtype=bool),
+        "chaser_identity_code": np.tile(np.asarray([1, 2], dtype=np.uint16), 3),
+        "chaser_behavior_role_code": np.tile(np.asarray([1, 2], dtype=np.uint8), 3),
+        "chaser_source_row_id": np.arange(6, dtype=np.int64),
+        "trial_id": np.ones(6, dtype=np.int64),
+        "trial_valid": np.ones(6, dtype=bool),
+        "active_state_code": np.ones(6, dtype=np.uint8),
+        "active_state_valid": np.ones(6, dtype=bool),
+    }
+
+    def envelope(record: dict[str, object]) -> dict[str, object]:
+        return {"record": record, "sha256": canonical_json_sha256(record)}
+
+    context = {
+        "fish_identity": "fish-a",
+        "subject_identity": envelope(
+            {
+                "schema_id": "fixture.subject_identity",
+                "schema_version": 1,
+                "recording_id": "recording-a",
+                "subject_id": "fish-a",
+            }
+        ),
+        "temporal_selection": envelope(
+            {
+                "schema_id": "fixture.temporal_selection",
+                "schema_version": 1,
+                "recording_id": "recording-a",
+                "selection_id": "source-selection-a",
+            }
+        ),
+        "chaser_occurrence": envelope(
+            {
+                "schema_id": "fixture.chaser_occurrence",
+                "schema_version": 1,
+                "recording_id": "recording-a",
+                "occurrence_policy_id": "logged-occurrence-a",
+            }
+        ),
+        "acquisition_projection": envelope(
+            {
+                "schema_id": "fixture.acquisition_projection",
+                "schema_version": 1,
+                "recording_id": "recording-a",
+                "policy_id": "direct-acquisition-projection-a",
+            }
+        ),
+        "acquisition_projection_publication": None,
+        "controller_state": envelope(controller),
+        "analysis_profile": envelope(
+            {
+                "schema_id": "fixture.chaser_profile",
+                "schema_version": 1,
+                "recording_id": "recording-a",
+                "profile_id": "source-chaser-profile-a",
+            }
+        ),
+        "arena_geometry": None,
+        "arena_to_source_camera_transform": None,
+    }
+    value = object.__new__(ChaserRelativeFrameSourceHandle)
+    for name, item in {
+        "analysis_zarr_path": (tmp_path / "recording-a.zarr").resolve(),
+        "run_path": "analysis/chaser_relative_frame_runs/chaser-a",
+        "run_name": "chaser-a",
+        "recording_id": "recording-a",
+        "selector_eligible": False,
+        "n_frames": n_frames,
+        "n_chasers": n_chasers,
+        "n_rows": n_frames * n_chasers,
+        "run_manifest": manifest,
+        "source_authorities": {"chaser_position": chaser_authority},
+        "context": context,
+        "identity_registries": {
+            "fish": {"1": "fish-a"},
+            "chaser": {"1": "chaser-a", "2": "chaser-b"},
+            "behavior_role": {"1": "good", "2": "bad"},
+            "active_state": {"0": "inactive", "1": "active"},
+        },
+        "base_arrays": arrays,
+        "body_arrays": None,
+        "verification_digest": "d" * 64,
+    }.items():
+        object.__setattr__(value, name, item)
+    return value
+
+
+def _timing_authority() -> SimpleNamespace:
+    return SimpleNamespace(
+        sha256="6" * 64,
+        recording_id="recording-a",
+        camera_id="camera-a",
+        frame_count=100,
+        source_video_metadata_sha256="7" * 64,
+    )
+
+
+def test_core_chaser_adapter_reuses_existing_relative_frame_surface(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fisheye.analysis_workflows import core_chaser_relative_frame_adapter as module
+
+    monkeypatch.setattr(
+        ChaserRelativeFrameSourceHandle, "assert_current", lambda self: None
+    )
+    monkeypatch.setattr(
+        module,
+        "load_provider_recording_timing_authority",
+        lambda *args, **kwargs: _timing_authority(),
+    )
+
+    adapted = prepare_core_chaser_relative_frame(
+        _core_chaser_motion_handle(tmp_path),
+        _chaser_source(tmp_path),
+    )
+    prepared = adapted.prepared
+
+    assert prepared.dimensions.n_rows == 6
+    assert np.array_equal(
+        prepared.base_arrays["track_sample_id"],
+        np.asarray([0, 0, 1, 1, 2, 2], dtype=np.int64),
+    )
+    assert np.array_equal(
+        prepared.base_arrays["relative_physical_valid"],
+        np.ones(6, dtype=bool),
+    )
+    assert np.allclose(
+        prepared.base_arrays["relative_distance_physical"],
+        np.asarray([2**0.5, 8**0.5] * 3, dtype=np.float32),
+    )
+    assert not any(
+        token in name
+        for name in prepared.base_arrays
+        for token in ("speed", "acceleration", "cumulative")
+    )
+    core_binding = prepared.manifest["context"]["core_authority"]["record"]
+    assert core_binding["core_motion_facts_repeated"] is False
+    assert core_binding["chaser_source"]["fish_position_authority"] == (
+        "not_used_core_roster_selected_instead"
+    )
+    assert core_binding["chaser_source"]["body_frame_authority"] == (
+        "not_used_core_roster_selected_instead"
+    )
+    assert (
+        prepared.manifest["source_authorities"]["fish_position"]["source_authority_id"]
+        == "analysis/track_kinematics_runs/offline/motion-a"
+    )
+    receipt = validate_prepared_chaser_relative_frame(prepared)
+    assert receipt["payload_digest"] == prepared.payload_digest
+    assert adapted.to_json()["publication_surface"] == (
+        "analysis/chaser_relative_frame_runs"
+    )
+
+
+def test_core_chaser_adapter_rejects_coordinate_authority_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        ChaserRelativeFrameSourceHandle, "assert_current", lambda self: None
+    )
+    source = _chaser_source(tmp_path)
+    source.run_manifest["coordinate_policy"][
+        "coordinate_authority_id"
+    ] = "/metadata/another_camera_frame"
+
+    with pytest.raises(
+        CoreChaserRelativeFrameAdapterError,
+        match="source-camera authority",
+    ):
+        prepare_core_chaser_relative_frame(
+            _core_chaser_motion_handle(tmp_path),
+            source,
+        )
+
+
+def test_core_chaser_adapter_rejects_a_missing_core_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fisheye.analysis_workflows import core_chaser_relative_frame_adapter as module
+
+    monkeypatch.setattr(
+        ChaserRelativeFrameSourceHandle, "assert_current", lambda self: None
+    )
+    monkeypatch.setattr(
+        module,
+        "load_provider_recording_timing_authority",
+        lambda *args, **kwargs: _timing_authority(),
+    )
+    source = _chaser_source(tmp_path)
+    source.base_arrays["acquisition_frame_id"][:] = np.repeat(
+        np.asarray([11, 12, 14], dtype=np.int64), 2
+    )
+
+    with pytest.raises(
+        CoreChaserRelativeFrameAdapterError,
+        match="Every chaser frame",
+    ):
+        prepare_core_chaser_relative_frame(
+            _core_chaser_motion_handle(tmp_path),
+            source,
+        )

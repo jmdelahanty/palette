@@ -443,6 +443,40 @@ core roster before admission. Until that migration is complete, composition
 must fail closed rather than treating equal-looking motion columns or event
 rows as shared authority.
 
+### Core-bound chaser-relative foundation checkpoint (2026-09-05)
+
+The first chaser re-projection boundary now feeds the existing
+`chaser_relative_frame` computation, prepared-candidate schema, atomic Zarr
+materializer, and strict source handle. It does not define a new run family,
+publisher, selector, or export table. The existing manifest context gained one
+optional digest-enveloped `core_authority` record; old publications remain
+readable unchanged, while a core-bound candidate seals the selected roster,
+consumption receipt, exact track, source chaser publication, and row join.
+
+This boundary deliberately consumes an existing chaser-relative publication
+only for chaser positions, identities, occurrence, trials, timestamps, and
+controller evidence. Its historical fish-position and body-frame authorities
+are stamped `not_used_core_roster_selected_instead`. Fish positions come from
+the roster-selected core track and every chaser frame must resolve exactly one
+row of that track; missing frames, coordinate conflicts, timing conflicts, or
+physical-scale conflicts fail before preparation. The relative result contains
+no speed, acceleration, cumulative-distance, or other repeated core-motion
+fact. Its pixel-space fish position is a bounded re-expression of selected
+`positions_mm` under the exact shared physical-scale authority.
+
+The first tranche is position-only: it records body-frame authority as not used
+and exposes no body extension. Canonical body-relative re-projection must bind
+the roster-selected `subject_body_frame_samples` capability before the
+maintained chaser planner can switch to this path; the old body authority is not
+a fallback. The planner still uses `MOTION_BOUT_PAIRS` at this checkpoint and
+therefore remains explicitly incomplete.
+
+Focused workstation validation passed 14/14 core-roster/adapter tests and
+16/16 existing chaser materializer/proxy tests. A real
+prepared-writer-to-atomic-materializer-to-unpatched-source-handle regression
+also proves that the optional roster context survives the existing publication
+surface with its digest intact.
+
 ## Composition contract
 
 ### 1. One reusable core authority roster

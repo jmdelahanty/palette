@@ -466,7 +466,11 @@ def _validate_context_and_authorities(
         "arena_geometry",
         "arena_to_source_camera_transform",
     }
-    optional_context = {"controller_state", "body_frame_projection"}
+    optional_context = {
+        "controller_state",
+        "body_frame_projection",
+        "core_authority",
+    }
     if not required_context.issubset(context) or not set(context).issubset(
         required_context | optional_context
     ):

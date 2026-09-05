@@ -297,6 +297,7 @@ class ChaserRelativeFramePublicationContext:
     acquisition_projection_publication_record: Mapping[str, Any] | None = None
     controller_state_record: Mapping[str, Any] | None = None
     body_frame_projection_record: Mapping[str, Any] | None = None
+    core_authority_record: Mapping[str, Any] | None = None
     arena_geometry_record: Mapping[str, Any] | None = None
     arena_to_source_camera_transform_record: Mapping[str, Any] | None = None
 
@@ -362,6 +363,17 @@ class ChaserRelativeFramePublicationContext:
                 "body_frame_projection_record",
                 MappingProxyType(body_projection_record),
             )
+        core_authority = self.core_authority_record
+        if core_authority is not None:
+            core_authority_record = _strict_json_record(
+                core_authority,
+                field="core_authority_record",
+            )
+            object.__setattr__(
+                self,
+                "core_authority_record",
+                MappingProxyType(core_authority_record),
+            )
 
         subject = self.subject_identity_record
         if subject.get("subject_id") != self.fish_identity:
@@ -405,6 +417,7 @@ class ChaserRelativeFramePublicationContext:
             "acquisition_projection_publication_record",
             "controller_state_record",
             "body_frame_projection_record",
+            "core_authority_record",
             "arena_geometry_record",
             "arena_to_source_camera_transform_record",
         ):
@@ -452,6 +465,10 @@ class ChaserRelativeFramePublicationContext:
         if self.body_frame_projection_record is not None:
             manifest["body_frame_projection"] = self._envelope(
                 self.body_frame_projection_record
+            )
+        if self.core_authority_record is not None:
+            manifest["core_authority"] = self._envelope(
+                self.core_authority_record
             )
         return manifest
 
@@ -560,6 +577,10 @@ def validate_prepared_chaser_relative_frame(
         records["body_frame_projection"] = _require_binding_envelope(
             context.get("body_frame_projection"),
             field="context.body_frame_projection",
+        )
+    if context.get("core_authority") is not None:
+        records["core_authority"] = _require_binding_envelope(
+            context.get("core_authority"), field="context.core_authority"
         )
     publication = context.get("acquisition_projection_publication")
     if records["acquisition_projection"].get("policy_id") == (
