@@ -962,7 +962,12 @@ def _core_chaser_handles(
     return motion, body
 
 
-def _chaser_source(tmp_path: Path) -> ChaserRelativeFrameSourceHandle:
+def _chaser_source(
+    tmp_path: Path,
+    *,
+    run_name: str = "chaser-a",
+    verification_digest: str = "d" * 64,
+) -> ChaserRelativeFrameSourceHandle:
     n_frames = 3
     n_chasers = 2
     frames = np.repeat(np.asarray([11, 12, 13], dtype=np.int64), n_chasers)
@@ -1093,8 +1098,8 @@ def _chaser_source(tmp_path: Path) -> ChaserRelativeFrameSourceHandle:
     value = object.__new__(ChaserRelativeFrameSourceHandle)
     for name, item in {
         "analysis_zarr_path": (tmp_path / "recording-a.zarr").resolve(),
-        "run_path": "analysis/chaser_relative_frame_runs/chaser-a",
-        "run_name": "chaser-a",
+        "run_path": f"analysis/chaser_relative_frame_runs/{run_name}",
+        "run_name": run_name,
         "recording_id": "recording-a",
         "selector_eligible": False,
         "n_frames": n_frames,
@@ -1111,7 +1116,7 @@ def _chaser_source(tmp_path: Path) -> ChaserRelativeFrameSourceHandle:
         },
         "base_arrays": arrays,
         "body_arrays": None,
-        "verification_digest": "d" * 64,
+        "verification_digest": verification_digest,
     }.items():
         object.__setattr__(value, name, item)
     return value
@@ -1157,6 +1162,7 @@ def test_core_chaser_adapter_reuses_existing_relative_frame_surface(
         "recording_id": prepared.manifest["recording_id"],
         "run_manifest": prepared.manifest,
         "context": prepared.manifest["context"],
+        "source_authorities": prepared.manifest["source_authorities"],
     }.items():
         object.__setattr__(reloaded, name, value)
     dependency = core_paradigm_dependency_from_relative_frame(
@@ -1207,11 +1213,62 @@ def test_core_chaser_adapter_reuses_existing_relative_frame_surface(
         prepared.manifest["source_authorities"]["fish_position"]["source_authority_id"]
         == "analysis/track_kinematics_runs/offline/motion-a"
     )
+    projection = core_binding["fish_pixel_projection"]
+    fish_authority = prepared.manifest["source_authorities"]["fish_position"]
+    assert fish_authority["source_digest"] == "c" * 64
+    assert fish_authority["provider_digest"] == projection["record_sha256"]
+    assert fish_authority["provider_id"].endswith(projection["record_sha256"])
     receipt = validate_prepared_chaser_relative_frame(prepared)
     assert receipt["payload_digest"] == prepared.payload_digest
     assert adapted.to_json()["publication_surface"] == (
         "analysis/chaser_relative_frame_runs"
     )
+
+
+def test_core_chaser_adapter_keeps_one_motion_authority_and_distinct_carrier_projections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fisheye.analysis_workflows import core_chaser_relative_frame_adapter as module
+
+    monkeypatch.setattr(
+        ChaserRelativeFrameSourceHandle, "assert_current", lambda self: None
+    )
+    monkeypatch.setattr(
+        module,
+        "load_provider_recording_timing_authority",
+        lambda *args, **kwargs: _timing_authority(),
+    )
+    motion, body = _core_chaser_handles(tmp_path, monkeypatch)
+    keypoint = prepare_core_chaser_relative_frame(
+        motion,
+        body,
+        _chaser_source(
+            tmp_path,
+            run_name="chaser-keypoint",
+            verification_digest="d" * 64,
+        ),
+    ).prepared
+    detection = prepare_core_chaser_relative_frame(
+        motion,
+        body,
+        _chaser_source(
+            tmp_path,
+            run_name="chaser-detection",
+            verification_digest="e" * 64,
+        ),
+    ).prepared
+
+    keypoint_authority = keypoint.manifest["source_authorities"]["fish_position"]
+    detection_authority = detection.manifest["source_authorities"]["fish_position"]
+    assert keypoint_authority["source_authority_id"] == detection_authority[
+        "source_authority_id"
+    ]
+    assert keypoint_authority["source_digest"] == detection_authority["source_digest"]
+    assert keypoint_authority["provider_id"] != detection_authority["provider_id"]
+    assert keypoint_authority["provider_digest"] != detection_authority[
+        "provider_digest"
+    ]
 
 
 def test_core_chaser_adapter_rejects_coordinate_authority_conflict(

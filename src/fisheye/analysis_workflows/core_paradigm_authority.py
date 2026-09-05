@@ -110,7 +110,39 @@ _CHASER_SOURCE_FIELDS = frozenset(
     }
 )
 _FISH_PIXEL_PROJECTION_FIELDS = frozenset(
-    {"source", "formula", "physical_authority_sha256"}
+    {
+        "schema_id",
+        "schema_version",
+        "recording_id",
+        "projection_id",
+        "core_authority_roster_sha256",
+        "source_core_motion_run_path",
+        "source_core_motion_manifest_sha256",
+        "source_chaser_run_path",
+        "source_chaser_manifest_sha256",
+        "source_chaser_profile_sha256",
+        "row_axis_authority_id",
+        "row_axis_authority_sha256",
+        "physical_authority_sha256",
+        "source",
+        "formula",
+        "fallback",
+        "record_sha256",
+    }
+)
+_POSITION_AUTHORITY_FIELDS = frozenset(
+    {
+        "recording_id",
+        "source_authority_id",
+        "source_digest",
+        "provider_id",
+        "provider_digest",
+        "coordinate_authority_id",
+        "scale_authority_id",
+        "timing_authority_id",
+        "row_axis_authority_id",
+        "row_axis_authority_digest",
+    }
 )
 _CORE_ANALYSIS_PROFILE_FIELDS = frozenset(
     {
@@ -240,32 +272,23 @@ def validate_core_paradigm_source_dependency(
     return dependency
 
 
-def core_paradigm_dependency_from_relative_frame(
-    value: object,
+def _core_paradigm_dependency_from_components(
     *,
+    context: object,
+    source_authorities: object,
+    recording_id: str,
+    analysis_zarr_path: str | Path,
+    run_path: str,
+    manifest_sha256: str,
     required: bool = False,
 ) -> Mapping[str, Any] | None:
-    """Project an existing relative-frame core binding into descendant lineage."""
+    """Project already-validated manifest components without scientific reads."""
 
     if type(required) is not bool:
         raise TypeError("required must be the exact boolean.")
-    from .chaser_relative_frame_source_handle import ChaserRelativeFrameSourceHandle
-    from .chaser_relative_frame_validation_receipt import (
-        ChaserRelativeFrameTargetedSourceHandle,
-    )
-
-    if type(value) not in {
-        ChaserRelativeFrameSourceHandle,
-        ChaserRelativeFrameTargetedSourceHandle,
-    }:
-        raise TypeError("value must be one strict chaser-relative source handle.")
-    handle = value
-    handle.assert_current()
-    context = (
-        handle.context
-        if type(handle) is ChaserRelativeFrameSourceHandle
-        else handle.run_manifest.get("context")
-    )
+    _text(recording_id, field="relative-frame recording identity")
+    _text(run_path, field="relative-frame run path")
+    _digest(manifest_sha256, field="relative-frame manifest digest")
     context = _mapping(context, field="relative-frame manifest context")
     raw_envelope = context.get("core_authority")
     if raw_envelope is None:
@@ -289,7 +312,7 @@ def core_paradigm_dependency_from_relative_frame(
         or binding.get("schema_id")
         != "palette.chaser_relative_frame.core_authority_binding"
         or binding.get("schema_version") != 1
-        or binding.get("recording_id") != handle.recording_id
+        or binding.get("recording_id") != recording_id
         or binding.get("fallback") != "prohibited"
         or binding.get("core_motion_facts_repeated") is not False
     ):
@@ -320,7 +343,7 @@ def core_paradigm_dependency_from_relative_frame(
         or receipt.get("schema_version") != 1
         or receipt.get("consumer_id") != "palette.chaser.core_relative_frame.v1"
         or canonical_json_sha256(receipt_body) != receipt_sha256
-        or receipt.get("recording_id") != handle.recording_id
+        or receipt.get("recording_id") != recording_id
         or receipt.get("core_authority_roster_sha256") != roster_sha256
         or type(receipt.get("analysis_zarr")) is not str
         or not receipt["analysis_zarr"]
@@ -332,7 +355,7 @@ def core_paradigm_dependency_from_relative_frame(
         _fail("Relative core-authority consumption receipt is incomplete or stale.")
     if (
         Path(receipt["analysis_zarr"]).expanduser().resolve()
-        != Path(handle.analysis_zarr_path).expanduser().resolve()
+        != Path(analysis_zarr_path).expanduser().resolve()
     ):
         _fail("Relative core-authority receipt belongs to another analysis Zarr.")
     for capability, raw_digest_record in capability_bindings.items():
@@ -443,16 +466,77 @@ def core_paradigm_dependency_from_relative_frame(
     fish_projection = _plain(
         _mapping(binding.get("fish_pixel_projection"), field="fish pixel projection")
     )
+    fish_projection_body = {
+        key: value for key, value in fish_projection.items() if key != "record_sha256"
+    }
     if (
         set(fish_projection) != _FISH_PIXEL_PROJECTION_FIELDS
+        or fish_projection.get("schema_id")
+        != "palette.chaser_relative_frame.core_fish_position_projection"
+        or fish_projection.get("schema_version") != 1
+        or fish_projection.get("recording_id") != recording_id
+        or fish_projection.get("projection_id")
+        != "core_motion_on_exact_chaser_carrier_v1"
+        or fish_projection.get("core_authority_roster_sha256") != roster_sha256
+        or fish_projection.get("source_core_motion_run_path")
+        != motion.get("run_path")
+        or fish_projection.get("source_core_motion_manifest_sha256")
+        != motion.get("source_manifest_sha256")
+        or fish_projection.get("source_chaser_run_path")
+        != chaser_source.get("run_path")
+        or fish_projection.get("source_chaser_manifest_sha256")
+        != chaser_source.get("manifest_sha256")
+        or fish_projection.get("row_axis_authority_sha256")
+        != motion.get("row_axis_sha256")
         or fish_projection.get("source") != "core_positions_mm"
         or fish_projection.get("formula") != "positions_mm * pixels_per_mm"
+        or fish_projection.get("fallback") != "prohibited"
+        or canonical_json_sha256(fish_projection_body)
+        != fish_projection.get("record_sha256")
     ):
         _fail("Core fish pixel-projection contract is invalid.")
-    _digest(
-        fish_projection.get("physical_authority_sha256"),
-        field="fish pixel physical-authority digest",
+    for field_name in (
+        "source_chaser_profile_sha256",
+        "row_axis_authority_sha256",
+        "physical_authority_sha256",
+        "record_sha256",
+    ):
+        _digest(
+            fish_projection.get(field_name),
+            field=f"fish pixel projection {field_name}",
+        )
+    _text(
+        fish_projection.get("row_axis_authority_id"),
+        field="fish pixel projection row-axis authority",
     )
+    source_authorities = _mapping(
+        source_authorities,
+        field="relative-frame source authorities",
+    )
+    fish_authority = _plain(
+        _mapping(
+            source_authorities.get("fish_position"),
+            field="relative-frame fish-position authority",
+        )
+    )
+    expected_provider_id = (
+        f"{fish_projection['projection_id']}:{fish_projection['record_sha256']}"
+    )
+    if (
+        set(fish_authority) != _POSITION_AUTHORITY_FIELDS
+        or fish_authority.get("recording_id") != recording_id
+        or fish_authority.get("source_authority_id") != motion.get("run_path")
+        or fish_authority.get("source_digest")
+        != motion.get("source_manifest_sha256")
+        or fish_authority.get("provider_id") != expected_provider_id
+        or fish_authority.get("provider_digest")
+        != fish_projection.get("record_sha256")
+        or fish_authority.get("row_axis_authority_id")
+        != fish_projection.get("row_axis_authority_id")
+        or fish_authority.get("row_axis_authority_digest")
+        != fish_projection.get("row_axis_authority_sha256")
+    ):
+        _fail("Core fish position authority differs from its sealed projection.")
     profile_envelope = _plain(
         _mapping(context.get("analysis_profile"), field="analysis profile")
     )
@@ -470,7 +554,7 @@ def core_paradigm_dependency_from_relative_frame(
         or profile.get("schema_id")
         != "palette.chaser_relative_frame.core_analysis_profile"
         or profile.get("schema_version") != 1
-        or profile.get("recording_id") != handle.recording_id
+        or profile.get("recording_id") != recording_id
         or profile.get("profile_id") != "core_roster_chaser_relative_frame_v1"
         or profile.get("core_authority_roster_sha256") != roster_sha256
     ):
@@ -484,12 +568,12 @@ def core_paradigm_dependency_from_relative_frame(
     dependency_body = {
         "schema_id": CORE_PARADIGM_DEPENDENCY_SCHEMA_ID,
         "schema_version": CORE_PARADIGM_DEPENDENCY_SCHEMA_VERSION,
-        "recording_id": handle.recording_id,
+        "recording_id": recording_id,
         "core_authority_roster_sha256": roster_sha256,
         "core_authority_consumption_receipt_sha256": receipt_sha256,
         "selected_track_id": track_id,
-        "source_relative_frame_run_path": handle.run_path,
-        "source_relative_frame_manifest_sha256": handle.manifest_sha256,
+        "source_relative_frame_run_path": run_path,
+        "source_relative_frame_manifest_sha256": manifest_sha256,
         "source_core_authority_binding_sha256": binding_sha256,
         "core_motion_source_binding_sha256": motion_binding_sha256,
         "core_subject_body_frame_source_binding_sha256": body_binding_sha256,
@@ -503,11 +587,83 @@ def core_paradigm_dependency_from_relative_frame(
     )
 
 
+def core_paradigm_dependency_from_relative_manifest(
+    run_manifest: object,
+    *,
+    recording_id: str,
+    analysis_zarr: str | Path,
+    run_path: str,
+    manifest_sha256: str,
+    required: bool = False,
+) -> Mapping[str, Any] | None:
+    """Project core lineage from one receipt-validated manifest, without arrays.
+
+    This is the evidence-only admission path used by composite planning. The
+    complete relative-frame manifest remains the sole grammar: callers cannot
+    provide a second hand-authored authority record or skip its digest check.
+    """
+
+    manifest = _plain(_mapping(run_manifest, field="relative-frame run manifest"))
+    expected_manifest_sha256 = _digest(
+        manifest_sha256,
+        field="relative-frame manifest digest",
+    )
+    if canonical_json_sha256(manifest) != expected_manifest_sha256:
+        _fail("Relative-frame manifest digest is stale.")
+    if manifest.get("recording_id") != recording_id:
+        _fail("Relative-frame manifest belongs to another recording.")
+    return _core_paradigm_dependency_from_components(
+        context=manifest.get("context"),
+        source_authorities=manifest.get("source_authorities"),
+        recording_id=recording_id,
+        analysis_zarr_path=analysis_zarr,
+        run_path=run_path,
+        manifest_sha256=expected_manifest_sha256,
+        required=required,
+    )
+
+
+def core_paradigm_dependency_from_relative_frame(
+    value: object,
+    *,
+    required: bool = False,
+) -> Mapping[str, Any] | None:
+    """Project an existing relative-frame core binding into descendant lineage."""
+
+    from .chaser_relative_frame_source_handle import ChaserRelativeFrameSourceHandle
+    from .chaser_relative_frame_validation_receipt import (
+        ChaserRelativeFrameTargetedSourceHandle,
+    )
+
+    if type(value) not in {
+        ChaserRelativeFrameSourceHandle,
+        ChaserRelativeFrameTargetedSourceHandle,
+    }:
+        raise TypeError("value must be one strict chaser-relative source handle.")
+    handle = value
+    handle.assert_current()
+    context = (
+        handle.context
+        if type(handle) is ChaserRelativeFrameSourceHandle
+        else handle.run_manifest.get("context")
+    )
+    return _core_paradigm_dependency_from_components(
+        context=context,
+        source_authorities=handle.source_authorities,
+        recording_id=handle.recording_id,
+        analysis_zarr_path=handle.analysis_zarr_path,
+        run_path=handle.run_path,
+        manifest_sha256=handle.manifest_sha256,
+        required=required,
+    )
+
+
 __all__ = [
     "CORE_PARADIGM_DEPENDENCY_SCHEMA_ID",
     "CORE_PARADIGM_DEPENDENCY_SCHEMA_VERSION",
     "CoreParadigmAuthorityError",
     "core_paradigm_dependency_from_relative_frame",
+    "core_paradigm_dependency_from_relative_manifest",
     "validate_core_paradigm_dependency",
     "validate_core_paradigm_source_dependency",
 ]

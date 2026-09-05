@@ -11,6 +11,7 @@ from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
 from fisheye.analysis_workflows.core_paradigm_authority import (
     CoreParadigmAuthorityError,
     core_paradigm_dependency_from_relative_frame,
+    core_paradigm_dependency_from_relative_manifest,
     validate_core_paradigm_dependency,
     validate_core_paradigm_source_dependency,
 )
@@ -117,6 +118,35 @@ def _core_context() -> dict[str, object]:
         "selected_track_id": 7,
     }
     receipt = _seal(receipt_body)
+    fish_projection = _seal(
+        {
+            "schema_id": (
+                "palette.chaser_relative_frame.core_fish_position_projection"
+            ),
+            "schema_version": 1,
+            "recording_id": "recording-1",
+            "projection_id": "core_motion_on_exact_chaser_carrier_v1",
+            "core_authority_roster_sha256": roster_sha,
+            "source_core_motion_run_path": (
+                "analysis/track_kinematics_runs/provider/core"
+            ),
+            "source_core_motion_manifest_sha256": "a" * 64,
+            "source_chaser_run_path": (
+                "analysis/chaser_relative_frame_runs/source"
+            ),
+            "source_chaser_manifest_sha256": "2" * 64,
+            "source_chaser_profile_sha256": "5" * 64,
+            "row_axis_authority_id": (
+                "analysis/track_kinematics_runs/provider/core/"
+                "tracks/id_7/track_sample_key"
+            ),
+            "row_axis_authority_sha256": "c" * 64,
+            "physical_authority_sha256": "4" * 64,
+            "source": "core_positions_mm",
+            "formula": "positions_mm * pixels_per_mm",
+            "fallback": "prohibited",
+        }
+    )
     binding = {
         "schema_id": "palette.chaser_relative_frame.core_authority_binding",
         "schema_version": 1,
@@ -146,11 +176,7 @@ def _core_context() -> dict[str, object]:
             "fish_position_authority": "not_used_core_roster_selected_instead",
             "body_frame_authority": "not_used_core_roster_selected_instead",
         },
-        "fish_pixel_projection": {
-            "source": "core_positions_mm",
-            "formula": "positions_mm * pixels_per_mm",
-            "physical_authority_sha256": "4" * 64,
-        },
+        "fish_pixel_projection": fish_projection,
         "core_motion_facts_repeated": False,
         "fallback": "prohibited",
     }
@@ -177,6 +203,7 @@ def _core_context() -> dict[str, object]:
 
 def _handle(*, context: dict[str, object]) -> ChaserRelativeFrameSourceHandle:
     handle = object.__new__(ChaserRelativeFrameSourceHandle)
+    authority_envelope = context.get("core_authority")
     object.__setattr__(handle, "analysis_zarr_path", Path("/archive/analysis.zarr"))
     object.__setattr__(
         handle,
@@ -187,6 +214,25 @@ def _handle(*, context: dict[str, object]) -> ChaserRelativeFrameSourceHandle:
     object.__setattr__(handle, "recording_id", "recording-1")
     object.__setattr__(handle, "run_manifest", {"payload_digest": "6" * 64})
     object.__setattr__(handle, "context", context)
+    source_authorities: dict[str, object] = {}
+    if isinstance(authority_envelope, dict):
+        binding = authority_envelope["record"]
+        projection = binding["fish_pixel_projection"]
+        source_authorities["fish_position"] = {
+            "recording_id": "recording-1",
+            "source_authority_id": binding["core_motion"]["run_path"],
+            "source_digest": binding["core_motion"]["source_manifest_sha256"],
+            "provider_id": (
+                f"{projection['projection_id']}:{projection['record_sha256']}"
+            ),
+            "provider_digest": projection["record_sha256"],
+            "coordinate_authority_id": "/metadata/acquisition_camera_frame",
+            "scale_authority_id": "/analysis/calibration/physical",
+            "timing_authority_id": "analysis/chaser/timestamp_ns",
+            "row_axis_authority_id": projection["row_axis_authority_id"],
+            "row_axis_authority_digest": projection["row_axis_authority_sha256"],
+        }
+    object.__setattr__(handle, "source_authorities", source_authorities)
     return handle
 
 
@@ -217,6 +263,37 @@ def test_projects_one_exact_core_roster_dependency(monkeypatch) -> None:
     )
 
 
+def test_projects_dependency_from_sealed_manifest_without_source_arrays() -> None:
+    context = _core_context()
+    handle = _handle(context=context)
+    manifest = {
+        "recording_id": "recording-1",
+        "context": context,
+        "source_authorities": handle.source_authorities,
+        "payload_digest": "6" * 64,
+    }
+    manifest_sha256 = canonical_json_sha256(manifest)
+
+    dependency = core_paradigm_dependency_from_relative_manifest(
+        manifest,
+        recording_id="recording-1",
+        analysis_zarr="/archive/analysis.zarr",
+        run_path="analysis/chaser_relative_frame_runs/core-relative",
+        manifest_sha256=manifest_sha256,
+        required=True,
+    )
+
+    assert dependency is not None
+    assert dependency["core_authority_roster_sha256"] == "1" * 64
+    with pytest.raises(CoreParadigmAuthorityError, match="manifest digest is stale"):
+        core_paradigm_dependency_from_relative_manifest(
+            {**manifest, "payload_digest": "7" * 64},
+            recording_id="recording-1",
+            analysis_zarr="/archive/analysis.zarr",
+            run_path="analysis/chaser_relative_frame_runs/core-relative",
+            manifest_sha256=manifest_sha256,
+            required=True,
+        )
 def test_dependency_and_missing_core_authority_fail_closed(monkeypatch) -> None:
     monkeypatch.setattr(
         ChaserRelativeFrameSourceHandle,

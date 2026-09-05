@@ -72,6 +72,7 @@ CORE_CHASER_RELATIVE_CONSUMER_ID = "palette.chaser.core_relative_frame.v1"
 CORE_CHASER_RELATIVE_PROFILE_ID = "core_roster_chaser_relative_frame_v1"
 CORE_CHASER_ROW_AXIS_POLICY_ID = "core_track_to_chaser_frame_exact_join_v1"
 CORE_CHASER_TEMPORAL_SELECTION_ID = "core_track_chaser_frame_intersection_v1"
+CORE_CHASER_FISH_PROJECTION_ID = "core_motion_on_exact_chaser_carrier_v1"
 
 
 class CoreChaserRelativeFrameAdapterError(ValueError):
@@ -692,12 +693,42 @@ def _prepare_core_chaser_relative_frame(
         row_axis_authority_id=row_axis_id,
         row_axis_authority_digest=row_axis_digest,
     )
+    source_analysis_profile = _context_record(source_context, "analysis_profile")
+    assert source_analysis_profile is not None
+    source_analysis_profile_sha256 = canonical_json_sha256(
+        _plain(source_analysis_profile)
+    )
+    fish_projection_body = {
+        "schema_id": "palette.chaser_relative_frame.core_fish_position_projection",
+        "schema_version": 1,
+        "recording_id": core.recording_id,
+        "projection_id": CORE_CHASER_FISH_PROJECTION_ID,
+        "core_authority_roster_sha256": core.core_authority_roster_sha256,
+        "source_core_motion_run_path": core.run_path,
+        "source_core_motion_manifest_sha256": core.source_manifest_sha256,
+        "source_chaser_run_path": chaser.run_path,
+        "source_chaser_manifest_sha256": chaser.manifest_sha256,
+        "source_chaser_profile_sha256": source_analysis_profile_sha256,
+        "row_axis_authority_id": row_axis_id,
+        "row_axis_authority_sha256": row_axis_digest,
+        "physical_authority_sha256": scale.get("scale_digest"),
+        "source": "core_positions_mm",
+        "formula": "positions_mm * pixels_per_mm",
+        "fallback": "prohibited",
+    }
+    fish_projection_sha256 = canonical_json_sha256(fish_projection_body)
+    fish_projection = {
+        **fish_projection_body,
+        "record_sha256": fish_projection_sha256,
+    }
     fish_authority = ProviderSourceAuthority(
         recording_id=core.recording_id,
         source_authority_id=core.run_path,
         source_digest=core.source_manifest_sha256,
-        provider_id="core_authority_roster",
-        provider_digest=core.core_authority_roster_sha256,
+        provider_id=(
+            f"{CORE_CHASER_FISH_PROJECTION_ID}:{fish_projection_sha256}"
+        ),
+        provider_digest=fish_projection_sha256,
         coordinate_authority_id=coordinate_id,
         scale_authority_id=scale_id,
         timing_authority_id=timing_id,
@@ -830,11 +861,7 @@ def _prepare_core_chaser_relative_frame(
             "fish_position_authority": "not_used_core_roster_selected_instead",
             "body_frame_authority": "not_used_core_roster_selected_instead",
         },
-        "fish_pixel_projection": {
-            "source": "core_positions_mm",
-            "formula": "positions_mm * pixels_per_mm",
-            "physical_authority_sha256": scale.get("scale_digest"),
-        },
+        "fish_pixel_projection": fish_projection,
         "core_motion_facts_repeated": False,
         "fallback": "prohibited",
     }
@@ -856,9 +883,7 @@ def _prepare_core_chaser_relative_frame(
         "recording_id": core.recording_id,
         "profile_id": CORE_CHASER_RELATIVE_PROFILE_ID,
         "core_authority_roster_sha256": core.core_authority_roster_sha256,
-        "source_chaser_profile_sha256": canonical_json_sha256(
-            _plain(_context_record(source_context, "analysis_profile"))
-        ),
+        "source_chaser_profile_sha256": source_analysis_profile_sha256,
         "body_frame": "core_roster_selected_subject_body_frame",
     }
     subject = _context_record(source_context, "subject_identity")
@@ -1010,6 +1035,7 @@ __all__ = [
     "CORE_CHASER_RELATIVE_ADAPTER_SCHEMA_ID",
     "CORE_CHASER_RELATIVE_CONSUMER_ID",
     "CORE_CHASER_RELATIVE_PROFILE_ID",
+    "CORE_CHASER_FISH_PROJECTION_ID",
     "CoreChaserRelativeFrameAdapterError",
     "PreparedCoreChaserRelativeFrame",
     "prepare_core_chaser_relative_frame",
