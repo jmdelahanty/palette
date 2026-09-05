@@ -27,6 +27,7 @@ from fisheye.analysis_workflows.core_authority_roster import (
     validate_core_authority_roster,
 )
 from fisheye.analysis_workflows.core_behavior_cohort_adapter import (
+    CoreBehaviorCohortAdapterError,
     core_authority_roster_from_bundle_set_member,
     core_behavior_capability_contract,
 )
@@ -365,6 +366,55 @@ def test_core_roster_is_recovered_from_one_complete_generic_bundle_member(
             capability_bindings=capabilities,
         )["record_sha256"]
     )
+
+
+def test_core_roster_rejects_completed_phase_c_bundle_profile(
+    tmp_path: Path,
+) -> None:
+    capabilities = _capability_bindings(tmp_path)
+    receipt = _report_binding(tmp_path)
+    contract = core_behavior_capability_contract()
+    bundle_set = {
+        "bundle_profile": {
+            **core_cohort_module._bundle_profile(  # noqa: SLF001
+                contract,
+                export_profile_id="validated_core_behavior_five_grain_v2",
+            ),
+            "adapter_id": "validated_recording_behavior_bundle_v1",
+            "bundle_method_id": "exact_chaser_projection_backed_recording_behavior_v1",
+        },
+        "capability_contract": contract,
+    }
+    member = {
+        "recording_id": "recording-a",
+        "analysis_zarr": str((tmp_path / "recording-a.zarr").resolve()),
+        "bundle_state": "complete",
+        "reason_code": None,
+        "bundle": {
+            "receipt_bindings": [receipt],
+            "binding_inventory_sha256": canonical_json_sha256(
+                {
+                    "execution_report": receipt,
+                    "capability_bindings": capabilities,
+                }
+            ),
+        },
+        "capabilities": {
+            key: {
+                "state": "complete",
+                "reason_code": None,
+                "detail": None,
+                "binding": value,
+            }
+            for key, value in capabilities.items()
+        },
+    }
+
+    with pytest.raises(
+        CoreBehaviorCohortAdapterError,
+        match="not the installed full-rate core-behavior profile",
+    ):
+        core_authority_roster_from_bundle_set_member(bundle_set, member)
 
 
 def _bout_identity(
