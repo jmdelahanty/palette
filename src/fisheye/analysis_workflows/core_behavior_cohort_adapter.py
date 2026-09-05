@@ -70,6 +70,11 @@ from .validated_behavior_cohort import (
     validate_validated_behavior_bundle_set,
 )
 from .contracts import TemporalPolicy
+from .core_authority_roster import (
+    BoutAuthorityIdentity,
+    build_core_authority_roster,
+    core_roster_bout_identity,
+)
 from .validated_behavior_cohort_adapters import (
     sha256_file,
     validate_membership_current_sources,
@@ -351,6 +356,8 @@ class BoundCoreBehaviorCohortSources:
     bouts: BoundActivitySpatialSources = field(repr=False, compare=False)
     join_authority: Mapping[str, Any]
     capability_bindings: Mapping[str, Mapping[str, Any]]
+    core_authority_roster: Mapping[str, Any]
+    bout_authority_identity: BoutAuthorityIdentity
 
 
 def bind_core_behavior_cohort_sources(
@@ -500,6 +507,17 @@ def bind_core_behavior_cohort_sources(
             join_authority_sha256=join_sha,
         ),
     }
+    authority_roster = build_core_authority_roster(
+        recording_id=expected_recording_id,
+        analysis_zarr=source_path,
+        execution_report_binding=binding,
+        capability_bindings=capability_bindings,
+    )
+    bout_identity = core_roster_bout_identity(
+        authority_roster,
+        bout_source=bouts.bout_sources[track_ids[0]],
+        track_binding=track.binding,
+    )
     return BoundCoreBehaviorCohortSources(
         report_path=Path(report_path).expanduser().resolve(),
         report_binding=binding,
@@ -514,6 +532,8 @@ def bind_core_behavior_cohort_sources(
         bouts=bouts,
         join_authority=join,
         capability_bindings=capability_bindings,
+        core_authority_roster=authority_roster,
+        bout_authority_identity=bout_identity,
     )
 
 

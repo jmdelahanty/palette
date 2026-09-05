@@ -395,6 +395,54 @@ This closes the core v2 writer-to-publisher-to-reader canary. It does not
 activate a selector, update a registry, mutate source Zarrs, or authorize the
 future chaser-composite profile described in Track C.
 
+### Core-authority roster implementation checkpoint (2026-09-05)
+
+Implementation started from merged `main` commit
+`68f7b7a7cff64f2483df2b39c135dcb369ca82ea`. The first tranche adds the shared
+authority boundary required before any composite profile is installed:
+
+- `build_core_authority_roster()` seals the exact six-capability map already
+  produced by `bind_core_behavior_cohort_sources()`, including the execution
+  receipt and cross-grain join authority. It does not rediscover a selector or
+  introduce another publisher;
+- the bound core source now exposes that roster and one normalized
+  `BoutAuthorityIdentity` constructed from the strict selected bout source;
+- `bind_core_motion_and_bouts_from_roster()` reopens only the exact motion and
+  bout dependency closure through the same strict binders. It rejects a stale
+  roster/source mismatch and does not open unrelated eye or tail sources;
+- `CoreMotionTrackSourceHandle` exposes only the roster-selected track and its
+  declared motion arrays. It requires an explicit track ID and a sealed
+  consumption receipt; selector names, fallback paths, and implicit track zero
+  are not representable at this boundary;
+- a sealed downstream consumption receipt names the roster digest, required
+  capabilities, and exact selected track. The cross-grain join authority is
+  mandatory, so a paradigm producer cannot bind motion by frame number alone;
+- the bout comparator returns `equal`, `conflict`, or `not_proven`. Equality
+  includes publication, motion, row bounds, FPS/frame axis, candidate/signal,
+  selected-event dtype/count/content, and binding identity; identical event
+  bytes do not erase a conflicting motion authority; and
+- `compose_disjoint_table_specs()` rejects a table collision before inserting
+  either component into a combined map, closing the dictionary-overwrite hole.
+
+The focused authority/core-export/chaser-planner suites pass 39/39 on the
+workstation. A
+read-only real-source resolution of Sleepyfish camera 2010093 through the
+ordinary unpatched core resolver completed in 35.312 seconds and produced core
+roster digest
+`2046ca97d8439483e4f752f00f27b5deef4bea21c0980306297206989d036dbc`
+and bout-identity digest
+`430b2e6c19e84589a99b718f414a0784b8299dd0b3658c5371ae5c0cf14031a8`.
+Reopening only the receipt-selected motion/bout dependency closure from that
+roster completed in 6.717 seconds and returned exact selected track `0`. Both
+reads used consolidated metadata and performed no writes.
+
+This checkpoint deliberately does **not** install the composite profile or
+reinterpret existing Phase-C products. The current Phase-C chaser facts remain
+provider-motion/body/bout-bound; they must be reprojected against the selected
+core roster before admission. Until that migration is complete, composition
+must fail closed rather than treating equal-looking motion columns or event
+rows as shared authority.
+
 ## Composition contract
 
 ### 1. One reusable core authority roster
@@ -828,13 +876,14 @@ inference from this static audit.
 - [ ] Register one explicit composite profile on `validated_behavior/v1`.
 - [ ] Add one composite bundle adapter requiring exactly one core receipt plus
       a closed set of supported extension receipts per admitted member.
-- [ ] Derive and seal `core_authority_roster_sha256` from the normalized core
-      capability bindings; require every extension to name it.
+- [x] Derive and seal `core_authority_roster_sha256` from the normalized core
+      capability bindings.
+- [ ] Require every extension publication to name the selected roster digest.
 - [ ] Compose the complete core specs with paradigm-only extension specs using
       a collision-checking helper rather than dictionary overwrite.
-- [ ] Implement normalized `BoutAuthorityIdentity` comparison. Equal identities
-      deduplicate to one table; mismatch or missing proof returns a typed
-      authority conflict before scratch writes.
+- [x] Implement normalized `BoutAuthorityIdentity` comparison.
+- [ ] Wire bout equality to deduplicate one table and make mismatch or missing
+      proof a typed authority conflict before scratch writes.
 - [ ] Reject duplicate table names and competing authority bindings at plan
       time.
 - [ ] Add exact foreign-key/cardinality contracts from paradigm rows to core

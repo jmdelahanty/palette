@@ -257,6 +257,45 @@ CORE_CONTRACTS: Mapping[str, ArrowTableContract] = MappingProxyType(
 )
 
 
+def compose_disjoint_table_specs(
+    *components: tuple[str, Mapping[str, ValidatedBehaviorTableSpec]],
+) -> Mapping[str, ValidatedBehaviorTableSpec]:
+    """Compose named table suites while rejecting collisions before insertion.
+
+    A dictionary-unpacking merge cannot detect an overwritten table after the
+    fact.  Composite behavior profiles use this helper so two components can
+    never silently claim the same table name or scientific authority surface.
+    """
+
+    if not components:
+        raise ValueError("Table-spec composition requires at least one component")
+    combined: dict[str, ValidatedBehaviorTableSpec] = {}
+    owners: dict[str, str] = {}
+    for component_name, specs in components:
+        if (
+            type(component_name) is not str
+            or not component_name
+            or component_name != component_name.strip()
+        ):
+            raise ValueError("Table-spec component names must be normalized text")
+        if not specs:
+            raise ValueError(f"Table-spec component {component_name!r} is empty")
+        collisions = sorted(set(combined).intersection(specs))
+        if collisions:
+            conflict_owners = {
+                table_name: owners[table_name] for table_name in collisions
+            }
+            raise ValueError(
+                f"Table-spec component {component_name!r} collides before composition: "
+                f"tables={collisions!r}, existing_owners={conflict_owners!r}"
+            )
+        for table_name, spec in specs.items():
+            combined[table_name] = spec
+            owners[table_name] = component_name
+    validate_table_specs(combined)
+    return MappingProxyType(combined)
+
+
 def validate_table_specs(
     specs: Mapping[str, ValidatedBehaviorTableSpec],
 ) -> tuple[str, ...]:
@@ -320,6 +359,7 @@ __all__ = [
     "CORE_TABLE_NAMES",
     "CORE_TABLE_SPECS",
     "ValidatedBehaviorTableSpec",
+    "compose_disjoint_table_specs",
     "table_contract_envelope",
     "validate_table_specs",
 ]
