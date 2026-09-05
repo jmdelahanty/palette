@@ -626,6 +626,32 @@ the Zarr-open-mode ratchet, and observed-metadata-literal checks also pass.
 Required repository CI and a real selector-ineligible composite canary remain
 pending; no production publication or selector changed at this checkpoint.
 
+### Read-only GoodBatBadBat admission checkpoint (2026-09-05)
+
+A read-only archive check exercised the new planner against the completed
+84-recording Phase-C bundle set. The bundle is valid under its published
+`validated_recording_behavior_bundle_v1` profile, but the core roster resolver
+rejected it before planning with `Bundle set is not the installed full-rate
+core-behavior profile.` No plan file or operation state was created. This is
+the intended fail-closed result: completion, recording membership, and the
+presence of motion/body/bout tables cannot relabel a provider-bound Phase-C
+bundle as core authority.
+
+The same check inspected the maintained core-workflow availability for the
+first eight GoodBatBadBat recordings. All eight have no stable admitted
+`refined_subject_masks` selection; consequently `subject_shape` and
+`tail_kinematics` are unavailable to the full core workflow. The first
+recording does contain complete selector-ineligible subject-shape and eye-angle
+candidates, but exact paths and completion state are not authority admission.
+The planner correctly leaves them blocked.
+
+Therefore the positive composite canary requires a newly admitted full-rate
+core execution report and core-bound chaser successors. It must not be obtained
+by reinterpreting the historical Phase-C bundle, forcing availability, or
+making a selector-ineligible prerequisite silently consumable. No source
+selector, scientific Zarr, registry, shared checkout, or production publication
+was changed by this audit.
+
 ## Composition contract
 
 ### 1. One reusable core authority roster
