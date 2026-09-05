@@ -25,6 +25,9 @@ from fisheye.analysis_workflows.controller_trial_successor import (
 from fisheye.analysis_workflows.core_motion_source_handle import (
     validate_core_motion_dependency_record,
 )
+from fisheye.analysis_workflows.core_paradigm_authority import (
+    core_paradigm_dependency_from_relative_frame,
+)
 from fisheye.analysis_workflows.generalized_bout_response_successor import (
     PreparedGeneralizedBoutResponse,
     exact_provider_frame_projection,
@@ -795,7 +798,9 @@ def escape_freeze_input_from_handles(
         _fail("track_id must be one non-negative exact integer.")
     if type(speed_level) is not str or speed_level not in SUPPORTED_SPEED_LEVELS:
         _fail(f"speed_level must be one of {SUPPORTED_SPEED_LEVELS!r}.")
-    relative_frame.assert_current()
+    relative_core_authority = core_paradigm_dependency_from_relative_frame(
+        relative_frame
+    )
     if provider_mode:
         provider_motion.assert_current()
     else:
@@ -830,6 +835,11 @@ def escape_freeze_input_from_handles(
         != controller_trials.payload_digest
     ):
         _fail("Escape/freeze dependency binding is stale or mixed across sources.")
+    if core_mode != (relative_core_authority is not None):
+        _fail("Relative-frame and motion sources mix core and legacy authorities.")
+    controller_core_authority = controller_trials.manifest.get("core_authority")
+    if _plain(controller_core_authority) != _plain(relative_core_authority):
+        _fail("Controller trials and relative frame bind different core authorities.")
     if core_mode:
         core_envelope = relative_frame.context.get("core_authority")
         core_record = (
@@ -846,6 +856,9 @@ def escape_freeze_input_from_handles(
             or core_record.get("core_motion", {}).get("track_id")
             != provider_motion.track_id
             or provider_motion.track_id != track_id
+            or relative_core_authority["core_authority_roster_sha256"]
+            != provider_motion.core_authority_roster_sha256
+            or relative_core_authority["selected_track_id"] != provider_motion.track_id
         ):
             _fail("Escape/freeze dependencies bind different core authority.")
     if provider_mode:

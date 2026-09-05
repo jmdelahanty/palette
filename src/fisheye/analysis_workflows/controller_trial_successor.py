@@ -20,9 +20,12 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from fisheye.analysis_workflows.core_paradigm_authority import (
+    core_paradigm_dependency_from_relative_frame,
+    validate_core_paradigm_source_dependency,
+)
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
-
 
 SCHEMA_ID = "palette.analysis.controller_chase_trials"
 SCHEMA_VERSION = 1
@@ -89,6 +92,7 @@ class ControllerTrialInput:
     active_state_code: np.ndarray
     active_state_valid: np.ndarray
     semantic_selection_binding: Mapping[str, Any] | None = None
+    core_authority_dependency: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,7 +147,9 @@ def _plain(value: Any) -> Any:
 
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+        return MappingProxyType(
+            {str(key): _freeze(item) for key, item in value.items()}
+        )
     if isinstance(value, list):
         return tuple(_freeze(item) for item in value)
     return value
@@ -179,9 +185,10 @@ def _semantic_binding(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
     }
     if not required.issubset(plain):
         _fail("semantic_selection_binding lacks exact semantic identity fields.")
-    if plain.get("selector_eligible") is not False or plain.get(
-        "production_authority"
-    ) is not False:
+    if (
+        plain.get("selector_eligible") is not False
+        or plain.get("production_authority") is not False
+    ):
         _fail("Semantic source must remain selector-ineligible and non-authoritative.")
     if list(plain.get("roles", ())) != [
         "chaser_pre",
@@ -205,6 +212,19 @@ def prepare_controller_trial_successor(
         source.source_manifest_sha256,
         name="source_manifest_sha256",
     )
+    core_authority: dict[str, Any] | None = None
+    if source.core_authority_dependency is not None:
+        try:
+            core_authority = dict(
+                validate_core_paradigm_source_dependency(
+                    source.core_authority_dependency,
+                    recording_id=recording_id,
+                    source_relative_frame_run_path=source_run_path,
+                    source_relative_frame_manifest_sha256=source_digest,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            _fail(f"Core-authority dependency is invalid: {exc}")
     if type(source.n_frames) is not int or source.n_frames < 0:
         _fail("n_frames must be one non-negative exact integer.")
     if type(source.n_chasers) is not int or source.n_chasers <= 0:
@@ -303,12 +323,13 @@ def prepare_controller_trial_successor(
         _fail("Acquisition-frame identity is not repeated across the chaser axis.")
 
     keys = sorted(
-        {
-            (int(chaser_code[row]), int(trial_id[row]))
-            for row in np.flatnonzero(member)
-        },
+        {(int(chaser_code[row]), int(trial_id[row])) for row in np.flatnonzero(member)},
         key=lambda key: (
-            int(np.flatnonzero(member & (chaser_code == key[0]) & (trial_id == key[1]))[0]),
+            int(
+                np.flatnonzero(member & (chaser_code == key[0]) & (trial_id == key[1]))[
+                    0
+                ]
+            ),
             key[0],
             key[1],
         ),
@@ -353,8 +374,7 @@ def prepare_controller_trial_successor(
         end_frame_row = int(frame_rows.max()) + 1
         chaser_axis = int(rows[0] % source.n_chasers)
         envelope_rows = (
-            np.arange(start_frame_row, end_frame_row, dtype=np.int64)
-            * source.n_chasers
+            np.arange(start_frame_row, end_frame_row, dtype=np.int64) * source.n_chasers
             + chaser_axis
         )
         if np.any(chaser_code[envelope_rows] != code):
@@ -378,8 +398,8 @@ def prepare_controller_trial_successor(
         table["active_member_count"][out_row] = rows.size
         table["envelope_frame_count"][out_row] = envelope_rows.size
         table["gap_frame_count"][out_row] = envelope_rows.size - rows.size
-        table["gap_fraction"][out_row] = (
-            float(envelope_rows.size - rows.size) / float(envelope_rows.size)
+        table["gap_fraction"][out_row] = float(envelope_rows.size - rows.size) / float(
+            envelope_rows.size
         )
         dense_trial_row[rows] = out_row
         envelope_trial_row[envelope_rows] = out_row
@@ -445,6 +465,7 @@ def prepare_controller_trial_successor(
             "run_path": source_run_path,
             "manifest_sha256": source_digest,
         },
+        **({"core_authority": core_authority} if core_authority is not None else {}),
         "semantic_selection": semantic_binding,
         "dimensions": {
             "n_frames": source.n_frames,
@@ -493,9 +514,7 @@ def prepare_controller_trial_successor(
                 str(TRIAL_GAP_REASON_TRIAL_ID_UNAVAILABLE): (
                     "logged_trial_id_unavailable"
                 ),
-                str(TRIAL_GAP_REASON_TRIAL_ID_MISMATCH): (
-                    "logged_trial_id_mismatch"
-                ),
+                str(TRIAL_GAP_REASON_TRIAL_ID_MISMATCH): ("logged_trial_id_mismatch"),
             },
         },
         "array_declarations": declarations,
@@ -537,7 +556,7 @@ def controller_trial_input_from_handles(
         raise TypeError("relative_frame must be a strict loader-minted handle.")
     if type(semantic_selection) is not ProtocolSemanticChaserSelectionSourceHandle:
         raise TypeError("semantic_selection must be a strict loader-minted handle.")
-    relative_frame.assert_current()
+    core_authority = core_paradigm_dependency_from_relative_frame(relative_frame)
     semantic_selection.assert_current()
     if relative_frame.recording_id != semantic_selection.recording_id:
         _fail("Relative-frame and semantic-selection recordings differ.")
@@ -570,14 +589,13 @@ def controller_trial_input_from_handles(
         timestamp_valid=relative_frame.base_array("timestamp_valid"),
         chaser_identity_code=relative_frame.base_array("chaser_identity_code"),
         selection_member=selection_member,
-        chaser_occurrence_member=relative_frame.base_array(
-            "chaser_occurrence_member"
-        ),
+        chaser_occurrence_member=relative_frame.base_array("chaser_occurrence_member"),
         trial_id=relative_frame.base_array("trial_id"),
         trial_valid=relative_frame.base_array("trial_valid"),
         active_state_code=relative_frame.base_array("active_state_code"),
         active_state_valid=relative_frame.base_array("active_state_valid"),
         semantic_selection_binding=semantic_binding,
+        core_authority_dependency=core_authority,
     )
 
 

@@ -582,6 +582,87 @@ def test_plan_freezes_exact_recording_inputs(tmp_path: Path) -> None:
     assert task["safety"] == cohort.EXPECTED_SAFETY
 
 
+def test_existing_outputs_remain_runnable_for_dynamic_admission(
+    tmp_path: Path,
+) -> None:
+    archive, _raw_h5, snapshot = _fixture(tmp_path)
+    operations_root = tmp_path / "operations"
+    initial = _plan(snapshot, operations_root=operations_root)
+    entry = initial["entries"][0]
+    recording_id = entry["recording_id"]
+    roster_sha256 = entry["core_authority"]["core_authority_roster_sha256"]
+
+    for group_path in cohort._output_groups():
+        run_name = Path(group_path).name
+        attrs: dict[str, object] = {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+            "production_authority": False,
+            "registry_update": False,
+            "selection": "none",
+            "palette_run_name": run_name,
+            "recording_id": recording_id,
+        }
+        _record(
+            attrs,
+            "fixture_manifest",
+            {
+                "recording_id": recording_id,
+                "run_name": run_name,
+                "core_authority": {
+                    "core_authority_roster_sha256": roster_sha256,
+                },
+            },
+        )
+        _write_group(archive / group_path, attrs)
+
+    plot_dir = Path(entry["plot_output_dir"])
+    plot_receipts = {
+        plot_dir / f"{cohort.SUCCESSOR_RUN}_plot_receipt.json",
+        plot_dir / f"{cohort.DASHBOARD_RECIPE_BUNDLE_NAME}_plot_receipt.json",
+        plot_dir / "detailed" / f"{cohort.DETAILED_BUNDLE_NAME}_receipt.json",
+        plot_dir / "detailed" / f"{cohort.DETAILED_RECIPE_BUNDLE_NAME}_receipt.json",
+        plot_dir
+        / "spatial_occupancy"
+        / (f"{cohort.SPATIAL_OCCUPANCY_RUN}_" "spatial_occupancy_plot_receipt.json"),
+        plot_dir
+        / "spatial_occupancy"
+        / (
+            f"{cohort.SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME}_"
+            "spatial_occupancy_plot_receipt.json"
+        ),
+        plot_dir
+        / "body_alignment_by_distance"
+        / (
+            f"{cohort.BODY_ALIGNMENT_RECIPE_BUNDLE_NAME}_"
+            "body_alignment_plot_receipt.json"
+        ),
+        plot_dir
+        / "near_field_visits"
+        / (
+            f"{cohort.KEYPOINT_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME}_"
+            "near_field_visit_plot_receipt.json"
+        ),
+        plot_dir
+        / "near_field_visits"
+        / (
+            f"{cohort.DETECTION_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME}_"
+            "near_field_visit_plot_receipt.json"
+        ),
+    }
+    for receipt in plot_receipts:
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text("{}", encoding="utf-8")
+
+    replanned = _plan(snapshot, operations_root=operations_root)
+    assert replanned["status_counts"] == {"validation_only": 1}
+    assert replanned["runnable_task_indices"] == [1]
+
+    successor = cohort.successor_cohort_task(replanned)
+    assert successor["status_counts"] == {"validation_only": 1}
+    assert successor["runnable_task_indices"] == [1]
+
+
 def test_task_digest_rejects_mutation(tmp_path: Path) -> None:
     _archive, _raw_h5, snapshot = _fixture(tmp_path)
     task = _plan(snapshot, operations_root=tmp_path / "operations")
@@ -717,19 +798,34 @@ def test_task_successor_reuses_existing_exact_spatial_science(tmp_path: Path) ->
     archive, _raw_h5, snapshot = _fixture(tmp_path)
     original = _plan(snapshot, operations_root=tmp_path / "operations")
     recording_id = original["entries"][0]["recording_id"]
+    core_roster_sha256 = original["entries"][0]["core_authority"][
+        "core_authority_roster_sha256"
+    ]
+    attrs: dict[str, object] = {
+        "palette_run_completion_status": "complete",
+        "stage_selector_eligible": False,
+        "production_authority": False,
+        "registry_update": False,
+        "selection": "none",
+        "palette_run_name": cohort.SPATIAL_OCCUPANCY_RUN,
+        "recording_id": recording_id,
+    }
+    _record(
+        attrs,
+        "composable_chaser_successor_manifest",
+        {
+            "recording_id": recording_id,
+            "run_name": cohort.SPATIAL_OCCUPANCY_RUN,
+            "core_authority": {
+                "core_authority_roster_sha256": core_roster_sha256,
+            },
+        },
+    )
     _write_group(
         archive
         / "analysis/chaser_spatial_occupancy_runs"
         / cohort.SPATIAL_OCCUPANCY_RUN,
-        {
-            "palette_run_completion_status": "complete",
-            "stage_selector_eligible": False,
-            "production_authority": False,
-            "registry_update": False,
-            "selection": "none",
-            "palette_run_name": cohort.SPATIAL_OCCUPANCY_RUN,
-            "recording_id": recording_id,
-        },
+        attrs,
     )
 
     successor = cohort.successor_cohort_task(original)
@@ -743,6 +839,66 @@ def test_task_successor_reuses_existing_exact_spatial_science(tmp_path: Path) ->
         "exact_run_name": cohort.SPATIAL_OCCUPANCY_RUN,
         "plot_bundle": cohort.SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME,
     }
+
+
+def test_task_successor_rejects_completed_spatial_science_without_exact_core_roster(
+    tmp_path: Path,
+) -> None:
+    archive, _raw_h5, snapshot = _fixture(tmp_path)
+    original = _plan(snapshot, operations_root=tmp_path / "operations")
+    recording_id = original["entries"][0]["recording_id"]
+    attrs: dict[str, object] = {
+        "palette_run_completion_status": "complete",
+        "stage_selector_eligible": False,
+        "production_authority": False,
+        "registry_update": False,
+        "selection": "none",
+        "palette_run_name": cohort.SPATIAL_OCCUPANCY_RUN,
+        "recording_id": recording_id,
+    }
+    _record(
+        attrs,
+        "composable_chaser_successor_manifest",
+        {
+            "recording_id": recording_id,
+            "run_name": cohort.SPATIAL_OCCUPANCY_RUN,
+        },
+    )
+    _write_group(
+        archive
+        / "analysis/chaser_spatial_occupancy_runs"
+        / cohort.SPATIAL_OCCUPANCY_RUN,
+        attrs,
+    )
+
+    with pytest.raises(
+        cohort.ComposableChaserCohortError,
+        match="no sealed core-authority roster",
+    ):
+        cohort.successor_cohort_task(original)
+
+    _record(
+        attrs,
+        "composable_chaser_successor_manifest",
+        {
+            "recording_id": recording_id,
+            "run_name": cohort.SPATIAL_OCCUPANCY_RUN,
+            "core_authority": {
+                "core_authority_roster_sha256": "f" * 64,
+            },
+        },
+    )
+    _write_group(
+        archive
+        / "analysis/chaser_spatial_occupancy_runs"
+        / cohort.SPATIAL_OCCUPANCY_RUN,
+        attrs,
+    )
+    with pytest.raises(
+        cohort.ComposableChaserCohortError,
+        match="binds another core-authority roster",
+    ):
+        cohort.successor_cohort_task(original)
 
 
 def test_task_successor_freezes_reviewed_gaze_and_plans_exact_projection(

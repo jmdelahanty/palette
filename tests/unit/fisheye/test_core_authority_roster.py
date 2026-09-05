@@ -38,6 +38,9 @@ from fisheye.analysis_workflows.core_motion_source_handle import (
     require_core_motion_track_source_handle,
     validate_core_motion_dependency_record,
 )
+from fisheye.analysis_workflows.core_paradigm_authority import (
+    core_paradigm_dependency_from_relative_frame,
+)
 from fisheye.analysis_workflows.core_subject_body_frame_source_handle import (
     CoreSubjectBodyFrameSourceHandle,
     CoreSubjectBodyFrameSourceHandleError,
@@ -1147,7 +1150,26 @@ def test_core_chaser_adapter_reuses_existing_relative_frame_surface(
     )
     prepared = adapted.prepared
 
+    reloaded = object.__new__(ChaserRelativeFrameSourceHandle)
+    for name, value in {
+        "analysis_zarr_path": motion.analysis_zarr_path,
+        "run_path": "analysis/chaser_relative_frame_runs/core-relative",
+        "recording_id": prepared.manifest["recording_id"],
+        "run_manifest": prepared.manifest,
+        "context": prepared.manifest["context"],
+    }.items():
+        object.__setattr__(reloaded, name, value)
+    dependency = core_paradigm_dependency_from_relative_frame(
+        reloaded,
+        required=True,
+    )
+
     assert prepared.dimensions.n_rows == 6
+    assert dependency is not None
+    assert dependency["core_authority_roster_sha256"] == (
+        motion.core_authority_roster_sha256
+    )
+    assert dependency["selected_track_id"] == motion.track_id
     assert prepared.body_arrays is not None
     assert np.array_equal(
         prepared.body_arrays["body_source_row_id"],

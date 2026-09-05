@@ -31,6 +31,9 @@ from fisheye.analysis_workflows.controller_trial_successor import (
 from fisheye.analysis_workflows.core_motion_source_handle import (
     validate_core_motion_dependency_record,
 )
+from fisheye.analysis_workflows.core_paradigm_authority import (
+    core_paradigm_dependency_from_relative_frame,
+)
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
@@ -949,7 +952,9 @@ def generalized_bout_response_input_from_handles(
         _fail("track_id must be one non-negative exact integer.")
     if type(include_body_extension) is not bool:
         _fail("include_body_extension must be the exact boolean.")
-    relative_frame.assert_current()
+    relative_core_authority = core_paradigm_dependency_from_relative_frame(
+        relative_frame
+    )
     semantic_selection.assert_current()
     if provider_mode:
         provider_motion.assert_current()
@@ -967,6 +972,11 @@ def generalized_bout_response_input_from_handles(
         == controller_trials.recording_id
     ):
         _fail("Successor sources belong to different recordings.")
+    if core_mode != (relative_core_authority is not None):
+        _fail("Relative-frame and motion sources mix core and legacy authorities.")
+    controller_core_authority = controller_trials.manifest.get("core_authority")
+    if _plain(controller_core_authority) != _plain(relative_core_authority):
+        _fail("Controller trials and relative frame bind different core authorities.")
     if core_mode:
         core_envelope = relative_frame.context.get("core_authority")
         core_record = (
@@ -983,6 +993,9 @@ def generalized_bout_response_input_from_handles(
             or core_motion_record.get("source_manifest_sha256")
             != provider_motion.source_manifest_sha256
             or core_motion_record.get("track_id") != provider_motion.track_id
+            or relative_core_authority["core_authority_roster_sha256"]
+            != provider_motion.core_authority_roster_sha256
+            or relative_core_authority["selected_track_id"] != provider_motion.track_id
         ):
             _fail("Relative frame and motion handle bind different core authority.")
     if relative_frame.run_manifest.get("scale_policy", {}).get("unit") != "mm":

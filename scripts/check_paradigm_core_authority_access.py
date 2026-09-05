@@ -12,6 +12,58 @@ import sys
 DEFAULT_PLANNER = Path(
     "src/fisheye/utils/materialize_composable_chaser_successor_cohort.py"
 )
+DESCENDANT_REQUIREMENTS = {
+    Path("src/fisheye/analysis_workflows/controller_trial_successor.py"): frozenset(
+        {
+            "core_paradigm_dependency_from_relative_frame",
+            "validate_core_paradigm_source_dependency",
+        }
+    ),
+    Path(
+        "src/fisheye/analysis_workflows/chaser_radial_near_field_successor.py"
+    ): frozenset(
+        {
+            "core_paradigm_dependency_from_relative_frame",
+            "validate_core_paradigm_source_dependency",
+        }
+    ),
+    Path(
+        "src/fisheye/analysis_workflows/chaser_near_field_visit_successor.py"
+    ): frozenset(
+        {
+            "core_paradigm_dependency_from_relative_frame",
+            "validate_core_paradigm_source_dependency",
+        }
+    ),
+    Path(
+        "src/fisheye/analysis_workflows/chaser_body_alignment_by_distance_successor.py"
+    ): frozenset(
+        {
+            "core_paradigm_dependency_from_relative_frame",
+            "validate_core_paradigm_source_dependency",
+        }
+    ),
+    Path("src/fisheye/analysis_workflows/gaze_tracking_successor.py"): frozenset(
+        {
+            "core_paradigm_dependency_from_relative_frame",
+            "validate_core_paradigm_source_dependency",
+        }
+    ),
+    Path(
+        "src/fisheye/analysis_workflows/chaser_spatial_occupancy_successor.py"
+    ): frozenset(
+        {
+            "core_paradigm_dependency_from_relative_frame",
+            "validate_core_paradigm_source_dependency",
+        }
+    ),
+    Path(
+        "src/fisheye/analysis_workflows/generalized_bout_response_successor.py"
+    ): frozenset({"core_paradigm_dependency_from_relative_frame"}),
+    Path("src/fisheye/analysis_workflows/escape_freeze_successor.py"): frozenset(
+        {"core_paradigm_dependency_from_relative_frame"}
+    ),
+}
 FORBIDDEN_NAMES = frozenset({"MOTION_BOUT_PAIRS", "_resolve_motion_bouts"})
 FORBIDDEN_CALLS = frozenset(
     {
@@ -34,6 +86,7 @@ REQUIRED_CALLS = frozenset(
         "selected_core_track_id_from_roster",
         "_core_authority_plan_binding",
         "_revalidate_core_bundle_selection",
+        "validate_core_paradigm_source_dependency",
     }
 )
 REQUIRED_ARGUMENTS = frozenset(
@@ -64,6 +117,7 @@ class _PlannerVisitor(ast.NodeVisitor):
         self.violations: list[ParadigmCoreAuthorityViolation] = []
         self.calls: set[str] = set()
         self.strings: set[str] = set()
+        self.roster_aware_reuse_gate = False
 
     def _record(self, node: ast.AST, reason: str) -> None:
         self.violations.append(
@@ -94,6 +148,11 @@ class _PlannerVisitor(ast.NodeVisitor):
             self.calls.add(name)
         if name in FORBIDDEN_CALLS:
             self._record(node, f"calls independent core-source resolver {name!r}")
+        if name == "_existing_complete_output" and any(
+            keyword.arg == "expected_core_authority_roster_sha256"
+            for keyword in node.keywords
+        ):
+            self.roster_aware_reuse_gate = True
         for keyword in node.keywords:
             if (
                 keyword.arg in {"track_id", "selected_track_id"}
@@ -149,6 +208,58 @@ def collect_paradigm_core_authority_violations(
                 reason=f"does not propagate frozen core argument {argument!r}",
             )
         )
+    if not visitor.roster_aware_reuse_gate:
+        visitor.violations.append(
+            ParadigmCoreAuthorityViolation(
+                line=0,
+                reason=(
+                    "does not gate reusable outputs by the frozen "
+                    "core-authority roster"
+                ),
+            )
+        )
+    for relative_path, required_calls in DESCENDANT_REQUIREMENTS.items():
+        descendant = repo / relative_path
+        if not descendant.is_file():
+            visitor.violations.append(
+                ParadigmCoreAuthorityViolation(
+                    line=0,
+                    reason=f"maintained core-bound descendant is absent: {relative_path}",
+                )
+            )
+            continue
+        descendant_tree = ast.parse(
+            descendant.read_text(encoding="utf-8"),
+            filename=str(descendant),
+        )
+        descendant_calls = {
+            name
+            for node in ast.walk(descendant_tree)
+            if isinstance(node, ast.Call)
+            if (name := _call_name(node)) is not None
+        }
+        descendant_strings = {
+            node.value
+            for node in ast.walk(descendant_tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        for name in sorted(required_calls - descendant_calls):
+            visitor.violations.append(
+                ParadigmCoreAuthorityViolation(
+                    line=0,
+                    reason=(
+                        f"{relative_path} does not invoke transitive core boundary "
+                        f"{name!r}"
+                    ),
+                )
+            )
+        if "core_authority" not in descendant_strings:
+            visitor.violations.append(
+                ParadigmCoreAuthorityViolation(
+                    line=0,
+                    reason=f"{relative_path} does not seal core_authority lineage",
+                )
+            )
     return sorted(visitor.violations, key=lambda item: (item.line, item.reason))
 
 

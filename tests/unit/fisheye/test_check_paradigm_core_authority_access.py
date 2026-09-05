@@ -20,6 +20,9 @@ def test_ratchet_accepts_shared_roster_planning_and_execution(tmp_path: Path) ->
         "    return binding, track\n"
         "def run(task, entry):\n"
         "    _revalidate_core_bundle_selection(task, entry)\n"
+        "    validate_core_paradigm_source_dependency(receipt)\n"
+        "    _existing_complete_output(path, "
+        "expected_core_authority_roster_sha256=digest)\n"
         "    return ('--core-authority-roster', "
         "'--expected-core-authority-roster-sha256', '--core-track-id')\n",
     )

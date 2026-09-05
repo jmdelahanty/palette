@@ -30,13 +30,16 @@ from fisheye.analysis.provider_chaser_position_suite import (
 from fisheye.analysis_workflows.chaser_relative_distance_view import (
     load_chaser_relative_distance_view,
 )
+from fisheye.analysis_workflows.core_paradigm_authority import (
+    core_paradigm_dependency_from_relative_frame,
+    validate_core_paradigm_source_dependency,
+)
 from fisheye.analysis_workflows.near_field_visit_state_machine import (
     ExactNearFieldVisitError,
     segment_exact_time_near_field_visits,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
-
 
 SCHEMA_ID = "palette.analysis.chaser_radial_near_field_successor"
 SCHEMA_VERSION = 1
@@ -61,7 +64,9 @@ def _text(value: object, *, name: str) -> str:
 
 def _digest(value: object, *, name: str) -> str:
     result = _text(value, name=name)
-    if len(result) != 64 or any(character not in "0123456789abcdef" for character in result):
+    if len(result) != 64 or any(
+        character not in "0123456789abcdef" for character in result
+    ):
         _fail(f"{name} must be one lowercase SHA-256 digest.")
     return result
 
@@ -78,7 +83,9 @@ def _plain(value: Any) -> Any:
 
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+        return MappingProxyType(
+            {str(key): _freeze(item) for key, item in value.items()}
+        )
     if isinstance(value, list):
         return tuple(_freeze(item) for item in value)
     return value
@@ -131,6 +138,7 @@ class ChaserRadialNearFieldInput:
     arena: CircularArena
     mm_per_pixel: float
     config: PositionSuiteConfig = PositionSuiteConfig()
+    core_authority_dependency: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,31 +245,54 @@ def _table_arrays(
 ) -> dict[str, np.ndarray]:
     arrays: dict[str, np.ndarray] = {}
     metric_int = (
-        "epoch_window_id", "epoch_start_frame", "epoch_end_frame_exclusive",
-        "chaser_column", "chaser_identity_code", "behavior_role_code",
-        "candidate_frame_count", "valid_distance_frame_count",
-        "same_quadrant_valid_frame_count", "near_zone_frame_count",
-        "near_zone_entry_count", "near_zone_invalid_gap_count",
-        "near_zone_censor_event_count", "near_zone_boundary_censor_event_count",
-        "near_zone_invalid_gap_censor_event_count", "wall_excluded_valid_frame_count",
+        "epoch_window_id",
+        "epoch_start_frame",
+        "epoch_end_frame_exclusive",
+        "chaser_column",
+        "chaser_identity_code",
+        "behavior_role_code",
+        "candidate_frame_count",
+        "valid_distance_frame_count",
+        "same_quadrant_valid_frame_count",
+        "near_zone_frame_count",
+        "near_zone_entry_count",
+        "near_zone_invalid_gap_count",
+        "near_zone_censor_event_count",
+        "near_zone_boundary_censor_event_count",
+        "near_zone_invalid_gap_censor_event_count",
+        "wall_excluded_valid_frame_count",
     )
     metric_float = (
-        "valid_distance_fraction", "distance_mean_mm", "distance_p05_mm",
-        "distance_p25_mm", "distance_p50_mm", "distance_p75_mm", "distance_p95_mm",
-        "same_quadrant_fraction_valid", "same_quadrant_fraction_candidate",
-        "near_zone_fraction_valid", "near_zone_fraction_candidate", "near_zone_dwell_s",
-        "near_zone_expected_fraction_geometric", "near_zone_enrichment_geometric",
-        "near_zone_entry_rate_per_min_valid_time", "near_zone_valid_tracked_duration_s",
+        "valid_distance_fraction",
+        "distance_mean_mm",
+        "distance_p05_mm",
+        "distance_p25_mm",
+        "distance_p50_mm",
+        "distance_p75_mm",
+        "distance_p95_mm",
+        "same_quadrant_fraction_valid",
+        "same_quadrant_fraction_candidate",
+        "near_zone_fraction_valid",
+        "near_zone_fraction_candidate",
+        "near_zone_dwell_s",
+        "near_zone_expected_fraction_geometric",
+        "near_zone_enrichment_geometric",
+        "near_zone_entry_rate_per_min_valid_time",
+        "near_zone_valid_tracked_duration_s",
         "near_zone_complete_visit_median_dwell_s",
-        "near_zone_complete_visit_total_dwell_s", "fish_arena_radius_mean_mm",
-        "fish_arena_radius_p50_mm", "fish_wall_distance_mean_mm",
+        "near_zone_complete_visit_total_dwell_s",
+        "fish_arena_radius_mean_mm",
+        "fish_arena_radius_p50_mm",
+        "fish_wall_distance_mean_mm",
         "fish_wall_distance_p50_mm",
     )
     arrays["metric_epoch_role_code"] = _readonly(
         [role_code[str(row["analysis_role"])] for row in metrics], dtype=np.uint8
     )
     for name in metric_int:
-        arrays[f"metric_{name}"] = _readonly([int(row[name]) for row in metrics], dtype=np.int64)
+        arrays[f"metric_{name}"] = _readonly(
+            [int(row[name]) for row in metrics], dtype=np.int64
+        )
     for name in metric_float:
         arrays[f"metric_{name}"] = _readonly(
             [_finite_or_nan(row[name]) for row in metrics], dtype=np.float64
@@ -280,11 +311,17 @@ def _table_arrays(
         [int(row["epoch_window_id"]) for row in radial], dtype=np.int64
     )
     for name in ("observed_count", "wall_excluded_observed_count"):
-        arrays[f"radial_{name}"] = _readonly([int(row[name]) for row in radial], dtype=np.int64)
+        arrays[f"radial_{name}"] = _readonly(
+            [int(row[name]) for row in radial], dtype=np.int64
+        )
     for name in (
-        "bin_start_mm", "bin_end_mm", "observed_fraction",
-        "expected_available_area_mm2_frames", "expected_fraction_geometric",
-        "selection_index_geometric", "wall_excluded_observed_fraction",
+        "bin_start_mm",
+        "bin_end_mm",
+        "observed_fraction",
+        "expected_available_area_mm2_frames",
+        "expected_fraction_geometric",
+        "selection_index_geometric",
+        "wall_excluded_observed_fraction",
         "wall_excluded_expected_available_area_mm2_frames",
         "wall_excluded_expected_fraction_geometric",
         "wall_excluded_selection_index_geometric",
@@ -322,12 +359,27 @@ def prepare_chaser_radial_near_field_successor(
     if type(inputs) is not ChaserRadialNearFieldInput:
         raise TypeError("inputs must be one ChaserRadialNearFieldInput.")
     recording_id = _text(inputs.recording_id, name="recording_id")
-    _text(inputs.source_relative_frame_run_path, name="source relative-frame path")
-    _digest(inputs.source_relative_frame_manifest_sha256, name="relative-frame manifest")
+    relative_path = _text(
+        inputs.source_relative_frame_run_path, name="source relative-frame path"
+    )
+    relative_digest = _digest(
+        inputs.source_relative_frame_manifest_sha256, name="relative-frame manifest"
+    )
+    try:
+        core_authority = validate_core_paradigm_source_dependency(
+            inputs.core_authority_dependency,
+            recording_id=recording_id,
+            source_relative_frame_run_path=relative_path,
+            source_relative_frame_manifest_sha256=relative_digest,
+        )
+    except (TypeError, ValueError) as exc:
+        _fail(f"Core-authority dependency is invalid: {exc}")
     _text(inputs.source_semantic_selection_run_path, name="semantic selection path")
     _digest(inputs.source_semantic_selection_manifest_sha256, name="semantic manifest")
     fish_authority = _plain(inputs.fish_position_authority)
-    provider_id = _text(fish_authority.get("provider_id"), name="fish position provider_id")
+    provider_id = _text(
+        fish_authority.get("provider_id"), name="fish position provider_id"
+    )
     provider_digest = _digest(
         fish_authority.get("provider_digest"), name="fish position provider digest"
     )
@@ -435,13 +487,20 @@ def prepare_chaser_radial_near_field_successor(
             "near_zone_entry_rate_per_min_valid_time",
         }:
             continue
-        left = metrics_by_role[(str(contrast["analysis_role"]), inputs.config.treatment_role)][contrast["metric"]]
-        right = metrics_by_role[(str(contrast["analysis_role"]), inputs.config.baseline_role)][contrast["metric"]]
+        left = metrics_by_role[
+            (str(contrast["analysis_role"]), inputs.config.treatment_role)
+        ][contrast["metric"]]
+        right = metrics_by_role[
+            (str(contrast["analysis_role"]), inputs.config.baseline_role)
+        ][contrast["metric"]]
         contrast["treatment_value"] = left
         contrast["baseline_value"] = right
         contrast["treatment_minus_baseline"] = (
             None
-            if left is None or right is None or not math.isfinite(float(left)) or not math.isfinite(float(right))
+            if left is None
+            or right is None
+            or not math.isfinite(float(left))
+            or not math.isfinite(float(right))
             else float(left) - float(right)
         )
 
@@ -469,8 +528,12 @@ def prepare_chaser_radial_near_field_successor(
     epoch_codes, epoch_registry = _code_registry(
         [epoch.analysis_role for epoch in inputs.epochs]
     )
-    behavior_codes = {str(value): int(key) for key, value in inputs.role_registry.items()}
-    identity_codes = {str(value): int(key) for key, value in inputs.chaser_registry.items()}
+    behavior_codes = {
+        str(value): int(key) for key, value in inputs.role_registry.items()
+    }
+    identity_codes = {
+        str(value): int(key) for key, value in inputs.chaser_registry.items()
+    }
     arrays = _table_arrays(
         metrics=metrics,
         radial=radial,
@@ -479,11 +542,18 @@ def prepare_chaser_radial_near_field_successor(
         behavior_code=behavior_codes,
         identity_code=identity_codes,
     )
-    readonly = MappingProxyType({name: _readonly(value) for name, value in arrays.items()})
+    readonly = MappingProxyType(
+        {name: _readonly(value) for name, value in arrays.items()}
+    )
     body = {
         "scientific_schema": {"schema_id": SCHEMA_ID, "schema_version": SCHEMA_VERSION},
         "method_id": METHOD_ID,
         "recording_id": recording_id,
+        **(
+            {"core_authority": _plain(core_authority)}
+            if core_authority is not None
+            else {}
+        ),
         "dimensions": {
             "n_frames": inputs.n_frames,
             "n_chasers": inputs.n_chasers,
@@ -516,8 +586,12 @@ def prepare_chaser_radial_near_field_successor(
         "temporal_metric_timebase": _plain(suite["temporal_metric_timebase"]),
         "identity_registries": {
             "epoch_role": epoch_registry,
-            "behavior_role": {str(key): str(value) for key, value in inputs.role_registry.items()},
-            "chaser": {str(key): str(value) for key, value in inputs.chaser_registry.items()},
+            "behavior_role": {
+                str(key): str(value) for key, value in inputs.role_registry.items()
+            },
+            "chaser": {
+                str(key): str(value) for key, value in inputs.chaser_registry.items()
+            },
         },
         "epoch_records": _plain(suite["epoch_roles"]),
         "source_distance_surface": {
@@ -526,8 +600,12 @@ def prepare_chaser_radial_near_field_successor(
             "unit": "mm",
             "copy_policy": "referenced_by_exact_immutable_digest_not_duplicated",
             "summary_fields": [
-                "distance_mean_mm", "distance_p05_mm", "distance_p25_mm",
-                "distance_p50_mm", "distance_p75_mm", "distance_p95_mm",
+                "distance_mean_mm",
+                "distance_p05_mm",
+                "distance_p25_mm",
+                "distance_p50_mm",
+                "distance_p75_mm",
+                "distance_p95_mm",
             ],
         },
         "interpretation_caveats": _plain(suite["interpretation_caveats"]),
@@ -570,7 +648,7 @@ def chaser_radial_near_field_input_from_handles(
         raise TypeError("relative_frame must be one strict loader-minted handle.")
     if type(semantic_selection) is not ProtocolSemanticChaserSelectionSourceHandle:
         raise TypeError("semantic_selection must be one strict loader-minted handle.")
-    relative_frame.assert_current()
+    core_authority = core_paradigm_dependency_from_relative_frame(relative_frame)
     semantic_selection.assert_current()
     if relative_frame.analysis_zarr_path != semantic_selection.analysis_zarr:
         _fail("Relative-frame and semantic sources belong to different archives.")
@@ -620,6 +698,7 @@ def chaser_radial_near_field_input_from_handles(
         epochs=semantic_selection.position_suite_epochs(),
         arena=arena,
         mm_per_pixel=float(mm_per_pixel),
+        core_authority_dependency=core_authority,
         config=config,
     )
 

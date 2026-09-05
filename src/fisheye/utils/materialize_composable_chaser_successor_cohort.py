@@ -41,6 +41,9 @@ from fisheye.analysis_workflows.chaser_near_field_visit_successor import (
 from fisheye.analysis_workflows.eye_gaze_source_handle import (
     validate_gaze_convention_review_receipt,
 )
+from fisheye.analysis_workflows.core_paradigm_authority import (
+    validate_core_paradigm_source_dependency,
+)
 from fisheye.analysis_workflows.validated_behavior_cohort import (
     read_validated_behavior_bundle_set,
     read_validated_behavior_cohort_membership,
@@ -791,7 +794,7 @@ def _plan_entry(
     )
     if len(existing_outputs) == len(output_groups):
         status = (
-            "complete"
+            "validation_only"
             if (
                 detailed_receipt.is_file()
                 and dashboard_receipt.is_file()
@@ -1448,10 +1451,17 @@ def successor_cohort_task(
         existing_spatial_path = (
             f"analysis/chaser_spatial_occupancy_runs/{SPATIAL_OCCUPANCY_RUN}"
         )
+        expected_core_roster_sha256 = _digest(
+            _mapping(entry["core_authority"], field="core authority").get(
+                "core_authority_roster_sha256"
+            ),
+            field="core-authority roster digest",
+        )
         if _existing_complete_output(
             archive,
             existing_spatial_path,
             recording_id,
+            expected_core_authority_roster_sha256=(expected_core_roster_sha256),
         ):
             spatial_occupancy_run = SPATIAL_OCCUPANCY_RUN
             spatial_occupancy_mode = "reuse_existing_exact_complete_v1"
@@ -1534,7 +1544,7 @@ def successor_cohort_task(
         )
         if len(existing_paths) == len(output_paths):
             status = (
-                "complete"
+                "validation_only"
                 if all(path.is_file() for path in expected_plot_receipts)
                 else "plot_only"
             )
@@ -1542,11 +1552,10 @@ def successor_cohort_task(
             status = "resume"
         else:
             status = "ready"
-        if eye_gaze is not None and status == "complete":
-            # The deployment commit is not known while planning, so an exact
-            # gaze child and v8 projection receipt must still be sealed by
-            # run-one even when every immutable science/plot output exists.
-            status = "plot_only"
+        # Even when every immutable science and plot output already exists,
+        # planning cannot establish dynamic admission.  Keeping the entry
+        # runnable makes run-one revalidate the frozen core bundle, every
+        # reused output's sealed roster identity, and the deployment commit.
         entry.update(
             {
                 "status": status,
@@ -1643,8 +1652,25 @@ def successor_cohort_task(
     return task
 
 
+def _collect_named_values(value: object, *, name: str) -> list[object]:
+    found: list[object] = []
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if key == name:
+                found.append(item)
+            found.extend(_collect_named_values(item, name=name))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            found.extend(_collect_named_values(item, name=name))
+    return found
+
+
 def _existing_complete_output(
-    archive: Path, group_path: str, recording_id: str
+    archive: Path,
+    group_path: str,
+    recording_id: str,
+    *,
+    expected_core_authority_roster_sha256: str | None = None,
 ) -> bool:
     target = archive / group_path
     if not target.exists():
@@ -1667,6 +1693,15 @@ def _existing_complete_output(
     observed_recording = attrs.get("recording_id")
     if observed_recording is not None and observed_recording != recording_id:
         _fail(f"Existing output recording identity mismatch: {group_path}")
+    expected_core_roster = (
+        _digest(
+            expected_core_authority_roster_sha256,
+            field="expected core-authority roster digest",
+        )
+        if expected_core_authority_roster_sha256 is not None
+        else None
+    )
+    core_roster_claims: list[object] = []
     for key, value in attrs.items():
         if not key.endswith("_manifest") or not isinstance(value, Mapping):
             continue
@@ -1681,6 +1716,26 @@ def _existing_complete_output(
             persisted = _digest(attrs[digest_key], field=f"existing {key} digest")
             if canonical_json_sha256(value) != persisted:
                 _fail(f"Existing output manifest digest is stale: {group_path}")
+            core_roster_claims.extend(
+                _collect_named_values(
+                    value,
+                    name="core_authority_roster_sha256",
+                )
+            )
+    if expected_core_roster is not None:
+        if not core_roster_claims:
+            _fail(
+                "Existing core-bound output has no sealed core-authority roster: "
+                f"{group_path}"
+            )
+        observed_core_rosters = {
+            _digest(value, field="existing core-authority roster digest")
+            for value in core_roster_claims
+        }
+        if observed_core_rosters != {expected_core_roster}:
+            _fail(
+                "Existing output binds another core-authority roster: " f"{group_path}"
+            )
     return True
 
 
@@ -1693,9 +1748,15 @@ def _existing_near_field_visit_output(
     semantic_selection_run: str,
     radial_near_field_run: str,
     minimum_quality_sample_count: int,
+    expected_core_authority_roster_sha256: str | None = None,
 ) -> bool:
     visit_path = f"analysis/chaser_near_field_visits_runs/{visit_run}"
-    if not _existing_complete_output(archive, visit_path, recording_id):
+    if not _existing_complete_output(
+        archive,
+        visit_path,
+        recording_id,
+        expected_core_authority_roster_sha256=(expected_core_authority_roster_sha256),
+    ):
         return False
     visit_attrs, _metadata_sha = _zarr_attrs(
         archive / visit_path,
@@ -1872,6 +1933,29 @@ def _existing_near_field_visit_output(
         "position_provider"
     ) or sources.get("fish_position") != radial_sources.get("fish_position"):
         _fail("Existing near-field visit position-provider binding is incompatible.")
+    try:
+        visit_core = validate_core_paradigm_source_dependency(
+            scientific.get("core_authority"),
+            recording_id=recording_id,
+            source_relative_frame_run_path=relative_path,
+            source_relative_frame_manifest_sha256=relative_manifest_sha,
+        )
+        radial_core = validate_core_paradigm_source_dependency(
+            radial_scientific.get("core_authority"),
+            recording_id=recording_id,
+            source_relative_frame_run_path=relative_path,
+            source_relative_frame_manifest_sha256=relative_manifest_sha,
+        )
+    except (TypeError, ValueError) as exc:
+        _fail(f"Existing near-field core-authority binding is invalid: {exc}")
+    if dict(visit_core or {}) != dict(radial_core or {}):
+        _fail("Existing visit and radial successors bind different core authorities.")
+    if expected_core_authority_roster_sha256 is not None and (
+        visit_core is None
+        or visit_core["core_authority_roster_sha256"]
+        != expected_core_authority_roster_sha256
+    ):
+        _fail("Existing near-field visit binds another core-authority roster.")
     config = _mapping(scientific.get("config"), field="near-field visit config")
     if config.get("minimum_quality_sample_count") != minimum_quality_sample_count:
         _fail("Existing near-field visit quality policy is incompatible.")
@@ -2129,14 +2213,31 @@ def run_one(
         _fail("Eye-gaze input and gaze-successor output bindings must appear together.")
     stages: list[dict[str, Any]] = []
 
-    def execute_if_missing(stage: str, group_path: str, command: Sequence[str]) -> None:
-        if _existing_complete_output(archive, group_path, recording_id):
+    def execute_if_missing(
+        stage: str,
+        group_path: str,
+        command: Sequence[str],
+        *,
+        core_bound: bool = False,
+    ) -> None:
+        expected_roster = core_roster_sha256 if core_bound else None
+        if _existing_complete_output(
+            archive,
+            group_path,
+            recording_id,
+            expected_core_authority_roster_sha256=expected_roster,
+        ):
             stages.append({"stage": stage, "mode": "reused_exact_complete_output"})
             return
         stages.append(
             _invoke(stage=stage, command=command, log_dir=receipt_dir, apply=apply)
         )
-        if apply and not _existing_complete_output(archive, group_path, recording_id):
+        if apply and not _existing_complete_output(
+            archive,
+            group_path,
+            recording_id,
+            expected_core_authority_roster_sha256=expected_roster,
+        ):
             _fail(f"Stage {stage!r} did not produce its exact complete output.")
 
     execute_if_missing(
@@ -2280,6 +2381,7 @@ def run_one(
                 "--apply",
                 "--json",
             ),
+            core_bound=True,
         )
 
     for provider, proxy, relative_key in (
@@ -2317,6 +2419,7 @@ def run_one(
                 "--apply",
                 "--json",
             ),
+            core_bound=True,
         )
 
     relative_receipts: dict[str, Path] = {}
@@ -2360,7 +2463,12 @@ def run_one(
         f"analysis/chaser_escape_freeze_runs/{outputs['successors']}",
     )
     successor_existing = [
-        _existing_complete_output(archive, group_path, recording_id)
+        _existing_complete_output(
+            archive,
+            group_path,
+            recording_id,
+            expected_core_authority_roster_sha256=core_roster_sha256,
+        )
         for group_path in successor_groups
     ]
     if all(successor_existing):
@@ -2411,7 +2519,12 @@ def run_one(
         )
         if apply:
             for group_path in successor_groups:
-                if not _existing_complete_output(archive, group_path, recording_id):
+                if not _existing_complete_output(
+                    archive,
+                    group_path,
+                    recording_id,
+                    expected_core_authority_roster_sha256=core_roster_sha256,
+                ):
                     _fail("Composable successor publication was incomplete.")
 
     for provider, relative_key, radial_key in (
@@ -2445,6 +2558,7 @@ def run_one(
                 copy_backend,
                 "--apply",
             ),
+            core_bound=True,
         )
 
     if eye_gaze is not None:
@@ -2479,6 +2593,7 @@ def run_one(
                 copy_backend,
                 "--apply",
             ),
+            core_bound=True,
         )
 
     exact_child_receipts: dict[str, Path] = {}
@@ -2606,6 +2721,7 @@ def run_one(
                 "minimum_quality_sample_count": visit_configuration[
                     "minimum_quality_sample_count"
                 ],
+                "expected_core_authority_roster_sha256": core_roster_sha256,
             }
             if _existing_near_field_visit_output(archive, **visit_binding):
                 stages.append(
@@ -2731,6 +2847,7 @@ def run_one(
                 copy_backend,
                 "--apply",
             ),
+            core_bound=True,
         )
         if receipt_bound_relative:
             assert relative_receipt_dir is not None
@@ -2816,6 +2933,7 @@ def run_one(
             copy_backend,
             "--apply",
         ),
+        core_bound=True,
     )
 
     if receipt_bound_relative:

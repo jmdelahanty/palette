@@ -18,6 +18,10 @@ import numpy as np
 from fisheye.analysis_workflows.generalized_bout_response_successor import (
     ROLE_CODES,
 )
+from fisheye.analysis_workflows.core_paradigm_authority import (
+    core_paradigm_dependency_from_relative_frame,
+    validate_core_paradigm_source_dependency,
+)
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
@@ -337,6 +341,7 @@ class GazeTrackingInput:
     maximum_dynamic_lag_s: float = 0.5
     minimum_regression_samples: int = 30
     minimum_regression_span_deg: float = 5.0
+    core_authority_dependency: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,6 +398,17 @@ def prepare_gaze_tracking_successor(source: GazeTrackingInput) -> PreparedGazeTr
         "source_radial_payload_sha256",
     ):
         _digest(getattr(source, name), name=name)
+    try:
+        core_authority = validate_core_paradigm_source_dependency(
+            source.core_authority_dependency,
+            recording_id=recording_id,
+            source_relative_frame_run_path=source.source_relative_frame_run_path,
+            source_relative_frame_manifest_sha256=(
+                source.source_relative_frame_manifest_sha256
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        _fail(f"Core-authority dependency is invalid: {exc}")
     if not isinstance(source.source_arena_geometry_and_scale, Mapping):
         _fail("source_arena_geometry_and_scale must be one exact source record.")
     try:
@@ -1277,6 +1293,11 @@ def prepare_gaze_tracking_successor(source: GazeTrackingInput) -> PreparedGazeTr
             "control_summary_unit": "semantic_role_x_eye_x_real_chaser",
         },
         "recording_id": recording_id,
+        **(
+            {"core_authority": dict(core_authority)}
+            if core_authority is not None
+            else {}
+        ),
         "sources": {
             "relative_frame": {
                 "run_path": source.source_relative_frame_run_path,
@@ -1415,7 +1436,7 @@ def gaze_tracking_input_from_handles(
         raise TypeError("eye_gaze must be a strict loader-minted reviewed handle.")
     if type(radial_near_field) is not ComposableChaserSuccessorSourceHandle:
         raise TypeError("radial_near_field must be a strict composable handle.")
-    relative_frame.assert_current()
+    core_authority = core_paradigm_dependency_from_relative_frame(relative_frame)
     semantic_selection.assert_current()
     eye_gaze.assert_current()
     radial_near_field.assert_current()
@@ -1440,6 +1461,13 @@ def gaze_tracking_input_from_handles(
     if radial_near_field.successor_kind != "chaser_radial_near_field":
         _fail("Gaze tracking requires one exact radial geometry authority.")
     radial_scientific = radial_near_field.scientific_manifest
+    radial_core_authority = radial_scientific.get("core_authority")
+    if (
+        dict(radial_core_authority)
+        if isinstance(radial_core_authority, Mapping)
+        else radial_core_authority
+    ) != (dict(core_authority) if core_authority is not None else None):
+        _fail("Radial and gaze successors bind different core authorities.")
     radial_sources = radial_scientific.get("sources")
     if not isinstance(radial_sources, Mapping):
         _fail("Radial gaze geometry authority lacks source bindings.")
@@ -1574,6 +1602,7 @@ def gaze_tracking_input_from_handles(
         gaze_valid=np.asarray(gaze_valid, dtype=bool),
         vergence_deg=np.asarray(vergence, dtype=np.float64),
         vergence_valid=np.asarray(vergence_valid, dtype=bool),
+        core_authority_dependency=core_authority,
         lock_threshold_deg=lock_threshold_deg,
         minimum_lock_duration_s=minimum_lock_duration_s,
         maximum_tracking_distance_mm=maximum_tracking_distance_mm,

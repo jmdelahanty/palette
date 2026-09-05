@@ -3,7 +3,7 @@
 <!-- decision-meta
 status: accepted-design-review-synthesized-current-implementation-partial
 created: 2026-09-03
-last_updated: 2026-09-04
+last_updated: 2026-09-05
 baseline_commit: 07db267c
 review_checkpoint_commit: afbc1d0d6af822ca7cc4e3b051cdd9bc981df80c
 review_method: six parallel read-only Luna xhigh audits plus primary-agent synthesis
@@ -540,6 +540,45 @@ merge-ready, every transitive chaser publication and reusable-output gate must
 prove the same roster digest explicitly, the composite export profile and
 foreign-key contracts remain Track-C work, and required CI has not yet run.
 
+### Transitive chaser authority and reuse checkpoint (2026-09-05)
+
+The maintained chaser dependency closure now carries one compact sealed
+`palette.core_behavior.paradigm_relative_frame_dependency` record derived from
+the already-validated `ChaserRelativeFrameSourceHandle`. This is a projection
+of the shared resolver result, not another authority selector or artifact
+grammar. The projection verifies the full core binding, exact consumption
+receipt, recording/archive identity, selected track, motion and body source
+bindings, chaser source, pixel-space conversion, and analysis profile before
+sealing the smaller downstream record.
+
+Controller trials, radial/near-field products, body alignment, gaze tracking,
+generalized bout response, and escape/freeze now preserve that exact dependency.
+Spatial occupancy requires its two providers to be either both legacy or both
+core-bound; two core-bound providers must name the same roster, receipt, track,
+motion binding, and body binding. Mixed core/legacy motion is rejected, and a
+dependent producer cannot select or substitute another core source.
+
+Reusable-output discovery is now authority-aware. For each core-bound stage,
+the executor requires a digest-validated publication manifest containing the
+exact frozen `core_authority_roster_sha256`; an absent, malformed, or different
+claim blocks reuse. Near-field visits additionally prove exact relative-frame
+and radial-child bindings. This is a cheap immutable-identity gate, not a
+replacement for dynamic resolver admission.
+
+Planning can no longer mark a task complete from existing paths and plot
+receipts. Even when every expected output exists, the task remains runnable as
+`validation_only`, causing `run-one` to reopen the frozen bundle selection and
+validate each reusable output before any scratch write. Thus path presence is
+only a reuse candidate, never authority evidence.
+
+The CI ratchet now checks both sides of this boundary: the planner must invoke
+the shared source validator and pass the exact expected roster into reusable
+output checks, while each maintained transitive successor must project and seal
+the shared dependency. Focused workstation validation passes 160/160 tests
+across the roster/resolver, planner, ratchet, direct successors, and downstream
+analytics. Required repository CI has not yet run, and the composite export
+profile and cross-table foreign-key contract remain Track-C work.
+
 ## Composition contract
 
 ### 1. One reusable core authority roster
@@ -999,10 +1038,10 @@ inference from this static audit.
 
 - [x] Replace composable chaser `MOTION_BOUT_PAIRS`/`matches[0]` authority
       selection with the persisted core roster.
-- [ ] Make chaser body-relative, bout-response, epoch, escape/freeze,
+- [x] Make chaser body-relative, bout-response, epoch, escape/freeze,
       occupancy, and response products consume selected core identities.
-      Body-relative, bout-response, epoch, and escape/freeze are complete;
-      transitive occupancy/response propagation remains.
+      Direct and transitive publications now preserve the exact sealed roster
+      dependency; paired-provider products require one common identity.
 - [ ] Add the core-roster dependency to shared stimulus response so moving
       grating, concentric/radial OMR, and looming cannot resolve independent
       latest motion or bout runs.
