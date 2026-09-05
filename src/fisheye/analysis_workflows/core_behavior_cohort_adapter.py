@@ -27,7 +27,11 @@ from fisheye.analytics_exports.eye_trace_samples import (
 )
 from fisheye.analytics_exports.kinematics_samples import (
     BoundKinematicsSamplesSource,
+    CORE_MOTION_PROJECTION_PROFILE_ID,
+    CORE_MOTION_SOURCE_SURFACE_PROFILE_ID,
+    KINEMATICS_SOURCE_SURFACE_PROFILE_ID,
     bind_kinematics_samples_source,
+    core_motion_projection_contract,
     kinematics_projection_contract,
 )
 from fisheye.analytics_exports.tail_trace_samples import (
@@ -39,10 +43,13 @@ from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import
     CANONICAL_SWIM_BOUTS_CAPABILITY,
     CORE_BEHAVIOR_CAPABILITY_KEYS,
     CORE_BEHAVIOR_CAPABILITY_PROFILE_ID,
+    CORE_BEHAVIOR_CAPABILITY_PROFILE_ID_V1,
     CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+    CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1,
     CROSS_GRAIN_JOIN_AUTHORITY,
     EYE_TRACE_CAPABILITY,
     KINEMATICS_SAMPLES_CAPABILITY,
+    KINEMATICS_SAMPLES,
     SUBJECT_BODY_FRAME_CAPABILITY,
     TAIL_TRACE_CAPABILITY,
 )
@@ -77,6 +84,9 @@ from .validated_behavior_source_admission import (
 CORE_BEHAVIOR_BUNDLE_ADAPTER_ID = "core_behavior_execution_report_v3"
 CORE_BEHAVIOR_BUNDLE_METHOD_ID = "strict_named_authority_bundle_v1"
 CORE_BEHAVIOR_BUNDLE_STATUS = "complete"
+SUPPORTED_CORE_BEHAVIOR_EXPORT_PROFILE_IDS = frozenset(
+    {CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1, CORE_BEHAVIOR_EXPORT_PROFILE_ID}
+)
 
 
 class CoreBehaviorCohortAdapterError(ValueError):
@@ -106,7 +116,16 @@ def _sealed(body: Mapping[str, Any]) -> dict[str, Any]:
     return {**normalized, "payload_sha256": canonical_json_sha256(normalized)}
 
 
-def core_behavior_capability_contract() -> dict[str, Any]:
+def _require_export_profile_id(value: object) -> str:
+    profile_id = str(value)
+    if profile_id not in SUPPORTED_CORE_BEHAVIOR_EXPORT_PROFILE_IDS:
+        _fail(f"Unsupported core-behavior export profile: {profile_id!r}.")
+    return profile_id
+
+
+def core_behavior_capability_contract(
+    export_profile_id: str = CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+) -> dict[str, Any]:
     """Return the closed capability vocabulary for this bundle profile."""
 
     reasons: dict[str, tuple[str | None, ...]] = {
@@ -122,8 +141,14 @@ def core_behavior_capability_contract() -> dict[str, Any]:
     }
     if set(reasons) != set(CAPABILITY_STATES):  # pragma: no cover - constant guard
         _fail("Core-behavior capability-state vocabulary is incomplete.")
+    profile_id = _require_export_profile_id(export_profile_id)
+    capability_profile_id = (
+        CORE_BEHAVIOR_CAPABILITY_PROFILE_ID_V1
+        if profile_id == CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1
+        else CORE_BEHAVIOR_CAPABILITY_PROFILE_ID
+    )
     return build_capability_contract(
-        profile_id=CORE_BEHAVIOR_CAPABILITY_PROFILE_ID,
+        profile_id=capability_profile_id,
         keys=CORE_BEHAVIOR_CAPABILITY_KEYS,
         reason_codes_by_state=reasons,
     )
@@ -333,9 +358,11 @@ def bind_core_behavior_cohort_sources(
     *,
     expected_analysis_zarr: str | Path,
     expected_recording_id: str,
+    export_profile_id: str = CORE_BEHAVIOR_EXPORT_PROFILE_ID,
 ) -> BoundCoreBehaviorCohortSources:
     """Resolve one report through all five strict scientific source binders."""
 
+    selected_export_profile_id = _require_export_profile_id(export_profile_id)
     source_path = Path(expected_analysis_zarr).expanduser().resolve()
     binding, report = bind_core_behavior_execution_report(
         report_path,
@@ -353,6 +380,11 @@ def bind_core_behavior_cohort_sources(
         expected_recording_id=expected_recording_id,
         track_kinematics_run=runs["track_kinematics"]["run_name"],
         track_scope="offline",
+        source_surface_profile_id=(
+            CORE_MOTION_SOURCE_SURFACE_PROFILE_ID
+            if selected_export_profile_id == CORE_BEHAVIOR_EXPORT_PROFILE_ID
+            else KINEMATICS_SOURCE_SURFACE_PROFILE_ID
+        ),
     )
     if track.binding["run_path"] != runs["track_kinematics"]["run_path"]:
         _fail("Strict track binder resolved another execution-report run.")
@@ -422,15 +454,25 @@ def bind_core_behavior_cohort_sources(
     requested_rate = temporal_policy.kinematics_export_rate_hz(
         source_sample_rate_hz=source_sample_rate_hz
     )
+    if selected_export_profile_id == CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1:
+        kinematics_profile_id = "kinematics_samples_v1"
+        kinematics_projection = kinematics_projection_contract(
+            source_sample_rate_hz=source_sample_rate_hz,
+            requested_sample_rate_hz=requested_rate,
+        )
+    else:
+        kinematics_profile_id = CORE_MOTION_PROJECTION_PROFILE_ID
+        kinematics_projection = core_motion_projection_contract(
+            source_sample_rate_hz=source_sample_rate_hz,
+            requested_sample_rate_hz=requested_rate,
+            arrow_schema_sha256=KINEMATICS_SAMPLES.payload_sha256,
+        )
     capability_bindings: dict[str, Mapping[str, Any]] = {
         CROSS_GRAIN_JOIN_AUTHORITY: join,
         KINEMATICS_SAMPLES_CAPABILITY: _capability_binding(
-            profile_id="kinematics_samples_v1",
+            profile_id=kinematics_profile_id,
             source_binding=track.binding,
-            projection_contract=kinematics_projection_contract(
-                source_sample_rate_hz=source_sample_rate_hz,
-                requested_sample_rate_hz=requested_rate,
-            ),
+            projection_contract=kinematics_projection,
             join_authority_sha256=join_sha,
         ),
         SUBJECT_BODY_FRAME_CAPABILITY: _capability_binding(
@@ -479,6 +521,7 @@ def _complete_member(
     report_path: str | Path,
     *,
     membership_member: Mapping[str, Any],
+    export_profile_id: str,
 ) -> dict[str, Any]:
     receipts = list(membership_member["admission_receipts"])
     if (
@@ -490,6 +533,7 @@ def _complete_member(
         report_path,
         expected_analysis_zarr=membership_member["analysis_zarr"],
         expected_recording_id=membership_member["recording_id"],
+        export_profile_id=export_profile_id,
     )
     if _plain(bound.report_binding) != _plain(receipts[0]):
         _fail("Core-behavior bundle path differs from its admission receipt.")
@@ -556,7 +600,11 @@ def _nonadmitted_member(member: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _bundle_profile(capability_contract: Mapping[str, Any]) -> dict[str, Any]:
+def _bundle_profile(
+    capability_contract: Mapping[str, Any],
+    *,
+    export_profile_id: str,
+) -> dict[str, Any]:
     return {
         "adapter_id": CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
         "bundle_schema_id": CORE_BEHAVIOR_EXECUTION_SCHEMA_ID,
@@ -564,7 +612,7 @@ def _bundle_profile(capability_contract: Mapping[str, Any]) -> dict[str, Any]:
         "bundle_method_id": CORE_BEHAVIOR_BUNDLE_METHOD_ID,
         "bundle_status": CORE_BEHAVIOR_BUNDLE_STATUS,
         "capability_contract_sha256": capability_contract["record_sha256"],
-        "export_profile_id": CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+        "export_profile_id": _require_export_profile_id(export_profile_id),
         "publication_surface": "validated_behavior/v1",
         "join_authority_profile": "cross_grain_join_authority_v1",
     }
@@ -579,6 +627,7 @@ def build_bundle_set_from_core_behavior_execution_reports(
     bundle_root: str | Path,
     palette_commit: str,
     created_at_utc: str,
+    export_profile_id: str = CORE_BEHAVIOR_EXPORT_PROFILE_ID,
 ) -> dict[str, Any]:
     """Adapt completed execution reports into the generic bundle-set schema."""
 
@@ -595,25 +644,30 @@ def build_bundle_set_from_core_behavior_execution_reports(
     }
     if set(report_paths_by_recording) != admitted:
         _fail("Report paths must name every and only admitted membership record.")
+    selected_export_profile_id = _require_export_profile_id(export_profile_id)
     members = [
         (
             _complete_member(
                 report_paths_by_recording[member["recording_id"]],
                 membership_member=member,
+                export_profile_id=selected_export_profile_id,
             )
             if member["membership_state"] == "admitted"
             else _nonadmitted_member(member)
         )
         for member in validated_membership["members"]
     ]
-    contract = core_behavior_capability_contract()
+    contract = core_behavior_capability_contract(selected_export_profile_id)
     return build_validated_behavior_bundle_set(
         bundle_set_id=bundle_set_id,
         membership=validated_membership,
         membership_path=membership_file,
         membership_file_sha256=sha256_file(membership_file),
         bundle_root=bundle_root,
-        bundle_profile=_bundle_profile(contract),
+        bundle_profile=_bundle_profile(
+            contract,
+            export_profile_id=selected_export_profile_id,
+        ),
         capability_contract=contract,
         members=members,
         palette_commit=palette_commit,
@@ -633,8 +687,15 @@ def validate_core_behavior_bundle_set_current_sources(
         value,
         membership=validated_membership,
     )
-    contract = core_behavior_capability_contract()
-    if _plain(bundle_set["bundle_profile"]) != _bundle_profile(contract):
+    bundle_profile = _mapping(bundle_set["bundle_profile"], field_name="bundle_profile")
+    export_profile_id = _require_export_profile_id(
+        bundle_profile.get("export_profile_id")
+    )
+    contract = core_behavior_capability_contract(export_profile_id)
+    if _plain(bundle_profile) != _bundle_profile(
+        contract,
+        export_profile_id=export_profile_id,
+    ):
         _fail("Bundle set is not the installed core-behavior report profile.")
     if _plain(bundle_set["capability_contract"]) != _plain(contract):
         _fail("Core-behavior bundle set uses another capability contract.")
@@ -647,6 +708,7 @@ def validate_core_behavior_bundle_set_current_sources(
         rebuilt = _complete_member(
             item["bundle"]["path"],
             membership_member=members_by_id[item["recording_id"]],
+            export_profile_id=export_profile_id,
         )
         if _plain(rebuilt["bundle"]) != _plain(item["bundle"]) or _plain(
             rebuilt["capabilities"]
@@ -660,11 +722,13 @@ __all__ = [
     "CORE_BEHAVIOR_BUNDLE_ADAPTER_ID",
     "CORE_BEHAVIOR_CAPABILITY_KEYS",
     "CORE_BEHAVIOR_EXPORT_PROFILE_ID",
+    "CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1",
     "CROSS_GRAIN_JOIN_AUTHORITY",
     "CoreBehaviorCohortAdapterError",
     "EYE_TRACE_CAPABILITY",
     "KINEMATICS_SAMPLES_CAPABILITY",
     "SUBJECT_BODY_FRAME_CAPABILITY",
+    "SUPPORTED_CORE_BEHAVIOR_EXPORT_PROFILE_IDS",
     "TAIL_TRACE_CAPABILITY",
     "BoundCoreBehaviorCohortSources",
     "bind_core_behavior_cohort_sources",

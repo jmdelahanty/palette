@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from fisheye.analysis_workflows.core_behavior_cohort_adapter import (
     CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
     core_behavior_capability_contract,
+)
+from fisheye.analysis_workflows.validated_behavior_cohort import (
+    build_validated_behavior_bundle_set,
+    build_validated_behavior_cohort_membership,
+    policy_envelope,
 )
 from fisheye.analysis_workflows.validated_behavior_cohort_adapters import (
     RECORDING_BUNDLE_ADAPTER_ID,
@@ -24,7 +31,11 @@ from fisheye.analysis_workflows.validated_behavior_source_admission import (
 from fisheye.analytics_exports.validated_behavior_cohort import (
     EXPORT_METHOD_ID,
     EXPORT_PLAN_METHOD_ID,
+    build_validated_behavior_export_plan,
+    publish_validated_behavior_cohort,
     validated_behavior_manifest_path,
+    write_validated_behavior_export_plan,
+    write_validated_behavior_recording_shard,
 )
 import fisheye.analytics_exports.validated_behavior_cohort as export_core
 from fisheye.analytics_exports.validated_behavior_contracts import (
@@ -32,12 +43,28 @@ from fisheye.analytics_exports.validated_behavior_contracts import (
     validate_table_specs,
 )
 from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import (
+    CORE_BEHAVIOR_CAPABILITY_PROFILE_ID,
+    CORE_BEHAVIOR_CAPABILITY_PROFILE_ID_V1,
     CORE_BEHAVIOR_CAPABILITY_KEYS,
     CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+    CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1,
     CORE_BEHAVIOR_TABLE_SPECS,
+    CORE_BEHAVIOR_TABLE_SPECS_V1,
+    KINEMATICS_SAMPLES,
+    KINEMATICS_SAMPLES_V1,
 )
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.analytics_exports.validated_behavior_profiles import (
+    ValidatedBehaviorExportProfile,
+    ValidatedBehaviorProfileError,
+    _validated_profile_map,
     resolve_validated_behavior_profile,
+)
+from fisheye.analytics_exports.validated_behavior_phase_b_contracts import (
+    PHASE_B_TABLE_SPECS,
+)
+from fisheye.analytics_exports.validated_behavior_dataset import (
+    ValidatedBehaviorExportDataset,
 )
 import fisheye.utils.materialize_validated_behavior_bundle_cohort as bundle_cli
 import fisheye.utils.materialize_validated_behavior_cohort_export as export_cli
@@ -212,6 +239,70 @@ def test_core_behavior_profile_uses_the_existing_cohort_surface() -> None:
     )
     assert EXPORT_PLAN_METHOD_ID == "closed_membership_recording_shard_plan_v2"
     assert EXPORT_METHOD_ID == "receipt_composed_manifest_selected_parquet_v2"
+
+
+def test_core_motion_successor_preserves_v1_profile_and_uses_explicit_semantics() -> (
+    None
+):
+    current = resolve_validated_behavior_profile(CORE_BEHAVIOR_EXPORT_PROFILE_ID)
+    v1 = resolve_validated_behavior_profile(CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1)
+
+    assert current.table_specs is CORE_BEHAVIOR_TABLE_SPECS
+    assert v1.table_specs is CORE_BEHAVIOR_TABLE_SPECS_V1
+    assert KINEMATICS_SAMPLES.schema_version == 2
+    assert KINEMATICS_SAMPLES_V1.schema_version == 1
+    current_fields = {field.name for field in KINEMATICS_SAMPLES.fields}
+    v1_fields = {field.name for field in KINEMATICS_SAMPLES_V1.fields}
+    assert {
+        "delta_frames",
+        "delta_seconds",
+        "speed_filtered_mm_s",
+        "speed_smoothed_mm_s",
+        "frame_path_distance_filtered_mm",
+        "frame_path_distance_smoothed_mm",
+        "signed_tangential_acceleration_mm_s2",
+        "smoothed_signed_tangential_acceleration_mm_s2",
+        "cumulative_smoothed_path_distance_mm",
+    }.issubset(current_fields)
+    assert "acceleration_mm_s2" not in current_fields
+    assert "signed_tangential_acceleration_mm_s2" not in v1_fields
+    assert "speed_mm_s" in v1_fields
+    assert KINEMATICS_SAMPLES_V1.payload_sha256 == (
+        "35f7b95cc2c46253365a8ae91dc88b886f2cde7b93f4a1e4a1581bd18be69505"
+    )
+    assert (
+        canonical_json_sha256(export_core._spec_records(CORE_BEHAVIOR_TABLE_SPECS_V1))
+        == "bbb9ababe1000bca3d19d1f4cca18403a422c20a019fd9b288dc52b89fc3b98d"
+    )
+
+
+def test_core_motion_successor_versions_capability_contract_with_export_profile() -> (
+    None
+):
+    current = core_behavior_capability_contract(CORE_BEHAVIOR_EXPORT_PROFILE_ID)
+    v1 = core_behavior_capability_contract(CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1)
+
+    assert current["profile_id"] == CORE_BEHAVIOR_CAPABILITY_PROFILE_ID
+    assert v1["profile_id"] == CORE_BEHAVIOR_CAPABILITY_PROFILE_ID_V1
+    assert current["record_sha256"] != v1["record_sha256"]
+    assert current["keys"] == v1["keys"]
+
+
+def test_installed_profile_gate_rejects_competing_motion_projections() -> None:
+    invalid_specs = {
+        **CORE_BEHAVIOR_TABLE_SPECS,
+        "provider_motion_samples": PHASE_B_TABLE_SPECS["provider_motion_samples"],
+    }
+    invalid = ValidatedBehaviorExportProfile(
+        profile_id="invalid_competing_motion",
+        table_specs=invalid_specs,
+        row_extractor_factory=lambda: {},
+    )
+    with pytest.raises(
+        ValidatedBehaviorProfileError,
+        match="competing core-motion projections",
+    ):
+        _validated_profile_map({invalid.profile_id: invalid})
 
 
 def test_completed_execution_report_is_typed_admission_not_name_authority(
@@ -395,3 +486,293 @@ def test_core_behavior_finalize_routes_through_the_generic_publisher(
     assert result["manifest_path"].endswith(
         "/validated_behavior/v1/manifests/export_run_id=core-behavior-test.json"
     )
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _fixture_digest(label: str) -> str:
+    return canonical_json_sha256({"fixture": label})
+
+
+def _core_profile_plan(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+    commit = "a" * 40
+    now = "2026-09-04T12:00:00Z"
+    analysis_root = (tmp_path / "recordings").resolve()
+    receipt_root = (tmp_path / "receipts").resolve()
+    bundle_root = (tmp_path / "bundles").resolve()
+    for path in (analysis_root, receipt_root, bundle_root):
+        path.mkdir()
+
+    source_member = {"recording_id": "recording-a"}
+    source_path = tmp_path / "source-membership.json"
+    _write_json(source_path, {"members": [source_member]})
+    receipt_path = receipt_root / "recording-a" / "execution-report.json"
+    _write_json(receipt_path, {"status": "complete"})
+    decision_path = tmp_path / "identity-decision.md"
+    decision_path.write_text("one recording is one analysis unit\n", encoding="utf-8")
+
+    membership = build_validated_behavior_cohort_membership(
+        membership_id="core-motion-boundary-v2",
+        source_membership={
+            "adapter_id": "core_motion_boundary_fixture_v1",
+            "schema_id": "fixture.closed_membership",
+            "schema_version": 1,
+            "profile": "core_motion_boundary_fixture_v1",
+            "path": str(source_path.resolve()),
+            "file_sha256": _file_sha256(source_path),
+            "record_sha256": _fixture_digest("source-membership"),
+            "member_count": 1,
+            "source_members_sha256": canonical_json_sha256(
+                [canonical_json_sha256(source_member)]
+            ),
+        },
+        members=[
+            {
+                "source_ordinal": 1,
+                "dataset_id": "dataset-a",
+                "recording_id": "recording-a",
+                "analysis_zarr": str(analysis_root / "recording-a.zarr"),
+                "protocol_names": ["core-behavior"],
+                "protocol_hashes": [_fixture_digest("protocol")],
+                "source_member_sha256": canonical_json_sha256(source_member),
+                "source_subject_ids": ["capture-subject-a"],
+                "source_subject_identity_status": "capture_time_non_authoritative",
+                "acquisition_batch_id": None,
+                "acquisition_batch_identity_status": (
+                    "missing_historical_not_inferred"
+                ),
+                "analysis_unit_kind": "recording",
+                "analysis_unit_id": "recording-a",
+                "membership_state": "admitted",
+                "reason_code": None,
+                "disposition_evidence": {
+                    "evidence_type": "fixture_decision_v1",
+                    "detail": "exact fixture authority accepted",
+                    "path": None,
+                    "file_sha256": None,
+                    "record_sha256": None,
+                },
+                "admission_receipts": [
+                    {
+                        "role": CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE,
+                        "path": str(receipt_path.resolve()),
+                        "file_sha256": _file_sha256(receipt_path),
+                        "record_sha256": _fixture_digest("execution-report"),
+                        "schema_id": "fixture.execution_report",
+                        "schema_version": 1,
+                    }
+                ],
+            }
+        ],
+        analysis_zarr_root=analysis_root,
+        admission_receipt_root=receipt_root,
+        analysis_unit_policy=policy_envelope(
+            {
+                "policy_id": "recording_scoped_fixture_v1",
+                "analysis_unit_kind": "recording",
+                "member_id_field": "recording_id",
+                "decision_evidence": {
+                    "path": str(decision_path.resolve()),
+                    "file_sha256": _file_sha256(decision_path),
+                },
+            }
+        ),
+        acquisition_batch_policy=policy_envelope(
+            {
+                "policy_id": "missing_batch_fixture_v1",
+                "missing_identity_status": "missing_historical_not_inferred",
+                "authoritative_identity_status": "authoritative",
+                "inference_allowed": False,
+            }
+        ),
+        temporal_alignment_policy=policy_envelope(
+            {
+                "policy_id": "framewise_fixture_v1",
+                "temporal_alignment_requirement": "exact_acquisition_frame",
+            }
+        ),
+        palette_commit=commit,
+        created_at_utc=now,
+    )
+    membership_path = tmp_path / "membership.json"
+    _write_json(membership_path, membership)
+
+    bundle_path = bundle_root / "recording-a.bundle.json"
+    _write_json(bundle_path, {"status": "complete"})
+    capability_contract = core_behavior_capability_contract()
+    capabilities = {
+        key: {
+            "state": "complete",
+            "reason_code": None,
+            "detail": None,
+            "binding": {"fixture_binding": key},
+        }
+        for key in capability_contract["keys"]
+    }
+    receipt_binding = membership["members"][0]["admission_receipts"][0]
+    bundle_set = build_validated_behavior_bundle_set(
+        bundle_set_id="core-motion-boundary-bundles-v2",
+        membership=membership,
+        membership_path=membership_path,
+        membership_file_sha256=_file_sha256(membership_path),
+        bundle_root=bundle_root,
+        bundle_profile={
+            "adapter_id": CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
+            "export_profile_id": CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+        },
+        capability_contract=capability_contract,
+        members=[
+            {
+                "recording_id": "recording-a",
+                "bundle_state": "complete",
+                "reason_code": None,
+                "bundle": {
+                    "adapter_id": CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
+                    "path": str(bundle_path.resolve()),
+                    "file_sha256": _file_sha256(bundle_path),
+                    "record_sha256": _fixture_digest("bundle"),
+                    "schema_id": "fixture.core_behavior_bundle",
+                    "schema_version": 1,
+                    "method_id": "fixture_core_behavior_bundle_v1",
+                    "status": "complete",
+                    "receipt_bindings": [receipt_binding],
+                    "binding_inventory_sha256": _fixture_digest("binding-inventory"),
+                },
+                "capabilities": capabilities,
+            }
+        ],
+        palette_commit=commit,
+        created_at_utc=now,
+    )
+    bundle_set_path = tmp_path / "bundle-set.json"
+    _write_json(bundle_set_path, bundle_set)
+    plan = build_validated_behavior_export_plan(
+        membership_path=membership_path,
+        bundle_set_path=bundle_set_path,
+        export_run_id="core-motion-writer-reader-boundary-v2",
+        shard_root=(tmp_path / "shards").resolve(),
+        publication_root=(tmp_path / "publication").resolve(),
+        palette_commit=commit,
+        palette_repo=Path(__file__).resolve().parents[3],
+        table_specs=CORE_BEHAVIOR_TABLE_SPECS,
+        export_profile_id=CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+        created_at_utc=now,
+    )
+    plan_path = tmp_path / "plan.json"
+    write_validated_behavior_export_plan(plan_path, plan)
+    return plan_path, plan
+
+
+def _fixture_scientific_row(
+    *,
+    table_name: str,
+    plan: dict[str, Any],
+    member: dict[str, Any],
+    bundle_member: dict[str, Any],
+) -> dict[str, Any]:
+    spec = CORE_BEHAVIOR_TABLE_SPECS[table_name]
+    known: dict[str, Any] = {
+        "export_run_id": plan["export_run_id"],
+        "recording_id": member["recording_id"],
+        "membership_member_sha256": member["member_sha256"],
+        "bundle_set_member_sha256": bundle_member["member_sha256"],
+        "bundle_record_sha256": bundle_member["bundle"]["record_sha256"],
+        "cross_grain_join_authority_sha256": _fixture_digest("join"),
+        "source_track_kinematics_scope": "offline",
+        "motion_projection_profile_id": "core_motion_physical_v2",
+        "acceleration_source_speed_level": "speed_smoothed",
+        "cumulative_path_distance_source_level": "smoothed",
+        "sampling_stride_frames": 1,
+        "source_sample_rate_hz": 30.0,
+        "requested_sample_rate_hz": 30.0,
+        "nominal_sample_rate_hz": 30.0,
+        "position_coordinate_space": "physical_mm",
+        "speed_filtered_mm_s": 4.0,
+        "speed_smoothed_mm_s": 3.5,
+        "signed_tangential_acceleration_mm_s2": -2.0,
+        "smoothed_signed_tangential_acceleration_mm_s2": -1.5,
+        "cumulative_smoothed_path_distance_mm": 9.5,
+    }
+    row: dict[str, Any] = {}
+    for field in spec.contract.fields:
+        if field.name in known:
+            row[field.name] = known[field.name]
+        elif field.nullable:
+            row[field.name] = None
+        elif field.arrow_type == "string":
+            row[field.name] = (
+                _fixture_digest(field.name)
+                if any(token in field.name for token in ("sha256", "digest", "hash"))
+                else "fixture"
+            )
+        elif field.arrow_type == "bool":
+            row[field.name] = True
+        elif field.arrow_type.startswith(("int", "uint")):
+            row[field.name] = 0
+        elif field.arrow_type.startswith("float"):
+            row[field.name] = 0.0
+        else:  # pragma: no cover - closed current scientific schemas
+            raise AssertionError(f"Unsupported fixture Arrow type: {field.arrow_type}")
+    return row
+
+
+def test_core_motion_v2_real_writer_publisher_unpatched_reader_round_trip(
+    tmp_path: Path,
+) -> None:
+    plan_path, plan = _core_profile_plan(tmp_path)
+
+    def extractor(table_name: str) -> Any:
+        def rows(
+            plan_value: dict[str, Any],
+            member: dict[str, Any],
+            bundle_member: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], None]:
+            return [
+                _fixture_scientific_row(
+                    table_name=table_name,
+                    plan=plan_value,
+                    member=member,
+                    bundle_member=bundle_member,
+                )
+            ], None
+
+        return rows
+
+    extractors = {table_name: extractor(table_name) for table_name in SCIENTIFIC_TABLES}
+    write_validated_behavior_recording_shard(
+        plan_path=plan_path,
+        member_ordinal=1,
+        table_specs=CORE_BEHAVIOR_TABLE_SPECS,
+        row_extractors=extractors,
+        created_at_utc="2026-09-04T12:01:00Z",
+    )
+    published = publish_validated_behavior_cohort(
+        plan_path=plan_path,
+        table_specs=CORE_BEHAVIOR_TABLE_SPECS,
+        generation_id="core-motion-boundary-generation-v2",
+        created_at_utc="2026-09-04T12:02:00Z",
+    )
+
+    # No table specs are injected here: the reader must resolve the sealed
+    # installed profile ID and its v2 kinematics contract itself.
+    dataset = ValidatedBehaviorExportDataset.open(
+        plan["publication_root"], plan["export_run_id"]
+    )
+    row = dataset.table("kinematics_samples").collect_bounded(max_rows=2).to_dicts()[0]
+
+    assert published["status"] == "complete_selector_ineligible"
+    assert dataset.manifest["export_profile"]["profile_id"] == (
+        CORE_BEHAVIOR_EXPORT_PROFILE_ID
+    )
+    assert dataset.table_specs["kinematics_samples"].contract.schema_version == 2
+    assert "provider_motion_samples" not in dataset.table_names
+    assert row["speed_filtered_mm_s"] == pytest.approx(4.0)
+    assert row["signed_tangential_acceleration_mm_s2"] == pytest.approx(-2.0)
+    assert row["cumulative_smoothed_path_distance_mm"] == pytest.approx(9.5)

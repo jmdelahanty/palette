@@ -3,7 +3,7 @@
 <!-- decision-meta
 status: accepted-design-review-synthesized-current-implementation-partial
 created: 2026-09-03
-last_updated: 2026-09-03
+last_updated: 2026-09-04
 baseline_commit: 07db267c
 review_checkpoint_commit: afbc1d0d6af822ca7cc4e3b051cdd9bc981df80c
 review_method: six parallel read-only Luna xhigh audits plus primary-agent synthesis
@@ -222,6 +222,178 @@ rate with `sampling_stride_frames=1`. A lower-rate projection remains
 available only when a caller explicitly supplies a sampling rate. This changes
 neither the recording-local track-kinematics authority nor the shared
 `validated_behavior/v1` publication surface.
+
+### Core-motion ownership implementation checkpoint (2026-09-04)
+
+The maintained five-grain core profile now owns the complete reusable physical
+motion projection. Its `kinematics_samples` v2 contract adds the persisted
+filtered and smoothed speed/path increments, signed tangential acceleration,
+smoothed signed tangential acceleration, transition deltas, and cumulative
+smoothed path distance. These values are copied from the selected
+track-kinematics authority; the export does not recompute them.
+
+The successor is deliberately a profile version, not a new publication
+surface:
+
+- new bundle sets default to `validated_core_behavior_five_grain_v2` on the
+  existing `validated_behavior/v1` planner, sharder, atomic publisher,
+  manifest, selector, validator, and reader;
+- immutable v1 bundle sets continue to resolve through
+  `validated_core_behavior_five_grain_v1`; its kinematics Arrow-contract digest
+  and complete table-spec digest are frozen by regression tests;
+- v2 source admission binds the exact persisted derivative and integral arrays
+  and their physical/temporal authority records, then verifies their sealed
+  array digests while those arrays are already resident for Parquet projection;
+- the acceleration field is named
+  `signed_tangential_acceleration_mm_s2` because it is the signed first
+  difference of scalar smoothed speed, not a vector-acceleration magnitude;
+- cumulative distance is explicitly the per-track cumulative sum of smoothed
+  frame-path increments, with invalid transitions contributing zero; and
+- installed export profiles fail closed if they contain both
+  `kinematics_samples` and `provider_motion_samples`. A paradigm extension must
+  join the selected core motion authority instead of installing a competing
+  motion projection; and
+- a real v2 profile writer-to-atomic-publisher-to-unpatched-lazy-reader
+  regression seals the installed profile boundary and verifies the new motion
+  fields without injecting table specs into the reader.
+
+This checkpoint does not reinterpret or mutate existing Phase-C exports. The
+chaser migration remains Track C/D work: subtract the overlapping provider
+motion projection, rebind the retained paradigm relations to core row identity,
+and prove their foreign-key cardinality before publishing a composite profile.
+
+### Core-motion all-camera admission checkpoint (2026-09-04)
+
+At `2026-09-04T20:55:00Z`, the new v2 core source resolver was run read-only
+against the four completed Sleepyfish execution reports below, using published
+consolidated metadata. The four checks ran concurrently on
+`delahantyj-ws1.hhmi.org`; they did not create a plan, write scratch data,
+mutate a Zarr, or change a selector.
+
+```text
+/groups/johnson/johnsonlab/jeremy/operations/
+  sleepyfish_validated_core_behavior_full_rate_20260904_v002/source_reports/
+```
+
+All four recordings passed. Each resolution selected export profile
+`validated_core_behavior_five_grain_v2`, motion surface
+`core_motion_physical_v2`, all 27 required persisted motion arrays, and
+projection-contract schema v3:
+
+| Recording | Admission time (s) |
+|---|---:|
+| `2026_08_06_19_13_35_cam2010093` | 114.282 |
+| `2026_08_06_19_13_35_cam2010094` | 113.993 |
+| `2026_08_06_19_13_35_cam2010095` | 114.516 |
+| `2026_08_06_19_13_35_cam2010096` | 114.053 |
+
+This is source-admission evidence, not publication evidence. It proves that
+the selected immutable track-kinematics publications already contain and bind
+the physical motion surfaces required by the v2 projection, so no upstream
+motion recomputation or scientific-Zarr migration is required.
+
+### First full publisher canary and frozen-contract correction (2026-09-04)
+
+The first selector-ineligible full publisher canary ran from CI-tested commit
+`9e3fdcfdf113f799759c3ecdcf11cf7ebd383a8f` in its immutable deployment
+worktree. The operation, bundle, and plan remain at:
+
+```text
+/groups/johnson/johnsonlab/jeremy/operations/
+  sleepyfish_validated_core_behavior_full_rate_core_motion_v2_20260904_v004/
+```
+
+The bundle record digest is
+`8049e4226d1189d49a324bc3191bb2cc4bcd37eec3fbcf015c02be6849228fa5`,
+the capability-matrix digest is
+`5e1e582229250ffb966d772328351eb9485f59c4b075d20266a4c513c632fbd5`,
+and the plan digest is
+`033a28a41f0cfe64a03c8507466bffef050cb1b5066b99436c123e725f6710a6`.
+All safety fields are false.
+
+LSF shard array `154008697` ran all four members concurrently; each failed
+closed after 164--200 seconds with the same error before any shard receipt or
+publication was created. Dependent finalizer `154008698` therefore did not
+publish:
+
+```text
+ValueError: Core-motion projection differs from the installed successor contract.
+```
+
+The scientific records were identical. Production bundle validation had
+recursively frozen JSON objects as read-only mappings and JSON arrays as
+tuples, while the adapter performed a shallow comparison against ordinary
+dictionaries and lists. Commit `d7cdb1da` corrects that representation
+boundary by recursively thawing only JSON containers before exact comparison;
+it does not coerce scalar values. A production-shaped regression proves that
+the frozen valid contract is accepted and that a nested semantic change still
+fails closed. The two focused export suites pass 44/44 locally. This correction
+still requires complete CI and a fresh immutable v005 deployment, bundle,
+plan, and canary; the failed v004 evidence will not be edited or reused.
+
+### Successful replacement full publisher canary (2026-09-04)
+
+All required CI gates and all 16 non-GPU shards passed on runtime commit
+`4077579afc8cd29922b7d8cbe22f6178a9b7a154`. The deployment helper then
+created and locked the detached worktree below, verified its import root, and
+left the shared `/groups` checkout unchanged:
+
+```text
+/groups/johnson/johnsonlab/jeremy/gitrepos/palette-worktrees/
+  core-motion-authority-20260904-4077579a
+```
+
+The fresh v005 operation is:
+
+```text
+/groups/johnson/johnsonlab/jeremy/operations/
+  sleepyfish_validated_core_behavior_full_rate_core_motion_v2_20260904_v005/
+```
+
+Its bundle record digest is
+`3e8111a6b29c8d432331be0815498b0985f0af330c8ea77ac314fdcea4ba44aa`.
+Its capability-matrix digest remains exactly
+`5e1e582229250ffb966d772328351eb9485f59c4b075d20266a4c513c632fbd5`,
+proving that v004 and v005 selected the same scientific authorities. The new
+plan digest is
+`3ca8af2079892b255b0677b22f15e743c8ab38232da7688b5a092540cf250c8d`.
+
+LSF shard array `154008759` ran all four recordings concurrently on compute
+hosts and completed in 432--468 seconds per recording. Every stderr file is
+empty, and all four schema-v2 shard receipts passed semantic validation.
+Dependent finalizer `154008760` then completed in 48 seconds. Its internal
+telemetry records 5,882,107,589 bytes across 32 parts, 37.283 seconds for the
+necessary destination copy-and-hash pass, 0.097 seconds for receipt
+composition, 0.907 seconds for receipt-only precommit plus atomic commit, and
+38.779 seconds total.
+
+The manifest-last publication is `complete_selector_ineligible`, retains all
+six false safety fields, and has record digest
+`9e06161f8aa0f63f7154fc6e22f75191a6af00cbe13ad57fb593c662bb48c386`.
+Its transfer-receipt digest is
+`3e632a616b93f5c261cd9f102bf75ece3f79c0afa066a291187ddd73d3644a67`,
+and its validation-receipt digest is
+`7fa0a0fec0e85d3d668a939baaf4aed7228f7d44e619fcbf1a4819023cb1680a`.
+The generic unpatched reader reopened the publication in receipt mode and
+performed a bounded projection of the new speed, signed-acceleration, and
+cumulative-distance columns.
+
+The sealed row counts are:
+
+| Table | Rows |
+|---|---:|
+| `kinematics_samples` | 11,469,925 |
+| `subject_body_frame_samples` | 11,469,925 |
+| `eye_trace_samples` | 11,750,416 |
+| `tail_trace_samples` | 114,699,250 |
+| `canonical_swim_bouts` | 79,235 |
+| `recording_capabilities` | 24 |
+| `cohort_recordings` | 4 |
+| `recording_bundles` | 4 |
+
+This closes the core v2 writer-to-publisher-to-reader canary. It does not
+activate a selector, update a registry, mutate source Zarrs, or authorize the
+future chaser-composite profile described in Track C.
 
 ## Composition contract
 
@@ -611,15 +783,20 @@ reselecting core motion/body/bout authority.
       Sleepyfish tail publications through the maintained atomic materializer;
       the four v011 successors were published from `289e9ddc` without mutating
       the originals.
-- [ ] Keep the five scientific grains in separate normalized tables.
-- [ ] Route planning, sharding, publication, validation, and reading through
+- [x] Keep the five scientific grains in separate normalized tables.
+- [x] Route planning, sharding, publication, validation, and reading through
       the existing generic cohort engine.
-- [ ] Prove that no new publisher, selector, manifest family, or CLI path was
+- [x] Prove that no new publisher, selector, manifest family, or CLI path was
       introduced.
-- [ ] Add real execution-report-to-resolver and generic-publisher boundary
-      tests.
-- [ ] Run a read-only admission canary for all four Sleepyfish cameras.
-- [ ] Run required CI before merge, deployment, or production publication.
+- [ ] Add a real execution-report-to-resolver boundary test.
+- [x] Add a real generic-writer-to-publisher-to-unpatched-reader boundary test
+      for the installed v2 profile.
+- [x] Run a read-only admission canary for all four Sleepyfish cameras.
+- [x] Run every required CI gate on runtime commit `4077579a` before its
+      detached deployment and selector-ineligible canary.
+- [x] Run and validate the real four-camera selector-ineligible v005
+      writer-to-publisher-to-unpatched-reader canary.
+- [ ] Run required CI on the final documentation head before merge.
 
 ### Track B — audit paradigm composition
 
