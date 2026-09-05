@@ -9,8 +9,9 @@ the same analysis Zarr.
 
 Neither command resolves a scientific selector while executing a task.  Every
 publication remains selector-ineligible and no command writes the registry.
-Task schema v7 adds exact keypoint- and detection-provider near-field visit
-children, independent validation receipts, and receipt-bound static plots.
+Task schema v8 replaces ordered provider-motion/bout selection, provider-derived
+body authority, and implicit track zero with one exact generic core-bundle
+member, its sealed authority roster, and a roster-derived track identity.
 """
 
 from __future__ import annotations
@@ -23,6 +24,15 @@ from pathlib import Path
 import subprocess
 from typing import Any, Mapping, Sequence
 
+from fisheye.analysis_workflows.core_authority_roster import (
+    build_core_authority_consumption_receipt,
+    selected_core_track_id_from_roster,
+    validate_core_authority_consumption_receipt,
+    validate_core_authority_roster,
+)
+from fisheye.analysis_workflows.core_behavior_cohort_adapter import (
+    core_authority_roster_from_bundle_set_member,
+)
 from fisheye.analysis_workflows.chaser_near_field_visit_successor import (
     MIN_VISIT_SAMPLE_COUNT as NEAR_FIELD_VISIT_MINIMUM_QUALITY_SAMPLE_COUNT,
     SCHEMA_ID as NEAR_FIELD_VISIT_SCIENTIFIC_SCHEMA_ID,
@@ -31,15 +41,24 @@ from fisheye.analysis_workflows.chaser_near_field_visit_successor import (
 from fisheye.analysis_workflows.eye_gaze_source_handle import (
     validate_gaze_convention_review_receipt,
 )
+from fisheye.analysis_workflows.validated_behavior_cohort import (
+    read_validated_behavior_bundle_set,
+    read_validated_behavior_cohort_membership,
+)
+from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import (
+    CANONICAL_SWIM_BOUTS_CAPABILITY,
+    CROSS_GRAIN_JOIN_AUTHORITY,
+    KINEMATICS_SAMPLES_CAPABILITY,
+    SUBJECT_BODY_FRAME_CAPABILITY,
+)
 from fisheye.shared.json_safety import json_attr_safe, write_json_atomic
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.visualization.chaser_spatial_occupancy_display import (
     DISPLAY_RECIPE_ID as SPATIAL_OCCUPANCY_PLOT_RECIPE_ID,
 )
 
-
 TASK_SCHEMA_ID = "palette.composable_chaser_successor_cohort_task"
-TASK_SCHEMA_VERSION = 7
+TASK_SCHEMA_VERSION = 8
 RECEIPT_SCHEMA_ID = "palette.composable_chaser_successor_cohort_receipt"
 RECEIPT_SCHEMA_VERSION = 1
 
@@ -47,45 +66,42 @@ SEMANTIC_STIMULUS_RUN = "stimulus_semantic_goodbatbadbat_historical_20260825_v2"
 SEMANTIC_EPOCH_V1_RUN = "stimulus_epochs_semantic_goodbatbadbat_20260825_r2_v1"
 SEMANTIC_EPOCH_V2_RUN = "stimulus_epochs_semantic_goodbatbadbat_20260825_r2_v2"
 SEMANTIC_SELECTION_RUN = "protocol_semantic_chaser_goodbatbadbat_historical_20260825_v2"
-EPOCH_BEHAVIOR_RUN = "epoch_behavior_goodbatbadbat_keypoint_triad_semantic_20260830_v2"
+EPOCH_BEHAVIOR_RUN = "epoch_behavior_goodbatbadbat_core_authority_20260905_v1"
 BODY_ALIGNMENT_RUN = (
-    "goodbatbadbat_chaser_body_alignment_by_distance_keypoint_semantic_20260830_v1"
+    "goodbatbadbat_chaser_body_alignment_by_distance_core_authority_20260905_v1"
 )
 BODY_ALIGNMENT_RECIPE_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_body_alignment_by_distance_keypoint_semantic_20260830_"
-    "recipe_v2"
+    "goodbatbadbat_chaser_body_alignment_by_distance_core_authority_20260905_"
+    "recipe_v1"
 )
 KEYPOINT_PROXY_RUN = "chaser_input_provenance_proxy_keypoint_triad_cohort_20260821_v2"
 DETECTION_PROXY_RUN = (
     "chaser_input_provenance_proxy_detection_bbox_centroid_cohort_20260821_v2"
 )
 KEYPOINT_RELATIVE_RUN = (
-    "chaser_relative_frame_keypoint_triad_cohort_20260827_"
-    "exact_body_frame_projection_v4"
+    "chaser_relative_frame_keypoint_proxy_core_authority_20260905_v1"
 )
 DETECTION_RELATIVE_RUN = (
-    "chaser_relative_frame_detection_bbox_centroid_cohort_20260825_"
-    "exact_trials_session_time_activity_orthogonal_v3"
+    "chaser_relative_frame_detection_proxy_core_authority_20260905_v1"
 )
-SUCCESSOR_RUN = "goodbatbadbat_chaser_successors_20260827_body_frame_projection_v4"
+SUCCESSOR_RUN = "goodbatbadbat_chaser_successors_core_authority_20260905_v1"
 KEYPOINT_RADIAL_RUN = (
-    "goodbatbadbat_chaser_radial_near_field_20260827_body_frame_projection_v3"
+    "goodbatbadbat_chaser_radial_near_field_keypoint_core_authority_20260905_v1"
 )
 DETECTION_RADIAL_RUN = (
-    "goodbatbadbat_chaser_radial_near_field_detection_bbox_centroid_20260825_"
-    "exact_session_time_activity_orthogonal_v2"
+    "goodbatbadbat_chaser_radial_near_field_detection_core_authority_20260905_v1"
 )
 KEYPOINT_NEAR_FIELD_VISIT_RUN = (
-    "goodbatbadbat_chaser_near_field_visits_keypoint_body_frame_20260903_v1"
+    "goodbatbadbat_chaser_near_field_visits_keypoint_core_authority_20260905_v1"
 )
 DETECTION_NEAR_FIELD_VISIT_RUN = (
-    "goodbatbadbat_chaser_near_field_visits_detection_bbox_centroid_20260903_v1"
+    "goodbatbadbat_chaser_near_field_visits_detection_core_authority_20260905_v1"
 )
 KEYPOINT_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_near_field_visits_keypoint_body_frame_20260903_recipe_v1"
+    "goodbatbadbat_chaser_near_field_visits_keypoint_core_authority_20260905_recipe_v1"
 )
 DETECTION_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_near_field_visits_detection_bbox_centroid_20260903_recipe_v1"
+    "goodbatbadbat_chaser_near_field_visits_detection_core_authority_20260905_recipe_v1"
 )
 NEAR_FIELD_VISIT_PROVIDER_POLICY = "both_exact_first_class_position_providers_v1"
 NEAR_FIELD_VISIT_RECEIPT_POLICY = (
@@ -93,20 +109,21 @@ NEAR_FIELD_VISIT_RECEIPT_POLICY = (
 )
 NEAR_FIELD_VISIT_PLOT_RECIPE_ID = "persisted_exact_near_field_visit_trajectories_v1"
 SPATIAL_OCCUPANCY_RUN = (
-    "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260827_"
-    "body_frame_projection_v3"
+    "goodbatbadbat_chaser_spatial_occupancy_core_authority_20260905_v1"
 )
-DETAILED_BUNDLE_NAME = "goodbatbadbat_chaser_detailed_body_frame_v5"
+DETAILED_BUNDLE_NAME = "goodbatbadbat_chaser_detailed_core_authority_20260905_v1"
 SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN = (
-    "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260827_"
-    "body_frame_projection_receipt_bound_v4"
+    "goodbatbadbat_chaser_spatial_occupancy_core_authority_receipt_bound_20260905_v1"
 )
 SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_spatial_occupancy_keypoint_detection_20260827_"
-    "body_frame_projection_recipe_v4"
+    "goodbatbadbat_chaser_spatial_occupancy_core_authority_20260905_recipe_v1"
 )
-DASHBOARD_RECIPE_BUNDLE_NAME = "goodbatbadbat_chaser_dashboard_body_frame_recipe_v3"
-DETAILED_RECIPE_BUNDLE_NAME = "goodbatbadbat_chaser_detailed_body_frame_recipe_v7"
+DASHBOARD_RECIPE_BUNDLE_NAME = (
+    "goodbatbadbat_chaser_dashboard_core_authority_20260905_recipe_v1"
+)
+DETAILED_RECIPE_BUNDLE_NAME = (
+    "goodbatbadbat_chaser_detailed_core_authority_20260905_recipe_v1"
+)
 DETAILED_PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v5"
 BODY_ALIGNMENT_PLOT_RECIPE_ID = "persisted_anatomical_alignment_distance_bins_static_v2"
 RELATIVE_FRAME_VALIDATION_MODE = "reusable_direct_subtree_receipt_v1"
@@ -120,20 +137,14 @@ EYE_GAZE_BINDING_RESOLUTION = (
     "exact_eye_run_and_reviewed_convention_receipt_no_selector_v1"
 )
 
-MOTION_BOUT_PAIRS = (
-    (
-        "provider_motion_goodbatbadbat_keypoint_triad_talk_20260818_v2",
-        "swim_bouts_goodbatbadbat_keypoint_triad_talk_20260818_v2",
-    ),
-    (
-        "provider_motion_goodbatbadbat_keypoint_triad_talk_20260818_v1",
-        "swim_bouts_goodbatbadbat_keypoint_triad_talk_20260818_v1",
-    ),
-    (
-        "provider_motion_goodbatbadbat_keypoint_triad_canary_20260818_v1",
-        "swim_bouts_goodbatbadbat_keypoint_triad_canary_20260818_v1",
-    ),
+CORE_CHASER_COHORT_CONSUMER_ID = "goodbatbadbat.composable_chaser_cohort_v1"
+CORE_CHASER_REQUIRED_CAPABILITIES = (
+    CROSS_GRAIN_JOIN_AUTHORITY,
+    KINEMATICS_SAMPLES_CAPABILITY,
+    SUBJECT_BODY_FRAME_CAPABILITY,
+    CANONICAL_SWIM_BOUTS_CAPABILITY,
 )
+CORE_BUNDLE_SELECTION_POLICY = "exact_generic_core_bundle_member_v1"
 
 EXPECTED_SAFETY = {
     "selector_eligible": False,
@@ -455,117 +466,188 @@ def _resolve_geometry(archive: Path, *, recording_id: str) -> dict[str, Any]:
     }
 
 
-def _resolve_motion_bouts(archive: Path, *, recording_id: str) -> dict[str, Any]:
-    motion_parent = archive / "analysis" / "track_kinematics_runs" / "provider"
-    bout_parent = archive / "analysis" / "swim_bout_runs"
-    motion_names = set(_run_children(motion_parent))
-    bout_names = set(_run_children(bout_parent))
+def _load_core_bundle_set_source(path: str | Path) -> dict[str, Any]:
+    """Load one generic core bundle set and its exact membership generation."""
+
+    bundle_path = Path(path).expanduser().resolve()
+    if not bundle_path.is_file():
+        raise FileNotFoundError(f"Core bundle set does not exist: {bundle_path}")
+    bundle_bytes = bundle_path.read_bytes()
+    try:
+        raw_bundle = _mapping(
+            json.loads(bundle_bytes),
+            field="core bundle set",
+        )
+    except json.JSONDecodeError as exc:
+        raise ComposableChaserCohortError(
+            "Core bundle set is not strict JSON."
+        ) from exc
+    raw_membership = _mapping(
+        raw_bundle.get("membership"),
+        field="core bundle membership binding",
+    )
+    membership_path = (
+        Path(_text(raw_membership.get("path"), field="core bundle membership path"))
+        .expanduser()
+        .resolve()
+    )
+    if not membership_path.is_file():
+        raise FileNotFoundError(
+            f"Core bundle membership does not exist: {membership_path}"
+        )
+    membership_file_sha256 = _sha256_file(membership_path)
+    expected_membership_file_sha256 = _digest(
+        raw_membership.get("file_sha256"),
+        field="core bundle membership file digest",
+    )
+    if membership_file_sha256 != expected_membership_file_sha256:
+        _fail("Core bundle membership file differs from its sealed binding.")
+    membership = read_validated_behavior_cohort_membership(membership_path)
+    bundle_set = read_validated_behavior_bundle_set(
+        bundle_path,
+        membership=membership,
+    )
+    bound_membership = _mapping(
+        bundle_set.get("membership"),
+        field="validated core bundle membership binding",
+    )
+    if (
+        Path(str(bound_membership.get("path"))).resolve() != membership_path
+        or bound_membership.get("file_sha256") != membership_file_sha256
+        or bound_membership.get("record_sha256") != membership["record_sha256"]
+    ):
+        _fail("Validated core bundle set binds another membership generation.")
+    return {
+        "bundle_set": bundle_set,
+        "source_binding": {
+            "path": str(bundle_path),
+            "file_sha256": hashlib.sha256(bundle_bytes).hexdigest(),
+            "record_sha256": bundle_set["record_sha256"],
+            "membership_path": str(membership_path),
+            "membership_file_sha256": membership_file_sha256,
+            "membership_record_sha256": membership["record_sha256"],
+        },
+    }
+
+
+def _core_bundle_member(
+    bundle_set: Mapping[str, Any],
+    *,
+    recording_id: str,
+    analysis_zarr: Path,
+) -> Mapping[str, Any]:
     matches = [
-        (motion, bouts)
-        for motion, bouts in MOTION_BOUT_PAIRS
-        if motion in motion_names and bouts in bout_names
+        _mapping(item, field="core bundle member")
+        for item in bundle_set["members"]
+        if item.get("recording_id") == recording_id
+        and Path(str(item.get("analysis_zarr"))).resolve() == analysis_zarr
     ]
-    if not matches:
-        _fail(f"No supported exact motion/bout pair exists for {recording_id!r}.")
-    motion, bouts = matches[0]
-    motion_run_path = f"analysis/track_kinematics_runs/provider/{motion}"
-    motion_attrs, motion_metadata_sha = _zarr_attrs(
-        archive / motion_run_path,
-        field="provider motion input",
+    if len(matches) != 1:
+        _fail(
+            f"Core bundle set must contain exactly one matching member for "
+            f"{recording_id!r}; found {len(matches)}."
+        )
+    return matches[0]
+
+
+def _core_authority_plan_binding(
+    bundle_set: Mapping[str, Any],
+    member: Mapping[str, Any],
+) -> dict[str, Any]:
+    roster = dict(core_authority_roster_from_bundle_set_member(bundle_set, member))
+    track_id = selected_core_track_id_from_roster(roster)
+    receipt = build_core_authority_consumption_receipt(
+        roster,
+        consumer_id=CORE_CHASER_COHORT_CONSUMER_ID,
+        required_capabilities=CORE_CHASER_REQUIRED_CAPABILITIES,
+        selected_track_id=track_id,
     )
-    motion_manifest = _mapping(
-        motion_attrs.get("provider_track_motion_manifest"),
-        field="provider motion manifest",
-    )
-    if set(motion_manifest) != {
+    body = {
+        "schema_id": "palette.composable_chaser_core_authority_plan_binding",
+        "schema_version": 1,
+        "admission_state": "static_capability_admitted",
+        "bundle_set_record_sha256": bundle_set["record_sha256"],
+        "bundle_set_member_sha256": member["member_sha256"],
+        "bundle_record_sha256": member["bundle"]["record_sha256"],
+        "core_authority_roster": roster,
+        "core_authority_roster_sha256": roster["record_sha256"],
+        "selected_track_id": track_id,
+        "consumption_receipt": receipt,
+    }
+    return {**body, "record_sha256": canonical_json_sha256(body)}
+
+
+def _validate_core_authority_plan_binding(
+    value: object,
+    *,
+    expected_bundle_set_record_sha256: str,
+    expected_recording_id: str,
+    expected_analysis_zarr: Path,
+) -> Mapping[str, Any]:
+    record = dict(_mapping(value, field="core-authority plan binding"))
+    required = {
         "schema_id",
         "schema_version",
-        "payload",
-        "payload_digest",
-    }:
-        _fail(f"Provider motion manifest envelope is not exact for {recording_id!r}.")
-    payload = _mapping(
-        motion_manifest.get("payload"), field="provider motion manifest payload"
+        "admission_state",
+        "bundle_set_record_sha256",
+        "bundle_set_member_sha256",
+        "bundle_record_sha256",
+        "core_authority_roster",
+        "core_authority_roster_sha256",
+        "selected_track_id",
+        "consumption_receipt",
+        "record_sha256",
+    }
+    if set(record) != required:
+        _fail("Core-authority plan binding field set is inexact.")
+    persisted = _digest(
+        record.pop("record_sha256"),
+        field="core-authority plan-binding digest",
     )
-    motion_manifest_sha = _digest(
-        motion_manifest.get("payload_digest"),
-        field="provider motion manifest payload digest",
+    if canonical_json_sha256(record) != persisted:
+        _fail("Core-authority plan-binding digest is stale.")
+    if (
+        record.get("schema_id")
+        != "palette.composable_chaser_core_authority_plan_binding"
+        or record.get("schema_version") != 1
+        or record.get("admission_state") != "static_capability_admitted"
+        or record.get("bundle_set_record_sha256") != expected_bundle_set_record_sha256
+    ):
+        _fail("Core-authority static admission identity is invalid.")
+    _digest(
+        record.get("bundle_set_member_sha256"),
+        field="core bundle-set member digest",
     )
-    persisted_motion_manifest_sha = _digest(
-        motion_attrs.get("provider_track_motion_manifest_sha256"),
-        field="persisted provider motion manifest digest",
+    _digest(
+        record.get("bundle_record_sha256"),
+        field="core bundle record digest",
+    )
+    roster = validate_core_authority_roster(record.get("core_authority_roster"))
+    if (
+        roster["record_sha256"] != record.get("core_authority_roster_sha256")
+        or roster["recording_id"] != expected_recording_id
+        or Path(str(roster["analysis_zarr"])).resolve() != expected_analysis_zarr
+    ):
+        _fail("Core-authority roster differs from the frozen cohort member.")
+    track_id = selected_core_track_id_from_roster(roster)
+    if record.get("selected_track_id") != track_id:
+        _fail("Core-authority plan selected track is stale.")
+    receipt = validate_core_authority_consumption_receipt(
+        record.get("consumption_receipt"),
+        roster=roster,
     )
     if (
-        canonical_json_sha256(payload) != motion_manifest_sha
-        or persisted_motion_manifest_sha != motion_manifest_sha
+        receipt.get("consumer_id") != CORE_CHASER_COHORT_CONSUMER_ID
+        or tuple(receipt.get("required_capabilities", ()))
+        != tuple(sorted(CORE_CHASER_REQUIRED_CAPABILITIES))
+        or receipt.get("selected_track_id") != track_id
     ):
-        _fail(
-            f"Provider motion manifest persisted digest is stale for {recording_id!r}."
-        )
-    authority_envelope = _mapping(
-        payload.get("source_authority"), field="provider motion source authority"
-    )
-    authority_record = _mapping(
-        authority_envelope.get("record"), field="provider motion authority record"
-    )
-    authority_sha = _digest(
-        authority_envelope.get("sha256"), field="provider motion authority digest"
-    )
-    if canonical_json_sha256(authority_record) != authority_sha:
-        _fail(f"Provider motion authority digest is stale for {recording_id!r}.")
-    body_source = _mapping(
-        authority_record.get("body_frame_source"),
-        field="provider motion body-frame source",
-    )
-    body_run_path = _text(
-        body_source.get("run_path"), field="body-frame source run path"
-    )
-    body_run_name = _exact_name(
-        body_run_path.removeprefix("analysis/body_frame_runs/"),
-        field="body-frame source run name",
-    )
-    if body_run_path != f"analysis/body_frame_runs/{body_run_name}":
-        _fail(f"Body-frame source path is not an exact run for {recording_id!r}.")
-    body_manifest_sha = _digest(
-        body_source.get("manifest_sha256"), field="body-frame source manifest digest"
-    )
-    body_attrs, body_metadata_sha = _zarr_attrs(
-        archive / body_run_path,
-        field="body-frame source input",
-    )
-    body_manifest = _mapping(
-        body_attrs.get("run_manifest"), field="body-frame run manifest"
-    )
-    observed_body_manifest_sha = _digest(
-        body_manifest.get("payload_digest"),
-        field="body-frame run manifest payload digest",
-    )
-    body_payload = _mapping(
-        body_manifest.get("payload"), field="body-frame run manifest payload"
-    )
-    if canonical_json_sha256(body_payload) != observed_body_manifest_sha:
-        _fail(f"Body-frame run manifest digest is stale for {recording_id!r}.")
-    if observed_body_manifest_sha != body_manifest_sha:
-        _fail(f"Provider motion and body-frame run disagree for {recording_id!r}.")
-    publication = _mapping(
-        body_payload.get("publication"), field="body-frame publication disposition"
-    )
-    if (
-        publication.get("completion_status") != "complete"
-        or publication.get("stage_selector_eligible") is not False
-    ):
-        _fail(f"Body-frame source is not exact complete evidence for {recording_id!r}.")
+        _fail("Core-authority consumption receipt is not the cohort dependency.")
     return {
-        "selection_policy": "ordered_exact_compatible_pair_v1",
-        "motion_run_path": motion_run_path,
-        "motion_manifest_sha256": motion_manifest_sha,
-        "motion_metadata_sha256": motion_metadata_sha,
-        "swim_bout_run": bouts,
-        "body_frame_run_path": body_run_path,
-        "body_frame_run_name": body_run_name,
-        "body_frame_manifest_sha256": body_manifest_sha,
-        "body_frame_metadata_sha256": body_metadata_sha,
-        "body_frame_resolution": "exact_provider_motion_authority_v1",
+        **record,
+        "core_authority_roster": roster,
+        "consumption_receipt": receipt,
+        "record_sha256": persisted,
     }
 
 
@@ -591,7 +673,11 @@ def _output_groups() -> tuple[str, ...]:
 
 
 def _plan_entry(
-    row: Mapping[str, Any], *, task_index: int, operations_root: Path
+    row: Mapping[str, Any],
+    *,
+    task_index: int,
+    operations_root: Path,
+    core_bundle_set: Mapping[str, Any],
 ) -> dict[str, Any]:
     archive = Path(_text(row.get("zarr_path"), field="registry Zarr path")).resolve()
     if not archive.is_dir():
@@ -607,7 +693,12 @@ def _plan_entry(
         field="canonical stimulus run",
     )
     geometry = _resolve_geometry(archive, recording_id=recording_id)
-    motion_bouts = _resolve_motion_bouts(archive, recording_id=recording_id)
+    core_member = _core_bundle_member(
+        core_bundle_set,
+        recording_id=recording_id,
+        analysis_zarr=archive,
+    )
+    core_authority = _core_authority_plan_binding(core_bundle_set, core_member)
 
     keypoint_proxy_attrs, keypoint_proxy_metadata_sha = _zarr_attrs(
         archive
@@ -653,19 +744,6 @@ def _plan_entry(
                 f"analysis/chaser_input_provenance_proxy_runs/{DETECTION_PROXY_RUN}"
             ),
             "metadata_sha256": detection_proxy_metadata_sha,
-        },
-        {
-            "group_path": motion_bouts["motion_run_path"],
-            "metadata_sha256": motion_bouts["motion_metadata_sha256"],
-        },
-        _input_group_binding(
-            archive,
-            f"analysis/swim_bout_runs/{motion_bouts['swim_bout_run']}",
-            field="swim-bout input",
-        ),
-        {
-            "group_path": motion_bouts["body_frame_run_path"],
-            "metadata_sha256": motion_bouts["body_frame_metadata_sha256"],
         },
         {
             "group_path": (
@@ -750,7 +828,7 @@ def _plan_entry(
                 "run_name": DETECTION_PROXY_RUN,
                 "manifest_sha256": detection_proxy_sha,
             },
-            "motion_and_bouts": motion_bouts,
+            "core_authority": core_authority,
             "input_group_bindings": input_groups,
             "output_run_names": {
                 "semantic_stimulus": SEMANTIC_STIMULUS_RUN,
@@ -795,6 +873,7 @@ def _build_cohort_task(
     *,
     operations_root: str | Path,
     source_registry_snapshot: Mapping[str, Any],
+    core_bundle_set_source: Mapping[str, Any],
     successor_of_task_sha256: str | None = None,
 ) -> dict[str, Any]:
     if not normalized_rows:
@@ -802,8 +881,25 @@ def _build_cohort_task(
     normalized_rows = list(normalized_rows)
     normalized_rows.sort(key=lambda row: str(row.get("zarr_path") or ""))
     operations = Path(operations_root).expanduser().resolve()
+    core_source = _mapping(
+        core_bundle_set_source,
+        field="core bundle-set source",
+    )
+    core_bundle_set = _mapping(
+        core_source.get("bundle_set"),
+        field="validated core bundle set",
+    )
+    core_source_binding = _mapping(
+        core_source.get("source_binding"),
+        field="core bundle-set source binding",
+    )
     entries = [
-        _plan_entry(row, task_index=index, operations_root=operations)
+        _plan_entry(
+            row,
+            task_index=index,
+            operations_root=operations,
+            core_bundle_set=core_bundle_set,
+        )
         for index, row in enumerate(normalized_rows, start=1)
     ]
     recording_ids = [str(entry["recording_id"]) for entry in entries]
@@ -819,8 +915,8 @@ def _build_cohort_task(
     selection_policy: dict[str, Any] = {
         "protocol_name": "goodbatbadbat",
         "recording_order": "lexicographic_absolute_analysis_zarr_path_v1",
-        "motion_bout_resolution": "ordered_exact_compatible_pair_v1",
-        "body_frame_resolution": "exact_provider_motion_authority_v1",
+        "core_authority_resolution": CORE_BUNDLE_SELECTION_POLICY,
+        "selected_track_resolution": "sole_roster_motion_and_bout_track_v1",
         "near_field_visit_provider_policy": NEAR_FIELD_VISIT_PROVIDER_POLICY,
         "near_field_visit_receipt_policy": NEAR_FIELD_VISIT_RECEIPT_POLICY,
         "near_field_visit_minimum_quality_sample_count": (
@@ -839,6 +935,7 @@ def _build_cohort_task(
             "schema_version": TASK_SCHEMA_VERSION,
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "source_registry_snapshot": dict(source_registry_snapshot),
+            "source_core_bundle_set": dict(core_source_binding),
             "selection_policy": selection_policy,
             "recording_count": len(entries),
             "status_counts": status_counts,
@@ -856,8 +953,9 @@ def plan_cohort_task(
     registry_snapshot: str | Path,
     *,
     operations_root: str | Path,
+    core_bundle_set: str | Path,
 ) -> dict[str, Any]:
-    """Build one frozen task from a read-only registry JSON export."""
+    """Build one frozen task from registry and generic core-bundle evidence."""
 
     snapshot = Path(registry_snapshot).expanduser().resolve()
     if not snapshot.is_file():
@@ -867,9 +965,11 @@ def plan_cohort_task(
     if not isinstance(rows, list) or not rows:
         _fail("Registry snapshot must be a non-empty JSON row list.")
     normalized_rows = [_mapping(row, field="registry snapshot row") for row in rows]
+    core_source = _load_core_bundle_set_source(core_bundle_set)
     return _build_cohort_task(
         normalized_rows,
         operations_root=operations_root,
+        core_bundle_set_source=core_source,
         source_registry_snapshot={
             "path": str(snapshot),
             "sha256": hashlib.sha256(source_bytes).hexdigest(),
@@ -882,10 +982,21 @@ def replan_cohort_task(
     source: str | Path | Mapping[str, Any],
     *,
     operations_root: str | Path,
+    core_bundle_set: str | Path | None = None,
 ) -> dict[str, Any]:
     """Freeze a new versioned cohort from one prior task's exact recording set."""
 
     previous = load_cohort_task(source)
+    if core_bundle_set is None:
+        previous_core_source = _mapping(
+            previous.get("source_core_bundle_set"),
+            field="predecessor core bundle-set binding",
+        )
+        core_bundle_set = _text(
+            previous_core_source.get("path"),
+            field="predecessor core bundle-set path",
+        )
+    core_source = _load_core_bundle_set_source(core_bundle_set)
     rows = []
     for raw_entry in previous["entries"]:
         entry = _mapping(raw_entry, field="predecessor cohort entry")
@@ -912,6 +1023,7 @@ def replan_cohort_task(
         rows,
         operations_root=operations_root,
         source_registry_snapshot=source_snapshot,
+        core_bundle_set_source=core_source,
         successor_of_task_sha256=str(previous["task_sha256"]),
     )
 
@@ -1008,6 +1120,7 @@ def load_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
         4,
         5,
         6,
+        7,
         TASK_SCHEMA_VERSION,
     }:
         _fail("Cohort task schema is unsupported.")
@@ -1044,6 +1157,60 @@ def load_cohort_task(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
             _fail("Cohort task near-field visit selection policy is invalid.")
     for entry in entry_records:
         _near_field_visit_configuration(entry, required=schema_version >= 7)
+    if schema_version >= 8:
+        core_source = _mapping(
+            task.get("source_core_bundle_set"),
+            field="core bundle-set source binding",
+        )
+        if set(core_source) != {
+            "path",
+            "file_sha256",
+            "record_sha256",
+            "membership_path",
+            "membership_file_sha256",
+            "membership_record_sha256",
+        }:
+            _fail("Core bundle-set source binding field set is inexact.")
+        _text(core_source.get("path"), field="core bundle-set path")
+        _digest(core_source.get("file_sha256"), field="core bundle-set file digest")
+        bundle_record_sha256 = _digest(
+            core_source.get("record_sha256"),
+            field="core bundle-set record digest",
+        )
+        _text(core_source.get("membership_path"), field="core membership path")
+        _digest(
+            core_source.get("membership_file_sha256"),
+            field="core membership file digest",
+        )
+        _digest(
+            core_source.get("membership_record_sha256"),
+            field="core membership record digest",
+        )
+        if (
+            selection_policy.get("core_authority_resolution")
+            != CORE_BUNDLE_SELECTION_POLICY
+            or selection_policy.get("selected_track_resolution")
+            != "sole_roster_motion_and_bout_track_v1"
+            or "motion_bout_resolution" in selection_policy
+            or "body_frame_resolution" in selection_policy
+        ):
+            _fail("Core-authority cohort selection policy is invalid.")
+        for entry in entry_records:
+            recording_id = _text(
+                entry.get("recording_id"),
+                field="cohort recording identity",
+            )
+            archive = Path(
+                _text(entry.get("analysis_zarr"), field="cohort analysis Zarr")
+            ).resolve()
+            _validate_core_authority_plan_binding(
+                entry.get("core_authority"),
+                expected_bundle_set_record_sha256=bundle_record_sha256,
+                expected_recording_id=recording_id,
+                expected_analysis_zarr=archive,
+            )
+            if "motion_and_bouts" in entry:
+                _fail("Core-authority cohort entries cannot carry legacy motion pairs.")
     gaze_resolution = selection_policy.get("eye_gaze_resolution")
     gaze_entries = [entry.get("eye_gaze") is not None for entry in entry_records]
     if gaze_resolution is None:
@@ -1175,6 +1342,38 @@ def _revalidate_entry(entry: Mapping[str, Any]) -> None:
             _fail("Frozen eye-gaze convention receipt identity has changed.")
 
 
+def _revalidate_core_bundle_selection(
+    task: Mapping[str, Any],
+    entry: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Rebuild static admission from the exact frozen generic bundle files."""
+
+    source = _mapping(
+        task.get("source_core_bundle_set"),
+        field="core bundle-set source binding",
+    )
+    bundle_path = Path(_text(source.get("path"), field="core bundle-set path"))
+    observed = _load_core_bundle_set_source(bundle_path)
+    if dict(observed["source_binding"]) != dict(source):
+        _fail("Core bundle-set or membership file changed after planning.")
+    bundle_set = _mapping(
+        observed.get("bundle_set"),
+        field="validated core bundle set",
+    )
+    recording_id = _text(entry.get("recording_id"), field="recording identity")
+    archive = Path(_text(entry.get("analysis_zarr"), field="analysis Zarr")).resolve()
+    member = _core_bundle_member(
+        bundle_set,
+        recording_id=recording_id,
+        analysis_zarr=archive,
+    )
+    rebuilt = _core_authority_plan_binding(bundle_set, member)
+    frozen = dict(_mapping(entry.get("core_authority"), field="core authority"))
+    if rebuilt != frozen:
+        _fail("Core authority selection differs from the frozen cohort plan.")
+    return validate_core_authority_roster(rebuilt["core_authority_roster"])
+
+
 def successor_cohort_task(
     source: str | Path | Mapping[str, Any],
     *,
@@ -1183,6 +1382,11 @@ def successor_cohort_task(
     """Create a receipt-bound plotting/visit successor with optional gaze."""
 
     previous = load_cohort_task(source)
+    if int(previous["schema_version"]) != TASK_SCHEMA_VERSION:
+        _fail(
+            "Historical cohort tasks are readable but cannot mint a canonical "
+            "successor; create a new v8 plan from one exact core bundle set."
+        )
     previous_digest = previous["task_sha256"]
     frozen_eye_gaze: dict[str, dict[str, Any]] = {}
     eye_gaze_binding_source: dict[str, Any] | None = None
@@ -1830,12 +2034,18 @@ def run_one(
     if copy_backend not in {"python", "rsync"}:
         _fail("Copy backend must be python or rsync.")
     task = load_cohort_task(task_source)
+    if int(task["schema_version"]) != TASK_SCHEMA_VERSION:
+        _fail(
+            "Historical cohort tasks remain readable but are not executable; "
+            "create a v8 task from one exact core bundle set."
+        )
     entry = _entry(task, task_index)
     visit_configuration = _near_field_visit_configuration(
         entry,
         required=int(task["schema_version"]) >= 7,
     )
     _revalidate_entry(entry)
+    core_roster = _revalidate_core_bundle_selection(task, entry)
     repo = Path(palette_repo).expanduser().resolve()
     commit = _repo_commit(repo, palette_commit)
     py = repo / "scripts" / "py"
@@ -1843,9 +2053,11 @@ def run_one(
     recording_id = str(entry["recording_id"])
     scratch = Path(scratch_root).expanduser().resolve() / f"task_{task_index:04d}"
     receipt_dir = Path(receipt_root).expanduser().resolve() / f"task_{task_index:04d}"
+    core_roster_path = receipt_dir / "core_authority_roster.json"
     if apply:
         scratch.mkdir(parents=True, exist_ok=True)
         receipt_dir.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(core_roster_path, dict(core_roster))
     plot_dir = Path(str(entry["plot_output_dir"]))
     detailed_dir = plot_dir / "detailed"
     spatial_plot_dir = plot_dir / "spatial_occupancy"
@@ -1901,7 +2113,12 @@ def run_one(
     geometry = _mapping(entry["geometry"], field="geometry binding")
     keypoint_proxy = _mapping(entry["keypoint_proxy"], field="keypoint proxy")
     detection_proxy = _mapping(entry["detection_proxy"], field="detection proxy")
-    motion_bouts = _mapping(entry["motion_and_bouts"], field="motion and bout binding")
+    core_authority = _mapping(entry["core_authority"], field="core authority")
+    core_track_id = int(core_authority["selected_track_id"])
+    core_roster_sha256 = _digest(
+        core_authority.get("core_authority_roster_sha256"),
+        field="core-authority roster digest",
+    )
     eye_gaze_raw = entry.get("eye_gaze")
     eye_gaze = (
         _mapping(eye_gaze_raw, field="eye-gaze binding")
@@ -2048,12 +2265,12 @@ def run_one(
                 outputs["semantic_epoch_v2"],
                 "--protocol-semantic-selection-run",
                 outputs["semantic_selection"],
-                "--motion-run",
-                motion_bouts["motion_run_path"],
-                "--swim-bout-run",
-                motion_bouts["swim_bout_run"],
-                "--track-id",
-                0,
+                "--core-authority-roster",
+                core_roster_path,
+                "--expected-core-authority-roster-sha256",
+                core_roster_sha256,
+                "--core-track-id",
+                core_track_id,
                 "--speed-level",
                 "filtered",
                 "--scratch-root",
@@ -2070,12 +2287,6 @@ def run_one(
         ("detection", detection_proxy, "detection_relative"),
     ):
         relative_name = outputs[relative_key]
-        body_frame_flags: tuple[object, ...] = ()
-        if provider == "keypoint":
-            body_frame_flags = (
-                "--body-frame-run",
-                motion_bouts["body_frame_run_name"],
-            )
         execute_if_missing(
             f"{provider}_relative_frame",
             f"analysis/chaser_relative_frame_runs/{relative_name}",
@@ -2095,7 +2306,12 @@ def run_one(
                 recording_id,
                 "--expected-proxy-manifest-sha256",
                 proxy["manifest_sha256"],
-                *body_frame_flags,
+                "--core-authority-roster",
+                core_roster_path,
+                "--expected-core-authority-roster-sha256",
+                core_roster_sha256,
+                "--core-track-id",
+                core_track_id,
                 "--copy-backend",
                 copy_backend,
                 "--apply",
@@ -2169,12 +2385,12 @@ def run_one(
                     outputs["keypoint_relative"],
                     "--semantic-selection-run",
                     outputs["semantic_selection"],
-                    "--provider-motion-run-path",
-                    motion_bouts["motion_run_path"],
-                    "--swim-bout-run-name",
-                    motion_bouts["swim_bout_run"],
-                    "--track-id",
-                    0,
+                    "--core-authority-roster",
+                    core_roster_path,
+                    "--expected-core-authority-roster-sha256",
+                    core_roster_sha256,
+                    "--core-track-id",
+                    core_track_id,
                     "--module",
                     "controller_chase_trials",
                     "--module",
@@ -2969,6 +3185,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     plan_parser = subparsers.add_parser("plan", help="freeze exact cohort inputs")
     plan_parser.add_argument("--registry-snapshot", type=Path, required=True)
+    plan_parser.add_argument("--core-bundle-set", type=Path, required=True)
     plan_parser.add_argument("--operations-root", type=Path, required=True)
     plan_parser.add_argument("--output", type=Path, required=True)
     replan_parser = subparsers.add_parser(
@@ -2976,6 +3193,7 @@ def _parser() -> argparse.ArgumentParser:
         help="freeze versioned successors from a prior task's exact recording set",
     )
     replan_parser.add_argument("task", type=Path)
+    replan_parser.add_argument("--core-bundle-set", type=Path)
     replan_parser.add_argument("--operations-root", type=Path, required=True)
     replan_parser.add_argument("--output", type=Path, required=True)
     successor_parser = subparsers.add_parser(
@@ -3015,12 +3233,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = plan_cohort_task(
             args.registry_snapshot,
             operations_root=args.operations_root,
+            core_bundle_set=args.core_bundle_set,
         )
         write_json_atomic(args.output.expanduser().resolve(), result)
     elif args.command == "replan":
         result = replan_cohort_task(
             args.task,
             operations_root=args.operations_root,
+            core_bundle_set=args.core_bundle_set,
         )
         write_json_atomic(args.output.expanduser().resolve(), result)
     elif args.command == "successor":

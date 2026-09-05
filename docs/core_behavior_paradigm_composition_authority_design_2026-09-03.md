@@ -507,6 +507,39 @@ prepared-writer-to-atomic-materializer-to-unpatched-source-handle regression
 also proves that the optional roster context survives the existing publication
 surface with its digest intact.
 
+### Maintained chaser planner migration checkpoint (2026-09-05)
+
+The maintained GoodBatBadBat cohort planner now freezes task schema v8 from one
+exact generic core-bundle set. Static planning selects the exact bundle member,
+derives its roster through the shared core-bundle adapter, derives the sole
+motion/bout track from that roster, and seals a consumer receipt. It no longer
+contains `MOTION_BOUT_PAIRS`, `matches[0]` pair precedence, a provider-derived
+body-frame choice, or implicit track zero. Historical task schemas remain
+readable but cannot execute or mint a canonical successor.
+
+Execution reopens the exact bundle-set and membership files and reconstructs
+the frozen roster binding before creating scratch or receipt directories. The
+epoch summary, relative-frame materializer, generalized bout response, and
+escape/freeze chain receive the roster path, expected digest, and selected
+track as an all-or-none input. Core-mode failure cannot fall back to the legacy
+provider-motion or independent swim-bout inputs. A shared motion dependency
+record validates the complete capability-digest roster and seals the selected
+motion and bout publications into each motion-dependent scientific manifest.
+
+`scripts/check_paradigm_core_authority_access.py` is wired into CI and rejects
+reintroduction of the retired pair resolver, provider-motion/bout CLI
+selection, or literal track zero in this maintained planner. It also requires
+the static and dynamic shared resolver calls and the three frozen core CLI
+arguments. Focused workstation validation passes 85/85 tests across the core
+roster, proxy/relative adapter, maintained planner, composable operator, epoch
+summary, generalized bout response, escape/freeze, handle adapters, and the new
+ratchet.
+
+This checkpoint is still intentionally incomplete. Before the branch is
+merge-ready, every transitive chaser publication and reusable-output gate must
+prove the same roster digest explicitly, the composite export profile and
+foreign-key contracts remain Track-C work, and required CI has not yet run.
+
 ## Composition contract
 
 ### 1. One reusable core authority roster
@@ -964,14 +997,17 @@ inference from this static audit.
 
 ### Track D — migrate maintained paradigm consumers
 
-- [ ] Replace composable chaser `MOTION_BOUT_PAIRS`/`matches[0]` authority
+- [x] Replace composable chaser `MOTION_BOUT_PAIRS`/`matches[0]` authority
       selection with the persisted core roster.
 - [ ] Make chaser body-relative, bout-response, epoch, escape/freeze,
       occupancy, and response products consume selected core identities.
+      Body-relative, bout-response, epoch, and escape/freeze are complete;
+      transitive occupancy/response propagation remains.
 - [ ] Add the core-roster dependency to shared stimulus response so moving
       grating, concentric/radial OMR, and looming cannot resolve independent
       latest motion or bout runs.
-- [ ] Remove implicit `track_id=0` from maintained composite dependency paths;
+- [x] Remove implicit `track_id=0` from the maintained chaser composite
+      dependency path;
       require the selected track identity and cardinality.
 - [ ] Point activity/spatial bins and classifier-specific extensions at the
       shared roster while retaining their genuinely distinct output grains.
