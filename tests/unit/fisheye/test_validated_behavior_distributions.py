@@ -62,6 +62,7 @@ from apps.marimo.components.validated_behavior_distributions import (
     validated_behavior_distribution_figure,
     validated_behavior_motion_trace_figure,
 )
+from fisheye.shared.bounded_identity_cache import BoundedIdentityCache
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
@@ -574,6 +575,30 @@ def test_shared_payload_feeds_static_and_plotly_renderers(tmp_path: Path):
         [row["bin_right"] - row["bin_left"] for row in whole_rows],
     )
     assert "Mean recording fraction" in rendered["layout"]["yaxis"]["title"]["text"]
+
+
+def test_distribution_view_payload_cache_reuses_exact_manifest_metric_and_weighting(
+    tmp_path: Path,
+) -> None:
+    target = _write_fixture_distribution(tmp_path)
+    source = ValidatedBehaviorDistributionViewSource.open(target)
+    cache = BoundedIdentityCache(max_entries=2)
+
+    first = build_distribution_view_payload(
+        source,
+        "fixture.duration_s",
+        "event",
+        payload_cache=cache,
+    )
+    repeated = build_distribution_view_payload(
+        source,
+        "fixture.duration_s",
+        "event",
+        payload_cache=cache,
+    )
+
+    assert repeated is first
+    assert len(cache) == 1
 
 
 def test_inter_bout_interval_label_reaches_cohort_figures_and_static_report(

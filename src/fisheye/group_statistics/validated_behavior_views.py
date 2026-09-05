@@ -20,6 +20,7 @@ from fisheye.group_statistics.validated_behavior_appearance import (
     behavior_role_styles,
     validate_chaser_appearance_dimension,
 )
+from fisheye.shared.bounded_identity_cache import BoundedIdentityCache
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
@@ -388,7 +389,20 @@ def _normalized_rows(
 def build_statistics_view_payload(
     source: ValidatedBehaviorStatisticsViewSource,
     view_id: str,
+    *,
+    payload_cache: (
+        BoundedIdentityCache[tuple[str, str, str, str], Mapping[str, object]]
+        | None
+    ) = None,
 ) -> Mapping[str, object]:
+    """Build one view, optionally reusing its exact immutable identity."""
+
+    if payload_cache is not None:
+        cache_key = (METHOD_ID, str(source.root), source.cache_identity, view_id)
+        return payload_cache.get_or_load(
+            cache_key,
+            lambda: build_statistics_view_payload(source, view_id),
+        )
     try:
         definition = next(item for item in VIEW_DEFINITIONS if item.view_id == view_id)
     except StopIteration as exc:

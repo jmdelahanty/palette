@@ -51,6 +51,7 @@ from apps.marimo.components.registry import (
     CHASER_EXACT_SUCCESSOR_RENDERER,
     InteractiveSpecOption,
 )
+from fisheye.shared.bounded_identity_cache import BoundedIdentityCache
 
 
 def _option(
@@ -1014,6 +1015,50 @@ def test_stale_projection_cannot_render_under_new_selection(tmp_path: Path) -> N
         )
 
 
+def test_exact_projection_cache_is_bound_to_complete_selection_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "recording.zarr"
+    option = _option(archive, manifest_sha256="a" * 64)
+    changed = _option(archive, manifest_sha256="b" * 64)
+    cache = BoundedIdentityCache(max_entries=2)
+    calls: list[ExactChaserSelectionIdentity] = []
+
+    def fake_loader(_zarr_path, _option, *, selection_identity, **_kwargs):
+        calls.append(selection_identity)
+        return selection_identity
+
+    monkeypatch.setattr(
+        exact_provider_module,
+        "load_exact_chaser_projection",
+        fake_loader,
+    )
+
+    first = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
+        archive,
+        option,
+        analysis_id="distance_traces",
+        projection_cache=cache,
+    )
+    repeated = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
+        archive,
+        option,
+        analysis_id="distance_traces",
+        projection_cache=cache,
+    )
+    changed_manifest = EXACT_CHASER_PROVIDER_ADAPTER.load_projection(
+        archive,
+        changed,
+        analysis_id="distance_traces",
+        projection_cache=cache,
+    )
+
+    assert repeated is first
+    assert changed_manifest is not first
+    assert calls == [first, changed_manifest]
+
+
 def test_shared_provenance_route_is_typed_unavailable(tmp_path: Path) -> None:
     archive = tmp_path / "recording.zarr"
     option = _option(archive)
@@ -1057,6 +1102,10 @@ def test_palette_explorer_uses_one_exact_provider_load_and_render_boundary() -> 
     assert "build_exact_trajectory_overlays_output" not in source
     assert source.count("EXACT_CHASER_PROVIDER_ADAPTER.load_projection(") == 1
     assert source.count("EXACT_CHASER_PROVIDER_ADAPTER.render(") == 1
+    assert "validate_current_sources=False" in source
+    assert "validate_current_source=False" in source
+    assert "defer_spec_discovery=True" in source
+    assert "projection_cache=exact_chaser_projection_cache" in source
     assert "EXACT_CHASER_PROVIDER_ADAPTER.initial_source_label(source_labels)" in source
     assert "source_picker.value is not None" in source
     assert "no analysis arrays will load until" in source

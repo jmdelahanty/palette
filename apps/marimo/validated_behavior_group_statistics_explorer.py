@@ -34,8 +34,10 @@ def _():
         available_statistics_views,
         build_statistics_view_payload,
     )
+    from fisheye.shared.bounded_identity_cache import BoundedIdentityCache
 
     return (
+        BoundedIdentityCache,
         Path,
         ValidatedBehaviorStatisticsViewSource,
         available_statistics_views,
@@ -49,6 +51,12 @@ def _():
         statistics_provenance_rows,
         validated_behavior_statistics_figure,
     )
+
+
+@app.cell
+def _(BoundedIdentityCache):
+    statistics_payload_cache = BoundedIdentityCache(max_entries=8)
+    return (statistics_payload_cache,)
 
 
 @app.cell
@@ -123,11 +131,16 @@ def _(
     statistics_dimension_options,
     statistics_metric_options,
     source,
+    statistics_payload_cache,
     view_label_to_id,
     view_picker,
 ):
     selected_view_id = view_label_to_id[view_picker.value]
-    payload = build_statistics_view_payload(source, selected_view_id)
+    payload = build_statistics_view_payload(
+        source,
+        selected_view_id,
+        payload_cache=statistics_payload_cache,
+    )
     metric_label_to_id = statistics_metric_options(payload)
     provider_values = (
         ()

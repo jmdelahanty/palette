@@ -19,6 +19,7 @@ from apps.marimo.components.core_behavior import (
     collect_projection,
     discover_core_behavior_options,
     scan_export_parquet,
+    validated_core_behavior_option,
 )
 from apps.marimo.components.registry import (
     discover_interactive_spec_options,
@@ -526,6 +527,47 @@ def test_export_parquet_uses_true_polars_lazy_scan(tmp_path) -> None:
     result = lazy.filter(pl.col("recording_id") == "a").collect()
     assert result.columns == ["recording_id", "speed_mm_s"]
     assert result["speed_mm_s"].to_list() == [1.0, 2.0]
+
+
+def test_validated_core_option_can_use_bundle_envelope_without_source_read(
+    tmp_path,
+) -> None:
+    class _Source:
+        analysis_zarr = tmp_path / "recording.zarr"
+        bundle_path = tmp_path / "bundle.json"
+        bundle_sha256 = "a" * 64
+
+        @staticmethod
+        def provider_motion_catalog():
+            raise AssertionError("menu discovery must not open provider motion")
+
+        @staticmethod
+        def require_capability(capability, *, expected_binding_scope):
+            assert capability == "provider_motion"
+            assert expected_binding_scope == "source_bindings"
+            return SimpleNamespace(
+                binding={
+                    "source": {
+                        "run_path": "analysis/track_kinematics_runs/provider/exact-v1",
+                        "track_id": 7,
+                        "manifest_sha256": "b" * 64,
+                        "verification_digest": "c" * 64,
+                    }
+                }
+            )
+
+    option = validated_core_behavior_option(
+        _Source(),  # type: ignore[arg-type]
+        validate_current_source=False,
+    )
+
+    assert option.track_id == 7
+    assert option.source_paths == {
+        "run": "analysis/track_kinematics_runs/provider/exact-v1"
+    }
+    assert option.attrs["current_source_validation"] == (
+        "deferred_until_provider_selection"
+    )
 
 
 def test_dense_core_plot_enforces_serialized_point_budget() -> None:

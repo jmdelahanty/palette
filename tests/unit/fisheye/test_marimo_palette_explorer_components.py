@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from pathlib import Path
 
 import apps.marimo.components.registry as registry_component
 import numpy as np
@@ -34,6 +35,7 @@ from apps.marimo.components.goodcopbadcop_chaser import (
     resolve_time_windows_from_multiselect,
 )
 from apps.marimo.components.registry import (
+    PROVIDER_CHASER_CANDIDATE_RENDERER,
     discover_interactive_spec_options,
     discover_recording_explorer_spec_options,
     discover_protocol_recording_options,
@@ -396,6 +398,65 @@ def test_palette_explorer_direct_launch_does_not_discover_siblings(tmp_path) -> 
     assert [option.zarr_path for option in options] == [selected]
     assert options[0].interactive_spec_count == 0
     assert options[0].supported_spec_count == 0
+
+
+def test_palette_explorer_can_defer_seed_spec_discovery_until_selection(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    selected = tmp_path / "recording_analysis.zarr"
+    selected.mkdir()
+
+    def _fail_spec_discovery(*_args, **_kwargs):
+        raise AssertionError("recording list must not inspect provider specs")
+
+    monkeypatch.setattr(
+        registry_component,
+        "discover_recording_explorer_spec_options",
+        _fail_spec_discovery,
+    )
+    options = discover_protocol_recording_options(
+        selected,
+        name_contains=None,
+        recording_explorer_only=True,
+        defer_spec_discovery=True,
+        include_collection=False,
+        include_seed_without_specs=True,
+    )
+
+    assert [option.zarr_path for option in options] == [selected]
+    assert options[0].spec_counts_loaded is False
+    assert options[0].interactive_spec_count == 0
+    assert options[0].supported_spec_count == 0
+    assert "specs loaded on selection" in options[0].label
+
+
+def test_recording_explorer_requires_explicit_candidate_discovery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    selected = tmp_path / "recording_analysis.zarr"
+    zarr.open_group(str(selected), mode="w", use_consolidated=False)
+    calls: list[Path] = []
+
+    def _candidate_discovery(path, **_kwargs):
+        calls.append(Path(path))
+        return []
+
+    monkeypatch.setattr(
+        registry_component,
+        "discover_provider_chaser_candidate_options",
+        _candidate_discovery,
+    )
+
+    discover_recording_explorer_spec_options(selected)
+    assert calls == []
+
+    discover_recording_explorer_spec_options(
+        selected,
+        renderer_filter=PROVIDER_CHASER_CANDIDATE_RENDERER,
+    )
+    assert calls == [selected]
 
 
 def test_palette_explorer_direct_launch_reports_selected_zarr_without_specs(tmp_path) -> None:
