@@ -43,9 +43,11 @@ def _():
         build_motion_trace_payload,
         distribution_recording_ids,
     )
+    from fisheye.shared.bounded_identity_cache import BoundedIdentityCache
 
     return (
         BEHAVIOR_DISTRIBUTION,
+        BoundedIdentityCache,
         COHORT_STATISTIC_LABELS,
         DEFAULT_DISPLAY_RANGE,
         DISPLAY_RANGE_LABELS,
@@ -64,6 +66,18 @@ def _():
         resolve_validated_behavior_product,
         validated_behavior_distribution_figure,
         validated_behavior_motion_trace_figure,
+    )
+
+
+@app.cell
+def _(BoundedIdentityCache):
+    distribution_payload_cache = BoundedIdentityCache(max_entries=12)
+    motion_trace_payload_cache = BoundedIdentityCache(max_entries=4)
+    parent_export_cache = BoundedIdentityCache(max_entries=2)
+    return (
+        distribution_payload_cache,
+        motion_trace_payload_cache,
+        parent_export_cache,
     )
 
 
@@ -223,6 +237,7 @@ def _(distribution_metrics, metric_label_to_id, metric_picker, mo):
 @app.cell
 def _(
     build_distribution_view_payload,
+    distribution_payload_cache,
     distribution_source,
     selected_metric_id,
     weighting_label_to_id,
@@ -230,7 +245,10 @@ def _(
 ):
     selected_weighting_id = weighting_label_to_id[weighting_picker.value]
     distribution_payload = build_distribution_view_payload(
-        distribution_source, selected_metric_id, selected_weighting_id
+        distribution_source,
+        selected_metric_id,
+        selected_weighting_id,
+        payload_cache=distribution_payload_cache,
     )
     return distribution_payload, selected_weighting_id
 
@@ -516,6 +534,8 @@ def _(
     coordinate_picker,
     distribution_source,
     mo,
+    motion_trace_payload_cache,
+    parent_export_cache,
     recording_picker,
     trace_load,
     trace_metric_label_to_id,
@@ -530,6 +550,8 @@ def _(
             recording_id=recording_picker.value,
             coordinate_id=coordinate_label_to_id[coordinate_picker.value],
             max_display_points=int(trace_points_picker.value),
+            payload_cache=motion_trace_payload_cache,
+            dataset_cache=parent_export_cache,
         )
     trace_status = (
         mo.md("Select the trace controls and press **Load exact recording trace**.")

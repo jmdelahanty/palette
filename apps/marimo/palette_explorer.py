@@ -37,6 +37,7 @@ def _():
     from fisheye.analysis_workflows.validated_recording_behavior_source import (
         ValidatedRecordingBehaviorSource,
     )
+    from fisheye.shared.bounded_identity_cache import BoundedIdentityCache
     from apps.marimo.components.bout_kinematics import (
         available_bout_analysis_ids,
         build_bout_controls,
@@ -96,6 +97,7 @@ def _():
     from apps.marimo.components.tail_kinematics import build_tail_kinematics_output
 
     return (
+        BoundedIdentityCache,
         CoreBehaviorSource,
         ValidatedCoreBehaviorSource,
         ValidatedRecordingBehaviorSource,
@@ -159,6 +161,14 @@ def _():
 
 
 @app.cell(hide_code=True)
+def _(BoundedIdentityCache):
+    # Projection values can retain large arrays, so keep only the two most
+    # recent complete receipt/display identities in this explorer session.
+    exact_chaser_projection_cache = BoundedIdentityCache(max_entries=2)
+    return (exact_chaser_projection_cache,)
+
+
+@app.cell(hide_code=True)
 def _(
     Path,
     ValidatedRecordingBehaviorSource,
@@ -198,7 +208,8 @@ def _(
     validated_behavior_bundle_raw = cli_args.get("validated-behavior-bundle")
     validated_behavior_source = (
         ValidatedRecordingBehaviorSource(
-            Path(str(validated_behavior_bundle_raw)).expanduser().resolve()
+            Path(str(validated_behavior_bundle_raw)).expanduser().resolve(),
+            validate_current_sources=False,
         )
         if validated_behavior_bundle_raw
         else None
@@ -223,6 +234,7 @@ def _(
         artifact_filter=str(initial_artifact) if initial_artifact else None,
         name_contains=str(name_contains) if name_contains else None,
         recording_explorer_only=True,
+        defer_spec_discovery=True,
         include_collection=collection_browsing,
         include_seed_without_specs=True,
     )
@@ -329,7 +341,10 @@ def _(
     ):
         selected_validated_behavior_source = validated_behavior_source
         core_options = [
-            validated_core_behavior_option(validated_behavior_source),
+            validated_core_behavior_option(
+                validated_behavior_source,
+                validate_current_source=False,
+            ),
             *core_options,
         ]
     return (
@@ -1275,6 +1290,7 @@ def _(
 def _(
     EXACT_CHASER_PROVIDER_ADAPTER,
     exact_chaser_receipt_path,
+    exact_chaser_projection_cache,
     selected_analysis_id,
     selected_provider,
     selected_spec,
@@ -1297,6 +1313,7 @@ def _(
                 analysis_id=selected_analysis_id,
                 projection_receipt_path=exact_chaser_receipt_path,
                 validated_behavior_source=selected_validated_behavior_source,
+                projection_cache=exact_chaser_projection_cache,
             )
         except Exception as exc:
             exact_chaser_projection_error = f"{type(exc).__name__}: {exc}"

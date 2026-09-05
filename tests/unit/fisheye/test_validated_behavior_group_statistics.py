@@ -47,6 +47,7 @@ from fisheye.group_statistics.validated_behavior_views import (
     build_statistics_view_payload,
     validate_statistics_view_payload,
 )
+from fisheye.shared.bounded_identity_cache import BoundedIdentityCache
 from fisheye.utils.compute_validated_behavior_group_statistics import main as cli_main
 from fisheye.visualization.validated_behavior_group_statistics import (
     render_statistics_view,
@@ -784,6 +785,29 @@ def test_shared_view_payload_binds_static_and_interactive_renderers(tmp_path: Pa
     stale["label"] = "mutated"
     with pytest.raises(ValidatedBehaviorStatisticsViewError, match="digest is stale"):
         validate_statistics_view_payload(stale)
+
+
+def test_statistics_view_payload_cache_reuses_exact_manifest_and_view(
+    tmp_path: Path,
+) -> None:
+    statistics_dir = tmp_path / "cached-stats"
+    write_validated_behavior_group_statistics_sandbox(_compute(), statistics_dir)
+    source = ValidatedBehaviorStatisticsViewSource.open(statistics_dir)
+    cache = BoundedIdentityCache(max_entries=2)
+
+    first = build_statistics_view_payload(
+        source,
+        "core_behavior",
+        payload_cache=cache,
+    )
+    repeated = build_statistics_view_payload(
+        source,
+        "core_behavior",
+        payload_cache=cache,
+    )
+
+    assert repeated is first
+    assert len(cache) == 1
 
 
 def test_static_report_is_atomic_digest_bound_and_non_overwriting(tmp_path: Path):

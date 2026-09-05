@@ -24,6 +24,7 @@ from fisheye.group_statistics.validated_behavior_appearance import (
     behavior_role_styles,
     validate_chaser_appearance_dimension,
 )
+from fisheye.shared.bounded_identity_cache import BoundedIdentityCache
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
@@ -228,9 +229,32 @@ def build_distribution_view_payload(
     source: ValidatedBehaviorDistributionViewSource,
     metric_id: str,
     weighting_id: str,
+    *,
+    payload_cache: (
+        BoundedIdentityCache[
+            tuple[str, str, str, str, str], Mapping[str, object]
+        ]
+        | None
+    ) = None,
 ) -> Mapping[str, object]:
     """Build one small exact-metric payload shared by both figure backends."""
 
+    if payload_cache is not None:
+        cache_key = (
+            METHOD_ID,
+            str(source.root),
+            source.cache_identity,
+            metric_id,
+            weighting_id,
+        )
+        return payload_cache.get_or_load(
+            cache_key,
+            lambda: build_distribution_view_payload(
+                source,
+                metric_id,
+                weighting_id,
+            ),
+        )
     import polars as pl
 
     metric = _metric(source, metric_id)
@@ -672,17 +696,45 @@ def distribution_recording_ids(
 
 def _parent_export(
     source: ValidatedBehaviorDistributionViewSource,
+    *,
+    dataset_cache: (
+        BoundedIdentityCache[
+            tuple[str, str, str, str], ValidatedBehaviorExportDataset
+        ]
+        | None
+    ) = None,
 ) -> ValidatedBehaviorExportDataset:
     record = source.manifest.get("source_export")
     if not isinstance(record, Mapping):
         _fail("Distribution source lacks the exact parent export")
-    dataset = ValidatedBehaviorExportDataset.open(
-        str(record["path"]),
-        str(record["export_run_id"]),
-        validate=True,
-        full_part_hashes=False,
+    export_path = str(Path(str(record["path"])).expanduser().resolve())
+    export_run_id = str(record["export_run_id"])
+    expected_digest = _digest(
+        record.get("export_manifest_record_sha256"),
+        label="exact parent export manifest digest",
     )
-    if dataset.cache_identity != record.get("export_manifest_record_sha256"):
+
+    def open_exact_parent() -> ValidatedBehaviorExportDataset:
+        return ValidatedBehaviorExportDataset.open(
+            export_path,
+            export_run_id,
+            validate=True,
+            full_part_hashes=False,
+        )
+
+    if dataset_cache is None:
+        dataset = open_exact_parent()
+    else:
+        dataset = dataset_cache.get_or_load(
+            (
+                "validated_behavior_parent_export_v1",
+                export_path,
+                export_run_id,
+                expected_digest,
+            ),
+            open_exact_parent,
+        )
+    if dataset.cache_identity != expected_digest:
         _fail("Exact parent export manifest differs from the distribution binding")
     return dataset
 
@@ -701,9 +753,41 @@ def build_motion_trace_payload(
     coordinate_id: str,
     provider_role: str | None = None,
     max_display_points: int = 5000,
+    payload_cache: (
+        BoundedIdentityCache[tuple[object, ...], Mapping[str, object]] | None
+    ) = None,
+    dataset_cache: (
+        BoundedIdentityCache[
+            tuple[str, str, str, str], ValidatedBehaviorExportDataset
+        ]
+        | None
+    ) = None,
 ) -> Mapping[str, object]:
     """Read one exact parent motion series with bounded display-only decimation."""
 
+    if payload_cache is not None:
+        cache_key = (
+            TRACE_METHOD_ID,
+            str(source.root),
+            source.cache_identity,
+            metric_id,
+            recording_id,
+            coordinate_id,
+            provider_role,
+            max_display_points,
+        )
+        return payload_cache.get_or_load(
+            cache_key,
+            lambda: build_motion_trace_payload(
+                source,
+                metric_id=metric_id,
+                recording_id=recording_id,
+                coordinate_id=coordinate_id,
+                provider_role=provider_role,
+                max_display_points=max_display_points,
+                dataset_cache=dataset_cache,
+            ),
+        )
     import polars as pl
 
     metric = _metric(source, metric_id)
@@ -715,7 +799,7 @@ def build_motion_trace_payload(
         raise ValueError(
             "max_display_points must be an integer from 100 through 100000"
         )
-    dataset = _parent_export(source)
+    dataset = _parent_export(source, dataset_cache=dataset_cache)
     if recording_id not in set(distribution_recording_ids(source)):
         raise KeyError(f"Unknown contributing recording: {recording_id}")
     table = dataset.table("provider_motion_samples")

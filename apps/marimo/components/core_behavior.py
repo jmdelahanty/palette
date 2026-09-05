@@ -159,31 +159,71 @@ def _core_option_from_spec(option: InteractiveSpecOption) -> CoreBehaviorOption:
 
 def validated_core_behavior_option(
     source: ValidatedRecordingBehaviorSource,
+    *,
+    validate_current_source: bool = True,
 ) -> CoreBehaviorOption:
     """Describe the exact provider-motion track selected by one bundle."""
 
-    catalog = source.provider_motion_catalog()
-    source_paths: dict[str, str] = {"run": catalog.run_path}
-    aliases = {"source_acquisition_frame_index": "frame_indices"}
-    for path in catalog.sample_array_paths:
-        source_paths[aliases.get(path, path)] = f"{catalog.run_path}/{path}"
+    if type(validate_current_source) is not bool:
+        raise TypeError("validate_current_source must be the exact boolean")
+    if validate_current_source:
+        catalog = source.provider_motion_catalog()
+        run_path = catalog.run_path
+        track_id = catalog.track_id
+        manifest_sha256 = catalog.manifest_sha256
+        verification_digest = catalog.verification_digest
+        source_paths: dict[str, str] = {"run": run_path}
+        aliases = {"source_acquisition_frame_index": "frame_indices"}
+        for path in catalog.sample_array_paths:
+            source_paths[aliases.get(path, path)] = f"{run_path}/{path}"
+    else:
+        capability = source.require_capability(
+            "provider_motion",
+            expected_binding_scope="source_bindings",
+        )
+        binding = capability.binding.get("source")
+        if not isinstance(binding, Mapping):
+            raise ValidatedRecordingBehaviorSourceError(
+                "Provider-motion bundle binding lacks its exact source."
+            )
+        run_path = binding.get("run_path")
+        track_id = binding.get("track_id")
+        manifest_sha256 = binding.get("manifest_sha256")
+        verification_digest = binding.get("verification_digest")
+        if (
+            type(run_path) is not str
+            or not run_path
+            or type(track_id) is not int
+            or track_id < 0
+            or type(manifest_sha256) is not str
+            or type(verification_digest) is not str
+        ):
+            raise ValidatedRecordingBehaviorSourceError(
+                "Provider-motion bundle binding is invalid."
+            )
+        source_paths = {"run": run_path}
     return CoreBehaviorOption(
         zarr_path=source.analysis_zarr,
-        run_path=catalog.run_path,
-        run_name=catalog.run_path.rsplit("/", 1)[-1],
+        run_path=run_path,
+        run_name=run_path.rsplit("/", 1)[-1],
         label=(
-            f"validated bundle | track {catalog.track_id} | "
+            f"validated bundle | track {track_id} | "
             f"{source.bundle_sha256[:12]}"
         ),
-        track_id=catalog.track_id,
+        track_id=track_id,
         source_paths=MappingProxyType(source_paths),
         attrs=MappingProxyType(
             {
                 "source_mode": "validated_recording_behavior_bundle_v1",
                 "bundle_path": str(source.bundle_path),
                 "bundle_sha256": source.bundle_sha256,
-                "provider_motion_manifest_sha256": catalog.manifest_sha256,
-                "provider_motion_verification_digest": catalog.verification_digest,
+                "provider_motion_manifest_sha256": manifest_sha256,
+                "provider_motion_verification_digest": verification_digest,
+                "current_source_validation": (
+                    "provider_boundary"
+                    if validate_current_source
+                    else "deferred_until_provider_selection"
+                ),
             }
         ),
         validated_bundle_path=str(source.bundle_path),
