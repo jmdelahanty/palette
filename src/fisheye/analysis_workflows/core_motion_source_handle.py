@@ -46,6 +46,31 @@ def _readonly(values: Any) -> np.ndarray:
     return result
 
 
+def _binding_dtype(record: Mapping[str, Any]) -> np.dtype[Any]:
+    fields = record.get("dtype_fields")
+    if fields is None:
+        return np.dtype(record["dtype"])
+    if not isinstance(fields, Sequence) or isinstance(fields, (str, bytes)):
+        _fail("Selected core-motion structured dtype declaration is invalid.")
+    names: list[str] = []
+    formats: list[np.dtype[Any]] = []
+    offsets: list[int] = []
+    for field_record in fields:
+        if not isinstance(field_record, Mapping):
+            _fail("Selected core-motion structured dtype field is invalid.")
+        names.append(str(field_record.get("name")))
+        formats.append(np.dtype(field_record.get("dtype")))
+        offsets.append(int(field_record.get("offset")))
+    return np.dtype(
+        {
+            "names": names,
+            "formats": formats,
+            "offsets": offsets,
+            "itemsize": int(record["itemsize"]),
+        }
+    )
+
+
 @dataclass(frozen=True, init=False, eq=False)
 class CoreMotionTrackSourceHandle:
     """One exact roster-selected track and its receipt-authorized arrays."""
@@ -109,7 +134,7 @@ class CoreMotionTrackSourceHandle:
         observed_shape = tuple(int(value) for value in node.shape)
         observed_dtype = np.dtype(node.dtype)
         expected_shape = tuple(int(value) for value in record["shape"])
-        expected_dtype = np.dtype(record["dtype"])
+        expected_dtype = _binding_dtype(record)
         if observed_shape != expected_shape or observed_dtype != expected_dtype:
             _fail(f"Selected core-motion surface metadata changed: {path!r}.")
         return _readonly(node[:])

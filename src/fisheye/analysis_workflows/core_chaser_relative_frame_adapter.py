@@ -19,12 +19,14 @@ import numpy as np
 from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import (
     CROSS_GRAIN_JOIN_AUTHORITY,
     KINEMATICS_SAMPLES_CAPABILITY,
+    SUBJECT_BODY_FRAME_CAPABILITY,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 from .chaser_relative_frame import (
     AcquisitionFrameKeys,
+    BodyFrameInput,
     ChaserObservations,
     ChaserRelativeFrameInput,
     CoordinatePolicy,
@@ -45,6 +47,10 @@ from .chaser_relative_frame_storage import (
 from .core_motion_source_handle import (
     CoreMotionTrackSourceHandle,
     require_core_motion_track_source_handle,
+)
+from .core_subject_body_frame_source_handle import (
+    CoreSubjectBodyFrameSourceHandle,
+    require_core_subject_body_frame_source_handle,
 )
 from .provider_recording_timing_authority import (
     ProviderRecordingTimingAuthorityError,
@@ -146,6 +152,184 @@ def _source_authority(
     )
 
 
+_COMPOUND_BODY_KEY_DTYPE = np.dtype(
+    [("acquisition_frame", "<i8"), ("instance_key", "<u8")]
+)
+
+
+def _compound_body_keys(
+    frames: np.ndarray,
+    instance_keys: np.ndarray,
+) -> np.ndarray:
+    if frames.ndim != 1 or instance_keys.shape != frames.shape:
+        _fail("Body-frame compound join keys do not share one row axis.")
+    result = np.empty(frames.shape, dtype=_COMPOUND_BODY_KEY_DTYPE)
+    result["acquisition_frame"] = frames
+    result["instance_key"] = instance_keys
+    return result
+
+
+def _project_core_body_frame(
+    *,
+    core: CoreMotionTrackSourceHandle,
+    body: CoreSubjectBodyFrameSourceHandle,
+    core_rows: np.ndarray,
+    frame_keys: AcquisitionFrameKeys,
+    coordinate_authority_id: str,
+    scale_authority_id: str,
+    timing_authority_id: str,
+) -> tuple[BodyFrameInput, dict[str, Any]]:
+    """Join canonical body observations by exact frame and instance identity."""
+
+    source_instances = np.asarray(core.array("source_instance_key"))
+    if (
+        source_instances.shape != (core.sample_count,)
+        or source_instances.dtype.names != ("valid", "instance_key")
+    ):
+        _fail("Core track has no canonical nullable source-instance identity.")
+    query_valid = np.asarray(source_instances["valid"], dtype=bool)[core_rows]
+    query_instances = np.asarray(
+        source_instances["instance_key"], dtype=np.uint64
+    )[core_rows]
+    if np.any((~query_valid) & (query_instances != 0)):
+        _fail("Core track nullable instance keys violate canonical zero fill.")
+
+    source_frames = np.asarray(body.frame_indices, dtype=np.int64)
+    source_instances = np.asarray(body.instance_keys, dtype=np.uint64)
+    if source_frames.shape != (body.row_count,) or source_instances.shape != (
+        body.row_count,
+    ):
+        _fail("Subject body-frame identity arrays do not share one source row axis.")
+    source_keys = _compound_body_keys(source_frames, source_instances)
+    order = np.argsort(source_keys, kind="stable")
+    ordered = source_keys[order]
+    if ordered.size > 1 and np.any(ordered[1:] == ordered[:-1]):
+        _fail(
+            "Subject body-frame source contains duplicate frame/instance keys; "
+            "implicit observation selection is prohibited."
+        )
+
+    query_keys = _compound_body_keys(
+        np.asarray(frame_keys.acquisition_frame_id, dtype=np.int64),
+        query_instances,
+    )
+    insertion = np.searchsorted(ordered, query_keys)
+    present = query_valid & (insertion < ordered.size)
+    candidate_rows = np.flatnonzero(present)
+    if candidate_rows.size:
+        present[candidate_rows] &= (
+            ordered[insertion[candidate_rows]] == query_keys[candidate_rows]
+        )
+    body_source_rows = np.full(query_keys.size, -1, dtype=np.int64)
+    body_source_rows[present] = order[insertion[present]]
+
+    source_origin = np.asarray(body.origin_xy, dtype=np.float64)
+    source_forward = np.asarray(body.forward_axis_xy, dtype=np.float64)
+    source_left = np.asarray(body.left_axis_xy, dtype=np.float64)
+    source_axis_valid = np.asarray(body.axis_valid, dtype=bool)
+    if (
+        source_origin.shape != (body.row_count, 2)
+        or source_forward.shape != (body.row_count, 2)
+        or source_left.shape != (body.row_count, 2)
+        or source_axis_valid.shape != (body.row_count,)
+    ):
+        _fail("Subject body-frame geometry does not share its identity row axis.")
+    source_finite = (
+        np.isfinite(source_origin).all(axis=1)
+        & np.isfinite(source_forward).all(axis=1)
+        & np.isfinite(source_left).all(axis=1)
+    )
+    if not np.array_equal(source_axis_valid, source_finite):
+        _fail("Subject body-frame validity differs from its finite geometry.")
+
+    origin = np.full((query_keys.size, 2), np.nan, dtype=np.float64)
+    forward = np.full((query_keys.size, 2), np.nan, dtype=np.float64)
+    left = np.full((query_keys.size, 2), np.nan, dtype=np.float64)
+    axis_valid = np.zeros(query_keys.size, dtype=bool)
+    if np.any(present):
+        selected_rows = body_source_rows[present]
+        selected_valid = source_axis_valid[selected_rows]
+        selected_query_rows = np.flatnonzero(present)
+        valid_query_rows = selected_query_rows[selected_valid]
+        valid_source_rows = selected_rows[selected_valid]
+        origin[valid_query_rows] = source_origin[valid_source_rows]
+        forward[valid_query_rows] = source_forward[valid_source_rows]
+        left[valid_query_rows] = source_left[valid_source_rows]
+        axis_valid[valid_query_rows] = True
+
+    authority = ProviderSourceAuthority(
+        recording_id=core.recording_id,
+        source_authority_id=body.run_path,
+        source_digest=body.publication_manifest_sha256,
+        provider_id="core_authority_roster",
+        provider_digest=core.core_authority_roster_sha256,
+        coordinate_authority_id=coordinate_authority_id,
+        scale_authority_id=scale_authority_id,
+        timing_authority_id=timing_authority_id,
+        row_axis_authority_id=frame_keys.row_axis_authority_id,
+        row_axis_authority_digest=frame_keys.row_axis_authority_digest,
+    )
+    projected = BodyFrameInput(
+        frame_keys=frame_keys,
+        origin_xy=origin,
+        forward_axis_xy=forward,
+        left_axis_xy=left,
+        axis_valid=axis_valid,
+        source_row_index=body_source_rows,
+        authority=authority,
+    )
+    projection_record = {
+        "schema_id": "palette.chaser_relative_frame.core_body_frame_projection",
+        "schema_version": 1,
+        "recording_id": core.recording_id,
+        "policy_id": "core_motion_to_subject_body_exact_compound_join_v1",
+        "core_authority_roster_sha256": core.core_authority_roster_sha256,
+        "core_authority_consumption_receipt_sha256": core.consumption_receipt[
+            "record_sha256"
+        ],
+        "source_body_frame_run_path": body.run_path,
+        "source_body_frame_manifest_sha256": body.publication_manifest_sha256,
+        "source_body_frame_binding_sha256": body.source_binding_sha256,
+        "source_body_frame_row_identity_sha256": body.row_identity_sha256,
+        "source_body_frame_record_sha256": body.body_frame_record_sha256,
+        "relative_row_axis_authority_id": frame_keys.row_axis_authority_id,
+        "relative_row_axis_authority_sha256": frame_keys.row_axis_authority_digest,
+        "join_keys": [
+            "recording_id",
+            "source_acquisition_frame_index",
+            "source_instance_key",
+        ],
+        "cardinality": (
+            "zero_or_one_motion_row_to_zero_or_one_body_observation"
+        ),
+        "requires_source_instance_key_valid": True,
+        "source_acquisition_frame_sha256": array_values_sha256(source_frames),
+        "source_instance_key_sha256": array_values_sha256(source_instances),
+        "query_acquisition_frame_sha256": array_values_sha256(
+            frame_keys.acquisition_frame_id
+        ),
+        "query_instance_key_sha256": array_values_sha256(query_instances),
+        "query_instance_key_valid_sha256": array_values_sha256(query_valid),
+        "projected_body_source_row_index_sha256": array_values_sha256(
+            body_source_rows
+        ),
+        "source_body_row_count": body.row_count,
+        "relative_frame_count": int(query_keys.size),
+        "query_instance_key_invalid_count": int(np.count_nonzero(~query_valid)),
+        "exact_source_row_count": int(np.count_nonzero(present)),
+        "missing_source_row_count": int(np.count_nonzero(~present)),
+        "present_invalid_axis_count": int(np.count_nonzero(present & ~axis_valid)),
+        "valid_axis_count": int(np.count_nonzero(axis_valid)),
+        "missing_source_row_semantics": "explicit_minus_one_no_interpolation",
+        "present_invalid_axis_semantics": "source_identity_retained_geometry_nan",
+        "duplicate_source_key_policy": "prohibited_fail_closed",
+        "interpolation": "prohibited",
+        "motion_heading_fallback": "prohibited",
+        "neighboring_body_frame_fallback": "prohibited",
+    }
+    return projected, projection_record
+
+
 @dataclass(frozen=True)
 class PreparedCoreChaserRelativeFrame:
     """Existing-schema relative-frame payload plus its core authority evidence."""
@@ -172,11 +356,13 @@ class PreparedCoreChaserRelativeFrame:
 
 def prepare_core_chaser_relative_frame(
     core_motion: CoreMotionTrackSourceHandle,
+    core_body_frame: CoreSubjectBodyFrameSourceHandle,
     chaser_source: ChaserRelativeFrameSourceHandle,
 ) -> PreparedCoreChaserRelativeFrame:
     """Prepare a core-bound candidate for the existing relative-frame publisher."""
 
     core = require_core_motion_track_source_handle(core_motion)
+    body = require_core_subject_body_frame_source_handle(core_body_frame)
     chaser = require_chaser_relative_frame_source_handle(chaser_source)
     if chaser.selector_eligible is not False:
         _fail("Core rebinding requires one exact selector-ineligible chaser source.")
@@ -184,13 +370,26 @@ def prepare_core_chaser_relative_frame(
         _fail("Core and chaser sources do not belong to one analysis Zarr.")
     if core.recording_id != chaser.recording_id:
         _fail("Core and chaser sources name different recordings.")
+    if (
+        body.analysis_zarr_path != core.analysis_zarr_path
+        or body.recording_id != core.recording_id
+        or body.core_authority_roster_sha256
+        != core.core_authority_roster_sha256
+    ):
+        _fail("Core motion and subject body frame bind different authority rosters.")
+    if body.consumption_receipt != core.consumption_receipt:
+        _fail("Core motion and subject body frame lack one shared admission receipt.")
 
     receipt = _mapping(core.consumption_receipt, label="core consumption receipt")
     if (
         receipt.get("consumer_id") != CORE_CHASER_RELATIVE_CONSUMER_ID
         or receipt.get("selected_track_id") != core.track_id
         or set(receipt.get("required_capabilities", ()))
-        != {CROSS_GRAIN_JOIN_AUTHORITY, KINEMATICS_SAMPLES_CAPABILITY}
+        != {
+            CROSS_GRAIN_JOIN_AUTHORITY,
+            KINEMATICS_SAMPLES_CAPABILITY,
+            SUBJECT_BODY_FRAME_CAPABILITY,
+        }
     ):
         _fail("Core track was not admitted for this exact relative-frame consumer.")
     roster = _mapping(core.core_authority_roster, label="core authority roster")
@@ -335,6 +534,15 @@ def prepare_core_chaser_relative_frame(
         row_axis_authority_digest=row_axis_digest,
         timestamp_ns=timestamp_ns,
     )
+    body_frame_input, body_frame_projection_record = _project_core_body_frame(
+        core=core,
+        body=body,
+        core_rows=core_rows,
+        frame_keys=frame_keys,
+        coordinate_authority_id=coordinate_id,
+        scale_authority_id=scale_id,
+        timing_authority_id=timing_id,
+    )
 
     chaser_authority_record = _mapping(
         chaser.source_authorities.get("chaser_position"),
@@ -354,7 +562,7 @@ def prepare_core_chaser_relative_frame(
         source_authority_id=core.run_path,
         source_digest=core.source_manifest_sha256,
         provider_id="core_authority_roster",
-        provider_digest=core.source_binding_sha256,
+        provider_digest=core.core_authority_roster_sha256,
         coordinate_authority_id=coordinate_id,
         scale_authority_id=scale_id,
         timing_authority_id=timing_id,
@@ -452,7 +660,7 @@ def prepare_core_chaser_relative_frame(
         coordinate_policy=coordinate_policy,
         scale_policy=scale_policy,
         timing_policy=timing_policy,
-        body_frame=None,
+        body_frame=body_frame_input,
     )
     result = compute_chaser_relative_frame(inputs)
 
@@ -468,6 +676,16 @@ def prepare_core_chaser_relative_frame(
             "source_binding_sha256": core.source_binding_sha256,
             "track_id": core.track_id,
             "row_axis_sha256": row_axis_digest,
+        },
+        "core_subject_body_frame": {
+            "run_path": body.run_path,
+            "publication_manifest_sha256": body.publication_manifest_sha256,
+            "source_binding_sha256": body.source_binding_sha256,
+            "row_identity_sha256": body.row_identity_sha256,
+            "body_frame_record_sha256": body.body_frame_record_sha256,
+            "projection_record_sha256": canonical_json_sha256(
+                body_frame_projection_record
+            ),
         },
         "chaser_source": {
             "run_path": chaser.run_path,
@@ -506,7 +724,7 @@ def prepare_core_chaser_relative_frame(
         "source_chaser_profile_sha256": canonical_json_sha256(
             _plain(_context_record(source_context, "analysis_profile"))
         ),
-        "body_frame": "unavailable_not_requested",
+        "body_frame": "core_roster_selected_subject_body_frame",
     }
     subject = _context_record(source_context, "subject_identity")
     occurrence_record = _context_record(source_context, "chaser_occurrence")
@@ -535,6 +753,7 @@ def prepare_core_chaser_relative_frame(
         acquisition_projection_record=acquisition,
         acquisition_projection_publication_record=publication,
         controller_state_record=controller,
+        body_frame_projection_record=body_frame_projection_record,
         analysis_profile_record=analysis_profile,
         core_authority_record=core_authority_record,
         arena_geometry_record=arena,

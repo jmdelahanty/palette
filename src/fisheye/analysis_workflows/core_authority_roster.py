@@ -31,6 +31,8 @@ from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import
     CANONICAL_SWIM_BOUTS_CAPABILITY,
     CORE_BEHAVIOR_CAPABILITY_KEYS,
     CROSS_GRAIN_JOIN_AUTHORITY,
+    SUBJECT_BODY_FRAME_CAPABILITY,
+    SUBJECT_BODY_FRAME_SOURCE_PROFILE_ID,
 )
 from fisheye.analytics_exports.kinematics_samples import (
     BoundKinematicsSamplesSource,
@@ -42,6 +44,10 @@ from fisheye.analytics_exports.activity_spatial_time_bins import (
     bind_activity_spatial_sources,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
+from fisheye.shared.subject_shape_coordinate_publication import (
+    BoundSubjectShapeCoordinatePublication,
+    load_persisted_subject_shape_coordinate_publication,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_io import open_zarr_root
 
@@ -222,6 +228,56 @@ def _verify_sealed_mapping(
     if canonical_json_sha256(body) != digest:
         _fail(f"{label} {digest_field} is stale.")
     return record
+
+
+def build_subject_body_frame_source_binding(
+    publication: BoundSubjectShapeCoordinatePublication,
+) -> dict[str, Any]:
+    """Normalize one strict subject-shape publication for the core roster."""
+
+    if type(publication) is not BoundSubjectShapeCoordinatePublication:
+        _fail("Subject body-frame binding requires one strict publication.")
+    run = publication._run
+    temporal = publication.temporal_authority
+    acquisition = temporal.acquisition_frame
+    source_rate = acquisition.record.source_video_metadata.get("fps")
+    if isinstance(source_rate, bool) or not isinstance(source_rate, (int, float)):
+        _fail("Subject-shape acquisition authority lacks exact FPS.")
+    body: dict[str, Any] = {
+        "schema_id": "palette.subject_body_frame_samples.source_binding",
+        "schema_version": 1,
+        "stage_id": "subject_shape",
+        "run_name": publication.run_path.rsplit("/", 1)[-1],
+        "run_path": publication.run_path,
+        "source_schema_id": run.attrs.get("schema_id"),
+        "source_schema_version": run.attrs.get("schema_version"),
+        "publication_manifest_sha256": publication.manifest.record_sha256,
+        "row_count": int(publication.row_identity.leading_dimension),
+        "row_identity_sha256": publication.row_identity.record_sha256,
+        "temporal_authority_sha256": temporal.record_sha256,
+        "acquisition_camera_frame_sha256": acquisition.record_sha256,
+        "recording_id": temporal.record.recording_id,
+        "camera_id": temporal.record.camera_id,
+        "source_total_frames": temporal.record.source_total_frames,
+        "source_sample_rate_hz": float(source_rate),
+        "body_frame_record_sha256": publication.body_frame.record_sha256,
+        "heading_semantics_sha256": publication.heading_semantics.record_sha256,
+        "origin_coordinate_descriptor_sha256": publication.descriptors[
+            "body_frame/origin_xy"
+        ].descriptor.digest(),
+        "forward_coordinate_descriptor_sha256": publication.descriptors[
+            "body_frame/forward_axis_xy"
+        ].descriptor.digest(),
+        "left_coordinate_descriptor_sha256": publication.descriptors[
+            "body_frame/left_axis_xy"
+        ].descriptor.digest(),
+        "completion_snapshot": {
+            "status": run.attrs.get("palette_run_completion_status"),
+            "completed_at_utc": run.attrs.get("palette_run_completed_at_utc"),
+            "selector_eligible": publication.selector_eligible,
+        },
+    }
+    return {**body, "payload_sha256": canonical_json_sha256(body)}
 
 
 def _validated_capability_bindings(
@@ -507,6 +563,64 @@ class BoundCoreMotionAndBouts:
     @property
     def track_ids(self) -> tuple[int, ...]:
         return tuple(sorted(self.bout_identities))
+
+
+def bind_subject_body_frame_from_core_roster(
+    bound: BoundCoreMotionAndBouts,
+) -> BoundSubjectShapeCoordinatePublication:
+    """Reopen the roster-selected body authority through its strict loader.
+
+    The roster supplies the exact publication identity and the normal
+    subject-shape loader proves that immutable publication still matches it.
+    No selector or alternate body-frame grammar is consulted.
+    """
+
+    if (
+        type(bound) is not BoundCoreMotionAndBouts
+        or bound._verification_seal is not _BOUND_CORE_MOTION_SEAL
+    ):
+        raise TypeError("bound must be a resolver-minted BoundCoreMotionAndBouts.")
+    validated = validate_core_authority_roster(bound.roster)
+    capability = _mapping(
+        validated["capability_bindings"][SUBJECT_BODY_FRAME_CAPABILITY],
+        label="subject body-frame capability",
+    )
+    if capability.get("profile_id") != SUBJECT_BODY_FRAME_SOURCE_PROFILE_ID:
+        _fail("Paradigm body consumers require the canonical subject-body profile.")
+    expected = _mapping(
+        capability.get("source_binding"),
+        label="subject body-frame source binding",
+    )
+    run_path = _text(expected.get("run_path"), label="subject body-frame run path")
+    publication = load_persisted_subject_shape_coordinate_publication(
+        bound.root,
+        run_path,
+    )
+    observed = build_subject_body_frame_source_binding(publication)
+    if _plain(observed) != _plain(expected):
+        _fail("Live subject body-frame source differs from the selected roster.")
+
+    join = _mapping(
+        validated["cross_grain_join_authority"],
+        label="core cross-grain join authority",
+    )
+    expected_domain = (
+        validated["recording_id"],
+        join.get("camera_id"),
+        join.get("source_total_frames"),
+        join.get("source_sample_rate_hz"),
+        join.get("acquisition_camera_frame_sha256"),
+    )
+    observed_domain = (
+        observed.get("recording_id"),
+        observed.get("camera_id"),
+        observed.get("source_total_frames"),
+        observed.get("source_sample_rate_hz"),
+        observed.get("acquisition_camera_frame_sha256"),
+    )
+    if observed_domain != expected_domain:
+        _fail("Subject body frame and core join authority name another frame domain.")
+    return publication
 
 
 def _dtype_record(dtype: np.dtype[Any]) -> Any:
@@ -1064,9 +1178,11 @@ __all__ = [
     "bout_authority_identity_from_phase_c_source",
     "bout_authority_identity_from_phase_c_tables",
     "bind_core_motion_and_bouts_from_roster",
+    "bind_subject_body_frame_from_core_roster",
     "build_bout_authority_identity",
     "build_core_authority_consumption_receipt",
     "build_core_authority_roster",
+    "build_subject_body_frame_source_binding",
     "compare_bout_authority_identities",
     "core_roster_bout_identity",
     "validate_bout_authority_identity",

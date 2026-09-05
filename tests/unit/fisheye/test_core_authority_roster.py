@@ -15,6 +15,7 @@ from fisheye.analysis_workflows.core_authority_roster import (
     bout_authority_identity_from_phase_c_tables,
     build_core_authority_consumption_receipt,
     build_core_authority_roster,
+    build_subject_body_frame_source_binding,
     compare_bout_authority_identities,
     validate_bout_authority_identity,
     validate_core_authority_consumption_receipt,
@@ -25,6 +26,12 @@ from fisheye.analysis_workflows.core_motion_source_handle import (
     CoreMotionTrackSourceHandle,
     bind_core_motion_track_source_handle,
     require_core_motion_track_source_handle,
+)
+from fisheye.analysis_workflows.core_subject_body_frame_source_handle import (
+    CoreSubjectBodyFrameSourceHandle,
+    CoreSubjectBodyFrameSourceHandleError,
+    bind_core_subject_body_frame_source_handle,
+    require_core_subject_body_frame_source_handle,
 )
 from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
     ChaserRelativeFrameSourceHandle,
@@ -44,6 +51,11 @@ from fisheye.analytics_exports.validated_behavior_contracts import (
 from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import (
     CORE_BEHAVIOR_CAPABILITY_KEYS,
     CROSS_GRAIN_JOIN_AUTHORITY,
+    SUBJECT_BODY_FRAME_CAPABILITY,
+    SUBJECT_BODY_FRAME_SOURCE_PROFILE_ID,
+)
+from fisheye.shared.subject_shape_coordinate_publication import (
+    BoundSubjectShapeCoordinatePublication,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
@@ -59,6 +71,7 @@ def _capability_bindings(tmp_path: Path) -> dict[str, object]:
         recording_id="recording-a",
         camera_id="camera-a",
         source_total_frames=100,
+        source_sample_rate_hz=30.0,
         acquisition_camera_frame_ref="/metadata/acquisition_camera_frame",
         acquisition_camera_frame_sha256="8" * 64,
         source_video_metadata_sha256="7" * 64,
@@ -385,10 +398,123 @@ class _FakeArray:
         return self._values[selection]
 
 
-def _bound_core_motion(tmp_path: Path) -> BoundCoreMotionAndBouts:
+class _FakeGroup(dict[str, object]):
+    def __init__(self, values: dict[str, object], *, attrs: dict[str, object] | None = None):
+        super().__init__(values)
+        self.attrs = {} if attrs is None else attrs
+
+
+def _body_publication(
+    *,
+    frames: np.ndarray | None = None,
+    instance_keys: np.ndarray | None = None,
+    axis_valid: np.ndarray | None = None,
+) -> BoundSubjectShapeCoordinatePublication:
+    frames = np.asarray(
+        [11, 12, 13] if frames is None else frames,
+        dtype=np.int64,
+    )
+    instance_keys = np.asarray(
+        [101, 102, 103] if instance_keys is None else instance_keys,
+        dtype=np.uint64,
+    )
+    axis_valid = np.asarray(
+        np.ones(frames.size, dtype=bool) if axis_valid is None else axis_valid,
+        dtype=bool,
+    )
+    origin = np.column_stack(
+        (np.arange(frames.size, dtype=np.float32) + 2.0, np.ones(frames.size))
+    ).astype(np.float32)
+    forward = np.tile(np.asarray([[1.0, 0.0]], dtype=np.float32), (frames.size, 1))
+    left = np.tile(np.asarray([[0.0, -1.0]], dtype=np.float32), (frames.size, 1))
+    origin[~axis_valid] = np.nan
+    forward[~axis_valid] = np.nan
+    left[~axis_valid] = np.nan
+    body_group = _FakeGroup(
+        {
+            "origin_xy": _FakeArray(origin),
+            "forward_axis_xy": _FakeArray(forward),
+            "left_axis_xy": _FakeArray(left),
+            "heading_deg": _FakeArray(
+                np.where(axis_valid, 0.0, np.nan).astype(np.float32)
+            ),
+            "axis_valid": _FakeArray(axis_valid),
+            "failure_reason_bytes": _FakeArray(
+                np.zeros((frames.size, 64), dtype=np.uint8)
+            ),
+        }
+    )
+    run = _FakeGroup(
+        {
+            "instance_key": _FakeArray(instance_keys),
+            "source_acquisition_frame_index": _FakeArray(frames),
+            "body_frame": body_group,
+        },
+        attrs={
+            "schema_id": "palette.subject_shape_coordinate_publication",
+            "schema_version": 4,
+            "palette_run_completion_status": "complete",
+            "palette_run_completed_at_utc": "2026-09-05T00:00:00Z",
+        },
+    )
+    acquisition_record = SimpleNamespace(
+        recording_id="recording-a",
+        camera_id="camera-a",
+        source_total_frames=100,
+        source_video_metadata={"fps": 30.0},
+    )
+    publication = object.__new__(BoundSubjectShapeCoordinatePublication)
+    values = {
+        "run_path": "analysis/subject_shape_runs/body-a",
+        "row_identity": SimpleNamespace(
+            leading_dimension=frames.size,
+            record_sha256="1" * 64,
+        ),
+        "temporal_authority": SimpleNamespace(
+            record=acquisition_record,
+            acquisition_frame=SimpleNamespace(
+                record=acquisition_record,
+                record_sha256="8" * 64,
+            ),
+            record_sha256="2" * 64,
+        ),
+        "body_frame": SimpleNamespace(record_sha256="3" * 64),
+        "heading_semantics": SimpleNamespace(record_sha256="4" * 64),
+        "manifest": SimpleNamespace(record_sha256="5" * 64),
+        "descriptors": {
+            path: SimpleNamespace(
+                descriptor=SimpleNamespace(
+                    digest=(lambda value=value: value),
+                )
+            )
+            for path, value in {
+                "body_frame/origin_xy": "a" * 64,
+                "body_frame/forward_axis_xy": "b" * 64,
+                "body_frame/left_axis_xy": "c" * 64,
+            }.items()
+        },
+        "selector_eligible": True,
+        "_run": run,
+    }
+    for name, value in values.items():
+        object.__setattr__(publication, name, value)
+    return publication
+
+
+def _bound_core_motion(
+    tmp_path: Path,
+    *,
+    body_publication: BoundSubjectShapeCoordinatePublication | None = None,
+) -> BoundCoreMotionAndBouts:
     frames = np.asarray([11, 12, 13], dtype=np.int64)
     positions = np.asarray([[1.0, 2.0], [2.0, 3.0], [4.0, 5.0]], dtype=np.float32)
     transition_valid = np.asarray([False, True, True], dtype=bool)
+    source_instances = np.zeros(
+        frames.size,
+        dtype=np.dtype([("valid", "?"), ("instance_key", "<u8")]),
+    )
+    source_instances["valid"] = True
+    source_instances["instance_key"] = np.asarray([101, 102, 103], dtype=np.uint64)
     selected = {
         "source_acquisition_frame_index": {
             "shape": list(frames.shape),
@@ -410,6 +536,19 @@ def _bound_core_motion(tmp_path: Path) -> BoundCoreMotionAndBouts:
         "position_finite": {
             "shape": [3],
             "dtype": np.dtype(bool).str,
+        },
+        "source_instance_key": {
+            "shape": list(source_instances.shape),
+            "dtype": source_instances.dtype.str,
+            "dtype_fields": [
+                {"name": "valid", "dtype": np.dtype(bool).str, "offset": 0},
+                {
+                    "name": "instance_key",
+                    "dtype": np.dtype("<u8").str,
+                    "offset": 1,
+                },
+            ],
+            "itemsize": source_instances.dtype.itemsize,
         },
     }
     capabilities = _capability_bindings(tmp_path)
@@ -442,6 +581,19 @@ def _bound_core_motion(tmp_path: Path) -> BoundCoreMotionAndBouts:
             "payload_sha256"
         ],
     }
+    if body_publication is None:
+        body_publication = _body_publication()
+    capabilities[SUBJECT_BODY_FRAME_CAPABILITY] = {
+        "profile_id": SUBJECT_BODY_FRAME_SOURCE_PROFILE_ID,
+        "source_binding": build_subject_body_frame_source_binding(body_publication),
+        "projection_contract": _sealed(
+            schema_id="fixture.subject_body_frame_samples.projection",
+            schema_version=1,
+        ),
+        "join_authority_sha256": capabilities[CROSS_GRAIN_JOIN_AUTHORITY][
+            "payload_sha256"
+        ],
+    }
     roster = build_core_authority_roster(
         recording_id="recording-a",
         analysis_zarr=tmp_path / "recording-a.zarr",
@@ -454,6 +606,7 @@ def _bound_core_motion(tmp_path: Path) -> BoundCoreMotionAndBouts:
         "transition_valid": _FakeArray(transition_valid),
         "sample_valid": _FakeArray(np.ones(3, dtype=bool)),
         "position_finite": _FakeArray(np.ones(3, dtype=bool)),
+        "source_instance_key": _FakeArray(source_instances),
     }
     return BoundCoreMotionAndBouts(
         _verification_seal=roster_module._BOUND_CORE_MOTION_SEAL,
@@ -515,16 +668,37 @@ def test_core_motion_handle_rejects_implicit_or_mismatched_track(
             )
 
 
-def _core_chaser_motion_handle(tmp_path: Path) -> CoreMotionTrackSourceHandle:
-    return bind_core_motion_track_source_handle(
-        _bound_core_motion(tmp_path),
+def _core_chaser_handles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    body_publication: BoundSubjectShapeCoordinatePublication | None = None,
+) -> tuple[CoreMotionTrackSourceHandle, CoreSubjectBodyFrameSourceHandle]:
+    publication = body_publication or _body_publication()
+    bound = _bound_core_motion(tmp_path, body_publication=publication)
+    monkeypatch.setattr(
+        roster_module,
+        "load_persisted_subject_shape_coordinate_publication",
+        lambda *args, **kwargs: publication,
+    )
+    required = (
+        CROSS_GRAIN_JOIN_AUTHORITY,
+        "kinematics_samples",
+        SUBJECT_BODY_FRAME_CAPABILITY,
+    )
+    motion = bind_core_motion_track_source_handle(
+        bound,
         consumer_id=CORE_CHASER_RELATIVE_CONSUMER_ID,
-        required_capabilities=(
-            CROSS_GRAIN_JOIN_AUTHORITY,
-            "kinematics_samples",
-        ),
+        required_capabilities=required,
         track_id=7,
     )
+    body = bind_core_subject_body_frame_source_handle(
+        bound,
+        consumer_id=CORE_CHASER_RELATIVE_CONSUMER_ID,
+        required_capabilities=required,
+        track_id=7,
+    )
+    return motion, body
 
 
 def _chaser_source(tmp_path: Path) -> ChaserRelativeFrameSourceHandle:
@@ -707,13 +881,20 @@ def test_core_chaser_adapter_reuses_existing_relative_frame_surface(
         lambda *args, **kwargs: _timing_authority(),
     )
 
+    motion, body = _core_chaser_handles(tmp_path, monkeypatch)
     adapted = prepare_core_chaser_relative_frame(
-        _core_chaser_motion_handle(tmp_path),
+        motion,
+        body,
         _chaser_source(tmp_path),
     )
     prepared = adapted.prepared
 
     assert prepared.dimensions.n_rows == 6
+    assert prepared.body_arrays is not None
+    assert np.array_equal(
+        prepared.body_arrays["body_source_row_id"],
+        np.repeat(np.asarray([0, 1, 2], dtype=np.int64), 2),
+    )
     assert np.array_equal(
         prepared.base_arrays["track_sample_id"],
         np.asarray([0, 0, 1, 1, 2, 2], dtype=np.int64),
@@ -733,6 +914,9 @@ def test_core_chaser_adapter_reuses_existing_relative_frame_surface(
     )
     core_binding = prepared.manifest["context"]["core_authority"]["record"]
     assert core_binding["core_motion_facts_repeated"] is False
+    assert core_binding["core_subject_body_frame"]["run_path"] == (
+        "analysis/subject_shape_runs/body-a"
+    )
     assert core_binding["chaser_source"]["fish_position_authority"] == (
         "not_used_core_roster_selected_instead"
     )
@@ -766,10 +950,8 @@ def test_core_chaser_adapter_rejects_coordinate_authority_conflict(
         CoreChaserRelativeFrameAdapterError,
         match="source-camera authority",
     ):
-        prepare_core_chaser_relative_frame(
-            _core_chaser_motion_handle(tmp_path),
-            source,
-        )
+        motion, body = _core_chaser_handles(tmp_path, monkeypatch)
+        prepare_core_chaser_relative_frame(motion, body, source)
 
 
 def test_core_chaser_adapter_rejects_a_missing_core_frame(
@@ -795,7 +977,137 @@ def test_core_chaser_adapter_rejects_a_missing_core_frame(
         CoreChaserRelativeFrameAdapterError,
         match="Every chaser frame",
     ):
+        motion, body = _core_chaser_handles(tmp_path, monkeypatch)
+        prepare_core_chaser_relative_frame(motion, body, source)
+
+
+def test_core_subject_body_handle_is_resolver_minted_and_receipt_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(
+        CoreSubjectBodyFrameSourceHandleError,
+        match="minted by the resolver",
+    ):
+        CoreSubjectBodyFrameSourceHandle()
+
+    motion, body = _core_chaser_handles(tmp_path, monkeypatch)
+
+    assert require_core_subject_body_frame_source_handle(body) is body
+    assert body.consumption_receipt == motion.consumption_receipt
+    assert np.array_equal(body.frame_indices, np.asarray([11, 12, 13]))
+    assert np.array_equal(body.instance_keys, np.asarray([101, 102, 103]))
+    assert body.origin_xy.flags.writeable is False
+    assert np.array_equal(
+        motion.array("source_instance_key")["instance_key"],
+        np.asarray([101, 102, 103], dtype=np.uint64),
+    )
+
+
+def test_core_chaser_adapter_keeps_missing_body_observation_explicit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fisheye.analysis_workflows import core_chaser_relative_frame_adapter as module
+
+    monkeypatch.setattr(
+        ChaserRelativeFrameSourceHandle, "assert_current", lambda self: None
+    )
+    monkeypatch.setattr(
+        module,
+        "load_provider_recording_timing_authority",
+        lambda *args, **kwargs: _timing_authority(),
+    )
+    publication = _body_publication(
+        frames=np.asarray([11, 13]),
+        instance_keys=np.asarray([101, 103]),
+    )
+    motion, body = _core_chaser_handles(
+        tmp_path,
+        monkeypatch,
+        body_publication=publication,
+    )
+
+    prepared = prepare_core_chaser_relative_frame(
+        motion,
+        body,
+        _chaser_source(tmp_path),
+    ).prepared
+
+    assert prepared.body_arrays is not None
+    assert np.array_equal(
+        prepared.body_arrays["body_source_row_id"],
+        np.asarray([0, 0, -1, -1, 1, 1], dtype=np.int64),
+    )
+    assert np.array_equal(
+        prepared.body_arrays["body_axes_valid"],
+        np.asarray([True, True, False, False, True, True]),
+    )
+    projection = prepared.manifest["context"]["body_frame_projection"]["record"]
+    assert projection["missing_source_row_count"] == 1
+    assert projection["interpolation"] == "prohibited"
+
+
+def test_core_chaser_adapter_rejects_duplicate_body_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fisheye.analysis_workflows import core_chaser_relative_frame_adapter as module
+
+    monkeypatch.setattr(
+        ChaserRelativeFrameSourceHandle, "assert_current", lambda self: None
+    )
+    monkeypatch.setattr(
+        module,
+        "load_provider_recording_timing_authority",
+        lambda *args, **kwargs: _timing_authority(),
+    )
+    publication = _body_publication(
+        frames=np.asarray([11, 11, 13]),
+        instance_keys=np.asarray([101, 101, 103]),
+    )
+    motion, body = _core_chaser_handles(
+        tmp_path,
+        monkeypatch,
+        body_publication=publication,
+    )
+
+    with pytest.raises(
+        CoreChaserRelativeFrameAdapterError,
+        match="duplicate frame/instance keys",
+    ):
         prepare_core_chaser_relative_frame(
-            _core_chaser_motion_handle(tmp_path),
-            source,
+            motion,
+            body,
+            _chaser_source(tmp_path),
+        )
+
+
+def test_core_chaser_adapter_rejects_separate_body_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        ChaserRelativeFrameSourceHandle, "assert_current", lambda self: None
+    )
+    motion, body = _core_chaser_handles(tmp_path, monkeypatch)
+    separate = bind_core_subject_body_frame_source_handle(
+        body._bound,
+        consumer_id="another.paradigm.consumer.v1",
+        required_capabilities=(
+            CROSS_GRAIN_JOIN_AUTHORITY,
+            "kinematics_samples",
+            SUBJECT_BODY_FRAME_CAPABILITY,
+        ),
+        track_id=7,
+    )
+
+    with pytest.raises(
+        CoreChaserRelativeFrameAdapterError,
+        match="shared admission receipt",
+    ):
+        prepare_core_chaser_relative_frame(
+            motion,
+            separate,
+            _chaser_source(tmp_path),
         )

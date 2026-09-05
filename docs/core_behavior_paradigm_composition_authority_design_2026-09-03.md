@@ -464,14 +464,24 @@ no speed, acceleration, cumulative-distance, or other repeated core-motion
 fact. Its pixel-space fish position is a bounded re-expression of selected
 `positions_mm` under the exact shared physical-scale authority.
 
-The first tranche is position-only: it records body-frame authority as not used
-and exposes no body extension. Canonical body-relative re-projection must bind
-the roster-selected `subject_body_frame_samples` capability before the
-maintained chaser planner can switch to this path; the old body authority is not
-a fallback. The planner still uses `MOTION_BOUT_PAIRS` at this checkpoint and
-therefore remains explicitly incomplete.
+The second tranche binds the roster-selected `subject_body_frame_samples`
+capability through the ordinary strict subject-shape loader and mints a
+receipt-bound process-local body handle. Chaser rows join to body observations
+only by the declared `(recording_id, source_acquisition_frame_index,
+source_instance_key)` key. A missing observation remains explicit `-1`/NaN
+evidence, duplicate compound keys fail closed, and interpolation, neighboring
+body frames, motion-heading substitution, and the historical chaser body
+authority are all prohibited. Motion and body handles must carry the identical
+consumer/capability/track receipt from one roster. The existing body extension
+and publisher carry the result; no second body schema or publication surface
+was introduced.
 
-Focused workstation validation passed 14/14 core-roster/adapter tests and
+The maintained planner still uses `MOTION_BOUT_PAIRS` at this checkpoint and
+therefore remains explicitly incomplete. It must switch atomically to the
+roster-selected motion, body, bout, and explicit track identities; the old body
+authority is not a fallback during that migration.
+
+Focused workstation validation passed 18/18 core-roster/adapter tests and
 16/16 existing chaser materializer/proxy tests. A real
 prepared-writer-to-atomic-materializer-to-unpatched-source-handle regression
 also proves that the optional roster context survives the existing publication
