@@ -4,13 +4,17 @@ import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 
 import pytest
 
 from fisheye.analysis_workflows.core_behavior_cohort_adapter import (
     CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
     core_behavior_capability_contract,
+)
+from fisheye.analysis_workflows.core_chaser_composite_bundle import (
+    CORE_CHASER_BUNDLE_ADAPTER_ID,
+    core_chaser_capability_contract,
 )
 from fisheye.analysis_workflows.validated_behavior_cohort import (
     build_validated_behavior_bundle_set,
@@ -52,6 +56,10 @@ from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import
     CORE_BEHAVIOR_TABLE_SPECS_V1,
     KINEMATICS_SAMPLES,
     KINEMATICS_SAMPLES_V1,
+)
+from fisheye.analytics_exports.validated_behavior_core_chaser_contracts import (
+    CORE_CHASER_EXPORT_PROFILE_ID,
+    CORE_CHASER_TABLE_SPECS,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.analytics_exports.validated_behavior_profiles import (
@@ -414,6 +422,18 @@ def test_bundle_cli_dispatches_typed_roles_without_a_second_command() -> None:
         bundle_cli._bundle_adapter_for_membership(mixed)  # noqa: SLF001
 
 
+def test_bundle_cli_dispatches_one_core_plus_chaser_profile_from_exact_roles() -> None:
+    membership = _membership_for_role(CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE)
+    membership["members"][0]["admission_receipts"].append(  # type: ignore[index, union-attr]
+        {"role": EXACT_CHASER_ADMISSION_ROLE}
+    )
+
+    assert (
+        bundle_cli._bundle_adapter_for_membership(membership)  # noqa: SLF001
+        == CORE_CHASER_BUNDLE_ADAPTER_ID
+    )
+
+
 def test_profile_aware_bundle_cannot_be_reinterpreted_by_another_export() -> None:
     bundle_set = {
         "bundle_profile": {"export_profile_id": CORE_BEHAVIOR_EXPORT_PROFILE_ID}
@@ -501,7 +521,15 @@ def _fixture_digest(label: str) -> str:
     return canonical_json_sha256({"fixture": label})
 
 
-def _core_profile_plan(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+def _core_profile_plan(
+    tmp_path: Path,
+    *,
+    table_specs: Mapping[str, Any] = CORE_BEHAVIOR_TABLE_SPECS,
+    export_profile_id: str = CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+    adapter_id: str = CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
+    admission_roles: tuple[str, ...] = (CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE,),
+    capability_contract: Mapping[str, Any] | None = None,
+) -> tuple[Path, dict[str, Any]]:
     commit = "a" * 40
     now = "2026-09-04T12:00:00Z"
     analysis_root = (tmp_path / "recordings").resolve()
@@ -513,8 +541,20 @@ def _core_profile_plan(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
     source_member = {"recording_id": "recording-a"}
     source_path = tmp_path / "source-membership.json"
     _write_json(source_path, {"members": [source_member]})
-    receipt_path = receipt_root / "recording-a" / "execution-report.json"
-    _write_json(receipt_path, {"status": "complete"})
+    receipt_bindings: list[dict[str, Any]] = []
+    for index, role in enumerate(admission_roles):
+        receipt_path = receipt_root / "recording-a" / f"receipt-{index}.json"
+        _write_json(receipt_path, {"status": "complete", "role": role})
+        receipt_bindings.append(
+            {
+                "role": role,
+                "path": str(receipt_path.resolve()),
+                "file_sha256": _file_sha256(receipt_path),
+                "record_sha256": _fixture_digest(f"receipt-{index}"),
+                "schema_id": f"fixture.receipt.{index}",
+                "schema_version": 1,
+            }
+        )
     decision_path = tmp_path / "identity-decision.md"
     decision_path.write_text("one recording is one analysis unit\n", encoding="utf-8")
 
@@ -559,16 +599,7 @@ def _core_profile_plan(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
                     "file_sha256": None,
                     "record_sha256": None,
                 },
-                "admission_receipts": [
-                    {
-                        "role": CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE,
-                        "path": str(receipt_path.resolve()),
-                        "file_sha256": _file_sha256(receipt_path),
-                        "record_sha256": _fixture_digest("execution-report"),
-                        "schema_id": "fixture.execution_report",
-                        "schema_version": 1,
-                    }
-                ],
+                "admission_receipts": receipt_bindings,
             }
         ],
         analysis_zarr_root=analysis_root,
@@ -606,7 +637,7 @@ def _core_profile_plan(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
 
     bundle_path = bundle_root / "recording-a.bundle.json"
     _write_json(bundle_path, {"status": "complete"})
-    capability_contract = core_behavior_capability_contract()
+    capability_contract = capability_contract or core_behavior_capability_contract()
     capabilities = {
         key: {
             "state": "complete",
@@ -616,7 +647,6 @@ def _core_profile_plan(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
         }
         for key in capability_contract["keys"]
     }
-    receipt_binding = membership["members"][0]["admission_receipts"][0]
     bundle_set = build_validated_behavior_bundle_set(
         bundle_set_id="core-motion-boundary-bundles-v2",
         membership=membership,
@@ -624,8 +654,8 @@ def _core_profile_plan(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
         membership_file_sha256=_file_sha256(membership_path),
         bundle_root=bundle_root,
         bundle_profile={
-            "adapter_id": CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
-            "export_profile_id": CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+            "adapter_id": adapter_id,
+            "export_profile_id": export_profile_id,
         },
         capability_contract=capability_contract,
         members=[
@@ -634,7 +664,7 @@ def _core_profile_plan(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
                 "bundle_state": "complete",
                 "reason_code": None,
                 "bundle": {
-                    "adapter_id": CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
+                    "adapter_id": adapter_id,
                     "path": str(bundle_path.resolve()),
                     "file_sha256": _file_sha256(bundle_path),
                     "record_sha256": _fixture_digest("bundle"),
@@ -642,7 +672,7 @@ def _core_profile_plan(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
                     "schema_version": 1,
                     "method_id": "fixture_core_behavior_bundle_v1",
                     "status": "complete",
-                    "receipt_bindings": [receipt_binding],
+                    "receipt_bindings": receipt_bindings,
                     "binding_inventory_sha256": _fixture_digest("binding-inventory"),
                 },
                 "capabilities": capabilities,
@@ -661,8 +691,8 @@ def _core_profile_plan(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
         publication_root=(tmp_path / "publication").resolve(),
         palette_commit=commit,
         palette_repo=Path(__file__).resolve().parents[3],
-        table_specs=CORE_BEHAVIOR_TABLE_SPECS,
-        export_profile_id=CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+        table_specs=table_specs,
+        export_profile_id=export_profile_id,
         created_at_utc=now,
     )
     plan_path = tmp_path / "plan.json"
@@ -676,8 +706,9 @@ def _fixture_scientific_row(
     plan: dict[str, Any],
     member: dict[str, Any],
     bundle_member: dict[str, Any],
+    table_specs: Mapping[str, Any] = CORE_BEHAVIOR_TABLE_SPECS,
 ) -> dict[str, Any]:
-    spec = CORE_BEHAVIOR_TABLE_SPECS[table_name]
+    spec = table_specs[table_name]
     known: dict[str, Any] = {
         "export_run_id": plan["export_run_id"],
         "recording_id": member["recording_id"],
@@ -699,6 +730,7 @@ def _fixture_scientific_row(
         "signed_tangential_acceleration_mm_s2": -2.0,
         "smoothed_signed_tangential_acceleration_mm_s2": -1.5,
         "cumulative_smoothed_path_distance_mm": 9.5,
+        "core_subject_shape_row_index": 0,
     }
     row: dict[str, Any] = {}
     for field in spec.contract.fields:
@@ -776,3 +808,73 @@ def test_core_motion_v2_real_writer_publisher_unpatched_reader_round_trip(
     assert row["speed_filtered_mm_s"] == pytest.approx(4.0)
     assert row["signed_tangential_acceleration_mm_s2"] == pytest.approx(-2.0)
     assert row["cumulative_smoothed_path_distance_mm"] == pytest.approx(9.5)
+
+
+def test_core_chaser_real_writer_publisher_unpatched_reader_round_trip(
+    tmp_path: Path,
+) -> None:
+    plan_path, plan = _core_profile_plan(
+        tmp_path,
+        table_specs=CORE_CHASER_TABLE_SPECS,
+        export_profile_id=CORE_CHASER_EXPORT_PROFILE_ID,
+        adapter_id=CORE_CHASER_BUNDLE_ADAPTER_ID,
+        admission_roles=(
+            CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE,
+            EXACT_CHASER_ADMISSION_ROLE,
+        ),
+        capability_contract=core_chaser_capability_contract(),
+    )
+    scientific_tables = set(CORE_CHASER_TABLE_SPECS).difference(CORE_TABLE_NAMES)
+
+    def extractor(table_name: str) -> Any:
+        def rows(
+            plan_value: dict[str, Any],
+            member: dict[str, Any],
+            bundle_member: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], None]:
+            return [
+                _fixture_scientific_row(
+                    table_name=table_name,
+                    plan=plan_value,
+                    member=member,
+                    bundle_member=bundle_member,
+                    table_specs=CORE_CHASER_TABLE_SPECS,
+                )
+            ], None
+
+        return rows
+
+    write_validated_behavior_recording_shard(
+        plan_path=plan_path,
+        member_ordinal=1,
+        table_specs=CORE_CHASER_TABLE_SPECS,
+        row_extractors={
+            table_name: extractor(table_name) for table_name in scientific_tables
+        },
+        created_at_utc="2026-09-05T12:01:00Z",
+    )
+    published = publish_validated_behavior_cohort(
+        plan_path=plan_path,
+        table_specs=CORE_CHASER_TABLE_SPECS,
+        generation_id="core-chaser-boundary-generation-v1",
+        created_at_utc="2026-09-05T12:02:00Z",
+    )
+
+    # No table specs are injected: the public reader must select the installed
+    # composite profile and its cross-grain foreign keys from the manifest.
+    dataset = ValidatedBehaviorExportDataset.open(
+        plan["publication_root"], plan["export_run_id"]
+    )
+    body_row = (
+        dataset.table("body_relative_samples").collect_bounded(max_rows=2).to_dicts()[0]
+    )
+
+    assert published["status"] == "complete_selector_ineligible"
+    assert dataset.manifest["export_profile"]["profile_id"] == (
+        CORE_CHASER_EXPORT_PROFILE_ID
+    )
+    assert len(dataset.table_names) == 30
+    assert "provider_motion_samples" not in dataset.table_names
+    assert "body_frame_samples" not in dataset.table_names
+    assert dataset.table_names.count("canonical_swim_bouts") == 1
+    assert body_row["core_subject_shape_row_index"] == 0

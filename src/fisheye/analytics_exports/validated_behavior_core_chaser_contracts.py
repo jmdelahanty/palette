@@ -13,13 +13,13 @@ from dataclasses import replace
 from types import MappingProxyType
 from typing import Mapping
 
+from .arrow_contract_core import field
 from .validated_behavior_contracts import (
     ValidatedBehaviorTableSpec,
     compose_disjoint_table_specs,
 )
 from .validated_behavior_core_behavior_contracts import CORE_BEHAVIOR_TABLE_SPECS
 from .validated_behavior_phase_c_contracts import PHASE_C_TABLE_SPECS
-
 
 CORE_CHASER_EXPORT_PROFILE_ID = "validated_core_behavior_chaser_v1"
 CORE_BOUND_CHASER_RELATIVE_PAIR_CAPABILITY = "core_bound_chaser_relative_pair"
@@ -86,6 +86,17 @@ def _extension_specs() -> Mapping[str, ValidatedBehaviorTableSpec]:
     body_relative = retained["body_relative_samples"]
     retained["body_relative_samples"] = replace(
         body_relative,
+        contract=replace(
+            body_relative.contract,
+            fields=body_relative.contract.fields
+            + (
+                field(
+                    "core_subject_shape_row_index",
+                    "int64",
+                    nullable=True,
+                ),
+            ),
+        ),
         foreign_keys=tuple(
             foreign_key
             for foreign_key in body_relative.foreign_keys
@@ -96,7 +107,7 @@ def _extension_specs() -> Mapping[str, ValidatedBehaviorTableSpec]:
                 (
                     "export_run_id",
                     "recording_id",
-                    "body_source_row_id",
+                    "core_subject_shape_row_index",
                 ),
                 "subject_body_frame_samples",
                 (
@@ -111,6 +122,10 @@ def _extension_specs() -> Mapping[str, ValidatedBehaviorTableSpec]:
             (
                 "body_frame_authority",
                 "foreign_key_to_selected_core_subject_body_frame_samples",
+            ),
+            (
+                "missing_body_frame_join",
+                "nullable_foreign_key_with_explicit_invalid_source_row_evidence",
             ),
         ),
     )

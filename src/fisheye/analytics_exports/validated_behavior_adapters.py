@@ -463,16 +463,37 @@ class _RecordingContext:
             "file_sha256"
         ):
             _fail("Recording bundle file is absent or differs from the bundle set.")
-        from fisheye.analysis_workflows.validated_recording_behavior_bundle import (
-            read_validated_recording_behavior_bundle,
+        from fisheye.analysis_workflows.core_chaser_composite_bundle import (
+            CORE_CHASER_BUNDLE_ADAPTER_ID,
+            read_core_chaser_composite_bundle,
+        )
+        from fisheye.analysis_workflows.validated_behavior_cohort_adapters import (
+            RECORDING_BUNDLE_ADAPTER_ID,
         )
 
-        bundle = read_validated_recording_behavior_bundle(
-            bundle_path,
-            expected_analysis_zarr=membership_member["analysis_zarr"],
-            expected_recording_id=membership_member["recording_id"],
-            validate_current_sources=False,
-        )
+        adapter_id = bundle_binding.get("adapter_id")
+        if adapter_id == CORE_CHASER_BUNDLE_ADAPTER_ID:
+            bundle = read_core_chaser_composite_bundle(
+                bundle_path,
+                expected_analysis_zarr=membership_member["analysis_zarr"],
+                expected_recording_id=membership_member["recording_id"],
+                validate_current_sources=False,
+            )
+            bundle_capabilities = bundle["internal_capabilities"]
+        elif adapter_id == RECORDING_BUNDLE_ADAPTER_ID:
+            from fisheye.analysis_workflows.validated_recording_behavior_bundle import (
+                read_validated_recording_behavior_bundle,
+            )
+
+            bundle = read_validated_recording_behavior_bundle(
+                bundle_path,
+                expected_analysis_zarr=membership_member["analysis_zarr"],
+                expected_recording_id=membership_member["recording_id"],
+                validate_current_sources=False,
+            )
+            bundle_capabilities = bundle["capabilities"]
+        else:
+            _fail("Chaser extractor received an unsupported bundle adapter.")
         if (
             bundle["record_sha256"] != bundle_binding.get("record_sha256")
             or bundle["schema_id"] != bundle_binding.get("schema_id")
@@ -482,7 +503,7 @@ class _RecordingContext:
         ):
             _fail("Recording bundle identity differs from its bundle-set member.")
         for capability, normalized in bundle_member["capabilities"].items():
-            raw = bundle["capabilities"][capability]
+            raw = bundle_capabilities[capability]
             expected_binding = (
                 None
                 if raw["state"] != "complete"
@@ -521,9 +542,47 @@ class _RecordingContext:
         }
 
     def require_capability(self, capability: str) -> None:
-        record = self.bundle["capabilities"].get(capability)
+        capabilities = self.bundle.get("internal_capabilities")
+        if not isinstance(capabilities, Mapping):
+            capabilities = self.bundle.get("capabilities")
+        record = (
+            capabilities.get(capability) if isinstance(capabilities, Mapping) else None
+        )
         if not isinstance(record, Mapping) or record.get("state") != "complete":
             _fail(f"Required bundle capability {capability!r} is not complete.")
+
+    def motion_provider_identity(self) -> tuple[str, str]:
+        """Return one selected motion identity across supported bundle profiles."""
+
+        binding = _mapping(
+            self.bundle["source_bindings"].get("provider_motion"),
+            field="provider_motion source binding",
+        )
+        if binding.get("binding_type") == "selected_core_motion_authority_v1":
+            authority = _mapping(
+                binding.get("authority"), field="selected core motion authority"
+            )
+            return (
+                _text(authority.get("provider_id"), field="core motion provider ID"),
+                _text(
+                    authority.get("provider_digest"),
+                    field="core motion provider digest",
+                ),
+            )
+        authority = _mapping(
+            binding.get("source_authority"), field="provider motion authority"
+        )
+        record = _mapping(authority.get("record"), field="provider motion record")
+        position = _mapping(
+            record.get("position_source"), field="provider motion position source"
+        )
+        return (
+            _text(position.get("estimator_id"), field="position estimator ID"),
+            _text(
+                position.get("estimator_sha256"),
+                field="position estimator digest",
+            ),
+        )
 
     def child_binding(self, key: str) -> Mapping[str, Any]:
         self.require_capability(key)
@@ -1368,17 +1427,15 @@ def _epoch_behavior_summary(
         name: handle.array(f"per_epoch_fish/{name}") for name in _EPOCH_FISH_ARRAYS
     }
     sources = _array_rows(arrays, _EPOCH_FISH_ARRAYS)
-    provider_authority = context.bundle["source_bindings"]["provider_motion"][
-        "source_authority"
-    ]["record"]["position_source"]
+    provider_id, provider_digest = context.motion_provider_identity()
     rename = {"window_id": "epoch_window_id"}
     rows = []
     for source in sources:
         row = {
             **context.child_common("epoch_behavior"),
             **{rename.get(name, name): source[name] for name in _EPOCH_FISH_ARRAYS},
-            "position_provider_id": str(provider_authority["estimator_id"]),
-            "position_provider_digest": str(provider_authority["estimator_sha256"]),
+            "position_provider_id": provider_id,
+            "position_provider_digest": provider_digest,
         }
         for name in (
             "track_id",
