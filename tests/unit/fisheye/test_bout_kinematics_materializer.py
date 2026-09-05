@@ -186,6 +186,10 @@ def test_materialize_bout_kinematics_storage_publishes_without_promotion(
     assert candidate["movement_metrics/bout_id"].shards is not None
     assert candidate["heading_metrics/heading_level_bytes"].shards is not None
     assert candidate["visualizations/summary_png"].shards is None
+    consolidated = zarr.open_group(str(source), mode="r", use_consolidated=True)
+    consolidated_parent = consolidated["analysis/bout_kinematics_runs"]
+    assert dict(consolidated_parent.attrs) == dict(parent.attrs)
+    assert dict(consolidated_parent["bout_candidate"].attrs) == dict(candidate.attrs)
 
 
 def test_promote_bout_candidate_validates_then_updates_both_pointers(
@@ -422,3 +426,7 @@ def test_compute_materializer_publishes_and_promotes_local_run(
     assert fresh.attrs["cluster_output_staging"]["promotion_policy"] == (
         "complete_ineligible_then_pointers_then_eligibility_final"
     )
+    consolidated = zarr.open_group(str(source), mode="r", use_consolidated=True)
+    consolidated_parent = consolidated["analysis/bout_kinematics_runs"]
+    assert dict(consolidated_parent.attrs) == dict(parent.attrs)
+    assert dict(consolidated_parent["bout_fresh"].attrs) == dict(fresh.attrs)

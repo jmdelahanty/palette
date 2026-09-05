@@ -15,6 +15,7 @@ are cached for the lifetime of the source handle.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path, PurePosixPath
 import re
 from types import MappingProxyType
@@ -22,6 +23,9 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from fisheye.analysis.swim_bout_io import (
+    load_exact_selector_ineligible_default_swim_bout_tables,
+)
 from fisheye.analysis_workflows.exact_chaser_projection_receipt import (
     read_exact_chaser_projection_receipt,
 )
@@ -493,6 +497,100 @@ class ValidatedRecordingBehaviorSource:
                 "Semantic intervals and role bindings do not close the same axis."
             )
         return tuple(sorted(result, key=lambda item: item.window_id))
+
+    def canonical_swim_bout_tables(self) -> Any:
+        """Load the exact selector-ineligible bout source sealed by the bundle."""
+
+        capability = self.require_capability(
+            "canonical_swim_bouts", expected_binding_scope="source_bindings"
+        )
+        binding = _mapping(
+            capability.binding.get("source"), field="canonical_swim_bouts.source"
+        )
+        run_path = _text(
+            binding.get("run_path"), field="canonical_swim_bouts.source.run_path"
+        )
+        prefix = "analysis/swim_bout_runs/"
+        if not run_path.startswith(prefix) or "/" in run_path[len(prefix) :]:
+            raise ValidatedRecordingBehaviorSourceError(
+                "Canonical swim-bout binding does not name one exact run."
+            )
+        root = open_zarr_root(
+            self.analysis_zarr, mode="r", use_consolidated=True
+        )
+        tables = load_exact_selector_ineligible_default_swim_bout_tables(
+            root, run_name=run_path.rsplit("/", 1)[-1]
+        )
+        frame_contract = tables.run_attrs.get("frame_axis_contract")
+        motion_authority = tables.run_attrs.get("source_track_motion_authority")
+        if not isinstance(frame_contract, Mapping) or not isinstance(
+            motion_authority, Mapping
+        ):
+            raise ValidatedRecordingBehaviorSourceError(
+                "Bound swim-bout run lacks exact frame or motion authority."
+            )
+        expected = {
+            "run_path": run_path,
+            "lineage_hash": binding.get("lineage_hash"),
+            "track_id": int(binding["track_id"]),
+            "candidate_id": int(binding["default_candidate_id"]),
+            "signal_id": int(binding["default_signal_id"]),
+            "signal_level": str(binding["default_signal_level"]),
+            "frame_axis_sha256": str(binding["frame_axis_sha256"]),
+            "motion_manifest": str(
+                binding["source_track_motion_manifest_sha256"]
+            ),
+            "motion_verification": str(
+                binding["source_track_motion_verification_digest"]
+            ),
+        }
+        observed = {
+            "run_path": tables.run_path,
+            "lineage_hash": tables.run_attrs.get("lineage_hash"),
+            "track_id": tables.candidate.track_id,
+            "candidate_id": tables.candidate.candidate_id,
+            "signal_id": tables.signal.signal_id,
+            "signal_level": tables.signal.speed_level,
+            "frame_axis_sha256": frame_contract.get("content_sha256"),
+            "motion_manifest": frame_contract.get(
+                "source_track_motion_manifest_sha256"
+            ),
+            "motion_verification": motion_authority.get(
+                "provider_verification_digest"
+            ),
+        }
+        if observed != expected or tables.signal.role != "detector_response":
+            raise ValidatedRecordingBehaviorSourceError(
+                "Selected swim-bout source differs from the validated bundle."
+            )
+        fps = tables.run_attrs.get("fps")
+        if (
+            isinstance(fps, bool)
+            or not isinstance(fps, (int, float))
+            or not math.isfinite(float(fps))
+            or float(fps) <= 0
+        ):
+            raise ValidatedRecordingBehaviorSourceError(
+                "Bound swim-bout run lacks exact positive FPS."
+            )
+        required_interval_fields = {
+            "interval_id",
+            "valid",
+            "prev_bout_id",
+            "next_bout_id",
+            "prev_end_frame",
+            "next_start_frame",
+            "interval_frames",
+            "prev_end_time_s",
+            "next_start_time_s",
+            "interval_s",
+        }
+        observed_fields = set(tables.inter_bout_intervals.dtype.names or ())
+        if not required_interval_fields.issubset(observed_fields):
+            raise ValidatedRecordingBehaviorSourceError(
+                "Bound swim-bout run lacks required interval fields."
+            )
+        return tables
 
     def provider_motion_catalog(self) -> ProviderMotionArrayCatalog:
         if self._provider_catalog is not None:

@@ -128,6 +128,7 @@ def _build_root() -> _FakeGroup:
             "source_refined_run": "refined_001",
             "height": 1000,
             "width": 1000,
+            "palette_run_completion_status": "complete",
         }
     )
     crop_run.create_array("frame_indices", data=np.array([0, 1, 2], dtype=np.int32))
@@ -597,7 +598,14 @@ def test_assign_arenas_spatial_resolves_canonical_keypoint_crop_and_exact_runs(
     root = _build_root()
     keypoints = root.create_group("keypoints_runs")
     canonical = keypoints.create_group("canonical_a")
-    canonical.attrs["source_crop_run"] = "crop_001"
+    canonical.attrs.update(
+        {
+            "source_crop_run": "crop_001",
+            "keypoints_processed": 3,
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        }
+    )
     captured: dict[str, object] = {}
 
     def fake_open(_path: str, mode: str = "a"):
@@ -622,8 +630,6 @@ def test_assign_arenas_spatial_resolves_canonical_keypoint_crop_and_exact_runs(
         return "tracks_a", track, {"ok": True}
 
     monkeypatch.setattr(mod, "open_zarr_root", fake_open)
-    monkeypatch.setattr(mod, "is_run_complete_in_parent", lambda *_a, **_k: True)
-    monkeypatch.setattr(mod, "is_run_selector_eligible", lambda _group: True)
     monkeypatch.setattr(
         mod,
         "require_runs_parent",

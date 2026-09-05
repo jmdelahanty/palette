@@ -115,6 +115,14 @@ def _build_canonical_sealed_source(tmp_path: Path) -> Path:
         "instance_key",
         data=np.asarray(crop["instance_key"][:]),
     )
+    keypoints.attrs.update(
+        {
+            "source_crop_run": "canonical_track_source",
+            "keypoints_processed": 2,
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        }
+    )
 
     tracking = root.require_group("tracking_runs").create_group("trk_1")
     tracking.create_array("track_ids", data=np.asarray([7, 7], dtype=np.int32))

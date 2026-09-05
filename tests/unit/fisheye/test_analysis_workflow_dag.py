@@ -20,7 +20,9 @@ from fisheye.analysis_workflows import (
 from fisheye.utils.plan_analysis_workflow import build_availability
 
 
-def _write_zarr_metadata(path: Path, attributes: dict[str, object] | None = None) -> None:
+def _write_zarr_metadata(
+    path: Path, attributes: dict[str, object] | None = None
+) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / "zarr.json").write_text(
         json.dumps(
@@ -34,11 +36,12 @@ def _write_zarr_metadata(path: Path, attributes: dict[str, object] | None = None
     )
 
 
-def test_core_behavior_profile_declares_portable_and_framewise_resolutions() -> None:
+def test_core_behavior_profile_preserves_framewise_scientific_traces() -> None:
     workflow = load_analysis_workflow(default_core_behavior_profile_path())
 
     assert workflow.workflow_id == "core_behavior_v1"
-    assert workflow.temporal_policy.kinematics_sample_rate_hz == 10.0
+    assert workflow.temporal_policy.kinematics_resolution == "framewise"
+    assert workflow.temporal_policy.kinematics_sample_rate_hz is None
     assert workflow.temporal_policy.activity_spatial_bin_size_s == 5.0
     assert workflow.temporal_policy.eye_trace_resolution == "framewise"
     assert workflow.temporal_policy.tail_trace_resolution == "framewise"
@@ -131,7 +134,11 @@ def test_temporal_policy_allows_numeric_overrides_but_not_trace_downsampling() -
         activity_spatial_bin_size_s=2.5,
     )
 
-    assert policy.product_policy("kinematics")["sample_rate_hz"] == 20.0
+    assert policy.product_policy("kinematics") == {
+        "resolution": "sampled",
+        "sample_rate_hz": 20.0,
+        "source_authority": "framewise_zarr",
+    }
     assert policy.product_policy("activity_spatial")["bin_size_s"] == 2.5
     with pytest.raises(ValueError, match="eye_traces.resolution must remain"):
         TemporalPolicy(eye_trace_resolution="10_hz")
@@ -144,6 +151,27 @@ def test_temporal_policy_rejects_unknown_configuration_fields() -> None:
         TemporalPolicy.from_mapping({"kinematic": {"sample_rate_hz": 10}})
     with pytest.raises(ValueError, match="unknown temporal_policy.kinematics field"):
         TemporalPolicy.from_mapping({"kinematics": {"sample_hz": 10}})
+
+
+def test_temporal_policy_round_trips_framewise_and_historical_sampled_forms() -> None:
+    framewise = TemporalPolicy()
+    assert TemporalPolicy.from_mapping(framewise.to_dict()) == framewise
+    assert framewise.kinematics_export_rate_hz(source_sample_rate_hz=29.97) == (
+        29.97
+    )
+
+    sampled = TemporalPolicy.from_mapping(
+        {"kinematics": {"sample_rate_hz": 10}}
+    )
+    assert sampled.kinematics_resolution == "sampled"
+    assert sampled.kinematics_export_rate_hz(source_sample_rate_hz=30) == 10.0
+
+
+def test_framewise_temporal_policy_rejects_a_sampling_rate() -> None:
+    with pytest.raises(ValueError, match="must not declare sample_rate_hz"):
+        TemporalPolicy.from_mapping(
+            {"kinematics": {"resolution": "framewise", "sample_rate_hz": 10}}
+        )
 
 
 @pytest.mark.parametrize(
@@ -160,7 +188,13 @@ def test_temporal_policy_rejects_non_positive_or_non_finite_values(
     value: float,
 ) -> None:
     with pytest.raises(ValueError, match="positive finite"):
-        TemporalPolicy(**{field: value})
+        if field == "kinematics_sample_rate_hz":
+            TemporalPolicy(
+                kinematics_resolution="sampled",
+                kinematics_sample_rate_hz=value,
+            )
+        else:
+            TemporalPolicy(**{field: value})
 
 
 def test_targeted_plan_reuses_authority_and_schedules_only_dependency_closure() -> None:
@@ -204,8 +238,7 @@ def test_targeted_plan_reuses_authority_and_schedules_only_dependency_closure() 
     assert plan.node_by_id["refined_keypoints"].action == "reuse"
     assert plan.node_by_id["tracks"].action == "reuse"
     assert plan.node_by_id["kinematics_samples"].temporal_policy == {
-        "resolution": "sampled",
-        "sample_rate_hz": 10.0,
+        "resolution": "framewise",
         "source_authority": "framewise_zarr",
     }
 
@@ -343,6 +376,55 @@ def test_availability_refuses_child_when_dependency_is_unavailable(
     assert plan.execution_order == ("track_kinematics", "swim_bouts")
 
 
+def test_availability_resolves_dependencies_before_declaration_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = AnalysisWorkflow(
+        schema_id=ANALYSIS_WORKFLOW_SCHEMA_ID,
+        schema_version=ANALYSIS_WORKFLOW_SCHEMA_VERSION,
+        workflow_id="reverse_declaration_order",
+        description="dependency-first availability fixture",
+        nodes=(
+            WorkflowNode(
+                node_id="eye_angles",
+                kind="analysis",
+                stage_id="eye_angles",
+                depends_on=("subject_shape",),
+            ),
+            WorkflowNode(
+                node_id="subject_shape",
+                kind="analysis",
+                stage_id="subject_shape",
+            ),
+        ),
+        targets=("eye_angles",),
+    )
+    observed: list[tuple[str, dict[str, str]]] = []
+
+    def discover(_zarr_path, stage_id, *, dependency_runs, **_kwargs):
+        observed.append((stage_id, dict(dependency_runs)))
+        run_name = "shape_a" if stage_id == "subject_shape" else "eyes_a"
+        return StageAvailability(
+            stage_id=stage_id,
+            available=True,
+            run_name=run_name,
+            reason="complete",
+        )
+
+    monkeypatch.setattr(
+        "fisheye.utils.plan_analysis_workflow.discover_stage_availability",
+        discover,
+    )
+
+    availability = build_availability(workflow, Path("recording.zarr"))
+
+    assert availability["eye_angles"].available is True
+    assert observed == [
+        ("subject_shape", {}),
+        ("eye_angles", {"subject_shape": "shape_a"}),
+    ]
+
+
 def test_workflow_rejects_dependency_cycles() -> None:
     with pytest.raises(ValueError, match="dependency cycle"):
         AnalysisWorkflow(
@@ -358,7 +440,9 @@ def test_workflow_rejects_dependency_cycles() -> None:
         )
 
 
-def test_availability_resolver_uses_latest_complete_metadata_pointer(tmp_path: Path) -> None:
+def test_availability_resolver_uses_latest_complete_metadata_pointer(
+    tmp_path: Path,
+) -> None:
     parent = tmp_path / "analysis" / "track_kinematics_runs" / "offline"
     _write_zarr_metadata(
         parent,
@@ -421,9 +505,7 @@ def _write_keypoint_crop_tracking_lineage(
             "artifact_class": "geometry_only_analysis",
             "stage_selector_eligible": False,
             "run_manifest": {
-                "payload": {
-                    "source_refined_snapshot": {"run_id": "refined_a"}
-                }
+                "payload": {"source_refined_snapshot": {"run_id": "refined_a"}}
             },
         },
     )
@@ -557,9 +639,7 @@ def test_subject_mask_resolver_uses_active_root_bundle_authority(
                 "bundle_id": bundle_id,
                 "bundle_path": f"subject_mask_bundle_runs/{bundle_id}",
                 "members": {
-                    "refined": {
-                        "run_path": "refined_subject_masks_runs/refined_a"
-                    }
+                    "refined": {"run_path": "refined_subject_masks_runs/refined_a"}
                 },
             },
         },
@@ -666,9 +746,7 @@ def test_visualization_availability_is_tied_to_selected_track_run(
     )
     motion_authority = {
         "run_ref": "/analysis/track_kinematics_runs/offline/track_a",
-        "track_ref": (
-            "/analysis/track_kinematics_runs/offline/track_a/tracks/id_0"
-        ),
+        "track_ref": ("/analysis/track_kinematics_runs/offline/track_a/tracks/id_0"),
         "track_id": 0,
         "motion_manifest_sha256": "a" * 64,
         "positions_px_coordinate_descriptor_sha256": "b" * 64,
@@ -684,9 +762,7 @@ def test_visualization_availability_is_tied_to_selected_track_run(
         },
     )
     artifact = (
-        render
-        / "visualizations"
-        / "track_kinematics_summary_track_0_interactive"
+        render / "visualizations" / "track_kinematics_summary_track_0_interactive"
     )
     _write_zarr_metadata(
         artifact,

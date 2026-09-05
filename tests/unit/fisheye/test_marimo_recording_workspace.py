@@ -64,6 +64,7 @@ def test_recording_workspace_exposes_compact_live_handles(tmp_path: Path) -> Non
             "position_df",
             "windows_df",
         ),
+        "distribution_series_count": 0,
         "persisted_pngs": (),
     }
     assert "recording-17" in repr(workspace)
@@ -83,6 +84,22 @@ def test_recording_workspace_opens_zarr_read_only(monkeypatch, tmp_path: Path) -
 
     assert workspace.open_zarr() is sentinel
     assert calls == [(tmp_path / "recording_analysis.zarr", "r")]
+
+
+def test_recording_workspace_exposes_selected_distribution_series(
+    tmp_path: Path,
+) -> None:
+    workspace, _, _ = _workspace(tmp_path)
+    first = object()
+    second = object()
+    object.__setattr__(
+        workspace,
+        "distribution_view",
+        SimpleNamespace(series=(first, second)),
+    )
+
+    assert workspace.distribution_series == (first, second)
+    assert workspace.summary()["distribution_series_count"] == 2
 
 
 def test_recording_workspace_exposes_gaze_tables_and_persisted_png(tmp_path: Path) -> None:

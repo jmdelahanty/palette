@@ -248,10 +248,31 @@ Palette source. This mode is intentionally limited to one selected recording.
 
 The single-recording explorer uses targeted track/chaser provider discovery
 rather than constructing the audit-oriented whole-recording artifact
-inventory. Within one selected recording/run, the process retains the time
-coordinate, resolved bout source, and bout-event rows in RAM so reactive time
-window changes do not repeat network metadata and table reads. Speed samples
-remain bounded Zarr slices from the authoritative source.
+inventory. Its recording roster is metadata-only: provider specs are opened
+once, after a recording is selected. Unpromoted provider-chaser candidates are
+excluded from ordinary discovery because admitting them performs a deep array
+audit; they remain inspectable through an explicit candidate-renderer filter.
+
+A validated recording-behavior bundle is admitted at launch by validating its
+complete JSON envelope and record digest. Current scientific sources are then
+validated at the selected provider boundary: exact chaser views use their
+bound child receipts, while Core Behavior verifies the selected provider-motion
+manifest, track partition, and every consumed array. This deferral does not
+weaken producer, publication, or selector validation.
+
+Within one explorer session, bounded LRU caches retain exact-chaser projections
+and cohort view payloads. Keys include the immutable receipt or manifest digest,
+the selected analysis/metric and weighting, and display-method identity; exact
+chaser keys also include renderer and display-parameter versions. A changed
+identity is always a cache miss. These caches are display accelerators only and
+cannot become scientific evidence, publication authority, or selector state.
+The exact-chaser cache retains at most two projections because those values can
+own large arrays.
+
+Within one selected recording/run, the process retains the time coordinate,
+resolved bout source, and bout-event rows in RAM so reactive time window changes
+do not repeat network metadata and table reads. Speed samples remain bounded
+Zarr slices from the authoritative source.
 
 Dense core plots also enforce a display-only serialization budget. Speed and
 heading read only explicitly selected series, with one physical speed trace as

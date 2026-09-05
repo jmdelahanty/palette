@@ -22,18 +22,19 @@ The core profile has these defaults:
 
 | Product | Default | Configurable? | Source authority |
 |---|---:|---|---|
-| portable kinematic samples | 10 Hz | yes, positive finite rate | framewise Zarr kinematics |
+| kinematic samples | every source frame | explicit downsampling only | framewise Zarr kinematics |
 | activity/spatial summaries | 5-second bins | yes, positive finite width | framewise Zarr kinematics and bouts; no arena-normalized occupancy without a geometry authority |
 | eye angles and convergence | framewise | no downsampling in this contract | framewise eye-angle analysis |
 | tail splines, angles, and curvature | framewise | no downsampling in this contract | framewise subject shape and tail kinematics |
 
-The sampled and binned products are portable analysis views. They do not
-replace the framewise Zarr authorities. Eye and tail traces remain framewise
-because their temporal structure is itself an analysis input; a consumer may
-derive a lower-resolution view later without changing the export contract.
+The exported products do not replace the framewise Zarr authorities. Core
+motion, eye, and tail traces preserve every source frame because their temporal
+structure is itself an analysis input. A consumer may explicitly derive a
+lower-resolution motion view later without changing the source authority.
 
-The profile owns the defaults. A particular plan can override the two numeric
-values without editing the profile:
+The profile owns the defaults. A particular plan can explicitly request a
+sampled motion projection or change the summary-bin width without editing the
+profile:
 
 ```bash
 scripts/plan_analysis_workflow /path/to/recording_analysis.zarr \
@@ -41,12 +42,14 @@ scripts/plan_analysis_workflow /path/to/recording_analysis.zarr \
   --activity-spatial-bin-size-s 2.5
 ```
 
-Invalid rates, widths, and non-framewise eye or tail declarations are rejected
-while loading the workflow.
+Omitting `--kinematics-sample-rate-hz` preserves every source frame. Supplying
+it is an express request for a derived sampled projection. Invalid rates,
+widths, and non-framewise eye or tail declarations are rejected while loading
+the workflow.
 
-The current cross-recording analytics exporter already has equivalent
-`--baseline-sample-rate-hz` and `--baseline-time-bin-s` switches. An execution
-adapter should pass the DAG's numeric policy to those exporter arguments when
+The current cross-recording analytics exporter already has explicit
+full-resolution and sampled baseline modes plus a `--baseline-time-bin-s`
+switch. An execution adapter must preserve the selected temporal policy when
 materializing baseline products. The DAG planner does not silently invoke that
 exporter.
 
@@ -72,7 +75,7 @@ flowchart LR
   TR --> TK[track kinematics]
   RK --> TK
   TK --> SB[swim bouts]
-  TK --> KS[10 Hz kinematic samples]
+  TK --> KS[source-rate kinematic samples]
   TK --> AS[5 s activity/spatial summaries]
   SB --> AS
   SB --> BK[bout kinematics]
@@ -432,11 +435,12 @@ process on the same node-local scratch. The materializer is dry-run by default
 when invoked directly; the DAG adds `--apply` only inside the verified LSF
 allocation.
 
-The 10 Hz kinematic samples, 5-second activity/spatial summaries, framewise eye
-traces, and long-form framewise tail traces now have exact opt-in publishers
-and execution adapters. All remain immutable query projections rather than
-recording-local scientific authorities, and none activates a selector or
-registry authority.
+The source-rate kinematic samples, 5-second activity/spatial summaries,
+framewise eye traces, and long-form framewise tail traces now have exact
+opt-in publishers and execution adapters. All remain immutable query
+projections rather than recording-local scientific authorities, and none
+activates a selector or registry authority. Lower-rate kinematic sampling is
+available only through an explicit rate request.
 Tail kinematics itself is executable after its staged, chunk-safe materializer
 and million-frame canary validation.
 Registry updates remain serialized after successful artifact publication.

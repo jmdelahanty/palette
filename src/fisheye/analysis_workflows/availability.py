@@ -11,6 +11,11 @@ from fisheye.analysis_workflows.storage_contract_catalog import (
     DERIVED_ANALYSIS_AVAILABILITY_RUN_PARENTS,
 )
 from fisheye.registry.stage_catalog import canonical_stage_id
+from fisheye.shared.keypoint_motion_authority import (
+    KeypointMotionAuthorityError,
+    keypoint_lineage_from_attributes,
+)
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_run_completion import (
     is_run_complete_in_parent_attrs,
     is_run_selector_eligible_attrs,
@@ -396,7 +401,12 @@ def _keypoint_crop_lineage(
         )
     keypoint_path = root / keypoints.artifact_path
     keypoint_attrs = _attrs(keypoint_path)
-    if keypoints.artifact_path.startswith("refined_keypoints_runs/"):
+    family, keypoint_name = keypoints.artifact_path.split("/", 1)
+    raw_attrs: Mapping[str, object] | None = None
+    if (
+        family == "refined_keypoints_runs"
+        and not isinstance(keypoint_attrs.get("run_manifest"), Mapping)
+    ):
         raw_name = str(keypoint_attrs.get("source_keypoints_run") or "").strip()
         if not raw_name or "/" in raw_name:
             return StageAvailability(
@@ -431,17 +441,67 @@ def _keypoint_crop_lineage(
                 run_name=keypoints.run_name,
                 reason="selected refined keypoint base run is incomplete",
             )
-        keypoint_attrs = raw_attrs
-
-    crop_name = str(keypoint_attrs.get("source_crop_run") or "").strip()
-    if not crop_name or "/" in crop_name:
+    try:
+        lineage = keypoint_lineage_from_attributes(
+            family=family,
+            run_name=keypoint_name,
+            attrs=keypoint_attrs,
+            raw_attrs=raw_attrs,
+        )
+    except (KeypointMotionAuthorityError, TypeError, ValueError) as exc:
         return StageAvailability(
             stage_id="tracks",
             available=False,
             artifact_path=keypoints.artifact_path,
             run_name=keypoints.run_name,
-            reason="selected keypoint authority lacks its exact source crop run",
+            reason=f"selected keypoint lineage is invalid: {exc}",
         )
+
+    raw_parent = root / "keypoints_runs"
+    raw_path = root / lineage.base_run_path
+    if not (raw_parent / "zarr.json").is_file() or not (
+        raw_path / "zarr.json"
+    ).is_file():
+        return StageAvailability(
+            stage_id="tracks",
+            available=False,
+            artifact_path=lineage.base_run_path,
+            run_name=keypoints.run_name,
+            reason="selected keypoint base-run metadata is missing",
+        )
+    persisted_raw_attrs = _attrs(raw_path)
+    if not is_run_complete_in_parent_attrs(
+        _attrs(raw_parent),
+        persisted_raw_attrs,
+        legacy_default=False,
+    ):
+        return StageAvailability(
+            stage_id="tracks",
+            available=False,
+            artifact_path=lineage.base_run_path,
+            run_name=keypoints.run_name,
+            reason="selected keypoint base run is incomplete",
+        )
+    if lineage.base_manifest_digest is not None:
+        raw_manifest = persisted_raw_attrs.get("run_manifest")
+        try:
+            raw_digest = (
+                canonical_json_sha256(raw_manifest)
+                if isinstance(raw_manifest, Mapping)
+                else None
+            )
+        except (TypeError, ValueError):
+            raw_digest = None
+        if raw_digest != lineage.base_manifest_digest:
+            return StageAvailability(
+                stage_id="tracks",
+                available=False,
+                artifact_path=lineage.base_run_path,
+                run_name=keypoints.run_name,
+                reason="selected keypoint base manifest differs from its binding",
+            )
+
+    crop_name = lineage.crop_run
     crop_path = root / "crop_runs" / crop_name
     if not (crop_path / "zarr.json").is_file():
         return StageAvailability(
@@ -452,6 +512,24 @@ def _keypoint_crop_lineage(
             reason="selected keypoint source-crop metadata is missing",
         )
     crop_attrs = _attrs(crop_path)
+    if lineage.crop_manifest_digest is not None:
+        crop_manifest = crop_attrs.get("run_manifest")
+        try:
+            crop_digest = (
+                canonical_json_sha256(crop_manifest)
+                if isinstance(crop_manifest, Mapping)
+                else None
+            )
+        except (TypeError, ValueError):
+            crop_digest = None
+        if crop_digest != lineage.crop_manifest_digest:
+            return StageAvailability(
+                stage_id="tracks",
+                available=False,
+                artifact_path=lineage.crop_path,
+                run_name=keypoints.run_name,
+                reason="selected keypoint crop manifest differs from its binding",
+            )
     refined_name = str(
         crop_attrs.get("source_refined_run")
         or crop_attrs.get("source_refined_detect_run")
@@ -480,13 +558,7 @@ def _keypoint_crop_lineage(
             run_name=keypoints.run_name,
             reason="selected keypoint source-crop refined lineage is malformed",
         )
-    row_count_value = keypoint_attrs.get("keypoints_processed")
-    row_count = (
-        int(row_count_value)
-        if type(row_count_value) is int and row_count_value >= 0
-        else None
-    )
-    return f"crop_runs/{crop_name}", row_count, refined_name or None
+    return lineage.crop_path, lineage.row_count, refined_name or None
 
 
 def _tracking_authority_availability(

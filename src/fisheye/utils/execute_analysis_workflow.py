@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ from fisheye.analysis_workflows import (
     AnalysisWorkflow,
     EXECUTION_SCHEMA_ID,
     EXECUTION_SCHEMA_VERSION,
+    StageCommand,
     WorkflowExecutionError,
     WorkflowExecutionPlan,
     build_workflow_execution_plan,
@@ -30,6 +32,7 @@ from fisheye.analysis_workflows import (
     stage_run_relative_path,
 )
 from fisheye.analysis_workflows.runtime_verification import (
+    RuntimeVerificationSession,
     verify_persisted_stage_output,
 )
 from fisheye.analytics_exports.publication import export_manifest_path
@@ -94,6 +97,13 @@ def _preflight_new_outputs(
     execution_plan: WorkflowExecutionPlan,
 ) -> None:
     for command in execution_plan.commands:
+        if command.admission is not None:
+            receipt_path = Path(command.admission.receipt_path)
+            if receipt_path.is_symlink() or receipt_path.exists():
+                raise WorkflowExecutionError(
+                    "refusing existing admission receipt for "
+                    f"{command.node_id}: {receipt_path}"
+                )
         if command.output_kind == "parquet_export":
             manifest = export_manifest_path(
                 Path(command.output_root), command.output_run
@@ -160,6 +170,168 @@ def _write_report(path: Path | None, payload: Mapping[str, object]) -> None:
         write_json_atomic(path, payload)
 
 
+_FAILED_NODE_STATUSES = frozenset(
+    {"blocked_dependency", "failed", "failed_admission", "failed_verification"}
+)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _failed_dependencies(
+    results: list[dict[str, object]],
+    execution_plan: WorkflowExecutionPlan,
+    node_id: str,
+) -> list[str]:
+    node = execution_plan.workflow_plan.node_by_id[node_id]
+    failed: list[str] = []
+    for dependency in node.depends_on:
+        dependency_result = _result_for_node(results, dependency)
+        if dependency_result.get("status") in _FAILED_NODE_STATUSES:
+            failed.append(dependency)
+    return failed
+
+
+def _remember_failure(payload: dict[str, object], message: str) -> None:
+    payload["status"] = "failed"
+    if payload.get("error") is None:
+        payload["error"] = message
+
+
+def _revalidate_reused_stage_inputs(
+    zarr_path: Path,
+    execution_plan: WorkflowExecutionPlan,
+    results: list[dict[str, object]],
+    *,
+    payload: dict[str, object],
+    report_path: Path | None,
+) -> None:
+    """Dynamically admit exact reused artifacts before any command mutates state."""
+
+    session = RuntimeVerificationSession(zarr_path)
+    for node in execution_plan.workflow_plan.nodes:
+        if node.action != "reuse" or node.stage_id is None:
+            continue
+        result = _result_for_node(results, node.node_id)
+        failed_dependencies: list[str] = []
+        dependency_runs: dict[str, str] = {}
+        for dependency in node.depends_on:
+            try:
+                dependency_result = _result_for_node(results, dependency)
+            except KeyError:
+                # A persisted downstream authority can close a structural branch;
+                # its strict resolver remains responsible for that sealed lineage.
+                continue
+            if dependency_result.get("status") in _FAILED_NODE_STATUSES:
+                failed_dependencies.append(dependency)
+                continue
+            dependency_run = dependency_result.get("run_name")
+            if isinstance(dependency_run, str) and dependency_run:
+                dependency_runs[dependency] = dependency_run
+        if failed_dependencies:
+            result["status"] = "blocked_dependency"
+            result["blocked_by"] = failed_dependencies
+            result["completed_at_utc"] = _utc_now()
+            _remember_failure(
+                payload,
+                f"reused node {node.node_id} was blocked by failed dependencies: "
+                + ", ".join(failed_dependencies),
+            )
+            _write_report(report_path, payload)
+            continue
+
+        run_name = result.get("run_name")
+        if not isinstance(run_name, str) or not run_name:
+            message = f"reused node {node.node_id} has no exact selected run"
+            result["status"] = "failed_verification"
+            result["completed_at_utc"] = _utc_now()
+            result["error"] = message
+            _remember_failure(payload, message)
+            _write_report(report_path, payload)
+            continue
+        availability = verify_persisted_stage_output(
+            zarr_path,
+            node.stage_id,
+            requested_run=run_name,
+            dependency_runs=dependency_runs,
+            session=session,
+        )
+        result["verification"] = availability.to_dict()
+        result["completed_at_utc"] = _utc_now()
+        if not availability.available:
+            message = (
+                f"reused node {node.node_id} failed dynamic admission: "
+                f"{availability.reason}"
+            )
+            result["status"] = "failed_verification"
+            result["error"] = message
+            _remember_failure(payload, message)
+        _write_report(report_path, payload)
+
+
+def _run_admission_command(
+    command: StageCommand,
+    result: dict[str, object],
+    *,
+    environment: Mapping[str, str],
+    payload: dict[str, object],
+    report_path: Path | None,
+) -> str | None:
+    admission = command.admission
+    if admission is None:
+        return None
+    receipt_path = Path(admission.receipt_path)
+    admission_result: dict[str, object] = {
+        "status": "running",
+        "receipt_path": str(receipt_path),
+        "started_at_utc": _utc_now(),
+        "argv": list(admission.argv),
+    }
+    result["status"] = "admitting"
+    result["admission"] = admission_result
+    _write_report(report_path, payload)
+    print(f"workflow_node={command.node_id}", flush=True)
+    print(f"workflow_admission_command={shlex.join(admission.argv)}", flush=True)
+    try:
+        completed = subprocess.run(admission.argv, check=False, env=environment)
+    except OSError as exc:
+        admission_result["status"] = "failed"
+        admission_result["completed_at_utc"] = _utc_now()
+        admission_result["error"] = f"{type(exc).__name__}: {exc}"
+        return f"could not start admission for node {command.node_id}: {exc}"
+    admission_result["returncode"] = int(completed.returncode)
+    admission_result["completed_at_utc"] = _utc_now()
+    if completed.returncode != 0:
+        admission_result["status"] = "failed"
+        return (
+            f"admission for node {command.node_id} failed with exit code "
+            f"{completed.returncode}"
+        )
+    if receipt_path.is_symlink() or not receipt_path.is_file():
+        admission_result["status"] = "failed"
+        admission_result["error"] = (
+            "admission command did not create one regular receipt"
+        )
+        return (
+            f"admission for node {command.node_id} returned successfully without "
+            f"creating its receipt: {receipt_path}"
+        )
+    try:
+        admission_result["receipt_sha256"] = _sha256_file(receipt_path)
+    except OSError as exc:
+        admission_result["status"] = "failed"
+        admission_result["error"] = f"{type(exc).__name__}: {exc}"
+        return f"could not hash admission receipt for node {command.node_id}: {exc}"
+    admission_result["status"] = "complete"
+    _write_report(report_path, payload)
+    return None
+
+
 def execute_workflow_plan(
     zarr_path: Path,
     execution_plan: WorkflowExecutionPlan,
@@ -169,7 +341,7 @@ def execute_workflow_plan(
     report_path: Path | None,
     defer_registry_writes: bool = True,
 ) -> dict[str, object]:
-    """Run commands serially, verifying completion before advancing."""
+    """Run topologically, blocking failed descendants but continuing independent nodes."""
 
     _preflight_new_outputs(zarr_path, execution_plan)
     if apply and not os.environ.get("LSB_JOBID"):
@@ -234,8 +406,48 @@ def execute_workflow_plan(
     else:
         environment.pop("PALETTE_DISABLE_REGISTRY_WRITES", None)
 
+    _revalidate_reused_stage_inputs(
+        zarr_path,
+        execution_plan,
+        results,
+        payload=payload,
+        report_path=report_path,
+    )
+
     for command in execution_plan.commands:
         result = _result_for_node(results, command.node_id)
+        failed_dependencies = _failed_dependencies(
+            results,
+            execution_plan,
+            command.node_id,
+        )
+        if failed_dependencies:
+            result["status"] = "blocked_dependency"
+            result["blocked_by"] = failed_dependencies
+            result["completed_at_utc"] = _utc_now()
+            _remember_failure(
+                payload,
+                f"node {command.node_id} was blocked by failed dependencies: "
+                + ", ".join(failed_dependencies),
+            )
+            _write_report(report_path, payload)
+            continue
+
+        admission_failure = _run_admission_command(
+            command,
+            result,
+            environment=environment,
+            payload=payload,
+            report_path=report_path,
+        )
+        if admission_failure is not None:
+            result["status"] = "failed_admission"
+            result["completed_at_utc"] = _utc_now()
+            result["error"] = admission_failure
+            _remember_failure(payload, admission_failure)
+            _write_report(report_path, payload)
+            continue
+
         result["status"] = "running"
         result["started_at_utc"] = _utc_now()
         result["argv"] = list(command.argv)
@@ -245,25 +457,23 @@ def execute_workflow_plan(
         try:
             completed = subprocess.run(command.argv, check=False, env=environment)
         except OSError as exc:
+            message = f"could not start node {command.node_id}: {exc}"
             result["status"] = "failed"
             result["completed_at_utc"] = _utc_now()
             result["error"] = f"{type(exc).__name__}: {exc}"
-            payload["status"] = "failed"
-            payload["error"] = f"could not start node {command.node_id}: {exc}"
-            payload["completed_at_utc"] = _utc_now()
+            _remember_failure(payload, message)
             _write_report(report_path, payload)
-            return payload
+            continue
         result["returncode"] = int(completed.returncode)
         result["completed_at_utc"] = _utc_now()
         if completed.returncode != 0:
-            result["status"] = "failed"
-            payload["status"] = "failed"
-            payload["error"] = (
+            message = (
                 f"node {command.node_id} failed with exit code {completed.returncode}"
             )
-            payload["completed_at_utc"] = _utc_now()
+            result["status"] = "failed"
+            _remember_failure(payload, message)
             _write_report(report_path, payload)
-            return payload
+            continue
 
         if command.output_kind == "parquet_export":
             try:
@@ -277,20 +487,19 @@ def execute_workflow_plan(
                 OSError,
                 ValueError,
             ) as exc:
+                message = (
+                    f"node {command.node_id} returned successfully but its export "
+                    f"manifest failed validation: {exc}"
+                )
                 result["status"] = "failed_verification"
                 result["verification"] = {
                     "available": False,
                     "status": "invalid",
                     "error": f"{type(exc).__name__}: {exc}",
                 }
-                payload["status"] = "failed"
-                payload["error"] = (
-                    f"node {command.node_id} returned successfully but its export "
-                    f"manifest failed validation: {exc}"
-                )
-                payload["completed_at_utc"] = _utc_now()
+                _remember_failure(payload, message)
                 _write_report(report_path, payload)
-                return payload
+                continue
             result["verification"] = {
                 **export_validation,
                 "available": export_validation.get("status") == "valid",
@@ -312,19 +521,19 @@ def execute_workflow_plan(
             output_available = availability.available
             unavailable_reason = availability.reason
         if not output_available:
-            result["status"] = "failed_verification"
-            payload["status"] = "failed"
-            payload["error"] = (
+            message = (
                 f"node {command.node_id} returned successfully but output run is not "
                 f"complete: {unavailable_reason}"
             )
-            payload["completed_at_utc"] = _utc_now()
+            result["status"] = "failed_verification"
+            _remember_failure(payload, message)
             _write_report(report_path, payload)
-            return payload
+            continue
         result["status"] = "complete"
         _write_report(report_path, payload)
 
-    payload["status"] = "complete"
+    if payload["status"] != "failed":
+        payload["status"] = "complete"
     payload["completed_at_utc"] = _utc_now()
     _write_report(report_path, payload)
     return payload
@@ -382,7 +591,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--execution-id", required=True)
     parser.add_argument("--num-workers", type=int, default=_default_num_workers())
-    parser.add_argument("--kinematics-sample-rate-hz", type=float)
+    parser.add_argument(
+        "--kinematics-sample-rate-hz",
+        type=float,
+        help=(
+            "Explicitly downsample kinematics; omission preserves every source "
+            "frame under the maintained core profile."
+        ),
+    )
     parser.add_argument("--activity-spatial-bin-size-s", type=float)
     parser.add_argument("--report", type=Path)
     parser.add_argument(
@@ -428,6 +644,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             availability,
             targets=tuple(args.target),
         )
+        report_path = (
+            args.report.expanduser().resolve() if args.report is not None else None
+        )
+        admission_receipt_root = (
+            report_path.parent / "admission_receipts"
+            if report_path is not None
+            else Path(os.environ.get("TMPDIR") or "/tmp")
+            / "palette_analysis_workflow_admission_receipts"
+            / str(args.execution_id)
+        )
         execution_plan = build_workflow_execution_plan(
             workflow,
             workflow_plan,
@@ -444,6 +670,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             export_root=args.export_root,
             scratch_root=args.scratch_root,
+            admission_receipt_root=admission_receipt_root,
             python_executable=sys.executable,
         )
         payload = execute_workflow_plan(
@@ -451,7 +678,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             execution_plan,
             workflow_payload=workflow.to_dict(),
             apply=bool(args.apply),
-            report_path=args.report.expanduser() if args.report is not None else None,
+            report_path=report_path,
             defer_registry_writes=not bool(args.inline_registry),
         )
     except (KeyError, ValueError, WorkflowExecutionError) as exc:
@@ -467,6 +694,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.report is not None:
             print(f"report={args.report.expanduser()}")
         for command in execution_plan.commands:
+            if command.admission is not None:
+                print(
+                    f"admission[{command.node_id}]="
+                    f"{shlex.join(command.admission.argv)}"
+                )
             print(f"command[{command.node_id}]={shlex.join(command.argv)}")
         if payload.get("error"):
             print(f"error={payload['error']}", file=sys.stderr)

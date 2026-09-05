@@ -59,6 +59,9 @@ from fisheye.visualization.chaser_body_bearing_distance import (
     DISTANCE_BIN_WIDTH_MM,
     INTERACTIVE_POINT_CLOUD_MAX_ROWS_PER_PANEL_CHASER,
 )
+from fisheye.visualization.chaser_spatial_occupancy_display import (
+    spatial_occupancy_display_contract_record,
+)
 from fisheye.visualization.bout_kinematics_interactive import (
     BOUT_EYE_GAZE_PLOT_RENDERER,
     BOUT_HEADING_PLOT_RENDERER,
@@ -1127,38 +1130,7 @@ def discover_exact_chaser_successor_options(
                 "read_only_exact_children_no_selector_no_interpolation"
             ),
             "display_parameters": {
-                "spatial_occupancy": {
-                    "recipe_id": (
-                        "paired_provider_exact_epoch_spatial_occupancy_heatmap_v4"
-                    ),
-                    "source_arrays": [
-                        "occupancy_density_valid_in_arena",
-                        "occupancy_fraction_candidate_epoch",
-                    ],
-                    "default_normalization": "valid_in_arena",
-                    "available_normalizations": [
-                        "valid_in_arena",
-                        "candidate_epoch",
-                    ],
-                    "density_multiplier_to_percent": 100.0,
-                    "density_color_normalization": (
-                        "shared_robust_p98_default_full_range_available"
-                    ),
-                    "provider_difference": (
-                        "detection_minus_keypoint_percentage_points_per_bin"
-                    ),
-                    "difference_color_normalization": (
-                        "symmetric_shared_robust_p98_default_full_range_available"
-                    ),
-                    "display_bin_widths_mm": [2.0, 4.0],
-                    "coarsening": ("aligned_exact_2x2_count_sum_no_interpolation"),
-                    "coverage_annotation_array": (
-                        "in_arena_coverage_fraction_candidate"
-                    ),
-                    "arena_bin_center_mask_role": (
-                        "hover_evidence_only_bins_not_discarded_boundary_bins_may_straddle_circle"
-                    ),
-                },
+                "spatial_occupancy": spatial_occupancy_display_contract_record(),
                 "distance_distributions": {
                     "recipe_id": (
                         "paired_provider_persisted_distance_cdf_and_geometric_mass_v1"
@@ -1561,13 +1533,19 @@ def discover_recording_explorer_spec_options(
     renderer_filter: Optional[str] = None,
     run_path_filter: Optional[str] = None,
     artifact_filter: Optional[str] = None,
+    include_provider_candidates: bool = False,
 ) -> list[InteractiveSpecOption]:
     """Discover only providers mounted by the single-recording explorer.
 
     This avoids building the broad recording artifact inventory, which is
-    useful for audits but expensive over a network filesystem.
+    useful for audits but expensive over a network filesystem. Unpromoted
+    provider candidates are excluded from ordinary discovery because their
+    admission is a deep audit; request their exact renderer or opt in
+    explicitly when inspecting that compatibility surface.
     """
 
+    if type(include_provider_candidates) is not bool:
+        raise TypeError("include_provider_candidates must be the exact boolean")
     archive = Path(zarr_path)
     renderer_wanted = str(renderer_filter).strip() if renderer_filter else None
     if renderer_wanted and renderer_wanted not in {
@@ -1595,7 +1573,9 @@ def discover_recording_explorer_spec_options(
                 artifact_filter=artifact_filter,
             )
         )
-    if renderer_wanted in {None, PROVIDER_CHASER_CANDIDATE_RENDERER}:
+    if renderer_wanted == PROVIDER_CHASER_CANDIDATE_RENDERER or (
+        renderer_wanted is None and include_provider_candidates
+    ):
         options.extend(
             discover_provider_chaser_candidate_options(
                 archive,
@@ -1885,6 +1865,7 @@ def discover_protocol_recording_options(
     artifact_filter: Optional[str] = None,
     name_contains: Optional[str] = "GoodCopBadCop",
     lazy_registry_specs: bool = True,
+    defer_spec_discovery: bool = False,
     recording_explorer_only: bool = False,
     include_collection: bool = True,
     include_seed_without_specs: bool = False,
@@ -1897,8 +1878,12 @@ def discover_protocol_recording_options(
     continue to work even when no sibling root can be inferred. Set
     ``include_collection=False`` for a direct single-recording launch; sibling
     discovery then occurs only when a recordings root or registry is supplied.
+    Setting defer_spec_discovery=True keeps the recording list metadata-only
+    and leaves exact provider discovery to the selected-recording boundary.
     """
 
+    if type(defer_spec_discovery) is not bool:
+        raise TypeError("defer_spec_discovery must be the exact boolean")
     seed = Path(seed_zarr_path).expanduser()
     candidates = {seed}
     registry_candidates: set[Path] = set()
@@ -1917,17 +1902,21 @@ def discover_protocol_recording_options(
 
     options: list[RecordingSpecOption] = []
     for archive in sorted(candidates):
-        if (
+        registry_deferred = (
             registry_path is not None
             and lazy_registry_specs
             and archive in registry_candidates
-        ):
+        )
+        if defer_spec_discovery or registry_deferred:
             recording_id = recording_id_from_analysis_zarr(archive)
+            source_label = "registered; " if archive in registry_candidates else ""
             options.append(
                 RecordingSpecOption(
                     zarr_path=archive,
                     recording_id=recording_id,
-                    label=f"{recording_id} (registered; specs loaded on selection)",
+                    label=(
+                        f"{recording_id} ({source_label}specs loaded on selection)"
+                    ),
                     interactive_spec_count=0,
                     supported_spec_count=0,
                     renderer_counts={},

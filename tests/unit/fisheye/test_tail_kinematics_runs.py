@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import math
 from types import SimpleNamespace
 
@@ -9,6 +10,10 @@ import zarr
 
 from fisheye.analysis import tail_kinematics_runs as mod
 from fisheye.analysis import subject_shape_io
+from fisheye.analysis.tail_kinematics_schema import (
+    TAIL_KINEMATICS_ARRAY_SCHEMA_ID,
+    validate_tail_kinematics_array_schema,
+)
 from fisheye.shared.coordinate_frame_record import array_payload_sha256
 from fisheye.shared.detect_reason_codec import decode_reason_bytes
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
@@ -323,7 +328,7 @@ def _build_shape_root(*, row_count: int = 2) -> zarr.Group:
 
     shape.create_array(
         "source_acquisition_frame_index",
-        data=np.arange(10, 10 + int(row_count), dtype=np.int32),
+        data=np.arange(10, 10 + int(row_count), dtype=np.int64),
         overwrite=True,
     )
     shape.create_array(
@@ -385,6 +390,101 @@ def _build_shape_root(*, row_count: int = 2) -> zarr.Group:
     return root
 
 
+def _staged_source_receipts(
+    shape: zarr.Group,
+    *,
+    row_count: int,
+    chunk_rows: int,
+) -> tuple[dict[str, object], dict[str, object]]:
+    run_name = "shape_001"
+    run_path = f"analysis/subject_shape_runs/{run_name}"
+    publication = _fake_coordinate_publication(shape, run_path)
+    authority = mod._build_staged_source_authority(
+        shape,
+        run_name=run_name,
+        row_count=row_count,
+        source_sample_count=4,
+        publication=publication,
+    )
+    receipt = mod.build_tail_kinematics_staged_input_integrity_receipt(
+        shape,
+        run_name=run_name,
+        authority=authority,
+        chunk_rows=chunk_rows,
+        read_workers=2,
+    )
+    return authority, receipt
+
+
+def test_staged_input_receipt_is_checked_in_each_worker_owned_block() -> None:
+    root = _build_shape_root(row_count=9)
+    shape = root["analysis/subject_shape_runs/shape_001"]
+    authority, receipt = _staged_source_receipts(
+        shape,
+        row_count=9,
+        chunk_rows=4,
+    )
+    assert [(chunk["start_row"], chunk["stop_row"]) for chunk in receipt["chunks"]] == [
+        (0, 4),
+        (4, 8),
+        (8, 9),
+    ]
+
+    _name, _group, sources = mod._resolve_tail_kinematics_sources(
+        root,
+        "shape_001",
+        _staged_source_authority=authority,
+        _staged_input_integrity_receipt=receipt,
+    )
+    values = np.asarray(shape["components/subject_body/tail_sample_xy"][0:4]).copy()
+    values[0, 0, 0] += 1.0
+    shape["components/subject_body/tail_sample_xy"][0:4] = values
+    with pytest.raises(
+        subject_shape_io.SubjectShapeIOError,
+        match="worker input.*differs",
+    ):
+        mod._read_tail_kinematics_source_block(sources, slice(0, 4))
+
+
+def test_staged_input_receipt_rejects_gaps_and_requires_complete_attestation() -> None:
+    root = _build_shape_root(row_count=9)
+    shape = root["analysis/subject_shape_runs/shape_001"]
+    authority, receipt = _staged_source_receipts(
+        shape,
+        row_count=9,
+        chunk_rows=4,
+    )
+    expected = [str(chunk["record_sha256"]) for chunk in receipt["chunks"]]
+    attestation = mod._complete_staged_input_worker_attestation(receipt, expected)
+    assert attestation["complete_worker_chunk_set"] is True
+    assert attestation["chunk_count"] == 3
+    with pytest.raises(RuntimeError, match="exact complete"):
+        mod._complete_staged_input_worker_attestation(receipt, expected[:-1])
+
+    broken = deepcopy(receipt)
+    broken["chunks"][1]["start_row"] = 5
+    broken_chunk_body = {
+        key: value
+        for key, value in broken["chunks"][1].items()
+        if key != "record_sha256"
+    }
+    broken["chunks"][1]["record_sha256"] = mod._canonical_sha256(broken_chunk_body)
+    broken_body = {
+        key: value for key, value in broken.items() if key != "record_sha256"
+    }
+    broken["record_sha256"] = mod._canonical_sha256(broken_body)
+    with pytest.raises(
+        subject_shape_io.SubjectShapeIOError,
+        match="gap, overlap",
+    ):
+        mod._canonical_staged_input_integrity_receipt(
+            shape,
+            run_name="shape_001",
+            authority=authority,
+            receipt=broken,
+        )
+
+
 def test_normal_tail_writer_rejects_unpublished_subject_shape_source() -> None:
     root = _build_shape_root()
 
@@ -397,6 +497,26 @@ def test_normal_tail_writer_rejects_unpublished_subject_shape_source() -> None:
             shape_run="shape_001",
             run_name="tail_rejected",
             dry_run=True,
+        )
+
+
+def test_public_tail_writer_retires_non_atomic_publication_before_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(
+        mod,
+        "open_zarr_root",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("retired writer opened the archive")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="atomic payload receipt"):
+        mod.write_tail_kinematics_run(
+            tmp_path / "archive.zarr",
+            shape_run="shape_001",
+            run_name="tail_rejected",
         )
 
 
@@ -454,6 +574,28 @@ def test_write_tail_kinematics_run_group_writes_schema_and_row_lineage(
         == "vectorized_shared_grid_v1"
     )
     assert run.attrs["completed_block_count"] == 1
+    assert run.attrs["tail_kinematics_array_schema"]["schema_id"] == (
+        TAIL_KINEMATICS_ARRAY_SCHEMA_ID
+    )
+    assert run.attrs["tail_kinematics_array_schema_sha256"] == (
+        run.attrs["tail_kinematics_array_schema"]["payload_digest"]
+    )
+    assert (
+        validate_tail_kinematics_array_schema(
+            run,
+            byte_planner_adopted=False,
+        )
+        == ()
+    )
+    from fisheye.analytics_exports.tail_trace_samples import (
+        _tail_array_schema_adoption,
+    )
+
+    adopted, export_binding = _tail_array_schema_adoption(run)
+    assert adopted is False
+    assert export_binding["payload_sha256"] == (
+        run.attrs["tail_kinematics_array_schema"]["payload_digest"]
+    )
     assert tuple(run["tail_angle_rad"].chunks) == (2, 10)
     assert tuple(run["tail_angle_rad"].shards) == (2, 10)
     assert tuple(run["source_acquisition_frame_index"].shards) == (2,)

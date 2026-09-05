@@ -25,7 +25,7 @@ from .dag import NodePlan, WorkflowPlan
 
 EXECUTION_SCHEMA_ID = "palette.analysis_workflow_execution"
 EXECUTION_LEGACY_SCHEMA_VERSION = 1
-EXECUTION_SCHEMA_VERSION = 2
+EXECUTION_SCHEMA_VERSION = 3
 SAFE_RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -43,6 +43,7 @@ class StageCommandContext:
     num_workers: int
     export_root: Path | None = None
     scratch_root: Path | None = None
+    admission_receipt_path: Path | None = None
 
     def dependency_run(self, node_id: str) -> str:
         try:
@@ -55,6 +56,20 @@ class StageCommandContext:
 
 
 @dataclass(frozen=True)
+class StageAdmissionCommand:
+    """Read-only command that seals one node's exact execution admission."""
+
+    receipt_path: str
+    argv: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "receipt_path": self.receipt_path,
+            "argv": list(self.argv),
+        }
+
+
+@dataclass(frozen=True)
 class StageCommand:
     node_id: str
     node_kind: str
@@ -64,6 +79,7 @@ class StageCommand:
     output_root: str
     dependency_runs: Mapping[str, str]
     argv: tuple[str, ...]
+    admission: StageAdmissionCommand | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -75,6 +91,7 @@ class StageCommand:
             "output_root": self.output_root,
             "dependency_runs": dict(self.dependency_runs),
             "argv": list(self.argv),
+            "admission": (None if self.admission is None else self.admission.to_dict()),
         }
 
 
@@ -99,6 +116,15 @@ class WorkflowExecutionPlan:
 
 
 StageCommandBuilder = Callable[[StageCommandContext], tuple[str, ...]]
+
+
+def _required_admission_receipt_path(context: StageCommandContext) -> Path:
+    path = context.admission_receipt_path
+    if path is None:
+        raise WorkflowExecutionError(
+            f"stage {context.node.stage_id!r} requires an exact admission receipt"
+        )
+    return path
 
 
 def _module_command(context: StageCommandContext, module: str) -> list[str]:
@@ -298,7 +324,7 @@ def _bout_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
     return tuple(command)
 
 
-def _eye_angle_command(context: StageCommandContext) -> tuple[str, ...]:
+def _eye_angle_base_command(context: StageCommandContext) -> list[str]:
     command = _module_command(
         context,
         "fisheye.analysis_workflows.materializers.eye_angles",
@@ -331,6 +357,33 @@ def _eye_angle_command(context: StageCommandContext) -> tuple[str, ...]:
             "1",
             "--copy-backend",
             "rsync",
+        )
+    )
+    return command
+
+
+def _eye_angle_admission_command(context: StageCommandContext) -> tuple[str, ...]:
+    """Render the read-only half of the eye-angle plan/apply contract."""
+
+    command = _eye_angle_base_command(context)
+    command.extend(
+        (
+            "--write-admission-receipt",
+            str(_required_admission_receipt_path(context)),
+            "--json",
+        )
+    )
+    return tuple(command)
+
+
+def _eye_angle_command(context: StageCommandContext) -> tuple[str, ...]:
+    """Render apply bound to the exact receipt emitted by the admission phase."""
+
+    command = _eye_angle_base_command(context)
+    command.extend(
+        (
+            "--admission-receipt",
+            str(_required_admission_receipt_path(context)),
             "--apply",
             "--json",
         )
@@ -585,24 +638,39 @@ def _kinematics_samples_export_command(
             "scratch roots"
         )
     policy = context.node.temporal_policy
-    if (
-        set(policy) != {"resolution", "sample_rate_hz", "source_authority"}
-        or policy.get("resolution") != "sampled"
-        or policy.get("source_authority") != "framewise_zarr"
-    ):
+    resolution = policy.get("resolution")
+    if policy.get("source_authority") != "framewise_zarr":
         raise WorkflowExecutionError(
-            "kinematics-sample export requires the exact sampled framewise-Zarr "
-            "temporal policy"
+            "kinematics-sample export requires framewise-Zarr source authority"
         )
-    sample_rate = policy.get("sample_rate_hz")
-    if (
-        isinstance(sample_rate, bool)
-        or not isinstance(sample_rate, (int, float))
-        or not math.isfinite(float(sample_rate))
-        or float(sample_rate) <= 0
-    ):
+    if resolution == "framewise":
+        if set(policy) != {"resolution", "source_authority"}:
+            raise WorkflowExecutionError(
+                "framewise kinematics export has an inexact temporal policy"
+            )
+        sampling_args: tuple[str, ...] = ()
+    elif resolution == "sampled":
+        if set(policy) != {"resolution", "sample_rate_hz", "source_authority"}:
+            raise WorkflowExecutionError(
+                "sampled kinematics export has an inexact temporal policy"
+            )
+        sample_rate = policy.get("sample_rate_hz")
+        if (
+            isinstance(sample_rate, bool)
+            or not isinstance(sample_rate, (int, float))
+            or not math.isfinite(float(sample_rate))
+            or float(sample_rate) <= 0
+        ):
+            raise WorkflowExecutionError(
+                "sampled kinematics export requires a positive finite sample rate"
+            )
+        sampling_args = (
+            "--sample-rate-hz",
+            format(float(sample_rate), ".17g"),
+        )
+    else:
         raise WorkflowExecutionError(
-            "kinematics-sample export requires a positive finite sample rate"
+            "kinematics export resolution must be 'framewise' or 'sampled'"
         )
     command = _module_command(
         context,
@@ -614,8 +682,7 @@ def _kinematics_samples_export_command(
             context.dependency_run("track_kinematics"),
             "--track-scope",
             "offline",
-            "--sample-rate-hz",
-            format(float(sample_rate), ".17g"),
+            *sampling_args,
             "--output-root",
             str(context.export_root),
             "--export-run-id",
@@ -704,6 +771,15 @@ STAGE_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
     }
 )
 
+# Admission builders are part of the same stage-command interface.  A stage in
+# this map cannot be rendered for execution without a durable receipt root, and
+# its apply command is always bound to the exact path emitted here.
+STAGE_ADMISSION_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
+    {
+        "eye_angles": _eye_angle_admission_command,
+    }
+)
+
 EXPORT_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
     {
         "kinematics_samples": _kinematics_samples_export_command,
@@ -744,6 +820,7 @@ def build_workflow_execution_plan(
     export_run_overrides: Mapping[str, str] | None = None,
     export_root: str | Path | None = None,
     scratch_root: str | Path | None = None,
+    admission_receipt_root: str | Path | None = None,
     python_executable: str,
 ) -> WorkflowExecutionPlan:
     """Render exact commands for runnable analysis nodes in topological order."""
@@ -821,6 +898,28 @@ def build_workflow_execution_plan(
     resolved_scratch_root = (
         Path(scratch_root).expanduser().resolve() if scratch_root is not None else None
     )
+    admission_node_ids = {
+        node.node_id
+        for node in run_nodes
+        if node.stage_id in STAGE_ADMISSION_COMMAND_BUILDERS
+    }
+    resolved_admission_receipt_root = (
+        Path(admission_receipt_root).expanduser().resolve()
+        if admission_receipt_root is not None
+        else None
+    )
+    if admission_node_ids and resolved_admission_receipt_root is None:
+        raise WorkflowExecutionError(
+            "runnable admission-bound stages require an explicit "
+            "admission_receipt_root: " + ", ".join(sorted(admission_node_ids))
+        )
+    source_root = Path(zarr_path).expanduser().resolve()
+    if resolved_admission_receipt_root is not None and _path_is_within(
+        resolved_admission_receipt_root, source_root
+    ):
+        raise WorkflowExecutionError(
+            "admission_receipt_root must remain outside the analysis Zarr"
+        )
     if run_export_node_ids and (
         resolved_export_root is None or resolved_scratch_root is None
     ):
@@ -829,7 +928,6 @@ def build_workflow_execution_plan(
         )
     if run_export_node_ids:
         assert resolved_export_root is not None and resolved_scratch_root is not None
-        source_root = Path(zarr_path).expanduser().resolve()
         if _path_is_within(resolved_export_root, source_root):
             raise WorkflowExecutionError(
                 "export_root must remain outside the analysis Zarr"
@@ -935,6 +1033,25 @@ def build_workflow_execution_plan(
             num_workers=int(num_workers),
             export_root=resolved_export_root,
             scratch_root=resolved_scratch_root,
+            admission_receipt_path=(
+                resolved_admission_receipt_root / f"{node.node_id}__{output_run}.json"
+                if node.stage_id in STAGE_ADMISSION_COMMAND_BUILDERS
+                and resolved_admission_receipt_root is not None
+                else None
+            ),
+        )
+        admission_builder = (
+            STAGE_ADMISSION_COMMAND_BUILDERS.get(node.stage_id)
+            if node.stage_id is not None
+            else None
+        )
+        admission = (
+            StageAdmissionCommand(
+                receipt_path=str(_required_admission_receipt_path(context)),
+                argv=admission_builder(context),
+            )
+            if admission_builder is not None
+            else None
         )
         commands.append(
             StageCommand(
@@ -946,6 +1063,7 @@ def build_workflow_execution_plan(
                 output_root=output_root,
                 dependency_runs=MappingProxyType(dependency_runs),
                 argv=builder(context),
+                admission=admission,
             )
         )
 
@@ -963,7 +1081,9 @@ __all__ = [
     "EXECUTION_LEGACY_SCHEMA_VERSION",
     "EXECUTION_SCHEMA_VERSION",
     "EXPORT_COMMAND_BUILDERS",
+    "STAGE_ADMISSION_COMMAND_BUILDERS",
     "STAGE_COMMAND_BUILDERS",
+    "StageAdmissionCommand",
     "StageCommand",
     "WorkflowExecutionError",
     "WorkflowExecutionPlan",

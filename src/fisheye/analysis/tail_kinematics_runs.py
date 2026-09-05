@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import multiprocessing as mp
@@ -22,7 +22,7 @@ import zarr
 from ..shared.archive_identity import archive_identity
 from ..shared.coordinate_reference import canonical_node_path
 from ..shared.detect_reason_codec import decode_reason_bytes
-from ..shared.coordinate_frame_record import array_payload_sha256
+from ..shared.coordinate_frame_record import array_payload_sha256, array_values_sha256
 from ..shared.json_safety import json_attr_safe
 from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
@@ -50,7 +50,9 @@ from ..shared.zarr_io import open_zarr_root
 from ..shared.zarr.storage_profiles import StorageProfile, get_storage_profile
 from .tail_kinematics_schema import (
     TailKinematicsDimensions,
+    infer_tail_kinematics_dimensions,
     stamp_tail_kinematics_array_schema,
+    validate_tail_kinematics_array_schema,
 )
 from .tail_kinematics_storage import (
     build_tail_kinematics_storage_receipt,
@@ -108,6 +110,17 @@ TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCHEMA_VERSION = 1
 TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCOPE = (
     "tail_kinematics_exact_digest_bound_staged_subset_only"
 )
+TAIL_KINEMATICS_STAGED_INPUT_INTEGRITY_SCHEMA_ID = (
+    "palette.tail_kinematics_staged_input_integrity_receipt"
+)
+TAIL_KINEMATICS_STAGED_INPUT_INTEGRITY_SCHEMA_VERSION = 1
+TAIL_KINEMATICS_STAGED_INPUT_INTEGRITY_SCOPE = (
+    "materializer_private_tail_worker_inputs_not_coordinate_authority"
+)
+TAIL_KINEMATICS_WORKER_INPUT_ATTESTATION_SCHEMA_ID = (
+    "palette.tail_kinematics_worker_input_attestation"
+)
+TAIL_KINEMATICS_WORKER_INPUT_ATTESTATION_SCHEMA_VERSION = 1
 TAIL_KINEMATICS_CANDIDATE_PROFILE_ID = "published_http_v1"
 
 _REQUIRED_SOURCE_ARRAY_PATHS = (
@@ -141,6 +154,26 @@ _SOURCE_CONTRACT_ATTR_NAMES = (
     "body_frame_schema_id",
     "tail_geometry_schema_id",
 )
+
+_TAIL_WORKER_ROW_SOURCE_PATHS = {
+    "tail_sample_xy": "components/subject_body/tail_sample_xy",
+    "tail_tangent_xy": "components/subject_body/tail_tangent_xy",
+    "tail_curvature_px_inv": "components/subject_body/tail_curvature_px_inv",
+    "tail_sample_valid": "components/subject_body/tail_sample_valid",
+    "bspline_valid": "components/subject_body/bspline_valid",
+    "tail_base_xy": "components/subject_body/tail_base_xy",
+    "body_forward_axis_xy": "body_frame/forward_axis_xy",
+    "body_left_axis_xy": "body_frame/left_axis_xy",
+    "body_frame_valid": "body_frame/axis_valid",
+    "tail_sample_failure_reason": (
+        "components/subject_body/tail_sample_failure_reason_bytes"
+    ),
+    "bspline_failure_reason": ("components/subject_body/bspline_failure_reason_bytes"),
+    "body_frame_failure_reason": "body_frame/failure_reason_bytes",
+}
+_TAIL_WORKER_STATIC_SOURCE_PATHS = {
+    "source_tail_sample_s": "components/subject_body/tail_sample_s",
+}
 
 
 @dataclass(frozen=True)
@@ -180,6 +213,9 @@ class TailKinematicsSources:
     source_publication_manifest_sha256: str
     source_authority_mode: str
     source_authority: Mapping[str, Any] = field(repr=False)
+    staged_input_integrity_receipt: Mapping[str, Any] | None = field(
+        repr=False,
+    )
     shape_group: Any = field(repr=False, compare=False)
 
 
@@ -308,6 +344,7 @@ def _validated_staged_source_authority(
     *,
     run_name: str,
     authority: Mapping[str, Any],
+    verify_payload: bool = True,
 ) -> dict[str, Any]:
     """Validate one explicit materializer-only detached source receipt."""
 
@@ -406,18 +443,406 @@ def _validated_staged_source_authority(
             raise SubjectShapeIOError(
                 f"Staged source metadata for {relative_ref!r} differs from its receipt."
             )
-        try:
-            observed_digest = array_payload_sha256(node)
-        except Exception as exc:
+        if verify_payload:
+            try:
+                observed_digest = array_payload_sha256(node)
+            except Exception as exc:
+                raise SubjectShapeIOError(
+                    f"Staged source array {relative_ref!r} could not be verified: {exc}"
+                ) from exc
+            if observed_digest != declared.get("content_sha256"):
+                raise SubjectShapeIOError(
+                    f"Staged source array {relative_ref!r} differs from its canonical payload."
+                )
+
+    return {**canonical, "record_sha256": str(digest)}
+
+
+def _staged_array_digest_header(dtype: np.dtype[Any], shape: tuple[int, ...]) -> Any:
+    header = {
+        "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        "dtype": np.lib.format.dtype_to_descr(dtype),
+        "shape": [int(value) for value in shape],
+    }
+    digest = hashlib.sha256()
+    digest.update(
+        json.dumps(
+            header,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    digest.update(b"\x00")
+    return digest
+
+
+def _scan_staged_source_array_once(
+    relative_ref: str,
+    node: Any,
+    *,
+    row_count: int,
+    chunk_rows: int,
+    retain_worker_chunks: bool,
+) -> dict[str, Any]:
+    """Read one staged source array once into whole-array and chunk evidence."""
+
+    dtype = np.dtype(node.dtype)
+    shape = tuple(int(value) for value in node.shape)
+    if dtype.hasobject:
+        raise SubjectShapeIOError(
+            f"Staged source array {relative_ref!r} has no deterministic payload grammar."
+        )
+    full_digest = _staged_array_digest_header(dtype, shape)
+    chunks: list[dict[str, Any]] = []
+    row_aligned = bool(shape and shape[0] == int(row_count))
+    if row_aligned:
+        trailing = (slice(None),) * (len(shape) - 1)
+        for chunk_index, start in enumerate(range(0, shape[0], int(chunk_rows))):
+            stop = min(shape[0], start + int(chunk_rows))
+            values = np.ascontiguousarray(node[(slice(start, stop), *trailing)])
+            if values.dtype != dtype or values.shape != (stop - start, *shape[1:]):
+                raise SubjectShapeIOError(
+                    f"Staged source array {relative_ref!r} changed during receipt scan."
+                )
+            full_digest.update(values.tobytes(order="C"))
+            if retain_worker_chunks:
+                chunks.append(
+                    {
+                        "chunk_index": int(chunk_index),
+                        "start_row": int(start),
+                        "stop_row": int(stop),
+                        "dtype": dtype.str,
+                        "shape": [int(value) for value in values.shape],
+                        "canonicalization": ("numpy_dtype_shape_c_order_bytes_v1"),
+                        "content_sha256": array_values_sha256(values),
+                    }
+                )
+    else:
+        values = np.ascontiguousarray(node[...])
+        if values.dtype != dtype or values.shape != shape:
             raise SubjectShapeIOError(
-                f"Staged source array {relative_ref!r} could not be verified: {exc}"
-            ) from exc
-        if observed_digest != declared.get("content_sha256"):
+                f"Staged source array {relative_ref!r} changed during receipt scan."
+            )
+        full_digest.update(values.tobytes(order="C"))
+    if (
+        np.dtype(node.dtype) != dtype
+        or tuple(int(value) for value in node.shape) != shape
+    ):
+        raise SubjectShapeIOError(
+            f"Staged source array {relative_ref!r} metadata changed during receipt scan."
+        )
+    return {
+        "relative_ref": relative_ref,
+        "dtype": dtype.str,
+        "shape": [int(value) for value in shape],
+        "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        "content_sha256": full_digest.hexdigest(),
+        "row_aligned": row_aligned,
+        "worker_chunks": chunks,
+    }
+
+
+def _canonical_staged_input_chunk(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise SubjectShapeIOError("Staged tail input chunk must be a mapping.")
+    canonical = _canonical_json_copy(value)
+    digest = canonical.pop("record_sha256", None)
+    if (
+        set(canonical) != {"chunk_index", "start_row", "stop_row", "source_arrays"}
+        or type(canonical.get("chunk_index")) is not int
+        or type(canonical.get("start_row")) is not int
+        or type(canonical.get("stop_row")) is not int
+        or not (0 <= canonical["start_row"] < canonical["stop_row"])
+        or not isinstance(canonical.get("source_arrays"), Mapping)
+        or not _is_sha256(digest)
+        or digest != _canonical_sha256(canonical)
+    ):
+        raise SubjectShapeIOError(
+            "Staged tail input chunk receipt is malformed or stale."
+        )
+    return {**canonical, "record_sha256": str(digest)}
+
+
+def _canonical_staged_input_integrity_receipt(
+    shape_group: Any,
+    *,
+    run_name: str,
+    authority: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one staged-input receipt using metadata and sealed digests only."""
+
+    staged_authority = _validated_staged_source_authority(
+        shape_group,
+        run_name=run_name,
+        authority=authority,
+        verify_payload=False,
+    )
+    if not isinstance(receipt, Mapping):
+        raise SubjectShapeIOError(
+            "Staged tail input integrity receipt must be a mapping."
+        )
+    canonical = _canonical_json_copy(receipt)
+    digest = canonical.pop("record_sha256", None)
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "integrity_scope",
+        "receipt_role",
+        "source_subject_shape_run",
+        "staged_source_authority_sha256",
+        "row_count",
+        "source_sample_count",
+        "requested_chunk_rows",
+        "source_arrays",
+        "worker_row_input_paths",
+        "worker_static_input_paths",
+        "worker_static_inputs",
+        "chunks",
+        "closed_source_array_inventory",
+        "normal_reader_authority",
+        "coordinate_authority",
+    }
+    if (
+        set(canonical) != expected_fields
+        or canonical.get("schema_id")
+        != TAIL_KINEMATICS_STAGED_INPUT_INTEGRITY_SCHEMA_ID
+        or canonical.get("schema_version")
+        != TAIL_KINEMATICS_STAGED_INPUT_INTEGRITY_SCHEMA_VERSION
+        or canonical.get("integrity_scope")
+        != TAIL_KINEMATICS_STAGED_INPUT_INTEGRITY_SCOPE
+        or canonical.get("receipt_role")
+        != "materializer_private_integrity_not_coordinate_authority"
+        or canonical.get("source_subject_shape_run") != run_name
+        or canonical.get("staged_source_authority_sha256")
+        != staged_authority["record_sha256"]
+        or canonical.get("closed_source_array_inventory") is not True
+        or canonical.get("normal_reader_authority") is not False
+        or canonical.get("coordinate_authority") is not False
+        or not _is_sha256(digest)
+        or digest != _canonical_sha256(canonical)
+    ):
+        raise SubjectShapeIOError(
+            "Staged tail input integrity receipt is unsupported, stale, or unbound."
+        )
+    row_count = canonical.get("row_count")
+    source_sample_count = canonical.get("source_sample_count")
+    chunk_rows = canonical.get("requested_chunk_rows")
+    if (
+        type(row_count) is not int
+        or row_count < 0
+        or type(source_sample_count) is not int
+        or source_sample_count < 2
+        or type(chunk_rows) is not int
+        or chunk_rows <= 0
+        or row_count != staged_authority.get("row_count")
+        or source_sample_count != staged_authority.get("source_sample_count")
+    ):
+        raise SubjectShapeIOError(
+            "Staged tail input receipt cardinality differs from its authority."
+        )
+    allowed = staged_authority["allowed_arrays"]
+    source_arrays = canonical.get("source_arrays")
+    if not isinstance(source_arrays, Mapping) or set(source_arrays) != set(allowed):
+        raise SubjectShapeIOError(
+            "Staged tail input receipt source-array inventory is not closed."
+        )
+    for relative_ref in sorted(source_arrays):
+        record = source_arrays[relative_ref]
+        declared = allowed[relative_ref]
+        node = shape_group.get(relative_ref)
+        if (
+            not isinstance(record, Mapping)
+            or set(record)
+            != {"relative_ref", "dtype", "shape", "canonicalization", "content_sha256"}
+            or node is None
+            or record.get("relative_ref") != relative_ref
+            or record.get("dtype") != np.dtype(node.dtype).str
+            or record.get("shape") != [int(value) for value in node.shape]
+            or record.get("canonicalization") != "numpy_dtype_shape_c_order_bytes_v1"
+            or record.get("content_sha256") != declared.get("content_sha256")
+        ):
+            raise SubjectShapeIOError(
+                f"Staged tail input receipt differs for source array {relative_ref!r}."
+            )
+    expected_static_paths = list(sorted(_TAIL_WORKER_STATIC_SOURCE_PATHS.values()))
+    expected_row_paths = list(
+        sorted(
+            path for path in _TAIL_WORKER_ROW_SOURCE_PATHS.values() if path in allowed
+        )
+    )
+    if (
+        canonical.get("worker_row_input_paths") != expected_row_paths
+        or canonical.get("worker_static_input_paths") != expected_static_paths
+        or canonical.get("worker_static_inputs")
+        != {path: source_arrays[path] for path in expected_static_paths}
+    ):
+        raise SubjectShapeIOError(
+            "Staged tail worker input inventory differs from the maintained kernel."
+        )
+    chunks = canonical.get("chunks")
+    if not isinstance(chunks, list):
+        raise SubjectShapeIOError("Staged tail input chunk inventory must be a list.")
+    canonical_chunks: list[dict[str, Any]] = []
+    cursor = 0
+    for expected_index, raw_chunk in enumerate(chunks):
+        chunk = _canonical_staged_input_chunk(raw_chunk)
+        start = chunk["start_row"]
+        stop = chunk["stop_row"]
+        if (
+            chunk["chunk_index"] != expected_index
+            or start != cursor
+            or stop > row_count
+            or stop - start > chunk_rows
+            or (stop < row_count and stop - start != chunk_rows)
+            or set(chunk["source_arrays"]) != set(expected_row_paths)
+        ):
+            raise SubjectShapeIOError(
+                "Staged tail input chunks have a gap, overlap, or wrong inventory."
+            )
+        for relative_ref in expected_row_paths:
+            record = chunk["source_arrays"][relative_ref]
+            full = source_arrays[relative_ref]
+            if (
+                not isinstance(record, Mapping)
+                or set(record)
+                != {"dtype", "shape", "canonicalization", "content_sha256"}
+                or record.get("dtype") != full["dtype"]
+                or record.get("shape") != [stop - start, *full["shape"][1:]]
+                or record.get("canonicalization")
+                != "numpy_dtype_shape_c_order_bytes_v1"
+                or not _is_sha256(record.get("content_sha256"))
+            ):
+                raise SubjectShapeIOError(
+                    f"Staged tail chunk declaration differs for {relative_ref!r}."
+                )
+        cursor = stop
+        canonical_chunks.append(chunk)
+    if cursor != row_count or (row_count == 0 and canonical_chunks):
+        raise SubjectShapeIOError(
+            "Staged tail input chunks do not cover every row exactly once."
+        )
+    canonical["chunks"] = canonical_chunks
+    return {**canonical, "record_sha256": str(digest)}
+
+
+def build_tail_kinematics_staged_input_integrity_receipt(
+    shape_group: Any,
+    *,
+    run_name: str,
+    authority: Mapping[str, Any],
+    chunk_rows: int,
+    read_workers: int = 4,
+) -> dict[str, Any]:
+    """Scan staged inputs once and seal the chunks workers will consume."""
+
+    if type(chunk_rows) is not int or chunk_rows <= 0:
+        raise ValueError("Tail staged-input receipt chunk_rows must be positive.")
+    if type(read_workers) is not int or read_workers <= 0:
+        raise ValueError("Tail staged-input receipt read_workers must be positive.")
+    staged_authority = _validated_staged_source_authority(
+        shape_group,
+        run_name=run_name,
+        authority=authority,
+        verify_payload=False,
+    )
+    row_count = int(staged_authority["row_count"])
+    worker_paths = set(_TAIL_WORKER_ROW_SOURCE_PATHS.values())
+    allowed = staged_authority["allowed_arrays"]
+    effective_workers = min(int(read_workers), max(1, len(allowed)))
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        futures = [
+            executor.submit(
+                _scan_staged_source_array_once,
+                relative_ref,
+                shape_group[relative_ref],
+                row_count=row_count,
+                chunk_rows=int(chunk_rows),
+                retain_worker_chunks=relative_ref in worker_paths,
+            )
+            for relative_ref in sorted(allowed)
+        ]
+        results = sorted(
+            (future.result() for future in futures),
+            key=lambda item: str(item["relative_ref"]),
+        )
+    source_arrays: dict[str, Any] = {}
+    result_by_path: dict[str, Mapping[str, Any]] = {}
+    for result in results:
+        relative_ref = str(result["relative_ref"])
+        if result["content_sha256"] != allowed[relative_ref]["content_sha256"]:
             raise SubjectShapeIOError(
                 f"Staged source array {relative_ref!r} differs from its canonical payload."
             )
-
-    return {**canonical, "record_sha256": str(digest)}
+        source_arrays[relative_ref] = {
+            key: result[key]
+            for key in (
+                "relative_ref",
+                "dtype",
+                "shape",
+                "canonicalization",
+                "content_sha256",
+            )
+        }
+        result_by_path[relative_ref] = result
+    worker_row_paths = list(
+        sorted(path for path in worker_paths if path in source_arrays)
+    )
+    worker_static_paths = list(sorted(_TAIL_WORKER_STATIC_SOURCE_PATHS.values()))
+    chunk_records: list[dict[str, Any]] = []
+    for chunk_index, start in enumerate(range(0, row_count, int(chunk_rows))):
+        stop = min(row_count, start + int(chunk_rows))
+        chunk_arrays: dict[str, Any] = {}
+        for relative_ref in worker_row_paths:
+            leaves = result_by_path[relative_ref]["worker_chunks"]
+            leaf = leaves[chunk_index]
+            if leaf["start_row"] != start or leaf["stop_row"] != stop:
+                raise RuntimeError(
+                    "Tail staged-input receipt scanner produced inconsistent chunks."
+                )
+            chunk_arrays[relative_ref] = {
+                key: leaf[key]
+                for key in ("dtype", "shape", "canonicalization", "content_sha256")
+            }
+        chunk_body = {
+            "chunk_index": int(chunk_index),
+            "start_row": int(start),
+            "stop_row": int(stop),
+            "source_arrays": chunk_arrays,
+        }
+        chunk_records.append(
+            {**chunk_body, "record_sha256": _canonical_sha256(chunk_body)}
+        )
+    body = {
+        "schema_id": TAIL_KINEMATICS_STAGED_INPUT_INTEGRITY_SCHEMA_ID,
+        "schema_version": TAIL_KINEMATICS_STAGED_INPUT_INTEGRITY_SCHEMA_VERSION,
+        "integrity_scope": TAIL_KINEMATICS_STAGED_INPUT_INTEGRITY_SCOPE,
+        "receipt_role": "materializer_private_integrity_not_coordinate_authority",
+        "source_subject_shape_run": str(run_name),
+        "staged_source_authority_sha256": staged_authority["record_sha256"],
+        "row_count": row_count,
+        "source_sample_count": int(staged_authority["source_sample_count"]),
+        "requested_chunk_rows": int(chunk_rows),
+        "source_arrays": source_arrays,
+        "worker_row_input_paths": worker_row_paths,
+        "worker_static_input_paths": worker_static_paths,
+        "worker_static_inputs": {
+            path: source_arrays[path] for path in worker_static_paths
+        },
+        "chunks": chunk_records,
+        "closed_source_array_inventory": True,
+        "normal_reader_authority": False,
+        "coordinate_authority": False,
+    }
+    receipt = {**body, "record_sha256": _canonical_sha256(body)}
+    return _canonical_staged_input_integrity_receipt(
+        shape_group,
+        run_name=run_name,
+        authority=staged_authority,
+        receipt=receipt,
+    )
 
 
 def _encode_reasons(
@@ -1084,6 +1509,8 @@ def _resolve_tail_kinematics_sources(
     shape_run: Optional[str],
     *,
     _staged_source_authority: Mapping[str, Any] | None = None,
+    _staged_input_integrity_receipt: Mapping[str, Any] | None = None,
+    _verify_staged_payload: bool = True,
 ) -> tuple[str, zarr.Group, TailKinematicsSources]:
     """Resolve lazy source handles through canonical or explicit staged proof.
 
@@ -1126,6 +1553,13 @@ def _resolve_tail_kinematics_sources(
             shape_group,
             run_name=run_name,
             authority=_staged_source_authority,
+            verify_payload=(
+                bool(_verify_staged_payload) and _staged_input_integrity_receipt is None
+            ),
+        )
+    if _staged_source_authority is None and _staged_input_integrity_receipt is not None:
+        raise SubjectShapeIOError(
+            "Staged tail input integrity cannot replace canonical source authority."
         )
     components = _require_group(shape_group, "components", path=run_path)
     body_path = f"{run_path}/components"
@@ -1135,7 +1569,8 @@ def _resolve_tail_kinematics_sources(
     source_s_array = _require_array_handle(
         body, "tail_sample_s", path=f"{body_path}/subject_body"
     )
-    source_s = np.asarray(source_s_array[:], dtype=np.float32)
+    source_s_raw = np.asarray(source_s_array[:])
+    source_s = np.asarray(source_s_raw, dtype=np.float32)
     if source_s.ndim != 1 or int(source_s.shape[0]) < 2:
         raise SubjectShapeIOError(
             "tail_sample_s must be one-dimensional with at least two positions."
@@ -1220,6 +1655,29 @@ def _resolve_tail_kinematics_sources(
             )
         source_authority = staged_authority
         source_authority_mode = "digest_bound_staged_subset"
+        staged_input_receipt = (
+            _canonical_staged_input_integrity_receipt(
+                shape_group,
+                run_name=run_name,
+                authority=staged_authority,
+                receipt=_staged_input_integrity_receipt,
+            )
+            if _staged_input_integrity_receipt is not None
+            else None
+        )
+        if staged_input_receipt is not None:
+            static_path = _TAIL_WORKER_STATIC_SOURCE_PATHS["source_tail_sample_s"]
+            expected_static = staged_input_receipt["worker_static_inputs"][static_path]
+            if (
+                np.dtype(source_s_raw.dtype).str != expected_static["dtype"]
+                or [int(value) for value in source_s_raw.shape]
+                != expected_static["shape"]
+                or array_values_sha256(source_s_raw)
+                != expected_static["content_sha256"]
+            ):
+                raise SubjectShapeIOError(
+                    "Staged tail_sample_s differs from its input integrity receipt."
+                )
     else:
         assert publication is not None
         source_authority = _build_staged_source_authority(
@@ -1230,6 +1688,7 @@ def _resolve_tail_kinematics_sources(
             publication=publication,
         )
         source_authority_mode = "canonical_publication"
+        staged_input_receipt = None
     manifest_sha256 = source_authority["canonical_publication"]["manifest_sha256"]
 
     return (
@@ -1244,22 +1703,103 @@ def _resolve_tail_kinematics_sources(
             source_publication_manifest_sha256=str(manifest_sha256),
             source_authority_mode=source_authority_mode,
             source_authority=source_authority,
+            staged_input_integrity_receipt=staged_input_receipt,
             shape_group=shape_group,
         ),
     )
 
 
 def _revalidate_tail_kinematics_sources(sources: TailKinematicsSources) -> None:
-    """Close staged-copy TOCTOU after all bounded source reads complete."""
+    """Rebind staged metadata after reads without another whole-input scan."""
 
     if sources.source_authority_mode != "digest_bound_staged_subset":
         return
     run_name = str(sources.source_authority.get("source_subject_shape_run") or "")
-    _validated_staged_source_authority(
-        sources.shape_group,
-        run_name=run_name,
-        authority=sources.source_authority,
-    )
+    if sources.staged_input_integrity_receipt is not None:
+        _canonical_staged_input_integrity_receipt(
+            sources.shape_group,
+            run_name=run_name,
+            authority=sources.source_authority,
+            receipt=sources.staged_input_integrity_receipt,
+        )
+    else:
+        _validated_staged_source_authority(
+            sources.shape_group,
+            run_name=run_name,
+            authority=sources.source_authority,
+        )
+
+
+def _staged_input_chunk_for_slice(
+    sources: TailKinematicsSources,
+    row_slice: slice,
+) -> Mapping[str, Any] | None:
+    receipt = sources.staged_input_integrity_receipt
+    if receipt is None:
+        return None
+    start = int(row_slice.start or 0)
+    stop = int(row_slice.stop or 0)
+    chunk_rows = int(receipt["requested_chunk_rows"])
+    chunk_index = start // chunk_rows
+    chunks = receipt["chunks"]
+    if not 0 <= chunk_index < len(chunks):
+        raise SubjectShapeIOError(
+            "Tail worker row slice is absent from its staged-input receipt."
+        )
+    chunk = chunks[chunk_index]
+    if chunk["start_row"] != start or chunk["stop_row"] != stop:
+        raise SubjectShapeIOError(
+            "Tail worker row slice differs from its staged-input receipt."
+        )
+    return chunk
+
+
+def _validate_staged_block_value(
+    chunk: Mapping[str, Any] | None,
+    *,
+    relative_ref: str,
+    values: np.ndarray,
+) -> None:
+    if chunk is None:
+        return
+    record = chunk["source_arrays"].get(relative_ref)
+    if (
+        not isinstance(record, Mapping)
+        or np.dtype(values.dtype).str != record.get("dtype")
+        or [int(value) for value in values.shape] != record.get("shape")
+        or array_values_sha256(values) != record.get("content_sha256")
+    ):
+        raise SubjectShapeIOError(
+            f"Tail worker input {relative_ref!r} differs from its staged receipt."
+        )
+
+
+def _complete_staged_input_worker_attestation(
+    receipt: Mapping[str, Any],
+    observed_chunk_receipts: Sequence[str],
+) -> dict[str, Any]:
+    expected = [str(chunk["record_sha256"]) for chunk in receipt["chunks"]]
+    observed = [str(value) for value in observed_chunk_receipts]
+    if (
+        any(not _is_sha256(value) for value in observed)
+        or len(observed) != len(set(observed))
+        or sorted(observed) != sorted(expected)
+    ):
+        raise RuntimeError(
+            "Tail workers did not attest the exact complete staged-input chunk set."
+        )
+    body = {
+        "schema_id": TAIL_KINEMATICS_WORKER_INPUT_ATTESTATION_SCHEMA_ID,
+        "schema_version": TAIL_KINEMATICS_WORKER_INPUT_ATTESTATION_SCHEMA_VERSION,
+        "staged_input_integrity_receipt_sha256": receipt["record_sha256"],
+        "chunk_count": len(expected),
+        "ordered_chunk_receipt_set_sha256": _canonical_sha256(expected),
+        "complete_worker_chunk_set": True,
+        "verification_location": (
+            "worker_owned_decoded_block_before_scientific_compute"
+        ),
+    }
+    return {**body, "record_sha256": _canonical_sha256(body)}
 
 
 def _read_tail_kinematics_source_block(
@@ -1269,40 +1809,63 @@ def _read_tail_kinematics_source_block(
     """Read one bounded row block from the lazy subject-shape source handles."""
 
     arrays = sources.arrays
+    chunk = _staged_input_chunk_for_slice(sources, row_slice)
+    raw_values = {
+        "tail_sample_xy": np.asarray(arrays["tail_sample_xy"][row_slice]),
+        "tail_tangent_xy": np.asarray(arrays["tail_tangent_xy"][row_slice]),
+        "tail_curvature_px_inv": np.asarray(arrays["tail_curvature_px_inv"][row_slice]),
+        "tail_sample_valid": np.asarray(arrays["tail_sample_valid"][row_slice]),
+        "bspline_valid": np.asarray(arrays["bspline_valid"][row_slice]),
+        "tail_base_xy": np.asarray(arrays["tail_base_xy"][row_slice]),
+        "body_forward_axis_xy": np.asarray(arrays["body_forward_axis_xy"][row_slice]),
+        "body_left_axis_xy": np.asarray(arrays["body_left_axis_xy"][row_slice]),
+        "body_frame_valid": np.asarray(arrays["body_frame_valid"][row_slice]),
+    }
+    for logical_name, values in raw_values.items():
+        _validate_staged_block_value(
+            chunk,
+            relative_ref=_TAIL_WORKER_ROW_SOURCE_PATHS[logical_name],
+            values=values,
+        )
+    reason_values: dict[str, np.ndarray] = {}
+    for logical_name in (
+        "tail_sample_failure_reason",
+        "bspline_failure_reason",
+        "body_frame_failure_reason",
+    ):
+        relative_ref = _TAIL_WORKER_ROW_SOURCE_PATHS[logical_name]
+        source = sources.reason_arrays.get(logical_name)
+        if source is None:
+            reason_values[logical_name] = _read_optional_reason_labels(None, row_slice)
+            continue
+        raw = np.asarray(source[row_slice])
+        _validate_staged_block_value(
+            chunk,
+            relative_ref=relative_ref,
+            values=raw,
+        )
+        if raw.ndim == 2 and np.issubdtype(raw.dtype, np.integer):
+            reason_values[logical_name] = decode_reason_bytes(raw)
+        else:
+            reason_values[logical_name] = np.asarray(raw, dtype=object).reshape(-1)
     return {
         "source_tail_sample_s": sources.source_tail_sample_s,
-        "tail_sample_xy": np.asarray(
-            arrays["tail_sample_xy"][row_slice], dtype=np.float32
-        ),
-        "tail_tangent_xy": np.asarray(
-            arrays["tail_tangent_xy"][row_slice], dtype=np.float32
-        ),
+        "tail_sample_xy": np.asarray(raw_values["tail_sample_xy"], dtype=np.float32),
+        "tail_tangent_xy": np.asarray(raw_values["tail_tangent_xy"], dtype=np.float32),
         "tail_curvature_px_inv": np.asarray(
-            arrays["tail_curvature_px_inv"][row_slice], dtype=np.float32
+            raw_values["tail_curvature_px_inv"], dtype=np.float32
         ),
-        "tail_sample_valid": np.asarray(
-            arrays["tail_sample_valid"][row_slice], dtype=bool
-        ),
-        "bspline_valid": np.asarray(arrays["bspline_valid"][row_slice], dtype=bool),
-        "tail_base_xy": np.asarray(arrays["tail_base_xy"][row_slice], dtype=np.float32),
+        "tail_sample_valid": np.asarray(raw_values["tail_sample_valid"], dtype=bool),
+        "bspline_valid": np.asarray(raw_values["bspline_valid"], dtype=bool),
+        "tail_base_xy": np.asarray(raw_values["tail_base_xy"], dtype=np.float32),
         "body_forward_axis_xy": np.asarray(
-            arrays["body_forward_axis_xy"][row_slice], dtype=np.float32
+            raw_values["body_forward_axis_xy"], dtype=np.float32
         ),
         "body_left_axis_xy": np.asarray(
-            arrays["body_left_axis_xy"][row_slice], dtype=np.float32
+            raw_values["body_left_axis_xy"], dtype=np.float32
         ),
-        "body_frame_valid": np.asarray(
-            arrays["body_frame_valid"][row_slice], dtype=bool
-        ),
-        "tail_sample_failure_reason": _read_optional_reason_labels(
-            sources.reason_arrays.get("tail_sample_failure_reason"), row_slice
-        ),
-        "bspline_failure_reason": _read_optional_reason_labels(
-            sources.reason_arrays.get("bspline_failure_reason"), row_slice
-        ),
-        "body_frame_failure_reason": _read_optional_reason_labels(
-            sources.reason_arrays.get("body_frame_failure_reason"), row_slice
-        ),
+        "body_frame_valid": np.asarray(raw_values["body_frame_valid"], dtype=bool),
+        **reason_values,
     }
 
 
@@ -1744,9 +2307,9 @@ def _prepare_tail_kinematics_run(
                 source_authority.get("record_sha256")
             ),
             "source_subject_shape_authority": json_attr_safe(source_authority),
-            "source_refined_subject_masks_run": str(source_refined_run)
-            if source_refined_run is not None
-            else None,
+            "source_refined_subject_masks_run": (
+                str(source_refined_run) if source_refined_run is not None else None
+            ),
             "source_tail_geometry_kind": SOURCE_TAIL_GEOMETRY_KIND,
             "body_frame_convention": shape_group.attrs.get(
                 "body_frame_schema_id", "fish_anatomical_body_frame"
@@ -2022,26 +2585,26 @@ def _write_tail_kinematics_batch_slice(
     run_group["tail_angle_deg"][row_slice] = batch.tail_angle_deg
     run_group["tail_tip_angle_rad"][row_slice] = batch.tail_tip_angle_rad
     run_group["tail_tip_angle_deg"][row_slice] = batch.tail_tip_angle_deg
-    run_group["tail_lateral_deflection_px"][row_slice] = (
-        batch.tail_lateral_deflection_px
-    )
-    run_group["tail_tip_lateral_deflection_px"][row_slice] = (
-        batch.tail_tip_lateral_deflection_px
-    )
+    run_group["tail_lateral_deflection_px"][
+        row_slice
+    ] = batch.tail_lateral_deflection_px
+    run_group["tail_tip_lateral_deflection_px"][
+        row_slice
+    ] = batch.tail_tip_lateral_deflection_px
     run_group["max_abs_tail_angle_rad"][row_slice] = batch.max_abs_tail_angle_rad
     run_group["max_abs_tail_angle_deg"][row_slice] = batch.max_abs_tail_angle_deg
     run_group["tail_angle_rms_rad"][row_slice] = batch.tail_angle_rms_rad
     run_group["tail_angle_rms_deg"][row_slice] = batch.tail_angle_rms_deg
-    run_group["integrated_abs_tail_angle_rad"][row_slice] = (
-        batch.integrated_abs_tail_angle_rad
-    )
+    run_group["integrated_abs_tail_angle_rad"][
+        row_slice
+    ] = batch.integrated_abs_tail_angle_rad
     run_group["tail_curvature_px_inv"][row_slice] = batch.tail_curvature_px_inv
-    run_group["max_abs_tail_curvature_px_inv"][row_slice] = (
-        batch.max_abs_tail_curvature_px_inv
-    )
-    run_group["integrated_abs_tail_curvature"][row_slice] = (
-        batch.integrated_abs_tail_curvature
-    )
+    run_group["max_abs_tail_curvature_px_inv"][
+        row_slice
+    ] = batch.max_abs_tail_curvature_px_inv
+    run_group["integrated_abs_tail_curvature"][
+        row_slice
+    ] = batch.integrated_abs_tail_curvature
 
 
 def _tail_kinematics_batch_counts(
@@ -2068,6 +2631,7 @@ def _process_tail_kinematics_shard(
     tail_angle_sample_count: int,
     block_rows: int,
     staged_source_authority: Mapping[str, Any] | None = None,
+    staged_input_integrity_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     """Compute one worker-owned output shard in bounded row sub-blocks."""
 
@@ -2076,6 +2640,7 @@ def _process_tail_kinematics_shard(
         root,
         shape_run,
         _staged_source_authority=staged_source_authority,
+        _staged_input_integrity_receipt=staged_input_integrity_receipt,
     )
     if resolved_shape_run != shape_run:
         raise RuntimeError(
@@ -2088,10 +2653,14 @@ def _process_tail_kinematics_shard(
     compute_duration = 0.0
     write_duration = 0.0
     completed_block_count = 0
+    attested_input_chunks: list[str] = []
     for start in range(int(row_start), int(row_stop), int(block_rows)):
         row_slice = slice(start, min(start + int(block_rows), int(row_stop)))
         read_started = time.perf_counter()
         block_sources = _read_tail_kinematics_source_block(sources, row_slice)
+        input_chunk = _staged_input_chunk_for_slice(sources, row_slice)
+        if input_chunk is not None:
+            attested_input_chunks.append(str(input_chunk["record_sha256"]))
         read_duration += float(time.perf_counter() - read_started)
         compute_started = time.perf_counter()
         batch = compute_tail_kinematics_from_subject_shape_arrays(
@@ -2120,6 +2689,7 @@ def _process_tail_kinematics_shard(
         "write_duration_seconds": write_duration,
         "completed_block_count": int(completed_block_count),
         "completed_worker_task_count": 1,
+        "staged_input_chunk_receipt_sha256": attested_input_chunks,
     }
 
 
@@ -2154,6 +2724,7 @@ def write_tail_kinematics_run_group(
     stage_command: Optional[str] = None,
     storage_profile: StorageProfile | None = None,
     _staged_source_authority: Mapping[str, Any] | None = None,
+    _staged_input_integrity_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     """Write one tail-kinematics run from an existing subject-shape run."""
 
@@ -2189,10 +2760,19 @@ def write_tail_kinematics_run_group(
         raise ValueError(
             "process_shards requires worker_zarr_path for independent worker opens."
         )
+    if (
+        not dry_run
+        and _staged_source_authority is not None
+        and _staged_input_integrity_receipt is None
+    ):
+        raise ValueError(
+            "Staged tail execution requires one sealed input-integrity receipt."
+        )
     shape_run_name, shape_group, sources = _resolve_tail_kinematics_sources(
         root,
         shape_run,
         _staged_source_authority=_staged_source_authority,
+        _staged_input_integrity_receipt=_staged_input_integrity_receipt,
     )
     row_count = int(sources.row_count)
     storage_dimensions: TailKinematicsDimensions | None = None
@@ -2222,6 +2802,18 @@ def write_tail_kinematics_run_group(
         if backend == "serial"
         else min(int(num_workers), max(1, len(worker_shard_slices)))
     )
+    if sources.staged_input_integrity_receipt is not None:
+        receipt_slices = [
+            (int(chunk["start_row"]), int(chunk["stop_row"]))
+            for chunk in sources.staged_input_integrity_receipt["chunks"]
+        ]
+        expected_slices = [
+            (int(item.start or 0), int(item.stop or 0)) for item in compute_block_slices
+        ]
+        if receipt_slices != expected_slices:
+            raise ValueError(
+                "Staged tail input receipt chunking differs from compute blocking."
+            )
     output_row_chunk = int(_metric_chunks(row_count)[0])
     if backend == "process_shards":
         if len(worker_shard_slices) > 1 and (
@@ -2312,6 +2904,7 @@ def write_tail_kinematics_run_group(
     source_read_duration_seconds_sum = 0.0
     compute_duration_seconds_sum = 0.0
     write_duration_seconds_sum = 0.0
+    attested_input_chunk_receipts: list[str] = []
     publication_owner_uuid = str(uuid.uuid4())
 
     def record_block_result(block_result: Mapping[str, object]) -> None:
@@ -2334,6 +2927,12 @@ def write_tail_kinematics_run_group(
         completed_worker_task_count += int(
             block_result.get("completed_worker_task_count", 0)
         )
+        raw_attestations = block_result.get("staged_input_chunk_receipt_sha256", [])
+        if not isinstance(raw_attestations, Sequence) or isinstance(
+            raw_attestations, (str, bytes)
+        ):
+            raise RuntimeError("Tail worker returned malformed input attestation.")
+        attested_input_chunk_receipts.extend(str(value) for value in raw_attestations)
 
     try:
         run_group = _prepare_tail_kinematics_run(
@@ -2372,10 +2971,21 @@ def write_tail_kinematics_run_group(
             shard_rows=int(effective_output_shard_rows),
             precreated=storage_receipt is not None,
         )
+        if storage_receipt is None:
+            # The logical array schema is scientific publication evidence, not
+            # a byte-planner-only optimization.  Stamp the ordinary maintained
+            # layout as well so every selector-eligible tail publication can be
+            # admitted through the same strict reader contract.
+            stamp_tail_kinematics_array_schema(
+                run_group,
+                infer_tail_kinematics_dimensions(run_group),
+                byte_planner_adopted=False,
+            )
         if backend == "serial":
             for row_slice in compute_block_slices:
                 read_started = time.perf_counter()
                 block_sources = _read_tail_kinematics_source_block(sources, row_slice)
+                input_chunk = _staged_input_chunk_for_slice(sources, row_slice)
                 read_duration = float(time.perf_counter() - read_started)
                 compute_started = time.perf_counter()
                 batch = compute_tail_kinematics_from_subject_shape_arrays(
@@ -2398,6 +3008,11 @@ def write_tail_kinematics_run_group(
                         "write_duration_seconds": write_duration,
                         "completed_block_count": 1,
                         "completed_worker_task_count": 0,
+                        "staged_input_chunk_receipt_sha256": (
+                            [str(input_chunk["record_sha256"])]
+                            if input_chunk is not None
+                            else []
+                        ),
                     }
                 )
         else:
@@ -2422,6 +3037,11 @@ def write_tail_kinematics_run_group(
                             if _staged_source_authority is not None
                             else None
                         ),
+                        staged_input_integrity_receipt=(
+                            _canonical_json_copy(_staged_input_integrity_receipt)
+                            if _staged_input_integrity_receipt is not None
+                            else None
+                        ),
                     )
                     for row_slice in worker_shard_slices
                 ]
@@ -2429,6 +3049,25 @@ def write_tail_kinematics_run_group(
                     record_block_result(future.result())
 
         _revalidate_tail_kinematics_sources(sources)
+
+        array_schema_errors = validate_tail_kinematics_array_schema(
+            run_group,
+            byte_planner_adopted=storage_receipt is not None,
+        )
+        if array_schema_errors:
+            raise RuntimeError(
+                "Tail-kinematics exact array-schema validation failed: "
+                + "; ".join(array_schema_errors)
+            )
+
+        staged_input_attestation = (
+            _complete_staged_input_worker_attestation(
+                sources.staged_input_integrity_receipt,
+                attested_input_chunk_receipts,
+            )
+            if sources.staged_input_integrity_receipt is not None
+            else None
+        )
 
         if storage_profile is not None:
             storage_errors = validate_tail_kinematics_storage_receipt(run_group)
@@ -2470,6 +3109,13 @@ def write_tail_kinematics_run_group(
         )
         run_group.attrs["compute_duration_seconds_sum"] = compute_duration_seconds_sum
         run_group.attrs["write_duration_seconds_sum"] = write_duration_seconds_sum
+        if sources.staged_input_integrity_receipt is not None:
+            run_group.attrs["staged_input_integrity_receipt_sha256"] = (
+                sources.staged_input_integrity_receipt["record_sha256"]
+            )
+            run_group.attrs["staged_input_worker_attestation"] = (
+                staged_input_attestation
+            )
         if sources.source_authority_mode == "canonical_publication":
             publish_tail_kinematics_coordinate_surfaces(root, run_group)
         else:
@@ -2598,6 +3244,12 @@ def write_tail_kinematics_run(
     dry_run: bool = False,
     storage_profile: StorageProfile | None = None,
 ) -> dict[str, object]:
+    if not dry_run:
+        raise RuntimeError(
+            "Direct archive tail-kinematics publication is retired because it "
+            "cannot issue the maintained atomic payload receipt. Use "
+            "fisheye.analysis_workflows.materializers.tail_kinematics instead."
+        )
     root = open_zarr_root(zarr_path, mode="a")
     return write_tail_kinematics_run_group(
         root,

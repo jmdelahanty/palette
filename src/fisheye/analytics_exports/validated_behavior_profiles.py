@@ -8,11 +8,23 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
-from .validated_behavior_adapters import build_phase_a_row_extractors
+from .validated_behavior_adapters import (
+    build_phase_a_row_extractors,
+    build_phase_c_compact_row_extractors,
+)
 from .validated_behavior_contracts import (
     CORE_METADATA_PROFILE_ID,
     CORE_TABLE_SPECS,
     ValidatedBehaviorTableSpec,
+)
+from .validated_behavior_core_behavior_adapters import (
+    build_core_behavior_row_extractors,
+)
+from .validated_behavior_core_behavior_contracts import (
+    CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+    CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1,
+    CORE_BEHAVIOR_TABLE_SPECS,
+    CORE_BEHAVIOR_TABLE_SPECS_V1,
 )
 from .validated_behavior_phase_a_contracts import (
     PHASE_A_PROFILE_ID,
@@ -24,6 +36,10 @@ from .validated_behavior_phase_b_adapters import (
 from .validated_behavior_phase_b_contracts import (
     PHASE_B_PROFILE_ID,
     PHASE_B_TABLE_SPECS,
+)
+from .validated_behavior_phase_c_contracts import (
+    PHASE_C_PROFILE_ID,
+    PHASE_C_TABLE_SPECS,
 )
 
 
@@ -51,13 +67,52 @@ def _phase_b_extractors() -> Mapping[str, Callable[..., Any]]:
     return MappingProxyType(extractors)
 
 
+def _phase_c_extractors() -> Mapping[str, Callable[..., Any]]:
+    extractors = dict(build_phase_c_compact_row_extractors())
+    extractors.update(build_phase_b_dense_row_extractors())
+    return MappingProxyType(extractors)
+
+
+_COMPETING_CORE_MOTION_TABLES = frozenset(
+    {"kinematics_samples", "provider_motion_samples"}
+)
+
+
+def _validated_profile_map(
+    profiles: Mapping[str, ValidatedBehaviorExportProfile],
+) -> Mapping[str, ValidatedBehaviorExportProfile]:
+    for profile_id, profile in profiles.items():
+        if profile.profile_id != profile_id:
+            raise ValidatedBehaviorProfileError(
+                "Installed validated-behavior profile key and ID differ."
+            )
+        competing = _COMPETING_CORE_MOTION_TABLES.intersection(profile.table_specs)
+        if len(competing) > 1:
+            raise ValidatedBehaviorProfileError(
+                f"Profile {profile_id!r} contains competing core-motion projections: "
+                f"{sorted(competing)!r}. Paradigm extensions must join the selected "
+                "kinematics_samples authority instead."
+            )
+    return MappingProxyType(dict(profiles))
+
+
 INSTALLED_VALIDATED_BEHAVIOR_PROFILES: Mapping[str, ValidatedBehaviorExportProfile] = (
-    MappingProxyType(
+    _validated_profile_map(
         {
             CORE_METADATA_PROFILE_ID: ValidatedBehaviorExportProfile(
                 profile_id=CORE_METADATA_PROFILE_ID,
                 table_specs=CORE_TABLE_SPECS,
                 row_extractor_factory=_no_extractors,
+            ),
+            CORE_BEHAVIOR_EXPORT_PROFILE_ID: ValidatedBehaviorExportProfile(
+                profile_id=CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+                table_specs=CORE_BEHAVIOR_TABLE_SPECS,
+                row_extractor_factory=build_core_behavior_row_extractors,
+            ),
+            CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1: ValidatedBehaviorExportProfile(
+                profile_id=CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1,
+                table_specs=CORE_BEHAVIOR_TABLE_SPECS_V1,
+                row_extractor_factory=build_core_behavior_row_extractors,
             ),
             PHASE_A_PROFILE_ID: ValidatedBehaviorExportProfile(
                 profile_id=PHASE_A_PROFILE_ID,
@@ -68,6 +123,11 @@ INSTALLED_VALIDATED_BEHAVIOR_PROFILES: Mapping[str, ValidatedBehaviorExportProfi
                 profile_id=PHASE_B_PROFILE_ID,
                 table_specs=PHASE_B_TABLE_SPECS,
                 row_extractor_factory=_phase_b_extractors,
+            ),
+            PHASE_C_PROFILE_ID: ValidatedBehaviorExportProfile(
+                profile_id=PHASE_C_PROFILE_ID,
+                table_specs=PHASE_C_TABLE_SPECS,
+                row_extractor_factory=_phase_c_extractors,
             ),
         }
     )

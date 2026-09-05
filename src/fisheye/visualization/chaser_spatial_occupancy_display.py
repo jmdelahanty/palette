@@ -12,6 +12,56 @@ ROBUST_COLOR_QUANTILE = 0.98
 ROBUST_COLOR_QUANTILE_METHOD = "linear"
 COARSEN_POLICY_ID = "aligned_integer_factor_count_sum_preserve_denominators_v1"
 COLOR_SCALE_POLICY_ID = "shared_positive_bin_quantile_with_full_range_reference_v1"
+DISPLAY_RECIPE_ID = "paired_provider_exact_epoch_spatial_occupancy_heatmap_v5"
+DENSITY_MULTIPLIER_TO_PERCENT = 100.0
+SOURCE_COUNT_ARRAY = "occupancy_count"
+SOURCE_DENSITY_ARRAY = "occupancy_density_valid_in_arena"
+SOURCE_CANDIDATE_FRACTION_ARRAY = "occupancy_fraction_candidate_epoch"
+SOURCE_ARRAYS = (SOURCE_DENSITY_ARRAY, SOURCE_CANDIDATE_FRACTION_ARRAY)
+COVERAGE_ARRAY = "in_arena_coverage_fraction_candidate"
+SOURCE_BIN_WIDTH_MM = 2.0
+COARSEN_FACTOR = 2
+COARSENED_BIN_WIDTH_MM = SOURCE_BIN_WIDTH_MM * COARSEN_FACTOR
+DEFAULT_DISPLAY_MODE_ID = "4_mm_valid_in_arena_robust_p98"
+STATIC_EXPORT_MODE_IDS = (
+    DEFAULT_DISPLAY_MODE_ID,
+    "4_mm_valid_in_arena_full_range",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SpatialOccupancyNormalization:
+    """One denominator-preserving occupancy normalization."""
+
+    normalization_id: str
+    surface_attribute: str
+    source_array: str
+    denominator: str
+    label: str
+    colorbar: str
+    difference_colorbar: str
+
+
+NORMALIZATIONS = (
+    SpatialOccupancyNormalization(
+        normalization_id="valid_in_arena",
+        surface_attribute="density_valid_in_arena",
+        source_array=SOURCE_DENSITY_ARRAY,
+        denominator="in_arena_position_frame_count",
+        label="valid in-arena",
+        colorbar="occupancy (% valid in-arena/bin)",
+        difference_colorbar="detection − keypoint (pp valid/bin)",
+    ),
+    SpatialOccupancyNormalization(
+        normalization_id="candidate_epoch",
+        surface_attribute="fraction_candidate_epoch",
+        source_array=SOURCE_CANDIDATE_FRACTION_ARRAY,
+        denominator="candidate_frame_count",
+        label="candidate epoch",
+        colorbar="occupancy (% candidate epoch/bin)",
+        difference_colorbar="detection − keypoint (pp candidate/bin)",
+    ),
+)
 
 
 class ChaserSpatialOccupancyDisplayError(ValueError):
@@ -103,6 +153,125 @@ class SharedColorScale:
             "values_above_robust_limit": (
                 "color_saturated_only_exact_hover_values_retained"
             ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SpatialOccupancyDisplayPayload:
+    """One surface interpreted through one sealed denominator."""
+
+    resolution_id: str
+    surface: SpatialOccupancyDisplaySurface
+    normalization: SpatialOccupancyNormalization
+    values_percent: np.ndarray
+    difference_percentage_points: np.ndarray
+    value_scale: SharedColorScale
+    difference_scale: SharedColorScale
+
+    @property
+    def payload_id(self) -> str:
+        return f"{self.resolution_id}_{self.normalization.normalization_id}"
+
+    @property
+    def x_centers_mm(self) -> np.ndarray:
+        return (self.surface.x_edges_mm[:-1] + self.surface.x_edges_mm[1:]) / 2.0
+
+    @property
+    def y_centers_mm(self) -> np.ndarray:
+        return (self.surface.y_edges_mm[:-1] + self.surface.y_edges_mm[1:]) / 2.0
+
+    def provenance_record(self) -> dict[str, Any]:
+        return {
+            **self.surface.provenance_record(),
+            "normalization": self.normalization.normalization_id,
+            "source_array": self.normalization.source_array,
+            "denominator": self.normalization.denominator,
+            "density_multiplier_to_percent": DENSITY_MULTIPLIER_TO_PERCENT,
+            "color_scale_percent_per_bin": self.value_scale.provenance_record(),
+            "difference_color_scale_absolute_percentage_points_per_bin": (
+                self.difference_scale.provenance_record()
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SpatialOccupancyDisplayMode:
+    """One named view from the shared display recipe."""
+
+    mode_id: str
+    payload: SpatialOccupancyDisplayPayload
+    robust: bool
+
+    @property
+    def scale_label(self) -> str:
+        if self.robust:
+            return f"robust p{int(round(ROBUST_COLOR_QUANTILE * 100))}"
+        return "full range"
+
+    @property
+    def label(self) -> str:
+        return (
+            f"{self.payload.surface.display_bin_width_mm:g} mm · "
+            f"{self.payload.normalization.label} · {self.scale_label}"
+        )
+
+    @property
+    def value_limit(self) -> float:
+        scale = self.payload.value_scale
+        return scale.robust_limit if self.robust else scale.full_limit
+
+    @property
+    def difference_limit(self) -> float:
+        scale = self.payload.difference_scale
+        return scale.robust_limit if self.robust else scale.full_limit
+
+    def provenance_record(self) -> dict[str, Any]:
+        return {
+            "mode_id": self.mode_id,
+            "payload_id": self.payload.payload_id,
+            "display_bin_width_mm": self.payload.surface.display_bin_width_mm,
+            "normalization": self.payload.normalization.normalization_id,
+            "scale": "robust_p98" if self.robust else "full_range",
+            "value_color_limit_percent_per_bin": self.value_limit,
+            "difference_color_limit_absolute_percentage_points_per_bin": (
+                self.difference_limit
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SpatialOccupancyDisplayPlan:
+    """The renderer-neutral single source of occupancy display semantics."""
+
+    payloads: tuple[SpatialOccupancyDisplayPayload, ...]
+    modes: tuple[SpatialOccupancyDisplayMode, ...]
+
+    def payload(self, payload_id: str) -> SpatialOccupancyDisplayPayload:
+        for payload in self.payloads:
+            if payload.payload_id == payload_id:
+                return payload
+        _fail(f"Unknown spatial occupancy display payload {payload_id!r}.")
+
+    def mode(self, mode_id: str) -> SpatialOccupancyDisplayMode:
+        for mode in self.modes:
+            if mode.mode_id == mode_id:
+                return mode
+        _fail(f"Unknown spatial occupancy display mode {mode_id!r}.")
+
+    @property
+    def default_mode(self) -> SpatialOccupancyDisplayMode:
+        return self.mode(DEFAULT_DISPLAY_MODE_ID)
+
+    def provenance_record(self) -> dict[str, Any]:
+        return {
+            **spatial_occupancy_display_contract_record(),
+            "display_surfaces": {
+                payload.payload_id: payload.provenance_record()
+                for payload in self.payloads
+            },
+            "display_modes": {
+                mode.mode_id: mode.provenance_record() for mode in self.modes
+            },
         }
 
 
@@ -309,15 +478,237 @@ def shared_robust_color_scale(
     )
 
 
+def spatial_occupancy_display_contract_record() -> dict[str, Any]:
+    """Return the renderer-neutral contract shared by every presentation target."""
+
+    return {
+        "recipe_id": DISPLAY_RECIPE_ID,
+        "source_count_array": SOURCE_COUNT_ARRAY,
+        "source_array": SOURCE_DENSITY_ARRAY,
+        "source_arrays": list(SOURCE_ARRAYS),
+        "coverage_annotation_array": COVERAGE_ARRAY,
+        "density_multiplier_to_percent": DENSITY_MULTIPLIER_TO_PERCENT,
+        "provider_difference": ("detection_minus_keypoint_percentage_points_per_bin"),
+        "default_normalization": "valid_in_arena",
+        "available_normalizations": [
+            normalization.normalization_id for normalization in NORMALIZATIONS
+        ],
+        "source_bin_width_mm": SOURCE_BIN_WIDTH_MM,
+        "display_bin_widths_mm": [SOURCE_BIN_WIDTH_MM, COARSENED_BIN_WIDTH_MM],
+        "default_display_mode": DEFAULT_DISPLAY_MODE_ID,
+        "available_display_modes": [mode_id for mode_id, *_ in _MODE_SPECS],
+        "static_export_modes": list(STATIC_EXPORT_MODE_IDS),
+        "density_color_normalization": (
+            "shared_robust_p98_default_full_range_available"
+        ),
+        "difference_color_normalization": (
+            "symmetric_shared_robust_p98_default_full_range_available"
+        ),
+        "coarsening": "aligned_exact_2x2_count_sum_no_interpolation",
+        "arena_bin_center_mask_role": (
+            "hover_evidence_only_bins_not_discarded_boundary_bins_may_straddle_circle"
+        ),
+        "coordinate_orientation": "+x_right_+y_down",
+        "interpolation": "prohibited",
+        "scientific_recomputation": False,
+        "display_only_derivation": (
+            "aligned_2x2_exact_count_sum_then_persisted_denominator_normalization"
+        ),
+        "color_saturation_semantics": (
+            "display_only_exact_values_and_full_range_reference_retained"
+        ),
+        "scientific_authority": False,
+    }
+
+
+def _display_payload(
+    resolution_id: str,
+    surface: SpatialOccupancyDisplaySurface,
+    normalization: SpatialOccupancyNormalization,
+) -> SpatialOccupancyDisplayPayload:
+    values_percent = (
+        np.asarray(getattr(surface, normalization.surface_attribute), dtype=np.float64)
+        * DENSITY_MULTIPLIER_TO_PERCENT
+    )
+    difference = values_percent[1] - values_percent[0]
+    value_scale = shared_robust_color_scale(
+        values_percent,
+        quantile=ROBUST_COLOR_QUANTILE,
+    )
+    difference_scale = shared_robust_color_scale(
+        np.abs(difference),
+        quantile=ROBUST_COLOR_QUANTILE,
+        empty_fallback_limit=max(
+            value_scale.full_limit * 1e-6,
+            float(np.finfo(np.float64).eps),
+        ),
+    )
+    return SpatialOccupancyDisplayPayload(
+        resolution_id=resolution_id,
+        surface=surface,
+        normalization=normalization,
+        values_percent=_readonly(values_percent, dtype=np.float64),
+        difference_percentage_points=_readonly(difference, dtype=np.float64),
+        value_scale=value_scale,
+        difference_scale=difference_scale,
+    )
+
+
+_MODE_SPECS = (
+    (DEFAULT_DISPLAY_MODE_ID, "4mm_valid_in_arena", True),
+    ("4_mm_valid_in_arena_full_range", "4mm_valid_in_arena", False),
+    ("2_mm_valid_in_arena_robust_p98", "2mm_valid_in_arena", True),
+    ("2_mm_valid_in_arena_full_range", "2mm_valid_in_arena", False),
+    ("4_mm_candidate_epoch_robust_p98", "4mm_candidate_epoch", True),
+    ("4_mm_candidate_epoch_full_range", "4mm_candidate_epoch", False),
+    ("2_mm_candidate_epoch_robust_p98", "2mm_candidate_epoch", True),
+    ("2_mm_candidate_epoch_full_range", "2mm_candidate_epoch", False),
+)
+
+
+def build_spatial_occupancy_display_plan(
+    *,
+    counts: np.ndarray,
+    density_valid_in_arena: np.ndarray,
+    fraction_candidate_epoch: np.ndarray,
+    x_edges_mm: np.ndarray,
+    y_edges_mm: np.ndarray,
+    arena_bin_center_mask: np.ndarray,
+    in_arena_denominator: np.ndarray,
+    candidate_denominator: np.ndarray,
+    arena_radius_mm: float,
+    declared_bin_width_mm: float,
+) -> SpatialOccupancyDisplayPlan:
+    """Resolve every named occupancy view from one exact sealed input surface."""
+
+    canonical = exact_spatial_occupancy_display_surface(
+        counts=counts,
+        density_valid_in_arena=density_valid_in_arena,
+        fraction_candidate_epoch=fraction_candidate_epoch,
+        x_edges_mm=x_edges_mm,
+        y_edges_mm=y_edges_mm,
+        arena_bin_center_mask=arena_bin_center_mask,
+    )
+    if not math.isclose(
+        float(declared_bin_width_mm),
+        canonical.source_bin_width_mm,
+        rel_tol=0.0,
+        abs_tol=1e-10,
+    ):
+        _fail("Declared spatial occupancy bin width differs from persisted edges.")
+    if not math.isclose(
+        canonical.source_bin_width_mm,
+        SOURCE_BIN_WIDTH_MM,
+        rel_tol=0.0,
+        abs_tol=1e-10,
+    ):
+        _fail("The shared occupancy display recipe requires sealed 2 mm source bins.")
+
+    in_arena = np.asarray(in_arena_denominator)
+    candidate = np.asarray(candidate_denominator)
+    denominator_shape = canonical.counts.shape[:2]
+    if (
+        in_arena.shape != denominator_shape
+        or candidate.shape != denominator_shape
+        or in_arena.dtype.kind not in "iu"
+        or candidate.dtype.kind not in "iu"
+        or np.any(in_arena < 0)
+        or np.any(candidate <= 0)
+        or np.any(in_arena > candidate)
+    ):
+        _fail("Persisted occupancy denominators are invalid for the display recipe.")
+    if not np.array_equal(
+        canonical.counts.sum(axis=(-2, -1), dtype=np.int64), in_arena
+    ):
+        _fail("Persisted occupancy counts differ from in-arena denominators.")
+    expected_density = np.zeros(canonical.counts.shape, dtype=np.float64)
+    expected_fraction = np.zeros(canonical.counts.shape, dtype=np.float64)
+    np.divide(
+        canonical.counts,
+        in_arena[..., None, None],
+        out=expected_density,
+        where=in_arena[..., None, None] > 0,
+    )
+    np.divide(
+        canonical.counts,
+        candidate[..., None, None],
+        out=expected_fraction,
+        where=candidate[..., None, None] > 0,
+    )
+    if not np.allclose(
+        canonical.density_valid_in_arena,
+        expected_density,
+        rtol=1e-10,
+        atol=1e-12,
+    ) or not np.allclose(
+        canonical.fraction_candidate_epoch,
+        expected_fraction,
+        rtol=1e-10,
+        atol=1e-12,
+    ):
+        _fail("Persisted occupancy normalizations differ from their exact counts.")
+
+    coarse = aligned_coarsened_spatial_occupancy_display_surface(
+        canonical,
+        factor=COARSEN_FACTOR,
+        in_arena_denominator=in_arena,
+        candidate_denominator=candidate,
+        arena_radius_mm=arena_radius_mm,
+    )
+    if not math.isclose(
+        coarse.display_bin_width_mm,
+        COARSENED_BIN_WIDTH_MM,
+        rel_tol=0.0,
+        abs_tol=1e-10,
+    ):
+        _fail("Aligned occupancy display did not produce exact 4 mm bins.")
+
+    surfaces = (("4mm", coarse), ("2mm", canonical))
+    payloads = tuple(
+        _display_payload(resolution_id, surface, normalization)
+        for resolution_id, surface in surfaces
+        for normalization in NORMALIZATIONS
+    )
+    payload_by_id = {payload.payload_id: payload for payload in payloads}
+    modes = tuple(
+        SpatialOccupancyDisplayMode(
+            mode_id=mode_id,
+            payload=payload_by_id[payload_id],
+            robust=robust,
+        )
+        for mode_id, payload_id, robust in _MODE_SPECS
+    )
+    return SpatialOccupancyDisplayPlan(payloads=payloads, modes=modes)
+
+
 __all__ = [
+    "COARSENED_BIN_WIDTH_MM",
+    "COARSEN_FACTOR",
     "COARSEN_POLICY_ID",
     "COLOR_SCALE_POLICY_ID",
+    "COVERAGE_ARRAY",
+    "DEFAULT_DISPLAY_MODE_ID",
+    "DENSITY_MULTIPLIER_TO_PERCENT",
+    "DISPLAY_RECIPE_ID",
+    "NORMALIZATIONS",
     "ROBUST_COLOR_QUANTILE",
     "ROBUST_COLOR_QUANTILE_METHOD",
+    "SOURCE_ARRAYS",
+    "SOURCE_BIN_WIDTH_MM",
+    "SOURCE_CANDIDATE_FRACTION_ARRAY",
+    "SOURCE_COUNT_ARRAY",
+    "SOURCE_DENSITY_ARRAY",
+    "STATIC_EXPORT_MODE_IDS",
     "ChaserSpatialOccupancyDisplayError",
     "SharedColorScale",
+    "SpatialOccupancyDisplayMode",
+    "SpatialOccupancyDisplayPayload",
+    "SpatialOccupancyDisplayPlan",
+    "SpatialOccupancyNormalization",
     "SpatialOccupancyDisplaySurface",
     "aligned_coarsened_spatial_occupancy_display_surface",
+    "build_spatial_occupancy_display_plan",
     "exact_spatial_occupancy_display_surface",
     "shared_robust_color_scale",
+    "spatial_occupancy_display_contract_record",
 ]

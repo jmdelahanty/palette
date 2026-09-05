@@ -264,3 +264,87 @@ new output run ID.
   covered by repeated-run identity tests before scientific activation.
 - Required CI for any new documentation or scientific-hardening head remains a
   merge and activation gate.
+
+## Receipt-composed immutable loading follow-through (2026-09-03)
+
+Status: **implemented locally at `47cd101e` on
+`agent/palette/subject-shape-receipt-load-20260903`; required CI, a
+commit-pinned cluster canary, and production cohort publication remain
+pending**.
+
+The receipt-v2 writer removed the dominant publication rescans, but normal
+loading still repeated several facts already established by the completed
+publication epoch:
+
+- bundle admission reopened and canonicalized the raw and refined worker
+  evidence sidecars;
+- subject-shape identity and acquisition-frame arrays were decoded again by
+  row-identity and temporal-authority binders;
+- body-frame source, support, axis, and validity arrays were decoded repeatedly
+  by nested coordinate binders; and
+- the closing operation proof decoded `instance_key` once more after the
+  receipt scope had ended.
+
+The follow-through keeps one consumer interface and changes the proof source,
+not the scientific contract:
+
+1. Normal bundle admission now consumes the recording-assembly and assignment
+   evidence already sealed by the core and bundle manifests. The existing
+   explicit candidate/deep validator still reopens the sidecars and proves the
+   producer join before a new bundle can become complete.
+2. Shared row-identity, temporal-authority, coordinate-descriptor, estimator,
+   and body-frame binders accept array digests only inside an explicit
+   validated-scientific-receipt scope. The bound identity and temporal objects
+   retain that scoped evidence for their operation-closing proof recheck.
+3. Writer authority stamping does **not** enter that scientific-receipt scope.
+   It still decodes identity, frame ranges, body estimator inputs, body axes,
+   tail sample coordinates, and heading-formula outputs when first creating
+   the authority. Digest reuse during stamping remains only a hashing
+   optimization.
+4. Normal loading validates exact array inventory, dtype, shape, canonical
+   digest, immutable lifecycle, manifest binding, coordinate records, and
+   source authority without decoding the subject-shape payload. Explicit deep
+   audit still rehashes the physical payload and revalidates tail-axis,
+   heading-formula, and duplicated row-identity values.
+
+### Local production-scale evidence
+
+A read-only trace used the selected 2,745,488-row Cam2010094 publication
+`subject_shape_sleepyfish_2026_08_06_component_area_support_20260831_v002_sleepyfish_cam2010094`.
+The trace replaced Zarr array access with a hard failure for every array below
+that subject-shape run and then invoked the ordinary unpatched canonical
+loader.
+
+| Measurement | Result |
+|---|---:|
+| subject-shape array decodes during ordinary load | 0 |
+| elapsed wall time | 19.64 s |
+| user time | 16.48 s |
+| system time | 4.36 s |
+| process CPU | 106% |
+| peak RSS | 1,415,028 KiB |
+| exit status | 0 |
+
+This is a workstation read-only measurement against the mounted publication,
+not a cluster performance canary. It did not create scratch state, mutate a
+Zarr, change a selector, or write the registry. The still-high peak RSS and
+roughly 20-second metadata/source-authority traversal remain a bounded future
+optimization target; they no longer include any subject-shape scientific-array
+decode.
+
+### Local validation
+
+- 95 shared coordinate-identity and coordinate-frame tests passed.
+- 20 subject-shape coordinate-publication tests passed.
+- 93 eye-angle and tail-kinematics materializer tests passed.
+- The real subject-mask writer -> bundle publisher -> subject-shape publisher
+  -> unpatched selected reader regression passed and asserts zero array reads
+  below the selected subject-shape run.
+- A receipt-bound identity mutation test now states the lifecycle boundary
+  explicitly: ordinary immutable loading accepts the unchanged sealed receipt,
+  while `deep_audit_subject_shape_payload_receipt` detects the out-of-band
+  payload mutation.
+- `py_compile`, Ruff, `git diff --check`, and the Palette Git preflight passed.
+
+Required CI remains a hard merge, deployment, activation, and production
+publication gate for this follow-through commit.

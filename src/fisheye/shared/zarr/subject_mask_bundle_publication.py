@@ -1126,49 +1126,47 @@ def _validate_persisted_members_with_quality_validator(
                     archive_root_metadata=archive_root_metadata,
                 )
             )
-    producer_join_errors: tuple[str, ...] = ()
-    if (
-        not raw_errors
-        and not refined_errors
-        and refined_manifest.get("schema_version") in _COORDINATE_CORE_MANIFEST_VERSIONS
-    ):
-        try:
-            root = open_zarr_root(archive, mode="r")
-            raw_manifest = root[f"subject_mask_runs/{raw_run_id}"].attrs.get(
-                SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE
-            )
-            if not isinstance(raw_manifest, Mapping):
-                raise ValueError("Raw coordinate core manifest is absent.")
-            raw_evidence = _persisted_core_producer_evidence(archive, raw_manifest)
-            refined_evidence = _persisted_core_producer_evidence(
-                archive, refined_manifest
-            )
-            dimensions = refined_manifest["payload"]["logical_schema"]["dimensions"]
-            validate_recording_subject_mask_refined_source_join(
-                raw_producer_evidence=raw_evidence,
-                refined_producer_evidence=refined_evidence,
-                raw_source_run_path=raw_manifest["payload"]["source"]["run_path"],
-                refined_source_run_path=refined_manifest["payload"]["source"][
-                    "run_path"
-                ],
-                n_frames=dimensions["n_frames"],
-                n_rois=dimensions["n_rois"],
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            producer_join_errors = (str(exc),)
-    if (
-        raw_errors
-        or refined_errors
-        or quality_errors
-        or cache_errors
-        or producer_join_errors
-    ):
+    if raw_errors or refined_errors or quality_errors or cache_errors:
         raise RuntimeError(
             "Persisted subject-mask bundle member validation failed: "
             f"raw={list(raw_errors)}, refined={list(refined_errors)}, "
-            f"quality={list(quality_errors)}, cache={list(cache_errors)}, "
-            f"producer_join={list(producer_join_errors)}"
+            f"quality={list(quality_errors)}, cache={list(cache_errors)}"
         )
+
+
+def _deep_validate_persisted_producer_join(
+    archive: Path,
+    *,
+    raw_run_id: str,
+    refined_manifest: Mapping[str, Any],
+) -> None:
+    """Replay the large worker-evidence join only for an explicit deep audit."""
+
+    if refined_manifest.get("schema_version") not in _COORDINATE_CORE_MANIFEST_VERSIONS:
+        return
+    try:
+        root = open_zarr_root(archive, mode="r")
+        raw_manifest = root[f"subject_mask_runs/{raw_run_id}"].attrs.get(
+            SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE
+        )
+        if not isinstance(raw_manifest, Mapping):
+            raise ValueError("Raw coordinate core manifest is absent.")
+        raw_evidence = _persisted_core_producer_evidence(archive, raw_manifest)
+        refined_evidence = _persisted_core_producer_evidence(archive, refined_manifest)
+        dimensions = refined_manifest["payload"]["logical_schema"]["dimensions"]
+        validate_recording_subject_mask_refined_source_join(
+            raw_producer_evidence=raw_evidence,
+            refined_producer_evidence=refined_evidence,
+            raw_source_run_path=raw_manifest["payload"]["source"]["run_path"],
+            refined_source_run_path=refined_manifest["payload"]["source"]["run_path"],
+            n_frames=dimensions["n_frames"],
+            n_rois=dimensions["n_rois"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "Persisted subject-mask bundle producer join failed deep validation: "
+            f"{exc}"
+        ) from exc
 
 
 def _validate_persisted_members(
@@ -1207,6 +1205,11 @@ def _validate_persisted_members(
         quality_validator=validate_quality,
         cache_run_id=cache_run_id,
         archive_root_metadata=archive_root_metadata,
+    )
+    _deep_validate_persisted_producer_join(
+        archive,
+        raw_run_id=raw_run_id,
+        refined_manifest=refined_manifest,
     )
 
 

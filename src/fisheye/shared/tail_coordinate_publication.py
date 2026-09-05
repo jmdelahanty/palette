@@ -10,14 +10,20 @@ the exact authoritative subject-shape record.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import hashlib
 import json
-from typing import Any, Mapping, Sequence
+from pathlib import Path
+import re
+from typing import Any, Iterator, Mapping, Sequence
 import uuid
 
 import numpy as np
 
+from fisheye.shared.archive_identity import archive_identity
 from fisheye.shared.canonical_coordinate_publication import (
     BoundCanonicalCoordinateDescriptor,
     build_bound_canonical_coordinate_descriptor,
@@ -37,7 +43,10 @@ from fisheye.shared.coordinate_descriptor import (
     CanonicalCollectionAxis,
     DigestBoundCoordinateRecordRef,
 )
-from fisheye.shared.coordinate_frame_record import array_payload_sha256
+from fisheye.shared.coordinate_frame_record import (
+    array_payload_digest_evidence_scope,
+    array_payload_sha256,
+)
 from fisheye.shared.coordinate_identity import (
     OBSERVATION_INSTANCE_DOMAIN,
     BoundRowIdentityContract,
@@ -69,6 +78,14 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
     RUN_STATUS_COMPLETE,
 )
+from fisheye.shared.zarr_payload_receipt import (
+    build_payload_integrity_receipt,
+    build_payload_validation_receipt,
+    canonical_payload_integrity_receipt,
+    decoded_payload_receipt_from_copy_report,
+    verify_payload_integrity_receipt,
+    verify_payload_validation_receipt,
+)
 
 TAIL_COORDINATE_CONTRACT = "canonical_v2"
 TAIL_PUBLICATION_MANIFEST_ATTR = "tail_coordinate_publication_manifest"
@@ -84,6 +101,14 @@ TAIL_PARENT_PUBLICATION_LEASE_ATTR = "tail_publication_lease"
 TAIL_PUBLICATION_GENERATION_ATTR = "publication_generation"
 TAIL_PUBLICATION_POLICY_ATTR = "publication_policy"
 TAIL_PUBLICATION_POLICY = "owner_generation_guarded_selectors_then_eligibility_v1"
+TAIL_PAYLOAD_RECEIPT_PROFILE_ATTR = "tail_payload_receipt_profile"
+TAIL_PAYLOAD_RECEIPT_PROFILE = "tail_payload_receipt_v1"
+TAIL_PAYLOAD_INTEGRITY_RECEIPT_ATTR = "tail_payload_integrity_receipt"
+TAIL_PAYLOAD_VALIDATION_RECEIPT_ATTR = "tail_payload_validation_receipt"
+TAIL_PAYLOAD_VALIDATOR_SCHEMA_ID = "palette.tail_payload_validator"
+TAIL_PAYLOAD_VALIDATOR_SCHEMA_VERSION = 1
+TAIL_PAYLOAD_SCAN_RECEIPT_SCHEMA_ID = "palette.tail_payload_scan_receipt"
+TAIL_PAYLOAD_SCAN_RECEIPT_SCHEMA_VERSION = 1
 
 _SCHEMA_VERSION = 1
 _KINEMATICS_KIND = "tail_kinematics"
@@ -149,6 +174,11 @@ _RECORD_GROUPS = frozenset(
     }
 )
 
+_ACTIVE_TAIL_ARRAY_DIGESTS: ContextVar[Mapping[str, str] | None] = ContextVar(
+    "palette_tail_array_digests",
+    default=None,
+)
+
 # These attrs are lifecycle/publisher state rather than scientific authority.
 # They may be written after the scientific manifest is sealed.  Every other
 # run attr is part of the exact manifest snapshot; a new unsealed attr fails.
@@ -170,6 +200,9 @@ _OPERATIONAL_RUN_ATTRS = frozenset(
         TAIL_PUBLICATION_MANIFEST_ATTR,
         TAIL_PUBLICATION_MANIFEST_DIGEST_ATTR,
         TAIL_PUBLICATION_MANIFEST_ALIAS_ATTR,
+        TAIL_PAYLOAD_RECEIPT_PROFILE_ATTR,
+        TAIL_PAYLOAD_INTEGRITY_RECEIPT_ATTR,
+        TAIL_PAYLOAD_VALIDATION_RECEIPT_ATTR,
     }
 )
 
@@ -217,6 +250,32 @@ def _sha256(value: Any) -> str:
     ).hexdigest()
 
 
+def _is_sha256(value: Any) -> bool:
+    return type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+@contextmanager
+def _run_tail_array_digest_scope(
+    run: Any,
+    values: Mapping[str, str],
+) -> Iterator[None]:
+    evidence = {
+        canonical_node_path(run[path]): {
+            "dtype": np.dtype(run[path].dtype).str,
+            "shape": [int(value) for value in run[path].shape],
+            "content_sha256": str(values[path]),
+            "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        }
+        for path in values
+    }
+    token = _ACTIVE_TAIL_ARRAY_DIGESTS.set(dict(values))
+    try:
+        with array_payload_digest_evidence_scope(run, evidence):
+            yield
+    finally:
+        _ACTIVE_TAIL_ARRAY_DIGESTS.reset(token)
+
+
 def _pointer(record: BoundCoordinateRecord) -> dict[str, str]:
     return {
         "record_ref": record.record_ref,
@@ -225,11 +284,18 @@ def _pointer(record: BoundCoordinateRecord) -> dict[str, str]:
 
 
 def _array_record(relative_ref: str, node: Any) -> dict[str, Any]:
+    digests = _ACTIVE_TAIL_ARRAY_DIGESTS.get()
+    if digests is None:
+        content_sha256 = array_payload_sha256(node)
+    else:
+        content_sha256 = digests.get(relative_ref)
+        if not _is_sha256(content_sha256):
+            _fail(f"Tail payload receipt omits exact array digest {relative_ref!r}.")
     return {
         "relative_ref": str(relative_ref),
         "dtype": np.dtype(node.dtype).str,
         "shape": [int(value) for value in node.shape],
-        "content_sha256": array_payload_sha256(node),
+        "content_sha256": content_sha256,
         "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
     }
 
@@ -320,6 +386,258 @@ def _validate_closed_schema(
     return expected_arrays, expected_groups
 
 
+def _array_digest_header(dtype: np.dtype[Any], shape: tuple[int, ...]) -> Any:
+    header = {
+        "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        "dtype": np.lib.format.dtype_to_descr(dtype),
+        "shape": [int(value) for value in shape],
+    }
+    digest = hashlib.sha256()
+    digest.update(
+        json.dumps(
+            header,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    digest.update(b"\x00")
+    return digest
+
+
+def _scan_tail_array_once(
+    relative_ref: str,
+    node: Any,
+    *,
+    row_count: int,
+) -> dict[str, Any]:
+    """Read one immutable tail array once into reusable digest evidence."""
+
+    dtype = np.dtype(node.dtype)
+    shape = tuple(int(value) for value in node.shape)
+    if dtype.hasobject:
+        _fail(f"Tail array {relative_ref!r} has no deterministic payload grammar.")
+    digest = _array_digest_header(dtype, shape)
+    leaves: list[dict[str, Any]] = []
+    decoded_bytes = 0
+    row_aligned = bool(shape and shape[0] == int(row_count))
+    if row_aligned:
+        try:
+            metadata = node.metadata.to_dict()
+            step = int(metadata["chunk_grid"]["configuration"]["chunk_shape"][0])
+        except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
+            _fail(
+                f"Tail array {relative_ref!r} physical outer grid is unavailable: {exc}."
+            )
+        if step <= 0:
+            _fail(f"Tail array {relative_ref!r} physical outer grid is invalid.")
+        trailing = (slice(None),) * (len(shape) - 1)
+        for start in range(0, shape[0], step):
+            stop = min(shape[0], start + step)
+            values = np.ascontiguousarray(node[(slice(start, stop), *trailing)])
+            if values.dtype != dtype or values.shape != (stop - start, *shape[1:]):
+                _fail(f"Tail array {relative_ref!r} changed during payload scan.")
+            payload = values.tobytes(order="C")
+            digest.update(payload)
+            decoded_bytes += len(payload)
+            leaves.append(
+                {
+                    "path": relative_ref,
+                    "start_row": int(start),
+                    "stop_row": int(stop),
+                    "decoded_bytes": len(payload),
+                    "decoded_sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            )
+    else:
+        values = np.ascontiguousarray(node[...])
+        if values.dtype != dtype or values.shape != shape:
+            _fail(f"Tail array {relative_ref!r} changed during payload scan.")
+        payload = values.tobytes(order="C")
+        digest.update(payload)
+        decoded_bytes = len(payload)
+        leaves.append(
+            {
+                "path": relative_ref,
+                "decoded_bytes": len(payload),
+                "decoded_sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+    if (
+        np.dtype(node.dtype) != dtype
+        or tuple(int(value) for value in node.shape) != shape
+    ):
+        _fail(f"Tail array {relative_ref!r} metadata changed during payload scan.")
+    return {
+        "path": relative_ref,
+        "plan": {
+            "path": relative_ref,
+            "shape": [int(value) for value in shape],
+            "dtype": str(dtype),
+        },
+        "row_aligned": row_aligned,
+        "leaves": leaves,
+        "decoded_bytes": decoded_bytes,
+        "content_sha256": digest.hexdigest(),
+    }
+
+
+def _canonical_tail_payload_scan_receipt(
+    value: Mapping[str, Any],
+    *,
+    run: Any,
+    kind: str,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        _fail("Tail payload scan receipt must be a mapping.")
+    canonical = _json_copy(value)
+    digest = canonical.pop("record_sha256", None)
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "run_ref",
+        "kind",
+        "scan_profile",
+        "closed_array_inventory",
+        "array_content_sha256",
+        "decoded_copy_report",
+    }
+    if (
+        set(canonical) != expected_fields
+        or canonical.get("schema_id") != TAIL_PAYLOAD_SCAN_RECEIPT_SCHEMA_ID
+        or canonical.get("schema_version") != TAIL_PAYLOAD_SCAN_RECEIPT_SCHEMA_VERSION
+        or canonical.get("run_ref") != f"/{canonical_node_path(run)}"
+        or canonical.get("kind") != kind
+        or canonical.get("scan_profile")
+        != "single_exclusive_post_compute_decoded_scan_v1"
+        or canonical.get("closed_array_inventory") is not True
+        or not _is_sha256(digest)
+        or digest != _sha256(canonical)
+    ):
+        _fail("Tail payload scan receipt is unsupported, stale, or unbound.")
+    arrays = canonical.get("array_content_sha256")
+    if not isinstance(arrays, Mapping):
+        _fail("Tail payload scan receipt lacks its array digests.")
+    expected_arrays = _expected_arrays(run, kind)
+    if _array_paths(run) != expected_arrays or set(arrays) != set(expected_arrays):
+        _fail("Tail payload scan receipt array inventory differs from the run.")
+    try:
+        decoded = decoded_payload_receipt_from_copy_report(
+            canonical["decoded_copy_report"]
+        )
+    except Exception as exc:
+        _fail(f"Tail decoded payload scan receipt is invalid: {exc}.")
+    decoded_by_path = {str(item["path"]): item for item in decoded["arrays"]}
+    if set(decoded_by_path) != set(expected_arrays):
+        _fail("Tail decoded payload receipt array inventory differs from the run.")
+    for relative_ref in expected_arrays:
+        node = run[relative_ref]
+        declared = decoded_by_path[relative_ref]
+        if (
+            not _is_sha256(arrays.get(relative_ref))
+            or declared.get("dtype") != str(np.dtype(node.dtype))
+            or declared.get("shape") != [int(value) for value in node.shape]
+        ):
+            _fail(f"Tail payload scan declaration differs for {relative_ref!r}.")
+    return {**canonical, "record_sha256": str(digest)}
+
+
+def build_tail_payload_scan_receipt(
+    run: Any,
+    *,
+    kind: str,
+    workers: int = 4,
+    _allow_selector_eligible: bool = False,
+) -> dict[str, Any]:
+    """Scan one completed local tail payload once for later receipt reuse."""
+
+    if type(workers) is not int or workers <= 0:
+        _fail("Tail payload scan workers must be positive.")
+    if run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE or (
+        run.attrs.get("stage_selector_eligible") is not False
+        and not (
+            _allow_selector_eligible
+            and run.attrs.get("stage_selector_eligible") is True
+        )
+    ):
+        _fail("Tail payload scan requires one complete run in the expected lifecycle.")
+    expected_arrays = _expected_arrays(run, kind)
+    if _array_paths(run) != expected_arrays:
+        _fail("Tail payload scan requires the exact controlled array inventory.")
+    instance_key = run.get("instance_key")
+    if instance_key is None or len(instance_key.shape) != 1:
+        _fail("Tail payload scan lacks one-dimensional instance_key.")
+    row_count = int(instance_key.shape[0])
+    effective_workers = min(int(workers), max(1, len(expected_arrays)))
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        futures = [
+            executor.submit(
+                _scan_tail_array_once,
+                relative_ref,
+                run[relative_ref],
+                row_count=row_count,
+            )
+            for relative_ref in expected_arrays
+        ]
+        results = sorted(
+            (future.result() for future in futures),
+            key=lambda item: str(item["path"]),
+        )
+    plans = [dict(item["plan"]) for item in results]
+    shard_leaves = [
+        dict(leaf)
+        for item in results
+        if item["row_aligned"] is True
+        for leaf in item["leaves"]
+    ]
+    static_leaves = [
+        dict(leaf)
+        for item in results
+        if item["row_aligned"] is False
+        for leaf in item["leaves"]
+    ]
+    copy_report = {
+        "schema_id": "palette.zarr_sharded_run_copy.v1",
+        "status": "complete",
+        "source_run": f"/{canonical_node_path(run)}",
+        "destination_run": f"/{canonical_node_path(run)}",
+        "array_count": len(plans),
+        "arrays": plans,
+        "shards": shard_leaves,
+        "static_arrays": static_leaves,
+        "decoded_bytes_copied": sum(int(item["decoded_bytes"]) for item in results),
+        "exact_decoded_validation": True,
+        "receipt_origin": "single_exclusive_post_compute_decoded_scan_v1",
+    }
+    body = {
+        "schema_id": TAIL_PAYLOAD_SCAN_RECEIPT_SCHEMA_ID,
+        "schema_version": TAIL_PAYLOAD_SCAN_RECEIPT_SCHEMA_VERSION,
+        "run_ref": f"/{canonical_node_path(run)}",
+        "kind": kind,
+        "scan_profile": "single_exclusive_post_compute_decoded_scan_v1",
+        "closed_array_inventory": True,
+        "array_content_sha256": {
+            str(item["path"]): str(item["content_sha256"]) for item in results
+        },
+        "decoded_copy_report": copy_report,
+    }
+    receipt = {**body, "record_sha256": _sha256(body)}
+    return _canonical_tail_payload_scan_receipt(receipt, run=run, kind=kind)
+
+
+def build_tail_kinematics_payload_scan_receipt(
+    run: Any,
+    *,
+    workers: int = 4,
+) -> dict[str, Any]:
+    return build_tail_payload_scan_receipt(
+        run,
+        kind=_KINEMATICS_KIND,
+        workers=workers,
+    )
+
+
 def _source_array(source_run: Any, name: str, *, row_count: int) -> Any:
     node = source_run.get(name)
     if node is None:
@@ -336,6 +654,11 @@ def _validate_exact_identity_copies(
 ) -> dict[str, Any]:
     source_run = source._run
     row_count = int(source.row_identity.leading_dimension)
+    source_manifest_arrays = (
+        source.manifest.record.get("arrays")
+        if _ACTIVE_TAIL_ARRAY_DIGESTS.get() is not None
+        else None
+    )
     result: dict[str, Any] = {}
     for name in (
         "instance_key",
@@ -348,14 +671,35 @@ def _validate_exact_identity_copies(
             row_count,
         ):
             _fail(f"Tail publication lacks direct row-aligned {name!r}.")
-        source_values = np.asarray(source_node[:])
-        target_values = np.asarray(target_node[:])
-        if source_values.dtype != target_values.dtype or not np.array_equal(
-            source_values,
-            target_values,
-        ):
-            _fail(f"Tail {name!r} is not an exact dtype-preserving source copy.")
-        result[name] = _array_record(name, target_node)
+        target_record = _array_record(name, target_node)
+        if _ACTIVE_TAIL_ARRAY_DIGESTS.get() is None:
+            source_values = np.asarray(source_node[:])
+            target_values = np.asarray(target_node[:])
+            if source_values.dtype != target_values.dtype or not np.array_equal(
+                source_values,
+                target_values,
+            ):
+                _fail(f"Tail {name!r} is not an exact dtype-preserving source copy.")
+        else:
+            source_record = (
+                source_manifest_arrays.get(name)
+                if isinstance(source_manifest_arrays, Mapping)
+                else None
+            )
+            if (
+                not isinstance(source_record, Mapping)
+                or source_record.get("dtype") != np.dtype(source_node.dtype).str
+                or source_record.get("shape") != [row_count]
+                or source_record.get("dtype") != target_record["dtype"]
+                or source_record.get("shape") != target_record["shape"]
+                or source_record.get("content_sha256")
+                != target_record["content_sha256"]
+            ):
+                _fail(
+                    f"Tail {name!r} receipt is not an exact dtype-preserving "
+                    "source-manifest copy."
+                )
+        result[name] = target_record
     if np.dtype(run["instance_key"].dtype) != np.dtype("uint64"):
         _fail("Canonical tail instance_key must use exact uint64 dtype.")
     return result
@@ -1319,6 +1663,221 @@ def _manifest_record(
     }
 
 
+def _tail_payload_path(run: Any, payload_run_path: str | Path | None) -> Path:
+    if payload_run_path is not None:
+        return Path(payload_run_path).expanduser().resolve()
+    identity = archive_identity(run)
+    if identity.kind != "local_store_root":
+        _fail("Tail payload receipts require an explicit local run path.")
+    return Path(str(identity.key[0])).joinpath(
+        *canonical_node_path(run).strip("/").split("/")
+    )
+
+
+def _canonical_tail_physical_copy_receipt(
+    value: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        _fail("Tail payload receipt lacks verified physical-copy evidence.")
+    receipt = _json_copy(value)
+    expected = {
+        "backend",
+        "verification",
+        "file_count",
+        "physical_bytes",
+        "inventory_sha256",
+        "content_sha256",
+    }
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != expected
+        or receipt.get("backend") not in {"python", "rsync"}
+        or receipt.get("verification")
+        not in {"sha256_all_physical_files", "rsync_checksum_dry_run"}
+        or type(receipt.get("file_count")) is not int
+        or receipt["file_count"] < 1
+        or type(receipt.get("physical_bytes")) is not int
+        or receipt["physical_bytes"] < 0
+        or not _is_sha256(receipt.get("inventory_sha256"))
+        or not _is_sha256(receipt.get("content_sha256"))
+        or (
+            receipt["backend"] == "python"
+            and receipt["verification"] != "sha256_all_physical_files"
+        )
+        or (
+            receipt["backend"] == "rsync"
+            and receipt["verification"] != "rsync_checksum_dry_run"
+        )
+    ):
+        _fail("Tail verified physical-copy receipt is malformed.")
+    return receipt
+
+
+def _tail_payload_numerical_policy(
+    array_content_sha256: Mapping[str, str],
+    *,
+    scan_receipt_sha256: str,
+    verified_physical_copy: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not _is_sha256(scan_receipt_sha256):
+        _fail("Tail payload scan receipt digest is invalid.")
+    return {
+        "array_digest_source": "single_exclusive_post_compute_decoded_scan_v1",
+        "array_payload_canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        "array_content_sha256": {
+            path: str(array_content_sha256[path])
+            for path in sorted(array_content_sha256)
+        },
+        "closed_array_inventory": True,
+        "mutation_exclusion_contract": (
+            "exclusive_node_local_compute_then_atomic_verified_copy_then_"
+            "archive_publication_lock_v1"
+        ),
+        "normal_load_physical_rehash": False,
+        "deep_audit_physical_rehash_available": True,
+        "payload_scan_receipt_sha256": scan_receipt_sha256,
+        "verified_physical_copy": _canonical_tail_physical_copy_receipt(
+            verified_physical_copy
+        ),
+    }
+
+
+def _stamp_tail_payload_receipts(
+    run: Any,
+    *,
+    manifest_sha256: str,
+    scan_receipt: Mapping[str, Any],
+    payload_run_path: str | Path,
+    verified_physical_copy: Mapping[str, Any],
+    hash_workers: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if (
+        TAIL_PAYLOAD_INTEGRITY_RECEIPT_ATTR in run.attrs
+        or TAIL_PAYLOAD_VALIDATION_RECEIPT_ATTR in run.attrs
+        or TAIL_PAYLOAD_RECEIPT_PROFILE_ATTR in run.attrs
+    ):
+        _fail("Tail payload receipt attributes are already occupied.")
+    canonical_scan = _canonical_tail_payload_scan_receipt(
+        scan_receipt,
+        run=run,
+        kind=str(run.attrs.get("tail_coordinate_publication_kind") or ""),
+    )
+    integrity = build_payload_integrity_receipt(
+        _tail_payload_path(run, payload_run_path),
+        run_ref=f"/{canonical_node_path(run)}",
+        decoded_copy_report=canonical_scan["decoded_copy_report"],
+        hash_workers=max(1, int(hash_workers)),
+    )
+    validation = build_payload_validation_receipt(
+        integrity,
+        scientific_manifest_schema_id="palette.tail_coordinate_publication_manifest",
+        scientific_manifest_schema_version=_SCHEMA_VERSION,
+        scientific_manifest_sha256=manifest_sha256,
+        validator_schema_id=TAIL_PAYLOAD_VALIDATOR_SCHEMA_ID,
+        validator_schema_version=TAIL_PAYLOAD_VALIDATOR_SCHEMA_VERSION,
+        numerical_policy=_tail_payload_numerical_policy(
+            canonical_scan["array_content_sha256"],
+            scan_receipt_sha256=canonical_scan["record_sha256"],
+            verified_physical_copy=verified_physical_copy,
+        ),
+    )
+    run.attrs[TAIL_PAYLOAD_RECEIPT_PROFILE_ATTR] = TAIL_PAYLOAD_RECEIPT_PROFILE
+    run.attrs[TAIL_PAYLOAD_INTEGRITY_RECEIPT_ATTR] = _json_copy(integrity)
+    run.attrs[TAIL_PAYLOAD_VALIDATION_RECEIPT_ATTR] = _json_copy(validation)
+    if (
+        run.attrs.get(TAIL_PAYLOAD_RECEIPT_PROFILE_ATTR) != TAIL_PAYLOAD_RECEIPT_PROFILE
+        or run.attrs.get(TAIL_PAYLOAD_INTEGRITY_RECEIPT_ATTR) != integrity
+        or run.attrs.get(TAIL_PAYLOAD_VALIDATION_RECEIPT_ATTR) != validation
+    ):
+        _fail("Tail payload receipts did not persist exactly.")
+    return integrity, validation
+
+
+def _load_tail_payload_digest_evidence(
+    run: Any,
+    *,
+    manifest_sha256: str,
+) -> Mapping[str, str] | None:
+    raw_integrity = run.attrs.get(TAIL_PAYLOAD_INTEGRITY_RECEIPT_ATTR)
+    raw_validation = run.attrs.get(TAIL_PAYLOAD_VALIDATION_RECEIPT_ATTR)
+    receipt_profile = run.attrs.get(TAIL_PAYLOAD_RECEIPT_PROFILE_ATTR)
+    if raw_integrity is None and raw_validation is None:
+        if receipt_profile is not None:
+            _fail("Tail receipt-profile publication lacks its receipt pair.")
+        return None
+    if (
+        receipt_profile != TAIL_PAYLOAD_RECEIPT_PROFILE
+        or not isinstance(raw_integrity, Mapping)
+        or not isinstance(raw_validation, Mapping)
+    ):
+        _fail("Tail payload receipt pair is incomplete or unsupported.")
+    try:
+        integrity = canonical_payload_integrity_receipt(raw_integrity)
+        if integrity.get("run_ref") != f"/{canonical_node_path(run)}":
+            raise ValueError("payload integrity receipt names another run")
+        validation = verify_payload_validation_receipt(
+            raw_validation,
+            integrity_receipt=integrity,
+            expected_scientific_manifest_sha256=manifest_sha256,
+            expected_validator_schema_id=TAIL_PAYLOAD_VALIDATOR_SCHEMA_ID,
+            expected_validator_schema_version=TAIL_PAYLOAD_VALIDATOR_SCHEMA_VERSION,
+        )
+    except Exception as exc:
+        _fail(f"Tail payload receipt validation failed: {exc}.")
+    policy = validation.get("numerical_policy")
+    expected_policy_fields = {
+        "array_digest_source",
+        "array_payload_canonicalization",
+        "array_content_sha256",
+        "closed_array_inventory",
+        "mutation_exclusion_contract",
+        "normal_load_physical_rehash",
+        "deep_audit_physical_rehash_available",
+        "payload_scan_receipt_sha256",
+        "verified_physical_copy",
+    }
+    if (
+        not isinstance(policy, Mapping)
+        or set(policy) != expected_policy_fields
+        or policy.get("array_digest_source")
+        != "single_exclusive_post_compute_decoded_scan_v1"
+        or policy.get("array_payload_canonicalization")
+        != "numpy_dtype_shape_c_order_bytes_v1"
+        or policy.get("closed_array_inventory") is not True
+        or policy.get("mutation_exclusion_contract")
+        != (
+            "exclusive_node_local_compute_then_atomic_verified_copy_then_"
+            "archive_publication_lock_v1"
+        )
+        or policy.get("normal_load_physical_rehash") is not False
+        or policy.get("deep_audit_physical_rehash_available") is not True
+        or not _is_sha256(policy.get("payload_scan_receipt_sha256"))
+    ):
+        _fail("Tail payload validation policy is not exact.")
+    _canonical_tail_physical_copy_receipt(policy.get("verified_physical_copy"))
+    digests = policy.get("array_content_sha256")
+    if not isinstance(digests, Mapping):
+        _fail("Tail payload validation lacks its array digests.")
+    decoded_arrays = integrity["decoded_payload"]["arrays"]
+    decoded_by_path = {str(item["path"]): item for item in decoded_arrays}
+    live_arrays = {path: run[path] for path in _array_paths(run)}
+    if set(digests) != set(live_arrays) or set(decoded_by_path) != set(live_arrays):
+        _fail("Tail payload receipt array inventory differs from the run.")
+    normalized: dict[str, str] = {}
+    for path in sorted(live_arrays):
+        node = live_arrays[path]
+        digest = digests.get(path)
+        decoded = decoded_by_path[path]
+        if (
+            not _is_sha256(digest)
+            or decoded.get("dtype") != str(np.dtype(node.dtype))
+            or decoded.get("shape") != [int(value) for value in node.shape]
+        ):
+            _fail(f"Tail payload receipt declaration differs for {path!r}.")
+        normalized[path] = str(digest)
+    return normalized
+
+
 @dataclass(frozen=True, init=False)
 class BoundTailCoordinatePublication:
     run_path: str
@@ -1349,6 +1908,220 @@ class BoundTailCoordinatePublication:
 _BOUND_TAIL_PUBLICATION_SEAL = object()
 
 
+@dataclass(frozen=True, init=False)
+class SealedTailPublicationMetadataProof:
+    """Lifecycle proof for receipt-backed tail publications without array reads."""
+
+    run_path: str
+    kind: str
+    manifest: BoundCoordinateRecord = field(repr=False)
+    row_count: int
+    selector_eligible: bool
+    publication_owner: str
+    array_content_sha256: Mapping[str, str] = field(repr=False)
+    integrity_receipt_sha256: str
+    _seal: object = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        *,
+        _verification_seal: object | None = None,
+        **values: Any,
+    ) -> None:
+        if _verification_seal is not _SEALED_TAIL_METADATA_PROOF_SEAL:
+            _fail("Tail metadata proofs cannot be constructed directly.")
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "_seal", _verification_seal)
+
+
+_SEALED_TAIL_METADATA_PROOF_SEAL = object()
+
+
+def validate_sealed_tail_publication_metadata(
+    root: Any,
+    run_path: str,
+    *,
+    expected_selector_eligible: bool,
+    expected_publication_owner: str,
+    expected_kind: str | None = None,
+    payload_run_path: str | Path | None = None,
+) -> SealedTailPublicationMetadataProof:
+    """Validate one receipt-backed publication epoch without decoding arrays."""
+
+    path = str(run_path).strip("/")
+    run = root.get(path)
+    if run is None:
+        _fail(f"Tail run {path!r} is missing.")
+    kind = str(run.attrs.get("tail_coordinate_publication_kind") or "")
+    if expected_kind is not None and kind != expected_kind:
+        _fail(f"Tail publication kind {kind!r} differs from {expected_kind!r}.")
+    prefix = _expected_prefix(kind)
+    if not path.startswith(prefix) or "/" in path[len(prefix) :]:
+        _fail("Tail publication path does not match its declared kind.")
+    if (
+        run.attrs.get("coordinate_contract") != TAIL_COORDINATE_CONTRACT
+        or run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+        or run.attrs.get("stage_selector_eligible") is not expected_selector_eligible
+    ):
+        _fail("Tail metadata proof requires one complete run in the expected state.")
+    owner = _publication_owner_uuid(run)
+    if owner != expected_publication_owner:
+        _fail("Tail metadata proof publication owner differs.")
+    manifest = bind_persisted_coordinate_record(
+        run,
+        attr_name=TAIL_PUBLICATION_MANIFEST_ATTR,
+    )
+    if run.attrs.get(TAIL_PUBLICATION_MANIFEST_ALIAS_ATTR) != manifest.record_sha256:
+        _fail("Tail publication manifest digest alias is stale.")
+    payload_digests = _load_tail_payload_digest_evidence(
+        run,
+        manifest_sha256=manifest.record_sha256,
+    )
+    if payload_digests is None:
+        _fail("Tail metadata-only validation requires sealed payload receipts.")
+    raw_integrity = run.attrs.get(TAIL_PAYLOAD_INTEGRITY_RECEIPT_ATTR)
+    try:
+        integrity = verify_payload_integrity_receipt(
+            _tail_payload_path(run, payload_run_path),
+            raw_integrity,
+            expected_run_ref=f"/{path}",
+            verify_physical_payload=False,
+        )
+    except Exception as exc:
+        _fail(f"Tail immutable metadata validation failed: {exc}.")
+    arrays, groups = _validate_closed_schema(run, kind)
+    record = manifest.record
+    expected_manifest_fields = {
+        "schema_id",
+        "schema_version",
+        "kind",
+        "run_ref",
+        "publication_owner_uuid",
+        "source_subject_shape",
+        "row_identity",
+        "point_collection_axis",
+        "measurement_collection_axis",
+        "derivation",
+        "coordinate_descriptors",
+        "measurement_authority",
+        "measurement_descriptors",
+        "arrays",
+        "schema_inventory",
+    }
+    manifest_arrays = record.get("arrays")
+    expected_inventory = {
+        "groups": list(groups),
+        "arrays": list(arrays),
+        "run_attrs": _node_attrs_record(run, excluded=_OPERATIONAL_RUN_ATTRS),
+        "group_attrs": {path: _node_attrs_record(run[path]) for path in groups},
+        "array_attrs": {path: _node_attrs_record(run[path]) for path in arrays},
+        "excluded_operational_run_attrs": sorted(_OPERATIONAL_RUN_ATTRS),
+        "closed_group_inventory": True,
+        "closed_array_inventory": True,
+        "closed_attr_inventory": True,
+    }
+    if (
+        set(record) != expected_manifest_fields
+        or record.get("schema_id") != "palette.tail_coordinate_publication_manifest"
+        or record.get("schema_version") != _SCHEMA_VERSION
+        or record.get("kind") != kind
+        or record.get("run_ref") != f"/{path}"
+        or record.get("publication_owner_uuid") != owner
+        or record.get("schema_inventory") != expected_inventory
+        or not isinstance(manifest_arrays, Mapping)
+        or set(manifest_arrays) != set(arrays)
+        or set(payload_digests) != set(arrays)
+    ):
+        _fail("Tail metadata proof differs from its closed manifest.")
+    for relative_ref in arrays:
+        node = run[relative_ref]
+        entry = manifest_arrays[relative_ref]
+        if (
+            not isinstance(entry, Mapping)
+            or set(entry)
+            != {
+                "relative_ref",
+                "dtype",
+                "shape",
+                "content_sha256",
+                "canonicalization",
+            }
+            or entry.get("relative_ref") != relative_ref
+            or entry.get("dtype") != np.dtype(node.dtype).str
+            or entry.get("shape") != [int(value) for value in node.shape]
+            or entry.get("content_sha256") != payload_digests[relative_ref]
+            or entry.get("canonicalization") != "numpy_dtype_shape_c_order_bytes_v1"
+        ):
+            _fail(
+                f"Tail metadata proof array declaration differs for {relative_ref!r}."
+            )
+    instance_key = run.get("instance_key")
+    if instance_key is None or len(instance_key.shape) != 1:
+        _fail("Tail metadata proof lacks one-dimensional instance_key.")
+    return SealedTailPublicationMetadataProof(
+        run_path=path,
+        kind=kind,
+        manifest=manifest,
+        row_count=int(instance_key.shape[0]),
+        selector_eligible=expected_selector_eligible,
+        publication_owner=owner,
+        array_content_sha256=dict(payload_digests),
+        integrity_receipt_sha256=str(integrity["record_sha256"]),
+        _verification_seal=_SEALED_TAIL_METADATA_PROOF_SEAL,
+    )
+
+
+def deep_audit_tail_payload_receipt(
+    root: Any,
+    run_path: str,
+    *,
+    payload_run_path: str | Path | None = None,
+    hash_workers: int = 4,
+) -> dict[str, Any]:
+    """Explicitly rehash one immutable tail payload and its physical files."""
+
+    path = str(run_path).strip("/")
+    run = root.get(path)
+    if run is None:
+        _fail(f"Tail run {path!r} is missing.")
+    owner = _publication_owner_uuid(run)
+    proof = validate_sealed_tail_publication_metadata(
+        root,
+        path,
+        expected_selector_eligible=(run.attrs.get("stage_selector_eligible") is True),
+        expected_publication_owner=owner,
+        payload_run_path=payload_run_path,
+    )
+    try:
+        integrity = verify_payload_integrity_receipt(
+            _tail_payload_path(run, payload_run_path),
+            run.attrs.get(TAIL_PAYLOAD_INTEGRITY_RECEIPT_ATTR),
+            expected_run_ref=f"/{path}",
+            hash_workers=max(1, int(hash_workers)),
+            verify_physical_payload=True,
+        )
+    except Exception as exc:
+        _fail(f"Tail deep physical payload audit failed: {exc}.")
+    scan = build_tail_payload_scan_receipt(
+        run,
+        kind=proof.kind,
+        workers=max(1, int(hash_workers)),
+        _allow_selector_eligible=True,
+    )
+    if scan["array_content_sha256"] != dict(proof.array_content_sha256):
+        _fail("Tail deep decoded payload audit differs from its sealed receipt.")
+    return {
+        "valid": True,
+        "run_ref": f"/{path}",
+        "manifest_sha256": proof.manifest.record_sha256,
+        "integrity_receipt_sha256": integrity["record_sha256"],
+        "array_count": len(proof.array_content_sha256),
+        "decoded_rehash_performed": True,
+        "physical_rehash_performed": True,
+    }
+
+
 def _source_publication(root: Any, run: Any) -> BoundSubjectShapeCoordinatePublication:
     source_path = str(run.attrs.get("source_subject_shape_path") or "").strip("/")
     if not source_path:
@@ -1370,11 +2143,15 @@ def _prepare_record_groups(run: Any) -> None:
     records.require_group("measurement_authority")
 
 
-def publish_tail_coordinate_surfaces(
+def _publish_tail_coordinate_surfaces(
     root: Any,
     run: Any,
     *,
     kind: str,
+    payload_scan_receipt: Mapping[str, Any] | None = None,
+    payload_run_path: str | Path | None = None,
+    verified_physical_copy: Mapping[str, Any] | None = None,
+    payload_hash_workers: int = 4,
 ) -> BoundTailCoordinatePublication:
     """Seal one complete numerical tail run before selector activation."""
 
@@ -1387,89 +2164,133 @@ def publish_tail_coordinate_surfaces(
     source = _source_publication(root, run)
     run.attrs["coordinate_contract"] = TAIL_COORDINATE_CONTRACT
     run.attrs["tail_coordinate_publication_kind"] = kind
+    receipt_evidence = (
+        payload_scan_receipt,
+        payload_run_path,
+        verified_physical_copy,
+    )
+    if any(value is not None for value in receipt_evidence) and any(
+        value is None for value in receipt_evidence
+    ):
+        _fail("Tail staged payload receipt evidence is incomplete.")
+    canonical_scan = (
+        _canonical_tail_payload_scan_receipt(
+            payload_scan_receipt,
+            run=run,
+            kind=kind,
+        )
+        if payload_scan_receipt is not None
+        else None
+    )
+    digest_scope = (
+        _run_tail_array_digest_scope(run, canonical_scan["array_content_sha256"])
+        if canonical_scan is not None
+        else nullcontext()
+    )
     _prepare_record_groups(run)
-    identity = _identity(run, load=False)
-    source_authority = _stamp_or_load_source_authority(run, source, load=False)
-    collection_axis = _stamp_or_load_collection_axis(run, kind, load=False)
-    measurement_collection_axis = _stamp_or_load_measurement_collection_axis(
-        run,
-        kind,
-        collection_axis,
-        load=False,
-    )
-    derivation = _stamp_or_load_derivation(
-        run,
-        kind,
-        source,
-        source_authority,
-        collection_axis,
-        measurement_collection_axis,
-        load=False,
-    )
-    descriptors = _descriptor_bindings(
-        run,
-        kind,
-        source,
-        identity,
-        source_authority,
-        collection_axis,
-        derivation,
-        load=False,
-    )
-    stamp_bound_canonical_coordinate_descriptors(descriptors.values())
-    source_coordinate_inputs, source_measurement_inputs = _source_measurement_inputs(
-        kind, source
-    )
-    measurement_authority = _stamp_or_load_measurement_authority(
-        run,
-        kind,
-        identity,
-        source_authority,
-        collection_axis,
-        measurement_collection_axis,
-        derivation,
-        descriptors,
-        source_coordinate_inputs,
-        source_measurement_inputs,
-        load=False,
-    )
-    measurements = _measurement_bindings(
-        run,
-        kind,
-        identity,
-        descriptors,
-        source_coordinate_inputs,
-        source_measurement_inputs,
-        measurement_collection_axis,
-        measurement_authority,
-        derivation,
-        load=False,
-    )
-    expected_manifest = _manifest_record(
-        run,
-        kind,
-        source,
-        identity,
-        source_authority,
-        collection_axis,
-        measurement_collection_axis,
-        derivation,
-        descriptors,
-        measurement_authority,
-        measurements,
-    )
+    with digest_scope:
+        identity = _identity(run, load=False)
+        source_authority = _stamp_or_load_source_authority(run, source, load=False)
+        collection_axis = _stamp_or_load_collection_axis(run, kind, load=False)
+        measurement_collection_axis = _stamp_or_load_measurement_collection_axis(
+            run,
+            kind,
+            collection_axis,
+            load=False,
+        )
+        derivation = _stamp_or_load_derivation(
+            run,
+            kind,
+            source,
+            source_authority,
+            collection_axis,
+            measurement_collection_axis,
+            load=False,
+        )
+        descriptors = _descriptor_bindings(
+            run,
+            kind,
+            source,
+            identity,
+            source_authority,
+            collection_axis,
+            derivation,
+            load=False,
+        )
+        stamp_bound_canonical_coordinate_descriptors(descriptors.values())
+        source_coordinate_inputs, source_measurement_inputs = (
+            _source_measurement_inputs(kind, source)
+        )
+        measurement_authority = _stamp_or_load_measurement_authority(
+            run,
+            kind,
+            identity,
+            source_authority,
+            collection_axis,
+            measurement_collection_axis,
+            derivation,
+            descriptors,
+            source_coordinate_inputs,
+            source_measurement_inputs,
+            load=False,
+        )
+        measurements = _measurement_bindings(
+            run,
+            kind,
+            identity,
+            descriptors,
+            source_coordinate_inputs,
+            source_measurement_inputs,
+            measurement_collection_axis,
+            measurement_authority,
+            derivation,
+            load=False,
+        )
+        expected_manifest = _manifest_record(
+            run,
+            kind,
+            source,
+            identity,
+            source_authority,
+            collection_axis,
+            measurement_collection_axis,
+            derivation,
+            descriptors,
+            measurement_authority,
+            measurements,
+        )
     manifest = stamp_and_bind_persisted_coordinate_record(
         run,
         expected_manifest,
         attr_name=TAIL_PUBLICATION_MANIFEST_ATTR,
     )
     run.attrs[TAIL_PUBLICATION_MANIFEST_ALIAS_ATTR] = manifest.record_sha256
-    return _load_tail_coordinate_publication(
-        root,
-        run_path,
-        expected_kind=kind,
-        require_complete=False,
-        expected_selector_eligible=False,
+    if canonical_scan is not None:
+        assert payload_run_path is not None
+        assert verified_physical_copy is not None
+        _stamp_tail_payload_receipts(
+            run,
+            manifest_sha256=manifest.record_sha256,
+            scan_receipt=canonical_scan,
+            payload_run_path=payload_run_path,
+            verified_physical_copy=verified_physical_copy,
+            hash_workers=max(1, int(payload_hash_workers)),
+        )
+    return BoundTailCoordinatePublication(
+        run_path=run_path,
+        kind=kind,
+        source=source,
+        row_identity=identity,
+        source_authority=source_authority,
+        collection_axis=collection_axis,
+        measurement_collection_axis=measurement_collection_axis,
+        derivation=derivation,
+        descriptors=descriptors,
+        measurement_authority=measurement_authority,
+        measurements=measurements,
+        manifest=manifest,
+        _run=run,
+        _verification_seal=_BOUND_TAIL_PUBLICATION_SEAL,
     )
 
 
@@ -1481,7 +2302,7 @@ def _load_tail_coordinate_publication(
     expected_kind: str | None = None,
     require_complete: bool = True,
 ) -> BoundTailCoordinatePublication:
-    """Freshly validate one closed future tail publication."""
+    """Freshly validate one closed tail publication under its declared kind."""
 
     path = str(run_path).strip("/")
     run = root.get(path)
@@ -1503,80 +2324,105 @@ def _load_tail_coordinate_publication(
     if run.attrs.get("stage_selector_eligible") is not expected_selector_eligible:
         state = "eligible" if expected_selector_eligible else "ineligible"
         _fail(f"Tail coordinate publication is not literally selector-{state}.")
-    source = _source_publication(root, run)
-    identity = _identity(run, load=True)
-    source_authority = _stamp_or_load_source_authority(run, source, load=True)
-    collection_axis = _stamp_or_load_collection_axis(run, kind, load=True)
-    measurement_collection_axis = _stamp_or_load_measurement_collection_axis(
-        run,
-        kind,
-        collection_axis,
-        load=True,
-    )
-    derivation = _stamp_or_load_derivation(
-        run,
-        kind,
-        source,
-        source_authority,
-        collection_axis,
-        measurement_collection_axis,
-        load=True,
-    )
-    descriptors = _descriptor_bindings(
-        run,
-        kind,
-        source,
-        identity,
-        source_authority,
-        collection_axis,
-        derivation,
-        load=True,
-    )
-    source_coordinate_inputs, source_measurement_inputs = _source_measurement_inputs(
-        kind, source
-    )
-    measurement_authority = _stamp_or_load_measurement_authority(
-        run,
-        kind,
-        identity,
-        source_authority,
-        collection_axis,
-        measurement_collection_axis,
-        derivation,
-        descriptors,
-        source_coordinate_inputs,
-        source_measurement_inputs,
-        load=True,
-    )
-    measurements = _measurement_bindings(
-        run,
-        kind,
-        identity,
-        descriptors,
-        source_coordinate_inputs,
-        source_measurement_inputs,
-        measurement_collection_axis,
-        measurement_authority,
-        derivation,
-        load=True,
-    )
     manifest = bind_persisted_coordinate_record(
         run,
         attr_name=TAIL_PUBLICATION_MANIFEST_ATTR,
     )
-    expected_manifest = _manifest_record(
+    payload_digests = _load_tail_payload_digest_evidence(
         run,
-        kind,
-        source,
-        identity,
-        source_authority,
-        collection_axis,
-        measurement_collection_axis,
-        derivation,
-        descriptors,
-        measurement_authority,
-        measurements,
+        manifest_sha256=manifest.record_sha256,
     )
+    if kind == _KINEMATICS_KIND and payload_digests is None:
+        _fail(
+            "Maintained tail loading requires one complete sealed payload "
+            "receipt pair. Receipt-free tail kinematics are unsupported."
+        )
+    if payload_digests is not None:
+        try:
+            verify_payload_integrity_receipt(
+                _tail_payload_path(run, None),
+                run.attrs.get(TAIL_PAYLOAD_INTEGRITY_RECEIPT_ATTR),
+                expected_run_ref=f"/{path}",
+                verify_physical_payload=False,
+            )
+        except Exception as exc:
+            _fail(f"Tail immutable metadata validation failed: {exc}.")
+    digest_scope = (
+        _run_tail_array_digest_scope(run, payload_digests)
+        if payload_digests is not None
+        else nullcontext()
+    )
+    source = _source_publication(root, run)
+    with digest_scope:
+        identity = _identity(run, load=True)
+        source_authority = _stamp_or_load_source_authority(run, source, load=True)
+        collection_axis = _stamp_or_load_collection_axis(run, kind, load=True)
+        measurement_collection_axis = _stamp_or_load_measurement_collection_axis(
+            run,
+            kind,
+            collection_axis,
+            load=True,
+        )
+        derivation = _stamp_or_load_derivation(
+            run,
+            kind,
+            source,
+            source_authority,
+            collection_axis,
+            measurement_collection_axis,
+            load=True,
+        )
+        descriptors = _descriptor_bindings(
+            run,
+            kind,
+            source,
+            identity,
+            source_authority,
+            collection_axis,
+            derivation,
+            load=True,
+        )
+        source_coordinate_inputs, source_measurement_inputs = (
+            _source_measurement_inputs(kind, source)
+        )
+        measurement_authority = _stamp_or_load_measurement_authority(
+            run,
+            kind,
+            identity,
+            source_authority,
+            collection_axis,
+            measurement_collection_axis,
+            derivation,
+            descriptors,
+            source_coordinate_inputs,
+            source_measurement_inputs,
+            load=True,
+        )
+        measurements = _measurement_bindings(
+            run,
+            kind,
+            identity,
+            descriptors,
+            source_coordinate_inputs,
+            source_measurement_inputs,
+            measurement_collection_axis,
+            measurement_authority,
+            derivation,
+            load=True,
+        )
+        expected_manifest = _manifest_record(
+            run,
+            kind,
+            source,
+            identity,
+            source_authority,
+            collection_axis,
+            measurement_collection_axis,
+            derivation,
+            descriptors,
+            measurement_authority,
+            measurements,
+        )
     if manifest.record != expected_manifest:
         _fail("Tail publication manifest differs from live arrays, attrs, or lineage.")
     if run.attrs.get(TAIL_PUBLICATION_MANIFEST_ALIAS_ATTR) != manifest.record_sha256:
@@ -1599,7 +2445,7 @@ def _load_tail_coordinate_publication(
     )
 
 
-def load_tail_coordinate_publication(
+def _load_complete_tail_coordinate_publication(
     root: Any,
     run_path: str,
     *,
@@ -1622,15 +2468,38 @@ def load_tail_coordinate_publication(
 
 
 def publish_tail_kinematics_coordinate_surfaces(
-    root: Any, run: Any
+    root: Any,
+    run: Any,
+    *,
+    payload_scan_receipt: Mapping[str, Any] | None = None,
+    payload_run_path: str | Path | None = None,
+    verified_physical_copy: Mapping[str, Any] | None = None,
+    payload_hash_workers: int = 4,
 ) -> BoundTailCoordinatePublication:
-    return publish_tail_coordinate_surfaces(root, run, kind=_KINEMATICS_KIND)
+    if (
+        payload_scan_receipt is None
+        or payload_run_path is None
+        or verified_physical_copy is None
+    ):
+        _fail(
+            "Canonical tail-kinematics publication requires the complete sealed "
+            "payload receipt evidence produced by the atomic materializer."
+        )
+    return _publish_tail_coordinate_surfaces(
+        root,
+        run,
+        kind=_KINEMATICS_KIND,
+        payload_scan_receipt=payload_scan_receipt,
+        payload_run_path=payload_run_path,
+        verified_physical_copy=verified_physical_copy,
+        payload_hash_workers=payload_hash_workers,
+    )
 
 
 def publish_tail_posture_coordinate_surfaces(
     root: Any, run: Any
 ) -> BoundTailCoordinatePublication:
-    return publish_tail_coordinate_surfaces(root, run, kind=_POSTURE_KIND)
+    return _publish_tail_coordinate_surfaces(root, run, kind=_POSTURE_KIND)
 
 
 def _tail_activation_inputs(
@@ -1646,6 +2515,15 @@ def _tail_activation_inputs(
     name = str(run_name).strip()
     kind = str(run.attrs.get("tail_coordinate_publication_kind") or "")
     prefix = _expected_prefix(kind)
+    if (
+        kind == _KINEMATICS_KIND
+        and run.attrs.get(TAIL_PAYLOAD_RECEIPT_PROFILE_ATTR)
+        != TAIL_PAYLOAD_RECEIPT_PROFILE
+    ):
+        _fail(
+            "Tail-kinematics activation requires the complete maintained payload "
+            "receipt profile; receipt-free publications cannot become eligible."
+        )
     expected_path = f"{prefix}{name}"
     expected_parent = prefix.rstrip("/")
     if (
@@ -1669,6 +2547,20 @@ def _tail_activation_inputs(
         _fail("Tail activation received an invalid parent selector attribute.")
 
     def proof() -> tuple[Any, ...]:
+        if run.attrs.get(TAIL_PAYLOAD_RECEIPT_PROFILE_ATTR) is not None:
+            metadata = validate_sealed_tail_publication_metadata(
+                root,
+                expected_path,
+                expected_selector_eligible=False,
+                expected_publication_owner=_publication_owner_uuid(run),
+                expected_kind=kind,
+            )
+            return (
+                metadata.manifest.record_sha256,
+                metadata.integrity_receipt_sha256,
+                metadata.publication_owner,
+                tuple(sorted(metadata.array_content_sha256.items())),
+            )
         bound = _load_tail_coordinate_publication(
             root,
             expected_path,
@@ -1852,20 +2744,27 @@ def rollback_deferred_tail_coordinate_publication_activation(
 def load_tail_kinematics_coordinate_publication(
     root: Any, run_path: str
 ) -> BoundTailCoordinatePublication:
-    return load_tail_coordinate_publication(
-        root, run_path, expected_kind=_KINEMATICS_KIND
+    return _load_complete_tail_coordinate_publication(
+        root,
+        run_path,
+        expected_kind=_KINEMATICS_KIND,
     )
 
 
 def load_tail_posture_coordinate_publication(
     root: Any, run_path: str
 ) -> BoundTailCoordinatePublication:
-    return load_tail_coordinate_publication(root, run_path, expected_kind=_POSTURE_KIND)
+    return _load_complete_tail_coordinate_publication(
+        root,
+        run_path,
+        expected_kind=_POSTURE_KIND,
+    )
 
 
 __all__ = [
     "ARRAY_MEASUREMENT_DESCRIPTOR_ATTR",
     "BoundTailCoordinatePublication",
+    "SealedTailPublicationMetadataProof",
     "TAIL_COORDINATE_CONTRACT",
     "TAIL_PARENT_PUBLICATION_LEASE_ATTR",
     "TAIL_PUBLICATION_GENERATION_ATTR",
@@ -1874,15 +2773,21 @@ __all__ = [
     "TAIL_PUBLICATION_OWNER_ATTR",
     "TAIL_PUBLICATION_POLICY",
     "TAIL_PUBLICATION_POLICY_ATTR",
+    "TAIL_PAYLOAD_INTEGRITY_RECEIPT_ATTR",
+    "TAIL_PAYLOAD_RECEIPT_PROFILE",
+    "TAIL_PAYLOAD_RECEIPT_PROFILE_ATTR",
+    "TAIL_PAYLOAD_VALIDATION_RECEIPT_ATTR",
     "TailCoordinatePublicationError",
     "activate_tail_coordinate_publication",
+    "build_tail_kinematics_payload_scan_receipt",
+    "build_tail_payload_scan_receipt",
     "commit_deferred_tail_coordinate_publication_activation",
     "defer_tail_coordinate_publication_activation",
-    "load_tail_coordinate_publication",
+    "deep_audit_tail_payload_receipt",
     "load_tail_kinematics_coordinate_publication",
     "load_tail_posture_coordinate_publication",
-    "publish_tail_coordinate_surfaces",
     "publish_tail_kinematics_coordinate_surfaces",
     "publish_tail_posture_coordinate_surfaces",
     "rollback_deferred_tail_coordinate_publication_activation",
+    "validate_sealed_tail_publication_metadata",
 ]

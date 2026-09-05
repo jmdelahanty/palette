@@ -912,6 +912,7 @@ __all__ = [
     "build_keypoint_coordinate_successor_manifest",
     "build_keypoint_run_manifest",
     "keypoint_crop_source_from_manifest",
+    "keypoint_crop_source_from_persisted",
     "keypoint_logical_content_document",
     "keypoint_metadata_declarations_digest",
     "keypoint_skeleton_digest",

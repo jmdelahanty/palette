@@ -19,7 +19,14 @@ from fisheye.analysis_workflows.validated_behavior_cohort import (
     policy_envelope,
     validate_validated_behavior_bundle_set,
 )
+from fisheye.analysis_workflows.core_behavior_cohort_adapter import (
+    CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
+    CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+    build_bundle_set_from_core_behavior_execution_reports,
+    validate_core_behavior_bundle_set_current_sources,
+)
 from fisheye.analysis_workflows.validated_behavior_cohort_adapters import (
+    RECORDING_BUNDLE_ADAPTER_ID,
     build_bundle_set_from_validated_recording_behavior_bundles,
     build_membership_from_composable_chaser_task_v5,
     build_membership_from_frozen_cohort_v2,
@@ -30,9 +37,12 @@ from fisheye.analysis_workflows.validated_behavior_cohort_adapters import (
     validate_membership_current_sources,
     validate_recording_behavior_bundle_set_current_sources,
 )
+from fisheye.analysis_workflows.validated_behavior_source_admission import (
+    CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE,
+    EXACT_CHASER_ADMISSION_ROLE,
+)
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
-
 
 BUNDLE_PATHS_SCHEMA_ID = "palette.analysis.validated_behavior_bundle_paths"
 BUNDLE_PATHS_SCHEMA_VERSION = 1
@@ -40,6 +50,12 @@ BUNDLE_PATHS_SCHEMA_VERSION = 1
 
 class ValidatedBehaviorCohortCliError(ValueError):
     """A CLI input cannot produce one exact generic cohort contract."""
+
+
+_BUNDLE_ADAPTER_BY_ADMISSION_ROLE = {
+    EXACT_CHASER_ADMISSION_ROLE: RECORDING_BUNDLE_ADAPTER_ID,
+    CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE: CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
+}
 
 
 def _utc_now() -> str:
@@ -217,6 +233,53 @@ def _load_bundle_paths(
     return result
 
 
+def _bundle_adapter_for_membership(membership: Mapping[str, Any]) -> str:
+    """Select one installed adapter from typed admitted-member receipts."""
+
+    adapters: set[str] = set()
+    for member in membership["members"]:
+        if member["membership_state"] != "admitted":
+            continue
+        roles = {
+            str(binding["role"])
+            for binding in member["admission_receipts"]
+            if binding.get("role") in _BUNDLE_ADAPTER_BY_ADMISSION_ROLE
+        }
+        if len(roles) != 1:
+            raise ValidatedBehaviorCohortCliError(
+                f"Admitted member {member['recording_id']!r} does not select "
+                "exactly one installed bundle adapter."
+            )
+        adapters.add(_BUNDLE_ADAPTER_BY_ADMISSION_ROLE[roles.pop()])
+    if not adapters:
+        # Preserve the historical all-noncontributor behavior.  No scientific
+        # path is opened and the resulting bundle set carries only typed states.
+        return RECORDING_BUNDLE_ADAPTER_ID
+    if len(adapters) != 1:
+        raise ValidatedBehaviorCohortCliError(
+            "One bundle set cannot mix scientific bundle profiles."
+        )
+    return adapters.pop()
+
+
+def _bundle_validator(
+    adapter_id: str,
+    *,
+    membership: Mapping[str, Any],
+) -> Any:
+    if adapter_id == RECORDING_BUNDLE_ADAPTER_ID:
+        return lambda raw: validate_recording_behavior_bundle_set_current_sources(
+            raw, membership=membership
+        )
+    if adapter_id == CORE_BEHAVIOR_BUNDLE_ADAPTER_ID:
+        return lambda raw: validate_core_behavior_bundle_set_current_sources(
+            raw, membership=membership
+        )
+    raise ValidatedBehaviorCohortCliError(
+        f"No installed current-source validator accepts adapter {adapter_id!r}."
+    )
+
+
 def _membership_parser(subparsers: Any, *, frozen: bool) -> None:
     command = (
         "membership-from-frozen-v2" if frozen else "membership-from-chaser-task-v5"
@@ -377,28 +440,48 @@ def _bundle_set_command(args: argparse.Namespace) -> dict[str, Any]:
         membership_record_sha256=membership["record_sha256"],
     )
     output = args.output_json.expanduser().resolve()
+    existing_export_profile_id: str | None = None
     if output.exists():
         _, existing = _read_object(output, field="existing bundle set")
         created_at_utc = existing.get("created_at_utc")
+        existing_profile = existing.get("bundle_profile")
+        if isinstance(existing_profile, Mapping) and isinstance(
+            existing_profile.get("export_profile_id"), str
+        ):
+            existing_export_profile_id = str(existing_profile["export_profile_id"])
     else:
         created_at_utc = _utc_now()
-    requested = build_bundle_set_from_validated_recording_behavior_bundles(
-        bundle_set_id=args.bundle_set_id,
-        membership=membership,
-        membership_path=membership_path,
-        bundle_paths_by_recording=bundle_paths,
-        bundle_root=args.bundle_root,
-        palette_commit=args.palette_commit,
-        created_at_utc=created_at_utc,
-        validate_current_sources=True,
-    )
-
-    def validator(raw: object) -> Mapping[str, Any]:
-        return validate_recording_behavior_bundle_set_current_sources(
-            raw, membership=membership
+    adapter_id = _bundle_adapter_for_membership(membership)
+    if adapter_id == CORE_BEHAVIOR_BUNDLE_ADAPTER_ID:
+        requested = build_bundle_set_from_core_behavior_execution_reports(
+            bundle_set_id=args.bundle_set_id,
+            membership=membership,
+            membership_path=membership_path,
+            report_paths_by_recording=bundle_paths,
+            bundle_root=args.bundle_root,
+            palette_commit=args.palette_commit,
+            created_at_utc=created_at_utc,
+            export_profile_id=(
+                existing_export_profile_id or CORE_BEHAVIOR_EXPORT_PROFILE_ID
+            ),
+        )
+    else:
+        requested = build_bundle_set_from_validated_recording_behavior_bundles(
+            bundle_set_id=args.bundle_set_id,
+            membership=membership,
+            membership_path=membership_path,
+            bundle_paths_by_recording=bundle_paths,
+            bundle_root=args.bundle_root,
+            palette_commit=args.palette_commit,
+            created_at_utc=created_at_utc,
+            validate_current_sources=True,
         )
 
-    persisted, mode = _ensure_json(output, requested, validator=validator)
+    persisted, mode = _ensure_json(
+        output,
+        requested,
+        validator=_bundle_validator(adapter_id, membership=membership),
+    )
     return {
         "mode": mode,
         "path": str(output),
@@ -439,9 +522,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         # First prove the generic membership binding before the adapter re-opens
         # the complete bundle sources.
         validate_validated_behavior_bundle_set(bundle_raw, membership=membership)
-        value = validate_recording_behavior_bundle_set_current_sources(
-            bundle_raw, membership=membership
-        )
+        adapter_id = str(bundle_raw["bundle_profile"]["adapter_id"])
+        value = _bundle_validator(adapter_id, membership=membership)(bundle_raw)
         summary = {
             "status": "valid",
             "membership_path": str(membership_path),

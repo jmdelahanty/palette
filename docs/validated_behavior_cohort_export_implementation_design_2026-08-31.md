@@ -671,6 +671,13 @@ anatomical-forward/anatomical-left convention.
 Global validation must check foreign-key closure and primary-key uniqueness
 across all parts, not only inside each recording shard.
 
+That global proof may be composed from exact recording-owned shard receipts
+when the receipt contract seals row ownership, per-part key validity, every
+recording-scoped foreign-key result, the complete part roster, and the transfer
+into the immutable generation. It must not be inferred from bounds alone or
+from an unversioned status string. The measured receipt-composition contract is
+[`diagnostics/validated_behavior_receipt_composed_finalization_2026-09-04.md`](diagnostics/validated_behavior_receipt_composed_finalization_2026-09-04.md).
+
 ## Reader and consumer boundary
 
 Add a validated storage-facing API with the conceptual shape:
@@ -1214,6 +1221,11 @@ or physical-presentation mutation or claim.
       non-overlapping physical chunk ownership.
 - [x] Publish dense tables in the explicit Phase-B manifest-bound profile, not
       as a prerequisite for the compact Phase-A release.
+- [x] Define the Phase-C protocol-authored chaser-appearance successor without
+      mutating Phase A/B. Its exact authority chain, occurrence schema v2,
+      grouped-statistics handoff, and color/role plotting rules are documented
+      in
+      `validated_behavior_chaser_appearance_export_successor_2026-09-01.md`.
 
 ### Phase 6 — Later scientific successors
 

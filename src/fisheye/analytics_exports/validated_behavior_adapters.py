@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from fisheye.analysis_workflows.provider_epoch_behavior_summary_source_handle import (
         ProviderEpochBehaviorSummarySourceHandle,
     )
+    from fisheye.visualization.chaser_appearance import ChaserAppearanceProjection
 
 
 class ValidatedBehaviorAdapterError(ValueError):
@@ -505,7 +506,9 @@ class _RecordingContext:
         self.recording_id = str(bundle["recording_id"])
         self._child_handles: dict[str, ComposableChaserSuccessorSourceHandle] = {}
         self._epoch_handle: ProviderEpochBehaviorSummarySourceHandle | None = None
+        self._identity_receipt: Mapping[str, Any] | None = None
         self._identity_maps: tuple[dict[int, str], dict[int, str]] | None = None
+        self._chaser_appearance: ChaserAppearanceProjection | None = None
 
     @property
     def bundle_common(self) -> dict[str, Any]:
@@ -621,9 +624,9 @@ class _RecordingContext:
         self._epoch_handle = handle
         return handle
 
-    def chaser_identity_maps(self) -> tuple[dict[int, str], dict[int, str]]:
-        if self._identity_maps is not None:
-            return self._identity_maps
+    def chaser_identity_receipt(self) -> Mapping[str, Any]:
+        if self._identity_receipt is not None:
+            return self._identity_receipt
         binding = self.child_binding("chaser_relative_keypoint")
         from fisheye.analysis_workflows.chaser_relative_frame_validation_receipt import (
             read_chaser_relative_frame_validation_receipt,
@@ -642,6 +645,13 @@ class _RecordingContext:
             or receipt["payload_digest"] != binding["payload_digest"]
         ):
             _fail("Relative-frame identity receipt differs from the bundle binding.")
+        self._identity_receipt = receipt
+        return self._identity_receipt
+
+    def chaser_identity_maps(self) -> tuple[dict[int, str], dict[int, str]]:
+        if self._identity_maps is not None:
+            return self._identity_maps
+        receipt = self.chaser_identity_receipt()
         identities = _registry(receipt["run_manifest"], "chaser")
         roles = _registry(receipt["run_manifest"], "behavior_role")
         occurrence = self.bundle["source_bindings"]["row_axis_timing_and_scale"][
@@ -661,6 +671,85 @@ class _RecordingContext:
             )
         self._identity_maps = identities, roles
         return self._identity_maps
+
+    def chaser_appearance_projection(self) -> ChaserAppearanceProjection:
+        """Resolve protocol RGBA from the exact bundle-bound relative receipt."""
+
+        if self._chaser_appearance is not None:
+            return self._chaser_appearance
+        receipt = self.chaser_identity_receipt()
+        relative_manifest = _mapping(
+            receipt.get("run_manifest"), field="relative-frame run manifest"
+        )
+        relative_context = _mapping(
+            relative_manifest.get("context"), field="relative-frame context"
+        )
+        occurrence_envelope = _mapping(
+            relative_context.get("chaser_occurrence"),
+            field="relative-frame chaser occurrence",
+        )
+        receipt_occurrence = _mapping(
+            occurrence_envelope.get("record"),
+            field="relative-frame chaser occurrence record",
+        )
+        bundle_occurrence = _mapping(
+            self.bundle["source_bindings"]["row_axis_timing_and_scale"]["authority"][
+                "chaser_occurrence"
+            ],
+            field="bundle chaser occurrence",
+        )
+        if _plain(receipt_occurrence) != _plain(bundle_occurrence):
+            _fail("Bundle chaser occurrence differs from the relative-frame receipt.")
+
+        identities, roles = self.chaser_identity_maps()
+        identity_codes = tuple(sorted(identities))
+        if identity_codes != tuple(range(1, len(identity_codes) + 1)):
+            _fail("Chaser identity codes do not close one contiguous column axis.")
+        role_registry = _registry(relative_manifest, "behavior_role")
+        role_codes_by_label: dict[str, int] = {}
+        for role_code, label in role_registry.items():
+            if label in role_codes_by_label:
+                _fail("Behavior-role registry labels are not unique.")
+            role_codes_by_label[label] = role_code
+        try:
+            behavior_role_codes = tuple(
+                role_codes_by_label[roles[identity_code]]
+                for identity_code in identity_codes
+            )
+        except KeyError as exc:
+            raise ValidatedBehaviorAdapterError(
+                "Chaser occurrence role is absent from its sealed role registry."
+            ) from exc
+
+        from fisheye.visualization.chaser_appearance import (
+            ChaserAppearanceProjectionError,
+            load_chaser_appearance_projection,
+        )
+
+        try:
+            projection = load_chaser_appearance_projection(
+                self.analysis_zarr,
+                relative_manifest=relative_manifest,
+                identity_code_by_column=np.asarray(identity_codes, dtype=np.int32),
+                behavior_role_code_by_column=np.asarray(
+                    behavior_role_codes, dtype=np.int32
+                ),
+                expected_recording_id=self.recording_id,
+            )
+        except ChaserAppearanceProjectionError as exc:
+            raise ValidatedBehaviorAdapterError(
+                f"Protocol-authored chaser appearance is invalid: {exc}"
+            ) from exc
+        if (
+            projection.source_stimulus_run_path
+            != bundle_occurrence.get("source_stimulus_run_path")
+            or projection.source_protocol_sha256
+            != bundle_occurrence.get("source_protocol_sha256")
+            or projection.occurrence_binding_sha256 != occurrence_envelope.get("sha256")
+        ):
+            _fail("Resolved chaser appearance differs from its bundle authority.")
+        self._chaser_appearance = projection
+        return self._chaser_appearance
 
 
 class _LastRecordingContext:
@@ -770,6 +859,61 @@ def _chaser_occurrences(
             }
         )
     return _complete_rows(rows)
+
+
+def _chaser_occurrences_v2(
+    context: _RecordingContext,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Add exact protocol appearance without changing occurrence grain."""
+
+    rows, zero_reason = _chaser_occurrences(context)
+    if not rows:
+        return rows, zero_reason
+    projection = context.chaser_appearance_projection()
+    appearance_by_code = projection.by_identity_code()
+    if set(appearance_by_code) != {int(row["chaser_identity_code"]) for row in rows}:
+        _fail("Appearance projection does not close the chaser occurrence rowset.")
+    projection_record = projection.provenance_record()
+
+    augmented: list[dict[str, Any]] = []
+    for row in rows:
+        code = int(row["chaser_identity_code"])
+        appearance = appearance_by_code[code]
+        if (
+            appearance.chaser_index != int(row["chaser_index"])
+            or appearance.identity != row["chaser_identity"]
+            or appearance.behavior_role != row["behavior_role"]
+            or projection.source_stimulus_run_path != row["stimulus_run_path"]
+            or projection.source_protocol_sha256 != row["source_protocol_sha256"]
+        ):
+            _fail("Appearance projection differs from its exact chaser occurrence row.")
+        red, green, blue, alpha = appearance.experimental_color_rgba
+        augmented.append(
+            {
+                **row,
+                "behavior_role_code": int(appearance.behavior_role_code),
+                "experimental_color_r": float(red),
+                "experimental_color_g": float(green),
+                "experimental_color_b": float(blue),
+                "experimental_color_a": float(alpha),
+                "experimental_color_hex": appearance.experimental_color_hex,
+                "experimental_color_css": appearance.experimental_color_css,
+                "contrast_outline_hex": appearance.contrast_outline_hex,
+                "plotly_role_symbol": appearance.plotly_role_symbol,
+                "matplotlib_role_marker": appearance.matplotlib_role_marker,
+                "appearance_schema_id": str(projection_record["schema_id"]),
+                "appearance_schema_version": int(projection_record["schema_version"]),
+                "appearance_policy_id": str(projection_record["appearance_policy_id"]),
+                "appearance_projection_sha256": projection.projection_sha256,
+                "occurrence_binding_sha256": projection.occurrence_binding_sha256,
+                "color_semantics": str(projection_record["color_semantics"]),
+                "role_semantics": str(projection_record["role_semantics"]),
+                "color_role_independence": bool(
+                    projection_record["color_role_independence"]
+                ),
+            }
+        )
+    return _complete_rows(augmented)
 
 
 def _semantic_epochs(
@@ -1853,10 +1997,23 @@ _EXTRACTORS: Mapping[
     }
 )
 
+_PHASE_C_COMPACT_EXTRACTORS: Mapping[
+    str,
+    Callable[[_RecordingContext], tuple[list[dict[str, Any]], str | None]],
+] = MappingProxyType(
+    {
+        **_EXTRACTORS,
+        "chaser_occurrences": _chaser_occurrences_v2,
+    }
+)
 
-def build_phase_a_row_extractors() -> Mapping[str, Callable[..., Any]]:
-    """Return recording-scoped extractors sharing one bounded last-record cache."""
 
+def _build_recording_row_extractors(
+    producers: Mapping[
+        str,
+        Callable[[_RecordingContext], tuple[list[dict[str, Any]], str | None]],
+    ],
+) -> Mapping[str, Callable[..., Any]]:
     cache = _LastRecordingContext()
 
     def wrap(
@@ -1874,11 +2031,24 @@ def build_phase_a_row_extractors() -> Mapping[str, Callable[..., Any]]:
         return extract
 
     return MappingProxyType(
-        {name: wrap(producer) for name, producer in _EXTRACTORS.items()}
+        {name: wrap(producer) for name, producer in producers.items()}
     )
+
+
+def build_phase_a_row_extractors() -> Mapping[str, Callable[..., Any]]:
+    """Return Phase-A extractors sharing one bounded last-record cache."""
+
+    return _build_recording_row_extractors(_EXTRACTORS)
+
+
+def build_phase_c_compact_row_extractors() -> Mapping[str, Callable[..., Any]]:
+    """Return compact extractors with appearance-bearing occurrences."""
+
+    return _build_recording_row_extractors(_PHASE_C_COMPACT_EXTRACTORS)
 
 
 __all__ = [
     "ValidatedBehaviorAdapterError",
     "build_phase_a_row_extractors",
+    "build_phase_c_compact_row_extractors",
 ]

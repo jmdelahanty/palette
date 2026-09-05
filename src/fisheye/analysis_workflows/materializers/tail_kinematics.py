@@ -40,8 +40,11 @@ from ...analysis.tail_kinematics_runs import (
     _resolve_tail_kinematics_sources,
     write_tail_kinematics_run_group,
 )
+from ...analysis.tail_kinematics_schema import (
+    validate_tail_kinematics_array_schema,
+)
 from ...analysis_workflows.tail_kinematics_candidate_execution import (
-    compute_tail_kinematics_logical_hashes,
+    build_tail_kinematics_logical_hashes_from_array_digests,
 )
 from ...shared.json_safety import json_attr_safe
 from ...shared.run_provenance import build_run_provenance_from_stage_record
@@ -65,7 +68,10 @@ from ...shared.zarr_helpers import (
     archive_metadata_publication_lock,
     consolidate_metadata_capture_expected_warnings,
 )
-from fisheye.shared.atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from fisheye.shared.atomic_run_publisher import (
+    AtomicRunPublishSpec,
+    atomic_publish_run_group,
+)
 from fisheye.shared.runtime_telemetry import PhaseTelemetry
 
 MATERIALIZATION_SCHEMA_ID = "palette.tail_kinematics_materialization.v1"
@@ -77,6 +83,7 @@ TAIL_KINEMATICS_EXECUTION_PHASE_ORDER = (
     "plan",
     "source_staging",
     "scientific_compute",
+    "payload_receipt_scan",
     "local_validation",
     "local_consolidation",
     "local_direct_consolidated_comparison",
@@ -552,6 +559,7 @@ def stage_tail_kinematics_sources(
         staged_root,
         plan.shape_run,
         _staged_source_authority=plan.staged_source_authority,
+        _verify_staged_payload=False,
     )
     if staged_shape_run != plan.shape_run or int(staged_sources.row_count) != int(
         plan.row_count
@@ -559,6 +567,19 @@ def stage_tail_kinematics_sources(
         raise RuntimeError(
             "Staged subject-shape logical validation did not match the staging plan."
         )
+    effective_block_rows = tail_mod._effective_block_rows(
+        row_count=int(plan.row_count),
+        requested_block_rows=int(plan.requested_block_rows),
+    )
+    staged_input_integrity_receipt = (
+        tail_mod.build_tail_kinematics_staged_input_integrity_receipt(
+            staged_sources.shape_group,
+            run_name=plan.shape_run,
+            authority=plan.staged_source_authority,
+            chunk_rows=int(effective_block_rows),
+            read_workers=max(1, min(4, int(plan.requested_num_workers))),
+        )
+    )
 
     payload = {
         "schema_id": STAGING_SCHEMA_ID,
@@ -585,6 +606,12 @@ def stage_tail_kinematics_sources(
             "record_sha256"
         ),
         "staged_source_authority": json_attr_safe(plan.staged_source_authority),
+        "staged_input_integrity_receipt_sha256": (
+            staged_input_integrity_receipt["record_sha256"]
+        ),
+        "staged_input_integrity_receipt": json_attr_safe(
+            staged_input_integrity_receipt
+        ),
         "inventory": validation,
         "capacity": {
             "check_enabled": bool(check_capacity),
@@ -644,7 +671,14 @@ def _validate_tail_run(
         attrs.get("tail_coordinate_publication_manifest_sha256"), str
     ):
         errors.append("selector-eligible run lacks tail coordinate publication seal")
-    if attrs.get("byte_planner_adopted") is True:
+    byte_planner_adopted = attrs.get("byte_planner_adopted") is True
+    errors.extend(
+        validate_tail_kinematics_array_schema(
+            group,
+            byte_planner_adopted=byte_planner_adopted,
+        )
+    )
+    if byte_planner_adopted:
         errors.extend(tail_mod.validate_tail_kinematics_storage_receipt(group))
     return {
         "valid": not errors,
@@ -761,6 +795,7 @@ def publish_tail_kinematics_run(
     plan: TailKinematicsMaterializationPlan,
     *,
     staging_payload: dict[str, Any],
+    payload_scan_receipt: Mapping[str, Any],
     copy_backend: str = "rsync",
     telemetry: PhaseTelemetry | None = None,
     expected_source_logical_hashes: Mapping[str, Any] | None = None,
@@ -812,6 +847,33 @@ def publish_tail_kinematics_run(
             ),
         )
 
+    def after_rename(
+        root: zarr.Group,
+        run_group: zarr.Group,
+        physical_copy: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if "tail_coordinate_publication_deferred" not in run_group.attrs:
+            raise RuntimeError(
+                "Tail-kinematics authoritative binding lacks its staged marker."
+            )
+        del run_group.attrs["tail_coordinate_publication_deferred"]
+        run_group.attrs["stage_selector_eligible"] = False
+        publication = tail_publication_mod.publish_tail_kinematics_coordinate_surfaces(
+            root,
+            run_group,
+            payload_scan_receipt=payload_scan_receipt,
+            payload_run_path=plan.target_run_path,
+            verified_physical_copy=physical_copy,
+        )
+        return {
+            "tail_coordinate_publication": {
+                "manifest_sha256": publication.manifest.record_sha256,
+                "payload_scan_receipt_sha256": payload_scan_receipt.get(
+                    "record_sha256"
+                ),
+            }
+        }
+
     def complete(
         root: zarr.Group,
         parent: zarr.Group,
@@ -819,9 +881,9 @@ def publish_tail_kinematics_run(
     ) -> None:
         command = " ".join(sys.argv) if sys.argv else "unknown"
         if "tail_coordinate_publication_deferred" in run_group.attrs:
-            del run_group.attrs["tail_coordinate_publication_deferred"]
-        run_group.attrs["stage_selector_eligible"] = False
-        tail_mod.publish_tail_kinematics_coordinate_surfaces(root, run_group)
+            raise RuntimeError(
+                "Tail-kinematics completion ran before authoritative binding."
+            )
         mark_run_complete(
             run_group,
             parent_group=parent,
@@ -871,7 +933,20 @@ def publish_tail_kinematics_run(
                     subtree_path=run_path,
                 )
             with phase("decoded_equality"):
-                published_hashes = compute_tail_kinematics_logical_hashes(run_group)
+                proof = tail_publication_mod.validate_sealed_tail_publication_metadata(
+                    root,
+                    run_path,
+                    expected_selector_eligible=False,
+                    expected_publication_owner=expected_publication_owner_uuid,
+                    expected_kind="tail_kinematics",
+                    payload_run_path=plan.target_run_path,
+                )
+                published_hashes = (
+                    build_tail_kinematics_logical_hashes_from_array_digests(
+                        run_group,
+                        proof.array_content_sha256,
+                    )
+                )
                 if (
                     expected_source_logical_hashes is not None
                     and published_hashes != dict(expected_source_logical_hashes)
@@ -917,6 +992,24 @@ def publish_tail_kinematics_run(
             root=root,
             parent=parent,
             run=run_group,
+        )
+        consolidate_metadata_capture_expected_warnings(plan.source_zarr)
+        validate_direct_consolidated_subtree(
+            plan.source_zarr,
+            subtree_path=f"analysis/tail_kinematics_runs/{plan.run_name}",
+        )
+        consolidated_root = zarr.open_group(
+            str(plan.source_zarr),
+            mode="r",
+            use_consolidated=True,
+        )
+        tail_publication_mod.validate_sealed_tail_publication_metadata(
+            consolidated_root,
+            f"analysis/tail_kinematics_runs/{plan.run_name}",
+            expected_selector_eligible=True,
+            expected_publication_owner=expected_publication_owner_uuid,
+            expected_kind="tail_kinematics",
+            payload_run_path=plan.target_run_path,
         )
 
     def rollback_activation() -> None:
@@ -972,15 +1065,15 @@ def publish_tail_kinematics_run(
         verify_pointers=verify,
         activate_run=activate,
         rollback_activation=(None if byte_planner_candidate else rollback_activation),
-        repair_failed_publication_visibility=(
-            repair_failed_candidate_visibility if byte_planner_candidate else None
-        ),
+        repair_failed_publication_visibility=(repair_failed_candidate_visibility),
+        after_rename=after_rename,
         payload_metadata={
             "staged_zarr": str(plan.staged_zarr),
             "source_run_path": str(source_run),
             "copy_backend": copy_backend,
             "source_staging": json_attr_safe(staging_payload),
         },
+        accept_persisted_activation_on_callback_error=False,
     )
     if byte_planner_candidate:
         result.update(publication_acceptance)
@@ -1096,12 +1189,22 @@ def materialize_tail_kinematics(
                     else None
                 ),
                 _staged_source_authority=plan.staged_source_authority,
+                _staged_input_integrity_receipt=staging[
+                    "staged_input_integrity_receipt"
+                ],
             )
         local_run = local_root["analysis"]["tail_kinematics_runs"][plan.run_name]
         local_run.attrs["node_local_source_staging"] = staging
         if normalized_binding is not None:
             local_run.attrs[EXECUTION_BINDING_ATTR] = normalized_binding
             local_run.attrs["storage_candidate_profile_promoted"] = False
+        with telemetry.phase("payload_receipt_scan"):
+            payload_scan_receipt = (
+                tail_publication_mod.build_tail_kinematics_payload_scan_receipt(
+                    local_run,
+                    workers=max(1, min(4, int(plan.requested_num_workers))),
+                )
+            )
         local_validation: dict[str, Any] | None = None
         local_hashes: dict[str, object] | None = None
         local_metadata: Any | None = None
@@ -1117,7 +1220,10 @@ def materialize_tail_kinematics(
                         "Local tail-kinematics candidate is invalid: "
                         f"{local_validation}"
                     )
-                local_hashes = compute_tail_kinematics_logical_hashes(local_run)
+                local_hashes = build_tail_kinematics_logical_hashes_from_array_digests(
+                    local_run,
+                    payload_scan_receipt["array_content_sha256"],
+                )
                 if expected_source_logical_hashes is not None and local_hashes != dict(
                     expected_source_logical_hashes
                 ):
@@ -1135,6 +1241,7 @@ def materialize_tail_kinematics(
             publish = publish_tail_kinematics_run(
                 plan,
                 staging_payload=staging,
+                payload_scan_receipt=payload_scan_receipt,
                 copy_backend=copy_backend,
                 telemetry=telemetry,
                 expected_source_logical_hashes=expected_source_logical_hashes,
@@ -1145,6 +1252,9 @@ def materialize_tail_kinematics(
                 "status": "complete",
                 "staging": staging,
                 "local_materialization": local_summary,
+                "payload_scan_receipt_sha256": payload_scan_receipt.get(
+                    "record_sha256"
+                ),
                 "local_validation": local_validation,
                 "local_direct_consolidated_array_count": (
                     int(local_metadata.array_count)

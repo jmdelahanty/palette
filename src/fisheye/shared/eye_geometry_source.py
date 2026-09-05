@@ -36,9 +36,11 @@ from .subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR,
     SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR,
     BoundSubjectShapeCoordinatePublication,
+    SealedSubjectShapePublicationMetadataProof,
     SubjectShapeCoordinatePublicationError,
     load_completed_ineligible_subject_shape_coordinate_publication,
     load_persisted_subject_shape_coordinate_publication,
+    validate_sealed_subject_shape_publication_metadata,
 )
 from .subject_shape_storage import (
     SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
@@ -53,7 +55,6 @@ from .zarr.assignment_keypoint_rebinding import (
     ASSIGNMENT_KEYPOINT_SOURCE_REBINDING_PROFILE,
 )
 from .zarr_run_completion import resolve_authoritative_run_name
-
 
 EYE_GEOMETRY_STAGE_REFINED_SUBJECT = "refined_subject_masks_runs"
 EYE_GEOMETRY_STAGE_SUBJECT_SHAPE = "analysis/subject_shape_runs"
@@ -225,10 +226,7 @@ def _canonical_sha256(value: Any) -> str:
 
 
 def _is_sha256(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and re.fullmatch(r"[0-9a-f]{64}", value) is not None
-    )
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
 def _subject_shape_source_contract_attrs(group: Any) -> dict[str, Any]:
@@ -248,7 +246,9 @@ def _exact_subject_shape_candidate_run_name(value: object) -> str:
         )
     normalized = requested.strip("/")
     prefix = f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/"
-    run_name = normalized[len(prefix) :] if normalized.startswith(prefix) else normalized
+    run_name = (
+        normalized[len(prefix) :] if normalized.startswith(prefix) else normalized
+    )
     if (
         not run_name
         or "/" in run_name
@@ -280,7 +280,9 @@ def _canonical_metadata_equivalence_receipt(
         "array_count",
         "declarations_sha256",
     }
-    counts = tuple(receipt.get(name) for name in ("node_count", "group_count", "array_count"))
+    counts = tuple(
+        receipt.get(name) for name in ("node_count", "group_count", "array_count")
+    )
     if (
         set(receipt) != expected_fields
         or receipt.get("schema_id") != METADATA_EQUIVALENCE_SCHEMA_ID
@@ -313,8 +315,7 @@ def _canonical_subject_shape_candidate_envelope(value: object) -> dict[str, Any]
         }
         or envelope.get("schema_id") != "palette.subject_shape_storage_candidate"
         or envelope.get("schema_version") != 1
-        or envelope.get("profile_id")
-        != SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
+        or envelope.get("profile_id") != SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
         or not isinstance(envelope.get("logical_profile_id"), str)
         or not envelope["logical_profile_id"]
         or envelope.get("phase") != "bound"
@@ -380,11 +381,9 @@ def _canonical_subject_shape_candidate_admission(
     admission["candidate_envelope"] = _canonical_subject_shape_candidate_envelope(
         admission.get("candidate_envelope")
     )
-    admission["direct_consolidated_metadata"] = (
-        _canonical_metadata_equivalence_receipt(
-            admission.get("direct_consolidated_metadata"),
-            expected_subtree_path=run_path,
-        )
+    admission["direct_consolidated_metadata"] = _canonical_metadata_equivalence_receipt(
+        admission.get("direct_consolidated_metadata"),
+        expected_subtree_path=run_path,
     )
     return {**admission, "record_sha256": str(digest)}
 
@@ -397,7 +396,9 @@ def _validated_subject_shape_candidate_admission(
     validate_storage: bool,
 ) -> dict[str, Any]:
     if type(validate_storage) is not bool:
-        raise ValueError("Subject-shape candidate storage-validation mode must be bool.")
+        raise ValueError(
+            "Subject-shape candidate storage-validation mode must be bool."
+        )
     canonical = _canonical_subject_shape_candidate_admission(
         admission,
         expected_run_name=run_name,
@@ -411,9 +412,7 @@ def _validated_subject_shape_candidate_admission(
         != canonical["expected_publication_manifest_sha256"]
         or group.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR)
         != canonical["expected_storage_profile_id"]
-        or _canonical_json_copy(
-            group.attrs.get(SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR)
-        )
+        or _canonical_json_copy(group.attrs.get(SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR))
         != canonical["candidate_envelope"]
     ):
         raise ValueError(
@@ -525,7 +524,12 @@ def _publication_supports_eye_authority(publication: Any) -> bool:
 
     return all(
         hasattr(publication, name)
-        for name in ("manifest", "row_identity", "descriptors", "require_scalar_surface")
+        for name in (
+            "manifest",
+            "row_identity",
+            "descriptors",
+            "require_scalar_surface",
+        )
     )
 
 
@@ -646,14 +650,10 @@ def resolve_subject_shape_assignment_keypoint_authority_pointer(
             source_binding,
             label="Canonical subject-shape direct assignment authority",
         )
-        if (
-            pointer["record_ref"]
-            != (
-                f"/{publication.run_path}/coordinate_records/source_binding"
-                f"@{SUBJECT_SHAPE_SOURCE_BINDING_ATTR}"
-            )
-            or pointer["record_sha256"] != _canonical_sha256(source_record)
-        ):
+        if pointer["record_ref"] != (
+            f"/{publication.run_path}/coordinate_records/source_binding"
+            f"@{SUBJECT_SHAPE_SOURCE_BINDING_ATTR}"
+        ) or pointer["record_sha256"] != _canonical_sha256(source_record):
             raise ValueError(
                 "Direct assignment authority pointer differs from the exact "
                 "subject-shape source-binding record."
@@ -669,9 +669,7 @@ def resolve_subject_shape_assignment_keypoint_authority_pointer(
             "Subject-shape assignment rebinding lacks its bundle authority."
         )
     if getattr(publication, "source_binding", None) is not None:
-        raise ValueError(
-            "Subject-shape source binding lacks its bundle authority."
-        )
+        raise ValueError("Subject-shape source binding lacks its bundle authority.")
     if historical_authority is None:
         return None
     return _assignment_authority_pointer(
@@ -766,8 +764,8 @@ def _build_staged_subject_shape_authority(
             "Canonical eye-separation scalar semantics bind another array."
         )
 
-    assignment_pointer = (
-        resolve_subject_shape_assignment_keypoint_authority_pointer(publication)
+    assignment_pointer = resolve_subject_shape_assignment_keypoint_authority_pointer(
+        publication
     )
 
     record = {
@@ -830,8 +828,7 @@ def _validate_descriptor_metadata(
     if (
         exact_descriptor != descriptor.to_dict()
         or descriptor.digest() != expected_digest
-        or node.attrs.get(f"{COORDINATE_DESCRIPTOR_ATTR}_sha256")
-        != expected_digest
+        or node.attrs.get(f"{COORDINATE_DESCRIPTOR_ATTR}_sha256") != expected_digest
         or node.attrs.get(f"{COORDINATE_DESCRIPTOR_ATTR}_owner_dtype")
         != np.dtype(node.dtype).str
         or descriptor.row_identity.record_ref != row_identity_ref
@@ -879,6 +876,7 @@ def _validated_staged_subject_shape_authority(
     run_name: str,
     authority: Mapping[str, Any],
     verify_payload: bool,
+    require_closed_inventory: bool = True,
 ) -> dict[str, Any]:
     """Validate the materializer-only authority for an exact staged subset."""
 
@@ -886,6 +884,8 @@ def _validated_staged_subject_shape_authority(
         raise ValueError("Staged subject-shape authority must be a mapping.")
     if type(verify_payload) is not bool:
         raise ValueError("Staged payload verification flag must be an exact bool.")
+    if type(require_closed_inventory) is not bool:
+        raise ValueError("Closed-inventory verification flag must be an exact bool.")
     canonical = _canonical_json_copy(authority)
     digest = canonical.pop("record_sha256", None)
     base_fields = {
@@ -907,15 +907,16 @@ def _validated_staged_subject_shape_authority(
         == EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_SCHEMA_VERSION
     )
     expected_fields = (
-        base_fields | {"candidate_admission"}
-        if candidate_authority
-        else base_fields
+        base_fields | {"candidate_admission"} if candidate_authority else base_fields
     )
     if set(canonical) != expected_fields:
         raise ValueError("Staged subject-shape authority fields are not exact.")
     if not _is_sha256(digest) or digest != _canonical_sha256(canonical):
         raise ValueError("Staged subject-shape authority digest is missing or stale.")
-    if canonical.get("schema_id") != EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_ID:
+    if (
+        canonical.get("schema_id")
+        != EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_ID
+    ):
         raise ValueError("Unsupported staged subject-shape authority schema.")
     if type(schema_version) is not int or schema_version not in {
         EYE_GEOMETRY_STAGED_SUBJECT_SHAPE_AUTHORITY_SCHEMA_VERSION,
@@ -930,7 +931,9 @@ def _validated_staged_subject_shape_authority(
     if canonical.get("authority_scope") != expected_scope:
         raise ValueError("Staged subject-shape authority has the wrong scope.")
     if canonical.get("normal_reader_authority") is not False:
-        raise ValueError("Detached staging receipts cannot grant normal reader authority.")
+        raise ValueError(
+            "Detached staging receipts cannot grant normal reader authority."
+        )
     if canonical.get("closed_array_inventory") is not True:
         raise ValueError("Staged subject-shape array inventory is not closed.")
 
@@ -968,8 +971,7 @@ def _validated_staged_subject_shape_authority(
             "Staged authority lacks exact canonical-publication proof fields."
         )
     if (
-        publication.get("manifest_ref")
-        != f"/{run_path}@{SUBJECT_SHAPE_MANIFEST_ATTR}"
+        publication.get("manifest_ref") != f"/{run_path}@{SUBJECT_SHAPE_MANIFEST_ATTR}"
         or publication.get("row_identity_ref")
         != f"/{run_path}@{ROW_IDENTITY_CONTRACT_ATTR}"
         or not _is_sha256(publication.get("manifest_sha256"))
@@ -1007,9 +1009,8 @@ def _validated_staged_subject_shape_authority(
         )
 
     ellipse_proofs = publication.get("ellipse_coordinate_descriptors")
-    if (
-        not isinstance(ellipse_proofs, Mapping)
-        or set(ellipse_proofs) != set(_SUBJECT_SHAPE_ELLIPSE_PATHS)
+    if not isinstance(ellipse_proofs, Mapping) or set(ellipse_proofs) != set(
+        _SUBJECT_SHAPE_ELLIPSE_PATHS
     ):
         raise ValueError("Staged authority lacks exact ellipse descriptor proofs.")
     for relative_ref in _SUBJECT_SHAPE_ELLIPSE_PATHS:
@@ -1057,14 +1058,15 @@ def _validated_staged_subject_shape_authority(
         raise ValueError(
             "Staged subject-shape authority has missing or unsupported arrays."
         )
-    observed_inventory = set(_iter_descendant_array_paths(group))
-    if observed_inventory != set(_SUBJECT_SHAPE_EYE_ARRAY_PATHS):
-        missing = sorted(set(_SUBJECT_SHAPE_EYE_ARRAY_PATHS) - observed_inventory)
-        extra = sorted(observed_inventory - set(_SUBJECT_SHAPE_EYE_ARRAY_PATHS))
-        raise ValueError(
-            "Staged subject-shape subset has a noncanonical array inventory: "
-            f"missing={missing!r}, extra={extra!r}."
-        )
+    if require_closed_inventory:
+        observed_inventory = set(_iter_descendant_array_paths(group))
+        if observed_inventory != set(_SUBJECT_SHAPE_EYE_ARRAY_PATHS):
+            missing = sorted(set(_SUBJECT_SHAPE_EYE_ARRAY_PATHS) - observed_inventory)
+            extra = sorted(observed_inventory - set(_SUBJECT_SHAPE_EYE_ARRAY_PATHS))
+            raise ValueError(
+                "Staged subject-shape subset has a noncanonical array inventory: "
+                f"missing={missing!r}, extra={extra!r}."
+            )
 
     for relative_ref in _SUBJECT_SHAPE_EYE_ARRAY_PATHS:
         declared = allowed.get(relative_ref)
@@ -1078,8 +1080,7 @@ def _validated_staged_subject_shape_authority(
             set(declared) != _ARRAY_MANIFEST_ENTRY_FIELDS
             or declared.get("array_ref") != f"/{run_path}/{relative_ref}"
             or declared.get("relative_ref") != relative_ref
-            or declared.get("canonicalization")
-            != "numpy_dtype_shape_c_order_bytes_v1"
+            or declared.get("canonicalization") != "numpy_dtype_shape_c_order_bytes_v1"
             or not isinstance(expected_shape, list)
             or not expected_shape
             or any(type(value) is not int or value < 0 for value in expected_shape)
@@ -1131,7 +1132,9 @@ def _select_channel_indices(channel_key: object, channel_count: int) -> list[int
         return list(range(channel_count))[channel_key]
     if isinstance(channel_key, np.ndarray):
         return [int(v) for v in channel_key.reshape(-1).tolist()]
-    if isinstance(channel_key, Sequence) and not isinstance(channel_key, (str, bytes, bytearray)):
+    if isinstance(channel_key, Sequence) and not isinstance(
+        channel_key, (str, bytes, bytearray)
+    ):
         return [int(v) for v in channel_key]
     raise TypeError(f"Unsupported channel index type: {type(channel_key).__name__}")
 
@@ -1140,7 +1143,9 @@ def _is_scalar_row_key(row_key: object) -> bool:
     return isinstance(row_key, (int, np.integer))
 
 
-def _stack_component_values(values: list[np.ndarray], *, row_scalar: bool) -> np.ndarray:
+def _stack_component_values(
+    values: list[np.ndarray], *, row_scalar: bool
+) -> np.ndarray:
     if not values:
         return np.asarray(values)
     axis = 0 if row_scalar else 1
@@ -1164,9 +1169,15 @@ class StackedComponentArray:
             *tuple(int(v) for v in self._component_shape[1:]),
         )
         self.ndim = len(self.shape)
-        self.dtype = getattr(self._components[0], "dtype", np.asarray(self._components[0][:]).dtype)
+        self.dtype = getattr(
+            self._components[0], "dtype", np.asarray(self._components[0][:]).dtype
+        )
         chunks = getattr(self._components[0], "chunks", None)
-        self.chunks = None if chunks is None else (chunks[0], len(self._components), *tuple(chunks[1:]))
+        self.chunks = (
+            None
+            if chunks is None
+            else (chunks[0], len(self._components), *tuple(chunks[1:]))
+        )
 
     def __array__(self, dtype=None) -> np.ndarray:
         values = np.asarray(self[:])
@@ -1182,13 +1193,17 @@ class StackedComponentArray:
         row_key = key[0]
         if len(key) == 1:
             values = [np.asarray(component[row_key]) for component in self._components]
-            return _stack_component_values(values, row_scalar=_is_scalar_row_key(row_key))
+            return _stack_component_values(
+                values, row_scalar=_is_scalar_row_key(row_key)
+            )
 
         channel_key = key[1]
         tail_key = tuple(key[2:])
         channel_indices = _select_channel_indices(channel_key, len(self._components))
         component_key = (row_key, *tail_key)
-        values = [np.asarray(self._components[idx][component_key]) for idx in channel_indices]
+        values = [
+            np.asarray(self._components[idx][component_key]) for idx in channel_indices
+        ]
         if isinstance(channel_key, (int, np.integer)):
             return np.asarray(values[0])
         return _stack_component_values(values, row_scalar=_is_scalar_row_key(row_key))
@@ -1204,13 +1219,26 @@ class ChannelSelectionArray:
         self._channel_indices = tuple(int(v) for v in channel_indices)
         source_shape = _shape(source)
         if len(source_shape) < 2:
-            raise ValueError(f"Source array must include a channel axis, got {source_shape}.")
-        self._component_shape = (int(source_shape[0]), *tuple(int(v) for v in source_shape[2:]))
-        self.shape = (int(source_shape[0]), len(self._channel_indices), *tuple(int(v) for v in source_shape[2:]))
+            raise ValueError(
+                f"Source array must include a channel axis, got {source_shape}."
+            )
+        self._component_shape = (
+            int(source_shape[0]),
+            *tuple(int(v) for v in source_shape[2:]),
+        )
+        self.shape = (
+            int(source_shape[0]),
+            len(self._channel_indices),
+            *tuple(int(v) for v in source_shape[2:]),
+        )
         self.ndim = len(self.shape)
         self.dtype = getattr(source, "dtype", np.asarray(source[:1]).dtype)
         chunks = getattr(source, "chunks", None)
-        self.chunks = None if chunks is None else (chunks[0], len(self._channel_indices), *tuple(chunks[2:]))
+        self.chunks = (
+            None
+            if chunks is None
+            else (chunks[0], len(self._channel_indices), *tuple(chunks[2:]))
+        )
 
     def __array__(self, dtype=None) -> np.ndarray:
         values = np.asarray(self[:])
@@ -1218,22 +1246,37 @@ class ChannelSelectionArray:
 
     def __getitem__(self, key):
         if not isinstance(key, tuple):
-            values = [np.asarray(self._source[(key, idx)]) for idx in self._channel_indices]
+            values = [
+                np.asarray(self._source[(key, idx)]) for idx in self._channel_indices
+            ]
             return _stack_component_values(values, row_scalar=_is_scalar_row_key(key))
 
         if not key:
             return self[:]
         row_key = key[0]
         if len(key) == 1:
-            values = [np.asarray(self._source[(row_key, idx)]) for idx in self._channel_indices]
-            return _stack_component_values(values, row_scalar=_is_scalar_row_key(row_key))
+            values = [
+                np.asarray(self._source[(row_key, idx)])
+                for idx in self._channel_indices
+            ]
+            return _stack_component_values(
+                values, row_scalar=_is_scalar_row_key(row_key)
+            )
 
         channel_key = key[1]
         tail_key = tuple(key[2:])
         selected = _select_channel_indices(channel_key, len(self._channel_indices))
         source_key_tail = (row_key, *tail_key)
         values = [
-            np.asarray(self._source[(source_key_tail[0], self._channel_indices[idx], *source_key_tail[1:])])
+            np.asarray(
+                self._source[
+                    (
+                        source_key_tail[0],
+                        self._channel_indices[idx],
+                        *source_key_tail[1:],
+                    )
+                ]
+            )
             for idx in selected
         ]
         if isinstance(channel_key, (int, np.integer)):
@@ -1249,8 +1292,12 @@ class MaskStoreChannelSelectionArray:
             raise ValueError("At least one channel index is required.")
         self._mask_store = mask_store
         self._channel_indices = tuple(int(v) for v in channel_indices)
-        if any(idx < 0 or idx >= int(mask_store.shape[1]) for idx in self._channel_indices):
-            raise ValueError(f"Channel indices {self._channel_indices} out of range for mask store {mask_store.shape}.")
+        if any(
+            idx < 0 or idx >= int(mask_store.shape[1]) for idx in self._channel_indices
+        ):
+            raise ValueError(
+                f"Channel indices {self._channel_indices} out of range for mask store {mask_store.shape}."
+            )
         self.shape = (
             int(mask_store.shape[0]),
             len(self._channel_indices),
@@ -1267,14 +1314,18 @@ class MaskStoreChannelSelectionArray:
 
     def __getitem__(self, key):
         if not isinstance(key, tuple):
-            values = self._mask_store.read_dense(rows=key, channels=self._channel_indices)
+            values = self._mask_store.read_dense(
+                rows=key, channels=self._channel_indices
+            )
             return values[0] if _is_scalar_row_key(key) else values
 
         if not key:
             return self[:]
         row_key = key[0]
         if len(key) == 1:
-            values = self._mask_store.read_dense(rows=row_key, channels=self._channel_indices)
+            values = self._mask_store.read_dense(
+                rows=row_key, channels=self._channel_indices
+            )
             return values[0] if _is_scalar_row_key(row_key) else values
 
         channel_key = key[1]
@@ -1351,7 +1402,11 @@ def _has_subject_shape_eye_geometry(group: zarr.Group) -> bool:
             return False
         param_shape = _shape(params)
         success_shape = _shape(success)
-        if len(param_shape) < 2 or len(success_shape) != 1 or param_shape[0] != success_shape[0]:
+        if (
+            len(param_shape) < 2
+            or len(success_shape) != 1
+            or param_shape[0] != success_shape[0]
+        ):
             return False
         arrays.extend([params, success])
     if _shape(arrays[0]) != _shape(arrays[2]) or _shape(arrays[1]) != _shape(arrays[3]):
@@ -1360,7 +1415,9 @@ def _has_subject_shape_eye_geometry(group: zarr.Group) -> bool:
     return separation is not None and _shape(separation)[:1] == _shape(arrays[1])[:1]
 
 
-def _find_latest_subject_eye_geometry(root: zarr.Group) -> tuple[Optional[str], Optional[zarr.Group]]:
+def _find_latest_subject_eye_geometry(
+    root: zarr.Group,
+) -> tuple[Optional[str], Optional[zarr.Group]]:
     parent = _group_get(root, EYE_GEOMETRY_STAGE_REFINED_SUBJECT)
     if parent is None:
         return None, None
@@ -1411,7 +1468,9 @@ def _exact_staged_subject_shape_run_name(value: Optional[str]) -> str:
         )
     normalized = requested.strip("/")
     prefix = f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/"
-    run_name = normalized[len(prefix) :] if normalized.startswith(prefix) else normalized
+    run_name = (
+        normalized[len(prefix) :] if normalized.startswith(prefix) else normalized
+    )
     if not run_name or "/" in run_name:
         raise ValueError(f"Invalid staged subject-shape run name {value!r}.")
     return run_name
@@ -1460,9 +1519,7 @@ def _strict_completed_ineligible_subject_shape_eye_geometry(
     selected = _exact_subject_shape_candidate_run_name(run_name)
     parent = _group_get(root, EYE_GEOMETRY_STAGE_SUBJECT_SHAPE)
     if parent is None or selected not in parent:
-        raise ValueError(
-            f"Explicit subject-shape candidate {selected!r} is absent."
-        )
+        raise ValueError(f"Explicit subject-shape candidate {selected!r} is absent.")
     path = f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{selected}"
     group = parent[selected]
     canonical_admission = _validated_subject_shape_candidate_admission(
@@ -1534,14 +1591,18 @@ def _build_subject_source(
     historical_compatibility: bool = False,
 ) -> EyeGeometrySource:
     if not _has_subject_eye_geometry(group):
-        raise ValueError(f"{EYE_GEOMETRY_STAGE_REFINED_SUBJECT}/{run_name} missing canonical eye geometry.")
+        raise ValueError(
+            f"{EYE_GEOMETRY_STAGE_REFINED_SUBJECT}/{run_name} missing canonical eye geometry."
+        )
     label_map = _label_index_map(group)
     mask_store = open_mask_store(
         group,
         source_path=f"{EYE_GEOMETRY_STAGE_REFINED_SUBJECT}/{run_name}",
         prefer="dense",
     )
-    masks = MaskStoreChannelSelectionArray(mask_store, [label_map["eye_left"], label_map["eye_right"]])
+    masks = MaskStoreChannelSelectionArray(
+        mask_store, [label_map["eye_left"], label_map["eye_right"]]
+    )
     ellipse_params = StackedComponentArray(
         [
             group["components/eye_left/geometry/ellipse_params"],
@@ -1554,7 +1615,9 @@ def _build_subject_source(
             group["components/eye_right/geometry/ellipse_success"],
         ]
     )
-    source_refined_eye_run = source_refined_eye_run or _normalize_text(group.attrs.get("source_refined_eye_masks_run"))
+    source_refined_eye_run = source_refined_eye_run or _normalize_text(
+        group.attrs.get("source_refined_eye_masks_run")
+    )
     lineage_attrs = dict(group.attrs)
     if historical_compatibility:
         lineage_attrs["coordinate_authority_status"] = (
@@ -1590,7 +1653,9 @@ def _build_subject_shape_source(
     candidate_admission: Optional[Mapping[str, Any]] = None,
 ) -> EyeGeometrySource:
     if not _has_subject_shape_eye_geometry(group):
-        raise ValueError(f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{run_name} missing analysis eye geometry.")
+        raise ValueError(
+            f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{run_name} missing analysis eye geometry."
+        )
     ellipse_params = StackedComponentArray(
         [
             group["components/eye_left/ellipse_params"],
@@ -1603,9 +1668,7 @@ def _build_subject_shape_source(
             group["components/eye_right/ellipse_success"],
         ]
     )
-    if source_authority is None and _publication_supports_eye_authority(
-        publication
-    ):
+    if source_authority is None and _publication_supports_eye_authority(publication):
         source_authority = _build_staged_subject_shape_authority(
             group,
             run_name=run_name,
@@ -1622,13 +1685,82 @@ def _build_subject_shape_source(
         ellipse_success=ellipse_success,
         eye_separation=group["relations/eye_pair/separation_px"],
         lineage_attrs=dict(group.attrs),
-        source_refined_eye_run=_normalize_text(group.attrs.get("source_refined_eye_masks_run")),
-        source_refined_subject_run=_normalize_text(group.attrs.get("source_refined_subject_masks_run")),
+        source_refined_eye_run=_normalize_text(
+            group.attrs.get("source_refined_eye_masks_run")
+        ),
+        source_refined_subject_run=_normalize_text(
+            group.attrs.get("source_refined_subject_masks_run")
+        ),
         source_subject_shape_run=run_name,
         source_authority_mode=source_authority_mode,
         source_authority=source_authority,
         subject_shape_coordinate_publication=publication,
     )
+
+
+def validate_staged_subject_shape_eye_geometry_authority(
+    root: zarr.Group,
+    *,
+    run_name: str,
+    authority: Mapping[str, Any],
+    verify_payload: bool = False,
+    publication_metadata_proof: (
+        SealedSubjectShapePublicationMetadataProof | None
+    ) = None,
+) -> dict[str, Any]:
+    """Validate one persisted staging receipt against its canonical publication.
+
+    A staged subset has an intentionally closed five-array inventory, whereas
+    the canonical subject-shape publication contains additional scientific
+    arrays. Reconstructing the receipt from the fully validated publication
+    proves the same five-array projection without mistaking those additional
+    canonical arrays for staging corruption.
+    """
+
+    selected = _exact_staged_subject_shape_run_name(run_name)
+    path = f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{selected}"
+    group = _group_get(root, path)
+    if group is None:
+        raise ValueError(f"Canonical subject-shape run {path!r} is missing.")
+    authority_record = _validated_staged_subject_shape_authority(
+        group,
+        run_name=selected,
+        authority=authority,
+        verify_payload=verify_payload,
+        require_closed_inventory=False,
+    )
+    source_attrs = authority_record["source_contract_attrs"]
+    publication_owner = source_attrs.get("subject_shape_publication_owner_uuid")
+    if not isinstance(publication_owner, str) or not publication_owner:
+        raise ValueError("Staged subject-shape authority lacks its publication owner.")
+    metadata_proof = publication_metadata_proof
+    if metadata_proof is None:
+        metadata_proof = validate_sealed_subject_shape_publication_metadata(
+            root,
+            path,
+            expected_selector_eligible=True,
+            expected_publication_owner=publication_owner,
+        )
+    elif not isinstance(
+        metadata_proof,
+        SealedSubjectShapePublicationMetadataProof,
+    ):
+        raise ValueError(
+            "Subject-shape publication metadata proof is not process-sealed."
+        )
+    canonical_publication = authority_record["canonical_publication"]
+    if (
+        metadata_proof.run_path != path
+        or metadata_proof.manifest.record_sha256
+        != canonical_publication["manifest_sha256"]
+        or metadata_proof.row_count != authority_record["row_count"]
+        or metadata_proof.selector_eligible is not True
+        or metadata_proof.publication_owner != publication_owner
+    ):
+        raise ValueError(
+            "Staged subject-shape authority differs from the sealed publication metadata."
+        )
+    return authority_record
 
 
 def resolve_eye_geometry_source(
@@ -1640,9 +1772,7 @@ def resolve_eye_geometry_source(
     prefer_subject: bool = True,
     historical_refined_subject_compatibility: bool = False,
     _staged_subject_shape_authority: Optional[Mapping[str, Any]] = None,
-    _completed_ineligible_subject_shape_candidate: Optional[
-        Mapping[str, Any]
-    ] = None,
+    _completed_ineligible_subject_shape_candidate: Optional[Mapping[str, Any]] = None,
     _verify_staged_payload: bool = True,
 ) -> EyeGeometrySource:
     """Resolve the active eye geometry source.
@@ -1685,9 +1815,7 @@ def resolve_eye_geometry_source(
             verify_payload=_verify_staged_payload,
         )
         if not _has_subject_shape_eye_geometry(group):
-            raise ValueError(
-                f"{path} is missing staged subject-shape eye geometry."
-            )
+            raise ValueError(f"{path} is missing staged subject-shape eye geometry.")
         return _build_subject_shape_source(
             run_name,
             group,
@@ -1721,9 +1849,7 @@ def resolve_eye_geometry_source(
             run_name,
             group,
             publication=publication,
-            source_authority_mode=(
-                EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_MODE
-            ),
+            source_authority_mode=(EYE_GEOMETRY_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_MODE),
             candidate_admission=candidate_admission,
         )
 
@@ -1755,7 +1881,9 @@ def resolve_eye_geometry_source(
                 root,
                 refined_subject_run,
             )
-        source_refined_eye_run = _normalize_text(group.attrs.get("source_refined_eye_masks_run"))
+        source_refined_eye_run = _normalize_text(
+            group.attrs.get("source_refined_eye_masks_run")
+        )
         return _build_subject_source(
             run_name,
             group,
@@ -1786,7 +1914,9 @@ def resolve_eye_geometry_source(
             except ValueError:
                 subject_name, subject_group = None, None
         if subject_name is not None and subject_group is not None:
-            source_refined_eye_run = _normalize_text(subject_group.attrs.get("source_refined_eye_masks_run"))
+            source_refined_eye_run = _normalize_text(
+                subject_group.attrs.get("source_refined_eye_masks_run")
+            )
             return _build_subject_source(
                 subject_name,
                 subject_group,
@@ -1794,10 +1924,14 @@ def resolve_eye_geometry_source(
                 historical_compatibility=historical_refined_subject_compatibility,
             )
 
-    raise ValueError("No canonical subject-shape or refined-subject eye geometry found.")
+    raise ValueError(
+        "No canonical subject-shape or refined-subject eye geometry found."
+    )
 
 
-def resolve_source_keypoints_run_for_eye_geometry(source: EyeGeometrySource) -> Optional[str]:
+def resolve_source_keypoints_run_for_eye_geometry(
+    source: EyeGeometrySource,
+) -> Optional[str]:
     return resolve_source_keypoints_run(source.lineage_attrs)
 
 
@@ -1821,4 +1955,5 @@ __all__ = [
     "resolve_eye_geometry_source",
     "resolve_source_keypoints_run_for_eye_geometry",
     "resolve_subject_shape_assignment_keypoint_authority_pointer",
+    "validate_staged_subject_shape_eye_geometry_authority",
 ]

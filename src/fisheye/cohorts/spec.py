@@ -16,7 +16,6 @@ from typing import Any, Mapping, Sequence
 
 import yaml
 
-
 SCHEMA_ID = "palette.cohort_query"
 SCHEMA_VERSION = 1
 COHORT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -78,12 +77,18 @@ class DatasetSelector:
     statuses: tuple[str, ...] = ("active",)
     zarr_uses: tuple[str, ...] = ("analysis",)
     zarr_origins: tuple[str, ...] = ("source",)
+    recording_ids_any: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "DatasetSelector":
         _reject_unknown(
             raw,
-            allowed={"statuses", "zarr_uses", "zarr_origins"},
+            allowed={
+                "statuses",
+                "zarr_uses",
+                "zarr_origins",
+                "recording_ids_any",
+            },
             label="dataset",
         )
         statuses = _strings(raw.get("statuses", ["active"]), label="dataset.statuses")
@@ -97,7 +102,15 @@ class DatasetSelector:
             raise CohortSpecError(
                 "dataset.statuses, dataset.zarr_uses, and dataset.zarr_origins cannot be empty"
             )
-        return cls(statuses=statuses, zarr_uses=zarr_uses, zarr_origins=origins)
+        return cls(
+            statuses=statuses,
+            zarr_uses=zarr_uses,
+            zarr_origins=origins,
+            recording_ids_any=_strings(
+                raw.get("recording_ids_any"),
+                label="dataset.recording_ids_any",
+            ),
+        )
 
 
 @dataclass(frozen=True)

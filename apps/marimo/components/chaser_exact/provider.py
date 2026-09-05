@@ -10,6 +10,7 @@ from typing import Any, Callable, Mapping, Sequence
 from fisheye.analysis_workflows.validated_recording_behavior_source import (
     ValidatedRecordingBehaviorSource,
 )
+from fisheye.shared.bounded_identity_cache import BoundedIdentityCache
 
 from ..registry import InteractiveSpecOption
 from ..chaser_exact_body_bearing_contract import (
@@ -377,6 +378,12 @@ class ExactChaserProviderAdapter:
         analysis_id: str,
         projection_receipt_path: str | Path | None = None,
         validated_behavior_source: ValidatedRecordingBehaviorSource | None = None,
+        projection_cache: (
+            BoundedIdentityCache[
+                ExactChaserSelectionIdentity, ExactChaserSuccessorProjection
+            ]
+            | None
+        ) = None,
     ) -> ExactChaserSuccessorProjection:
         route = self.route(analysis_id)
         if route.load_keypoint_body_bearing:
@@ -390,22 +397,29 @@ class ExactChaserProviderAdapter:
             projection_receipt_path=projection_receipt_path,
             validated_behavior_source=validated_behavior_source,
         )
-        return load_exact_chaser_projection(
-            zarr_path,
-            option,
-            selection_identity=identity,
-            load_relative=route.load_relative,
-            load_relative_arrays=route.load_relative_arrays,
-            load_chaser_appearance=route.load_chaser_appearance,
-            load_keypoint_body_bearing=route.load_keypoint_body_bearing,
-            load_keypoint_body_heading=route.load_keypoint_body_heading,
-            load_controller_trials=route.load_controller_trials,
-            load_generalized_bout_response=(route.load_generalized_bout_response),
-            load_escape_freeze=route.load_escape_freeze,
-            load_gaze_tracking=route.load_gaze_tracking,
-            load_epoch_behavior=route.load_epoch_behavior,
-            load_body_alignment_by_distance=(route.load_body_alignment_by_distance),
-        )
+        def load_selected_projection() -> ExactChaserSuccessorProjection:
+            return load_exact_chaser_projection(
+                zarr_path,
+                option,
+                selection_identity=identity,
+                load_relative=route.load_relative,
+                load_relative_arrays=route.load_relative_arrays,
+                load_chaser_appearance=route.load_chaser_appearance,
+                load_keypoint_body_bearing=route.load_keypoint_body_bearing,
+                load_keypoint_body_heading=route.load_keypoint_body_heading,
+                load_controller_trials=route.load_controller_trials,
+                load_generalized_bout_response=(route.load_generalized_bout_response),
+                load_escape_freeze=route.load_escape_freeze,
+                load_gaze_tracking=route.load_gaze_tracking,
+                load_epoch_behavior=route.load_epoch_behavior,
+                load_body_alignment_by_distance=(
+                    route.load_body_alignment_by_distance
+                ),
+            )
+
+        if projection_cache is None:
+            return load_selected_projection()
+        return projection_cache.get_or_load(identity, load_selected_projection)
 
     def require_current_projection(
         self,
@@ -481,6 +495,12 @@ def load_exact_chaser_successor_projection(
     analysis_id: str,
     projection_receipt_path: str | Path | None = None,
     validated_behavior_source: ValidatedRecordingBehaviorSource | None = None,
+    projection_cache: (
+        BoundedIdentityCache[
+            ExactChaserSelectionIdentity, ExactChaserSuccessorProjection
+        ]
+        | None
+    ) = None,
 ) -> ExactChaserSuccessorProjection:
     """Compatibility function for the pre-package component API."""
 
@@ -490,6 +510,7 @@ def load_exact_chaser_successor_projection(
         analysis_id=analysis_id,
         projection_receipt_path=projection_receipt_path,
         validated_behavior_source=validated_behavior_source,
+        projection_cache=projection_cache,
     )
 
 

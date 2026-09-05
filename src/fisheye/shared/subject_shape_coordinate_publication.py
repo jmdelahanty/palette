@@ -49,6 +49,7 @@ from fisheye.shared.coordinate_frame_record import (
     BODY_FRAME_ESTIMATOR_ATTR,
     FISH_ANATOMICAL_BODY_FRAME_ATTR,
     BoundFishAnatomicalBodyFrame,
+    array_payload_digest_evidence_scope,
     array_payload_sha256,
     array_values_sha256,
     bind_body_frame_geometry,
@@ -64,6 +65,7 @@ from fisheye.shared.coordinate_frame_record import (
     stamp_body_frame_contract,
     stamp_body_frame_estimator,
     stamp_fish_anatomical_body_frame_record,
+    validated_scientific_array_receipt_scope,
 )
 from fisheye.shared.coordinate_identity import (
     OBSERVATION_INSTANCE_DOMAIN,
@@ -79,6 +81,7 @@ from fisheye.shared.coordinate_identity import (
     build_row_identity_contract,
     load_bound_row_identity_contract,
     load_bound_source_row_temporal_authority,
+    row_authority_array_digest_evidence_scope,
     stamp_and_bind_row_identity_contract,
     stamp_source_row_temporal_authority,
 )
@@ -259,11 +262,29 @@ def is_supported_subject_shape_payload_receipt_profile(value: Any) -> bool:
 
 @contextmanager
 def _subject_shape_array_digest_scope(
+    run: Any,
     values: Mapping[str, str],
+    *,
+    validated_scientific_receipt: bool = False,
 ) -> Iterator[None]:
+    evidence = {
+        canonical_node_path(run[path]): {
+            "dtype": np.dtype(run[path].dtype).str,
+            "shape": [int(value) for value in run[path].shape],
+            "content_sha256": str(values[path]),
+            "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        }
+        for path in values
+    }
     token = _ACTIVE_SUBJECT_SHAPE_ARRAY_DIGESTS.set(dict(values))
     try:
-        yield
+        with array_payload_digest_evidence_scope(run, evidence):
+            if validated_scientific_receipt:
+                with row_authority_array_digest_evidence_scope(run, evidence):
+                    with validated_scientific_array_receipt_scope():
+                        yield
+            else:
+                yield
     finally:
         _ACTIVE_SUBJECT_SHAPE_ARRAY_DIGESTS.reset(token)
 
@@ -2600,12 +2621,11 @@ def load_subject_shape_consumed_unbound_stage(run: Any) -> BoundCoordinateRecord
     return result
 
 
-def _tail_sample_axis_record(run: Any) -> dict[str, Any]:
+def _validate_tail_sample_axis_values(run: Any) -> None:
     body = run.get("components/subject_body")
     if body is None or "tail_sample_s" not in body:
         _fail("Canonical subject-shape publication lacks tail_sample_s.")
-    samples = body["tail_sample_s"]
-    values = np.asarray(samples[:])
+    values = np.asarray(body["tail_sample_s"][:])
     if (
         values.dtype.kind != "f"
         or values.ndim != 1
@@ -2616,10 +2636,24 @@ def _tail_sample_axis_record(run: Any) -> dict[str, Any]:
         or not np.all(np.diff(values.astype(np.float64)) > 0.0)
     ):
         _fail("tail_sample_s must be a finite, strictly increasing closed [0,1] axis.")
+
+
+def _tail_sample_axis_record(run: Any) -> dict[str, Any]:
+    body = run.get("components/subject_body")
+    if body is None or "tail_sample_s" not in body:
+        _fail("Canonical subject-shape publication lacks tail_sample_s.")
+    samples = body["tail_sample_s"]
+    sample_shape = tuple(int(value) for value in samples.shape)
+    if (
+        np.dtype(samples.dtype).kind != "f"
+        or len(sample_shape) != 1
+        or sample_shape[0] < 2
+    ):
+        _fail("tail_sample_s requires one floating sample axis with at least two rows.")
     for name in ("tail_sample_xy", "tail_tangent_xy", "tail_normal_xy"):
         node = body.get(name)
         if node is None or tuple(int(value) for value in node.shape[1:]) != (
-            int(values.size),
+            sample_shape[0],
             2,
         ):
             _fail(f"{name} does not use the exact tail-sample cardinality.")
@@ -2628,7 +2662,7 @@ def _tail_sample_axis_record(run: Any) -> dict[str, Any]:
         "schema_version": SUBJECT_SHAPE_SCHEMA_VERSION,
         "axis_index": 1,
         "axis_role": "tail_sample",
-        "cardinality": int(values.size),
+        "cardinality": sample_shape[0],
         "coordinate_kind": "normalized_arclength",
         "coordinate_units": "unitless",
         "domain": "closed_0_to_1",
@@ -2646,6 +2680,7 @@ def _tail_sample_axis_record(run: Any) -> dict[str, Any]:
 
 
 def _stamp_tail_sample_axis(run: Any) -> BoundCoordinateRecord:
+    _validate_tail_sample_axis_values(run)
     node = run["components/subject_body/tail_sample_s"]
     return stamp_and_bind_persisted_coordinate_record(
         node,
@@ -3393,13 +3428,11 @@ def _stamp_body_frame(
     )
 
 
-def _heading_semantics_record(
+def _validate_heading_semantics_values(
     run: Any,
     *,
     identity: BoundRowIdentityContract,
-    forward_descriptor: BoundCanonicalCoordinateDescriptor,
-    body_frame: BoundFishAnatomicalBodyFrame,
-) -> dict[str, Any]:
+) -> None:
     frame = run["body_frame"]
     heading = np.asarray(frame["heading_deg"][:], dtype=np.float64)
     forward = np.asarray(frame["forward_axis_xy"][:], dtype=np.float64)
@@ -3415,6 +3448,25 @@ def _heading_semantics_record(
     )
     if not np.allclose(heading, expected, rtol=0.0, atol=1e-5, equal_nan=True):
         _fail("body_frame/heading_deg differs from its declared forward-axis formula.")
+
+
+def _heading_semantics_record(
+    run: Any,
+    *,
+    identity: BoundRowIdentityContract,
+    forward_descriptor: BoundCanonicalCoordinateDescriptor,
+    body_frame: BoundFishAnatomicalBodyFrame,
+) -> dict[str, Any]:
+    frame = run["body_frame"]
+    if (
+        tuple(int(value) for value in frame["heading_deg"].shape)
+        != (identity.leading_dimension,)
+        or tuple(int(value) for value in frame["forward_axis_xy"].shape)
+        != (identity.leading_dimension, 2)
+        or tuple(int(value) for value in frame["axis_valid"].shape)
+        != (identity.leading_dimension,)
+    ):
+        _fail("Subject-shape heading arrays do not share the exact row identity.")
     return {
         "schema_id": SUBJECT_SHAPE_HEADING_SEMANTICS_SCHEMA_ID,
         "schema_version": SUBJECT_SHAPE_SCHEMA_VERSION,
@@ -3454,6 +3506,7 @@ def _stamp_heading_semantics(
     forward_descriptor: BoundCanonicalCoordinateDescriptor,
     body_frame: BoundFishAnatomicalBodyFrame,
 ) -> BoundCoordinateRecord:
+    _validate_heading_semantics_values(run, identity=identity)
     return stamp_and_bind_persisted_coordinate_record(
         run["body_frame/heading_deg"],
         _heading_semantics_record(
@@ -3732,16 +3785,17 @@ def _load_subject_shape_payload_digest_evidence(
     run: Any,
     *,
     manifest_sha256: str,
-) -> Mapping[str, str] | None:
-    """Load receipt-backed digests, falling back only for historical artifacts."""
+) -> Mapping[str, str]:
+    """Load mandatory receipt-backed payload digests for a maintained publication."""
 
     raw_integrity = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR)
     raw_validation = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_VALIDATION_RECEIPT_ATTR)
     receipt_profile = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
     if raw_integrity is None and raw_validation is None:
-        if receipt_profile is not None:
-            _fail("Subject-shape receipt-profile publication lacks its receipts.")
-        return None
+        _fail(
+            "Maintained subject-shape loading requires a complete sealed payload "
+            "receipt pair; receipt-free publications are unsupported."
+        )
     if not is_supported_subject_shape_payload_receipt_profile(receipt_profile):
         _fail("Subject-shape payload receipts lack their exact profile marker.")
     if not isinstance(raw_integrity, Mapping) or not isinstance(
@@ -3857,8 +3911,6 @@ def deep_audit_subject_shape_payload_receipt(
         run,
         manifest_sha256=manifest.record_sha256,
     )
-    if digests is None:
-        _fail("Historical subject-shape publication lacks a payload receipt.")
     raw_integrity = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR)
     try:
         integrity = verify_payload_integrity_receipt(
@@ -3870,6 +3922,18 @@ def deep_audit_subject_shape_payload_receipt(
         )
     except Exception as exc:
         _fail(f"Subject-shape deep payload audit failed: {exc}")
+    identity = load_bound_row_identity_contract(run, run["instance_key"])
+    _validate_tail_sample_axis_values(run)
+    _validate_heading_semantics_values(run, identity=identity)
+    for name in CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS:
+        if not np.array_equal(
+            np.asarray(run[f"row_index/{name}"][:]),
+            np.asarray(run[name][:]),
+        ):
+            _fail(
+                f"Subject-shape deep audit found row_index/{name} differs from "
+                "its canonical direct row-identity array."
+            )
     return {
         "valid": True,
         "run_ref": integrity["run_ref"],
@@ -3882,6 +3946,9 @@ def deep_audit_subject_shape_payload_receipt(
         ],
         "array_count": len(digests),
         "physical_rehash_performed": True,
+        "scientific_derivation_revalidation": (
+            "tail_sample_axis_heading_formula_and_internal_row_identity_v1"
+        ),
     }
 
 
@@ -4601,8 +4668,6 @@ def validate_sealed_subject_shape_publication_metadata(
         run,
         manifest_sha256=manifest.record_sha256,
     )
-    if payload_digests is None:
-        _fail("Metadata-only validation requires sealed payload receipts.")
     raw_integrity = run.attrs.get(SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR)
     try:
         verify_payload_integrity_receipt(
@@ -4791,6 +4856,43 @@ def _load_body_frame(
     )
 
 
+def _require_receipt_bound_row_lineage_metadata(
+    run: Any,
+    source: SubjectShapeCoordinateSource,
+    payload_digests: Mapping[str, str],
+) -> None:
+    """Bind row lineage without replaying immutable publication-time copies.
+
+    The canonical publisher creates the three direct arrays from the exact
+    source and seals that derivation, the source binding, and every output
+    digest in one completed manifest/receipt epoch. A normal load therefore
+    checks live metadata plus the sealed internal duplicate digests. The
+    explicit deep-audit path remains responsible for rereading values.
+    """
+
+    for name in (
+        "instance_key",
+        "source_crop_row_ids",
+        "source_acquisition_frame_index",
+    ):
+        output = run[name]
+        source_node = _source_row_node(source, name)
+        if (
+            np.dtype(output.dtype) != np.dtype(source_node.dtype)
+            or tuple(int(value) for value in output.shape)
+            != tuple(int(value) for value in source_node.shape)
+        ):
+            _fail(f"Subject-shape {name} metadata differs from its exact source.")
+    for name in CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS:
+        direct_path = name
+        row_index_path = f"row_index/{name}"
+        if payload_digests.get(direct_path) != payload_digests.get(row_index_path):
+            _fail(
+                f"Subject-shape {row_index_path} receipt differs from its "
+                "canonical direct row-identity array."
+            )
+
+
 def _load_subject_shape_publication(
     root: Any,
     run_path: str,
@@ -4824,37 +4926,19 @@ def _load_subject_shape_publication(
     )
 
     def digest_scope():
-        return (
-            nullcontext()
-            if payload_digests is None
-            else _subject_shape_array_digest_scope(payload_digests)
+        return _subject_shape_array_digest_scope(
+            run,
+            payload_digests,
+            validated_scientific_receipt=True,
         )
 
     component_names = tuple(str(value) for value in (run.attrs.get("component_names") or ()))
     source = load_exact_subject_shape_source(root, run)
     source_binding = _load_source_binding(run, source)
-    identity = load_bound_row_identity_contract(run, run["instance_key"])
-    if not np.array_equal(
-        np.asarray(run["instance_key"][:]),
-        np.asarray(_source_row_node(source, "instance_key")[:]),
-    ):
-        _fail("Subject-shape instance_key order differs from selected refined rows.")
-    for name in ("source_crop_row_ids", "source_acquisition_frame_index"):
-        if not np.array_equal(
-            np.asarray(run[name][:]),
-            np.asarray(_source_row_node(source, name)[:]),
-        ):
-            _fail(f"Subject-shape {name} differs from selected refined rows.")
-    for name in CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS:
-        if not np.array_equal(
-            np.asarray(run[f"row_index/{name}"][:]),
-            np.asarray(run[name][:]),
-        ):
-            _fail(
-                f"Subject-shape row_index/{name} differs from its canonical "
-                "direct row-identity array."
-            )
-    temporal = load_subject_shape_temporal_authority(run, source, identity)
+    with digest_scope():
+        identity = load_bound_row_identity_contract(run, run["instance_key"])
+        _require_receipt_bound_row_lineage_metadata(run, source, payload_digests)
+        temporal = load_subject_shape_temporal_authority(run, source, identity)
     schema_node = run["coordinate_records/component_schema"]
     component_schema = bind_persisted_coordinate_record(
         schema_node,
@@ -4888,28 +4972,29 @@ def _load_subject_shape_publication(
         scalar_surface_inventory,
     ):
         _fail("Subject-shape derivation differs from live exact source evidence.")
-    descriptors = _descriptor_bindings(
-        run,
-        source=source,
-        source_binding=source_binding,
-        identity=identity,
-        component_schema=component_schema,
-        scientific_configuration=scientific_configuration,
-        tail_sample_axis=tail_sample_axis,
-        derivation=derivation,
-        component_names=component_names,
-        load=True,
-    )
-    body_frame = _load_body_frame(
-        run,
-        source=source,
-        source_binding=source_binding,
-        identity=identity,
-        component_schema=component_schema,
-        scientific_configuration=scientific_configuration,
-        tail_sample_axis=tail_sample_axis,
-        derivation=derivation,
-    )
+    with digest_scope():
+        descriptors = _descriptor_bindings(
+            run,
+            source=source,
+            source_binding=source_binding,
+            identity=identity,
+            component_schema=component_schema,
+            scientific_configuration=scientific_configuration,
+            tail_sample_axis=tail_sample_axis,
+            derivation=derivation,
+            component_names=component_names,
+            load=True,
+        )
+        body_frame = _load_body_frame(
+            run,
+            source=source,
+            source_binding=source_binding,
+            identity=identity,
+            component_schema=component_schema,
+            scientific_configuration=scientific_configuration,
+            tail_sample_axis=tail_sample_axis,
+            derivation=derivation,
+        )
     with digest_scope():
         heading_semantics = _load_heading_semantics(
             run,
@@ -5123,7 +5208,7 @@ def publish_subject_shape_coordinate_surfaces(
     with phase("authority_stamping"):
         with phase("authority_payload_profile"):
             run.attrs[SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR] = receipt_profile
-        with _subject_shape_array_digest_scope(array_digests):
+        with _subject_shape_array_digest_scope(run, array_digests):
             with phase("authority_temporal"):
                 temporal = stamp_subject_shape_temporal_authority(run, source, identity)
             with phase("authority_scientific_configuration"):
@@ -5646,25 +5731,15 @@ def activate_subject_shape_coordinate_publication(
         parent = fresh_parent()
         _require_activation_state(parent, snapshot, overrides=overrides)
 
-        # Reconstruct the complete child while no parent selector has changed.
-        # The supplied proof is an ownership/intent receipt; this live reload
-        # establishes the exact child and source graph for this activation.
-        if is_supported_subject_shape_payload_receipt_profile(
-            run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
-        ):
-            fresh_proof = validate_sealed_subject_shape_publication_metadata(
-                root,
-                expected_path,
-                expected_selector_eligible=False,
-                expected_publication_owner=owner,
-            )
-        else:
-            fresh_proof = _load_subject_shape_publication(
-                root,
-                expected_path,
-                eligible=False,
-                expected_owner=owner,
-            )
+        # Revalidate the complete child's sealed receipt/metadata epoch while no
+        # parent selector has changed.  Receipt-free children are not eligible
+        # for activation and never enter the decoded scientific loader here.
+        fresh_proof = validate_sealed_subject_shape_publication_metadata(
+            root,
+            expected_path,
+            expected_selector_eligible=False,
+            expected_publication_owner=owner,
+        )
         if fresh_proof.manifest.record_sha256 != proof.manifest.record_sha256:
             _fail("Subject-shape publication changed before activation.")
 
@@ -5762,22 +5837,12 @@ def activate_subject_shape_coordinate_publication(
         # individual write above.
         restart_proof_verification()
         run = _node(root, expected_path, label="subject-shape activation child")
-        if is_supported_subject_shape_payload_receipt_profile(
-            run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
-        ):
-            final_proof = validate_sealed_subject_shape_publication_metadata(
-                root,
-                expected_path,
-                expected_selector_eligible=False,
-                expected_publication_owner=owner,
-            )
-        else:
-            final_proof = _load_subject_shape_publication(
-                root,
-                expected_path,
-                eligible=False,
-                expected_owner=owner,
-            )
+        final_proof = validate_sealed_subject_shape_publication_metadata(
+            root,
+            expected_path,
+            expected_selector_eligible=False,
+            expected_publication_owner=owner,
+        )
         if final_proof.manifest.record_sha256 != proof.manifest.record_sha256:
             _fail("Subject-shape publication changed during activation.")
         # Close the post-selector proof phase while the child remains
@@ -5949,22 +6014,12 @@ def commit_deferred_subject_shape_coordinate_activation(
         activation.snapshot,
         overrides=expected_overrides,
     )
-    if is_supported_subject_shape_payload_receipt_profile(
-        run.attrs.get(SUBJECT_SHAPE_PAYLOAD_RECEIPT_PROFILE_ATTR)
-    ):
-        proof = validate_sealed_subject_shape_publication_metadata(
-            root,
-            expected_path,
-            expected_selector_eligible=False,
-            expected_publication_owner=activation.owner,
-        )
-    else:
-        proof = _load_subject_shape_publication(
-            root,
-            expected_path,
-            eligible=False,
-            expected_owner=activation.owner,
-        )
+    proof = validate_sealed_subject_shape_publication_metadata(
+        root,
+        expected_path,
+        expected_selector_eligible=False,
+        expected_publication_owner=activation.owner,
+    )
     if proof.manifest.record_sha256 != activation.manifest_sha256:
         _fail("Deferred subject-shape publication changed before commit.")
     parent = _node(

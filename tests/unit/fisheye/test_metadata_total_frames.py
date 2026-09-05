@@ -5,10 +5,16 @@ from typing import Any
 import numpy as np
 import pytest
 
-from fisheye.shared.metadata import get_fps, get_total_frames, get_video_source_path
+from fisheye.shared.metadata import (
+    get_fps,
+    get_total_frames,
+    get_video_source_path,
+    resolve_fps,
+)
 from fisheye.shared.source_video_metadata import (
     SourceVideoMetadataConflictError,
     SourceVideoMetadataError,
+    SourceVideoMetadataMissingError,
 )
 
 
@@ -225,3 +231,41 @@ def test_get_fps_fails_closed_on_clipped_member_conflict() -> None:
 def test_get_fps_preserves_legacy_root_fallback_and_missing_value() -> None:
     assert get_fps(_Group(attrs={"fps": 24.0})) == 24.0
     assert get_fps(_Group()) is None
+
+
+def test_resolve_fps_requires_metadata_or_explicit_compatibility_value() -> None:
+    with pytest.raises(SourceVideoMetadataMissingError, match="positive FPS"):
+        resolve_fps(_Group())
+
+    assert resolve_fps(_Group(), explicit_fps=24.0) == 24.0
+
+
+def test_resolve_fps_accepts_matching_explicit_value() -> None:
+    root = _Group(
+        attrs={
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_collection_metadata.v1",
+                "layout": "clipped_video_collection",
+                "fps": 30.0,
+                "collection": {"members": [{"fps": 30.0}]},
+            }
+        }
+    )
+
+    assert resolve_fps(root, explicit_fps=30.0) == 30.0
+
+
+def test_resolve_fps_rejects_explicit_canonical_conflict() -> None:
+    root = _Group(
+        attrs={
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_collection_metadata.v1",
+                "layout": "clipped_video_collection",
+                "fps": 30.0,
+                "collection": {"members": [{"fps": 30.0}]},
+            }
+        }
+    )
+
+    with pytest.raises(SourceVideoMetadataConflictError, match="Explicit FPS"):
+        resolve_fps(root, explicit_fps=60.0)

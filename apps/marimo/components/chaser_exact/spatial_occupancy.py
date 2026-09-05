@@ -7,11 +7,13 @@ from typing import Any, Mapping
 import numpy as np
 
 from fisheye.visualization.chaser_spatial_occupancy_display import (
-    ROBUST_COLOR_QUANTILE,
-    SpatialOccupancyDisplaySurface,
-    aligned_coarsened_spatial_occupancy_display_surface,
-    exact_spatial_occupancy_display_surface,
-    shared_robust_color_scale,
+    COVERAGE_ARRAY,
+    DENSITY_MULTIPLIER_TO_PERCENT,
+    DISPLAY_RECIPE_ID,
+    SOURCE_ARRAYS,
+    SOURCE_DENSITY_ARRAY,
+    SpatialOccupancyDisplayPayload,
+    build_spatial_occupancy_display_plan,
 )
 
 from .array_requirements import SPATIAL_OCCUPANCY_ARRAYS
@@ -22,34 +24,11 @@ from .chaser_locations import (
 from .projection import ExactChaserSuccessorProjection, identity_registry
 from .provenance import freeze, plain
 
-SPATIAL_OCCUPANCY_DISPLAY_RECIPE = (
-    "paired_provider_exact_epoch_spatial_occupancy_heatmap_v4"
-)
-SPATIAL_OCCUPANCY_DENSITY_MULTIPLIER = 100.0
-SPATIAL_OCCUPANCY_SOURCE_ARRAY = "occupancy_density_valid_in_arena"
-SPATIAL_OCCUPANCY_SOURCE_ARRAYS = (
-    "occupancy_density_valid_in_arena",
-    "occupancy_fraction_candidate_epoch",
-)
-SPATIAL_OCCUPANCY_COVERAGE_ARRAY = "in_arena_coverage_fraction_candidate"
-_NORMALIZATION_RECORDS = {
-    "valid_in_arena": {
-        "surface_attribute": "density_valid_in_arena",
-        "source_array": "occupancy_density_valid_in_arena",
-        "denominator": "in_arena_position_frame_count",
-        "label": "valid in-arena",
-        "colorbar": "occupancy (% valid in-arena/bin)",
-        "difference_colorbar": "detection − keypoint (pp valid/bin)",
-    },
-    "candidate_epoch": {
-        "surface_attribute": "fraction_candidate_epoch",
-        "source_array": "occupancy_fraction_candidate_epoch",
-        "denominator": "candidate_frame_count",
-        "label": "candidate epoch",
-        "colorbar": "occupancy (% candidate epoch/bin)",
-        "difference_colorbar": "detection − keypoint (pp candidate/bin)",
-    },
-}
+SPATIAL_OCCUPANCY_DISPLAY_RECIPE = DISPLAY_RECIPE_ID
+SPATIAL_OCCUPANCY_DENSITY_MULTIPLIER = DENSITY_MULTIPLIER_TO_PERCENT
+SPATIAL_OCCUPANCY_SOURCE_ARRAY = SOURCE_DENSITY_ARRAY
+SPATIAL_OCCUPANCY_SOURCE_ARRAYS = SOURCE_ARRAYS
+SPATIAL_OCCUPANCY_COVERAGE_ARRAY = COVERAGE_ARRAY
 
 
 def _array(handle: Any, name: str, *, dtype: Any) -> np.ndarray:
@@ -236,41 +215,15 @@ def _spatial_values(
 
 
 def _surface_plot_payload(
-    surface: SpatialOccupancyDisplaySurface,
-    *,
-    normalization: str,
+    payload: SpatialOccupancyDisplayPayload,
 ) -> Mapping[str, Any]:
     """Build deterministic Plotly coordinates while retaining exact hover values."""
 
-    try:
-        normalization_record = _NORMALIZATION_RECORDS[normalization]
-    except KeyError as exc:
-        raise ValueError(
-            f"Unsupported spatial occupancy normalization {normalization!r}."
-        ) from exc
-    values_percent = (
-        np.asarray(
-            getattr(surface, str(normalization_record["surface_attribute"])),
-            dtype=np.float64,
-        )
-        * SPATIAL_OCCUPANCY_DENSITY_MULTIPLIER
-    )
-    difference = values_percent[1] - values_percent[0]
-    value_scale = shared_robust_color_scale(
-        values_percent, quantile=ROBUST_COLOR_QUANTILE
-    )
-    difference_scale = shared_robust_color_scale(
-        np.abs(difference),
-        quantile=ROBUST_COLOR_QUANTILE,
-        empty_fallback_limit=max(
-            value_scale.full_limit * 1e-6,
-            float(np.finfo(np.float64).eps),
-        ),
-    )
-    x_edges = np.asarray(surface.x_edges_mm)
-    y_edges = np.asarray(surface.y_edges_mm)
-    x_centers = (x_edges[:-1] + x_edges[1:]) / 2.0
-    y_centers = (y_edges[:-1] + y_edges[1:]) / 2.0
+    surface = payload.surface
+    values_percent = np.asarray(payload.values_percent)
+    difference = np.asarray(payload.difference_percentage_points)
+    x_centers = np.asarray(payload.x_centers_mm)
+    y_centers = np.asarray(payload.y_centers_mm)
     arena_mask = np.asarray(surface.arena_bin_center_mask, dtype=bool)
     counts = np.asarray(surface.counts, dtype=np.int64)
     bin_width = np.full(
@@ -308,12 +261,12 @@ def _surface_plot_payload(
         trace_customdata.append(difference_customdata[epoch_index])
     return {
         "surface": surface,
-        "normalization": normalization,
-        "normalization_record": normalization_record,
+        "normalization": payload.normalization.normalization_id,
+        "normalization_record": payload.normalization,
         "values_percent": values_percent,
         "difference": difference,
-        "value_scale": value_scale,
-        "difference_scale": difference_scale,
+        "value_scale": payload.value_scale,
+        "difference_scale": payload.difference_scale,
         "x_centers": x_centers,
         "y_centers": y_centers,
         "trace_x": [x_centers for _ in trace_z],
@@ -331,7 +284,7 @@ def _color_axis(*, robust: bool, payload: Mapping[str, Any]) -> dict[str, Any]:
         "cmin": 0.0,
         "cmax": float(limit),
         "colorbar": {
-            "title": payload["normalization_record"]["colorbar"],
+            "title": payload["normalization_record"].colorbar,
             "x": 1.01,
         },
     }
@@ -348,7 +301,7 @@ def _difference_color_axis(
         "cmin": -float(limit),
         "cmax": float(limit),
         "colorbar": {
-            "title": payload["normalization_record"]["difference_colorbar"],
+            "title": payload["normalization_record"].difference_colorbar,
             "x": 1.08,
         },
     }
@@ -365,48 +318,28 @@ def build_exact_spatial_occupancy_output(
 
     values = _spatial_values(projection)
     chaser_locations = exact_static_chaser_epoch_locations(projection)
-    canonical_surface = exact_spatial_occupancy_display_surface(
+    radius_mm = float(values["arena"]["radius_mm"])
+    display_plan = build_spatial_occupancy_display_plan(
         counts=np.asarray(values["counts"]),
         density_valid_in_arena=np.asarray(values["density"]),
         fraction_candidate_epoch=np.asarray(values["candidate_fraction"]),
         x_edges_mm=np.asarray(values["x_edges"]),
         y_edges_mm=np.asarray(values["y_edges"]),
         arena_bin_center_mask=np.asarray(values["arena_mask"]),
-    )
-    declared_bin_width = float(values["grid"].get("bin_width_mm", np.nan))
-    if not np.isclose(
-        canonical_surface.source_bin_width_mm,
-        declared_bin_width,
-        rtol=0.0,
-        atol=1e-10,
-    ) or not np.isclose(declared_bin_width, 2.0, rtol=0.0, atol=1e-10):
-        raise ValueError(
-            "The aligned 4 mm display requires one sealed uniform 2 mm source grid."
-        )
-    radius_mm = float(values["arena"]["radius_mm"])
-    coarse_surface = aligned_coarsened_spatial_occupancy_display_surface(
-        canonical_surface,
-        factor=2,
         in_arena_denominator=np.asarray(values["in_arena"]),
         candidate_denominator=np.asarray(values["candidate"]),
         arena_radius_mm=radius_mm,
+        declared_bin_width_mm=float(values["grid"].get("bin_width_mm", np.nan)),
     )
-    if not np.isclose(coarse_surface.display_bin_width_mm, 4.0, rtol=0.0, atol=1e-10):
-        raise ValueError("Aligned spatial display did not produce exact 4 mm bins.")
-    surfaces = {
-        "2mm": canonical_surface,
-        "4mm": coarse_surface,
-    }
     payloads = {
-        f"{resolution}_{normalization}": _surface_plot_payload(
-            surface, normalization=normalization
-        )
-        for resolution, surface in surfaces.items()
-        for normalization in _NORMALIZATION_RECORDS
+        payload.payload_id: _surface_plot_payload(payload)
+        for payload in display_plan.payloads
     }
-    default_payload = payloads["2mm_valid_in_arena"]
-    x_edges = np.asarray(canonical_surface.x_edges_mm)
-    y_edges = np.asarray(canonical_surface.y_edges_mm)
+    default_mode = display_plan.default_mode
+    default_payload = payloads[default_mode.payload.payload_id]
+    default_surface = default_mode.payload.surface
+    x_edges = np.asarray(default_surface.x_edges_mm)
+    y_edges = np.asarray(default_surface.y_edges_mm)
     epoch_labels = ("pre", "training", "post")
     titles = []
     for row in range(3):
@@ -535,102 +468,55 @@ def build_exact_spatial_occupancy_output(
             )
     heatmap_trace_indices = list(range(9))
     display_buttons = []
-    for normalization in _NORMALIZATION_RECORDS:
-        for resolution in surfaces:
-            payload = payloads[f"{resolution}_{normalization}"]
-            surface = payload["surface"]
-            normalization_label = payload["normalization_record"]["label"]
-            provider_hover = (
-                "x=%{x:.2f} mm<br>y=%{y:.2f} mm<br>"
-                f"occupancy=%{{z:.4f}}% {normalization_label}/bin<br>"
-                "exact count=%{customdata[0]:,.0f}<br>"
-                "bin center inside reviewed circle=%{customdata[1]:.0f}<br>"
-                "display bin width=%{customdata[2]:g} mm<extra></extra>"
-            )
-            difference_hover = (
-                "x=%{x:.2f} mm<br>y=%{y:.2f} mm<br>"
-                f"detection − keypoint=%{{z:.4f}} pp {normalization_label}/bin<br>"
-                "keypoint exact count=%{customdata[0]:,.0f}<br>"
-                "detection exact count=%{customdata[1]:,.0f}<br>"
-                "bin center inside reviewed circle=%{customdata[2]:.0f}<br>"
-                "display bin width=%{customdata[3]:g} mm<extra></extra>"
-            )
-            hovertemplates = [
-                provider_hover if index % 3 < 2 else difference_hover
-                for index in range(9)
-            ]
-            for robust in (True, False):
-                scale_label = (
-                    f"robust p{int(round(ROBUST_COLOR_QUANTILE * 100))}"
-                    if robust
-                    else "full range"
-                )
-                display_buttons.append(
+    for mode in display_plan.modes:
+        payload = payloads[mode.payload.payload_id]
+        normalization_label = mode.payload.normalization.label
+        provider_hover = (
+            "x=%{x:.2f} mm<br>y=%{y:.2f} mm<br>"
+            f"occupancy=%{{z:.4f}}% {normalization_label}/bin<br>"
+            "exact count=%{customdata[0]:,.0f}<br>"
+            "bin center inside reviewed circle=%{customdata[1]:.0f}<br>"
+            "display bin width=%{customdata[2]:g} mm<extra></extra>"
+        )
+        difference_hover = (
+            "x=%{x:.2f} mm<br>y=%{y:.2f} mm<br>"
+            f"detection − keypoint=%{{z:.4f}} pp {normalization_label}/bin<br>"
+            "keypoint exact count=%{customdata[0]:,.0f}<br>"
+            "detection exact count=%{customdata[1]:,.0f}<br>"
+            "bin center inside reviewed circle=%{customdata[2]:.0f}<br>"
+            "display bin width=%{customdata[3]:g} mm<extra></extra>"
+        )
+        hovertemplates = [
+            provider_hover if index % 3 < 2 else difference_hover for index in range(9)
+        ]
+        display_buttons.append(
+            {
+                "label": mode.label,
+                "method": "update",
+                "args": [
                     {
-                        "label": (
-                            f"{surface.display_bin_width_mm:g} mm · "
-                            f"{normalization_label} · {scale_label}"
+                        "x": payload["trace_x"],
+                        "y": payload["trace_y"],
+                        "z": payload["trace_z"],
+                        "customdata": payload["trace_customdata"],
+                        "hovertemplate": hovertemplates,
+                    },
+                    {
+                        "coloraxis": _color_axis(robust=mode.robust, payload=payload),
+                        "coloraxis2": _difference_color_axis(
+                            robust=mode.robust, payload=payload
                         ),
-                        "method": "update",
-                        "args": [
-                            {
-                                "x": payload["trace_x"],
-                                "y": payload["trace_y"],
-                                "z": payload["trace_z"],
-                                "customdata": payload["trace_customdata"],
-                                "hovertemplate": hovertemplates,
-                            },
-                            {
-                                "coloraxis": _color_axis(
-                                    robust=robust, payload=payload
-                                ),
-                                "coloraxis2": _difference_color_axis(
-                                    robust=robust, payload=payload
-                                ),
-                                "title.text": (
-                                    "Exact protocol-semantic spatial occupancy · "
-                                    f"{projection.recording_id}<br>"
-                                    f"{surface.display_bin_width_mm:g} mm display · "
-                                    f"{normalization_label} normalization · "
-                                    f"{scale_label} shared color scale"
-                                ),
-                            },
-                            heatmap_trace_indices,
-                        ],
-                    }
-                )
-    display_parameters = {
-        "recipe_id": SPATIAL_OCCUPANCY_DISPLAY_RECIPE,
-        "source_array": SPATIAL_OCCUPANCY_SOURCE_ARRAY,
-        "source_arrays": list(SPATIAL_OCCUPANCY_SOURCE_ARRAYS),
-        "source_count_array": "occupancy_count",
-        "density_multiplier_to_percent": SPATIAL_OCCUPANCY_DENSITY_MULTIPLIER,
-        "provider_difference": ("detection_minus_keypoint_percentage_points_per_bin"),
-        "default_normalization": "valid_in_arena",
-        "available_normalizations": list(_NORMALIZATION_RECORDS),
-        "default_display_mode": "2_mm_valid_in_arena_robust_p98",
-        "available_display_modes": [
-            (f"{resolution.replace('mm', '_mm')}_{normalization}_{scale}")
-            for normalization in _NORMALIZATION_RECORDS
-            for resolution in surfaces
-            for scale in ("robust_p98", "full_range")
-        ],
-        "display_surfaces": {
-            key: {
-                **payload["surface"].provenance_record(),
-                "normalization": payload["normalization"],
-                "source_array": payload["normalization_record"]["source_array"],
-                "denominator": payload["normalization_record"]["denominator"],
-                "color_scale_percent_per_bin": payload[
-                    "value_scale"
-                ].provenance_record(),
-                "difference_color_scale_absolute_percentage_points_per_bin": payload[
-                    "difference_scale"
-                ].provenance_record(),
+                        "title.text": (
+                            "Exact protocol-semantic spatial occupancy · "
+                            f"{projection.recording_id}<br>{mode.label} shared view"
+                        ),
+                    },
+                    heatmap_trace_indices,
+                ],
             }
-            for key, payload in payloads.items()
-        },
-        "coverage_annotation_array": SPATIAL_OCCUPANCY_COVERAGE_ARRAY,
+        )
+    display_parameters = {
+        **display_plan.provenance_record(),
         "provider_epoch_denominators": {
             "candidate_frame_count": np.asarray(values["candidate"]).tolist(),
             "in_arena_position_frame_count": np.asarray(values["in_arena"]).tolist(),
@@ -642,18 +528,6 @@ def build_exact_spatial_occupancy_output(
                 values["coverage"]
             ).tolist(),
         },
-        "arena_bin_center_mask_role": (
-            "hover_evidence_only_bins_not_discarded_boundary_bins_may_straddle_circle"
-        ),
-        "coordinate_orientation": "+x_right_+y_down",
-        "interpolation": "prohibited",
-        "scientific_recomputation": False,
-        "display_only_derivation": (
-            "optional_aligned_2x2_exact_count_sum_then_persisted_denominator_normalization"
-        ),
-        "color_saturation_semantics": (
-            "display_only_exact_hover_values_and_full_range_reference_retained"
-        ),
         "chaser_location_overlay": {
             "recipe_id": CHASER_LOCATION_DISPLAY_RECIPE,
             "epochs": ["chaser_pre", "chaser_post"],
@@ -673,12 +547,13 @@ def build_exact_spatial_occupancy_output(
     figure.update_layout(
         title=(
             f"Exact protocol-semantic spatial occupancy · {projection.recording_id}"
-            "<br>2 mm display · valid in-arena normalization · "
-            "robust p98 shared color scale"
+            f"<br>{default_mode.label} shared view"
         ),
         height=1_150,
-        coloraxis=_color_axis(robust=True, payload=default_payload),
-        coloraxis2=_difference_color_axis(robust=True, payload=default_payload),
+        coloraxis=_color_axis(robust=default_mode.robust, payload=default_payload),
+        coloraxis2=_difference_color_axis(
+            robust=default_mode.robust, payload=default_payload
+        ),
         updatemenus=[
             {
                 "type": "dropdown",
@@ -695,7 +570,9 @@ def build_exact_spatial_occupancy_output(
     return mo.vstack(
         [
             mo.callout(
-                "The menu exposes both persisted normalizations: probability "
+                "The default is the aligned 4 mm, robust-p98 view from the shared "
+                "occupancy display recipe. The menu exposes both persisted "
+                "normalizations: probability "
                 "within valid in-arena rows and fraction of every candidate epoch "
                 "row. The latter makes tracking coverage visible rather than "
                 "renormalizing it away. Robust/full-range and exact aligned 2/4 mm "

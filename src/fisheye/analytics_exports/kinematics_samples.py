@@ -24,6 +24,7 @@ import uuid
 import numpy as np
 
 from fisheye.analysis.track_kinematics import (
+    DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL,
     TRACK_KINEMATICS_RUN_SCHEMA_ID,
     TRACK_KINEMATICS_RUN_SCHEMA_VERSION,
     TRACK_MOTION_PUBLICATION_COMMIT_ATTR,
@@ -35,6 +36,8 @@ from fisheye.analysis.track_kinematics import (
     TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID,
     TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION,
     TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2,
+    TRACK_MOTION_AXIS_TRACK_SAMPLE,
+    TRACK_MOTION_AXIS_TRACK_TRANSITION,
 )
 from fisheye.analysis.track_kinematics_io import resolve_track_kinematics_run
 from fisheye.analytics_exports.arrow_contracts import (
@@ -80,15 +83,21 @@ KINEMATICS_EXPORT_SCHEMA_ID = "palette.analytics_export.kinematics_samples"
 KINEMATICS_EXPORT_SCHEMA_VERSION = 1
 KINEMATICS_SOURCE_BINDING_SCHEMA_ID = "palette.kinematics_samples.source_binding"
 KINEMATICS_SOURCE_BINDING_SCHEMA_VERSION = 1
+KINEMATICS_SOURCE_BINDING_SCHEMA_VERSION_V2 = 2
 KINEMATICS_PROJECTION_SCHEMA_ID = "palette.kinematics_samples.projection"
 KINEMATICS_PROJECTION_SCHEMA_VERSION = 1
 KINEMATICS_PROJECTION_SCHEMA_VERSION_V2 = 2
+KINEMATICS_PROJECTION_SCHEMA_VERSION_V3 = 3
 KINEMATICS_PROJECTED_PAYLOAD_SCHEMA_ID = "palette.kinematics_samples.projected_payload"
 KINEMATICS_PROJECTED_PAYLOAD_SCHEMA_VERSION = 1
 KINEMATICS_PARQUET_POLICY_SCHEMA_ID = "palette.kinematics_samples.parquet_policy"
 KINEMATICS_PARQUET_POLICY_SCHEMA_VERSION = 1
 
 KINEMATICS_SPEED_LEVEL = "filtered"
+KINEMATICS_SOURCE_SURFACE_PROFILE_ID = "kinematics_samples_v1"
+CORE_MOTION_SOURCE_SURFACE_PROFILE_ID = "core_motion_physical_v2"
+CORE_MOTION_PROJECTION_PROFILE_ID = "core_motion_physical_v2"
+CORE_MOTION_ACCELERATION_SOURCE_SPEED_LEVEL = DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL
 KINEMATICS_SAMPLING_POLICY = "global_acquisition_frame_modulo_stride_v1"
 KINEMATICS_FRAME_SELECTION_POLICY = "half_open_acquisition_frame_range_v1"
 KINEMATICS_POSITION_SPACE = "physical_mm"
@@ -115,6 +124,19 @@ _SELECTED_SURFACES = (
     "sample_reason_code",
     "transition_reason_code",
 )
+_CORE_MOTION_ADDITIONAL_SURFACES = (
+    "delta_frames",
+    "delta_seconds",
+    "movement/speed/smoothed/mm",
+    "movement/speed/smoothed/frame_path_distance_mm",
+    "speed_derivatives/speed_smoothed/acceleration_mm",
+    "speed_derivatives/speed_smoothed/smoothed_acceleration_mm",
+    "cumulative_path_distance_mm",
+)
+_CORE_MOTION_SELECTED_SURFACES = (
+    *_SELECTED_SURFACES,
+    *_CORE_MOTION_ADDITIONAL_SURFACES,
+)
 _PHYSICAL_SURFACES = frozenset(
     {
         "positions_mm",
@@ -122,11 +144,42 @@ _PHYSICAL_SURFACES = frozenset(
         "movement/speed/filtered/frame_path_distance_mm",
     }
 )
+_CORE_MOTION_PHYSICAL_SURFACES = _PHYSICAL_SURFACES | frozenset(
+    {
+        "movement/speed/smoothed/mm",
+        "movement/speed/smoothed/frame_path_distance_mm",
+        "speed_derivatives/speed_smoothed/acceleration_mm",
+        "speed_derivatives/speed_smoothed/smoothed_acceleration_mm",
+        "cumulative_path_distance_mm",
+    }
+)
 _TRANSITION_SURFACES = frozenset(
     {
         "angular_velocity_smoothed_deg_s",
         "transition_valid",
         "transition_reason_code",
+    }
+)
+_CORE_MOTION_TRANSITION_SURFACES = _TRANSITION_SURFACES | frozenset(
+    {
+        "delta_frames",
+        "delta_seconds",
+    }
+)
+_TRANSITION_AXIS_SURFACES = _TRANSITION_SURFACES | frozenset(
+    {
+        "movement/speed/filtered/mm",
+        "movement/speed/filtered/frame_path_distance_mm",
+    }
+)
+_CORE_MOTION_TRANSITION_AXIS_SURFACES = _CORE_MOTION_TRANSITION_SURFACES | frozenset(
+    {
+        "movement/speed/filtered/mm",
+        "movement/speed/filtered/frame_path_distance_mm",
+        "movement/speed/smoothed/mm",
+        "movement/speed/smoothed/frame_path_distance_mm",
+        "speed_derivatives/speed_smoothed/acceleration_mm",
+        "speed_derivatives/speed_smoothed/smoothed_acceleration_mm",
     }
 )
 _SOURCE_DTYPES: Mapping[str, np.dtype[Any]] = {
@@ -151,10 +204,24 @@ _SOURCE_DTYPES: Mapping[str, np.dtype[Any]] = {
     "sample_reason_code": np.dtype("<i2"),
     "transition_reason_code": np.dtype("<i2"),
 }
+_CORE_MOTION_SOURCE_DTYPES: Mapping[str, np.dtype[Any]] = {
+    **_SOURCE_DTYPES,
+    "delta_frames": np.dtype("<i4"),
+    "delta_seconds": np.dtype("<f4"),
+    "movement/speed/smoothed/mm": np.dtype("<f4"),
+    "movement/speed/smoothed/frame_path_distance_mm": np.dtype("<f4"),
+    "speed_derivatives/speed_smoothed/acceleration_mm": np.dtype("<f4"),
+    "speed_derivatives/speed_smoothed/smoothed_acceleration_mm": np.dtype("<f4"),
+    "cumulative_path_distance_mm": np.dtype("<f4"),
+}
 _SOURCE_TRAILING_SHAPES: Mapping[str, tuple[int, ...]] = {
     **{name: () for name in _SELECTED_SURFACES},
     "track_sample_key": (2,),
     "positions_mm": (2,),
+}
+_CORE_MOTION_SOURCE_TRAILING_SHAPES: Mapping[str, tuple[int, ...]] = {
+    **_SOURCE_TRAILING_SHAPES,
+    **{name: () for name in _CORE_MOTION_ADDITIONAL_SURFACES},
 }
 
 KINEMATICS_SCIENTIFIC_DTYPES: Mapping[str, str] = {
@@ -170,6 +237,38 @@ KINEMATICS_SCIENTIFIC_DTYPES: Mapping[str, str] = {
     "position_y_mm": "float32",
     "speed_mm_s": "float32",
     "frame_path_distance_mm": "float32",
+    "motion_heading_degrees": "float32",
+    "smoothed_motion_heading_degrees": "float32",
+    "smoothed_angular_velocity_deg_s": "float32",
+    "source_observed": "bool",
+    "sample_observed": "bool",
+    "position_finite": "bool",
+    "heading_usable": "bool",
+    "sample_valid": "bool",
+    "transition_valid": "bool",
+    "sample_reason_code": "int16",
+    "transition_reason_code": "int16",
+}
+CORE_MOTION_SCIENTIFIC_DTYPES: Mapping[str, str] = {
+    "track_id": "int64",
+    "track_sample_index": "int64",
+    "source_acquisition_frame_index": "int64",
+    "time_seconds": "float32",
+    "source_row_index": "int64",
+    "source_instance_key_valid": "bool",
+    "source_instance_key": "uint64",
+    "detection_source": "int8",
+    "position_x_mm": "float32",
+    "position_y_mm": "float32",
+    "delta_frames": "int32",
+    "delta_seconds": "float32",
+    "speed_filtered_mm_s": "float32",
+    "frame_path_distance_filtered_mm": "float32",
+    "speed_smoothed_mm_s": "float32",
+    "frame_path_distance_smoothed_mm": "float32",
+    "signed_tangential_acceleration_mm_s2": "float32",
+    "smoothed_signed_tangential_acceleration_mm_s2": "float32",
+    "cumulative_smoothed_path_distance_mm": "float32",
     "motion_heading_degrees": "float32",
     "smoothed_motion_heading_degrees": "float32",
     "smoothed_angular_velocity_deg_s": "float32",
@@ -272,6 +371,7 @@ _SOURCE_BINDING_FIELDS = {
     "tracks",
     "payload_sha256",
 }
+_SOURCE_BINDING_FIELDS_V2 = _SOURCE_BINDING_FIELDS | {"source_surface_profile_id"}
 _SELECTION_SNAPSHOT_FIELDS = {
     "mode",
     "parent_latest",
@@ -314,9 +414,66 @@ _SHA256_LENGTH = 64
 
 
 @dataclass(frozen=True)
-class _BoundSource:
+class _SourceSurfaceProfile:
+    profile_id: str
+    binding_schema_version: int
+    selected_surfaces: tuple[str, ...]
+    physical_surfaces: frozenset[str]
+    transition_surfaces: frozenset[str]
+    transition_axis_surfaces: frozenset[str]
+    source_dtypes: Mapping[str, np.dtype[Any]]
+    trailing_shapes: Mapping[str, tuple[int, ...]]
+
+
+_KINEMATICS_SOURCE_SURFACE_PROFILE = _SourceSurfaceProfile(
+    profile_id=KINEMATICS_SOURCE_SURFACE_PROFILE_ID,
+    binding_schema_version=KINEMATICS_SOURCE_BINDING_SCHEMA_VERSION,
+    selected_surfaces=_SELECTED_SURFACES,
+    physical_surfaces=_PHYSICAL_SURFACES,
+    transition_surfaces=_TRANSITION_SURFACES,
+    transition_axis_surfaces=_TRANSITION_AXIS_SURFACES,
+    source_dtypes=_SOURCE_DTYPES,
+    trailing_shapes=_SOURCE_TRAILING_SHAPES,
+)
+_CORE_MOTION_SOURCE_SURFACE_PROFILE = _SourceSurfaceProfile(
+    profile_id=CORE_MOTION_SOURCE_SURFACE_PROFILE_ID,
+    binding_schema_version=KINEMATICS_SOURCE_BINDING_SCHEMA_VERSION_V2,
+    selected_surfaces=_CORE_MOTION_SELECTED_SURFACES,
+    physical_surfaces=_CORE_MOTION_PHYSICAL_SURFACES,
+    transition_surfaces=_CORE_MOTION_TRANSITION_SURFACES,
+    transition_axis_surfaces=_CORE_MOTION_TRANSITION_AXIS_SURFACES,
+    source_dtypes=_CORE_MOTION_SOURCE_DTYPES,
+    trailing_shapes=_CORE_MOTION_SOURCE_TRAILING_SHAPES,
+)
+_SOURCE_SURFACE_PROFILES: Mapping[str, _SourceSurfaceProfile] = {
+    profile.profile_id: profile
+    for profile in (
+        _KINEMATICS_SOURCE_SURFACE_PROFILE,
+        _CORE_MOTION_SOURCE_SURFACE_PROFILE,
+    )
+}
+
+
+def _source_surface_profile(profile_id: str) -> _SourceSurfaceProfile:
+    try:
+        return _SOURCE_SURFACE_PROFILES[profile_id]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported kinematics source-surface profile: {profile_id!r}."
+        ) from exc
+
+
+@dataclass(frozen=True)
+class BoundKinematicsSamplesSource:
+    """Strictly validated track source used by standalone and cohort exports."""
+
     binding: Mapping[str, Any]
     run_group: Any
+
+
+# Keep the private spelling for internal type annotations while exposing one
+# supported source interface to sibling export profiles.
+_BoundSource = BoundKinematicsSamplesSource
 
 
 def _recording_id(path: Path) -> str:
@@ -324,6 +481,39 @@ def _recording_id(path: Path) -> str:
     if not name:
         raise ValueError("Cannot derive recording ID from an empty archive name.")
     return name
+
+
+def _plain_json_containers(
+    value: object,
+    *,
+    label: str,
+    path: str = "$",
+) -> object:
+    """Thaw validated immutable JSON containers without coercing scalars."""
+
+    if isinstance(value, Mapping):
+        normalized: dict[str, object] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError(
+                    f"{label} contains a non-string JSON object key at {path}."
+                )
+            normalized[key] = _plain_json_containers(
+                item,
+                label=label,
+                path=f"{path}.{key}",
+            )
+        return normalized
+    if isinstance(value, (list, tuple)):
+        return [
+            _plain_json_containers(
+                item,
+                label=label,
+                path=f"{path}[{index}]",
+            )
+            for index, item in enumerate(value)
+        ]
+    return value
 
 
 def _json_object(value: object, *, label: str) -> dict[str, Any]:
@@ -334,7 +524,11 @@ def _json_object(value: object, *, label: str) -> dict[str, Any]:
             raise ValueError(f"{label} is not strict JSON.") from exc
     if not isinstance(value, Mapping):
         raise ValueError(f"{label} must be one exact JSON object.")
-    normalized = json.loads(canonical_json_bytes(dict(value)).decode("utf-8"))
+    normalized = json.loads(
+        canonical_json_bytes(
+            _plain_json_containers(value, label=label),
+        ).decode("utf-8")
+    )
     if not isinstance(normalized, dict):  # pragma: no cover
         raise TypeError(f"{label} did not normalize to an object.")
     return normalized
@@ -506,6 +700,86 @@ def kinematics_projection_contract(
     return {**payload, "payload_sha256": canonical_json_sha256(payload)}
 
 
+def core_motion_projection_contract(
+    *,
+    source_sample_rate_hz: float,
+    requested_sample_rate_hz: float,
+    arrow_schema_sha256: str,
+) -> dict[str, Any]:
+    """Return the closed physical core-motion successor projection.
+
+    Unlike the historical single-speed projection, this contract keeps the
+    derivative and integral alongside the exact speed/distance surfaces from
+    which the track-motion publisher derived them.  The values are copied;
+    the export does not recompute motion.
+    """
+
+    source_rate = float(source_sample_rate_hz)
+    requested_rate = float(requested_sample_rate_hz)
+    stride = _sampling_stride(source_rate, requested_rate)
+    schema_sha = _sha256_text(arrow_schema_sha256, label="core-motion Arrow schema")
+    payload: dict[str, Any] = {
+        "schema_id": KINEMATICS_PROJECTION_SCHEMA_ID,
+        "schema_version": KINEMATICS_PROJECTION_SCHEMA_VERSION_V3,
+        "table_name": KINEMATICS_SAMPLES_TABLE,
+        "projection_profile_id": CORE_MOTION_PROJECTION_PROFILE_ID,
+        "source_surface_profile_id": CORE_MOTION_SOURCE_SURFACE_PROFILE_ID,
+        "source_sample_rate_hz": source_rate,
+        "requested_sample_rate_hz": requested_rate,
+        "sampling_stride_frames": stride,
+        "nominal_sample_rate_hz": source_rate / stride,
+        "sampling_policy": KINEMATICS_SAMPLING_POLICY,
+        "selection_expression": "source_acquisition_frame_index % stride == 0",
+        "row_order": "track_id_then_source_acquisition_frame_index",
+        "source_logical_paths": list(_CORE_MOTION_SELECTED_SURFACES),
+        "source_dtypes": {
+            name: {
+                "dtype": dtype.str,
+                "dtype_fields": _dtype_fields(dtype),
+                "trailing_shape": list(_CORE_MOTION_SOURCE_TRAILING_SHAPES[name]),
+            }
+            for name, dtype in _CORE_MOTION_SOURCE_DTYPES.items()
+        },
+        "scientific_dtypes": dict(CORE_MOTION_SCIENTIFIC_DTYPES),
+        "arrow_schema_sha256": schema_sha,
+        "invalid_float_semantics": "source_ieee_nan_not_arrow_null",
+        "position_authority": "source_camera_physical_mm",
+        "motion_semantics": {
+            "filtered_speed_source": "movement/speed/filtered/mm",
+            "filtered_path_increment_source": (
+                "movement/speed/filtered/frame_path_distance_mm"
+            ),
+            "smoothed_speed_source": "movement/speed/smoothed/mm",
+            "smoothed_path_increment_source": (
+                "movement/speed/smoothed/frame_path_distance_mm"
+            ),
+            "acceleration_source_speed_level": (
+                CORE_MOTION_ACCELERATION_SOURCE_SPEED_LEVEL
+            ),
+            "signed_tangential_acceleration_source": (
+                "speed_derivatives/speed_smoothed/acceleration_mm"
+            ),
+            "smoothed_signed_tangential_acceleration_source": (
+                "speed_derivatives/speed_smoothed/smoothed_acceleration_mm"
+            ),
+            "acceleration_interpretation": (
+                "signed_first_difference_of_scalar_speed_divided_by_delta_seconds"
+            ),
+            "acceleration_is_vector_magnitude": False,
+            "cumulative_path_distance_source": "cumulative_path_distance_mm",
+            "cumulative_path_distance_definition": (
+                "per_track_cumsum_of_smoothed_frame_path_distance"
+            ),
+            "invalid_transition_distance_contribution": "zero",
+            "transition_anchor": "destination_track_sample",
+            "subsampling_semantics": (
+                "selected_rows_retain_source_frame_transition_values_and_cumulative_state"
+            ),
+        },
+    }
+    return {**payload, "payload_sha256": canonical_json_sha256(payload)}
+
+
 def kinematics_parquet_policy(*, row_group_rows: int) -> dict[str, Any]:
     if type(row_group_rows) is not int or row_group_rows <= 0:
         raise ValueError("row_group_rows must be a positive exact integer.")
@@ -531,11 +805,21 @@ def _surface_binding(
     relative_path: str,
     record: Mapping[str, Any],
     sample_count: int,
+    source_surface_profile: _SourceSurfaceProfile,
+    physical_authority_sha256: str,
 ) -> dict[str, Any]:
     expected_fields = (
         _SURFACE_FIELDS
-        | (_PHYSICAL_SURFACE_FIELDS if relative_path in _PHYSICAL_SURFACES else set())
-        | ({"transition_anchor"} if relative_path in _TRANSITION_SURFACES else set())
+        | (
+            _PHYSICAL_SURFACE_FIELDS
+            if relative_path in source_surface_profile.physical_surfaces
+            else set()
+        )
+        | (
+            {"transition_anchor"}
+            if relative_path in source_surface_profile.transition_surfaces
+            else set()
+        )
     )
     if set(record) != expected_fields:
         raise ValueError(
@@ -545,15 +829,24 @@ def _surface_binding(
         raise ValueError(f"Track surface {relative_path!r} has a mismatched reference.")
     if record.get("authority_scope") != "public_derived_motion":
         raise ValueError(f"Track surface {relative_path!r} is not public authority.")
+    expected_axis = (
+        TRACK_MOTION_AXIS_TRACK_TRANSITION
+        if relative_path in source_surface_profile.transition_axis_surfaces
+        else TRACK_MOTION_AXIS_TRACK_SAMPLE
+    )
+    if record.get("axis0_domain") != expected_axis:
+        raise ValueError(
+            f"Track surface {relative_path!r} has another axis-0 authority."
+        )
     if (
-        relative_path in _TRANSITION_SURFACES
+        relative_path in source_surface_profile.transition_surfaces
         and record.get("transition_anchor") != "destination_track_sample"
     ):
         raise ValueError(
             f"Track transition surface {relative_path!r} has an invalid anchor."
         )
-    shape = [sample_count, *_SOURCE_TRAILING_SHAPES[relative_path]]
-    dtype = _SOURCE_DTYPES[relative_path]
+    shape = [sample_count, *source_surface_profile.trailing_shapes[relative_path]]
+    dtype = source_surface_profile.source_dtypes[relative_path]
     if (
         record.get("shape") != shape
         or record.get("dtype") != dtype.str
@@ -568,6 +861,31 @@ def _surface_binding(
     attrs = _json_object(record.get("attrs"), label=f"{relative_path} manifest attrs")
     if canonical_json_sha256(attrs) != record["attrs_sha256"]:
         raise ValueError(f"Track surface {relative_path!r} attr digest is invalid.")
+    if relative_path in source_surface_profile.physical_surfaces:
+        parts = relative_path.split("/")
+        leaf = parts[-1]
+        if leaf == "mm":
+            parts[-1] = "px"
+        elif leaf.endswith("_mm"):
+            parts[-1] = f"{leaf[:-3]}_px"
+        else:  # pragma: no cover - installed profile declaration bug
+            raise ValueError(f"Physical surface {relative_path!r} has no pixel peer.")
+        expected_pixel_ref = f"/{track_group.path}/{'/'.join(parts)}"
+        if (
+            record.get("pixel_source_ref") != expected_pixel_ref
+            or record.get("physical_authority_sha256") != physical_authority_sha256
+            or record.get("physical_value_comparison")
+            != {
+                "mode": "dtype_exact_after_multiply_mm_per_pixel_v1",
+                "rtol": 0.0,
+                "atol": 0.0,
+                "nan_policy": "same_mask",
+                "infinity_policy": "same_sign_mask",
+            }
+        ):
+            raise ValueError(
+                f"Track physical surface {relative_path!r} has another value authority."
+            )
     node = _child(track_group, relative_path)
     node_dtype = np.dtype(getattr(node, "dtype"))
     node_shape = [int(value) for value in getattr(node, "shape")]
@@ -602,7 +920,9 @@ def _source_binding(
     recording_id: str,
     run_name: str,
     scope: str,
+    source_surface_profile_id: str = KINEMATICS_SOURCE_SURFACE_PROFILE_ID,
 ) -> _BoundSource:
+    source_surface_profile = _source_surface_profile(source_surface_profile_id)
     run, resolved_name, run_path = resolve_track_kinematics_run(
         root,
         run_name=run_name,
@@ -710,8 +1030,10 @@ def _source_binding(
                 relative_path=relative_path,
                 record=surfaces.get(relative_path, {}),
                 sample_count=sample_count,
+                source_surface_profile=source_surface_profile,
+                physical_authority_sha256=physical_sha,
             )
-            for relative_path in _SELECTED_SURFACES
+            for relative_path in source_surface_profile.selected_surfaces
         }
         position_record = surfaces["positions_mm"]
         position_attrs = position_record["attrs"]
@@ -759,7 +1081,7 @@ def _source_binding(
     scope_group = parent[scope]
     payload: dict[str, Any] = {
         "schema_id": KINEMATICS_SOURCE_BINDING_SCHEMA_ID,
-        "schema_version": KINEMATICS_SOURCE_BINDING_SCHEMA_VERSION,
+        "schema_version": source_surface_profile.binding_schema_version,
         "stage_id": "track_kinematics",
         "recording_id": recording_id,
         "zarr_path": str(zarr_path),
@@ -793,9 +1115,49 @@ def _source_binding(
         "track_count": track_count,
         "tracks": ordered,
     }
+    if source_surface_profile.binding_schema_version >= (
+        KINEMATICS_SOURCE_BINDING_SCHEMA_VERSION_V2
+    ):
+        payload["source_surface_profile_id"] = source_surface_profile.profile_id
     return _BoundSource(
         binding={**payload, "payload_sha256": canonical_json_sha256(payload)},
         run_group=run,
+    )
+
+
+def bind_kinematics_samples_source(
+    root: Any,
+    *,
+    zarr_path: str | Path,
+    track_kinematics_run: str,
+    track_scope: str,
+    expected_recording_id: str | None = None,
+    source_surface_profile_id: str = KINEMATICS_SOURCE_SURFACE_PROFILE_ID,
+) -> BoundKinematicsSamplesSource:
+    """Bind one explicit canonical track-kinematics publication.
+
+    This is the shared admission boundary used by both the standalone
+    ``kinematics_samples`` exporter and composable cohort profiles.  It does
+    not discover a selector or publish any output.
+    """
+
+    source = Path(zarr_path).expanduser().resolve()
+    recording_id = _recording_id(source)
+    if expected_recording_id is not None and recording_id != str(expected_recording_id):
+        raise ValueError("Kinematic source archive has another recording identity.")
+    run_name = safe_component(
+        track_kinematics_run,
+        label="track-kinematics run ID",
+    )
+    if track_scope not in {"online", "offline"}:
+        raise ValueError("track_scope must be 'online' or 'offline'.")
+    return _source_binding(
+        root,
+        zarr_path=source,
+        recording_id=recording_id,
+        run_name=run_name,
+        scope=track_scope,
+        source_surface_profile_id=source_surface_profile_id,
     )
 
 
@@ -846,17 +1208,25 @@ class _ProjectedPayloadHasher:
 class _SelectedSourcePayloadHasher:
     """Stream the canonical source-array hashes already sealed by publication."""
 
-    def __init__(self, track_binding: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        track_binding: Mapping[str, Any],
+        *,
+        source_surface_profile: _SourceSurfaceProfile = (
+            _KINEMATICS_SOURCE_SURFACE_PROFILE
+        ),
+    ) -> None:
+        self._source_surface_profile = source_surface_profile
         surfaces = track_binding["selected_surfaces"]
         self._expected = {
             path: str(record["content_sha256"]) for path, record in surfaces.items()
         }
         self._hashers: dict[str, Any] = {}
-        for path in _SELECTED_SURFACES:
-            dtype = _SOURCE_DTYPES[path]
+        for path in source_surface_profile.selected_surfaces:
+            dtype = source_surface_profile.source_dtypes[path]
             shape = [
                 int(track_binding["sample_count"]),
-                *_SOURCE_TRAILING_SHAPES[path],
+                *source_surface_profile.trailing_shapes[path],
             ]
             header = {
                 "canonicalization": ARRAY_PAYLOAD_CANONICALIZATION,
@@ -869,9 +1239,10 @@ class _SelectedSourcePayloadHasher:
             self._hashers[path] = digest
 
     def update(self, source: Mapping[str, np.ndarray[Any, Any]]) -> None:
-        if set(source) != set(_SELECTED_SURFACES):
+        paths = self._source_surface_profile.selected_surfaces
+        if set(source) != set(paths):
             raise ValueError("Selected source payload inventory changed while reading.")
-        for path in _SELECTED_SURFACES:
+        for path in paths:
             self._hashers[path].update(
                 np.ascontiguousarray(source[path]).tobytes(order="C")
             )
@@ -879,7 +1250,7 @@ class _SelectedSourcePayloadHasher:
     def finish(self) -> None:
         changed = [
             path
-            for path in _SELECTED_SURFACES
+            for path in self._source_surface_profile.selected_surfaces
             if self._hashers[path].hexdigest() != self._expected[path]
         ]
         if changed:
@@ -923,12 +1294,21 @@ def _read_projected_window(
     source_hasher: _SelectedSourcePayloadHasher,
     source_frame_start: int | None = None,
     source_frame_stop_exclusive: int | None = None,
+    source_surface_profile: _SourceSurfaceProfile = (
+        _KINEMATICS_SOURCE_SURFACE_PROFILE
+    ),
 ) -> tuple[dict[str, np.ndarray[Any, Any]], np.ndarray[Any, Any]]:
     source: dict[str, np.ndarray[Any, Any]] = {}
-    for path in _SELECTED_SURFACES:
+    for path in source_surface_profile.selected_surfaces:
         values = np.asarray(_child(track_group, path)[start:stop])
-        expected_shape = (stop - start, *_SOURCE_TRAILING_SHAPES[path])
-        if values.dtype != _SOURCE_DTYPES[path] or values.shape != expected_shape:
+        expected_shape = (
+            stop - start,
+            *source_surface_profile.trailing_shapes[path],
+        )
+        if (
+            values.dtype != source_surface_profile.source_dtypes[path]
+            or values.shape != expected_shape
+        ):
             raise ValueError(
                 f"Track {track_id} source {path!r} changed dtype or shape while reading."
             )
@@ -965,7 +1345,7 @@ def _read_projected_window(
         selection &= frames >= source_frame_start
         selection &= frames < source_frame_stop_exclusive
     positions = source["positions_mm"][selection]
-    columns = {
+    common_columns = {
         "track_id": np.full(np.count_nonzero(selection), track_id, dtype=np.int64),
         "track_sample_index": np.arange(start, stop, dtype=np.int64)[selection],
         "source_acquisition_frame_index": frames[selection],
@@ -976,10 +1356,6 @@ def _read_projected_window(
         "detection_source": source["detection_source"][selection],
         "position_x_mm": positions[:, 0],
         "position_y_mm": positions[:, 1],
-        "speed_mm_s": source["movement/speed/filtered/mm"][selection],
-        "frame_path_distance_mm": source[
-            "movement/speed/filtered/frame_path_distance_mm"
-        ][selection],
         "motion_heading_degrees": source["heading_degrees"][selection],
         "smoothed_motion_heading_degrees": source["smoothed_heading_degrees"][
             selection
@@ -996,19 +1372,89 @@ def _read_projected_window(
         "sample_reason_code": source["sample_reason_code"][selection],
         "transition_reason_code": source["transition_reason_code"][selection],
     }
+    if source_surface_profile.profile_id == KINEMATICS_SOURCE_SURFACE_PROFILE_ID:
+        columns = {
+            **common_columns,
+            "speed_mm_s": source["movement/speed/filtered/mm"][selection],
+            "frame_path_distance_mm": source[
+                "movement/speed/filtered/frame_path_distance_mm"
+            ][selection],
+        }
+    elif source_surface_profile.profile_id == CORE_MOTION_SOURCE_SURFACE_PROFILE_ID:
+        if source["delta_frames"].size:
+            expected_delta_frames = np.empty(
+                source["delta_frames"].shape, dtype=np.int32
+            )
+            if start == 0:
+                expected_delta_frames[0] = 0
+            else:
+                # The boundary transition is bound by the source manifest hash;
+                # validate the within-window transitions without rereading the
+                # preceding physical chunk.
+                expected_delta_frames[0] = source["delta_frames"][0]
+            expected_delta_frames[1:] = np.diff(frames).astype(np.int32, copy=False)
+            expected_delta_seconds = np.asarray(
+                expected_delta_frames.astype(np.float64) / source_rate_hz,
+                dtype=np.float32,
+            )
+            if not np.array_equal(
+                source["delta_frames"], expected_delta_frames
+            ) or not (np.array_equal(source["delta_seconds"], expected_delta_seconds)):
+                raise ValueError(
+                    f"Track {track_id} transition deltas differ from frame/FPS authority."
+                )
+        smoothed_path = source["movement/speed/smoothed/frame_path_distance_mm"]
+        cumulative = source["cumulative_path_distance_mm"]
+        if (
+            np.any(~np.isfinite(smoothed_path))
+            or np.any(smoothed_path < 0)
+            or np.any(~np.isfinite(cumulative))
+            or (cumulative.size > 1 and np.any(np.diff(cumulative) < 0))
+            or (
+                cumulative.size > 1
+                and not np.allclose(
+                    np.diff(cumulative),
+                    smoothed_path[1:],
+                    rtol=0.0,
+                    atol=8.0
+                    * np.finfo(np.float32).eps
+                    * np.maximum(1.0, np.abs(cumulative[1:])),
+                )
+            )
+        ):
+            raise ValueError(
+                f"Track {track_id} cumulative path is inconsistent with smoothed increments."
+            )
+        columns = {
+            **common_columns,
+            "delta_frames": source["delta_frames"][selection],
+            "delta_seconds": source["delta_seconds"][selection],
+            "speed_filtered_mm_s": source["movement/speed/filtered/mm"][selection],
+            "frame_path_distance_filtered_mm": source[
+                "movement/speed/filtered/frame_path_distance_mm"
+            ][selection],
+            "speed_smoothed_mm_s": source["movement/speed/smoothed/mm"][selection],
+            "frame_path_distance_smoothed_mm": smoothed_path[selection],
+            "signed_tangential_acceleration_mm_s2": source[
+                "speed_derivatives/speed_smoothed/acceleration_mm"
+            ][selection],
+            "smoothed_signed_tangential_acceleration_mm_s2": source[
+                "speed_derivatives/speed_smoothed/smoothed_acceleration_mm"
+            ][selection],
+            "cumulative_smoothed_path_distance_mm": cumulative[selection],
+        }
+    else:  # pragma: no cover - closed profile routing above
+        raise ValueError("Kinematic source-surface profile is not projectable.")
     return columns, frames
 
 
-def _arrow_batch(
-    columns: Mapping[str, np.ndarray[Any, Any]],
-    *,
+def kinematics_sample_constant_values(
     source_binding: Mapping[str, Any],
     projection: Mapping[str, Any],
-) -> Any:
-    import pyarrow as pa
+) -> dict[str, Any]:
+    """Return the exact standalone provenance constants for one projection."""
 
-    count = int(np.asarray(columns["track_id"]).shape[0])
-    constants: dict[str, Any] = {
+    return {
         "export_schema_version": EXPORT_SCHEMA_VERSION,
         "table_name": KINEMATICS_SAMPLES_TABLE,
         "recording_id": source_binding["recording_id"],
@@ -1038,6 +1484,59 @@ def _arrow_batch(
         ],
         "physical_authority_sha256": source_binding["physical_authority_sha256"],
     }
+
+
+def core_motion_sample_constant_values(
+    source_binding: Mapping[str, Any],
+    projection: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return exact provenance constants for the core-motion successor."""
+
+    semantics = projection["motion_semantics"]
+    return {
+        "export_schema_version": EXPORT_SCHEMA_VERSION,
+        "table_name": KINEMATICS_SAMPLES_TABLE,
+        "recording_id": source_binding["recording_id"],
+        "zarr_path": source_binding["zarr_path"],
+        "source_lineage_hash": _source_lineage_sha256(source_binding, projection),
+        "source_track_kinematics_scope": source_binding["scope"],
+        "source_track_kinematics_run": source_binding["run_name"],
+        "source_track_kinematics_path": source_binding["run_path"],
+        "source_track_motion_manifest_schema_id": source_binding[
+            "source_manifest_schema_id"
+        ],
+        "source_track_motion_manifest_schema_version": source_binding[
+            "source_manifest_schema_version"
+        ],
+        "source_track_motion_manifest_sha256": source_binding["source_manifest_sha256"],
+        "source_binding_sha256": source_binding["payload_sha256"],
+        "projection_contract_sha256": projection["payload_sha256"],
+        "motion_projection_profile_id": projection["projection_profile_id"],
+        "acceleration_source_speed_level": semantics["acceleration_source_speed_level"],
+        "cumulative_path_distance_source_level": "smoothed",
+        "source_sample_rate_hz": projection["source_sample_rate_hz"],
+        "requested_sample_rate_hz": projection["requested_sample_rate_hz"],
+        "sampling_stride_frames": projection["sampling_stride_frames"],
+        "nominal_sample_rate_hz": projection["nominal_sample_rate_hz"],
+        "sampling_policy": projection["sampling_policy"],
+        "position_coordinate_space": source_binding["position_coordinate_space"],
+        "position_coordinate_descriptor_sha256": source_binding[
+            "position_coordinate_descriptor_sha256"
+        ],
+        "physical_authority_sha256": source_binding["physical_authority_sha256"],
+    }
+
+
+def _arrow_batch(
+    columns: Mapping[str, Any],
+    *,
+    source_binding: Mapping[str, Any],
+    projection: Mapping[str, Any],
+) -> Any:
+    import pyarrow as pa
+
+    count = int(np.asarray(columns["track_id"]).shape[0])
+    constants = kinematics_sample_constant_values(source_binding, projection)
     schema = exact_arrow_schema(KINEMATICS_SAMPLES_TABLE, metadata=_footer_metadata())
     arrays = [
         pa.array(
@@ -1051,6 +1550,130 @@ def _arrow_batch(
         for field in schema
     ]
     return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def iter_projected_kinematics_sample_batches(
+    bound: BoundKinematicsSamplesSource,
+    *,
+    projection: Mapping[str, Any],
+    source_window_rows: int,
+) -> Any:
+    """Yield bounded exact standalone-column batches from a bound source.
+
+    The iterator verifies every selected source surface against the manifest
+    while it is already resident for projection.  Consumers may add outer
+    dataset provenance columns, but must not alter these returned values.
+    """
+
+    if type(source_window_rows) is not int or source_window_rows <= 0:
+        raise ValueError("source_window_rows must be a positive exact integer.")
+    if projection.get("table_name") != KINEMATICS_SAMPLES_TABLE or float(
+        projection.get("source_sample_rate_hz", float("nan"))
+    ) != float(bound.binding["source_sample_rate_hz"]):
+        raise ValueError("Kinematic projection differs from its bound source.")
+    constants = kinematics_sample_constant_values(bound.binding, projection)
+    for track in bound.binding["tracks"]:
+        track_id = int(track["track_id"])
+        track_group = bound.run_group["tracks"][f"id_{track_id}"]
+        sample_count = int(track["sample_count"])
+        source_hasher = _SelectedSourcePayloadHasher(track)
+        last_frame: int | None = None
+        for start in range(0, sample_count, source_window_rows):
+            stop = min(sample_count, start + source_window_rows)
+            columns, source_frames = _read_projected_window(
+                track_group,
+                track_id=track_id,
+                start=start,
+                stop=stop,
+                stride=int(projection["sampling_stride_frames"]),
+                source_rate_hz=float(projection["source_sample_rate_hz"]),
+                source_hasher=source_hasher,
+                source_frame_start=projection.get("source_frame_start"),
+                source_frame_stop_exclusive=projection.get(
+                    "source_frame_stop_exclusive"
+                ),
+            )
+            if source_frames.size:
+                if last_frame is not None and int(source_frames[0]) <= last_frame:
+                    raise ValueError(
+                        f"Track {track_id} frame identity is not globally increasing."
+                    )
+                last_frame = int(source_frames[-1])
+            count = int(columns["track_id"].shape[0])
+            if count:
+                yield {
+                    **{name: [value] * count for name, value in constants.items()},
+                    **columns,
+                }
+        source_hasher.finish()
+
+
+def iter_projected_core_motion_sample_batches(
+    bound: BoundKinematicsSamplesSource,
+    *,
+    projection: Mapping[str, Any],
+    source_window_rows: int,
+    expected_arrow_schema_sha256: str,
+) -> Any:
+    """Yield the closed physical core-motion successor in bounded windows."""
+
+    if type(source_window_rows) is not int or source_window_rows <= 0:
+        raise ValueError("source_window_rows must be a positive exact integer.")
+    _validate_source_binding(
+        bound.binding,
+        expected_source_surface_profile_id=CORE_MOTION_SOURCE_SURFACE_PROFILE_ID,
+    )
+    expected_projection = core_motion_projection_contract(
+        source_sample_rate_hz=float(bound.binding["source_sample_rate_hz"]),
+        requested_sample_rate_hz=float(projection.get("requested_sample_rate_hz")),
+        arrow_schema_sha256=expected_arrow_schema_sha256,
+    )
+    normalized_projection = _json_object(
+        projection,
+        label="core-motion projection contract",
+    )
+    if normalized_projection != expected_projection:
+        raise ValueError(
+            "Core-motion projection differs from the installed successor contract."
+        )
+    constants = core_motion_sample_constant_values(bound.binding, projection)
+    profile = _CORE_MOTION_SOURCE_SURFACE_PROFILE
+    for track in bound.binding["tracks"]:
+        track_id = int(track["track_id"])
+        track_group = bound.run_group["tracks"][f"id_{track_id}"]
+        sample_count = int(track["sample_count"])
+        source_hasher = _SelectedSourcePayloadHasher(
+            track,
+            source_surface_profile=profile,
+        )
+        last_frame: int | None = None
+        for start in range(0, sample_count, source_window_rows):
+            stop = min(sample_count, start + source_window_rows)
+            columns, source_frames = _read_projected_window(
+                track_group,
+                track_id=track_id,
+                start=start,
+                stop=stop,
+                stride=int(projection["sampling_stride_frames"]),
+                source_rate_hz=float(projection["source_sample_rate_hz"]),
+                source_hasher=source_hasher,
+                source_surface_profile=profile,
+            )
+            if source_frames.size:
+                if last_frame is not None and int(source_frames[0]) <= last_frame:
+                    raise ValueError(
+                        f"Track {track_id} frame identity is not globally increasing."
+                    )
+                last_frame = int(source_frames[-1])
+            if set(columns) != set(CORE_MOTION_SCIENTIFIC_DTYPES):
+                raise ValueError("Core-motion projected column inventory is inexact.")
+            count = int(columns["track_id"].shape[0])
+            if count:
+                yield {
+                    **{name: [value] * count for name, value in constants.items()},
+                    **columns,
+                }
+        source_hasher.finish()
 
 
 def _write_streaming_part(
@@ -1081,51 +1704,53 @@ def _write_streaming_part(
         use_dictionary=dictionary_columns,
     )
     try:
-        for track in bound.binding["tracks"]:
-            track_id = int(track["track_id"])
-            track_group = bound.run_group["tracks"][f"id_{track_id}"]
-            sample_count = int(track["sample_count"])
-            source_hasher = _SelectedSourcePayloadHasher(track)
-            last_frame: int | None = None
-            for start in range(0, sample_count, source_window_rows):
-                stop = min(sample_count, start + source_window_rows)
-                columns, source_frames = _read_projected_window(
-                    track_group,
-                    track_id=track_id,
-                    start=start,
-                    stop=stop,
-                    stride=int(projection["sampling_stride_frames"]),
-                    source_rate_hz=float(projection["source_sample_rate_hz"]),
-                    source_hasher=source_hasher,
-                    source_frame_start=projection.get("source_frame_start"),
-                    source_frame_stop_exclusive=projection.get(
-                        "source_frame_stop_exclusive"
-                    ),
-                )
-                if source_frames.size:
-                    if last_frame is not None and int(source_frames[0]) <= last_frame:
-                        raise ValueError(
-                            f"Track {track_id} frame identity is not globally increasing."
-                        )
-                    last_frame = int(source_frames[-1])
-                hasher.update(columns)
-                if int(columns["track_id"].shape[0]):
-                    writer.write_table(
-                        _arrow_batch(
-                            columns,
-                            source_binding=bound.binding,
-                            projection=projection,
-                        ),
-                        row_group_size=row_group_rows,
-                    )
-            source_hasher.finish()
+        for columns in iter_projected_kinematics_sample_batches(
+            bound,
+            projection=projection,
+            source_window_rows=source_window_rows,
+        ):
+            hasher.update(
+                {name: columns[name] for name in KINEMATICS_SCIENTIFIC_DTYPES}
+            )
+            writer.write_table(
+                _arrow_batch(
+                    columns,
+                    source_binding=bound.binding,
+                    projection=projection,
+                ),
+                row_group_size=row_group_rows,
+            )
     finally:
         writer.close()
     return hasher.finish()
 
 
-def _validate_source_binding(source: Mapping[str, Any]) -> None:
-    if set(source) != _SOURCE_BINDING_FIELDS:
+def _validate_source_binding(
+    source: Mapping[str, Any],
+    *,
+    expected_source_surface_profile_id: str = KINEMATICS_SOURCE_SURFACE_PROFILE_ID,
+) -> None:
+    schema_version = source.get("schema_version")
+    if schema_version == KINEMATICS_SOURCE_BINDING_SCHEMA_VERSION:
+        source_surface_profile = _KINEMATICS_SOURCE_SURFACE_PROFILE
+        expected_fields = _SOURCE_BINDING_FIELDS
+        if "source_surface_profile_id" in source:
+            raise ValueError(
+                "Kinematic v1 source binding cannot declare a surface profile."
+            )
+    elif schema_version == KINEMATICS_SOURCE_BINDING_SCHEMA_VERSION_V2:
+        profile_id = source.get("source_surface_profile_id")
+        if profile_id != CORE_MOTION_SOURCE_SURFACE_PROFILE_ID:
+            raise ValueError("Kinematic v2 source-surface profile is invalid.")
+        source_surface_profile = _source_surface_profile(str(profile_id))
+        expected_fields = _SOURCE_BINDING_FIELDS_V2
+    else:
+        raise ValueError("Kinematic source-binding schema version is unsupported.")
+    if source_surface_profile.profile_id != expected_source_surface_profile_id:
+        raise ValueError(
+            "Kinematic source binding uses another source-surface profile."
+        )
+    if set(source) != expected_fields:
         raise ValueError("Kinematic source binding has an unexpected field set.")
     body = dict(source)
     digest = body.pop("payload_sha256", None)
@@ -1133,7 +1758,7 @@ def _validate_source_binding(source: Mapping[str, Any]) -> None:
         raise ValueError("Kinematic source-binding digest is invalid.")
     if (
         body.get("schema_id") != KINEMATICS_SOURCE_BINDING_SCHEMA_ID
-        or body.get("schema_version") != KINEMATICS_SOURCE_BINDING_SCHEMA_VERSION
+        or body.get("schema_version") != source_surface_profile.binding_schema_version
         or body.get("stage_id") != "track_kinematics"
         or body.get("source_manifest_schema_id")
         != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID
@@ -1220,7 +1845,7 @@ def _validate_source_binding(source: Mapping[str, Any]) -> None:
         _sha256_text(track.get("track_record_sha256"), label="track record")
         surfaces = track.get("selected_surfaces")
         if not isinstance(surfaces, Mapping) or set(surfaces) != set(
-            _SELECTED_SURFACES
+            source_surface_profile.selected_surfaces
         ):
             raise ValueError("Kinematic selected-surface inventory is invalid.")
         for path, surface in surfaces.items():
@@ -1229,14 +1854,17 @@ def _validate_source_binding(source: Mapping[str, Any]) -> None:
                 or set(surface) != _BOUND_SURFACE_FIELDS
             ):
                 raise ValueError(f"Kinematic surface binding {path!r} is invalid.")
-            expected_dtype = _SOURCE_DTYPES[path]
+            expected_dtype = source_surface_profile.source_dtypes[path]
             if (
                 surface.get("relative_ref") != path
                 or surface.get("dtype") != expected_dtype.str
                 or surface.get("dtype_fields") != _dtype_fields(expected_dtype)
                 or surface.get("itemsize") != expected_dtype.itemsize
                 or surface.get("shape")
-                != [track["sample_count"], *_SOURCE_TRAILING_SHAPES[path]]
+                != [
+                    track["sample_count"],
+                    *source_surface_profile.trailing_shapes[path],
+                ]
             ):
                 raise ValueError(f"Kinematic surface binding {path!r} is inconsistent.")
             for field in ("content_sha256", "attrs_sha256", "record_sha256"):
@@ -1472,10 +2100,10 @@ def export_kinematics_samples(
     *,
     track_kinematics_run: str,
     track_scope: str,
-    requested_sample_rate_hz: float,
     output_root: str | Path,
     export_run_id: str,
     scratch_root: str | Path,
+    requested_sample_rate_hz: float | None = None,
     source_window_rows: int = 131_072,
     row_group_rows: int = 65_536,
     source_frame_start: int | None = None,
@@ -1513,16 +2141,21 @@ def export_kinematics_samples(
     runtime = ExportRuntimePhaseRecorder()
     with runtime.measure("source_binding_before"):
         root = open_zarr_root(source_path, mode="r")
-        before = _source_binding(
+        before = bind_kinematics_samples_source(
             root,
             zarr_path=source_path,
-            recording_id=recording_id,
-            run_name=source_run,
-            scope=track_scope,
+            expected_recording_id=recording_id,
+            track_kinematics_run=source_run,
+            track_scope=track_scope,
         )
+    source_sample_rate_hz = float(before.binding["source_sample_rate_hz"])
     projection = kinematics_projection_contract(
-        source_sample_rate_hz=float(before.binding["source_sample_rate_hz"]),
-        requested_sample_rate_hz=float(requested_sample_rate_hz),
+        source_sample_rate_hz=source_sample_rate_hz,
+        requested_sample_rate_hz=(
+            source_sample_rate_hz
+            if requested_sample_rate_hz is None
+            else float(requested_sample_rate_hz)
+        ),
         source_frame_start=source_frame_start,
         source_frame_stop_exclusive=source_frame_stop_exclusive,
     )
@@ -1553,12 +2186,12 @@ def export_kinematics_samples(
             )
         with runtime.measure("source_binding_after"):
             after_root = open_zarr_root(source_path, mode="r")
-            after = _source_binding(
+            after = bind_kinematics_samples_source(
                 after_root,
                 zarr_path=source_path,
-                recording_id=recording_id,
-                run_name=source_run,
-                scope=track_scope,
+                expected_recording_id=recording_id,
+                track_kinematics_run=source_run,
+                track_scope=track_scope,
             )
             if after.binding != before.binding:
                 raise RuntimeError(
@@ -1698,13 +2331,26 @@ def export_kinematics_samples(
 
 
 __all__ = [
+    "BoundKinematicsSamplesSource",
+    "CORE_MOTION_ACCELERATION_SOURCE_SPEED_LEVEL",
+    "CORE_MOTION_PROJECTION_PROFILE_ID",
+    "CORE_MOTION_SCIENTIFIC_DTYPES",
+    "CORE_MOTION_SOURCE_SURFACE_PROFILE_ID",
     "KINEMATICS_EXPORT_SCHEMA_ID",
     "KINEMATICS_EXPORT_SCHEMA_VERSION",
     "KINEMATICS_FRAME_SELECTION_POLICY",
     "KINEMATICS_PROJECTION_SCHEMA_VERSION_V2",
+    "KINEMATICS_PROJECTION_SCHEMA_VERSION_V3",
     "KINEMATICS_SAMPLING_POLICY",
     "KINEMATICS_SCIENTIFIC_DTYPES",
+    "KINEMATICS_SOURCE_SURFACE_PROFILE_ID",
+    "bind_kinematics_samples_source",
+    "core_motion_projection_contract",
+    "core_motion_sample_constant_values",
     "export_kinematics_samples",
+    "iter_projected_kinematics_sample_batches",
+    "iter_projected_core_motion_sample_batches",
+    "kinematics_sample_constant_values",
     "kinematics_parquet_policy",
     "kinematics_projection_contract",
     "validate_kinematics_samples_export_payload",

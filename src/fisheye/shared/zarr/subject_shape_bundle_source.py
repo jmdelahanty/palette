@@ -353,7 +353,7 @@ class BoundSubjectShapeBundleSource:
 
     def assert_verified(self) -> None:
         def verify() -> None:
-            current = load_subject_shape_bundle_source(
+            current = _load_receipt_bound_subject_shape_bundle_source(
                 self.archive_path,
                 bundle_id=self.bundle_id,
                 allow_inactive=True,
@@ -378,7 +378,7 @@ class BoundSubjectShapeBundleSource:
         )
 
 
-def load_subject_shape_bundle_source(
+def _load_receipt_bound_subject_shape_bundle_source(
     analysis_zarr: Path,
     *,
     bundle_id: str | None = None,
@@ -407,7 +407,6 @@ def load_subject_shape_bundle_source(
         edge_frame=edge,
         assignment_keypoint_rebinding=rebinding_manifest,
     )
-    authority.require_translation_only_offsets()
     return BoundSubjectShapeBundleSource(
         archive_path=authority.archive_path,
         bundle_id=authority.bundle_id,
@@ -426,6 +425,30 @@ def load_subject_shape_bundle_source(
         edge_source_camera_frame=edge,
         _verification_seal=_BOUND_SOURCE_SEAL,
     )
+
+
+def load_subject_shape_bundle_source(
+    analysis_zarr: Path,
+    *,
+    bundle_id: str | None = None,
+    allow_inactive: bool = False,
+    assignment_keypoint_rebinding_run_id: str | None = None,
+) -> BoundSubjectShapeBundleSource:
+    """Load one exact source and validate its translation geometry once.
+
+    Later process-local proof rechecks reconstruct only the receipt-bound
+    metadata identity. They do not reread ``source_crop_xywh`` merely to prove
+    that the already-bound source digest remained stable.
+    """
+
+    source = _load_receipt_bound_subject_shape_bundle_source(
+        analysis_zarr,
+        bundle_id=bundle_id,
+        allow_inactive=allow_inactive,
+        assignment_keypoint_rebinding_run_id=assignment_keypoint_rebinding_run_id,
+    )
+    source.authority.require_translation_only_offsets()
+    return source
 
 
 def require_bound_subject_shape_bundle_source(

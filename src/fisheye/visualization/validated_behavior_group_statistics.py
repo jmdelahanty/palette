@@ -86,10 +86,28 @@ def _condition_color(payload: Mapping[str, object], condition: str) -> str:
 
 
 def _role_color(payload: Mapping[str, object], role: str) -> str:
+    styles = payload.get("behavior_role_styles")
+    if isinstance(styles, Mapping):
+        style = styles.get(role)
+        if isinstance(style, Mapping):
+            color = style.get("aggregate_color_hex")
+            if isinstance(color, str):
+                return color
     colors = payload.get("behavior_role_colors")
     if isinstance(colors, Mapping):
         return str(colors.get(role, "#666666"))
     return "#666666"
+
+
+def _role_marker(payload: Mapping[str, object], role: str) -> str:
+    styles = payload.get("behavior_role_styles")
+    if isinstance(styles, Mapping):
+        style = styles.get(role)
+        if isinstance(style, Mapping):
+            marker = style.get("matplotlib_role_marker")
+            if isinstance(marker, str) and marker:
+                return marker
+    return "o"
 
 
 def _provider_linestyle(payload: Mapping[str, object], provider: str) -> str:
@@ -389,7 +407,7 @@ def grouped_epoch_figure(payload: Mapping[str, object], *, columns: int = 4) -> 
                 medians,
                 color=color,
                 linestyle=linestyle,
-                marker="o",
+                marker=_role_marker(payload, role),
                 linewidth=2.0,
                 label=label,
             )
@@ -589,7 +607,7 @@ def trial_response_figure(payload: Mapping[str, object]) -> Any:
                 values[:, 0],
                 values[:, 1],
                 color=color,
-                marker="o",
+                marker=_role_marker(payload, role),
                 linewidth=2.0,
                 label=role.title(),
             )
