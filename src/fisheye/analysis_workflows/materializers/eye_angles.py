@@ -59,6 +59,7 @@ from ...shared.eye_geometry_source import (
 )
 from ...shared.json_safety import json_attr_safe
 from ...shared.metadata import get_fps
+from ...shared.proof_verification import proof_verification_operation
 from ...shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ...shared.run_provenance import (
     build_run_provenance_from_stage_record,
@@ -1235,6 +1236,7 @@ def _resolve_source_plan(
     )
 
 
+@proof_verification_operation
 def build_eye_angle_materialization_plan(
     source_zarr: str | Path,
     *,

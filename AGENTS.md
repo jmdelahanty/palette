@@ -151,6 +151,12 @@
 
 ## Sandbox Zarr Test Policy
 
+- Invoke Palette test suites only from a workstation checkout. Never run
+  pytest on the campus `login1` or `login2` nodes, and do not submit test
+  suites to LSF as a substitute for workstation validation.
+- `scripts/py` rejects pytest invocations on those hosts before Python starts,
+  and `tests/conftest.py` independently enforces the prohibition before
+  collection.
 - Run pytest-based validation outside the Codex sandbox by default for this repository; tests run normally there and sandbox execution can hang on zarr paths.
 - Use `scripts/py -m pytest ...` with an outside-sandbox/escalated command when running focused or full test suites.
 - Keep in-sandbox validation to static/non-zarr checks such as `scripts/py -m py_compile`, `git diff --check`, or explicitly safe in-memory tests.
