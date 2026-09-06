@@ -33,6 +33,9 @@ from fisheye.analysis_workflows.chaser_relative_frame_source_handle import (
     load_chaser_relative_frame_source_handle,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr.chaser_relative_frame_schema import (
+    CHASER_RELATIVE_FRAME_SCHEMA_ID,
+)
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.shared.zarr_io import open_zarr_root
 from tests.unit.fisheye.test_chaser_relative_frame_storage import (
@@ -91,7 +94,12 @@ def _context() -> ChaserRelativeFramePublicationContext:
     )
 
 
-def _prepared(*, body: bool = True, timestamps: bool = True):
+def _prepared(
+    *,
+    body: bool = True,
+    timestamps: bool = True,
+    context: ChaserRelativeFramePublicationContext | None = None,
+):
     n_frames = 3
     keys = AcquisitionFrameKeys(
         recording_id="recording-1",
@@ -152,15 +160,21 @@ def _prepared(*, body: bool = True, timestamps: bool = True):
             body_frame=body_input,
         )
     )
-    return prepare_chaser_relative_frame(result, context=_context())
+    return prepare_chaser_relative_frame(result, context=context or _context())
 
 
-def _publish(tmp_path, *, body: bool = True, timestamps: bool = True):
+def _publish(
+    tmp_path,
+    *,
+    body: bool = True,
+    timestamps: bool = True,
+    context: ChaserRelativeFramePublicationContext | None = None,
+):
     archive = tmp_path / "analysis.zarr"
     root = open_zarr_root(archive, mode="w-")
     root.attrs["recording_id"] = "recording-1"
     root.require_group(PARENT_PATH)
-    prepared = _prepared(body=body, timestamps=timestamps)
+    prepared = _prepared(body=body, timestamps=timestamps, context=context)
     materialize_chaser_relative_frame(
         archive,
         prepared=prepared,
@@ -243,6 +257,31 @@ def test_position_only_handle_seals_base_and_rejects_body_access(tmp_path):
         handle.body_array("body_bearing_deg")
     with pytest.raises(ChaserRelativeFrameBodyUnavailableError):
         handle.body_frame_chaser("body_bearing_deg")
+
+
+def test_core_authority_context_round_trips_through_existing_publisher(tmp_path):
+    core_record = _record(
+        "palette.chaser_relative_frame.core_authority_binding",
+        recording_id="recording-1",
+        core_authority_roster_sha256="a" * 64,
+        core_motion_facts_repeated=False,
+        fallback="prohibited",
+    )
+    context = replace(_context(), core_authority_record=core_record)
+    archive = _publish(tmp_path, body=False, context=context)
+
+    handle = load_chaser_relative_frame_source_handle(
+        archive,
+        run_name="candidate-v1",
+        expected_recording_id="recording-1",
+    )
+
+    assert handle.context["core_authority"]["record"] == core_record
+    assert handle.context["core_authority"]["sha256"] == canonical_json_sha256(
+        core_record
+    )
+    assert handle.schema_id == CHASER_RELATIVE_FRAME_SCHEMA_ID
+    handle.assert_current()
 
 
 def test_proxy_bound_handle_preserves_exact_publication_authority(tmp_path):

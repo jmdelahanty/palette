@@ -5993,7 +5993,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-287add7cc5a979bc"
+            "schema-writer-61bd6e8484a1bd15"
           ],
           "shape": "shape(plan.result.per_epoch_bout_histograms)"
         },
@@ -6015,7 +6015,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-ac783db20b12f8b8"
+            "schema-writer-695a890a45f773cb"
           ],
           "shape": "shape(plan.result.per_epoch_bouts)"
         },
@@ -6037,7 +6037,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-da679869307c12d4"
+            "schema-writer-40d5da7ea1736417"
           ],
           "shape": "shape(plan.result.per_epoch_fish)"
         },
@@ -6059,7 +6059,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-7181caa33e80ac3e"
+            "schema-writer-3ee616d3fe4c62f0"
           ],
           "shape": "shape(plan.result.per_epoch_inter_bout_interval_histograms)"
         },
@@ -34121,8 +34121,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis_workflows/materializers/provider_epoch_behavior_summary.py",
-      "line": 1267,
-      "occurrence_id": "schema-writer-da679869307c12d4",
+      "line": 1461,
+      "occurrence_id": "schema-writer-40d5da7ea1736417",
       "path_pattern": "<require_runs_parent(analysis, PARENT_PATH.split('/', 1)[1])>/<plan.run_name>/per_epoch_fish",
       "required": null,
       "shape_expression": "shape(plan.result.per_epoch_fish)",
@@ -34134,7 +34134,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-530f1090d55954a7"
+      "writer_site_id": "writer-d1c8147b45317a8c"
     },
     {
       "access_pattern": "unclassified",
@@ -34155,8 +34155,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis_workflows/materializers/provider_epoch_behavior_summary.py",
-      "line": 1279,
-      "occurrence_id": "schema-writer-ac783db20b12f8b8",
+      "line": 1473,
+      "occurrence_id": "schema-writer-695a890a45f773cb",
       "path_pattern": "<require_runs_parent(analysis, PARENT_PATH.split('/', 1)[1])>/<plan.run_name>/per_epoch_bouts",
       "required": null,
       "shape_expression": "shape(plan.result.per_epoch_bouts)",
@@ -34168,7 +34168,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-449d945adb2fea96"
+      "writer_site_id": "writer-9cbb129dc15c1e8a"
     },
     {
       "access_pattern": "unclassified",
@@ -34189,8 +34189,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis_workflows/materializers/provider_epoch_behavior_summary.py",
-      "line": 1290,
-      "occurrence_id": "schema-writer-287add7cc5a979bc",
+      "line": 1484,
+      "occurrence_id": "schema-writer-61bd6e8484a1bd15",
       "path_pattern": "<require_runs_parent(analysis, PARENT_PATH.split('/', 1)[1])>/<plan.run_name>/per_epoch_bout_histograms",
       "required": null,
       "shape_expression": "shape(plan.result.per_epoch_bout_histograms)",
@@ -34202,7 +34202,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-f4a2cf384e6ee38f"
+      "writer_site_id": "writer-b4eae1231fc62f4a"
     },
     {
       "access_pattern": "unclassified",
@@ -34223,8 +34223,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis_workflows/materializers/provider_epoch_behavior_summary.py",
-      "line": 1300,
-      "occurrence_id": "schema-writer-7181caa33e80ac3e",
+      "line": 1494,
+      "occurrence_id": "schema-writer-3ee616d3fe4c62f0",
       "path_pattern": "<require_runs_parent(analysis, PARENT_PATH.split('/', 1)[1])>/<plan.run_name>/per_epoch_inter_bout_interval_histograms",
       "required": null,
       "shape_expression": "shape(plan.result.per_epoch_inter_bout_interval_histograms)",
@@ -34236,7 +34236,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-ac1c6b52eb6ef53d"
+      "writer_site_id": "writer-6c696829c11e8868"
     },
     {
       "access_pattern": "unclassified",
@@ -74956,7 +74956,7 @@
     "parsed_writer_candidate_module_count": 236,
     "reader_required_array_declaration_count": 102,
     "resolved_writer_leaf_name_count": 630,
-    "scanned_python_module_count": 1697,
+    "scanned_python_module_count": 1706,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,

@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from typing import Sequence
 
+from fisheye.analysis_workflows.core_authority_roster import (
+    read_core_authority_roster,
+)
+from fisheye.analysis_workflows.core_chaser_relative_frame_adapter import (
+    prepare_core_proxy_chaser_relative_frame,
+)
 from fisheye.analysis_workflows.chaser_proxy_relative_frame_adapter import (
     prepare_proxy_relative_frame,
 )
@@ -47,6 +52,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-subject-metadata-sha256")
     parser.add_argument("--expected-timing-authority-sha256")
     parser.add_argument(
+        "--core-authority-roster",
+        type=Path,
+        help=(
+            "Exact sealed core-authority roster JSON. Supplying this selects "
+            "canonical motion/body mode; failure never falls back to the legacy "
+            "proxy fish or body authorities."
+        ),
+    )
+    parser.add_argument("--expected-core-authority-roster-sha256")
+    parser.add_argument("--core-track-id", type=int)
+    parser.add_argument(
         "--body-frame-run",
         help=(
             "Exact selector-ineligible analysis/body_frame_runs child to "
@@ -69,16 +85,47 @@ def _parser() -> argparse.ArgumentParser:
 
 def run(args: argparse.Namespace) -> dict[str, object]:
     archive = args.analysis_zarr.expanduser().resolve()
-    bound = prepare_proxy_relative_frame(
-        archive,
-        proxy_run_name=args.proxy_run_name,
-        analysis_profile_path=args.analysis_profile,
-        expected_recording_id=args.expected_recording_id,
-        expected_proxy_manifest_sha256=args.expected_proxy_manifest_sha256,
-        expected_subject_metadata_sha256=args.expected_subject_metadata_sha256,
-        expected_timing_authority_sha256=args.expected_timing_authority_sha256,
-        body_frame_run_name=args.body_frame_run,
+    core_arguments = (
+        args.core_authority_roster,
+        args.expected_core_authority_roster_sha256,
+        args.core_track_id,
     )
+    if any(value is not None for value in core_arguments):
+        if any(value is None for value in core_arguments):
+            raise ValueError(
+                "Core mode requires roster path, expected roster digest, and "
+                "one explicit track ID."
+            )
+        if args.body_frame_run is not None:
+            raise ValueError(
+                "Core mode cannot accept a legacy body-frame run or fallback."
+            )
+        roster = read_core_authority_roster(
+            args.core_authority_roster,
+            expected_record_sha256=args.expected_core_authority_roster_sha256,
+        )
+        bound = prepare_core_proxy_chaser_relative_frame(
+            archive,
+            core_authority_roster=roster,
+            core_track_id=args.core_track_id,
+            proxy_run_name=args.proxy_run_name,
+            analysis_profile_path=args.analysis_profile,
+            expected_recording_id=args.expected_recording_id,
+            expected_proxy_manifest_sha256=args.expected_proxy_manifest_sha256,
+            expected_subject_metadata_sha256=args.expected_subject_metadata_sha256,
+            expected_timing_authority_sha256=args.expected_timing_authority_sha256,
+        )
+    else:
+        bound = prepare_proxy_relative_frame(
+            archive,
+            proxy_run_name=args.proxy_run_name,
+            analysis_profile_path=args.analysis_profile,
+            expected_recording_id=args.expected_recording_id,
+            expected_proxy_manifest_sha256=args.expected_proxy_manifest_sha256,
+            expected_subject_metadata_sha256=args.expected_subject_metadata_sha256,
+            expected_timing_authority_sha256=args.expected_timing_authority_sha256,
+            body_frame_run_name=args.body_frame_run,
+        )
     if args.apply:
         publication = materialize_chaser_relative_frame(
             archive,
@@ -109,7 +156,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     result = run(args)
-    print(json.dumps(result, sort_keys=True if args.json else False, indent=None if args.json else 2))
+    print(
+        json.dumps(
+            result,
+            sort_keys=True if args.json else False,
+            indent=None if args.json else 2,
+        )
+    )
     return 0
 
 

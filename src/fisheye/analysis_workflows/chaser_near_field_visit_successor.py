@@ -27,6 +27,10 @@ from fisheye.analysis_workflows.chaser_radial_near_field_successor import (
 from fisheye.analysis_workflows.chaser_relative_distance_view import (
     load_chaser_relative_distance_view,
 )
+from fisheye.analysis_workflows.core_paradigm_authority import (
+    core_paradigm_dependency_from_relative_frame,
+    validate_core_paradigm_source_dependency,
+)
 from fisheye.analysis_workflows.near_field_visit_state_machine import (
     LEFT_CENSOR_INVALID_GAP,
     LEFT_CENSOR_NONE,
@@ -303,6 +307,7 @@ class ChaserNearFieldVisitInput:
     arena_radius_px: float
     mm_per_pixel: float
     minimum_quality_sample_count: int = MIN_VISIT_SAMPLE_COUNT
+    core_authority_dependency: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -731,6 +736,15 @@ def prepare_chaser_near_field_visit_successor(
         inputs.source_radial_near_field_manifest_sha256,
         field="radial/near-field manifest digest",
     )
+    try:
+        core_authority = validate_core_paradigm_source_dependency(
+            inputs.core_authority_dependency,
+            recording_id=recording_id,
+            source_relative_frame_run_path=relative_path,
+            source_relative_frame_manifest_sha256=relative_digest,
+        )
+    except (TypeError, ValueError) as exc:
+        _fail(f"Core-authority dependency is invalid: {exc}")
     if type(inputs.n_frames) is not int or inputs.n_frames <= 0:
         _fail("n_frames must be one positive exact integer.")
     if type(inputs.n_chasers) is not int or inputs.n_chasers <= 0:
@@ -742,6 +756,8 @@ def prepare_chaser_near_field_visit_successor(
     ):
         _fail("minimum_quality_sample_count is invalid.")
     radial, near_zone_mm, enter_mm, exit_mm = _validate_radial_manifest(inputs)
+    if _plain(radial.get("core_authority")) != _plain(core_authority):
+        _fail("Radial and visit successors bind different core authorities.")
     provider_id = _text(
         inputs.fish_position_authority.get("provider_id"),
         field="fish-position provider ID",
@@ -1309,6 +1325,11 @@ def prepare_chaser_near_field_visit_successor(
         "scientific_schema": {"schema_id": SCHEMA_ID, "schema_version": SCHEMA_VERSION},
         "method_id": METHOD_ID,
         "recording_id": recording_id,
+        **(
+            {"core_authority": _plain(core_authority)}
+            if core_authority is not None
+            else {}
+        ),
         "dimensions": {
             "n_frames": n,
             "n_chasers": m,
@@ -1459,7 +1480,7 @@ def chaser_near_field_visit_input_from_handles(
         raise TypeError("radial_near_field must be one strict loader-minted handle.")
     if radial_near_field.successor_kind != "chaser_radial_near_field":
         _fail("radial_near_field handle names another successor kind.")
-    relative_frame.assert_current()
+    core_authority = core_paradigm_dependency_from_relative_frame(relative_frame)
     semantic_selection.assert_current()
     radial_near_field.assert_current()
     radial_near_field.require_verified_arrays(RADIAL_PARITY_ARRAY_NAMES)
@@ -1558,6 +1579,7 @@ def chaser_near_field_visit_input_from_handles(
         ),
         arena_radius_px=float(arena["radius_px"]),
         mm_per_pixel=1.0 / pixels_per_mm,
+        core_authority_dependency=core_authority,
         minimum_quality_sample_count=minimum_quality_sample_count,
     )
 

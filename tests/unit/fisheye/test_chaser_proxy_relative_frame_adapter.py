@@ -8,9 +8,14 @@ import numpy as np
 import pytest
 
 from fisheye.analysis_workflows import chaser_proxy_relative_frame_adapter as adapter
+from fisheye.analysis_workflows import (
+    core_chaser_relative_frame_adapter as core_adapter,
+)
 from fisheye.analysis_workflows.chaser_input_provenance_proxy import (
     select_chaser_input_provenance_proxy,
 )
+
+
 @dataclass(frozen=True)
 class _NativeDimensions:
     total_frames: int = 4
@@ -73,7 +78,10 @@ class _Native:
             "temporal_authority": {"record_ref": "time", "record_sha256": "5" * 64},
             "surface_manifest": {"record_ref": "surface", "record_sha256": "6" * 64},
             "output_manifest": {"record_ref": "output", "record_sha256": "7" * 64},
-            "transform_manifest": {"record_ref": "transform", "record_sha256": "8" * 64},
+            "transform_manifest": {
+                "record_ref": "transform",
+                "record_sha256": "8" * 64,
+            },
             "source_camera_frame": {
                 "record_ref": "analysis/acquisition/source_camera_frame",
                 "record_sha256": "3" * 64,
@@ -122,9 +130,11 @@ class _Proxy:
         )
         self.dimensions = SimpleNamespace(
             n_frames=selected.unique_acquisition_frame_count,
-            n_candidates=selected.stimulus_frame_num.size
-            if hasattr(selected, "stimulus_frame_num")
-            else native.dimensions.n_samples,
+            n_candidates=(
+                selected.stimulus_frame_num.size
+                if hasattr(selected, "stimulus_frame_num")
+                else native.dimensions.n_samples
+            ),
             n_chasers=native.dimensions.n_chasers,
         )
         self.arrays = {
@@ -253,9 +263,7 @@ class _Root:
     def __getitem__(self, path: str) -> object:
         if path == "analysis/stimulus_runs/stimulus-v1":
             return self.stimulus
-        if path == (
-            "analysis/stimulus_runs/stimulus-v1/tracking_data/chaser_states"
-        ):
+        if path == ("analysis/stimulus_runs/stimulus-v1/tracking_data/chaser_states"):
             return self.chaser_states
         raise KeyError(path)
 
@@ -379,7 +387,10 @@ def test_adapter_applies_typed_arena_to_camera_chain_with_exact_session_time(
         lambda *args, **kwargs: subject,
     )
 
-    profile = Path(adapter.__file__).resolve().parents[1] / "analysis/profiles/chaser_behavior_full_v3.yaml"
+    profile = (
+        Path(adapter.__file__).resolve().parents[1]
+        / "analysis/profiles/chaser_behavior_full_v3.yaml"
+    )
     bound = adapter.prepare_proxy_relative_frame(
         "/tmp/fixture.zarr",
         proxy_run_name="proxy-v1",
@@ -424,13 +435,25 @@ def test_adapter_applies_typed_arena_to_camera_chain_with_exact_session_time(
         bound.prepared.manifest["timing_policy"]["timestamp_field"]
         == "timestamp_ns_session"
     )
-    transform = bound.prepared.manifest["context"][
-        "arena_to_source_camera_transform"
-    ]["record"]
+    transform = bound.prepared.manifest["context"]["arena_to_source_camera_transform"][
+        "record"
+    ]
     assert transform["from_coordinate_space"] == "arena_relative_canvas_px"
     assert transform["to_coordinate_space"] == "source_camera_image_px"
     assert transform["no_reflection_or_heuristic_flip"] is True
     assert bound.prepared.manifest["selector_eligible"] is False
+    facts = core_adapter._facts_from_prepared_proxy(
+        bound,
+        analysis_zarr="/tmp/fixture.zarr",
+    )
+    assert facts.run_path == proxy.run_path
+    assert facts.manifest_sha256 == proxy.manifest_sha256
+    assert facts.n_frames == 2
+    assert facts.n_chasers == 2
+    assert np.array_equal(
+        facts.base_frame_chaser("chaser_position_xy_px"),
+        base["chaser_position_xy_px"].reshape(2, 2, 2),
+    )
 
 
 def test_exact_controller_projection_rejects_active_row_without_logged_id() -> None:
@@ -476,7 +499,10 @@ def test_adapter_rejects_proxy_bound_to_another_native_authority(monkeypatch) ->
         lambda *args, **kwargs: native,
     )
 
-    profile = Path(adapter.__file__).resolve().parents[1] / "analysis/profiles/chaser_behavior_full_v3.yaml"
+    profile = (
+        Path(adapter.__file__).resolve().parents[1]
+        / "analysis/profiles/chaser_behavior_full_v3.yaml"
+    )
     try:
         adapter.prepare_proxy_relative_frame(
             "/tmp/fixture.zarr",

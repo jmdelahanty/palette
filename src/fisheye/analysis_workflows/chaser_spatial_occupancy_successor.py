@@ -20,12 +20,15 @@ from fisheye.analysis.provider_chaser_position_suite import PositionSuiteEpoch
 from fisheye.analysis_workflows.chaser_relative_distance_view import (
     load_chaser_relative_distance_view,
 )
+from fisheye.analysis_workflows.core_paradigm_authority import (
+    core_paradigm_dependency_from_relative_frame,
+    validate_core_paradigm_source_dependency,
+)
 from fisheye.analysis_workflows.protocol_semantic_chaser_selection import (
     CHASER_WINDOW_ROLES,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
-
 
 SCHEMA_ID = "palette.analysis.chaser_spatial_occupancy_successor"
 SCHEMA_VERSION = 1
@@ -52,7 +55,9 @@ def _text(value: object, *, field: str) -> str:
 
 def _digest(value: object, *, field: str) -> str:
     result = _text(value, field=field)
-    if len(result) != 64 or any(character not in "0123456789abcdef" for character in result):
+    if len(result) != 64 or any(
+        character not in "0123456789abcdef" for character in result
+    ):
         _fail(f"{field} must be one lowercase SHA-256 digest.")
     return result
 
@@ -107,6 +112,7 @@ class SpatialPositionProviderInput:
     fish_valid: np.ndarray
     relative_frame_verification_mode: str = "direct_prepared_input_no_receipt"
     relative_frame_validation_receipt_sha256: str | None = None
+    core_authority_dependency: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,7 +190,9 @@ def prepare_chaser_spatial_occupancy_successor(
     center_y = float(inputs.arena_center_y_px)
     radius_px = float(inputs.arena_radius_px)
     mm_per_pixel = float(inputs.mm_per_pixel)
-    if not all(math.isfinite(value) for value in (center_x, center_y, radius_px, mm_per_pixel)):
+    if not all(
+        math.isfinite(value) for value in (center_x, center_y, radius_px, mm_per_pixel)
+    ):
         _fail("Arena center, radius, and scale must be finite.")
     if radius_px <= 0 or mm_per_pixel <= 0:
         _fail("Arena radius and mm_per_pixel must be positive.")
@@ -224,21 +232,33 @@ def prepare_chaser_spatial_occupancy_successor(
     expected_selection = np.logical_or.reduce(epoch_masks)
     if np.any(expected_selection & ~selected):
         _fail("An exact semantic epoch row is absent from relative-frame selection.")
-    selected_outside_epoch_count = int(
-        np.count_nonzero(selected & ~expected_selection)
-    )
+    selected_outside_epoch_count = int(np.count_nonzero(selected & ~expected_selection))
 
     providers = tuple(inputs.providers)
     if tuple(provider.provider_role for provider in providers) != PROVIDER_ROLES:
         _fail("Spatial occupancy requires ordered keypoint and detection providers.")
     provider_ids: list[str] = []
     provider_digests: list[str] = []
+    core_dependencies: list[Mapping[str, Any] | None] = []
     for provider in providers:
-        _text(provider.relative_frame_run_path, field="relative-frame run path")
-        _digest(
+        relative_path = _text(
+            provider.relative_frame_run_path, field="relative-frame run path"
+        )
+        relative_digest = _digest(
             provider.relative_frame_manifest_sha256,
             field="relative-frame manifest digest",
         )
+        try:
+            core_dependencies.append(
+                validate_core_paradigm_source_dependency(
+                    provider.core_authority_dependency,
+                    recording_id=recording_id,
+                    source_relative_frame_run_path=relative_path,
+                    source_relative_frame_manifest_sha256=relative_digest,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            _fail(f"Core-authority dependency is invalid: {exc}")
         _text(provider.radial_run_path, field="radial run path")
         _digest(provider.radial_manifest_sha256, field="radial manifest digest")
         authority = _plain(provider.fish_position_authority)
@@ -257,6 +277,46 @@ def prepare_chaser_spatial_occupancy_successor(
             _fail("Fish position and reviewed geometry use different pixel frames.")
     if len(set(provider_ids)) != len(provider_ids):
         _fail("Paired occupancy providers must have distinct provider identities.")
+    present_core_dependencies = [
+        dependency for dependency in core_dependencies if dependency is not None
+    ]
+    if present_core_dependencies and len(present_core_dependencies) != len(providers):
+        _fail("Paired occupancy providers mix core-bound and legacy authorities.")
+    core_authority: dict[str, Any] | None = None
+    if present_core_dependencies:
+        shared_fields = (
+            "core_authority_roster_sha256",
+            "core_authority_consumption_receipt_sha256",
+            "selected_track_id",
+            "core_motion_source_binding_sha256",
+            "core_subject_body_frame_source_binding_sha256",
+        )
+        reference = present_core_dependencies[0]
+        if any(
+            any(dependency[field] != reference[field] for field in shared_fields)
+            for dependency in present_core_dependencies[1:]
+        ):
+            _fail("Paired occupancy providers bind different core authorities.")
+        core_authority = {
+            "schema_id": "palette.core_behavior.paired_paradigm_dependency",
+            "schema_version": 1,
+            "recording_id": recording_id,
+            "core_authority_roster_sha256": reference["core_authority_roster_sha256"],
+            "core_authority_consumption_receipt_sha256": reference[
+                "core_authority_consumption_receipt_sha256"
+            ],
+            "selected_track_id": reference["selected_track_id"],
+            "provider_dependencies": [
+                {
+                    "provider_role": provider.provider_role,
+                    "dependency": dict(dependency),
+                }
+                for provider, dependency in zip(
+                    providers, present_core_dependencies, strict=True
+                )
+            ],
+            "fallback": "prohibited",
+        }
 
     shape = (len(providers), len(epochs), grid_rows, grid_columns)
     counts = np.zeros(shape, dtype=np.int64)
@@ -307,11 +367,11 @@ def prepare_chaser_spatial_occupancy_successor(
                 _fail("Spatial histogram does not conserve in-arena position rows.")
             counts[provider_index, epoch_index] = integer_histogram
             if in_arena_total:
-                density_valid[provider_index, epoch_index] = (
-                    integer_histogram / float(in_arena_total)
+                density_valid[provider_index, epoch_index] = integer_histogram / float(
+                    in_arena_total
                 )
-            fraction_candidate[provider_index, epoch_index] = (
-                integer_histogram / float(candidate_total)
+            fraction_candidate[provider_index, epoch_index] = integer_histogram / float(
+                candidate_total
             )
             candidate_count[provider_index, epoch_index] = candidate_total
             declared_valid_count[provider_index, epoch_index] = declared_total
@@ -336,8 +396,12 @@ def prepare_chaser_spatial_occupancy_successor(
     arrays = {
         "provider_role_code": _readonly(np.arange(len(providers)), dtype=np.uint8),
         "epoch_role_code": _readonly(np.arange(len(epochs)), dtype=np.uint8),
-        "epoch_window_id": _readonly([epoch.window_id for epoch in epochs], dtype=np.int64),
-        "epoch_start_frame": _readonly([epoch.start_frame for epoch in epochs], dtype=np.int64),
+        "epoch_window_id": _readonly(
+            [epoch.window_id for epoch in epochs], dtype=np.int64
+        ),
+        "epoch_start_frame": _readonly(
+            [epoch.start_frame for epoch in epochs], dtype=np.int64
+        ),
         "epoch_end_frame_exclusive": _readonly(
             [epoch.end_frame for epoch in epochs], dtype=np.int64
         ),
@@ -345,9 +409,7 @@ def prepare_chaser_spatial_occupancy_successor(
         "y_bin_edges_mm": _readonly(edges, dtype=np.float64),
         "arena_bin_center_mask": _readonly(arena_mask, dtype=bool),
         "occupancy_count": _readonly(counts, dtype=np.int64),
-        "occupancy_density_valid_in_arena": _readonly(
-            density_valid, dtype=np.float64
-        ),
+        "occupancy_density_valid_in_arena": _readonly(density_valid, dtype=np.float64),
         "occupancy_fraction_candidate_epoch": _readonly(
             fraction_candidate, dtype=np.float64
         ),
@@ -363,9 +425,7 @@ def prepare_chaser_spatial_occupancy_successor(
         "out_of_arena_position_frame_count": _readonly(
             out_of_arena_count, dtype=np.int64
         ),
-        "in_arena_coverage_fraction_candidate": _readonly(
-            coverage, dtype=np.float64
-        ),
+        "in_arena_coverage_fraction_candidate": _readonly(coverage, dtype=np.float64),
         "in_arena_fraction_finite_valid": _readonly(
             in_arena_fraction_valid, dtype=np.float64
         ),
@@ -393,8 +453,7 @@ def prepare_chaser_spatial_occupancy_successor(
                             provider.relative_frame_validation_receipt_sha256,
                             field="relative-frame validation receipt digest",
                         )
-                        if provider.relative_frame_validation_receipt_sha256
-                        is not None
+                        if provider.relative_frame_validation_receipt_sha256 is not None
                         else None
                     ),
                 },
@@ -408,6 +467,7 @@ def prepare_chaser_spatial_occupancy_successor(
         "scientific_schema": {"schema_id": SCHEMA_ID, "schema_version": SCHEMA_VERSION},
         "method_id": METHOD_ID,
         "recording_id": recording_id,
+        **({"core_authority": core_authority} if core_authority is not None else {}),
         "dimensions": {
             "n_providers": len(providers),
             "n_epochs": len(epochs),
@@ -527,8 +587,7 @@ def chaser_spatial_occupancy_input_from_handles(
         type(value) is ChaserRelativeFrameSourceHandle for value in relatives
     )
     targeted_handles = all(
-        type(value) is ChaserRelativeFrameTargetedSourceHandle
-        for value in relatives
+        type(value) is ChaserRelativeFrameTargetedSourceHandle for value in relatives
     )
     if not (deep_handles or targeted_handles):
         raise TypeError(
@@ -537,9 +596,14 @@ def chaser_spatial_occupancy_input_from_handles(
         )
     if type(semantic_selection) is not ProtocolSemanticChaserSelectionSourceHandle:
         raise TypeError("semantic_selection must be one strict semantic handle.")
-    if any(type(value) is not ComposableChaserSuccessorSourceHandle for value in radials):
+    if any(
+        type(value) is not ComposableChaserSuccessorSourceHandle for value in radials
+    ):
         raise TypeError("radial providers must be strict composable handles.")
-    for handle in (*relatives, semantic_selection, *radials):
+    core_dependencies = tuple(
+        core_paradigm_dependency_from_relative_frame(relative) for relative in relatives
+    )
+    for handle in (semantic_selection, *radials):
         handle.assert_current()
     if any(radial.successor_kind != "chaser_radial_near_field" for radial in radials):
         _fail("Spatial occupancy requires radial/near-field source handles.")
@@ -601,6 +665,10 @@ def chaser_spatial_occupancy_input_from_handles(
             _fail("Paired radial successors expose different arena geometry.")
         if _plain(scientific.get("epoch_records")) != epoch_records:
             _fail("Paired radial successors expose different semantic epochs.")
+        radial_core = scientific.get("core_authority")
+        expected_core = core_dependencies[index]
+        if _plain(radial_core) != _plain(expected_core):
+            _fail("Radial and occupancy providers bind different core authorities.")
         position_provider = scientific.get("position_provider")
         fish_authority = relative.source_authorities["fish_position"]
         if (
@@ -611,7 +679,9 @@ def chaser_spatial_occupancy_input_from_handles(
         ):
             _fail(f"Radial provider {index} differs from relative-frame authority.")
 
-    scales = tuple(_plain(relative.run_manifest.get("scale_policy")) for relative in relatives)
+    scales = tuple(
+        _plain(relative.run_manifest.get("scale_policy")) for relative in relatives
+    )
     if scales[0] != scales[1] or scales[0].get("unit") != "mm":
         _fail("Paired providers do not share one millimetre scale policy.")
     pixels_per_mm = float(scales[0].get("pixels_per_unit", math.nan))
@@ -639,9 +709,10 @@ def chaser_spatial_occupancy_input_from_handles(
             fish_position_authority=relative.source_authorities["fish_position"],
             fish_xy_px=view.frame_array("fish_position_xy_px"),
             fish_valid=view.frame_array("fish_position_valid"),
+            core_authority_dependency=core_dependencies[index],
         )
-        for role, relative, radial, view in zip(
-            PROVIDER_ROLES, relatives, radials, views, strict=True
+        for index, (role, relative, radial, view) in enumerate(
+            zip(PROVIDER_ROLES, relatives, radials, views, strict=True)
         )
     )
     return ChaserSpatialOccupancyInput(

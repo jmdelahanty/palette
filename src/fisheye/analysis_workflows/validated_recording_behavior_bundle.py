@@ -14,6 +14,7 @@ and body-alignment capabilities must be represented explicitly when absent.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path, PurePosixPath
@@ -1125,6 +1126,140 @@ def _spatial_radial_proof(
     )
 
 
+@dataclass(frozen=True)
+class BoundExactChaserExtensionSources:
+    """One fully validated exact-chaser projection without a core selection.
+
+    This is the shared receipt-resolution boundary used by both the historical
+    recording-behavior bundle and a core-roster-backed composite.  It deliberately
+    stops before interpreting motion, body-frame, or bout authority: those belong
+    to the consuming bundle profile rather than to the chaser receipt grammar.
+    """
+
+    projection_path: Path
+    projection: Mapping[str, Any]
+    analysis_zarr: Path
+    recording_id: str
+    exact_receipts: Mapping[str, Mapping[str, Any]]
+    relative_receipts: Mapping[str, Mapping[str, Any]]
+    exact_bindings: Mapping[str, Mapping[str, Any]]
+    relative_bindings: Mapping[str, Mapping[str, Any]]
+    scientific_child_bindings: Mapping[str, Mapping[str, Any]]
+    scientific_manifests: Mapping[str, Mapping[str, Any]]
+    semantic_binding: Mapping[str, Any]
+    relative_evidence: Mapping[str, Mapping[str, Any]]
+    relative_axis: Mapping[str, Any]
+    spatial_evidence: Mapping[str, Any]
+    reviewed_geometry: Mapping[str, Any]
+
+
+def bind_exact_chaser_extension_sources(
+    projection_receipt_path: str | Path,
+    *,
+    expected_analysis_zarr: str | Path | None = None,
+    expected_recording_id: str | None = None,
+) -> BoundExactChaserExtensionSources:
+    """Resolve one exact chaser receipt through the shared strict grammar.
+
+    Child receipts and their current metadata generations are validated exactly
+    once here.  No selector is consulted and no scientific array is copied.
+    """
+
+    projection_path = Path(projection_receipt_path).expanduser().resolve()
+    projection = read_exact_chaser_projection_receipt(
+        projection_path,
+        expected_analysis_zarr=expected_analysis_zarr,
+        expected_recording_id=expected_recording_id,
+        validate_current_metadata=False,
+        validate_child_receipts=False,
+    )
+    archive = Path(str(projection["analysis_zarr"])).resolve()
+    recording_id = str(projection["recording_id"])
+    exact, relative = _read_child_receipts(
+        projection, archive=archive, recording_id=recording_id
+    )
+    exact_bindings = {
+        key: _binding_from_receipt(
+            receipt, Path(str(projection["exact_children"][key]["receipt_path"]))
+        )
+        for key, receipt in exact.items()
+    }
+    relative_bindings = {
+        key: _binding_from_receipt(
+            receipt,
+            Path(str(projection["relative_frame_children"][key]["receipt_path"])),
+        )
+        for key, receipt in relative.items()
+    }
+    for key, binding in exact_bindings.items():
+        parent = _EXPECTED_PARENTS.get(key)
+        if parent is not None:
+            _exact_run_path(binding["run_path"], field=f"{key} run_path", parent=parent)
+    for key, binding in relative_bindings.items():
+        _exact_run_path(
+            binding["run_path"],
+            field=f"{key} relative run_path",
+            parent=_EXPECTED_PARENTS[f"{key}_relative"],
+        )
+    scientific = {
+        key: _scientific_manifest(receipt, child_key=key)
+        for key, receipt in exact.items()
+    }
+    semantic_binding = {
+        "run_path": exact_bindings["semantic_selection"]["run_path"],
+        "manifest_sha256": exact_bindings["semantic_selection"]["manifest_sha256"],
+    }
+    relatives = {
+        role: _relative_evidence(
+            relative[role],
+            role=role,
+            receipt_path=Path(
+                str(projection["relative_frame_children"][role]["receipt_path"])
+            ),
+        )
+        for role in ("keypoint", "detection")
+    }
+    relative_axis = _paired_relative_proof(
+        relatives["keypoint"], relatives["detection"]
+    )
+    spatial_evidence, geometry = _spatial_radial_proof(
+        scientific=scientific,
+        exact_bindings=exact_bindings,
+        relative_bindings=relative_bindings,
+        relatives=relatives,
+        semantic_binding=semantic_binding,
+    )
+    scientific_children = {
+        _EXACT_CHILD_TO_SCIENTIFIC[key]: binding
+        for key, binding in exact_bindings.items()
+    }
+    scientific_children.update(
+        {
+            _RELATIVE_TO_SCIENTIFIC[key]: binding
+            for key, binding in relative_bindings.items()
+        }
+    )
+    if set(BASE_SCIENTIFIC_CHILD_KEYS).difference(scientific_children):
+        _fail("Projection receipt lacks a required base scientific child.")
+    return BoundExactChaserExtensionSources(
+        projection_path=projection_path,
+        projection=projection,
+        analysis_zarr=archive,
+        recording_id=recording_id,
+        exact_receipts=MappingProxyType(exact),
+        relative_receipts=MappingProxyType(relative),
+        exact_bindings=MappingProxyType(exact_bindings),
+        relative_bindings=MappingProxyType(relative_bindings),
+        scientific_child_bindings=MappingProxyType(scientific_children),
+        scientific_manifests=MappingProxyType(scientific),
+        semantic_binding=MappingProxyType(semantic_binding),
+        relative_evidence=MappingProxyType(relatives),
+        relative_axis=MappingProxyType(relative_axis),
+        spatial_evidence=MappingProxyType(spatial_evidence),
+        reviewed_geometry=geometry,
+    )
+
+
 def _chain_proofs(
     *,
     scientific: Mapping[str, Mapping[str, Any]],
@@ -1355,75 +1490,29 @@ def _resolve_bundle_content(
     expected_analysis_zarr: str | Path | None,
     expected_recording_id: str | None,
 ) -> dict[str, Any]:
-    projection_path = Path(projection_receipt_path).expanduser().resolve()
-    projection = read_exact_chaser_projection_receipt(
-        projection_path,
+    extension = bind_exact_chaser_extension_sources(
+        projection_receipt_path,
         expected_analysis_zarr=expected_analysis_zarr,
         expected_recording_id=expected_recording_id,
-        validate_current_metadata=False,
-        validate_child_receipts=False,
     )
-    archive = Path(str(projection["analysis_zarr"])).resolve()
-    recording_id = str(projection["recording_id"])
-    exact, relative = _read_child_receipts(
-        projection, archive=archive, recording_id=recording_id
-    )
+    projection_path = extension.projection_path
+    projection = extension.projection
+    archive = extension.analysis_zarr
+    recording_id = extension.recording_id
+    exact = extension.exact_receipts
     if "epoch_behavior" not in exact:
         _fail(
             "Validated recording-behavior schema v1 requires an exact "
             "epoch_behavior child to bind provider motion and swim bouts."
         )
-    exact_bindings = {
-        key: _binding_from_receipt(
-            receipt, Path(str(projection["exact_children"][key]["receipt_path"]))
-        )
-        for key, receipt in exact.items()
-    }
-    relative_bindings = {
-        key: _binding_from_receipt(
-            receipt,
-            Path(str(projection["relative_frame_children"][key]["receipt_path"])),
-        )
-        for key, receipt in relative.items()
-    }
-    for key, binding in exact_bindings.items():
-        parent = _EXPECTED_PARENTS.get(key)
-        if parent is not None:
-            _exact_run_path(binding["run_path"], field=f"{key} run_path", parent=parent)
-    for key, binding in relative_bindings.items():
-        _exact_run_path(
-            binding["run_path"],
-            field=f"{key} relative run_path",
-            parent=_EXPECTED_PARENTS[f"{key}_relative"],
-        )
-    scientific = {
-        key: _scientific_manifest(receipt, child_key=key)
-        for key, receipt in exact.items()
-    }
-    semantic_binding = {
-        "run_path": exact_bindings["semantic_selection"]["run_path"],
-        "manifest_sha256": exact_bindings["semantic_selection"]["manifest_sha256"],
-    }
-    relatives = {
-        role: _relative_evidence(
-            relative[role],
-            role=role,
-            receipt_path=Path(
-                str(projection["relative_frame_children"][role]["receipt_path"])
-            ),
-        )
-        for role in ("keypoint", "detection")
-    }
-    relative_axis = _paired_relative_proof(
-        relatives["keypoint"], relatives["detection"]
-    )
-    spatial_evidence, geometry = _spatial_radial_proof(
-        scientific=scientific,
-        exact_bindings=exact_bindings,
-        relative_bindings=relative_bindings,
-        relatives=relatives,
-        semantic_binding=semantic_binding,
-    )
+    exact_bindings = extension.exact_bindings
+    relative_bindings = extension.relative_bindings
+    scientific = extension.scientific_manifests
+    semantic_binding = extension.semantic_binding
+    relatives = extension.relative_evidence
+    relative_axis = extension.relative_axis
+    spatial_evidence = extension.spatial_evidence
+    geometry = extension.reviewed_geometry
     epoch = scientific["epoch_behavior"]
     (
         epoch_evidence,
@@ -1447,18 +1536,7 @@ def _resolve_bundle_content(
         geometry=geometry,
     )
 
-    scientific_children = {
-        _EXACT_CHILD_TO_SCIENTIFIC[key]: binding
-        for key, binding in exact_bindings.items()
-    }
-    scientific_children.update(
-        {
-            _RELATIVE_TO_SCIENTIFIC[key]: binding
-            for key, binding in relative_bindings.items()
-        }
-    )
-    if set(BASE_SCIENTIFIC_CHILD_KEYS).difference(scientific_children):
-        _fail("Projection receipt lacks a required base scientific child.")
+    scientific_children = extension.scientific_child_bindings
 
     source_bindings = {
         "fish_position_keypoint": {
@@ -1589,7 +1667,7 @@ def _resolve_bundle_content(
                 "projection_receipt_sha256": projection["record_sha256"],
                 "projection_schema_version": projection["schema_version"],
                 "exact_child_keys": sorted(exact),
-                "relative_child_keys": sorted(relative),
+                "relative_child_keys": sorted(extension.relative_receipts),
             },
         ),
         "paired_relative_frame_axis": _proof(
@@ -1606,22 +1684,24 @@ def _resolve_bundle_content(
         ),
         **chain_proofs,
     }
-    return {
-        "analysis_zarr": str(archive),
-        "recording_id": recording_id,
-        "projection_receipt": {
-            "receipt_path": str(projection_path),
-            "receipt_sha256": projection["record_sha256"],
-            "schema_id": PROJECTION_RECEIPT_SCHEMA_ID,
-            "schema_version": projection["schema_version"],
-        },
-        "source_bindings": source_bindings,
-        "scientific_child_bindings": scientific_children,
-        "capabilities": capabilities,
-        "compatibility_proofs": proofs,
-        "validation_policy": VALIDATION_POLICY,
-        "safety": SAFETY,
-    }
+    return _plain(
+        {
+            "analysis_zarr": str(archive),
+            "recording_id": recording_id,
+            "projection_receipt": {
+                "receipt_path": str(projection_path),
+                "receipt_sha256": projection["record_sha256"],
+                "schema_id": PROJECTION_RECEIPT_SCHEMA_ID,
+                "schema_version": projection["schema_version"],
+            },
+            "source_bindings": source_bindings,
+            "scientific_child_bindings": scientific_children,
+            "capabilities": capabilities,
+            "compatibility_proofs": proofs,
+            "validation_policy": VALIDATION_POLICY,
+            "safety": SAFETY,
+        }
+    )
 
 
 def build_validated_recording_behavior_bundle(
@@ -1984,6 +2064,7 @@ def ensure_validated_recording_behavior_bundle(
 
 
 __all__ = [
+    "BoundExactChaserExtensionSources",
     "BUNDLE_METHOD_ID",
     "BUNDLE_SCHEMA_ID",
     "BUNDLE_SCHEMA_VERSION",
@@ -1992,6 +2073,7 @@ __all__ = [
     "MAX_BUNDLE_BYTES",
     "REASON_CODES_BY_STATE",
     "ValidatedRecordingBehaviorBundleError",
+    "bind_exact_chaser_extension_sources",
     "build_validated_recording_behavior_bundle",
     "ensure_validated_recording_behavior_bundle",
     "read_validated_recording_behavior_bundle",

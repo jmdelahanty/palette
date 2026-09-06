@@ -25,6 +25,11 @@ from fisheye.analysis_workflows.core_behavior_cohort_adapter import (
     build_bundle_set_from_core_behavior_execution_reports,
     validate_core_behavior_bundle_set_current_sources,
 )
+from fisheye.analysis_workflows.core_chaser_composite_bundle import (
+    CORE_CHASER_BUNDLE_ADAPTER_ID,
+    build_bundle_set_from_core_chaser_composite_bundles,
+    validate_core_chaser_bundle_set_current_sources,
+)
 from fisheye.analysis_workflows.validated_behavior_cohort_adapters import (
     RECORDING_BUNDLE_ADAPTER_ID,
     build_bundle_set_from_validated_recording_behavior_bundles,
@@ -56,6 +61,9 @@ _BUNDLE_ADAPTER_BY_ADMISSION_ROLE = {
     EXACT_CHASER_ADMISSION_ROLE: RECORDING_BUNDLE_ADAPTER_ID,
     CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE: CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
 }
+_CORE_CHASER_ADMISSION_ROLES = frozenset(
+    {CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE, EXACT_CHASER_ADMISSION_ROLE}
+)
 
 
 def _utc_now() -> str:
@@ -245,6 +253,9 @@ def _bundle_adapter_for_membership(membership: Mapping[str, Any]) -> str:
             for binding in member["admission_receipts"]
             if binding.get("role") in _BUNDLE_ADAPTER_BY_ADMISSION_ROLE
         }
+        if roles == _CORE_CHASER_ADMISSION_ROLES:
+            adapters.add(CORE_CHASER_BUNDLE_ADAPTER_ID)
+            continue
         if len(roles) != 1:
             raise ValidatedBehaviorCohortCliError(
                 f"Admitted member {member['recording_id']!r} does not select "
@@ -273,6 +284,10 @@ def _bundle_validator(
         )
     if adapter_id == CORE_BEHAVIOR_BUNDLE_ADAPTER_ID:
         return lambda raw: validate_core_behavior_bundle_set_current_sources(
+            raw, membership=membership
+        )
+    if adapter_id == CORE_CHASER_BUNDLE_ADAPTER_ID:
+        return lambda raw: validate_core_chaser_bundle_set_current_sources(
             raw, membership=membership
         )
     raise ValidatedBehaviorCohortCliError(
@@ -464,6 +479,16 @@ def _bundle_set_command(args: argparse.Namespace) -> dict[str, Any]:
             export_profile_id=(
                 existing_export_profile_id or CORE_BEHAVIOR_EXPORT_PROFILE_ID
             ),
+        )
+    elif adapter_id == CORE_CHASER_BUNDLE_ADAPTER_ID:
+        requested = build_bundle_set_from_core_chaser_composite_bundles(
+            bundle_set_id=args.bundle_set_id,
+            membership=membership,
+            membership_path=membership_path,
+            bundle_paths_by_recording=bundle_paths,
+            bundle_root=args.bundle_root,
+            palette_commit=args.palette_commit,
+            created_at_utc=created_at_utc,
         )
     else:
         requested = build_bundle_set_from_validated_recording_behavior_bundles(

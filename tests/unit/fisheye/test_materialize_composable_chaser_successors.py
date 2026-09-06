@@ -255,3 +255,71 @@ def test_semantic_loader_failure_is_structured_and_blocks_all_dependents(
         "dependency_unavailable",
         "source_handle_unavailable",
     ]
+
+
+def test_core_mode_binds_one_roster_motion_and_bout_without_legacy_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_order = _install_ready_fakes(monkeypatch)
+    roster = {"record_sha256": "a" * 64}
+    bound = object()
+    core_handle = SimpleNamespace(
+        canonical_bout_source=SimpleNamespace(
+            binding={
+                "run_name": "core-bouts-v1",
+                "run_path": "analysis/swim_bout_runs/core-bouts-v1",
+                "payload_sha256": "b" * 64,
+            }
+        ),
+        core_authority_roster_sha256="a" * 64,
+    )
+    calls: list[tuple[object, dict[str, object]]] = []
+    monkeypatch.setattr(
+        operator,
+        "bind_core_motion_and_bouts_from_roster",
+        lambda value: bound if value is roster else pytest.fail("wrong roster"),
+    )
+
+    def bind_handle(value: object, **kwargs: object) -> object:
+        calls.append((value, kwargs))
+        return core_handle
+
+    monkeypatch.setattr(operator, "bind_core_motion_track_source_handle", bind_handle)
+    monkeypatch.setattr(
+        operator,
+        "load_provider_track_motion_source_handle",
+        lambda *args, **kwargs: pytest.fail("legacy motion fallback must not run"),
+    )
+
+    result = _run(
+        tmp_path,
+        modules=(operator.ESCAPE_FREEZE,),
+        provider_motion_run_path=None,
+        swim_bout_run_name=None,
+        core_authority_roster=roster,
+        core_track_id=7,
+        eye_run_name=None,
+        eye_convention_receipt=None,
+    )
+
+    assert result["status"] == "planned_no_writes"
+    assert prepared_order == ["controller", "bout", "escape"]
+    assert len(calls) == 1
+    assert calls[0][0] is bound
+    assert calls[0][1]["track_id"] == 7
+    assert result["sources"]["core_motion"]["status"] == "ready"
+    assert result["sources"]["swim_bouts"]["run_name"] == "core-bouts-v1"
+    assert "provider_motion" not in result["sources"]
+
+
+def test_core_mode_rejects_independent_provider_inputs(tmp_path: Path) -> None:
+    with pytest.raises(
+        operator.ComposableChaserSuccessorOperatorError,
+        match="cannot accept provider-motion or independent bout",
+    ):
+        _run(
+            tmp_path,
+            core_authority_roster={"record_sha256": "a" * 64},
+            core_track_id=7,
+        )

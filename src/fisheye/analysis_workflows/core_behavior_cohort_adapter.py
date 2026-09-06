@@ -51,6 +51,7 @@ from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import
     KINEMATICS_SAMPLES_CAPABILITY,
     KINEMATICS_SAMPLES,
     SUBJECT_BODY_FRAME_CAPABILITY,
+    SUBJECT_BODY_FRAME_SOURCE_PROFILE_ID,
     TAIL_TRACE_CAPABILITY,
 )
 from fisheye.shared.pixel_frame_authority import (
@@ -70,6 +71,12 @@ from .validated_behavior_cohort import (
     validate_validated_behavior_bundle_set,
 )
 from .contracts import TemporalPolicy
+from .core_authority_roster import (
+    BoutAuthorityIdentity,
+    build_core_authority_roster,
+    build_subject_body_frame_source_binding,
+    core_roster_bout_identity,
+)
 from .validated_behavior_cohort_adapters import (
     sha256_file,
     validate_membership_current_sources,
@@ -194,52 +201,6 @@ def canonical_swim_bout_projection_contract() -> dict[str, Any]:
     )
 
 
-def _subject_shape_binding(
-    publication: BoundSubjectShapeCoordinatePublication,
-) -> dict[str, Any]:
-    run = publication._run
-    temporal = publication.temporal_authority
-    acquisition = temporal.acquisition_frame
-    source_rate = acquisition.record.source_video_metadata.get("fps")
-    if isinstance(source_rate, bool) or not isinstance(source_rate, (int, float)):
-        _fail("Subject-shape acquisition authority lacks exact FPS.")
-    body: dict[str, Any] = {
-        "schema_id": "palette.subject_body_frame_samples.source_binding",
-        "schema_version": 1,
-        "stage_id": "subject_shape",
-        "run_name": publication.run_path.rsplit("/", 1)[-1],
-        "run_path": publication.run_path,
-        "source_schema_id": run.attrs.get("schema_id"),
-        "source_schema_version": run.attrs.get("schema_version"),
-        "publication_manifest_sha256": publication.manifest.record_sha256,
-        "row_count": int(publication.row_identity.leading_dimension),
-        "row_identity_sha256": publication.row_identity.record_sha256,
-        "temporal_authority_sha256": temporal.record_sha256,
-        "acquisition_camera_frame_sha256": acquisition.record_sha256,
-        "recording_id": temporal.record.recording_id,
-        "camera_id": temporal.record.camera_id,
-        "source_total_frames": temporal.record.source_total_frames,
-        "source_sample_rate_hz": float(source_rate),
-        "body_frame_record_sha256": publication.body_frame.record_sha256,
-        "heading_semantics_sha256": publication.heading_semantics.record_sha256,
-        "origin_coordinate_descriptor_sha256": publication.descriptors[
-            "body_frame/origin_xy"
-        ].descriptor.digest(),
-        "forward_coordinate_descriptor_sha256": publication.descriptors[
-            "body_frame/forward_axis_xy"
-        ].descriptor.digest(),
-        "left_coordinate_descriptor_sha256": publication.descriptors[
-            "body_frame/left_axis_xy"
-        ].descriptor.digest(),
-        "completion_snapshot": {
-            "status": run.attrs.get("palette_run_completion_status"),
-            "completed_at_utc": run.attrs.get("palette_run_completed_at_utc"),
-            "selector_eligible": publication.selector_eligible,
-        },
-    }
-    return _sealed(body)
-
-
 def _join_authority(
     *,
     acquisition: BoundAcquisitionCameraFrame,
@@ -351,6 +312,8 @@ class BoundCoreBehaviorCohortSources:
     bouts: BoundActivitySpatialSources = field(repr=False, compare=False)
     join_authority: Mapping[str, Any]
     capability_bindings: Mapping[str, Mapping[str, Any]]
+    core_authority_roster: Mapping[str, Any]
+    bout_authority_identity: BoutAuthorityIdentity
 
 
 def bind_core_behavior_cohort_sources(
@@ -412,7 +375,7 @@ def bind_core_behavior_cohort_sources(
         _fail("Tail binder did not retain its strict subject-shape authority.")
     if shape_publication.run_path != runs["subject_shape"]["run_path"]:
         _fail("Strict subject-shape binder resolved another execution-report run.")
-    shape_binding = _subject_shape_binding(shape_publication)
+    shape_binding = build_subject_body_frame_source_binding(shape_publication)
     track_ids = [int(item["track_id"]) for item in track.binding["tracks"]]
     if len(track_ids) != 1:
         _fail(
@@ -476,7 +439,7 @@ def bind_core_behavior_cohort_sources(
             join_authority_sha256=join_sha,
         ),
         SUBJECT_BODY_FRAME_CAPABILITY: _capability_binding(
-            profile_id="subject_body_frame_samples_v1",
+            profile_id=SUBJECT_BODY_FRAME_SOURCE_PROFILE_ID,
             source_binding=shape_binding,
             projection_contract=subject_body_frame_projection_contract(),
             join_authority_sha256=join_sha,
@@ -500,6 +463,17 @@ def bind_core_behavior_cohort_sources(
             join_authority_sha256=join_sha,
         ),
     }
+    authority_roster = build_core_authority_roster(
+        recording_id=expected_recording_id,
+        analysis_zarr=source_path,
+        execution_report_binding=binding,
+        capability_bindings=capability_bindings,
+    )
+    bout_identity = core_roster_bout_identity(
+        authority_roster,
+        bout_source=bouts.bout_sources[track_ids[0]],
+        track_binding=track.binding,
+    )
     return BoundCoreBehaviorCohortSources(
         report_path=Path(report_path).expanduser().resolve(),
         report_binding=binding,
@@ -514,6 +488,8 @@ def bind_core_behavior_cohort_sources(
         bouts=bouts,
         join_authority=join,
         capability_bindings=capability_bindings,
+        core_authority_roster=authority_roster,
+        bout_authority_identity=bout_identity,
     )
 
 
@@ -675,6 +651,71 @@ def build_bundle_set_from_core_behavior_execution_reports(
     )
 
 
+def core_authority_roster_from_bundle_set_member(
+    bundle_set: Mapping[str, Any],
+    member: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Recover one sealed roster from an already-validated core bundle member.
+
+    This is static capability admission: it consumes only the generic sealed
+    bundle-set records and does not reopen scientific arrays. Dynamic execution
+    must pass the result to the shared roster resolver before a dependent node
+    can write scratch state.
+    """
+
+    source = _mapping(bundle_set, field_name="core bundle set")
+    profile = _mapping(source.get("bundle_profile"), field_name="bundle profile")
+    contract = core_behavior_capability_contract(CORE_BEHAVIOR_EXPORT_PROFILE_ID)
+    if _plain(profile) != _bundle_profile(
+        contract,
+        export_profile_id=CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+    ) or _plain(source.get("capability_contract")) != _plain(contract):
+        _fail("Bundle set is not the installed full-rate core-behavior profile.")
+
+    item = _mapping(member, field_name="core bundle-set member")
+    if item.get("bundle_state") != "complete" or item.get("reason_code") is not None:
+        _fail("A paradigm dependency requires one complete core bundle member.")
+    bundle = _mapping(item.get("bundle"), field_name="core member bundle")
+    receipts = list(bundle.get("receipt_bindings") or ())
+    if (
+        len(receipts) != 1
+        or receipts[0].get("role") != CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE
+    ):
+        _fail("Core member lacks one exact execution-report admission receipt.")
+    capabilities = _mapping(
+        item.get("capabilities"),
+        field_name="core member capabilities",
+    )
+    if set(capabilities) != set(CORE_BEHAVIOR_CAPABILITY_KEYS):
+        _fail("Core member capability roster is not closed.")
+    bindings: dict[str, Mapping[str, Any]] = {}
+    for capability in CORE_BEHAVIOR_CAPABILITY_KEYS:
+        record = _mapping(
+            capabilities[capability],
+            field_name=f"core capability {capability}",
+        )
+        if (
+            record.get("state") != "complete"
+            or record.get("reason_code") is not None
+            or record.get("detail") is not None
+            or not isinstance(record.get("binding"), Mapping)
+        ):
+            _fail(f"Core capability {capability!r} is not completely admitted.")
+        bindings[capability] = record["binding"]
+    inventory = {
+        "execution_report": _plain(receipts[0]),
+        "capability_bindings": _plain(bindings),
+    }
+    if canonical_json_sha256(inventory) != bundle.get("binding_inventory_sha256"):
+        _fail("Core member binding inventory digest is stale.")
+    return build_core_authority_roster(
+        recording_id=str(item["recording_id"]),
+        analysis_zarr=str(item["analysis_zarr"]),
+        execution_report_binding=receipts[0],
+        capability_bindings=bindings,
+    )
+
+
 def validate_core_behavior_bundle_set_current_sources(
     value: object,
     *,
@@ -735,6 +776,7 @@ __all__ = [
     "build_bundle_set_from_core_behavior_execution_reports",
     "canonical_swim_bout_projection_contract",
     "core_behavior_capability_contract",
+    "core_authority_roster_from_bundle_set_member",
     "subject_body_frame_projection_contract",
     "validate_core_behavior_bundle_set_current_sources",
 ]
