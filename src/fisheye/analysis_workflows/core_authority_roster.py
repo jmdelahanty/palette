@@ -39,10 +39,14 @@ from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import
 from fisheye.analytics_exports.kinematics_samples import (
     BoundKinematicsSamplesSource,
     CORE_MOTION_SOURCE_SURFACE_PROFILE_ID,
+    TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
     bind_kinematics_samples_source,
 )
 from fisheye.analytics_exports.activity_spatial_time_bins import (
     BoundActivitySpatialSources,
+    SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
     bind_activity_spatial_sources,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
@@ -89,6 +93,56 @@ _ROSTER_FIELDS = frozenset(
         "cross_grain_join_authority",
         "capability_bindings",
         "record_sha256",
+    }
+)
+_TRACK_SELECTION_SNAPSHOT_FIELDS = frozenset(
+    {
+        "mode",
+        "parent_latest",
+        "parent_latest_complete",
+        "parent_latest_scope",
+        "scope_latest",
+        "parent_completion_epoch",
+        "scope_completion_epoch",
+    }
+)
+_BOUT_SELECTION_SNAPSHOT_FIELDS = frozenset(
+    {
+        "mode",
+        "parent_latest",
+        "parent_latest_complete",
+        "parent_completion_epoch",
+    }
+)
+_COMPLETION_SNAPSHOT_FIELDS = frozenset(
+    {
+        "status",
+        "completed_at_utc",
+        "selector_eligible",
+    }
+)
+_TRACK_AUTHORITY_PROFILE_BY_SELECTION_MODE = MappingProxyType(
+    {
+        "explicit_run": (
+            True,
+            TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+        ),
+        "explicit_selector_ineligible_canary": (
+            False,
+            TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+        ),
+    }
+)
+_BOUT_AUTHORITY_PROFILE_BY_SELECTION_MODE = MappingProxyType(
+    {
+        "explicit_per_track_run": (
+            True,
+            SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+        ),
+        "explicit_selector_ineligible_canary_per_track_run": (
+            False,
+            SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+        ),
     }
 )
 _BOUT_IDENTITY_FIELDS = frozenset(
@@ -1155,6 +1209,41 @@ def core_roster_bout_identity(
     )
 
 
+def _authority_profile_from_source_binding(
+    binding: Mapping[str, Any],
+    *,
+    label: str,
+    selection_snapshot_fields: frozenset[str],
+    profiles_by_mode: Mapping[str, tuple[bool, str]],
+) -> tuple[str, bool]:
+    selection = _mapping(
+        binding.get("selection_snapshot"),
+        label=f"{label} selection snapshot",
+    )
+    if set(selection) != selection_snapshot_fields:
+        _fail(f"{label} selection snapshot is not exact.")
+    mode = selection.get("mode")
+    if type(mode) is not str or mode not in profiles_by_mode:
+        _fail(f"{label} selection mode is unsupported.")
+    expected_selector_eligible, authority_profile_id = profiles_by_mode[mode]
+
+    completion = _mapping(
+        binding.get("completion_snapshot"),
+        label=f"{label} completion snapshot",
+    )
+    if set(completion) != _COMPLETION_SNAPSHOT_FIELDS:
+        _fail(f"{label} completion snapshot is not exact.")
+    if completion.get("status") != "complete":
+        _fail(f"{label} source is not complete.")
+    _text(
+        completion.get("completed_at_utc"),
+        label=f"{label} completion timestamp",
+    )
+    if completion.get("selector_eligible") is not expected_selector_eligible:
+        _fail(f"{label} selection and completion lifecycles differ.")
+    return authority_profile_id, expected_selector_eligible
+
+
 def bind_core_motion_and_bouts_from_roster(
     roster: Mapping[str, Any],
 ) -> BoundCoreMotionAndBouts:
@@ -1187,18 +1276,14 @@ def bind_core_motion_and_bouts_from_roster(
     if len(parts) != 2 or parts[0] not in {"online", "offline"}:
         _fail("Core motion roster path does not contain one exact scope and run.")
     scope, run_name = parts
-
-    root = open_zarr_root(source, mode="r", use_consolidated=True)
-    track = bind_kinematics_samples_source(
-        root,
-        zarr_path=source,
-        expected_recording_id=recording_id,
-        track_kinematics_run=run_name,
-        track_scope=scope,
-        source_surface_profile_id=CORE_MOTION_SOURCE_SURFACE_PROFILE_ID,
+    track_authority_profile_id, track_selector_eligible = (
+        _authority_profile_from_source_binding(
+            expected_track,
+            label="Track-motion",
+            selection_snapshot_fields=_TRACK_SELECTION_SNAPSHOT_FIELDS,
+            profiles_by_mode=_TRACK_AUTHORITY_PROFILE_BY_SELECTION_MODE,
+        )
     )
-    if _plain(track.binding) != _plain(expected_track):
-        _fail("Live core motion source differs from the selected authority roster.")
 
     bout_capability = _mapping(
         capabilities[CANONICAL_SWIM_BOUTS_CAPABILITY],
@@ -1218,6 +1303,32 @@ def bind_core_motion_and_bouts_from_roster(
         or "/" in bout_run_path[len(bout_prefix) :]
     ):
         _fail("Canonical swim-bout roster path does not name one exact run.")
+    bout_authority_profile_id, bout_selector_eligible = (
+        _authority_profile_from_source_binding(
+            expected_bout,
+            label="Swim-bout",
+            selection_snapshot_fields=_BOUT_SELECTION_SNAPSHOT_FIELDS,
+            profiles_by_mode=_BOUT_AUTHORITY_PROFILE_BY_SELECTION_MODE,
+        )
+    )
+    if track_selector_eligible is not bout_selector_eligible:
+        _fail(
+            "Core motion and canonical swim bouts must share one authority lifecycle."
+        )
+
+    root = open_zarr_root(source, mode="r", use_consolidated=True)
+    track = bind_kinematics_samples_source(
+        root,
+        zarr_path=source,
+        expected_recording_id=recording_id,
+        track_kinematics_run=run_name,
+        track_scope=scope,
+        source_surface_profile_id=CORE_MOTION_SOURCE_SURFACE_PROFILE_ID,
+        authority_profile_id=track_authority_profile_id,
+    )
+    if _plain(track.binding) != _plain(expected_track):
+        _fail("Live core motion source differs from the selected authority roster.")
+
     bouts = bind_activity_spatial_sources(
         root,
         zarr_path=source,
@@ -1226,6 +1337,8 @@ def bind_core_motion_and_bouts_from_roster(
         track_scope=scope,
         swim_bout_runs_by_track={track_id: bout_run_path[len(bout_prefix) :]},
         prebound_track_source=track,
+        track_authority_profile_id=track_authority_profile_id,
+        swim_bout_authority_profile_id=bout_authority_profile_id,
     )
     bound_bout = bouts.bout_sources[track_id]
     if _plain(bound_bout.binding) != _plain(expected_bout):

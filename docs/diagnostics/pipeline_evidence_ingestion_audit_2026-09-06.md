@@ -5,6 +5,52 @@ repository-wide evidence-family index. This is evidence and design clarification
 not a new runtime contract, implementation queue, or declaration of pipeline
 completion.
 
+## September 6 PR-preparation reconciliation
+
+The findings below describe the pinned audited source, not the state of every
+later branch. Historical measurements, diagnostic outputs, source pins, and
+numerical tables are unchanged. The user authorized Palette-only preparation,
+commits, pushes, and CI; main merges and production changes remain separate.
+
+- This audit candidate is refreshed from its clean prior head
+  `0cbca7f5be5e8f2c1a21660147b831606295bf4e` onto current main
+  `3d017867e79b14d11ddca3ee1916d50ac6499c78` by a conflict-free,
+  history-preserving merge. Each incoming exact commit had all 23 required
+  checks completed successfully. The refreshed candidate needs its own CI;
+  the PR records its exact commit and results. No runtime fix branch is
+  incorporated into this documentation-only change.
+- [CI gate #140](https://github.com/jmdelahanty/palette/pull/140), exact head
+  `74926b21cb2e587b1caae151aaa9c4df91e592b8`, passed all 24 checks in
+  [run 34028051914](https://github.com/jmdelahanty/palette/actions/runs/34028051914).
+  It remains unmerged; `ci-required` is not yet an active main requirement.
+- [Ingestion validation #143](https://github.com/jmdelahanty/palette/pull/143)
+  corrects the reproduced PTP-state, integer, and frame-map defects. Its old
+  head `3a85a8c9215894945685eaba6f0055730392db44` passed 23 checks.
+  Refreshed head `eb224a216ac7774770b33de021c599b741ce7927` includes the
+  validated CI gate and has fresh CI pending. Those fixes are not merged into
+  main, and do not close the independent clock-publication finding.
+- Clock-publication safety is separately implemented in the owned
+  `/tmp/palette-clock-publication-safety-20260906` worktree, based on the
+  original #143 head: 277 focused tests pass, including failure/retry and the
+  public source-digest interface. It is still uncommitted and lacks full CI.
+- The separate ingestion-enforcement worktree at
+  `/tmp/palette-ingestion-enforcement-20260906` now rejects recorded optional
+  failures, source legacy intake, unverified replay, and false invocation
+  acknowledgments. Required-context defaults and manual sampled-training
+  identity/failure gates have been corrected through their own contracts.
+  The 370-test regression and 40-test follow-up pass locally; full CI and
+  integration with clock safety remain unrun. This is not full dispatcher
+  recovery, parent-level clipped intake, or an all-entrypoint closure claim.
+- The separately reviewable documentation/rules draft preserves the older
+  architecture audits and narrows their scientific and authority claims.
+  Transfer-v2 consumer adoption, hardware synchronization/equivalence,
+  full crop-ledger payload integrity, historical mutation, and activation
+  remain separately scoped work. No deployed code or live data was changed.
+
+Implementation status continues to belong to the existing authority
+consolidation queue. Later PR heads/checks supersede this dated preparation
+snapshot; none of these local results is scientific acceptance.
+
 ## 1. Outcome and scope
 
 The desired interface is already the right architectural direction: one scientific
