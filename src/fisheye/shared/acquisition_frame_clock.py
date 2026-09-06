@@ -164,7 +164,10 @@ def _parse_optional_int(value: object, *, label: str, row_number: int) -> int | 
     if not text:
         return None
     try:
-        return int(text)
+        result = int(text)
+        if not -(1 << 63) <= result < (1 << 63):
+            raise ValueError("outside int64 range")
+        return result
     except ValueError as exc:
         raise AcquisitionFrameClockError(
             f"Invalid {label} at row {row_number}: {text!r}"
@@ -298,16 +301,13 @@ def _clock_semantics(
     normalized_ptp_status = explicit_ptp_status.lower()
     explicit_status_does_not_contradict_sync = bool(
         not explicit_ptp_status
-        or any(
-            marker in normalized_ptp_status
-            for marker in ("locked", "slave", "master", "synchronized")
-        )
+        # Match complete states: "unlocked" and "unsynchronized" are negative.
+        or normalized_ptp_status in {"locked", "slave", "master", "synchronized"}
     )
     expected_tai_minus_utc_ns = 37_000_000_000
     expected_tai_utc_offset = bool(
         delta is not None
-        and abs(int(delta["median_ns"]) - expected_tai_minus_utc_ns)
-        < 1_000_000_000
+        and abs(int(delta["median_ns"]) - expected_tai_minus_utc_ns) < 1_000_000_000
         and int(delta["maximum_ns"]) - int(delta["minimum_ns"]) < 1_000_000_000
     )
     ptp_operationally_inferred = bool(
@@ -492,10 +492,21 @@ def _load_csv_source(
     )
 
 
-def _nullable_arrow_ints(values: Sequence[object]) -> tuple[np.ndarray, np.ndarray]:
+def _nullable_arrow_ints(
+    values: Sequence[object], *, label: str, allow_null: bool = True
+) -> tuple[np.ndarray, np.ndarray]:
     normalized: list[int | None] = []
-    for value in values:
-        normalized.append(None if value is None else int(value))
+    for row_number, value in enumerate(values, start=1):
+        if value is None and allow_null:
+            normalized.append(None)
+            continue
+        # Arrow's Python integers preserve exact values, unlike int(float).
+        if type(value) is not int or not -(1 << 63) <= value < (1 << 63):
+            raise AcquisitionFrameClockError(
+                f"{label} at camera row {row_number} must be an exact int64 integer; "
+                f"got {value!r}."
+            )
+        normalized.append(value)
     return _timestamp_array(normalized)
 
 
@@ -523,17 +534,23 @@ def _load_parquet_source(
         raise AcquisitionFrameClockError(
             f"Recording frame index {path} has no rows for camera {camera_id}."
         )
-    recording_ids = np.asarray(
-        [columns["recording_frame_id"][index] for index in indices], dtype=np.int64
+    recording_ids, _ = _nullable_arrow_ints(
+        [columns["recording_frame_id"][index] for index in indices],
+        label="recording_frame_id",
+        allow_null=False,
     )
-    parent = np.asarray(
-        [columns["parent_frame_index"][index] for index in indices], dtype=np.int64
+    parent, _ = _nullable_arrow_ints(
+        [columns["parent_frame_index"][index] for index in indices],
+        label="parent_frame_index",
+        allow_null=False,
     )
     camera, camera_valid = _nullable_arrow_ints(
-        [columns["timestamp"][index] for index in indices]
+        [columns["timestamp"][index] for index in indices],
+        label="timestamp",
     )
     system, system_valid = _nullable_arrow_ints(
-        [columns["timestamp_sys"][index] for index in indices]
+        [columns["timestamp_sys"][index] for index in indices],
+        label="timestamp_sys",
     )
     clock_surfaces, semantic_evidence = _clock_semantics(
         recording_dir,
@@ -575,30 +592,51 @@ def _validate_source(
         raise AcquisitionFrameClockError(
             "Acquisition frame-clock arrays must be aligned one-dimensional vectors."
         )
+    for name, array in arrays.items():
+        if name.endswith("_valid"):
+            if array.dtype != np.dtype(np.bool_):
+                raise AcquisitionFrameClockError(f"{name} must be a boolean vector.")
+        elif array.dtype.kind not in "iu" or int(array.max()) >= (1 << 63):
+            raise AcquisitionFrameClockError(
+                f"{name} must contain exact int64 integers."
+            )
     if expected_frame_count is not None and row_count != int(expected_frame_count):
         raise AcquisitionFrameClockError(
             "Acquisition frame-clock row count does not match the source video: "
             f"clock={row_count}, video={int(expected_frame_count)}."
         )
-    if not np.array_equal(source.parent_frame_index, np.arange(row_count, dtype=np.int64)):
+    if not np.array_equal(
+        source.parent_frame_index, np.arange(row_count, dtype=np.int64)
+    ):
         raise AcquisitionFrameClockError(
             "Acquisition frame-clock parent_frame_index must be the complete ordered "
             "zero-based video-frame domain."
         )
-    if row_count > 1 and not np.all(np.diff(source.recording_frame_id) == 1):
+    ids = source.recording_frame_id
+    if row_count > 1 and (np.any(ids[1:] <= ids[:-1]) or not np.all(np.diff(ids) == 1)):
         raise AcquisitionFrameClockError(
             "Acquisition frame-clock recording_frame_id values must be contiguous."
         )
-    if not bool(np.any(source.camera_timestamp_valid) or np.any(source.system_timestamp_valid)):
+    if not bool(
+        np.any(source.camera_timestamp_valid) or np.any(source.system_timestamp_valid)
+    ):
         raise AcquisitionFrameClockError(
             "Acquisition frame-clock source contains no usable camera or system timestamps."
         )
     for label, values, valid in (
-        ("camera_timestamp_ns", source.camera_timestamp_ns, source.camera_timestamp_valid),
-        ("system_timestamp_ns", source.system_timestamp_ns, source.system_timestamp_valid),
+        (
+            "camera_timestamp_ns",
+            source.camera_timestamp_ns,
+            source.camera_timestamp_valid,
+        ),
+        (
+            "system_timestamp_ns",
+            source.system_timestamp_ns,
+            source.system_timestamp_valid,
+        ),
     ):
         selected = np.asarray(values[valid], dtype=np.int64)
-        if selected.size > 1 and np.any(np.diff(selected) < 0):
+        if selected.size > 1 and np.any(selected[1:] < selected[:-1]):
             raise AcquisitionFrameClockError(f"{label} must be monotonic.")
     return source
 
