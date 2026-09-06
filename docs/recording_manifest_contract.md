@@ -1,9 +1,9 @@
 # Recording Manifest Contract
 <!-- contract-meta
-version: 2
+version: 3
 status: active
 implementation: implemented
-last_verified: 2026-08-25
+last_verified: 2026-09-06
 -->
 
 This document defines the minimum metadata contract for `recording_manifest.json`
@@ -38,6 +38,14 @@ These keys should always be present in `recording_manifest.json`:
 - `recording_subtype`
 - `behavior_mode`
 - `artifact_schema_id`
+
+New source-analysis import and sealed replay enforce these fields as nonempty
+strings using the same vocabulary and behavior-mode consistency rules as the
+standalone manifest validator. Missing context is never filled with
+`behavior/free` by the importer. Existing source-analysis context must match
+the manifest before further writes. The manifest's artifact schema describes
+its source context; the separate analysis output remains
+`artifact_schema_id="recording_analysis_v1"`.
 
 Recommended additional keys (already used by backfill when present):
 
@@ -82,9 +90,11 @@ inference and stamps the root as
 `zarr_use="analysis"`, and `zarr_purpose="analysis"`. A disagreement between
 the marked manifest and root fails closed.
 
-Historical manifests without this marker remain explicit compatibility input.
-They are not silently upgraded, inferred, or accepted as current identity
-authority.
+Historical manifests without this marker are not accepted by new-recording
+analysis ingestion, including when an output directory already exists. They
+remain readable by separately scoped historical diagnostics and maintenance;
+those paths do not establish current identity authority. Existing current-profile
+roots must exactly match their manifest identity before any import write.
 
 ## Optional Preflight Section
 
@@ -127,10 +137,9 @@ Semantics:
   `--run-video-diagnostics`, `--run-h5-diagnostics`, or both.
 - `video.status` summarizes the unified raw-video preflight.
 - `h5.status` summarizes the unified H5 preflight.
-- `video.media_status` and `h5.core_status` are the strongest import-relevant
-  fields.
-- tooling-only problems may produce `warn` without indicating bad media or an
-  unimportable H5.
+- Every recorded component status is checked, including H5 optional components
+  and diagnostic tooling. A summary cannot hide a nested failure.
+- A warning without a recorded failure/error is distinct from a failed check.
 - Automatic video preflight uses the OpenCV decode smoke by default. Decord
   remains available as an explicit manual diagnostic backend, but it is not the
   default gate for current imports.
@@ -140,9 +149,28 @@ Semantics:
 - Current camera metadata CSVs use `recording_frame_id`; legacy `frame_id` and
   `local_frame_id` are compatibility aliases when validating older sidecars.
 
-Downstream import commands currently block only when `preflight.status=fail`,
-and allow `warn` by default. Commands that enforce this gate expose an explicit
-`--allow-preflight-failures` override.
+New-recording import and sealed-import replay reject any recorded `fail`,
+`error`, non-null diagnostic `error` field, invalid status, malformed section,
+duplicate JSON key, or unreadable manifest. There is no failure override.
+Diagnostics remain opt-in: `not_run` and contract-permitted absence are not
+fabricated passes, and warnings alone remain non-blocking. A stored diagnostic
+verdict is not immutable source evidence and does not replace source identity,
+acquisition authority, clock/crop validation, or import-receipt verification.
+
+Declared acquisition stream files must exist and be readable. Inventory read
+errors, row-count conflicts, and declared/observed colorimetry conflicts block
+inventory publication; optional declaration does not make failure optional.
+External-IPC full metadata must be CSV, with summaries declared separately.
+The organizer never substitutes crop timestamps for missing full timestamps.
+When streams are declared, source analysis imports only the `full` video and
+requires any conventional clock CSV to be explicitly bound by that stream.
+Diagnostic inventory reports may still describe invalid inputs without
+publishing them.
+
+This is an ingestion enforcement correction. The v2 source identity, v1 import
+receipt, and valid import configuration digest grammars are unchanged. The old
+false-valued preflight-override config field is retained only as a fixed digest
+field, not as a caller option. Historical evidence is not rewritten.
 
 ## Optional Analysis Import Status
 
@@ -275,9 +303,9 @@ stream. Recommended manifest content:
 - include one full-frame camera video entry under `files.cams`
 - include compatibility camera sidecars under `files.cams`:
   `Cam*.mp4`, `Cam*_meta.csv`, and `Cam*_keyframe.json`
-- the compatibility `Cam*_meta.csv` may be copied from the crop metadata table
-  when that table shares the same `recording_frame_id` / timestamp clock as the
-  full-frame video
+- compatibility `Cam*_meta.csv` copies of crop metadata remain retained source
+  files, not full-frame clock authority; full-frame timestamps must be bound to
+  the full stream's own metadata CSV
 - preserve cropped video and crop-native sidecars under
   `files.derived` / `derived/external_crop_recorder/`
 - declare crop stream pixels as `video_pixel_coordinate_space="crop_frame_pixels"`

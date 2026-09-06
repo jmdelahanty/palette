@@ -215,7 +215,6 @@ def build_finalize_plan(
     import_status: Optional[ImportLogStatus] = None,
     processed_root: Optional[Path] = None,
     require_analysis_zarr: bool = True,
-    allow_preflight_failures: bool = False,
     allow_organize_warnings: bool = False,
     delete: bool = False,
 ) -> FinalizePlan:
@@ -249,13 +248,11 @@ def build_finalize_plan(
             continue
         if not _manifest_source_matches_batch(manifest, batch):
             blockers.append(f"manifest source_dir does not point into batch: {manifest_path}")
-        preflight = manifest.get("preflight")
-        if (
-            isinstance(preflight, Mapping)
-            and str(preflight.get("status", "")).lower() == "fail"
-            and not allow_preflight_failures
-        ):
-            blockers.append(f"preflight failed in manifest: {manifest_path}")
+        from fisheye.shared.recording_preflight import preflight_gate_reason
+
+        gate_reason = preflight_gate_reason(recording_dir)
+        if gate_reason is not None:
+            blockers.append(gate_reason)
         file_paths = _manifest_file_paths(recording_dir, manifest)
         if not file_paths:
             warnings.append(f"manifest has no files.raw/cams/derived entries: {manifest_path}")
@@ -397,11 +394,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Allow finalization after organize only. Default requires each recording analysis zarr to exist.",
     )
     parser.add_argument(
-        "--allow-preflight-failures",
-        action="store_true",
-        help="Do not block on manifest preflight.status=fail.",
-    )
-    parser.add_argument(
         "--allow-organize-warnings",
         action="store_true",
         help="Do not block on warnings found in supplied organize logs.",
@@ -435,7 +427,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             import_status=import_status,
             processed_root=args.processed_root.expanduser() if args.processed_root else None,
             require_analysis_zarr=not bool(args.allow_missing_analysis_zarr),
-            allow_preflight_failures=bool(args.allow_preflight_failures),
             allow_organize_warnings=bool(args.allow_organize_warnings),
             delete=bool(args.delete),
         )

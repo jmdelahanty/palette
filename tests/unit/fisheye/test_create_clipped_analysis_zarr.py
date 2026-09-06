@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pyarrow as pa
+import pyarrow.parquet as pq
 import zarr
 
 from fisheye.shared.acquisition_publication_status import (
@@ -225,6 +227,61 @@ def test_created_clipped_archive_binds_as_crop_pixel_authority(tmp_path: Path) -
         "published_external_clipped_video_collection_v1"
     )
     bound.assert_verified()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"parent_frame_index": [0, 0, 2, 3, 4]},
+        {"clip_local_frame_index": [0, 0, 2, 0, 1]},
+        {"clip_local_frame_index": [0, 2, 1, 0, 1]},
+        {
+            "parent_frame_index": [0, 0, 2, 3, 4],
+            "clip_local_frame_index": [0, 0, 2, 0, 1],
+        },
+    ],
+)
+def test_clipped_producer_refuses_bad_frame_map_before_publication(
+    tmp_path: Path, changes
+) -> None:
+    recording = tmp_path / "rec_a"
+    _write_clipped_recording(recording)
+    frame_index = recording / "recording_frame_index.parquet"
+    table = pq.read_table(frame_index)
+    for field, values in changes.items():
+        table = table.set_column(
+            table.schema.get_field_index(field), field, pa.array(values)
+        )
+    pq.write_table(table, frame_index)
+    output = tmp_path / "analysis.zarr"
+
+    with pytest.raises(ValueError, match="recording_frame_index"):
+        create_clipped_analysis_zarr(recording, output_zarr=output)
+
+    assert not output.exists()
+    assert not output.with_name(f"{output.name}_shell_manifest.json").exists()
+
+
+def test_shuffled_frame_map_survives_producer_and_unpatched_consumer(
+    tmp_path: Path,
+) -> None:
+    recording = tmp_path / "rec_a"
+    _write_clipped_recording(recording)
+    frame_index = recording / "recording_frame_index.parquet"
+    table = pq.read_table(frame_index).take([4, 0, 3, 2, 1])
+    pq.write_table(table, frame_index)
+    output = tmp_path / "analysis.zarr"
+    create_clipped_analysis_zarr(recording, output_zarr=output)
+
+    root = zarr.open_group(output, mode="r", use_consolidated=False)
+    _, acquisition = load_persisted_acquisition_camera_authority(
+        root, expected_camera_id="2010093"
+    )
+    assert acquisition.record.source_total_frames == 5
+    native = load_native_archive_authority(
+        SimpleNamespace(recording_id="rec_a", analysis_zarr=output)
+    )
+    assert native.n_frames == 5
 
 
 def test_repair_clipped_analysis_authority_dry_run_apply_and_idempotence(

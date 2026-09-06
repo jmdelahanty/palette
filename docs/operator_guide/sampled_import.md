@@ -86,6 +86,17 @@ wrapper calls the sampled import path, then stamps the Zarr with recording
 metadata such as `recording_id`, `dish_design`, `camera_id`, and
 `experiment_context_status = "absent"`.
 
+Both `--session-uuid` and `--recording-id` are required exact declarations;
+neither is guessed from filenames or substituted for the other. The
+`video_only_v1` wrapper retains its behavior/free scientific defaults, but
+explicit invalid context is rejected. A present manifest must satisfy the
+recording-context contract and may not contain failed optional diagnostics.
+An absent manifest remains permitted for this manual sampled-training product.
+The metadata-only mode accepts training Zarrs, never source-analysis archives.
+Sampled frame identity, physical chunking, and the atomic publisher's
+selector-ineligible status are unchanged; this path does not establish regular
+source-recording authority.
+
 Example:
 
 ```bash
@@ -96,7 +107,7 @@ scripts/py -m fisheye.utils.intake_video_only_recording \
   --scratch-root /nvme1/palette_staging/sampled-training/<recording> \
   --frame-step 5000 \
   --skip-tail-frames 0 \
-  --session-uuid <recording> \
+  --session-uuid <acquisition-session-uuid> \
   --recording-id <recording> \
   --recording-name <recording> \
   --protocol-name sleepyfish \

@@ -49,6 +49,7 @@ def _make_external_ipc_batch(tmp_path: Path) -> Path:
     full_dir = batch / "external_recorder"
     crop_dir = batch / "external_crop_recorder"
     _touch(full_dir / f"Cam{camera}_external.mp4", "full")
+    _touch(full_dir / f"Cam{camera}_external_meta.csv", "recording_frame_id,timestamp,timestamp_sys\n1,10,20\n")
     _touch(full_dir / f"Cam{camera}_external_summary.json", "{}")
     _touch(full_dir / f"Cam{camera}_external_keyframes.json", "{}")
     _touch(full_dir / f"Cam{camera}_external_detach.csv", "frame_index\n0\n")
@@ -90,6 +91,9 @@ def _make_external_ipc_batch(tmp_path: Path) -> Path:
                         stale_root / "external_recorder" / f"Cam{camera}_external.mp4"
                     ),
                     "metadata": str(
+                        stale_root / "external_recorder" / f"Cam{camera}_external_meta.csv"
+                    ),
+                    "summary": str(
                         stale_root
                         / "external_recorder"
                         / f"Cam{camera}_external_summary.json"
@@ -175,6 +179,7 @@ def test_external_ipc_plan_maps_full_and_crop_outputs_without_shards(
     assert cam_names == [
         "Cam2010093_2026-05-29T18-11-16Z_arena_1.mp4",
         "Cam2010093_2026-05-29T18-11-16Z_arena_1_meta.csv",
+        "Cam2010093_2026-05-29T18-11-16Z_arena_1_external_meta.csv",
         "Cam2010093_2026-05-29T18-11-16Z_arena_1_keyframe.json",
         "Cam2010093_2026-05-29T18-11-16Z_arena_1_external_summary.json",
     ]
@@ -207,7 +212,7 @@ def test_external_ipc_plan_maps_full_and_crop_outputs_without_shards(
         "cams/Cam2010093_2026-05-29T18-11-16Z_arena_1.mp4"
     )
     assert video_streams["streams"]["full"]["frame_clock_metadata"] == (
-        "cams/Cam2010093_2026-05-29T18-11-16Z_arena_1_meta.csv"
+        "cams/Cam2010093_2026-05-29T18-11-16Z_arena_1_external_meta.csv"
     )
     assert (
         video_streams["streams"]["crop"]["role"] == "runtime_derived_acquisition_input"
@@ -237,6 +242,37 @@ def test_external_ipc_plan_rejects_h5_and_session_identity_disagreement(
             dest_root=tmp_path / "recordings",
             rename_cams=True,
         )
+
+
+def test_external_ipc_plan_rejects_summary_as_full_frame_metadata(tmp_path: Path) -> None:
+    batch = _make_external_ipc_batch(tmp_path)
+    session_path = batch / "recording_session.json"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    session["recording_outputs"]["2010093"]["full"]["metadata"] = (
+        "external_recorder/Cam2010093_external_summary.json"
+    )
+    session_path.write_text(json.dumps(session), encoding="utf-8")
+    with pytest.raises(ValueError, match="full.*metadata.*CSV"):
+        organize_recordings._build_external_ipc_plans(
+            batch, dest_root=tmp_path / "recordings", rename_cams=True,
+        )
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_external_ipc_plan_never_borrows_crop_clock(tmp_path: Path, declared: bool) -> None:
+    batch = _make_external_ipc_batch(tmp_path)
+    session_path = batch / "recording_session.json"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    full = session["recording_outputs"]["2010093"]["full"]
+    full.pop("metadata", None)
+    if declared:
+        full["metadata"] = "external_recorder/absent_full_meta.csv"
+    session_path.write_text(json.dumps(session), encoding="utf-8")
+    [plan] = organize_recordings._build_external_ipc_plans(
+        batch, dest_root=tmp_path / "recordings", rename_cams=True,
+    )
+    assert "frame_clock_metadata" not in plan.meta["video_streams"]["streams"]["full"]
+    assert bool(plan.missing) is declared
 
 
 def test_external_ipc_plan_accepts_missing_h5_session_identity(
@@ -341,6 +377,7 @@ def test_external_ipc_recording_only_plan_maps_full_and_crop_outputs(
     assert cam_names == [
         "Cam2010093_2026-05-29T18-11-16Z_arena_1.mp4",
         "Cam2010093_2026-05-29T18-11-16Z_arena_1_meta.csv",
+        "Cam2010093_2026-05-29T18-11-16Z_arena_1_external_meta.csv",
         "Cam2010093_2026-05-29T18-11-16Z_arena_1_keyframe.json",
         "Cam2010093_2026-05-29T18-11-16Z_arena_1_external_summary.json",
     ]
@@ -357,7 +394,7 @@ def test_external_ipc_recording_only_plan_maps_full_and_crop_outputs(
 
     video_streams = plan.meta["video_streams"]
     assert video_streams["streams"]["full"]["frame_clock_metadata"] == (
-        "cams/Cam2010093_2026-05-29T18-11-16Z_arena_1_meta.csv"
+        "cams/Cam2010093_2026-05-29T18-11-16Z_arena_1_external_meta.csv"
     )
     assert (
         video_streams["streams"]["crop"]["video_pixel_coordinate_space"]
@@ -419,10 +456,11 @@ def test_external_ipc_recording_only_full_video_without_crop_meta_is_valid(
     assert plan.missing == []
     assert [item.dest_name for item in plan.cam_files] == [
         "Cam2010093_2026-05-29T18-11-16Z_arena_1.mp4",
+        "Cam2010093_2026-05-29T18-11-16Z_arena_1_external_meta.csv",
         "Cam2010093_2026-05-29T18-11-16Z_arena_1_keyframe.json",
         "Cam2010093_2026-05-29T18-11-16Z_arena_1_external_summary.json",
     ]
-    assert "frame_clock_metadata" not in plan.meta["video_streams"]["streams"]["full"]
+    assert plan.meta["video_streams"]["streams"]["full"]["frame_clock_metadata"].endswith("_external_meta.csv")
     assert "crop" not in plan.meta["video_streams"]["streams"]
 
 
@@ -441,8 +479,8 @@ def test_external_ipc_h5_plan_does_not_declare_missing_compat_clock_csv(
     assert len(plans) == 1
     plan = plans[0]
     assert "Cam2010093_crop_meta.csv (compatibility camera metadata)" in plan.missing
-    assert not any(item.dest_name.endswith("_meta.csv") for item in plan.cam_files)
-    assert "frame_clock_metadata" not in plan.meta["video_streams"]["streams"]["full"]
+    assert not any(item.dest_name == "Cam2010093_2026-05-29T18-11-16Z_arena_1_meta.csv" for item in plan.cam_files)
+    assert plan.meta["video_streams"]["streams"]["full"]["frame_clock_metadata"].endswith("_external_meta.csv")
 
 
 def test_external_ipc_apply_writes_nested_sidecars_and_manifest(

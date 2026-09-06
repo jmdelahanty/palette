@@ -485,8 +485,9 @@ scripts/py -m fisheye.utils.organize_recordings \
 
 When these hooks run, the organizer persists a `preflight` block into
 `recording_manifest.json`. That block stores the combined preflight verdict plus
-separate video and H5 summaries. Downstream import entry points now refuse
-`preflight.status=fail` by default:
+separate video and H5 summaries. Downstream import entry points refuse a
+recorded `fail`/`error` in the summary or any declared video/H5 component,
+including optional/tooling checks, and malformed diagnostic evidence.
 
 If the hooks do not run, the manifest keeps the default
 `preflight.status="not_run"` with `checked_at_utc=null`; that is an unchecked
@@ -497,9 +498,8 @@ state, not a media/H5 failure.
 - `scripts/py -m fisheye.utils.run_recording_analysis_pipeline ...`
 - `scripts/py -m fisheye.utils.import_recordings_analysis ...`
 
-Use `--allow-preflight-failures` on those commands only when you intentionally
-want to bypass a failed recorded preflight. A stored `warn` does not block
-import.
+There is no failure-override option. A summary `pass` or `warn` cannot hide a
+component failure. A stored warning without a failure does not block import.
 
 Use the video report when you want media and camera-metadata confidence. Use
 the H5 report when you want to know whether stimulus import should succeed.
