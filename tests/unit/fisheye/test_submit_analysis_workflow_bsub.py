@@ -207,6 +207,66 @@ def test_submit_analysis_workflow_records_requested_and_runtime_resources(
     assert (run_dir / "workflow_stdout.log").is_file()
 
 
+def test_selector_ineligible_workflow_is_forwarded_without_registry_finalizer(
+    tmp_path: Path,
+) -> None:
+    palette_repo = tmp_path / "palette-checkout"
+    _build_clean_palette_checkout(palette_repo)
+    zarr_path = tmp_path / "recording" / "zarr" / "analysis.zarr"
+    zarr_path.mkdir(parents=True)
+    (zarr_path / "zarr.json").write_text("{}\n", encoding="utf-8")
+    log_dir = tmp_path / "logs"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_bsub = fake_bin / "bsub"
+    fake_bsub.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf 'Job <123456> is submitted to queue <short>.\\n'\n",
+        encoding="utf-8",
+    )
+    fake_bsub.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--zarr",
+            str(zarr_path),
+            "--execution-id",
+            "selector_ineligible_test",
+            "--execution-profile",
+            "selector_ineligible_canary_v1",
+            "--target",
+            "track_kinematics",
+            "--palette-repo",
+            str(palette_repo),
+            "--log-dir",
+            str(log_dir),
+            "--submit",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert "execution_profile=selector_ineligible_canary_v1" in result.stdout
+    assert "registry_write_mode=disabled_selector_ineligible_canary" in result.stdout
+    assert "registry_finalizer=disabled" in result.stdout
+    assert "registry_finalizer_job_id=" not in result.stdout
+    assert result.stdout.count("Job <123456>") == 1
+    run_dir = log_dir / "selector_ineligible_test_analysis.zarr_"
+    submission = (run_dir / "submission.txt").read_text(encoding="utf-8")
+    assert "execution_profile=selector_ineligible_canary_v1" in submission
+    assert "registry_write_mode=disabled_selector_ineligible_canary" in submission
+    assert "registry_finalizer_job_id=" not in submission
+    job_script = (run_dir / "run_analysis_workflow.sh").read_text(encoding="utf-8")
+    assert "EXECUTION_PROFILE=selector_ineligible_canary_v1" in job_script
+    assert '--execution-profile "${EXECUTION_PROFILE}"' in job_script
+
+
 def test_submit_analysis_workflow_labels_unspecified_queue_as_cluster_default(
     tmp_path: Path,
 ) -> None:

@@ -43,7 +43,9 @@ from fisheye.analysis_workflows.validated_behavior_cohort_adapters import (
     validate_recording_behavior_bundle_set_current_sources,
 )
 from fisheye.analysis_workflows.validated_behavior_source_admission import (
+    CORE_BEHAVIOR_CANARY_EXECUTION_ADMISSION_ROLE,
     CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE,
+    CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES,
     EXACT_CHASER_ADMISSION_ROLE,
 )
 from fisheye.shared.json_safety import write_json_atomic
@@ -60,10 +62,8 @@ class ValidatedBehaviorCohortCliError(ValueError):
 _BUNDLE_ADAPTER_BY_ADMISSION_ROLE = {
     EXACT_CHASER_ADMISSION_ROLE: RECORDING_BUNDLE_ADAPTER_ID,
     CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE: CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
+    CORE_BEHAVIOR_CANARY_EXECUTION_ADMISSION_ROLE: CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
 }
-_CORE_CHASER_ADMISSION_ROLES = frozenset(
-    {CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE, EXACT_CHASER_ADMISSION_ROLE}
-)
 
 
 def _utc_now() -> str:
@@ -253,7 +253,12 @@ def _bundle_adapter_for_membership(membership: Mapping[str, Any]) -> str:
             for binding in member["admission_receipts"]
             if binding.get("role") in _BUNDLE_ADAPTER_BY_ADMISSION_ROLE
         }
-        if roles == _CORE_CHASER_ADMISSION_ROLES:
+        if (
+            EXACT_CHASER_ADMISSION_ROLE in roles
+            and len(roles) == 2
+            and len(roles.intersection(CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES))
+            == 1
+        ):
             adapters.add(CORE_CHASER_BUNDLE_ADAPTER_ID)
             continue
         if len(roles) != 1:

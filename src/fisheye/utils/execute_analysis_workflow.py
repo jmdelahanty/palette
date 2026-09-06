@@ -30,6 +30,9 @@ from fisheye.analysis_workflows import (
     load_analysis_workflow,
     plan_analysis_workflow,
     stage_run_relative_path,
+    PRODUCTION_EXECUTION_PROFILE_ID,
+    resolve_workflow_execution_profile,
+    workflow_execution_profile_ids,
 )
 from fisheye.analysis_workflows.runtime_verification import (
     RuntimeVerificationSession,
@@ -203,6 +206,26 @@ def _remember_failure(payload: dict[str, object], message: str) -> None:
         payload["error"] = message
 
 
+def _verify_stage_for_execution_profile(
+    zarr_path: Path,
+    stage_id: str,
+    *,
+    requested_run: str,
+    dependency_runs: Mapping[str, str],
+    execution_profile_id: str,
+    session: RuntimeVerificationSession | None = None,
+):
+    arguments: dict[str, object] = {
+        "requested_run": requested_run,
+        "dependency_runs": dependency_runs,
+    }
+    if session is not None:
+        arguments["session"] = session
+    if execution_profile_id != PRODUCTION_EXECUTION_PROFILE_ID:
+        arguments["execution_profile_id"] = execution_profile_id
+    return verify_persisted_stage_output(zarr_path, stage_id, **arguments)
+
+
 def _revalidate_reused_stage_inputs(
     zarr_path: Path,
     execution_plan: WorkflowExecutionPlan,
@@ -254,11 +277,12 @@ def _revalidate_reused_stage_inputs(
             _remember_failure(payload, message)
             _write_report(report_path, payload)
             continue
-        availability = verify_persisted_stage_output(
+        availability = _verify_stage_for_execution_profile(
             zarr_path,
             node.stage_id,
             requested_run=run_name,
             dependency_runs=dependency_runs,
+            execution_profile_id=execution_plan.execution_profile_id,
             session=session,
         )
         result["verification"] = availability.to_dict()
@@ -343,6 +367,9 @@ def execute_workflow_plan(
 ) -> dict[str, object]:
     """Run topologically, blocking failed descendants but continuing independent nodes."""
 
+    execution_profile = resolve_workflow_execution_profile(
+        execution_plan.execution_profile_id
+    )
     _preflight_new_outputs(zarr_path, execution_plan)
     if apply and not os.environ.get("LSB_JOBID"):
         raise WorkflowExecutionError(
@@ -352,6 +379,11 @@ def execute_workflow_plan(
         raise WorkflowExecutionError(
             "--apply requires --report outside the analysis Zarr"
         )
+    if apply and not defer_registry_writes:
+        if execution_profile.expected_selector_eligible is False:
+            raise WorkflowExecutionError(
+                "selector-ineligible canary execution forbids inline registry writes"
+            )
     if report_path is not None:
         if _path_is_within(report_path, zarr_path):
             raise WorkflowExecutionError(
@@ -367,6 +399,7 @@ def execute_workflow_plan(
         "schema_id": EXECUTION_SCHEMA_ID,
         "schema_version": EXECUTION_SCHEMA_VERSION,
         "execution_id": execution_plan.execution_id,
+        "execution_profile_id": execution_profile.profile_id,
         "mode": "apply" if apply else "dry_run",
         "status": "running" if apply else "planned",
         "created_at_utc": _utc_now(),
@@ -376,7 +409,7 @@ def execute_workflow_plan(
         "palette_git": get_git_info(Path(__file__).resolve().parents[3]),
         "zarr_path": str(zarr_path),
         "registry_write_mode": (
-            "deferred_to_serial_finalizer"
+            execution_profile.registry_policy
             if defer_registry_writes
             else "inline_explicit"
         ),
@@ -511,11 +544,12 @@ def execute_workflow_plan(
                 raise WorkflowExecutionError(
                     f"Zarr-stage command {command.node_id!r} has no canonical stage ID"
                 )
-            availability = verify_persisted_stage_output(
+            availability = _verify_stage_for_execution_profile(
                 zarr_path,
                 command.stage_id,
                 requested_run=command.output_run,
                 dependency_runs=command.dependency_runs,
+                execution_profile_id=execution_plan.execution_profile_id,
             )
             result["verification"] = availability.to_dict()
             output_available = availability.available
@@ -554,6 +588,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=default_core_behavior_profile_path(),
+    )
+    parser.add_argument(
+        "--execution-profile",
+        choices=workflow_execution_profile_ids(),
+        default=PRODUCTION_EXECUTION_PROFILE_ID,
+        help=(
+            "Closed lifecycle profile. The canary profile requires exact named "
+            "selector-ineligible inputs and never moves production selectors."
+        ),
     )
     parser.add_argument(
         "--target",
@@ -638,11 +681,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             workflow,
             zarr_path,
             forced_unavailable=args.force_stage,
+            execution_profile_id=args.execution_profile,
         )
         workflow_plan = plan_analysis_workflow(
             workflow,
             availability,
             targets=tuple(args.target),
+            execution_profile_id=args.execution_profile,
+            materialize_stage_ids=tuple(
+                canonical_stage_id(value) for value in args.force_stage
+            ),
         )
         report_path = (
             args.report.expanduser().resolve() if args.report is not None else None
@@ -672,6 +720,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             scratch_root=args.scratch_root,
             admission_receipt_root=admission_receipt_root,
             python_executable=sys.executable,
+            execution_profile_id=args.execution_profile,
         )
         payload = execute_workflow_plan(
             zarr_path,

@@ -15,6 +15,11 @@ from fisheye.analysis_workflows import (
     load_analysis_workflow,
     plan_analysis_workflow,
 )
+from fisheye.analysis_workflows.execution_profiles import (
+    PRODUCTION_EXECUTION_PROFILE_ID,
+    resolve_workflow_execution_profile,
+    workflow_execution_profile_ids,
+)
 from fisheye.analysis_workflows.dag import topological_order
 from fisheye.registry.stage_catalog import canonical_stage_id
 from fisheye.shared.json_safety import write_json_atomic
@@ -50,9 +55,11 @@ def build_availability(
     *,
     forced_available: Mapping[str, StageAvailability] | None = None,
     forced_unavailable: Iterable[str] = (),
+    execution_profile_id: str = PRODUCTION_EXECUTION_PROFILE_ID,
 ) -> dict[str, StageAvailability]:
     """Resolve all persisted workflow stages using metadata files only."""
 
+    execution_profile = resolve_workflow_execution_profile(execution_profile_id)
     unavailable = {canonical_stage_id(value) for value in forced_unavailable}
     forced = dict(forced_available or {})
     statuses: dict[str, StageAvailability] = {}
@@ -106,6 +113,7 @@ def build_availability(
                 stage_id,
                 requested_run=requested_run,
                 dependency_runs=dependency_runs,
+                execution_profile_id=execution_profile.profile_id,
             )
     return statuses
 
@@ -117,18 +125,32 @@ def build_plan_payload(
     targets: Sequence[str] | None = None,
     forced_available: Mapping[str, StageAvailability] | None = None,
     forced_unavailable: Iterable[str] = (),
+    execution_profile_id: str = PRODUCTION_EXECUTION_PROFILE_ID,
 ) -> dict[str, object]:
+    requested_materializations = tuple(
+        canonical_stage_id(value) for value in forced_unavailable
+    )
     availability = build_availability(
         workflow,
         zarr_path,
         forced_available=forced_available,
-        forced_unavailable=forced_unavailable,
+        forced_unavailable=requested_materializations,
+        execution_profile_id=execution_profile_id,
     )
-    plan = plan_analysis_workflow(workflow, availability, targets=targets)
+    plan = plan_analysis_workflow(
+        workflow,
+        availability,
+        targets=targets,
+        execution_profile_id=execution_profile_id,
+        materialize_stage_ids=requested_materializations,
+    )
     return {
         "schema_id": "palette.analysis_workflow_plan",
         "schema_version": 1,
         "mode": "read_only_plan",
+        "execution_profile_id": resolve_workflow_execution_profile(
+            execution_profile_id
+        ).profile_id,
         "zarr_path": str(zarr_path),
         "workflow": workflow.to_dict(),
         "availability": {
@@ -198,6 +220,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Analysis workflow YAML (default: packaged core_behavior_v1 profile).",
     )
     parser.add_argument(
+        "--execution-profile",
+        choices=workflow_execution_profile_ids(),
+        default=PRODUCTION_EXECUTION_PROFILE_ID,
+        help="Closed lifecycle profile for planning persisted stage reuse.",
+    )
+    parser.add_argument(
         "--target",
         action="append",
         default=[],
@@ -265,6 +293,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         targets=tuple(args.target) if args.target else None,
         forced_available=_forced_available(args.available_stage),
         forced_unavailable=args.unavailable_stage,
+        execution_profile_id=args.execution_profile,
     )
     if args.json_output:
         args.json_output.parent.mkdir(parents=True, exist_ok=True)

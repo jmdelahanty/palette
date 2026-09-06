@@ -30,6 +30,19 @@ prerequisites, and candidate CI. Local checks do not satisfy its full required
 checks; all 23 existing contexts plus `ci-required` must succeed if the validated
 gate prerequisite is incorporated. This document grants no merge or activation.
 
+The local docs-only commit is `648d42b15a1b810d4b3e136214cec26023d77ffd`.
+The clean owned branch was then combined, without conflicts, with the exact
+green #140 prerequisite above. Newer main runtime/source/test changes are
+preserved; none are copied from an unvalidated worker branch. Generated module
+counts are refreshed for the combined tree. The resulting candidate remains
+incomplete until its own required CI succeeds, and its PR records that SHA.
+
+Fresh combined local validation: 151 host-policy, documentation-freshness,
+AGENTS-policy, and CI-gate tests passed in 1.01 seconds; script compilation,
+generated census, file-size, freshness, and working/index whitespace checks
+passed. No live diagnostic sweep, database acceptance, or scientific rerun was
+performed. Earlier local counts below are historical snapshots.
+
 Historical checkpoint, 2026-09-05. **Uncommitted preparation only; not merge-ready.** No source
 implementation, commit, push, merge, worktree removal, production activation,
 registry/store write, or `/groups` update was performed for this preparation.

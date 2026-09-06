@@ -75,7 +75,11 @@ from fisheye.shared.zarr.columnar import (
     store_array,
     write_columnar_dataset,
 )
-from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
+from fisheye.analysis.track_kinematics_io import (
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_IDS,
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1,
+    load_track_kinematics_track,
+)
 from fisheye.analysis.swim_bout_frame_axis import (
     FRAME_AXIS_CONTRACT_ATTR,
     FRAME_AXIS_CONTRACT_SHA256_ATTR,
@@ -2622,6 +2626,9 @@ def _load_track_kinematics_track_speeds(
     track_id: int = 0,
     *,
     track_kinematics_scope: str = "offline",
+    track_kinematics_publication_profile_id: str = (
+        TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1
+    ),
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
     """
     Load speed levels from a track kinematics track.
@@ -2658,6 +2665,7 @@ def _load_track_kinematics_track_speeds(
         run_name=track_kinematics_run,
         scope="offline",
         track_id=track_id,
+        publication_profile_id=track_kinematics_publication_profile_id,
     )
     speeds = track.speed_level_dict()
     source_array_paths = _resolved_track_source_array_paths(track)
@@ -2677,6 +2685,9 @@ def _load_track_kinematics_track_speeds(
         'n_frames': len(speeds['frames']),
         'track_kinematics_run': track.run_name,
         'track_kinematics_scope': track.scope,
+        'track_kinematics_publication_profile_id': (
+            track_kinematics_publication_profile_id
+        ),
         'source_track_path': track.track_path,
         'track_kinematics_created_at_utc': track.run_attrs.get('created_at_utc'),
         'track_kinematics_stage': source_provenance.get('stage'),
@@ -2916,6 +2927,9 @@ def detect_and_save_bouts(
     run_name: Optional[str],
     track_kinematics_run: str = "latest",
     track_kinematics_scope: str = "offline",
+    track_kinematics_publication_profile_id: str = (
+        TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1
+    ),
     track_id: int = 0,
     method: str = DEFAULT_DETECTION_METHOD,
     threshold_mm: float = 0.01,
@@ -3084,6 +3098,9 @@ def detect_and_save_bouts(
         track_kinematics_run,
         track_id,
         track_kinematics_scope=track_kinematics_scope,
+        track_kinematics_publication_profile_id=(
+            track_kinematics_publication_profile_id
+        ),
     )
     _finish_timed_phase(
         phase_durations_s,
@@ -3362,6 +3379,9 @@ def detect_and_save_bouts(
     run_group.attrs['source_track_kinematics_scope'] = metadata[
         'track_kinematics_scope'
     ]
+    run_group.attrs['source_track_kinematics_publication_profile_id'] = metadata[
+        'track_kinematics_publication_profile_id'
+    ]
     run_group.attrs['track_id'] = track_id
     run_group.attrs['fps'] = fps
     track_motion_authority = _json_safe_attr_value(
@@ -3464,11 +3484,17 @@ def detect_and_save_bouts(
         'distance_policy': 'path_length_from_track_frame_path_distance_only',
         'overwrite': bool(overwrite),
         'track_kinematics_scope': metadata['track_kinematics_scope'],
+        'track_kinematics_publication_profile_id': metadata[
+            'track_kinematics_publication_profile_id'
+        ],
     })
     run_group.attrs['parameters'] = parameters
     run_group.attrs['source_refs'] = _json_safe_attr_value({
         'source_track_kinematics_path': source_track_path,
         'source_track_kinematics_scope': metadata['track_kinematics_scope'],
+        'source_track_kinematics_publication_profile_id': metadata[
+            'track_kinematics_publication_profile_id'
+        ],
         'source_track_id': int(track_id),
         'source_track_motion_authority': track_motion_authority,
         'source_frame_axis_path': (
@@ -3509,6 +3535,9 @@ def detect_and_save_bouts(
         'zarr_path': str(zarr_path),
         'source_track_kinematics_run': metadata['track_kinematics_run'],
         'source_track_kinematics_scope': metadata['track_kinematics_scope'],
+        'source_track_kinematics_publication_profile_id': metadata[
+            'track_kinematics_publication_profile_id'
+        ],
         'source_track_kinematics_stage': metadata.get('track_kinematics_stage'),
         'source_track_kinematics_version': metadata.get('track_kinematics_version'),
         'source_track_path': source_track_path,
@@ -3886,6 +3915,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     parser.add_argument(
+        '--track-kinematics-publication-profile',
+        choices=TRACK_KINEMATICS_PUBLICATION_PROFILE_IDS,
+        default=TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1,
+        help=(
+            'Typed lifecycle profile for the exact offline track-motion source. '
+            'Selector-ineligible sources must always be named explicitly.'
+        ),
+    )
+
+    parser.add_argument(
         '--track-id',
         type=int,
         default=0,
@@ -4092,6 +4131,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         output_zarr_path=args.output_zarr_path,
         track_kinematics_run=args.track_kinematics_run,
         track_kinematics_scope=args.track_kinematics_scope,
+        track_kinematics_publication_profile_id=(
+            args.track_kinematics_publication_profile
+        ),
         track_id=args.track_id,
         method=args.method,
         threshold_mm=args.threshold_mm,

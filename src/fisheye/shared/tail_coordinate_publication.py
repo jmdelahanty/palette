@@ -72,6 +72,8 @@ from fisheye.shared.selector_activation import (
 from fisheye.shared.subject_shape_coordinate_publication import (
     BoundSubjectShapeCoordinatePublication,
     SubjectShapeCoordinatePublicationError,
+    SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
+    load_completed_ineligible_subject_shape_coordinate_publication,
     load_persisted_subject_shape_coordinate_publication,
 )
 from fisheye.shared.zarr_run_completion import (
@@ -92,6 +94,15 @@ TAIL_PUBLICATION_MANIFEST_ATTR = "tail_coordinate_publication_manifest"
 TAIL_PUBLICATION_MANIFEST_DIGEST_ATTR = f"{TAIL_PUBLICATION_MANIFEST_ATTR}_sha256"
 TAIL_PUBLICATION_MANIFEST_ALIAS_ATTR = "tail_coordinate_publication_manifest_sha256"
 TAIL_SOURCE_AUTHORITY_ATTR = "tail_source_subject_shape_authority"
+TAIL_SOURCE_SUBJECT_SHAPE_AUTHORITY_PROFILE_ATTR = (
+    "tail_source_subject_shape_authority_profile_id"
+)
+SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1 = (
+    "subject_shape_selector_eligible_v1"
+)
+SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1 = (
+    "subject_shape_selector_ineligible_canary_v1"
+)
 TAIL_DERIVATION_ATTR = "tail_coordinate_derivation"
 TAIL_COLLECTION_AXIS_ATTR = "tail_point_collection_axis"
 TAIL_MEASUREMENT_COLLECTION_AXIS_ATTR = "tail_measurement_collection_axis"
@@ -2126,8 +2137,32 @@ def _source_publication(root: Any, run: Any) -> BoundSubjectShapeCoordinatePubli
     source_path = str(run.attrs.get("source_subject_shape_path") or "").strip("/")
     if not source_path:
         _fail("Tail run lacks source_subject_shape_path.")
+    profile_id = run.attrs.get(TAIL_SOURCE_SUBJECT_SHAPE_AUTHORITY_PROFILE_ATTR)
+    if profile_id is None:
+        # Existing selector-backed publications predate the explicit profile attr.
+        profile_id = SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
     try:
-        return load_persisted_subject_shape_coordinate_publication(root, source_path)
+        if profile_id == SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1:
+            return load_persisted_subject_shape_coordinate_publication(
+                root,
+                source_path,
+            )
+        if (
+            profile_id
+            == SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+        ):
+            source = root.get(source_path)
+            if source is None:
+                _fail(f"Tail subject-shape source {source_path!r} is missing.")
+            owner = source.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
+            if not isinstance(owner, str) or not owner:
+                _fail("Tail subject-shape candidate lacks its publication owner.")
+            return load_completed_ineligible_subject_shape_coordinate_publication(
+                root,
+                source_path,
+                expected_publication_owner=owner,
+            )
+        _fail(f"Unsupported tail subject-shape authority profile {profile_id!r}.")
     except SubjectShapeCoordinatePublicationError as exc:
         raise TailCoordinatePublicationError(
             f"Tail source is not one exact canonical subject-shape publication: {exc}"
@@ -2751,6 +2786,19 @@ def load_tail_kinematics_coordinate_publication(
     )
 
 
+def load_completed_ineligible_tail_kinematics_coordinate_publication(
+    root: Any, run_path: str
+) -> BoundTailCoordinatePublication:
+    """Load one exact completed canary without consulting any selector."""
+
+    return _load_tail_coordinate_publication(
+        root,
+        run_path,
+        expected_selector_eligible=False,
+        expected_kind=_KINEMATICS_KIND,
+    )
+
+
 def load_tail_posture_coordinate_publication(
     root: Any, run_path: str
 ) -> BoundTailCoordinatePublication:
@@ -2777,6 +2825,9 @@ __all__ = [
     "TAIL_PAYLOAD_RECEIPT_PROFILE",
     "TAIL_PAYLOAD_RECEIPT_PROFILE_ATTR",
     "TAIL_PAYLOAD_VALIDATION_RECEIPT_ATTR",
+    "TAIL_SOURCE_SUBJECT_SHAPE_AUTHORITY_PROFILE_ATTR",
+    "SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1",
+    "SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1",
     "TailCoordinatePublicationError",
     "activate_tail_coordinate_publication",
     "build_tail_kinematics_payload_scan_receipt",
@@ -2785,6 +2836,7 @@ __all__ = [
     "defer_tail_coordinate_publication_activation",
     "deep_audit_tail_payload_receipt",
     "load_tail_kinematics_coordinate_publication",
+    "load_completed_ineligible_tail_kinematics_coordinate_publication",
     "load_tail_posture_coordinate_publication",
     "publish_tail_kinematics_coordinate_surfaces",
     "publish_tail_posture_coordinate_surfaces",

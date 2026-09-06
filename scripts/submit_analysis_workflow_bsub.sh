@@ -4,6 +4,7 @@ umask 0002
 
 ZARR_PATH=""
 EXECUTION_ID=""
+EXECUTION_PROFILE="selector_activated_production_v1"
 CONFIG=""
 EXPORT_ROOT=""
 SCRATCH_ROOT=""
@@ -41,6 +42,8 @@ Required:
   --target NODE                Executable analysis or implemented export target; repeatable
 
 Options:
+  --execution-profile PROFILE Closed lifecycle profile: selector_activated_production_v1
+                              or selector_ineligible_canary_v1
   --stage-run STAGE=RUN        Pin an existing dependency run; repeatable
   --output-run STAGE=RUN       Override a generated output run; repeatable
   --export-run NODE=RUN        Override an immutable export run; repeatable
@@ -81,6 +84,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --zarr) ZARR_PATH="$2"; shift 2;;
     --execution-id) EXECUTION_ID="$2"; shift 2;;
+    --execution-profile) EXECUTION_PROFILE="$2"; shift 2;;
     --target) TARGETS+=("$2"); shift 2;;
     --stage-run) STAGE_RUNS+=("$2"); shift 2;;
     --output-run) OUTPUT_RUNS+=("$2"); shift 2;;
@@ -111,6 +115,18 @@ done
 [[ -n "$ZARR_PATH" ]] || fail "--zarr is required"
 [[ -n "$EXECUTION_ID" ]] || fail "--execution-id is required"
 (( ${#TARGETS[@]} > 0 )) || fail "at least one --target is required"
+case "$EXECUTION_PROFILE" in
+  selector_activated_production_v1)
+    REGISTRY_WRITE_MODE="deferred_to_serial_finalizer"
+    ;;
+  selector_ineligible_canary_v1)
+    # A canary report is exact-path evidence, never a registry activation
+    # request.  The Python finalizer rejects it independently as well.
+    SUBMIT_REGISTRY_FINALIZER=0
+    REGISTRY_WRITE_MODE="disabled_selector_ineligible_canary"
+    ;;
+  *) fail "unsupported --execution-profile: $EXECUTION_PROFILE" ;;
+esac
 [[ "$EXECUTION_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || \
   fail "unsafe --execution-id: $EXECUTION_ID"
 [[ "$NCORES" =~ ^[1-9][0-9]*$ ]] || fail "--ncores must be a positive integer"
@@ -174,6 +190,8 @@ REGISTRY_FINALIZER_REPORT="${RUN_DIR}/registry_finalizer.json"
 q_repo="$(printf '%q' "$PALETTE_REPO")"
 q_zarr="$(printf '%q' "$ZARR_PATH")"
 q_execution_id="$(printf '%q' "$EXECUTION_ID")"
+q_execution_profile="$(printf '%q' "$EXECUTION_PROFILE")"
+q_registry_write_mode="$(printf '%q' "$REGISTRY_WRITE_MODE")"
 q_expected_commit="$(printf '%q' "$EXPECTED_COMMIT")"
 q_report="$(printf '%q' "$REPORT_PATH")"
 q_status="$(printf '%q' "$STATUS_FILE")"
@@ -208,6 +226,8 @@ umask 0002
 PALETTE_REPO=${q_repo}
 ZARR_PATH=${q_zarr}
 EXECUTION_ID=${q_execution_id}
+EXECUTION_PROFILE=${q_execution_profile}
+REGISTRY_WRITE_MODE=${q_registry_write_mode}
 EXPECTED_COMMIT=${q_expected_commit}
 REPORT_PATH=${q_report}
 STATUS_FILE=${q_status}
@@ -326,6 +346,8 @@ runtime_environment_tmp="\${RUNTIME_ENVIRONMENT_FILE}.tmp.\$\$"
   printf 'cpu_logical_count=%s\n' "\${CPU_LOGICAL_COUNT}"
   printf 'kernel_release=%s\n' "\$(uname -r)"
   printf 'fisheye_source_file=%s\n' "\${ACTUAL_FISHEYE_FILE}"
+  printf 'execution_profile=%s\n' "\${EXECUTION_PROFILE}"
+  printf 'registry_write_mode=%s\n' "\${REGISTRY_WRITE_MODE}"
   printf 'export_root=%s\n' "\${EXPORT_ROOT:-not_requested}"
   printf 'scratch_root=%s\n' "\${SCRATCH_ROOT:-not_requested}"
   printf 'scratch_root_source=%s\n' "\${SCRATCH_ROOT_SOURCE}"
@@ -346,6 +368,7 @@ cmd=(
   scripts/py -m fisheye.utils.execute_analysis_workflow
   "\${ZARR_PATH}"
   --execution-id "\${EXECUTION_ID}"
+  --execution-profile "\${EXECUTION_PROFILE}"
   --num-workers "\${NCORES}"
   --report "\${REPORT_PATH}"
   --apply
@@ -406,6 +429,8 @@ status_tmp="${STATUS_FILE}.tmp.$$"
   printf 'palette_commit=%s\n' "${ACTUAL_COMMIT}"
   printf 'zarr_path=%s\n' "${ZARR_PATH}"
   printf 'execution_id=%s\n' "${EXECUTION_ID}"
+  printf 'execution_profile=%s\n' "${EXECUTION_PROFILE}"
+  printf 'registry_write_mode=%s\n' "${REGISTRY_WRITE_MODE}"
   printf 'export_root=%s\n' "${EXPORT_ROOT:-not_requested}"
   printf 'scratch_root=%s\n' "${SCRATCH_ROOT:-not_requested}"
   printf 'scratch_root_source=%s\n' "${SCRATCH_ROOT_SOURCE}"
@@ -467,6 +492,7 @@ printf 'mode=%s\n' "$([[ "$SUBMIT" == "1" ]] && printf submit || printf render-o
 printf 'palette_commit=%s\n' "$EXPECTED_COMMIT"
 printf 'zarr_path=%s\n' "$ZARR_PATH"
 printf 'execution_id=%s\n' "$EXECUTION_ID"
+printf 'execution_profile=%s\n' "$EXECUTION_PROFILE"
 printf 'run_dir=%s\n' "$RUN_DIR"
 printf 'job_script=%s\n' "$JOB_SCRIPT"
 printf 'execution_report=%s\n' "$REPORT_PATH"
@@ -476,7 +502,7 @@ printf 'resource_telemetry_samples=%s\n' "$RESOURCE_SAMPLES_FILE"
 printf 'workflow_stdout=%s\n' "$RESOURCE_STDOUT_FILE"
 printf 'export_root=%s\n' "${EXPORT_ROOT:-not_requested}"
 printf 'scratch_root_request=%s\n' "$SCRATCH_ROOT_REQUEST_DISPLAY"
-printf 'registry_write_mode=deferred_to_serial_finalizer\n'
+printf 'registry_write_mode=%s\n' "$REGISTRY_WRITE_MODE"
 printf 'registry=%s\n' "$REGISTRY"
 printf 'registry_finalizer=%s\n' \
   "$([[ "$SUBMIT_REGISTRY_FINALIZER" == "1" ]] && printf enabled || printf disabled)"
@@ -509,6 +535,8 @@ if [[ "$SUBMIT" == "1" ]]; then
     printf 'requested_ncores=%s\n' "$NCORES"
     printf 'requested_mem_gb_per_slot=%s\n' "$MEM_GB"
     printf 'requested_walltime=%s\n' "$WALLTIME"
+    printf 'execution_profile=%s\n' "$EXECUTION_PROFILE"
+    printf 'registry_write_mode=%s\n' "$REGISTRY_WRITE_MODE"
     printf 'export_root=%s\n' "${EXPORT_ROOT:-not_requested}"
     printf 'scratch_root_request=%s\n' "$SCRATCH_ROOT_REQUEST_DISPLAY"
     printf 'job_id=%s\n' "$job_id"
@@ -555,7 +583,6 @@ if [[ "$SUBMIT" == "1" ]]; then
     finalizer_job_id="$(printf '%s\n' "$finalizer_output" | sed -n 's/^Job <\([0-9][0-9]*\)>.*/\1/p' | head -n 1)"
     [[ -n "$finalizer_job_id" ]] || fail "could not parse registry finalizer job ID"
     {
-      printf 'registry_write_mode=deferred_to_serial_finalizer\n'
       printf 'registry=%s\n' "$REGISTRY"
       printf 'registry_finalizer_job_id=%s\n' "$finalizer_job_id"
       printf 'registry_finalizer_dependency=done(%s)\n' "$job_id"

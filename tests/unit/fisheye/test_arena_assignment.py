@@ -665,8 +665,110 @@ def test_assign_arenas_spatial_resolves_canonical_keypoint_crop_and_exact_runs(
 
     assert captured["source_rowset_path"] == "crop_runs/crop_001"
     assert captured["exact_run_name"] == "tracks_a"
+    assert captured["stage_selector_eligible"] is True
     assert captured["source_detect_run"] == "detect_source_001"
+    assert root["arena_assignment_runs"].attrs["latest"] == (
+        "arena_assignment_tracks_a"
+    )
+    assert root["arena_assignment_runs"].attrs["latest_complete"] == (
+        "arena_assignment_tracks_a"
+    )
     assert result["assigned_detections"] == 3
+
+
+def test_assign_arenas_spatial_candidate_never_updates_parent_selectors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _build_root()
+    arena_parent = root["arena_assignment_runs"]
+    arena_parent.attrs.update(
+        {
+            "latest": "arena_assignment_previous",
+            "latest_complete": "arena_assignment_previous",
+        }
+    )
+    captured: dict[str, object] = {}
+    consolidations: list[str] = []
+
+    monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: root)
+    monkeypatch.setattr(
+        mod,
+        "infer_experiment_setup",
+        lambda _attrs: SimpleNamespace(
+            setup_type="single_dish",
+            num_dishes=1,
+            source="experiment_setup",
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_single_dish_roi_from_mask",
+        lambda *_args, **_kwargs: [
+            {
+                "id": 3,
+                "roi_pixels": [0, 0, 100, 100],
+                "source": "mask",
+                "image_shape": [100, 100],
+            }
+        ],
+    )
+
+    def fake_write_tracking_run(**kwargs):
+        captured.update(kwargs)
+        return "tracks_candidate", _FakeGroup(), {"ok": True}
+
+    monkeypatch.setattr(mod, "write_tracking_run", fake_write_tracking_run)
+    monkeypatch.setattr(
+        mod,
+        "consolidate_metadata_capture_expected_warnings",
+        lambda path: consolidations.append(str(path)),
+    )
+    monkeypatch.setattr(mod, "emit_stage_completion", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        mod,
+        "build_stage_provenance",
+        lambda **kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(mod, "write_stage_provenance", lambda *args, **kwargs: None)
+
+    result = assign_arenas_spatial(
+        "/tmp/fake.zarr",
+        config={},
+        console=None,
+        source_rowset_path="crop_runs/crop_001",
+        arena_assignment_run_name="arena_assignment_tracks_candidate",
+        tracking_run_name="tracks_candidate",
+        stage_selector_eligible=False,
+    )
+
+    candidate = arena_parent["arena_assignment_tracks_candidate"]
+    assert candidate.attrs["palette_run_completion_status"] == "complete"
+    assert candidate.attrs["stage_selector_eligible"] is False
+    assert captured["exact_run_name"] == "tracks_candidate"
+    assert captured["stage_selector_eligible"] is False
+    assert arena_parent.attrs["latest"] == "arena_assignment_previous"
+    assert arena_parent.attrs["latest_complete"] == "arena_assignment_previous"
+    assert "latest_pending" not in arena_parent.attrs
+    assert consolidations == ["/tmp/fake.zarr"]
+    assert result["assigned_detections"] == 3
+
+
+@pytest.mark.parametrize(
+    ("arena_run_name", "tracking_run_name"),
+    ((None, "tracks_candidate"), ("arena_candidate", None)),
+)
+def test_assign_arenas_spatial_candidate_requires_both_exact_output_names(
+    arena_run_name: str | None,
+    tracking_run_name: str | None,
+) -> None:
+    with pytest.raises(ValueError, match="requires exact arena-assignment and tracking"):
+        assign_arenas_spatial(
+            "/tmp/never-opened.zarr",
+            config={},
+            arena_assignment_run_name=arena_run_name,
+            tracking_run_name=tracking_run_name,
+            stage_selector_eligible=False,
+        )
 
 
 def test_crop_lineage_resolves_finalized_refined_working_source_detect() -> None:

@@ -68,6 +68,7 @@ from fisheye.shared.coordinate_identity import (
     TRACK_SAMPLE_SOURCE_INSTANCE_KEY_DTYPE,
 )
 from fisheye.shared.tail_coordinate_publication import (
+    load_completed_ineligible_tail_kinematics_coordinate_publication,
     load_tail_kinematics_coordinate_publication,
 )
 from fisheye.shared.system_metadata import get_git_info
@@ -92,6 +93,12 @@ TAIL_TRACE_REASON_VALID = np.uint16(0)
 TAIL_TRACE_REASON_SOURCE_INVALID = np.uint16(1)
 TAIL_TRACE_REASON_REFERENCE_INVALID = np.uint16(2)
 TAIL_TRACE_REASON_GEOMETRY_NONFINITE = np.uint16(3)
+TAIL_KINEMATICS_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1 = (
+    "tail_kinematics_selector_eligible_v1"
+)
+TAIL_KINEMATICS_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1 = (
+    "tail_kinematics_selector_ineligible_canary_v1"
+)
 
 TAIL_TRACE_SCIENTIFIC_DTYPES: Mapping[str, np.dtype[Any]] = {
     "source_tail_row_index": np.dtype("<i8"),
@@ -902,6 +909,12 @@ def bind_tail_trace_sources(
     track_scope: str,
     source_window_rows: int = 65_536,
     prebound_track_source: Any | None = None,
+    tail_authority_profile_id: str = (
+        TAIL_KINEMATICS_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+    ),
+    track_authority_profile_id: str = (
+        track_export.TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+    ),
 ) -> BoundTailTraceSources:
     """Bind exact tail/body/track authorities without publishing an export."""
 
@@ -909,14 +922,33 @@ def bind_tail_trace_sources(
     if not tail_name or "/" in tail_name:
         raise ValueError("tail_kinematics_run must be one explicit child name.")
     tail_path = f"analysis/tail_kinematics_runs/{tail_name}"
-    publication = load_tail_kinematics_coordinate_publication(root, tail_path)
+    if (
+        tail_authority_profile_id
+        == TAIL_KINEMATICS_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+    ):
+        publication = load_tail_kinematics_coordinate_publication(root, tail_path)
+        expected_selector_eligible = True
+    elif (
+        tail_authority_profile_id
+        == TAIL_KINEMATICS_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+    ):
+        publication = (
+            load_completed_ineligible_tail_kinematics_coordinate_publication(
+                root, tail_path
+            )
+        )
+        expected_selector_eligible = False
+    else:
+        raise ValueError(
+            f"Unsupported tail authority profile {tail_authority_profile_id!r}."
+        )
     tail_run = publication._run
     tail_attrs = _attrs(tail_run)
     if (
         tail_attrs.get("schema_id") != TAIL_KINEMATICS_SCHEMA_ID
         or tail_attrs.get("schema_version") != TAIL_KINEMATICS_SCHEMA_VERSION
         or tail_attrs.get("palette_run_completion_status") != "complete"
-        or tail_attrs.get("stage_selector_eligible") is not True
+        or tail_attrs.get("stage_selector_eligible") is not expected_selector_eligible
     ):
         raise ValueError("Tail source must be one exact completed eligible v2 run.")
     adopted, array_schema = _tail_array_schema_adoption(tail_run)
@@ -974,6 +1006,7 @@ def bind_tail_trace_sources(
             expected_recording_id=recording_id,
             track_kinematics_run=track_kinematics_run,
             track_scope=track_scope,
+            authority_profile_id=track_authority_profile_id,
         )
     elif (
         track_source.binding.get("recording_id") != recording_id
@@ -1525,16 +1558,23 @@ def _validate_source_binding(source: Mapping[str, Any]) -> None:
                 raise ValueError(f"{inventory_name} record {path!r} is invalid.")
             _exact_sha256(record.get("content_sha256"), label=f"{path} content")
     completion = body.get("completion_snapshot")
+    selector_eligible = (
+        completion.get("tail_selector_eligible")
+        if isinstance(completion, Mapping)
+        else None
+    )
     if not isinstance(completion, Mapping) or completion != {
         "tail_status": "complete",
         "tail_completed_at_utc": completion.get("tail_completed_at_utc"),
-        "tail_selector_eligible": True,
-        "subject_shape_selector_eligible": True,
+        "tail_selector_eligible": selector_eligible,
+        "subject_shape_selector_eligible": selector_eligible,
         "track_status": "complete",
         "track_completed_at_utc": completion.get("track_completed_at_utc"),
-        "track_selector_eligible": True,
+        "track_selector_eligible": selector_eligible,
     }:
         raise ValueError("Tail completion snapshot is invalid.")
+    if type(selector_eligible) is not bool:
+        raise ValueError("Tail completion lifecycle must be one exact bool.")
     for name in ("tail_completed_at_utc", "track_completed_at_utc"):
         if not isinstance(completion.get(name), str) or not completion[name]:
             raise ValueError(f"Tail completion field {name} is invalid.")
@@ -1983,6 +2023,8 @@ __all__ = [
     "TAIL_TRACE_REASON_SOURCE_INVALID",
     "TAIL_TRACE_REASON_VALID",
     "TAIL_TRACE_SCIENTIFIC_DTYPES",
+    "TAIL_KINEMATICS_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1",
+    "TAIL_KINEMATICS_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1",
     "TailTrackIdentityIndex",
     "bind_tail_trace_sources",
     "export_tail_trace_samples",

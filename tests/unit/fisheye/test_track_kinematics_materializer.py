@@ -362,6 +362,18 @@ def _install_writer_api(
             manifest_sha256="e" * 64,
         )
 
+    def validate_candidate(authoritative_root, final_run_group):
+        assert final_run_group.attrs["palette_run_completion_status"] == "complete"
+        assert final_run_group.attrs["stage_selector_eligible"] is False
+        assert final_run_group.attrs[
+            mod.track_writer.TRACK_KINEMATICS_PUBLICATION_PROFILE_ATTR
+        ] == (
+            mod.track_writer.TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+        )
+        assert str(authoritative_root.attrs["source_revision"]) == "source-revision-1"
+        events.append(("validate_candidate", False, "complete"))
+        return SimpleNamespace(assert_verified=lambda: None)
+
     def seal_motion(
         authoritative_root,
         final_run_group,
@@ -445,6 +457,12 @@ def _install_writer_api(
         mod.track_writer,
         "validate_bound_track_motion_run",
         validate_public,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        mod.track_writer,
+        "load_completed_ineligible_bound_track_motion_run",
+        validate_candidate,
         raising=False,
     )
     monkeypatch.setattr(
@@ -674,6 +692,63 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
         tmp_path
         / f".source.zarr.{atomic_mod.ARCHIVE_PUBLICATION_LOCK_SUFFIX}.lock"
     ).is_file()
+
+
+def test_selector_ineligible_materializer_publishes_without_selector_or_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    _seed_previous_pointers(source)
+    events: list[tuple[Any, ...]] = []
+    _install_writer_api(monkeypatch, events)
+
+    result = mod.materialize_track_kinematics(
+        source,
+        scratch_root=scratch,
+        keypoint_run="refined/kp_1",
+        tracking_run="tracking_candidate",
+        execution_profile_id="selector_ineligible_canary_v1",
+        run_name="track_1",
+        output_shard_rows=5,
+        shard_workers=2,
+        copy_backend="python",
+        apply=True,
+    )
+
+    assert result["status"] == "complete"
+    assert result["publish"]["execution_profile_id"] == (
+        "selector_ineligible_canary_v1"
+    )
+    assert result["publish"]["registry_updated"] is False
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    parent = root["analysis/track_kinematics_runs"]
+    offline = parent["offline"]
+    assert parent.attrs["latest"] == "offline/previous"
+    assert parent.attrs["latest_complete"] == "offline/previous"
+    assert parent.attrs["latest_offline"] == "previous"
+    assert offline.attrs["latest"] == "previous"
+    run = offline["track_1"]
+    assert run.attrs["palette_run_completion_status"] == "complete"
+    assert run.attrs["stage_selector_eligible"] is False
+    assert run.attrs[
+        mod.track_writer.TRACK_KINEMATICS_PUBLICATION_PROFILE_ATTR
+    ] == (
+        mod.track_writer.TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+    )
+    assert events[0][0] == "stage"
+    assert events[0][3][:4] == (
+        "--tracking-run",
+        "tracking_candidate",
+        "--tracking-authority-profile",
+        "tracking_selector_ineligible_canary_v1",
+    )
+    assert events[-2:] == [
+        ("seal_motion", False, "complete"),
+        ("validate_candidate", False, "complete"),
+    ]
 
 
 def test_unbound_stage_rejects_detached_coordinate_descriptor(

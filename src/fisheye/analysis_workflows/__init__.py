@@ -25,6 +25,13 @@ from .execution import (
     WorkflowExecutionPlan,
     build_workflow_execution_plan,
 )
+from .execution_profiles import (
+    PRODUCTION_EXECUTION_PROFILE_ID,
+    SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    WorkflowExecutionProfile,
+    resolve_workflow_execution_profile,
+    workflow_execution_profile_ids,
+)
 
 __all__ = [
     "ANALYSIS_WORKFLOW_SCHEMA_ID",
@@ -32,6 +39,11 @@ __all__ = [
     "EXECUTION_SCHEMA_ID",
     "EXECUTION_LEGACY_SCHEMA_VERSION",
     "EXECUTION_SCHEMA_VERSION",
+    "PRODUCTION_EXECUTION_PROFILE_ID",
+    "SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID",
+    "WorkflowExecutionProfile",
+    "resolve_workflow_execution_profile",
+    "workflow_execution_profile_ids",
     "AnalysisWorkflow",
     "NodePlan",
     "StageAvailability",

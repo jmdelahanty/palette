@@ -19,10 +19,13 @@ from datetime import datetime, timezone
 import numpy as np
 
 from fisheye.analysis.eye_angle_io import (
+    EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
     EyeAngleIOError,
     catalog_eye_angle_series,
     load_eye_angle_series_rows,
     resolve_eye_angle_run,
+    resolve_completed_ineligible_eye_angle_run,
 )
 from fisheye.analysis.eye_angle_schema import (
     EYE_ANGLE_ARRAY_SCHEMA_ATTR,
@@ -239,17 +242,33 @@ def _source_binding(
     zarr_path: Path,
     recording_id: str,
     run_name: str,
+    authority_profile_id: str,
 ) -> dict[str, Any]:
-    run, resolved_name, run_path = resolve_eye_angle_run(
-        root,
-        run_name,
-        legacy_compatibility=False,
-    )
+    if authority_profile_id == EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1:
+        run, resolved_name, run_path = resolve_eye_angle_run(
+            root,
+            run_name,
+            legacy_compatibility=False,
+        )
+        selection_mode = "explicit_run"
+    elif (
+        authority_profile_id
+        == EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+    ):
+        run, resolved_name, run_path = resolve_completed_ineligible_eye_angle_run(
+            root, run_name
+        )
+        selection_mode = "explicit_selector_ineligible_canary"
+    else:
+        raise EyeAngleIOError(
+            f"Unsupported eye-angle authority profile {authority_profile_id!r}."
+        )
     catalog = catalog_eye_angle_series(
         root,
         run_name=resolved_name,
         prefer_frame=True,
         legacy_compatibility=False,
+        authority_profile_id=authority_profile_id,
     )
     if catalog.row_axis != "frame":
         raise EyeAngleIOError("Eye-trace export requires the exact frame axis.")
@@ -292,7 +311,7 @@ def _source_binding(
         "source_method_version": attrs.get("method_version"),
         "frame_count": catalog.row_count,
         "selection_snapshot": {
-            "mode": "explicit_run",
+            "mode": selection_mode,
             "parent_latest": parent.attrs.get("latest"),
             "parent_latest_complete": parent.attrs.get("latest_complete"),
             "parent_completion_epoch": parent.attrs.get("palette_completion_epoch"),
@@ -313,6 +332,7 @@ def bind_eye_trace_source(
     zarr_path: str | Path,
     eye_angle_run: str,
     expected_recording_id: str | None = None,
+    authority_profile_id: str = EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
 ) -> dict[str, Any]:
     """Bind one explicit canonical eye-angle source without publishing."""
 
@@ -327,6 +347,7 @@ def bind_eye_trace_source(
         zarr_path=source,
         recording_id=recording_id,
         run_name=safe_component(eye_angle_run, label="eye-angle run ID"),
+        authority_profile_id=authority_profile_id,
     )
 
 
@@ -492,6 +513,15 @@ def iter_projected_eye_trace_batches(
         raise ValueError("Eye-trace projection names another table.")
     constants = eye_trace_constant_values(source_binding, projection)
     frame_count = int(source_binding["frame_count"])
+    selection_mode = source_binding["selection_snapshot"]["mode"]
+    if selection_mode == "explicit_run":
+        authority_profile_id = EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+    elif selection_mode == "explicit_selector_ineligible_canary":
+        authority_profile_id = (
+            EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+        )
+    else:
+        raise ValueError("Eye-trace source binding has an unknown selection mode.")
     for start in range(0, frame_count, row_group_rows):
         stop = min(frame_count, start + row_group_rows)
         window = load_eye_angle_series_rows(
@@ -502,6 +532,7 @@ def iter_projected_eye_trace_batches(
             angle_channels=EYE_TRACE_ANGLE_CHANNELS,
             qa_channels=EYE_TRACE_QA_CHANNELS,
             max_rows=row_group_rows,
+            authority_profile_id=authority_profile_id,
         )
         columns = _batch_columns(window)
         expected_frames = np.arange(start, stop, dtype=np.int64)
@@ -633,7 +664,10 @@ def _validate_eye_trace_envelope(payload: Mapping[str, Any]) -> Mapping[str, Any
         or set(selection) != _SELECTION_SNAPSHOT_FIELDS
     ):
         raise ValueError("Eye-trace source selection snapshot is invalid.")
-    if selection.get("mode") != "explicit_run":
+    if selection.get("mode") not in {
+        "explicit_run",
+        "explicit_selector_ineligible_canary",
+    }:
         raise ValueError("Eye-trace source selection mode is invalid.")
     for field in ("parent_latest", "parent_latest_complete"):
         if selection.get(field) is not None and not isinstance(selection[field], str):
@@ -656,8 +690,9 @@ def _validate_eye_trace_envelope(payload: Mapping[str, Any]) -> Mapping[str, Any
         or not completion["completed_at_utc"]
     ):
         raise ValueError("Eye-trace source completion time is invalid.")
-    if completion.get("selector_eligible") is not True:
-        raise ValueError("Eye-trace source must be selector-eligible.")
+    expected_eligible = selection.get("mode") == "explicit_run"
+    if completion.get("selector_eligible") is not expected_eligible:
+        raise ValueError("Eye-trace source lifecycle differs from its selection mode.")
     manifest_digests = source_body.get("manifest_digests")
     if (
         not isinstance(manifest_digests, Mapping)

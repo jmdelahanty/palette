@@ -40,6 +40,11 @@ from .compute_speed import (  # re-exported for compatibility
     load_arena_ids,
     resolve_dimensions,
 )
+from .track_kinematics_io import (
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_ATTR,
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1,
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+)
 from .chaser_metrics_loader import (
     CanonicalOnlineCoordinateHandoff,
     ChaserMetricsBundle,
@@ -144,7 +149,11 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_started,
     require_runs_parent,
 )
-from fisheye.tracking.single_subject_per_arena import load_tracking_ids
+from fisheye.tracking.single_subject_per_arena import (
+    TRACKING_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    TRACKING_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+    load_tracking_ids,
+)
 from fisheye.shared.system_metadata import get_git_info, get_environment_info
 from fisheye.shared.track_coordinate_publication import (
     TRACK_POSITION_DERIVATION_ATTR,
@@ -2480,9 +2489,29 @@ def mark_track_kinematics_run_complete(
     deferred_activation_sink: (
         Callable[[DeferredTrackKinematicsSelectorActivation], None] | None
     ) = None,
+    publication_profile_id: str = (
+        TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1
+    ),
 ) -> Optional[DeferredTrackKinematicsSelectorActivation]:
     """Validate a complete ineligible run, prepare pointers, and expose it last."""
 
+    if publication_profile_id not in {
+        TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1,
+        TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+    }:
+        raise ValueError(
+            f"Unsupported track publication profile {publication_profile_id!r}."
+        )
+    selector_ineligible_canary = (
+        publication_profile_id
+        == TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+    )
+    if selector_ineligible_canary and (
+        defer_selector_eligibility or deferred_activation_sink is not None
+    ):
+        raise ValueError(
+            "Selector-ineligible track publication cannot request activation."
+        )
     receipt_mode = payload_integrity_receipt is not None or payload_run_path is not None
     if receipt_mode and (
         payload_integrity_receipt is None or payload_run_path is None
@@ -2607,6 +2636,9 @@ def mark_track_kinematics_run_complete(
             owner_uuid=owner_uuid,
         )
         assert run_group is not None
+        run_group.attrs[TRACK_KINEMATICS_PUBLICATION_PROFILE_ATTR] = (
+            publication_profile_id
+        )
         mark_run_complete(
             run_group,
             # Parent selectors are handled below under an explicit attempt
@@ -2701,6 +2733,24 @@ def mark_track_kinematics_run_complete(
                 )
         else:
             sealed_motion.assert_verified()
+
+        if selector_ineligible_canary:
+            final_run = _resolve_owned_track_run_child(
+                root,
+                run_name=run_name,
+                run_type=run_type,
+                owner_uuid=owner_uuid,
+            )
+            assert final_run is not None
+            if (
+                final_run.attrs.get("stage_selector_eligible") is not False
+                or final_run.attrs.get(TRACK_KINEMATICS_PUBLICATION_PROFILE_ATTR)
+                != publication_profile_id
+            ):
+                raise RuntimeError(
+                    "Track canary did not remain complete and selector-ineligible."
+                )
+            return None
 
         write_selector(
             "analysis/track_kinematics_runs",
@@ -4526,6 +4576,7 @@ _MOTION_RUN_ALLOWED_ATTR_NAMES = frozenset(_MOTION_RUN_DERIVATION_ATTR_NAMES) | 
             TRACK_KINEMATICS_STAGING_MANIFEST_ATTR,
             TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR,
             TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR,
+            TRACK_KINEMATICS_PUBLICATION_PROFILE_ATTR,
             TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR,
         }
     )
@@ -12029,6 +12080,26 @@ def load_bound_track_motion_run(
     )
 
 
+def load_completed_ineligible_bound_track_motion_run(
+    authoritative_root: zarr.Group,
+    run_group: zarr.Group,
+) -> BoundTrackMotionRun:
+    """Load one exact complete canary through the full motion seal."""
+
+    if (
+        run_group.attrs.get(TRACK_KINEMATICS_PUBLICATION_PROFILE_ATTR)
+        != TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+    ):
+        raise ValueError(
+            "Selector-ineligible track motion lacks the explicit canary profile."
+        )
+    return _load_bound_track_motion_run_impl(
+        authoritative_root,
+        run_group,
+        expected_selector_eligible=False,
+    )
+
+
 def validate_bound_track_motion_run(
     authoritative_root: zarr.Group,
     run_group: zarr.Group,
@@ -13306,6 +13377,21 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         ),
     )
     parser.add_argument(
+        "--tracking-run",
+        help=(
+            "Exact tracking run. Required when consuming a selector-ineligible "
+            "tracking canary; optional production disambiguation otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--tracking-authority-profile",
+        choices=(
+            TRACKING_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+            TRACKING_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+        ),
+        default=TRACKING_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    )
+    parser.add_argument(
         "--run-name", help="Optional name for the output track kinematics run."
     )
     parser.add_argument(
@@ -14050,6 +14136,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             expected_instance_key=position_source_offline.instance_key,
             expected_source_rowset_fingerprint=tracking_source_fingerprint,
             return_metadata=True,
+            run_name=args.tracking_run,
+            authority_profile_id=args.tracking_authority_profile,
         )
         track_ids_offline = track_ids_offline.astype(np.int64, copy=False)
         track_id_to_arena_id = {
@@ -14468,6 +14556,7 @@ __all__ = [
     "_filter_public_track_rows",
     "load_arena_ids",
     "load_bound_track_motion_run",
+    "load_completed_ineligible_bound_track_motion_run",
     "load_bound_track_position_bindings",
     "resolve_dimensions",
     "rollback_deferred_track_kinematics_selector_activation",

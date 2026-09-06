@@ -31,6 +31,19 @@ TRACK_KINEMATICS_SOURCE_SPEED_LEVELS = {
     "averaged": "speed_averaged",
 }
 TRACK_KINEMATICS_GROUPED_SPEED_LAYOUT = "movement/speed/<level>"
+TRACK_KINEMATICS_PUBLICATION_PROFILE_ATTR = (
+    "track_kinematics_publication_profile_id"
+)
+TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1 = (
+    "track_kinematics_selector_activated_v1"
+)
+TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1 = (
+    "track_kinematics_selector_ineligible_canary_v1"
+)
+TRACK_KINEMATICS_PUBLICATION_PROFILE_IDS = (
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1,
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+)
 
 
 @dataclass(frozen=True)
@@ -505,6 +518,9 @@ def load_track_kinematics_track(
     scope: str = "offline",
     track_id: int = 0,
     required_speed_levels: Iterable[str] = TRACK_KINEMATICS_SPEED_LEVELS,
+    publication_profile_id: str = (
+        TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1
+    ),
 ) -> TrackKinematicsTrackTables:
     """Load one freshly verified canonical track-motion publication.
 
@@ -524,9 +540,31 @@ def load_track_kinematics_track(
     )
     # Import locally so this small reader module remains acyclic for producer
     # tooling that imports logical table types.
-    from fisheye.analysis.track_kinematics import load_bound_track_motion_run
+    from fisheye.analysis.track_kinematics import (
+        load_bound_track_motion_run,
+        load_completed_ineligible_bound_track_motion_run,
+    )
 
-    bound_run = load_bound_track_motion_run(root, run_group)
+    if (
+        publication_profile_id
+        == TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1
+    ):
+        bound_run = load_bound_track_motion_run(root, run_group)
+    elif (
+        publication_profile_id
+        == TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+    ):
+        if run_name == "latest":
+            raise ValueError(
+                "Selector-ineligible track motion requires one exact named run."
+            )
+        bound_run = load_completed_ineligible_bound_track_motion_run(root, run_group)
+    else:
+        raise ValueError(
+            "Unsupported track-kinematics publication profile "
+            f"{publication_profile_id!r}; expected one of "
+            f"{TRACK_KINEMATICS_PUBLICATION_PROFILE_IDS!r}."
+        )
     # All later metadata comes from the freshly resolved bound child or its
     # manifest snapshot, never the discovery handle supplied above.
     run_group = bound_run.run_group

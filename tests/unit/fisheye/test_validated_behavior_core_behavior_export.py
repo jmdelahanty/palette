@@ -25,12 +25,16 @@ from fisheye.analysis_workflows.validated_behavior_cohort_adapters import (
     RECORDING_BUNDLE_ADAPTER_ID,
 )
 from fisheye.analysis_workflows.validated_behavior_source_admission import (
+    CORE_BEHAVIOR_CANARY_EXECUTION_ADMISSION_ROLE,
     CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE,
     CORE_BEHAVIOR_REQUIRED_STAGE_NODES,
     EXACT_CHASER_ADMISSION_ROLE,
     ValidatedBehaviorAdmissionError,
     bind_core_behavior_execution_report,
     validate_core_behavior_execution_report,
+)
+from fisheye.analysis_workflows.execution_profiles import (
+    SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
 )
 from fisheye.analytics_exports.validated_behavior_cohort import (
     EXPORT_METHOD_ID,
@@ -347,6 +351,40 @@ def test_completed_execution_report_is_typed_admission_not_name_authority(
             expected_analysis_zarr=zarr_path,
             expected_recording_id=recording_id,
         )
+
+
+def test_selector_ineligible_execution_report_binds_distinct_canary_role(
+    tmp_path: Path,
+) -> None:
+    zarr_path, recording_id, report = _execution_report(tmp_path)
+    report["schema_version"] = 4
+    report["execution_profile_id"] = (
+        SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+    )
+    report["registry_write_mode"] = "disabled_selector_ineligible_canary"
+    execution_plan = report["execution_plan"]  # type: ignore[assignment]
+    execution_plan["schema_version"] = 4  # type: ignore[index]
+    execution_plan["execution_profile_id"] = (  # type: ignore[index]
+        SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+    )
+
+    validated = validate_core_behavior_execution_report(
+        report,
+        expected_analysis_zarr=zarr_path,
+        expected_recording_id=recording_id,
+    )
+    assert validated["execution_profile_id"] == (
+        SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+    )
+
+    report_path = tmp_path / "canary_execution_report.json"
+    report_path.write_text(json.dumps(report, sort_keys=True) + "\n", encoding="utf-8")
+    binding, _ = bind_core_behavior_execution_report(
+        report_path,
+        recording_id=recording_id,
+        analysis_zarr=zarr_path,
+    )
+    assert binding["role"] == CORE_BEHAVIOR_CANARY_EXECUTION_ADMISSION_ROLE
 
 
 def test_completed_execution_report_accepts_canonical_framewise_motion(

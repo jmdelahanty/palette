@@ -15,12 +15,29 @@ from typing import Any
 from fisheye.analysis.eye_angle_analysis import (
     validate_eye_angle_persisted_contract_manifests,
 )
-from fisheye.analysis.eye_angle_io import resolve_eye_angle_run
+from fisheye.analysis.eye_angle_io import (
+    resolve_completed_ineligible_eye_angle_run,
+    resolve_eye_angle_run,
+)
 from fisheye.analysis.eye_angle_schema import validate_eye_angle_compact_run
 from fisheye.analysis.subject_shape_io import resolve_canonical_subject_shape_run
 from fisheye.analysis.subject_shape_storage import (
+    SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
     is_subject_shape_access_aware_storage,
+    validate_subject_shape_access_aware_storage,
     validate_subject_shape_direct_consolidated_storage,
+)
+from fisheye.analysis.swim_bout_io import (
+    load_default_swim_bout_tables,
+    load_exact_selector_ineligible_default_swim_bout_tables,
+)
+from fisheye.analysis.track_kinematics import (
+    load_bound_track_motion_run,
+    load_completed_ineligible_bound_track_motion_run,
+)
+from fisheye.analysis.track_kinematics_io import (
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_ATTR,
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
 )
 from fisheye.registry.stage_catalog import canonical_stage_id
 from fisheye.shared.subject_shape_coordinate_publication import (
@@ -28,10 +45,11 @@ from fisheye.shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID,
     SUBJECT_SHAPE_BUNDLE_ID_ATTR,
     SUBJECT_SHAPE_BUNDLE_SOURCE_KIND,
-    SUBJECT_SHAPE_HISTORICAL_SOURCE_KIND,
+    SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
     SUBJECT_SHAPE_SOURCE_KIND_ATTR,
     SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR,
     SealedSubjectShapePublicationMetadataProof,
+    load_completed_ineligible_subject_shape_coordinate_publication,
     validate_sealed_subject_shape_publication_metadata,
 )
 from fisheye.shared.eye_geometry_source import (
@@ -39,8 +57,18 @@ from fisheye.shared.eye_geometry_source import (
     validate_staged_subject_shape_eye_geometry_authority,
 )
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.tail_coordinate_publication import (
+    load_completed_ineligible_tail_kinematics_coordinate_publication,
+    load_tail_kinematics_coordinate_publication,
+)
 
 from .availability import StageAvailability, discover_stage_availability
+from .execution_profiles import (
+    PRODUCTION_EXECUTION_PROFILE_ID,
+    WorkflowExecutionProfile,
+    resolve_workflow_execution_profile,
+)
+from .tracking_source_handle import load_tracking_source_handle
 
 
 @dataclass
@@ -71,6 +99,7 @@ RuntimeStageVerifier = Callable[
         StageAvailability,
         Mapping[str, str],
         RuntimeVerificationSession | None,
+        WorkflowExecutionProfile,
     ],
     StageAvailability,
 ]
@@ -81,6 +110,7 @@ def _verify_subject_shape(
     availability: StageAvailability,
     dependency_runs: Mapping[str, str],
     session: RuntimeVerificationSession | None,
+    execution_profile: WorkflowExecutionProfile,
 ) -> StageAvailability:
     run_name = availability.run_name
     if not availability.available or not isinstance(run_name, str):
@@ -95,19 +125,20 @@ def _verify_subject_shape(
         run = root.get(run_path)
         if run is None:
             raise ValueError("Subject-shape publication is missing.")
+        expected_selector_eligible = execution_profile.expected_selector_eligible
         if SUBJECT_SHAPE_PAYLOAD_INTEGRITY_RECEIPT_ATTR in run.attrs:
-            publication_owner = run.attrs.get("subject_shape_publication_owner_uuid")
+            publication_owner = run.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
             if not isinstance(publication_owner, str) or not publication_owner:
                 raise ValueError("Subject-shape publication lacks its immutable owner.")
             metadata_proof = validate_sealed_subject_shape_publication_metadata(
                 root,
                 run_path,
-                expected_selector_eligible=True,
+                expected_selector_eligible=expected_selector_eligible,
                 expected_publication_owner=publication_owner,
             )
             if (
                 metadata_proof.run_path != run_path
-                or metadata_proof.selector_eligible is not True
+                or metadata_proof.selector_eligible is not expected_selector_eligible
                 or metadata_proof.publication_owner != publication_owner
             ):
                 raise ValueError(
@@ -115,11 +146,23 @@ def _verify_subject_shape(
                 )
             if session is not None:
                 session.subject_shape_metadata_proofs[run_name] = metadata_proof
+            if expected_selector_eligible:
+                resolve_canonical_subject_shape_run(root, run_name)
+            else:
+                load_completed_ineligible_subject_shape_coordinate_publication(
+                    root,
+                    run_path,
+                    expected_publication_owner=publication_owner,
+                )
         else:
             # Compatibility for publications predating sealed payload receipts.
             # The full scientific resolver remains fail-closed, albeit slower.
-            run, resolved, resolved_path, publication = (
-                resolve_canonical_subject_shape_run(root, run_name)
+            if not expected_selector_eligible:
+                raise ValueError(
+                    "Selector-ineligible subject shape requires sealed payload receipts."
+                )
+            run, resolved, resolved_path, publication = resolve_canonical_subject_shape_run(
+                root, run_name
             )
             if (
                 resolved != run_name
@@ -132,11 +175,7 @@ def _verify_subject_shape(
                 )
         storage_profile_id = run.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR)
         source_authority = dependency_runs.get("refined_subject_masks")
-        if not isinstance(source_authority, str) or not source_authority:
-            raise ValueError(
-                "Subject-shape verification requires its refined-mask authority."
-            )
-        if source_authority.startswith("bundle/"):
+        if isinstance(source_authority, str) and source_authority.startswith("bundle/"):
             bundle_id = source_authority.removeprefix("bundle/")
             if not bundle_id or "/" in bundle_id:
                 raise ValueError("Subject-shape bundle dependency is malformed.")
@@ -144,39 +183,55 @@ def _verify_subject_shape(
                 run.attrs.get(SUBJECT_SHAPE_SOURCE_KIND_ATTR)
                 != SUBJECT_SHAPE_BUNDLE_SOURCE_KIND
                 or run.attrs.get(SUBJECT_SHAPE_BUNDLE_ID_ATTR) != bundle_id
-                or storage_profile_id != SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID
             ):
                 raise ValueError(
                     "Subject-shape publication does not match the planned bundle "
                     "authority and supported storage profile."
                 )
-        elif (
-            run.attrs.get(
-                SUBJECT_SHAPE_SOURCE_KIND_ATTR,
-                SUBJECT_SHAPE_HISTORICAL_SOURCE_KIND,
-            )
-            != SUBJECT_SHAPE_HISTORICAL_SOURCE_KIND
-            or run.attrs.get("source_refined_subject_masks_run") != source_authority
-        ):
-            raise ValueError(
-                "Subject-shape publication does not match the planned refined-mask "
-                "authority."
-            )
+        elif isinstance(source_authority, str) and source_authority:
+            if run.attrs.get("source_refined_subject_masks_run") != source_authority:
+                raise ValueError(
+                    "Subject-shape publication does not match the planned "
+                    "refined-mask authority."
+                )
         if storage_profile_id is not None:
             profile_id = str(storage_profile_id)
             if not is_subject_shape_access_aware_storage(profile_id):
                 raise ValueError(
                     f"Unsupported subject-shape storage profile {profile_id!r}."
                 )
-            errors = validate_subject_shape_direct_consolidated_storage(
-                zarr_path,
-                run_path=run_path,
-                phase="bound",
-                expected_profile_id=profile_id,
-            )
+            if expected_selector_eligible:
+                errors = validate_subject_shape_direct_consolidated_storage(
+                    zarr_path,
+                    run_path=run_path,
+                    phase="bound",
+                    expected_profile_id=profile_id,
+                )
+            else:
+                # Exact-path candidate consumption already opened the immutable
+                # consolidated generation above and validated its sealed payload
+                # and live metadata.  Reopening both archive views here reparses
+                # the archive-wide consolidated catalog and proves no additional
+                # candidate lifecycle fact.  Validate the physical storage plan
+                # against the same consolidated run instead.
+                errors = validate_subject_shape_access_aware_storage(
+                    run,
+                    phase="bound",
+                    expected_profile_id=profile_id,
+                )
             if errors:
                 raise ValueError(
                     "Subject-shape storage validation failed: " + "; ".join(errors)
+                )
+            expected_storage_profile = (
+                SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID
+                if expected_selector_eligible
+                else SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
+            )
+            if profile_id != expected_storage_profile:
+                raise ValueError(
+                    "Subject-shape storage profile does not match its execution "
+                    f"lifecycle: {profile_id!r} != {expected_storage_profile!r}."
                 )
     except Exception as exc:
         return StageAvailability(
@@ -205,6 +260,7 @@ def _verify_eye_angles(
     availability: StageAvailability,
     dependency_runs: Mapping[str, str],
     session: RuntimeVerificationSession | None,
+    execution_profile: WorkflowExecutionProfile,
 ) -> StageAvailability:
     run_name = availability.run_name
     if not availability.available or not isinstance(run_name, str):
@@ -223,7 +279,13 @@ def _verify_eye_angles(
             if session is not None
             else open_zarr_root(zarr_path, mode="r")
         )
-        run, resolved, run_path = resolve_eye_angle_run(root, run_name)
+        if execution_profile.expected_selector_eligible:
+            run, resolved, run_path = resolve_eye_angle_run(root, run_name)
+        else:
+            run, resolved, run_path = resolve_completed_ineligible_eye_angle_run(
+                root,
+                run_name,
+            )
         if resolved != run_name or run_path != f"analysis/eye_angle_runs/{run_name}":
             raise ValueError("Eye-angle resolver returned another run.")
 
@@ -277,6 +339,9 @@ def _verify_eye_angles(
             run_name=source_subject_shape_run,
             authority=source_authority,
             verify_payload=False,
+            expected_selector_eligible=(
+                execution_profile.expected_selector_eligible
+            ),
             publication_metadata_proof=(
                 session.subject_shape_metadata_proofs.get(source_subject_shape_run)
                 if session is not None
@@ -305,9 +370,190 @@ def _verify_eye_angles(
     )
 
 
+def _verified_result(
+    availability: StageAvailability,
+    *,
+    reason: str,
+) -> StageAvailability:
+    return StageAvailability(
+        stage_id=availability.stage_id,
+        available=True,
+        artifact_path=availability.artifact_path,
+        run_name=availability.run_name,
+        reason=reason,
+        completion_status=availability.completion_status,
+    )
+
+
+def _failed_result(
+    availability: StageAvailability,
+    *,
+    label: str,
+    exc: Exception,
+) -> StageAvailability:
+    return StageAvailability(
+        stage_id=availability.stage_id,
+        available=False,
+        artifact_path=availability.artifact_path,
+        run_name=availability.run_name,
+        reason=(
+            f"strict {label} authority verification failed: "
+            f"{type(exc).__name__}: {exc}"
+        ),
+        completion_status=availability.completion_status,
+    )
+
+
+def _verify_tracks(
+    zarr_path: Path,
+    availability: StageAvailability,
+    dependency_runs: Mapping[str, str],
+    session: RuntimeVerificationSession | None,
+    execution_profile: WorkflowExecutionProfile,
+) -> StageAvailability:
+    del dependency_runs, session
+    if not availability.available or not availability.artifact_path:
+        return availability
+    try:
+        handle = load_tracking_source_handle(
+            zarr_path,
+            availability.artifact_path,
+            expected_selector_eligible=(
+                execution_profile.expected_selector_eligible
+            ),
+            use_consolidated=True,
+        )
+        handle.assert_verified()
+    except Exception as exc:
+        return _failed_result(availability, label="tracking", exc=exc)
+    return _verified_result(
+        availability,
+        reason="strict manifest-bound tracking authority is available",
+    )
+
+
+def _verify_track_kinematics(
+    zarr_path: Path,
+    availability: StageAvailability,
+    dependency_runs: Mapping[str, str],
+    session: RuntimeVerificationSession | None,
+    execution_profile: WorkflowExecutionProfile,
+) -> StageAvailability:
+    del dependency_runs
+    if not availability.available or not availability.artifact_path:
+        return availability
+    try:
+        root = (
+            session.open_root(zarr_path)
+            if session is not None
+            else open_zarr_root(zarr_path, mode="r")
+        )
+        run = root[availability.artifact_path]
+        if execution_profile.expected_selector_eligible:
+            bound = load_bound_track_motion_run(root, run)
+        else:
+            if (
+                run.attrs.get(TRACK_KINEMATICS_PUBLICATION_PROFILE_ATTR)
+                != TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+            ):
+                raise ValueError("Track motion lacks its explicit canary profile.")
+            bound = load_completed_ineligible_bound_track_motion_run(root, run)
+        bound.assert_verified()
+    except Exception as exc:
+        return _failed_result(availability, label="track-motion", exc=exc)
+    return _verified_result(
+        availability,
+        reason="strict full-motion publication authority is available",
+    )
+
+
+def _verify_swim_bouts(
+    zarr_path: Path,
+    availability: StageAvailability,
+    dependency_runs: Mapping[str, str],
+    session: RuntimeVerificationSession | None,
+    execution_profile: WorkflowExecutionProfile,
+) -> StageAvailability:
+    run_name = availability.run_name
+    if not availability.available or not isinstance(run_name, str):
+        return availability
+    try:
+        root = (
+            session.open_root(zarr_path)
+            if session is not None
+            else open_zarr_root(zarr_path, mode="r")
+        )
+        if execution_profile.expected_selector_eligible:
+            load_default_swim_bout_tables(root, run_name=run_name)
+        else:
+            load_exact_selector_ineligible_default_swim_bout_tables(
+                root,
+                run_name=run_name,
+            )
+        run = root[f"analysis/swim_bout_runs/{run_name}"]
+        expected_track = dependency_runs.get("track_kinematics")
+        if not isinstance(expected_track, str) or not expected_track:
+            raise ValueError("Swim-bout verification requires exact track motion.")
+        if run.attrs.get("source_track_kinematics_run") != expected_track:
+            raise ValueError("Swim-bout source track-motion run differs from the plan.")
+        if not execution_profile.expected_selector_eligible and (
+            run.attrs.get("source_track_kinematics_publication_profile_id")
+            != TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+        ):
+            raise ValueError("Swim-bout candidate did not consume candidate track motion.")
+    except Exception as exc:
+        return _failed_result(availability, label="swim-bout", exc=exc)
+    return _verified_result(
+        availability,
+        reason="strict dependency-bound swim-bout authority is available",
+    )
+
+
+def _verify_tail_kinematics(
+    zarr_path: Path,
+    availability: StageAvailability,
+    dependency_runs: Mapping[str, str],
+    session: RuntimeVerificationSession | None,
+    execution_profile: WorkflowExecutionProfile,
+) -> StageAvailability:
+    if not availability.available or not availability.artifact_path:
+        return availability
+    try:
+        root = (
+            session.open_root(zarr_path)
+            if session is not None
+            else open_zarr_root(zarr_path, mode="r")
+        )
+        if execution_profile.expected_selector_eligible:
+            bound = load_tail_kinematics_coordinate_publication(
+                root,
+                availability.artifact_path,
+            )
+        else:
+            bound = load_completed_ineligible_tail_kinematics_coordinate_publication(
+                root,
+                availability.artifact_path,
+            )
+        expected_shape = dependency_runs.get("subject_shape")
+        if not isinstance(expected_shape, str) or not expected_shape:
+            raise ValueError("Tail verification requires exact subject shape.")
+        if bound.source.run_path != f"analysis/subject_shape_runs/{expected_shape}":
+            raise ValueError("Tail source subject-shape run differs from the plan.")
+    except Exception as exc:
+        return _failed_result(availability, label="tail-kinematics", exc=exc)
+    return _verified_result(
+        availability,
+        reason="strict dependency-bound tail-kinematics authority is available",
+    )
+
+
 _RUNTIME_STAGE_VERIFIERS: Mapping[str, RuntimeStageVerifier] = {
+    "tracks": _verify_tracks,
+    "track_kinematics": _verify_track_kinematics,
+    "swim_bouts": _verify_swim_bouts,
     "eye_angles": _verify_eye_angles,
     "subject_shape": _verify_subject_shape,
+    "tail_kinematics": _verify_tail_kinematics,
 }
 
 
@@ -318,21 +564,30 @@ def verify_persisted_stage_output(
     requested_run: str,
     dependency_runs: Mapping[str, str],
     session: RuntimeVerificationSession | None = None,
+    execution_profile_id: str = PRODUCTION_EXECUTION_PROFILE_ID,
 ) -> StageAvailability:
     """Verify one exact completed workflow output through the shared gate."""
 
     archive = Path(zarr_path).expanduser().resolve()
     canonical = canonical_stage_id(stage_id)
+    execution_profile = resolve_workflow_execution_profile(execution_profile_id)
     availability = discover_stage_availability(
         archive,
         canonical,
         requested_run=requested_run,
         dependency_runs=dependency_runs,
+        execution_profile_id=execution_profile.profile_id,
     )
     verifier = _RUNTIME_STAGE_VERIFIERS.get(canonical)
     if verifier is None or not availability.available:
         return availability
-    return verifier(archive, availability, dependency_runs, session)
+    return verifier(
+        archive,
+        availability,
+        dependency_runs,
+        session,
+        execution_profile,
+    )
 
 
 __all__ = ["RuntimeVerificationSession", "verify_persisted_stage_output"]
