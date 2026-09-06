@@ -10,26 +10,42 @@ second, potentially ambiguous timestamp array.
 
 from __future__ import annotations
 
+import copy
 import csv
+from collections.abc import MutableMapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+import uuid
 
 import numpy as np
 import pyarrow.parquet as pq
 
+from fisheye.shared.archive_identity import archive_identity
 from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from fisheye.shared.json_safety import json_attr_safe_mapping, strict_json_dumps
 from fisheye.shared.run_provenance import build_writer_run_provenance
+from fisheye.shared.selector_activation import (
+    DeferredSelectorActivation,
+    activate_selector_eligible_run,
+    commit_deferred_selector_activation,
+    rollback_deferred_selector_activation,
+)
 from fisheye.shared.zarr.columnar import store_array
+from fisheye.shared.zarr_helpers import (
+    consolidate_metadata_capture_expected_warnings,
+    zarr_store_metadata_publication_lock,
+)
+from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
     is_run_complete_in_parent,
     is_run_selector_eligible,
     mark_run_complete,
+    mark_run_failed,
     mark_run_started,
-    note_pending_latest,
     require_runs_parent,
     resolve_latest_complete_run_group,
 )
@@ -41,6 +57,12 @@ ACQUISITION_FRAME_CLOCK_RUNS_PATH = "analysis/acquisition_frame_clock_runs"
 ACQUISITION_FRAME_CLOCK_RECORD_ATTR = "acquisition_frame_clock_record"
 ACQUISITION_FRAME_CLOCK_SHA256_ATTR = "acquisition_frame_clock_sha256"
 ACQUISITION_FRAME_CLOCK_SHARD_ROWS = 131_072
+_PUBLICATION_OWNER_ATTR = "acquisition_frame_clock_publication_owner_uuid"
+_PUBLICATION_POLICY_ATTR = "acquisition_frame_clock_publication_policy"
+_PUBLICATION_GENERATION_ATTR = "acquisition_frame_clock_publication_generation"
+_PUBLICATION_LEASE_ATTR = "acquisition_frame_clock_publication_lease"
+_PUBLICATION_TOMBSTONE_ATTR = "acquisition_frame_clock_publication_tombstone"
+_PUBLICATION_POLICY = "owner_generation_guarded_selectors_then_eligibility_v1"
 MISSING_TIMESTAMP_SENTINEL = np.iinfo(np.int64).min
 
 _ARRAY_NAMES = (
@@ -747,6 +769,13 @@ def acquisition_frame_clock_sha256(record: Mapping[str, Any]) -> str:
     return sha256(strict_json_dumps(record).encode("utf-8")).hexdigest()
 
 
+def acquisition_frame_clock_source_sha256(source: AcquisitionFrameClockSource) -> str:
+    """Validate a live source and hash the publisher's unchanged record grammar."""
+
+    _validate_source(source, expected_frame_count=None)
+    return acquisition_frame_clock_sha256(_validate_record(_build_record(source)))
+
+
 def _validate_record(record: Mapping[str, Any], digest: str | None = None) -> dict[str, Any]:
     canonical = json_attr_safe_mapping(record)
     if canonical.get("schema_id") != ACQUISITION_FRAME_CLOCK_SCHEMA_ID:
@@ -812,6 +841,12 @@ def _validate_run(parent: Any, run_name: str, run: Any) -> ResolvedAcquisitionFr
         raise AcquisitionFrameClockError(
             f"Acquisition frame-clock run {run_name!r} is not selector eligible."
         )
+    return _validate_run_payload(run_name, run)
+
+
+def _validate_run_payload(run_name: str, run: Any) -> ResolvedAcquisitionFrameClock:
+    """Validate the same clock bytes before or after lifecycle completion."""
+
     raw_record = run.attrs.get(ACQUISITION_FRAME_CLOCK_RECORD_ATTR)
     if not isinstance(raw_record, Mapping):
         raise AcquisitionFrameClockError(f"Acquisition frame-clock run {run_name!r} has no record.")
@@ -843,17 +878,17 @@ def _validate_run(parent: Any, run_name: str, run: Any) -> ResolvedAcquisitionFr
     )
 
 
-def _stamp_root_binding(root: Any, resolved: ResolvedAcquisitionFrameClock) -> None:
-    root.attrs.update(
-        {
-            "acquisition_frame_clock_available": True,
-            "acquisition_frame_clock_status": "complete",
-            "acquisition_frame_clock_ref": resolved.group_path,
-            "acquisition_frame_clock_sha256": resolved.record_sha256,
-            "acquisition_frame_clock_camera_id": resolved.camera_id,
-            "acquisition_frame_clock_row_count": resolved.row_count,
-        }
-    )
+def _root_binding(resolved: ResolvedAcquisitionFrameClock) -> dict[str, Any]:
+    # The unique immutable attempt path is written first and restored last. It
+    # proves ownership of a partially persisted root binding during rollback.
+    return {
+        "acquisition_frame_clock_ref": resolved.group_path,
+        "acquisition_frame_clock_sha256": resolved.record_sha256,
+        "acquisition_frame_clock_camera_id": resolved.camera_id,
+        "acquisition_frame_clock_row_count": resolved.row_count,
+        "acquisition_frame_clock_available": True,
+        "acquisition_frame_clock_status": "complete",
+    }
 
 
 def resolve_acquisition_frame_clock(
@@ -891,76 +926,371 @@ def resolve_acquisition_frame_clock(
     return resolved
 
 
-def publish_acquisition_frame_clock(root: Any, source: AcquisitionFrameClockSource) -> ResolvedAcquisitionFrameClock:
-    """Idempotently publish and bind one immutable acquisition clock."""
+def _owned_clock_run(root: Any, run_name: str, owner: str) -> Any:
+    path = f"{ACQUISITION_FRAME_CLOCK_RUNS_PATH}/{run_name}"
+    run = root[path]
+    if (
+        archive_identity(run) != archive_identity(root)
+        or run.attrs.get(_PUBLICATION_OWNER_ATTR) != owner
+        or run.attrs.get("stage_selector_eligible") is not False
+    ):
+        raise AcquisitionFrameClockError(
+            "Acquisition clock publication lost its owner or ineligible state."
+        )
+    return run
+
+
+class _OwnedClockLifecycle(MutableMapping):
+    """Fresh owner checks for every shared lifecycle-helper attr operation."""
+
+    def __init__(self, root: Any, run_name: str, owner: str):
+        self.root, self.run_name, self.owner = root, run_name, owner
+
+    @property
+    def attrs(self):
+        return self
+
+    def _current(self):
+        return _owned_clock_run(self.root, self.run_name, self.owner).attrs
+
+    def __getitem__(self, key):
+        return self._current()[key]
+
+    def __setitem__(self, key, value):
+        self._current()[key] = value
+
+    def __delitem__(self, key):
+        del self._current()[key]
+
+    def __iter__(self):
+        return iter(self._current())
+
+    def __len__(self):
+        return len(self._current())
+
+
+def _fail_owned_clock(
+    root: Any, run_name: str, owner: str, error: BaseException
+) -> None:
+    """Retain a failed public name, never mutate a same-path replacement."""
+
+    path = f"{ACQUISITION_FRAME_CLOCK_RUNS_PATH}/{run_name}"
+    run = root.get(path)
+    if run is None or run.attrs.get(_PUBLICATION_OWNER_ATTR) != owner:
+        return
+    failed_at = datetime.now(timezone.utc).isoformat()
+    lifecycle = _OwnedClockLifecycle(root, run_name, owner)
+    mark_run_failed(
+        lifecycle, run_name=run_name, failed_at_utc=failed_at, error=str(error)
+    )
+    lifecycle.attrs[_PUBLICATION_TOMBSTONE_ATTR] = {
+        "schema_id": "palette.acquisition_frame_clock_publication_tombstone",
+        "schema_version": 1,
+        "owner_uuid": owner,
+        "failed_at_utc": failed_at,
+        "error": str(error),
+        "public_path_retained": True,
+        "retry_requires_new_run_name": True,
+    }
+
+
+def _restore_clock_root_binding(
+    root: Any,
+    snapshot: Mapping[str, tuple[bool, Any]],
+    attempted: Mapping[str, Any],
+    activation: DeferredSelectorActivation,
+) -> None:
+    """Undo only this unique attempt's root values, not another publication."""
+
+    for key in reversed(tuple(attempted)):
+        current = root[""]
+        ref_key = "acquisition_frame_clock_ref"
+        current_ref = current.attrs.get(ref_key)
+        current_parent = root[ACQUISITION_FRAME_CLOCK_RUNS_PATH]
+        # A failed/lost first ref write can leave later binding fields written.
+        # Only the exact still-owned lease permits undoing that partial state.
+        unchanged_ref_under_lease = (
+            (ref_key in current.attrs, current_ref) == snapshot[ref_key]
+            and current_parent.attrs.get(_PUBLICATION_LEASE_ATTR)
+            == dict(activation.lease)
+            and current_parent.attrs.get(_PUBLICATION_GENERATION_ATTR)
+            == activation.next_generation
+        )
+        if current_ref != attempted[ref_key] and not unchanged_ref_under_lease:
+            return
+        if current.attrs.get(key) != attempted[key]:
+            continue
+        present, previous = snapshot[key]
+        if present:
+            current.attrs[key] = copy.deepcopy(previous)
+        elif key in current.attrs:
+            del current.attrs[key]
+    # Do not "refresh" a caller's cached handle by writing its stale attrs back.
+    # On failure callers must reopen the mutable root before attempting a retry.
+
+
+def publish_acquisition_frame_clock(
+    root: Any, source: AcquisitionFrameClockSource
+) -> ResolvedAcquisitionFrameClock:
+    """Publish a fresh owned attempt; replay a selected identical clock read-only.
+
+    This mutates an active ingestion archive. The owning importer performs the
+    archive's final consolidation, after its remaining payload/manifest writes.
+    """
+
+    if (
+        getattr(getattr(root, "metadata", None), "consolidated_metadata", None)
+        is not None
+    ):
+        raise AcquisitionFrameClockError(
+            "Clock publication requires a mutable use_consolidated=False root."
+        )
+    with zarr_store_metadata_publication_lock(getattr(root, "store", None)):
+        return _publish_acquisition_frame_clock_locked(root, source)
+
+
+def _publish_acquisition_frame_clock_locked(
+    root: Any, source: AcquisitionFrameClockSource
+) -> ResolvedAcquisitionFrameClock:
 
     source = _validate_source(source, expected_frame_count=None)
     record = _validate_record(_build_record(source))
     digest = acquisition_frame_clock_sha256(record)
-    run_name = f"acquisition_frame_clock_{digest[:16]}"
+    if dict(root.attrs) != dict(root[""].attrs):
+        raise AcquisitionFrameClockError(
+            "Clock publication requires a freshly opened root; metadata changed."
+        )
+    # Mutable Zarr-v3 attr writes discard the root's inline consolidated view.
+    # If this local archive already had one, a rolled-back root binding must
+    # restore published-reader visibility as well as its direct selector state.
+    identity = archive_identity(root)
+    published_archive = None
+    if identity.kind == "local_store_root":
+        archive_path = Path(identity.key[0])
+        root_metadata = json.loads(
+            (archive_path / "zarr.json").read_text(encoding="utf-8")
+        )
+        if root_metadata.get("consolidated_metadata") is not None:
+            published_archive = archive_path
     analysis = root.require_group("analysis")
     parent = require_runs_parent(analysis, "acquisition_frame_clock_runs")
 
+    # Never repair a conflicting/in-progress selector pair as incidental reuse.
+    if "latest" in parent.attrs or "latest_complete" in parent.attrs:
+        selected = resolve_acquisition_frame_clock(root)
+        if selected is not None and selected.record_sha256 == digest:
+            return selected
+
+    owner = str(uuid.uuid4())
+    run_name = f"acquisition_frame_clock_{digest[:16]}"
     if run_name in parent:
         existing = parent[run_name]
-        resolved = _validate_run(parent, run_name, existing)
-        if resolved.record_sha256 != digest:
+        if existing.attrs.get(ACQUISITION_FRAME_CLOCK_SHA256_ATTR) not in (
+            None,
+            digest,
+        ):
             raise AcquisitionFrameClockError(
                 f"Existing acquisition frame-clock run {run_name!r} conflicts."
             )
-        parent.attrs["latest_complete"] = run_name
-        parent.attrs["latest"] = run_name
-        _stamp_root_binding(root, resolved)
-        return resolve_acquisition_frame_clock(root, required=True)  # type: ignore[return-value]
+        # Public names are permanently occupied, including failed attempts and
+        # previously selected clocks. Their arrays/attrs are never rewritten.
+        run_name = f"{run_name}_{uuid.UUID(owner).hex}"
 
-    run = parent.create_group(run_name)
-    mark_run_started(run, run_name=run_name, stage="acquisition_frame_clock")
-    note_pending_latest(parent, run_name)
-    run.attrs["stage_selector_eligible"] = False
-    run.attrs["schema_id"] = ACQUISITION_FRAME_CLOCK_SCHEMA_ID
-    run.attrs["schema_version"] = ACQUISITION_FRAME_CLOCK_SCHEMA_VERSION
-    run.attrs[ACQUISITION_FRAME_CLOCK_RECORD_ATTR] = record
-    run.attrs[ACQUISITION_FRAME_CLOCK_SHA256_ATTR] = digest
-    run.attrs["immutable"] = True
-    for name in _ARRAY_NAMES:
-        store_array(
-            run,
-            name,
-            np.asarray(getattr(source, name)),
-            shard_rows=ACQUISITION_FRAME_CLOCK_SHARD_ROWS,
-        )
-    run.attrs["stage_selector_eligible"] = True
+    activation = None
+    root_snapshot = None
+    bindings = None
+    binding_staged = False
     source_fingerprint = optional_source_stat_fingerprint_attrs(
         source.source_path,
         attr_prefix="source_frame_clock",
     ).get("source_frame_clock_fingerprint")
-    mark_run_complete(
-        run,
-        parent_group=parent,
-        run_name=run_name,
-        run_provenance=build_writer_run_provenance(
-            command="import:publish_acquisition_frame_clock",
-            params={
-                "schema_id": ACQUISITION_FRAME_CLOCK_SCHEMA_ID,
-                "record_sha256": digest,
-                "camera_id": source.camera_id,
-                "row_count": source.row_count,
-                "source_kind": source.source_kind,
-            },
-            input_run_ids={},
-            input_artifacts=[
-                {
-                    "role": "acquisition_frame_clock_source",
-                    "kind": source.source_kind,
-                    "path": str(source.source_path),
-                    "stat_fingerprint": source_fingerprint,
-                }
-            ],
-        ),
+    provenance = build_writer_run_provenance(
+        command="import:publish_acquisition_frame_clock",
+        params={
+            "schema_id": ACQUISITION_FRAME_CLOCK_SCHEMA_ID,
+            "record_sha256": digest,
+            "camera_id": source.camera_id,
+            "row_count": source.row_count,
+            "source_kind": source.source_kind,
+        },
+        input_run_ids={},
+        input_artifacts=[
+            {
+                "role": "acquisition_frame_clock_source",
+                "kind": source.source_kind,
+                "path": str(source.source_path),
+                "stat_fingerprint": source_fingerprint,
+            }
+        ],
     )
-    resolved = _validate_run(parent, run_name, run)
-    _stamp_root_binding(root, resolved)
-    return resolve_acquisition_frame_clock(root, required=True)  # type: ignore[return-value]
+    try:
+        parent.create_group(
+            run_name,
+            attributes={
+                _PUBLICATION_OWNER_ATTR: owner,
+                "stage_selector_eligible": False,
+                "palette_run_completion_status": "running",
+            },
+        )
+        lifecycle = _OwnedClockLifecycle(root, run_name, owner)
+        mark_run_started(lifecycle, run_name=run_name, stage="acquisition_frame_clock")
+        for key, value in {
+            "schema_id": ACQUISITION_FRAME_CLOCK_SCHEMA_ID,
+            "schema_version": ACQUISITION_FRAME_CLOCK_SCHEMA_VERSION,
+            ACQUISITION_FRAME_CLOCK_RECORD_ATTR: record,
+            ACQUISITION_FRAME_CLOCK_SHA256_ATTR: digest,
+            "immutable": True,
+        }.items():
+            _owned_clock_run(root, run_name, owner).attrs[key] = value
+        for name in _ARRAY_NAMES:
+            store_array(
+                _owned_clock_run(root, run_name, owner),
+                name,
+                np.asarray(getattr(source, name)),
+                shard_rows=ACQUISITION_FRAME_CLOCK_SHARD_ROWS,
+            )
+        resolved = _validate_run_payload(
+            run_name, _owned_clock_run(root, run_name, owner)
+        )
+        if resolved.record_sha256 != digest:
+            raise AcquisitionFrameClockError(
+                "Persisted acquisition clock differs from the requested digest."
+            )
+        mark_run_complete(
+            lifecycle,
+            parent_group=root[ACQUISITION_FRAME_CLOCK_RUNS_PATH],
+            run_name=run_name,
+            run_provenance=provenance,
+        )
+
+        def proof():
+            candidate = _owned_clock_run(root, run_name, owner)
+            current_parent = root[ACQUISITION_FRAME_CLOCK_RUNS_PATH]
+            if not is_run_complete_in_parent(
+                current_parent, candidate, legacy_default=False
+            ):
+                raise AcquisitionFrameClockError(
+                    "Acquisition clock candidate is incomplete."
+                )
+            current = _validate_run_payload(run_name, candidate)
+            if current != resolved:
+                raise AcquisitionFrameClockError(
+                    "Acquisition clock candidate changed after validation."
+                )
+            if binding_staged:
+                current_root = root[""]
+                if any(
+                    current_root.attrs.get(key) != value
+                    for key, value in bindings.items()
+                ):
+                    raise AcquisitionFrameClockError(
+                        "Acquisition clock root binding changed before commit."
+                    )
+            return current
+
+        activation = activate_selector_eligible_run(
+            root,
+            root[ACQUISITION_FRAME_CLOCK_RUNS_PATH],
+            _owned_clock_run(root, run_name, owner),
+            parent_path=ACQUISITION_FRAME_CLOCK_RUNS_PATH,
+            run_path=resolved.group_path,
+            run_name=run_name,
+            owner_attr=_PUBLICATION_OWNER_ATTR,
+            expected_owner_uuid=owner,
+            policy_attr=_PUBLICATION_POLICY_ATTR,
+            generation_attr=_PUBLICATION_GENERATION_ATTR,
+            lease_attr=_PUBLICATION_LEASE_ATTR,
+            policy=_PUBLICATION_POLICY,
+            lease_schema_id="palette.acquisition_frame_clock_publication_lease",
+            proof_loader=proof,
+            defer_eligibility=True,
+        )
+        bindings = _root_binding(resolved)
+        current_root = root[""]
+        if dict(root.attrs) != dict(current_root.attrs):
+            raise AcquisitionFrameClockError(
+                "Concurrent root metadata mutation during clock publication."
+            )
+        root_snapshot = {
+            key: (key in current_root.attrs, copy.deepcopy(current_root.attrs.get(key)))
+            for key in bindings
+        }
+        root.attrs.update(bindings)
+        binding_staged = True
+        current_root = root[""]
+        if any(current_root.attrs.get(key) != value for key, value in bindings.items()):
+            raise AcquisitionFrameClockError(
+                "Acquisition clock root binding did not persist."
+            )
+        commit_deferred_selector_activation(
+            activation,
+            root=root,
+            parent_group=root[ACQUISITION_FRAME_CLOCK_RUNS_PATH],
+            run_group=_owned_clock_run(root, run_name, owner),
+            proof_loader=proof,
+        )
+        # Eligibility is the literal final metadata operation. Return only the
+        # prevalidated value; do not call the public resolver after committing.
+        return resolved
+    except BaseException as exc:
+        failures = []
+        if root_snapshot is not None and bindings is not None:
+            try:
+                _restore_clock_root_binding(root, root_snapshot, bindings, activation)
+            except BaseException as rollback_exc:
+                failures.append(f"root binding: {rollback_exc}")
+        if activation is not None:
+            try:
+                rollback_deferred_selector_activation(activation)
+            except BaseException as rollback_exc:
+                failures.append(f"selector activation: {rollback_exc}")
+        try:
+            _fail_owned_clock(root, run_name, owner, exc)
+        except BaseException as rollback_exc:
+            failures.append(f"failed public tombstone: {rollback_exc}")
+        if not failures and published_archive is not None and root_snapshot is not None:
+            try:
+                current_root = root[""]
+                current_parent = root[ACQUISITION_FRAME_CLOCK_RUNS_PATH]
+                root_restored = all(
+                    (key in current_root.attrs) is present
+                    and (not present or current_root.attrs.get(key) == previous)
+                    for key, (present, previous) in root_snapshot.items()
+                )
+                selectors_restored = activation is not None and all(
+                    (key in current_parent.attrs) is present
+                    and (not present or current_parent.attrs.get(key) == previous)
+                    for key, (present, previous), _written in activation.mutations
+                    if key in activation.selectors
+                )
+                if root_restored and selectors_restored:
+                    consolidate_metadata_capture_expected_warnings(published_archive)
+                    # The helper builds the replacement view from direct
+                    # metadata; published-reader validation is independent.
+                    published = open_zarr_root(
+                        published_archive, mode="r", use_consolidated=True
+                    )
+                    if "latest" in current_parent.attrs:
+                        if resolve_acquisition_frame_clock(
+                            published
+                        ) != resolve_acquisition_frame_clock(current_root):
+                            raise AcquisitionFrameClockError(
+                                "Rollback consolidated clock selection differs from direct metadata."
+                            )
+                    elif any(
+                        key in published[ACQUISITION_FRAME_CLOCK_RUNS_PATH].attrs
+                        for key in ("latest", "latest_complete")
+                    ):
+                        raise AcquisitionFrameClockError(
+                            "Rollback consolidation exposed an uncommitted clock."
+                        )
+            except BaseException as rollback_exc:
+                failures.append(f"published metadata visibility: {rollback_exc}")
+        if failures:
+            raise AcquisitionFrameClockError(
+                f"Clock publication rollback was incomplete: {failures!r}."
+            ) from exc
+        raise
 
 
 def import_acquisition_frame_clock(
@@ -1002,6 +1332,7 @@ __all__ = [
     "AcquisitionFrameClockSource",
     "ResolvedAcquisitionFrameClock",
     "acquisition_frame_clock_sha256",
+    "acquisition_frame_clock_source_sha256",
     "import_acquisition_frame_clock",
     "load_acquisition_frame_clock_source",
     "publish_acquisition_frame_clock",

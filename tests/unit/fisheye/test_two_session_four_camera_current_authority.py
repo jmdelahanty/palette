@@ -87,6 +87,8 @@ def _organize_session(
             str(metadata_csv),
             "--dest-root",
             str(dest_root),
+            "--log-dir",
+            str(tmp_path / "logs" / session_uuid),
             "--apply",
         ],
     )
