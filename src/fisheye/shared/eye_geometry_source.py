@@ -1704,6 +1704,7 @@ def validate_staged_subject_shape_eye_geometry_authority(
     run_name: str,
     authority: Mapping[str, Any],
     verify_payload: bool = False,
+    expected_selector_eligible: bool = True,
     publication_metadata_proof: (
         SealedSubjectShapePublicationMetadataProof | None
     ) = None,
@@ -1717,6 +1718,8 @@ def validate_staged_subject_shape_eye_geometry_authority(
     canonical arrays for staging corruption.
     """
 
+    if type(expected_selector_eligible) is not bool:
+        raise ValueError("Expected subject-shape selector eligibility must be a bool.")
     selected = _exact_staged_subject_shape_run_name(run_name)
     path = f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{selected}"
     group = _group_get(root, path)
@@ -1738,7 +1741,7 @@ def validate_staged_subject_shape_eye_geometry_authority(
         metadata_proof = validate_sealed_subject_shape_publication_metadata(
             root,
             path,
-            expected_selector_eligible=True,
+            expected_selector_eligible=expected_selector_eligible,
             expected_publication_owner=publication_owner,
         )
     elif not isinstance(
@@ -1754,7 +1757,7 @@ def validate_staged_subject_shape_eye_geometry_authority(
         or metadata_proof.manifest.record_sha256
         != canonical_publication["manifest_sha256"]
         or metadata_proof.row_count != authority_record["row_count"]
-        or metadata_proof.selector_eligible is not True
+        or metadata_proof.selector_eligible is not expected_selector_eligible
         or metadata_proof.publication_owner != publication_owner
     ):
         raise ValueError(

@@ -29,9 +29,16 @@ from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
 from ..shared.tail_coordinate_publication import (
+    SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+    TAIL_SOURCE_SUBJECT_SHAPE_AUTHORITY_PROFILE_ATTR,
     TAIL_PUBLICATION_OWNER_ATTR,
     activate_tail_coordinate_publication,
     publish_tail_kinematics_coordinate_surfaces,
+)
+from ..shared.subject_shape_coordinate_publication import (
+    SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
+    load_completed_ineligible_subject_shape_coordinate_publication,
 )
 from ..shared.zarr_run_completion import (
     RUN_COMPLETED_AT_ATTR,
@@ -1511,6 +1518,9 @@ def _resolve_tail_kinematics_sources(
     _staged_source_authority: Mapping[str, Any] | None = None,
     _staged_input_integrity_receipt: Mapping[str, Any] | None = None,
     _verify_staged_payload: bool = True,
+    subject_shape_authority_profile_id: str = (
+        SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+    ),
 ) -> tuple[str, zarr.Group, TailKinematicsSources]:
     """Resolve lazy source handles through canonical or explicit staged proof.
 
@@ -1521,13 +1531,48 @@ def _resolve_tail_kinematics_sources(
 
     publication: Any | None = None
     staged_authority: dict[str, Any] | None = None
-    if _staged_source_authority is None:
+    if (
+        _staged_source_authority is None
+        and subject_shape_authority_profile_id
+        == SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+    ):
         (
             shape_group,
             run_name,
             run_path,
             publication,
         ) = resolve_canonical_subject_shape_run(root, shape_run)
+    elif _staged_source_authority is None:
+        if (
+            subject_shape_authority_profile_id
+            != SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+        ):
+            raise SubjectShapeIOError(
+                "Unsupported subject-shape authority profile "
+                f"{subject_shape_authority_profile_id!r}."
+            )
+        requested = str(shape_run or "").strip()
+        if not requested or requested.lower() == "latest" or "/" in requested:
+            raise SubjectShapeIOError(
+                "Selector-ineligible tail input requires one exact subject-shape run."
+            )
+        run_name = requested
+        run_path = f"analysis/subject_shape_runs/{run_name}"
+        shape_group = root.get(run_path)
+        if not isinstance(shape_group, zarr.Group):
+            raise SubjectShapeIOError(
+                f"Subject-shape candidate {run_path!r} is missing."
+            )
+        owner = shape_group.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
+        if not isinstance(owner, str) or not owner:
+            raise SubjectShapeIOError(
+                "Subject-shape candidate lacks its immutable publication owner."
+            )
+        publication = load_completed_ineligible_subject_shape_coordinate_publication(
+            root,
+            run_path,
+            expected_publication_owner=owner,
+        )
     else:
         requested = str(shape_run or "").strip()
         if not requested or requested.lower() == "latest":
@@ -2198,6 +2243,9 @@ def _prepare_tail_kinematics_run(
     source_publication_manifest_sha256: str,
     source_authority_mode: str,
     source_authority: Mapping[str, Any],
+    subject_shape_authority_profile_id: str = (
+        SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+    ),
     stage_command: str,
     publication_owner_uuid: str,
     overwrite: bool,
@@ -2303,6 +2351,9 @@ def _prepare_tail_kinematics_run(
                 source_publication_manifest_sha256
             ),
             "source_subject_shape_authority_mode": str(source_authority_mode),
+            TAIL_SOURCE_SUBJECT_SHAPE_AUTHORITY_PROFILE_ATTR: (
+                subject_shape_authority_profile_id
+            ),
             "source_subject_shape_authority_sha256": str(
                 source_authority.get("record_sha256")
             ),
@@ -2723,6 +2774,9 @@ def write_tail_kinematics_run_group(
     dry_run: bool = False,
     stage_command: Optional[str] = None,
     storage_profile: StorageProfile | None = None,
+    subject_shape_authority_profile_id: str = (
+        SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+    ),
     _staged_source_authority: Mapping[str, Any] | None = None,
     _staged_input_integrity_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
@@ -2773,6 +2827,7 @@ def write_tail_kinematics_run_group(
         shape_run,
         _staged_source_authority=_staged_source_authority,
         _staged_input_integrity_receipt=_staged_input_integrity_receipt,
+        subject_shape_authority_profile_id=subject_shape_authority_profile_id,
     )
     row_count = int(sources.row_count)
     storage_dimensions: TailKinematicsDimensions | None = None
@@ -2955,6 +3010,7 @@ def write_tail_kinematics_run_group(
             ),
             source_authority_mode=sources.source_authority_mode,
             source_authority=sources.source_authority,
+            subject_shape_authority_profile_id=subject_shape_authority_profile_id,
             stage_command=command,
             publication_owner_uuid=publication_owner_uuid,
             overwrite=overwrite,

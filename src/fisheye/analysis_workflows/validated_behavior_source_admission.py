@@ -20,12 +20,32 @@ from fisheye.analysis_workflows.exact_chaser_projection_receipt import (
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 from .contracts import TemporalPolicy
+from .execution_profiles import (
+    PRODUCTION_EXECUTION_PROFILE_ID,
+    resolve_workflow_execution_profile,
+)
 
 EXACT_CHASER_ADMISSION_ROLE = "exact_chaser_projection"
 CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE = "core_behavior_workflow_execution"
+CORE_BEHAVIOR_CANARY_EXECUTION_ADMISSION_ROLE = (
+    "core_behavior_selector_ineligible_canary_execution"
+)
+CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES = frozenset(
+    {
+        CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE,
+        CORE_BEHAVIOR_CANARY_EXECUTION_ADMISSION_ROLE,
+    }
+)
 
 CORE_BEHAVIOR_EXECUTION_SCHEMA_ID = "palette.analysis_workflow_execution"
 CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSION = 3
+CORE_BEHAVIOR_CANARY_EXECUTION_SCHEMA_VERSION = 4
+CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSIONS = frozenset(
+    {
+        CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSION,
+        CORE_BEHAVIOR_CANARY_EXECUTION_SCHEMA_VERSION,
+    }
+)
 CORE_BEHAVIOR_WORKFLOW_ID = "core_behavior_v1"
 
 CORE_BEHAVIOR_REQUIRED_STAGE_NODES = (
@@ -36,7 +56,7 @@ CORE_BEHAVIOR_REQUIRED_STAGE_NODES = (
     "tail_kinematics",
 )
 
-_REPORT_FIELDS = {
+_REPORT_FIELDS_V3 = {
     "schema_id",
     "schema_version",
     "execution_id",
@@ -54,6 +74,7 @@ _REPORT_FIELDS = {
     "node_results",
     "error",
 }
+_REPORT_FIELDS_V4 = _REPORT_FIELDS_V3 | {"execution_profile_id"}
 _GIT_FIELDS = {
     "branch",
     "commit_hash",
@@ -199,17 +220,44 @@ def validate_core_behavior_execution_report(
     """
 
     report = _plain(_mapping(value, field="core-behavior execution report"))
-    if set(report) != _REPORT_FIELDS:
+    schema_version = report.get("schema_version")
+    expected_fields = (
+        _REPORT_FIELDS_V3
+        if schema_version == CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSION
+        else _REPORT_FIELDS_V4
+        if schema_version == CORE_BEHAVIOR_CANARY_EXECUTION_SCHEMA_VERSION
+        else None
+    )
+    if expected_fields is None or set(report) != expected_fields:
         _fail("Core-behavior execution-report field set is inexact.")
+    execution_profile_id = (
+        PRODUCTION_EXECUTION_PROFILE_ID
+        if schema_version == CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSION
+        else _text(
+            report.get("execution_profile_id"),
+            field="execution_profile_id",
+        )
+    )
+    try:
+        execution_profile = resolve_workflow_execution_profile(execution_profile_id)
+    except ValueError as exc:
+        _fail(str(exc))
     if (
         report.get("schema_id") != CORE_BEHAVIOR_EXECUTION_SCHEMA_ID
-        or report.get("schema_version") != CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSION
         or report.get("mode") != "apply"
         or report.get("status") != "complete"
         or report.get("error") is not None
-        or report.get("registry_write_mode") != "deferred_to_serial_finalizer"
+        or report.get("registry_write_mode") != execution_profile.registry_policy
     ):
-        _fail("Core-behavior execution report is not one completed deferred-write run.")
+        _fail(
+            "Core-behavior execution report is not complete under its declared "
+            "execution profile."
+        )
+    if (
+        schema_version == CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSION
+        and execution_profile_id != PRODUCTION_EXECUTION_PROFILE_ID
+    ):
+        _fail("Version-3 execution reports are production-profile only.")
 
     expected_zarr = _exact_path(expected_analysis_zarr, field="expected analysis_zarr")
     observed_zarr = _exact_path(report.get("zarr_path"), field="report zarr_path")
@@ -281,11 +329,14 @@ def validate_core_behavior_execution_report(
     execution_plan = _mapping(report.get("execution_plan"), field="execution_plan")
     if (
         execution_plan.get("schema_id") != CORE_BEHAVIOR_EXECUTION_SCHEMA_ID
-        or execution_plan.get("schema_version")
-        != CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSION
+        or execution_plan.get("schema_version") != schema_version
         or execution_plan.get("execution_id") != report.get("execution_id")
     ):
         _fail("Execution-plan identity differs from the report envelope.")
+    if schema_version >= CORE_BEHAVIOR_CANARY_EXECUTION_SCHEMA_VERSION and (
+        execution_plan.get("execution_profile_id") != execution_profile_id
+    ):
+        _fail("Execution plan and report declare different execution profiles.")
     workflow_plan = _mapping(
         execution_plan.get("workflow_plan"), field="execution_plan.workflow_plan"
     )
@@ -374,8 +425,9 @@ def validate_core_behavior_execution_report(
 
     return {
         "schema_id": CORE_BEHAVIOR_EXECUTION_SCHEMA_ID,
-        "schema_version": CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSION,
+        "schema_version": int(schema_version),
         "execution_id": _text(report.get("execution_id"), field="execution_id"),
+        "execution_profile_id": execution_profile_id,
         "recording_id": recording_id,
         "analysis_zarr": str(observed_zarr),
         "workflow_id": CORE_BEHAVIOR_WORKFLOW_ID,
@@ -421,12 +473,22 @@ def validate_admission_receipt_binding(
             schema_id=str(receipt["schema_id"]),
             schema_version=int(receipt["schema_version"]),
         )
-    if role == CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE:
+    if role in CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES:
         receipt = validate_core_behavior_execution_report(
             raw,
             expected_analysis_zarr=analysis_zarr,
             expected_recording_id=recording_id,
         )
+        expected_role = (
+            CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE
+            if receipt["execution_profile_id"] == PRODUCTION_EXECUTION_PROFILE_ID
+            else CORE_BEHAVIOR_CANARY_EXECUTION_ADMISSION_ROLE
+        )
+        if role != expected_role:
+            _fail(
+                "Core-behavior admission role differs from the report's execution "
+                "profile."
+            )
         return _expected_binding(
             binding,
             path=path,
@@ -453,8 +515,13 @@ def bind_core_behavior_execution_report(
         expected_analysis_zarr=analysis_zarr,
         expected_recording_id=recording_id,
     )
+    role = (
+        CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE
+        if receipt["execution_profile_id"] == PRODUCTION_EXECUTION_PROFILE_ID
+        else CORE_BEHAVIOR_CANARY_EXECUTION_ADMISSION_ROLE
+    )
     binding = {
-        "role": CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE,
+        "role": role,
         "path": str(source),
         "file_sha256": sha256_file(source),
         "record_sha256": receipt["record_sha256"],
@@ -472,9 +539,13 @@ def bind_core_behavior_execution_report(
 
 
 __all__ = [
+    "CORE_BEHAVIOR_CANARY_EXECUTION_ADMISSION_ROLE",
+    "CORE_BEHAVIOR_CANARY_EXECUTION_SCHEMA_VERSION",
     "CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE",
+    "CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES",
     "CORE_BEHAVIOR_EXECUTION_SCHEMA_ID",
     "CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSION",
+    "CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSIONS",
     "CORE_BEHAVIOR_REQUIRED_STAGE_NODES",
     "CORE_BEHAVIOR_WORKFLOW_ID",
     "EXACT_CHASER_ADMISSION_ROLE",

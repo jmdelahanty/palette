@@ -247,7 +247,7 @@ def test_exact_source_binding_accepts_float32_and_rejects_float64_positions(
     )
 
     track.children["positions_mm"].dtype = np.dtype("float64")
-    with pytest.raises(ValueError, match="live declaration differs from its manifest"):
+    with pytest.raises(ValueError, match="values disagree with declared dtype/shape"):
         mod._source_binding(
             root,
             zarr_path=(tmp_path / "recording_analysis.zarr").resolve(),
@@ -705,7 +705,7 @@ def test_kinematics_export_fails_before_visibility_when_source_changes(
     monkeypatch.setattr(mod, "_write_streaming_part", changing_writer)
     output = tmp_path / "exports"
     scratch = tmp_path / "scratch"
-    with pytest.raises(ValueError, match="must be selector-eligible"):
+    with pytest.raises(ValueError, match="completion, selector eligibility"):
         mod.export_kinematics_samples(
             tmp_path / "recording_analysis.zarr",
             track_kinematics_run="motion_physical",
@@ -729,7 +729,7 @@ def test_kinematics_export_rejects_manifest_mismatched_unsampled_source_bytes(
     # At 1 Hz -> requested 0.5 Hz, frame 1 is not exported. The bounded source
     # verifier must still bind every decoded source row, not only selected rows.
     track.children["positions_mm"].data[1, 0] += 0.25
-    with pytest.raises(ValueError, match="payload differs from its publication"):
+    with pytest.raises(ValueError, match="exact staged physical mm_per_pixel authority"):
         mod.export_kinematics_samples(
             tmp_path / "recording_analysis.zarr",
             track_kinematics_run="motion_physical",
@@ -879,7 +879,7 @@ def test_failed_overwrite_preserves_previous_manifest_selected_generation(
         return result
 
     monkeypatch.setattr(mod, "_write_streaming_part", failing_replacement)
-    with pytest.raises(ValueError, match="must be selector-eligible"):
+    with pytest.raises(ValueError, match="completion, selector eligibility"):
         mod.export_kinematics_samples(
             source_path,
             track_kinematics_run="motion_physical",

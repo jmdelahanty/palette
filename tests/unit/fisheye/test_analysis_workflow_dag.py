@@ -17,6 +17,9 @@ from fisheye.analysis_workflows import (
     load_analysis_workflow,
     plan_analysis_workflow,
 )
+from fisheye.analysis_workflows.execution_profiles import (
+    SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+)
 from fisheye.utils.plan_analysis_workflow import build_availability
 
 
@@ -71,6 +74,45 @@ def test_core_behavior_profile_preserves_framewise_scientific_traces() -> None:
         "track_kinematics_visualization",
         "eye_angles",
     )
+
+
+def test_selector_ineligible_availability_requires_exact_candidate_name(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "analysis" / "track_kinematics_runs" / "offline"
+    _write_zarr_metadata(parent)
+    _write_zarr_metadata(
+        parent / "motion_canary",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        },
+    )
+
+    canary = discover_stage_availability(
+        tmp_path,
+        "track_kinematics",
+        requested_run="motion_canary",
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+    production = discover_stage_availability(
+        tmp_path,
+        "track_kinematics",
+        requested_run="motion_canary",
+    )
+    implicit = discover_stage_availability(
+        tmp_path,
+        "track_kinematics",
+        requested_run="latest",
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+
+    assert canary.available is True
+    assert canary.run_name == "motion_canary"
+    assert production.available is False
+    assert "literal True is required" in production.reason
+    assert implicit.available is False
+    assert "explicit named run" in implicit.reason
 
 
 def test_eye_plan_derives_keypoint_authority_only_through_subject_shape() -> None:
@@ -450,7 +492,10 @@ def test_availability_resolver_uses_latest_complete_metadata_pointer(
     )
     _write_zarr_metadata(
         parent / "track_a",
-        {"palette_run_completion_status": "complete"},
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        },
     )
 
     status = discover_stage_availability(tmp_path, "track_kinematics")
@@ -714,7 +759,10 @@ def test_visualization_availability_is_tied_to_selected_track_run(
     )
     _write_zarr_metadata(
         parent / "track_a",
-        {"palette_run_completion_status": "complete"},
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        },
     )
 
     missing = discover_stage_availability(
@@ -812,7 +860,10 @@ def test_availability_resolver_requires_pointer_or_explicit_run(tmp_path: Path) 
     _write_zarr_metadata(parent)
     _write_zarr_metadata(
         parent / "bout_a",
-        {"palette_run_completion_status": "complete"},
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        },
     )
 
     unresolved = discover_stage_availability(tmp_path, "swim_bouts")

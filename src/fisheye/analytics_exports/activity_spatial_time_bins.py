@@ -33,6 +33,7 @@ from fisheye.analysis.swim_bout_io import (
     SwimBoutEvents,
     SwimBoutSignalVariant,
     load_swim_bout_events,
+    load_exact_selector_ineligible_default_swim_bout_tables,
     resolve_swim_bout_candidate,
 )
 from fisheye.analysis.swim_bout_schema import (
@@ -77,7 +78,6 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_bytes
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
     is_run_complete_in_parent,
-    is_run_selector_eligible,
 )
 
 ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_ID = (
@@ -112,6 +112,12 @@ ACTIVITY_SPATIAL_EXTRACTION_POLICY_SCHEMA_ID = (
 )
 ACTIVITY_SPATIAL_EXTRACTION_POLICY_SCHEMA_VERSION = 1
 DEFAULT_ACTIVITY_SPATIAL_SOURCE_WINDOW_ROWS = 131_072
+SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1 = (
+    "swim_bout_selector_eligible_v1"
+)
+SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1 = (
+    "swim_bout_selector_ineligible_canary_v1"
+)
 
 _REQUIRED_BOUT_FIELDS = frozenset(
     {
@@ -326,6 +332,7 @@ def _bind_swim_bout_source(
     run_name: str,
     track_record: Mapping[str, Any],
     track_binding: Mapping[str, Any],
+    authority_profile_id: str,
 ) -> BoundSwimBoutSource:
     track_id = int(track_record["track_id"])
     parent = root["analysis"]["swim_bout_runs"]
@@ -339,13 +346,26 @@ def _bind_swim_bout_source(
         raise ValueError(
             f"Swim-bout run {run_name!r} is not the maintained exact schema."
         )
-    if not is_run_selector_eligible(run) or not is_run_complete_in_parent(
+    if authority_profile_id == SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1:
+        expected_selector_eligible = True
+        selection_mode = "explicit_per_track_run"
+    elif (
+        authority_profile_id
+        == SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+    ):
+        expected_selector_eligible = False
+        selection_mode = "explicit_selector_ineligible_canary_per_track_run"
+    else:
+        raise ValueError(
+            f"Unsupported swim-bout authority profile {authority_profile_id!r}."
+        )
+    if run.attrs.get("stage_selector_eligible") is not expected_selector_eligible or not is_run_complete_in_parent(
         parent,
         run,
         legacy_default=False,
     ):
         raise ValueError(
-            f"Swim-bout run {run_name!r} must be complete and selector-eligible."
+            f"Swim-bout run {run_name!r} lifecycle differs from its authority profile."
         )
     errors = validate_swim_bout_array_manifest(run)
     if errors:
@@ -380,22 +400,40 @@ def _bind_swim_bout_source(
     ):
         raise ValueError(f"Swim-bout run {run_name!r} source FPS differs.")
 
-    candidate = resolve_swim_bout_candidate(
-        root,
-        run_name=run_name,
-        legacy_compatibility=False,
-    )
+    if expected_selector_eligible:
+        candidate = resolve_swim_bout_candidate(
+            root,
+            run_name=run_name,
+            legacy_compatibility=False,
+        )
+        signal = _default_signal(candidate)
+        events = load_swim_bout_events(
+            root,
+            candidate=candidate,
+            signal=signal,
+            legacy_compatibility=False,
+        )
+    else:
+        tables = load_exact_selector_ineligible_default_swim_bout_tables(
+            root,
+            run_name=run_name,
+        )
+        candidate = tables.candidate
+        signal = tables.signal
+        events = SwimBoutEvents(
+            run_name=tables.run_name,
+            run_path=tables.run_path,
+            level_path=tables.level_path,
+            candidate=candidate,
+            signal=signal,
+            bouts=tables.bouts,
+            run_attrs=tables.run_attrs,
+            signal_attrs=tables.signal_attrs,
+        )
     if candidate.run_name != run_name or candidate.track_id != track_id:
         raise ValueError(
             f"Swim-bout run {run_name!r} candidate track identity differs."
         )
-    signal = _default_signal(candidate)
-    events = load_swim_bout_events(
-        root,
-        candidate=candidate,
-        signal=signal,
-        legacy_compatibility=False,
-    )
     bouts = np.asarray(events.bouts)
     names = frozenset(bouts.dtype.names or ())
     if not _REQUIRED_BOUT_FIELDS.issubset(names):
@@ -498,7 +536,7 @@ def _bind_swim_bout_source(
         "bout_dtype": bouts.dtype.descr,
         "bout_content_sha256": array_values_sha256(bouts),
         "selection_snapshot": {
-            "mode": "explicit_per_track_run",
+            "mode": selection_mode,
             "parent_latest": parent.attrs.get("latest"),
             "parent_latest_complete": parent.attrs.get("latest_complete"),
             "parent_completion_epoch": parent.attrs.get("palette_completion_epoch"),
@@ -525,6 +563,12 @@ def bind_activity_spatial_sources(
     track_scope: str,
     swim_bout_runs_by_track: Mapping[int, str],
     prebound_track_source: Any | None = None,
+    track_authority_profile_id: str = (
+        track_export.TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+    ),
+    swim_bout_authority_profile_id: str = (
+        SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+    ),
 ) -> BoundActivitySpatialSources:
     """Bind one track authority and exactly one maintained bout run per track."""
 
@@ -541,6 +585,7 @@ def bind_activity_spatial_sources(
             expected_recording_id=str(recording_id),
             track_kinematics_run=run_name,
             track_scope=track_scope,
+            authority_profile_id=track_authority_profile_id,
         )
     elif (
         track_source.binding.get("recording_id") != str(recording_id)
@@ -576,6 +621,7 @@ def bind_activity_spatial_sources(
             run_name=normalized[track_id],
             track_record=track_records[track_id],
             track_binding=track_source.binding,
+            authority_profile_id=swim_bout_authority_profile_id,
         )
         for track_id in sorted(track_records)
     }
@@ -1386,10 +1432,16 @@ def _validate_source_binding_payload(value: object) -> Mapping[str, Any]:
                 "parent_latest_complete",
                 "parent_completion_epoch",
             }
-            or selection.get("mode") != "explicit_per_track_run"
+            or selection.get("mode") not in {
+                "explicit_per_track_run",
+                "explicit_selector_ineligible_canary_per_track_run",
+            }
         ):
             raise ValueError(f"Track {track_text} selection snapshot is invalid.")
         completion = bout.get("completion_snapshot")
+        expected_selector_eligible = (
+            selection.get("mode") == "explicit_per_track_run"
+        )
         if (
             not isinstance(completion, Mapping)
             or set(completion)
@@ -1399,7 +1451,7 @@ def _validate_source_binding_payload(value: object) -> Mapping[str, Any]:
                 "selector_eligible",
             }
             or completion.get("status") != "complete"
-            or completion.get("selector_eligible") is not True
+            or completion.get("selector_eligible") is not expected_selector_eligible
         ):
             raise ValueError(f"Track {track_text} completion snapshot is invalid.")
         first = bout.get("frame_axis_first_frame")
@@ -2070,6 +2122,8 @@ __all__ = [
     "ACTIVITY_SPATIAL_EXTRACTION_POLICY_SCHEMA_ID",
     "ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_ID",
     "DEFAULT_ACTIVITY_SPATIAL_SOURCE_WINDOW_ROWS",
+    "SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1",
+    "SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1",
     "BoundActivitySpatialSources",
     "BoundSwimBoutSource",
     "activity_spatial_binning_contract",

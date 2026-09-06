@@ -36,6 +36,7 @@ from .storage_contract_catalog import (
     DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE,
     SERIALIZED_REGISTRY_STAGE_IDS,
 )
+from .execution_profiles import PRODUCTION_EXECUTION_PROFILE_ID
 
 REPORT_SCHEMA = "palette.derived_analysis_registry_finalizer.v2"
 TARGET_RECEIPT_SCHEMA = "palette.chaser_analytics_target_receipt.v1"
@@ -111,8 +112,15 @@ def _execution_report_requests(path: Path) -> list[RequestedPublication]:
     if payload.get("schema_id") != "palette.analysis_workflow_execution":
         raise ValueError(f"Unsupported analysis execution receipt: {path}")
     schema_version = payload.get("schema_version")
-    if schema_version not in {1, 2, 3}:
+    if schema_version not in {1, 2, 3, 4}:
         raise ValueError(f"Unsupported analysis execution receipt version: {path}")
+    if schema_version == 4 and (
+        payload.get("execution_profile_id") != PRODUCTION_EXECUTION_PROFILE_ID
+    ):
+        raise RuntimeError(
+            "Selector-ineligible analysis execution receipts cannot be registry-finalized: "
+            f"{path}"
+        )
     if payload.get("mode") != "apply" or payload.get("status") != "complete":
         raise RuntimeError(f"Analysis execution receipt is not complete: {path}")
     if payload.get("registry_write_mode") != "deferred_to_serial_finalizer":
@@ -150,7 +158,7 @@ def _execution_report_requests(path: Path) -> list[RequestedPublication]:
             raise RuntimeError(
                 f"Execution node {node_id!r} run identity differs from its command"
             )
-        if schema_version == 3:
+        if schema_version in {3, 4}:
             admission = command.get("admission")
             result_admission = result.get("admission")
             if admission is None:
@@ -198,7 +206,7 @@ def _execution_report_requests(path: Path) -> list[RequestedPublication]:
                     raise RuntimeError(
                         f"Execution node {node_id!r} admission receipt digest differs"
                     )
-        if schema_version in {2, 3}:
+        if schema_version in {2, 3, 4}:
             output_kind = command.get("output_kind")
             if output_kind == "parquet_export":
                 if (

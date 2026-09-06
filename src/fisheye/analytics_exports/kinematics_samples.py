@@ -38,6 +38,8 @@ from fisheye.analysis.track_kinematics import (
     TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2,
     TRACK_MOTION_AXIS_TRACK_SAMPLE,
     TRACK_MOTION_AXIS_TRACK_TRANSITION,
+    load_bound_track_motion_run,
+    load_completed_ineligible_bound_track_motion_run,
 )
 from fisheye.analysis.track_kinematics_io import resolve_track_kinematics_run
 from fisheye.analytics_exports.arrow_contracts import (
@@ -101,6 +103,12 @@ CORE_MOTION_ACCELERATION_SOURCE_SPEED_LEVEL = DEFAULT_ACCELERATION_SOURCE_SPEED_
 KINEMATICS_SAMPLING_POLICY = "global_acquisition_frame_modulo_stride_v1"
 KINEMATICS_FRAME_SELECTION_POLICY = "half_open_acquisition_frame_range_v1"
 KINEMATICS_POSITION_SPACE = "physical_mm"
+TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1 = (
+    "track_motion_selector_eligible_v1"
+)
+TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1 = (
+    "track_motion_selector_ineligible_canary_v1"
+)
 
 _SELECTED_SURFACES = (
     "track_sample_key",
@@ -921,14 +929,38 @@ def _source_binding(
     run_name: str,
     scope: str,
     source_surface_profile_id: str = KINEMATICS_SOURCE_SURFACE_PROFILE_ID,
+    authority_profile_id: str = TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
 ) -> _BoundSource:
     source_surface_profile = _source_surface_profile(source_surface_profile_id)
-    run, resolved_name, run_path = resolve_track_kinematics_run(
-        root,
-        run_name=run_name,
-        scope=scope,
-        historical_inspection=False,
-    )
+    if authority_profile_id == TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1:
+        run, resolved_name, run_path = resolve_track_kinematics_run(
+            root,
+            run_name=run_name,
+            scope=scope,
+            historical_inspection=False,
+        )
+        load_bound_track_motion_run(root, run)
+        expected_selector_eligible = True
+        selection_mode = "explicit_run"
+    elif (
+        authority_profile_id
+        == TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+    ):
+        resolved_name = safe_component(run_name, label="track-kinematics run ID")
+        run_path = f"analysis/track_kinematics_runs/{scope}/{resolved_name}"
+        try:
+            run = root[run_path]
+        except (KeyError, ValueError) as exc:
+            raise ValueError(
+                f"Exact selector-ineligible track-motion run is missing: {run_path}."
+            ) from exc
+        load_completed_ineligible_bound_track_motion_run(root, run)
+        expected_selector_eligible = False
+        selection_mode = "explicit_selector_ineligible_canary"
+    else:
+        raise ValueError(
+            f"Unsupported track-motion authority profile {authority_profile_id!r}."
+        )
     attrs = _group_attrs(run)
     if (
         attrs.get("schema_id") != TRACK_KINEMATICS_RUN_SCHEMA_ID
@@ -937,8 +969,10 @@ def _source_binding(
         raise ValueError("Kinematic export source run schema is invalid.")
     if attrs.get("palette_run_completion_status") != "complete":
         raise ValueError("Kinematic export source must be complete.")
-    if attrs.get("stage_selector_eligible") is not True:
-        raise ValueError("Kinematic export source must be selector-eligible.")
+    if attrs.get("stage_selector_eligible") is not expected_selector_eligible:
+        raise ValueError(
+            "Kinematic export source lifecycle differs from its authority profile."
+        )
     manifest = _json_object(
         attrs.get(TRACK_MOTION_PUBLICATION_MANIFEST_ATTR),
         label="track-motion publication manifest",
@@ -1099,7 +1133,7 @@ def _source_binding(
         "position_coordinate_descriptor_sha256": descriptor_sha,
         "physical_authority_sha256": physical_sha,
         "selection_snapshot": {
-            "mode": "explicit_run",
+            "mode": selection_mode,
             "parent_latest": parent.attrs.get("latest"),
             "parent_latest_complete": parent.attrs.get("latest_complete"),
             "parent_latest_scope": parent.attrs.get(f"latest_{scope}"),
@@ -1133,6 +1167,7 @@ def bind_kinematics_samples_source(
     track_scope: str,
     expected_recording_id: str | None = None,
     source_surface_profile_id: str = KINEMATICS_SOURCE_SURFACE_PROFILE_ID,
+    authority_profile_id: str = TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
 ) -> BoundKinematicsSamplesSource:
     """Bind one explicit canonical track-kinematics publication.
 
@@ -1158,6 +1193,7 @@ def bind_kinematics_samples_source(
         run_name=run_name,
         scope=track_scope,
         source_surface_profile_id=source_surface_profile_id,
+        authority_profile_id=authority_profile_id,
     )
 
 
@@ -1798,7 +1834,10 @@ def _validate_source_binding(
         or set(selection) != _SELECTION_SNAPSHOT_FIELDS
     ):
         raise ValueError("Kinematic source selection snapshot is invalid.")
-    if selection.get("mode") != "explicit_run":
+    if selection.get("mode") not in {
+        "explicit_run",
+        "explicit_selector_ineligible_canary",
+    }:
         raise ValueError("Kinematic source selection mode is invalid.")
     for field, value in selection.items():
         if field == "mode":
@@ -1809,11 +1848,12 @@ def _validate_source_binding(
         elif value is not None and not isinstance(value, str):
             raise ValueError(f"Kinematic selection field {field} is invalid.")
     completion = body.get("completion_snapshot")
+    expected_selector_eligible = selection.get("mode") == "explicit_run"
     if (
         not isinstance(completion, Mapping)
         or set(completion) != _COMPLETION_SNAPSHOT_FIELDS
         or completion.get("status") != "complete"
-        or completion.get("selector_eligible") is not True
+        or completion.get("selector_eligible") is not expected_selector_eligible
         or not isinstance(completion.get("completed_at_utc"), str)
         or not completion["completed_at_utc"]
     ):
@@ -2344,6 +2384,8 @@ __all__ = [
     "KINEMATICS_SAMPLING_POLICY",
     "KINEMATICS_SCIENTIFIC_DTYPES",
     "KINEMATICS_SOURCE_SURFACE_PROFILE_ID",
+    "TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1",
+    "TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1",
     "bind_kinematics_samples_source",
     "core_motion_projection_contract",
     "core_motion_sample_constant_values",

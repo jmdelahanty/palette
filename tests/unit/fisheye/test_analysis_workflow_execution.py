@@ -20,6 +20,9 @@ from fisheye.analysis_workflows.execution import (
     STAGE_COMMAND_BUILDERS,
     StageCommandContext,
 )
+from fisheye.analysis_workflows.execution_profiles import (
+    SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+)
 
 
 def _status(
@@ -898,6 +901,66 @@ def test_execution_renders_staged_track_kinematics_materializer(tmp_path: Path) 
     assert command.argv[command.argv.index("--shard-workers") + 1] == "5"
     assert "--apply" in command.argv
     assert "--" in command.argv
+
+
+def test_selector_ineligible_execution_renders_only_typed_candidate_commands(
+    tmp_path: Path,
+) -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    availability = {
+        "tracks": _status("tracks", available=True, run_name="tracking_candidate"),
+        "refined_keypoints": _status(
+            "refined_keypoints", available=True, run_name="keypoints_candidate"
+        ),
+        "track_kinematics": _status("track_kinematics", available=False),
+        "swim_bouts": _status("swim_bouts", available=False),
+        "refined_subject_masks": _status(
+            "refined_subject_masks", available=True, run_name="masks_candidate"
+        ),
+        "subject_shape": _status(
+            "subject_shape", available=True, run_name="shape_candidate"
+        ),
+        "tail_kinematics": _status("tail_kinematics", available=False),
+    }
+    plan = plan_analysis_workflow(
+        workflow,
+        availability,
+        targets=("swim_bouts", "tail_kinematics"),
+    )
+
+    execution = build_workflow_execution_plan(
+        workflow,
+        plan,
+        zarr_path=tmp_path / "analysis.zarr",
+        execution_id="authority_canary",
+        num_workers=8,
+        python_executable="scripts/py",
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+
+    assert execution.execution_profile_id == (
+        SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+    )
+    assert [command.node_id for command in execution.commands] == [
+        "track_kinematics",
+        "swim_bouts",
+        "tail_kinematics",
+    ]
+    commands = {command.node_id: command.argv for command in execution.commands}
+    motion = commands["track_kinematics"]
+    assert motion[motion.index("--tracking-run") + 1] == "tracking_candidate"
+    assert motion[motion.index("--execution-profile") + 1] == (
+        SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+    )
+    bouts = commands["swim_bouts"]
+    assert "--selector-ineligible" in bouts
+    assert "--track-kinematics-publication-profile" in bouts
+    tail = commands["tail_kinematics"]
+    assert tail[tail.index("--subject-shape-authority-profile") + 1] == (
+        "subject_shape_selector_ineligible_canary_v1"
+    )
+    assert tail[tail.index("--execution-backend") + 1] == "serial"
+    assert tail[tail.index("--num-workers") + 1] == "1"
 
 
 def test_execution_composes_clipped_tracking_and_active_mask_bundle(

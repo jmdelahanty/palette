@@ -48,7 +48,6 @@ from fisheye.shared.keypoint_coordinate_publication import (
 )
 from fisheye.shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_MANIFEST_ATTR,
-    SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
     SUBJECT_SHAPE_SCALAR_SURFACE_ATTR,
     SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR,
     SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR,
@@ -1101,6 +1100,34 @@ def test_plan_admits_only_exact_owner_bound_completed_ineligible_candidate(
     )
     assert staged.eye_geometry.source_authority_mode == "digest_bound_staged_subset"
     assert staged.eye_geometry.source_authority["candidate_admission"] == admission
+
+    metadata_proof = SimpleNamespace(
+        run_path=_SHAPE_RUN_PATH,
+        manifest=SimpleNamespace(
+            record_sha256=authority["canonical_publication"]["manifest_sha256"]
+        ),
+        row_count=authority["row_count"],
+        selector_eligible=False,
+        publication_owner=owner,
+    )
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "validate_sealed_subject_shape_publication_metadata",
+        lambda *_args, **kwargs: (
+            metadata_proof
+            if kwargs["expected_selector_eligible"] is False
+            else pytest.fail("candidate verification requested production lifecycle")
+        ),
+    )
+    validated = (
+        eye_geometry_source_mod.validate_staged_subject_shape_eye_geometry_authority(
+            root,
+            run_name="shape_1",
+            authority=authority,
+            expected_selector_eligible=False,
+        )
+    )
+    assert validated["record_sha256"] == authority["record_sha256"]
 
 
 def test_candidate_admission_rejects_wrong_owner_before_scratch_creation(

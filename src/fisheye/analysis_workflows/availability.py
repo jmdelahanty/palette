@@ -22,6 +22,11 @@ from fisheye.shared.zarr_run_completion import (
     resolve_latest_complete_run_name_from_attrs,
 )
 
+from .execution_profiles import (
+    PRODUCTION_EXECUTION_PROFILE_ID,
+    resolve_workflow_execution_profile,
+)
+
 
 STAGE_RUN_PARENTS: Mapping[str, tuple[str, ...]] = {
     # ``refined_keypoints`` is the workflow's curated keypoint-authority
@@ -141,6 +146,7 @@ def _resolve_metadata_run_name(
     requested_run: str | None,
     *,
     parent_relative_path: str,
+    expected_selector_eligible: bool = True,
 ) -> tuple[str | None, str | None]:
     """Resolve one strict maintained run through the shared lifecycle contract."""
 
@@ -159,9 +165,20 @@ def _resolve_metadata_run_name(
             legacy_default=False,
         ):
             return run_name, "selected run is not complete"
-        if not is_run_selector_eligible_attrs(run_attrs):
-            return run_name, "selected run is not selector-eligible"
+        observed_eligible = run_attrs.get("stage_selector_eligible")
+        if observed_eligible is not expected_selector_eligible:
+            expected = "eligible" if expected_selector_eligible else "ineligible"
+            return run_name, (
+                f"selected run is not selector-{expected}; literal "
+                f"{expected_selector_eligible!r} is required"
+            )
         return run_name, None
+
+    if not expected_selector_eligible:
+        return None, (
+            "selector-ineligible execution requires one explicit named run; "
+            "latest discovery is forbidden"
+        )
 
     run_name = resolve_latest_complete_run_name_from_attrs(
         parent_attrs=parent_attrs,
@@ -275,11 +292,27 @@ def _keypoint_authority_availability(
     root: Path,
     *,
     requested_run: str | None,
+    execution_profile_id: str = PRODUCTION_EXECUTION_PROFILE_ID,
 ) -> StageAvailability:
     """Resolve refined-bundle or clipped canonical-passthrough keypoints."""
 
     requested = str(requested_run or "latest").strip().strip("/")
-    root_attrs = _attrs(root)
+    execution_profile = resolve_workflow_execution_profile(execution_profile_id)
+    if (
+        execution_profile.expected_selector_eligible is False
+        and requested.lower() == "latest"
+    ):
+        return StageAvailability(
+            stage_id="refined_keypoints",
+            available=False,
+            reason=(
+                "selector-ineligible keypoint execution requires one exact named "
+                "authority; latest discovery is forbidden"
+            ),
+        )
+    root_attrs = (
+        _attrs(root) if execution_profile.expected_selector_eligible else {}
+    )
     authority_present = KEYPOINT_BUNDLE_AUTHORITY_ATTR in root_attrs
     if KEYPOINT_BUNDLE_AUTHORITY_LEASE_ATTR in root_attrs:
         return StageAvailability(
@@ -287,7 +320,11 @@ def _keypoint_authority_availability(
             available=False,
             reason="keypoint bundle activation lease is present",
         )
-    active_refined_path = _active_keypoint_bundle_refined_path(root)
+    active_refined_path = (
+        _active_keypoint_bundle_refined_path(root)
+        if execution_profile.expected_selector_eligible
+        else None
+    )
     if authority_present and active_refined_path is None:
         return StageAvailability(
             stage_id="refined_keypoints",
@@ -340,18 +377,28 @@ def _keypoint_authority_availability(
         else:
             name = _safe_run_name(explicit_name)
             member_path = f"{family}/{name}"
-            allow_ineligible = member_path == active_refined_path
+            allow_ineligible = (
+                member_path == active_refined_path
+                or execution_profile.expected_selector_eligible is False
+            )
+            if member_path == active_refined_path:
+                selection_reason = (
+                    "active keypoint-bundle refined authority is available"
+                )
+            elif execution_profile.expected_selector_eligible is False:
+                selection_reason = (
+                    "explicit complete selector-ineligible keypoint authority is "
+                    "available"
+                )
+            else:
+                selection_reason = "selected canonical keypoint authority is available"
             result = _available_selected_run(
                 root,
                 stage_id="refined_keypoints",
                 relative_parent=family,
                 run_name=name,
                 encoded_run_name=(f"refined/{name}" if family.startswith("refined_") else name),
-                reason=(
-                    "active keypoint-bundle refined authority is available"
-                    if allow_ineligible
-                    else "selected canonical keypoint authority is available"
-                ),
+                reason=selection_reason,
                 allow_selector_ineligible=allow_ineligible,
             )
             if result.available or explicit_family is not None:
@@ -383,12 +430,14 @@ def _keypoint_crop_lineage(
     root: Path,
     *,
     selected_keypoint_run: str,
+    execution_profile_id: str = PRODUCTION_EXECUTION_PROFILE_ID,
 ) -> tuple[str, int | None, str | None] | StageAvailability:
     """Resolve the exact crop rowset named by one selected keypoint authority."""
 
     keypoints = _keypoint_authority_availability(
         root,
         requested_run=selected_keypoint_run,
+        execution_profile_id=execution_profile_id,
     )
     if not keypoints.available or not keypoints.artifact_path:
         return StageAvailability(
@@ -566,6 +615,7 @@ def _tracking_authority_availability(
     *,
     requested_run: str | None,
     selected_keypoint_run: str,
+    execution_profile_id: str = PRODUCTION_EXECUTION_PROFILE_ID,
 ) -> StageAvailability:
     """Require selected tracks to bind the selected keypoint crop authority."""
 
@@ -573,17 +623,93 @@ def _tracking_authority_availability(
         root,
         "tracks",
         requested_run=requested_run,
+        execution_profile_id=execution_profile_id,
     )
     if not selected.available or not selected.artifact_path:
         return selected
+    tracking_attrs = _attrs(root / selected.artifact_path)
+    if tracking_attrs.get("source_authority_kind") == "subject_position_run":
+        keypoints = _keypoint_authority_availability(
+            root,
+            requested_run=selected_keypoint_run,
+            execution_profile_id=execution_profile_id,
+        )
+        if not keypoints.available or not keypoints.artifact_path:
+            return StageAvailability(
+                stage_id="tracks",
+                available=False,
+                artifact_path=selected.artifact_path,
+                run_name=selected.run_name,
+                reason=(
+                    "selected tracking subject-position authority cannot bind its "
+                    f"keypoint dependency: {keypoints.reason}"
+                ),
+                completion_status=selected.completion_status,
+            )
+        position_path = str(
+            tracking_attrs.get("source_rowset_path") or ""
+        ).strip("/")
+        position_attrs = _attrs(root / position_path)
+        manifest = position_attrs.get("subject_position_manifest")
+        manifest_sha256 = position_attrs.get("subject_position_manifest_sha256")
+        try:
+            manifest_payload = (
+                manifest.get("payload") if isinstance(manifest, Mapping) else None
+            )
+            manifest_digest = (
+                canonical_json_sha256(manifest_payload)
+                if isinstance(manifest_payload, Mapping)
+                else None
+            )
+        except (TypeError, ValueError):
+            manifest_digest = None
+        payload = manifest.get("payload") if isinstance(manifest, Mapping) else None
+        source = payload.get("source") if isinstance(payload, Mapping) else None
+        source_record = source.get("record") if isinstance(source, Mapping) else None
+        source_run_path = (
+            str(source_record.get("run_path") or "").strip("/")
+            if isinstance(source_record, Mapping)
+            else ""
+        )
+        if (
+            not position_path.startswith("analysis/subject_position_runs/observation/")
+            or manifest_digest != manifest_sha256
+            or not isinstance(payload, Mapping)
+            or payload.get("run_path") != position_path
+            or payload.get("status") != "complete"
+            or payload.get("stage_selector_eligible") is not False
+            or source_run_path != keypoints.artifact_path
+        ):
+            return StageAvailability(
+                stage_id="tracks",
+                available=False,
+                artifact_path=selected.artifact_path,
+                run_name=selected.run_name,
+                reason=(
+                    "selected tracking subject-position manifest does not bind the "
+                    "selected keypoint authority and lifecycle"
+                ),
+                completion_status=selected.completion_status,
+            )
+        return StageAvailability(
+            stage_id="tracks",
+            available=True,
+            artifact_path=selected.artifact_path,
+            run_name=selected.run_name,
+            reason=(
+                "persisted tracking authority matches the selected keypoint "
+                "subject-position successor"
+            ),
+            completion_status=selected.completion_status,
+        )
     lineage = _keypoint_crop_lineage(
         root,
         selected_keypoint_run=selected_keypoint_run,
+        execution_profile_id=execution_profile_id,
     )
     if isinstance(lineage, StageAvailability):
         return lineage
     expected_path, expected_rows, expected_refined = lineage
-    tracking_attrs = _attrs(root / selected.artifact_path)
     actual_path = str(tracking_attrs.get("source_rowset_path") or "").strip().strip("/")
     actual_refined = str(tracking_attrs.get("source_refined_run") or "").strip()
     actual_rows_value = tracking_attrs.get("source_rowset_row_count")
@@ -921,17 +1047,23 @@ def discover_stage_availability(
     *,
     requested_run: str | None = None,
     dependency_runs: Mapping[str, str] | None = None,
+    execution_profile_id: str = PRODUCTION_EXECUTION_PROFILE_ID,
 ) -> StageAvailability:
     """Resolve one persisted run using direct ``zarr.json`` reads only."""
 
     canonical = canonical_stage_id(stage_id)
+    execution_profile = resolve_workflow_execution_profile(execution_profile_id)
     root = Path(zarr_path)
     if canonical == "refined_keypoints":
         return _keypoint_authority_availability(
             root,
             requested_run=requested_run,
+            execution_profile_id=execution_profile.profile_id,
         )
-    if canonical == "refined_subject_masks":
+    if (
+        canonical == "refined_subject_masks"
+        and execution_profile.expected_selector_eligible
+    ):
         bundle_status = _subject_mask_authority_availability(
             root,
             requested_run=requested_run,
@@ -945,6 +1077,7 @@ def discover_stage_availability(
                 root,
                 requested_run=requested_run,
                 selected_keypoint_run=selected_keypoints,
+                execution_profile_id=execution_profile.profile_id,
             )
     if canonical == TRACK_KINEMATICS_VISUALIZATION_STAGE:
         return _track_kinematics_visualization_availability(
@@ -969,6 +1102,9 @@ def discover_stage_availability(
             parent_attrs,
             requested_run,
             parent_relative_path=relative_parent,
+            expected_selector_eligible=(
+                execution_profile.expected_selector_eligible
+            ),
         )
         if run_name is None or selection_error is not None:
             return StageAvailability(
@@ -999,7 +1135,11 @@ def discover_stage_availability(
             available=True,
             artifact_path=relative_run_path,
             run_name=run_name,
-            reason="persisted complete selector-eligible run is available",
+            reason=(
+                "persisted complete selector-eligible run is available"
+                if execution_profile.expected_selector_eligible
+                else "explicit complete selector-ineligible candidate is available"
+            ),
             completion_status=status,
         )
     return StageAvailability(

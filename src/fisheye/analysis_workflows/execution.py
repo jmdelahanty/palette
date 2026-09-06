@@ -15,6 +15,13 @@ from types import MappingProxyType
 from typing import Callable, Mapping
 
 from fisheye.registry.stage_catalog import canonical_stage_id
+from fisheye.analysis.tail_kinematics_runs import (
+    SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+    TAIL_KINEMATICS_CANDIDATE_PROFILE_ID,
+)
+from fisheye.analysis.track_kinematics_io import (
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+)
 from fisheye.shared.subject_shape_storage import (
     SUBJECT_SHAPE_ACCESS_AWARE_SUPPORTED_PROFILE_ID,
     SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE,
@@ -22,10 +29,17 @@ from fisheye.shared.subject_shape_storage import (
 
 from .contracts import AnalysisWorkflow
 from .dag import NodePlan, WorkflowPlan
+from .execution_profiles import (
+    PRODUCTION_EXECUTION_PROFILE_ID,
+    SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    WorkflowExecutionProfile,
+    resolve_workflow_execution_profile,
+)
 
 EXECUTION_SCHEMA_ID = "palette.analysis_workflow_execution"
 EXECUTION_LEGACY_SCHEMA_VERSION = 1
-EXECUTION_SCHEMA_VERSION = 3
+EXECUTION_PRODUCTION_SCHEMA_VERSION = 3
+EXECUTION_SCHEMA_VERSION = 4
 SAFE_RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -44,6 +58,7 @@ class StageCommandContext:
     export_root: Path | None = None
     scratch_root: Path | None = None
     admission_receipt_path: Path | None = None
+    execution_profile: WorkflowExecutionProfile | None = None
 
     def dependency_run(self, node_id: str) -> str:
         try:
@@ -98,6 +113,7 @@ class StageCommand:
 @dataclass(frozen=True)
 class WorkflowExecutionPlan:
     execution_id: str
+    execution_profile_id: str
     workflow_plan: WorkflowPlan
     output_runs: Mapping[str, str]
     export_runs: Mapping[str, str]
@@ -108,6 +124,7 @@ class WorkflowExecutionPlan:
             "schema_id": EXECUTION_SCHEMA_ID,
             "schema_version": EXECUTION_SCHEMA_VERSION,
             "execution_id": self.execution_id,
+            "execution_profile_id": self.execution_profile_id,
             "workflow_plan": self.workflow_plan.to_dict(),
             "output_runs": dict(self.output_runs),
             "export_runs": dict(self.export_runs),
@@ -167,6 +184,17 @@ def _track_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
             "causal",
         )
     )
+    if (
+        context.execution_profile is not None
+        and context.execution_profile.profile_id
+        == SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+    ):
+        command[4:4] = [
+            "--tracking-run",
+            context.dependency_run("tracks"),
+            "--execution-profile",
+            SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+        ]
     return tuple(command)
 
 
@@ -239,6 +267,18 @@ def _swim_bout_command(context: StageCommandContext) -> tuple[str, ...]:
             "sampled_frame_gap",
         )
     )
+    if (
+        context.execution_profile is not None
+        and context.execution_profile.profile_id
+        == SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+    ):
+        command.insert(4, "--selector-ineligible")
+        command.extend(
+            (
+                "--track-kinematics-publication-profile",
+                TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+            )
+        )
     return tuple(command)
 
 
@@ -472,6 +512,23 @@ def _tail_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
             "--json",
         )
     )
+    if (
+        context.execution_profile is not None
+        and context.execution_profile.profile_id
+        == SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+    ):
+        command.extend(
+            (
+                "--subject-shape-authority-profile",
+                SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+                "--storage-profile",
+                TAIL_KINEMATICS_CANDIDATE_PROFILE_ID,
+            )
+        )
+        backend_index = command.index("--execution-backend") + 1
+        command[backend_index] = "serial"
+        workers_index = command.index("--num-workers") + 1
+        command[workers_index] = "1"
     return tuple(command)
 
 
@@ -822,10 +879,12 @@ def build_workflow_execution_plan(
     scratch_root: str | Path | None = None,
     admission_receipt_root: str | Path | None = None,
     python_executable: str,
+    execution_profile_id: str = PRODUCTION_EXECUTION_PROFILE_ID,
 ) -> WorkflowExecutionPlan:
     """Render exact commands for runnable analysis nodes in topological order."""
 
     execution_id = _safe_name(execution_id, label="execution id")
+    execution_profile = resolve_workflow_execution_profile(execution_profile_id)
     if int(num_workers) < 1:
         raise WorkflowExecutionError("num_workers must be a positive integer")
     if not workflow_plan.ready:
@@ -1039,6 +1098,7 @@ def build_workflow_execution_plan(
                 and resolved_admission_receipt_root is not None
                 else None
             ),
+            execution_profile=execution_profile,
         )
         admission_builder = (
             STAGE_ADMISSION_COMMAND_BUILDERS.get(node.stage_id)
@@ -1069,6 +1129,7 @@ def build_workflow_execution_plan(
 
     return WorkflowExecutionPlan(
         execution_id=execution_id,
+        execution_profile_id=execution_profile.profile_id,
         workflow_plan=workflow_plan,
         output_runs=MappingProxyType(output_runs),
         export_runs=MappingProxyType(export_runs),
@@ -1079,6 +1140,7 @@ def build_workflow_execution_plan(
 __all__ = [
     "EXECUTION_SCHEMA_ID",
     "EXECUTION_LEGACY_SCHEMA_VERSION",
+    "EXECUTION_PRODUCTION_SCHEMA_VERSION",
     "EXECUTION_SCHEMA_VERSION",
     "EXPORT_COMMAND_BUILDERS",
     "STAGE_ADMISSION_COMMAND_BUILDERS",

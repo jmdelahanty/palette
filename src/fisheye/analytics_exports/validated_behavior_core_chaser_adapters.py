@@ -23,7 +23,7 @@ from fisheye.analysis_workflows.core_chaser_composite_bundle import (
     read_core_chaser_composite_bundle,
 )
 from fisheye.analysis_workflows.validated_behavior_source_admission import (
-    CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE,
+    CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES,
 )
 from fisheye.analysis_workflows.validated_behavior_cohort_adapters import sha256_file
 
@@ -109,7 +109,14 @@ class _CompositeRoutingContext:
         receipts = {
             item["role"]: item for item in self.bundle["source_admission_receipts"]
         }
-        report = receipts[CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE]
+        core_receipts = [
+            receipts[role]
+            for role in CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES
+            if role in receipts
+        ]
+        if len(core_receipts) != 1:
+            _fail("Composite bundle lacks one installed core execution receipt.")
+        report = core_receipts[0]
         capabilities = {
             key: _plain(self.bundle["capabilities"][key])
             for key in CORE_BEHAVIOR_CAPABILITY_KEYS
