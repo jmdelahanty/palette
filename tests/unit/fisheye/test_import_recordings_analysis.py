@@ -5,12 +5,24 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import h5py
+import pytest
 
 from fisheye.utils import import_recordings_analysis as analysis_import
 
 
+def _write_current_manifest(recording_dir: Path, *, camera_id: str = "2010093") -> None:
+    (recording_dir / "recording_manifest.json").write_text(json.dumps({
+        "source_recording_identity_profile": "palette.source_recording_identity.v2",
+        "recording_id": recording_dir.name,
+        "session_uuid": "session-test", "camera_id": camera_id,
+        "recording_type": "behavior", "recording_subtype": "free",
+        "behavior_mode": "free", "artifact_schema_id": "behavior_v1",
+    }))
+
+
 def _write_h5(path: Path, *, camera_id: str | None = None, ipc_source_name: str | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    _write_current_manifest(path.parent.parent, camera_id=camera_id or "2010093")
     with h5py.File(path, "w") as h5:
         if camera_id is not None:
             h5.attrs["camera_id"] = camera_id
@@ -48,6 +60,7 @@ def test_build_plans_includes_video_only_recording_when_stimulus_disabled(tmp_pa
     cams.mkdir(parents=True, exist_ok=True)
     wanted = cams / "Cam2010093_foo.mp4"
     wanted.touch()
+    _write_current_manifest(recording_dir)
 
     plans = analysis_import._build_plans(  # noqa: SLF001
         root=tmp_path,
@@ -105,7 +118,7 @@ def test_build_plans_marks_multi_camera_recording_as_unsupported(tmp_path: Path)
     assert "multi-camera analysis import is not yet supported" in (plan.reason or "")
 
 
-def test_build_plans_skips_existing_analysis_zarr(monkeypatch, tmp_path: Path) -> None:
+def test_build_plans_does_not_skip_an_existing_directory(monkeypatch, tmp_path: Path) -> None:
     recording_dir = tmp_path / "2026-01-28T22-22-57Z_arena_2_Feeding"
     h5_path = recording_dir / "raw" / "session.h5"
     _write_h5(h5_path, camera_id="2010094")
@@ -127,8 +140,7 @@ def test_build_plans_skips_existing_analysis_zarr(monkeypatch, tmp_path: Path) -
 
     assert len(plans) == 1
     plan = plans[0]
-    assert plan.status == "skipped"
-    assert "already exists" in (plan.reason or "")
+    assert plan.status != "skipped"
 
 
 def test_build_plans_marks_multi_h5_recording_as_unsupported(tmp_path: Path) -> None:
@@ -280,6 +292,7 @@ def test_main_recording_only_forwards_none_h5_to_pipeline(monkeypatch, tmp_path:
     cams = recording_dir / "cams"
     cams.mkdir(parents=True, exist_ok=True)
     (cams / "Cam2010093_foo.mp4").touch()
+    _write_current_manifest(recording_dir)
     registry_path = tmp_path / "registry.sqlite"
     registry_path.touch()
     captured: dict[str, object] = {}
@@ -349,7 +362,7 @@ def test_build_plans_blocks_failed_preflight_by_default(tmp_path: Path) -> None:
     assert "preflight failed" in (plans[0].reason or "")
 
 
-def test_build_plans_allows_failed_preflight_with_override(tmp_path: Path) -> None:
+def test_build_plans_rejects_removed_preflight_override(tmp_path: Path) -> None:
     recording_dir = tmp_path / "2026-01-28T23-10-00Z_arena_3_DefaultScreen"
     h5_path = recording_dir / "raw" / "session.h5"
     _write_h5(h5_path, camera_id="2010093")
@@ -362,14 +375,8 @@ def test_build_plans_allows_failed_preflight_with_override(tmp_path: Path) -> No
         encoding="utf-8",
     )
 
-    plans = analysis_import._build_plans(  # noqa: SLF001
-        root=tmp_path,
-        recursive=True,
-        skip_existing=True,
-        check_stimulus=False,
-        allow_preflight_failures=True,
-    )
-
-    assert len(plans) == 1
-    assert plans[0].status == "ok"
-    assert plans[0].cam_video == wanted
+    with pytest.raises(TypeError, match="allow_preflight_failures"):
+        analysis_import._build_plans(  # noqa: SLF001
+            root=tmp_path, recursive=True, skip_existing=True, check_stimulus=False,
+            allow_preflight_failures=True,
+        )

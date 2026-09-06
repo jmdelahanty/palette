@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
@@ -35,7 +36,7 @@ def _install_fake_zarr(monkeypatch) -> tuple[dict[str, FakeGroup], object]:
     roots: dict[str, FakeGroup] = {}
     original_open_group = mod.zarr.open_group
 
-    def fake_open_group(path: str, mode: str = "r+") -> FakeGroup:
+    def fake_open_group(path: str, mode: str = "r+", **kwargs) -> FakeGroup:
         key = str(path)
         if key not in roots:
             roots[key] = FakeGroup()
@@ -75,6 +76,7 @@ def test_apply_manual_metadata_preserves_existing_fields_without_overwrite(tmp_p
     zarr_path = tmp_path / "recording.zarr"
     zarr_path.mkdir(parents=True)
     root = roots.setdefault(str(zarr_path), FakeGroup())
+    root.attrs["zarr_purpose"] = "training"
     root.attrs["dish_design"] = "existing_dish"
     analysis_meta = root.require_group("analysis_metadata")
     analysis_meta.attrs["session_context"] = json.dumps(
@@ -176,6 +178,8 @@ def test_main_runs_import_and_writes_manifest_and_experiment_setup(
             "100",
             "--session-uuid",
             "2026-03-09_colleague_set_001",
+            "--recording-id",
+            "recording-camera-2010093",
             "--dish-design",
             "cedar",
             "--rig-id",
@@ -206,7 +210,7 @@ def test_main_runs_import_and_writes_manifest_and_experiment_setup(
 
     root = roots[str(zarr_path)]
     assert root.attrs["dish_design"] == "cedar"
-    assert root.attrs["recording_id"] == "2026-03-09_colleague_set_001"
+    assert root.attrs["recording_id"] == "recording-camera-2010093"
     assert root.attrs["artifact_schema_id"] == "video_only_v1"
     assert root.attrs["experiment_context_status"] == "absent"
     assert root.attrs["experiment_context_source"] == "none"
@@ -228,3 +232,49 @@ def test_main_runs_import_and_writes_manifest_and_experiment_setup(
         "cams/Cam2010093_meta.csv",
         "cams/Cam2010093_keyframe.json",
     ]
+
+
+@pytest.mark.parametrize("missing", ["--session-uuid", "--recording-id"])
+def test_manual_intake_requires_explicit_identity(missing: str) -> None:
+    args = ["video.mp4", "--session-uuid", "session", "--recording-id", "recording"]
+    index = args.index(missing)
+    del args[index:index + 2]
+    with pytest.raises(SystemExit) as error:
+        mod.parse_args(args)
+    assert error.value.code == 2
+
+
+def test_manual_metadata_cannot_mutate_source_analysis(tmp_path: Path, monkeypatch) -> None:
+    roots, _ = _install_fake_zarr(monkeypatch)
+    archive = tmp_path / "source.zarr"
+    archive.mkdir()
+    root = roots.setdefault(str(archive), FakeGroup())
+    root.attrs.update({"zarr_purpose": "analysis", "recording_id": "source"})
+    before = dict(root.attrs)
+    with pytest.raises(ValueError, match="training"):
+        mod.apply_manual_metadata(zarr_path=archive, metadata=_make_metadata(), overwrite=True)
+    assert dict(root.attrs) == before
+    assert root._groups == {}
+
+
+def test_manual_intake_refuses_failed_optional_diagnostic(tmp_path: Path) -> None:
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    (tmp_path / "recording_manifest.json").write_text(json.dumps({
+        "preflight": {"status": "pass", "h5": {"optional_status": "fail"}},
+    }))
+    assert mod.main([
+        str(video), "--session-uuid", "session", "--recording-id", "recording",
+        "--recording-dir", str(tmp_path), "--metadata-only", "--dry-run",
+    ]) == 1
+
+
+@pytest.mark.parametrize("schema", ["recording_analysis_v1", " recording_analysis_v1 "])
+def test_manual_intake_refuses_source_schema_before_publication(tmp_path: Path, schema: str) -> None:
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    assert mod.main([
+        str(video), "--session-uuid", "session", "--recording-id", "recording",
+        "--recording-dir", str(tmp_path), "--artifact-schema-id", schema,
+        "--metadata-only", "--dry-run",
+    ]) == 1

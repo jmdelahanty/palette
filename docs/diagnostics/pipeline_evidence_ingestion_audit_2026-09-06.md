@@ -5,6 +5,43 @@ repository-wide evidence-family index. This is evidence and design clarification
 not a new runtime contract, implementation queue, or declaration of pipeline
 completion.
 
+## September 6 authorized integration reconciliation
+
+The user subsequently authorized the Palette PR integrations. This audit branch
+is refreshed from owned head `9111f019a06b3f4a5146f65db9aa795ed89862ee`
+onto main `e802818dc12cecee1b53e3cc65bae422f0d5fc83` using a
+conflict-free, history-preserving merge. That incoming main commit passed all
+24 checks before incorporation. The old audit head had only the pre-aggregate
+23-job workflow and was not merge-ready under the newly expanded rule; the
+refreshed candidate must pass its own full 24-check run. PR 142 records its
+exact new head and current CI.
+Fresh documentation QA: nine host-policy/freshness tests passed in 0.11 seconds;
+generated census, contract freshness, and whitespace checks passed. These
+checks do not replace the new candidate's required CI.
+
+The scoped corrections now integrated and post-merge validated are:
+
+| PR | Validated main commit | Post-merge CI | Scope |
+|---|---|---|---|
+| [140](https://github.com/jmdelahanty/palette/pull/140) | `3c98979be9bf4eb19db5a855950e53f8dcec563f` | [34044178789](https://github.com/jmdelahanty/palette/actions/runs/34044178789), all 24 successful | Success-only aggregate, subsequently made required alongside all original 23 checks without weakening other main protections. |
+| [143](https://github.com/jmdelahanty/palette/pull/143) | `ca27b33062699289731fe84e4e7f72558d2b69f2` | [34046580164](https://github.com/jmdelahanty/palette/actions/runs/34046580164), all 24 successful | PTP complete-state classification, exact clock integers, and clipped frame-map correspondence. |
+| [146](https://github.com/jmdelahanty/palette/pull/146) | `e60b1195592defc7323ef35fb952955ebd616d60` | [34048830865](https://github.com/jmdelahanty/palette/actions/runs/34048830865), all 24 successful | Clock publication validation/rollback/retry and the existing-grammar public source-digest interface. |
+| [147](https://github.com/jmdelahanty/palette/pull/147) | `e802818dc12cecee1b53e3cc65bae422f0d5fc83` | [34051186036](https://github.com/jmdelahanty/palette/actions/runs/34051186036), all 24 successful | Scoped ingestion failure, identity/context, immutable replay, invocation acknowledgment, declared-stream, and manual sampled-training enforcement. |
+
+This is still a three-file documentation-only change relative to refreshed
+main. The two evidence files, original audited source/test pin, historical
+measurements, diagnostic outputs, and numerical tables are unchanged. No live
+data or scientific sweep was rerun; no deployed code, shared checkout, registry,
+historical artifact, or production selector was changed by this integration.
+The broader parent-level clipped intake, transfer-v2 adoption, hardware
+synchronization/equivalence, crop-ledger payload proof, aggregate source-content
+seals, and intake catalog/AST closure remain separate work. Documentation/rules
+PR 145 remains a separate integration with its own required CI. The owning
+consolidation queue retains implementation status; this audit is evidence.
+
+This section supersedes preparation-status statements below, not their pinned
+observations or historical interpretation limits.
+
 ## September 6 PR-preparation reconciliation
 
 The findings below describe the pinned audited source, not the state of every

@@ -86,7 +86,6 @@ def build_import_command(
     log_dir: Path,
     apply: bool,
     recording_only: bool,
-    allow_preflight_failures: bool,
     registry: Optional[Path],
 ) -> list[str]:
     command = [
@@ -101,8 +100,6 @@ def build_import_command(
     ]
     if recording_only:
         command.append("--recording-only")
-    if allow_preflight_failures:
-        command.append("--allow-preflight-failures")
     if registry is not None:
         command.extend(["--registry", str(registry)])
     return command
@@ -124,10 +121,9 @@ def _run_command(command: Sequence[str], *, name: str, run_dir: Path) -> Command
 
 def _newest_jsonl(log_dir: Path, pattern: str, *, before: set[Path]) -> Optional[Path]:
     candidates = sorted(set(log_dir.glob(pattern)) - before)
-    if candidates:
-        return candidates[-1]
-    all_candidates = sorted(log_dir.glob(pattern))
-    return all_candidates[-1] if all_candidates else None
+    # A previous invocation or ambiguous concurrent logs cannot acknowledge
+    # this command. Fresh logs are required even for an idempotent replay.
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _read_zarr_paths_from_import_log(log_path: Optional[Path]) -> list[Path]:
@@ -138,19 +134,22 @@ def _read_zarr_paths_from_import_log(log_path: Optional[Path]) -> list[Path]:
     for line in log_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        payload = json.loads(line)
+        if not isinstance(payload, dict):
+            raise ValueError("import log entry must be a JSON object")
         event = payload.get("event")
-        if event not in {"recording_plan", "recording_ok", "recording_skipped"}:
+        if event in {"recording_failed", "registry_sync_failed"}:
+            raise ValueError(f"import log contains {event}")
+        if event not in {"recording_ok", "recording_skipped"}:
             continue
         status = payload.get("status")
         if status == "missing":
-            continue
+            raise ValueError("import log contains a missing recording")
+        if event == "recording_skipped" and status != "skipped":
+            raise ValueError("import log has an invalid skipped-recording acknowledgment")
         zarr_path = payload.get("zarr_path")
         if not isinstance(zarr_path, str) or not zarr_path.strip():
-            continue
+            raise ValueError("import acknowledgment has no zarr_path")
         key = zarr_path.strip()
         if key not in seen:
             seen.add(key)
@@ -166,20 +165,48 @@ def _read_recording_dirs_from_organize_log(log_path: Optional[Path]) -> list[Pat
     for line in log_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        payload = json.loads(line)
+        if not isinstance(payload, dict):
+            raise ValueError("organize log entry must be a JSON object")
         if payload.get("event") != "recording_applied":
             continue
         dest_dir = payload.get("dest_dir")
         if not isinstance(dest_dir, str) or not dest_dir.strip():
-            continue
+            raise ValueError("organizer acknowledgment has no dest_dir")
         key = dest_dir.strip()
         if key not in seen:
             seen.add(key)
             paths.append(Path(key))
     return paths
+
+
+def _verify_import_acknowledgments(
+    *,
+    import_log: Path | None,
+    recording_dirs: Sequence[Path],
+    zarr_paths: Sequence[Path],
+    recording_only: bool,
+) -> None:
+    """Bind this invocation's acknowledgments to every planned live artifact."""
+
+    from fisheye.utils.import_recording_analysis import resolve_single_recording_plan
+    from fisheye.utils.import_organized_recordings_analysis import _existing_analysis_complete
+
+    if import_log is None:
+        raise ValueError("importer produced no fresh unambiguous JSONL log")
+    expected = {
+        resolve_single_recording_plan(
+            recording_dir=path, require_h5=not recording_only,
+        ).zarr_path.resolve()
+        for path in recording_dirs
+    }
+    acknowledged = {path.resolve() for path in zarr_paths}
+    if not expected or acknowledged != expected:
+        raise ValueError("import acknowledgments do not exactly cover organized recording outputs")
+    for path in sorted(expected):
+        complete, reason = _existing_analysis_complete(path, require_stimulus=not recording_only)
+        if not complete:
+            raise ValueError(f"acknowledged import is not validated: {path}: {reason}")
 
 
 def _organize_failure_reason(
@@ -251,7 +278,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Plan organization/import without writes.")
     parser.add_argument("--no-rename-cams", action="store_true", help="Keep original camera filenames.")
     parser.add_argument("--recording-only", action="store_true", help="Import organized camera-video-only recordings without stimulus.")
-    parser.add_argument("--allow-preflight-failures", action="store_true", help="Do not block import on manifest preflight failures.")
     parser.add_argument("--run-video-diagnostics", action="store_true", help="Run video diagnostics during organize apply.")
     parser.add_argument("--run-h5-diagnostics", action="store_true", help="Run H5 diagnostics during organize apply.")
     parser.add_argument(
@@ -313,13 +339,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     disposition_error: str | None = None
     status = "ok"
 
-    organized_recording_dirs = _read_recording_dirs_from_organize_log(organize_log)
-    organize_failure = _organize_failure_reason(
-        apply=bool(args.apply),
-        returncode=organize_result.returncode,
-        organize_log=organize_log,
-        organized_recording_dirs=organized_recording_dirs,
-    )
+    try:
+        organized_recording_dirs = _read_recording_dirs_from_organize_log(organize_log)
+        organize_failure = _organize_failure_reason(
+            apply=bool(args.apply),
+            returncode=organize_result.returncode,
+            organize_log=organize_log,
+            organized_recording_dirs=organized_recording_dirs,
+        )
+    except (ValueError, OSError) as exc:
+        organize_failure = f"organizer log is invalid: {exc}"
     if organize_failure is not None:
         status = "failed"
         print(f"ERROR: {organize_failure}", file=sys.stderr)
@@ -333,7 +362,6 @@ def main(argv: Optional[list[str]] = None) -> int:
                 log_dir=import_log_dir,
                 apply=bool(args.apply),
                 recording_only=bool(args.recording_only),
-                allow_preflight_failures=bool(args.allow_preflight_failures),
                 registry=args.registry if args.register else None,
             )
             print("Running import command:")
@@ -345,7 +373,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "import_organized_recordings_analysis_*.jsonl",
                 before=import_before,
             )
-            zarr_paths = _read_zarr_paths_from_import_log(import_log)
+            try:
+                zarr_paths = _read_zarr_paths_from_import_log(import_log)
+                if args.apply:
+                    _verify_import_acknowledgments(
+                        import_log=import_log,
+                        recording_dirs=organized_recording_dirs,
+                        zarr_paths=zarr_paths,
+                        recording_only=bool(args.recording_only),
+                    )
+            except (ValueError, OSError) as exc:
+                status = "failed"
+                print(f"ERROR: import acknowledgment failed: {exc}", file=sys.stderr)
             if import_result.returncode != 0:
                 status = "failed"
 

@@ -27,11 +27,11 @@ Recommended acquisition-to-analysis order:
 
 If you run diagnostics through `organize_recordings --run-video-diagnostics`
 and/or `--run-h5-diagnostics`, the organizer writes a `preflight` summary into
-`recording_manifest.json`. The import entry points below now block only when
-that stored manifest preflight is `fail`. They do not block on `warn`.
-
-Use `--allow-preflight-failures` only when you explicitly want to override a
-recorded failed preflight.
+`recording_manifest.json`. Import refuses a recorded `fail`/`error` in the
+summary or any declared video/H5 component, including optional/tooling checks,
+and malformed diagnostic evidence. A summary `pass` or `warn` cannot hide a
+component failure. Warnings without failures remain nonblocking; diagnostics
+are not run automatically by import. There is no failure-override option.
 
 For repeatable operator smoke checks on real data, use the shared fixture
 convention documented in [test_data.md](test_data.md) rather than writing test

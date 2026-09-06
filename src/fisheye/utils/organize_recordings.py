@@ -992,20 +992,14 @@ def _append_external_ipc_video_artifacts(
         batch_root=batch_root,
         preferred_dir=full_dir,
     )
-    metadata_is_legacy_summary = bool(
-        declared_full_metadata is not None
-        and declared_full_metadata.name.endswith("_external_summary.json")
-    )
-    full_metadata = None if metadata_is_legacy_summary else declared_full_metadata
-    full_summary = (
-        declared_full_metadata
-        if metadata_is_legacy_summary
-        else _resolve_external_ipc_path(
-            full_output.get("summary")
-            or full_dir / f"Cam{camera_id}_external_summary.json",
-            batch_root=batch_root,
-            preferred_dir=full_dir,
-        )
+    if declared_full_metadata is not None and declared_full_metadata.suffix.lower() != ".csv":
+        raise ValueError("full frame metadata must be a CSV, not a legacy summary")
+    full_metadata = declared_full_metadata
+    full_summary = _resolve_external_ipc_path(
+        full_output.get("summary")
+        or full_dir / f"Cam{camera_id}_external_summary.json",
+        batch_root=batch_root,
+        preferred_dir=full_dir,
     )
     full_status = full_dir / f"Cam{camera_id}_external_status.json"
     full_keyframes = _resolve_external_ipc_path(
@@ -1022,16 +1016,13 @@ def _append_external_ipc_video_artifacts(
     full_frame_clock_metadata = None
     if full_metadata is not None and full_metadata.is_file():
         full_frame_clock_metadata = f"cams/{cam_base}_external_meta.csv"
-    elif crop_meta is not None and crop_meta.is_file():
-        full_frame_clock_metadata = f"cams/{cam_base}_meta.csv"
     meta["video_streams"] = _external_ipc_video_streams_payload(
         camera_id=camera_id,
         cam_base=cam_base,
         full_output=full_output,
         crop_output=crop_output,
-        # A declared clock path is fail-closed at import time. Prefer Orange's
-        # full-frame metadata CSV; retain the crop-clock compatibility fallback
-        # only when that producer metadata is absent.
+        # A full-video clock must come from that producer stream. Crop metadata
+        # cannot substitute for absent or broken full-frame evidence.
         full_frame_clock_metadata=full_frame_clock_metadata,
         has_full_summary=bool(full_summary is not None and full_summary.is_file()),
         has_full_status=full_status.is_file(),
