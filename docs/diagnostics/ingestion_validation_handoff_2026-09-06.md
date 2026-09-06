@@ -1,5 +1,28 @@
 # Ingestion validation corrections — 2026-09-06
 
+## Authorized main-integration refresh
+
+The user authorized the Palette PR integration sequence on 2026-09-06. PR 140
+landed as main `3c98979be9bf4eb19db5a855950e53f8dcec563f`; all 24 post-merge
+checks passed in [run 34044178789](https://github.com/jmdelahanty/palette/actions/runs/34044178789)
+before this clean owned branch incorporated it. This branch's incoming head,
+`eb224a216ac7774770b33de021c599b741ce7927`, also had all 24 checks successful.
+The history-preserving merge leaves source and test content unchanged.
+Fresh focused validation on the combined tree: 281 tests passed in 9.29 seconds;
+generated census, file-size, contract-freshness, and whitespace gates passed.
+
+With separate explicit user approval, `main-required-ci` ruleset 22372296 now
+requires `ci-required` as the 24th check. All original 23 Actions-bound checks,
+strict up-to-date enforcement, pull-request rules, and other protections were
+preserved; the readback was verified. There are no bypass actors.
+
+The new candidate remains incomplete until its own 24 checks succeed. PR 143
+records its exact commit and current CI; successful incoming runs do not replace
+that evidence. This section supersedes the historical preparation-only
+authorization/status below. Deployment, shared-checkout updates, dependency
+installation, historical mutation, and production activation remain outside
+this integration task.
+
 ## Authorized candidate refresh
 
 The user authorized Palette-only PR preparation, commits, pushes, and CI on
