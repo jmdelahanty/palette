@@ -4,6 +4,10 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import zarr
+
+from fisheye.shared.source_recording_identity import SourceRecordingIdentity
+
 from fisheye.utils import import_organized_recordings_analysis as mod
 
 
@@ -16,6 +20,10 @@ def _recording(root: Path, name: str = "2026-05-29T18-11-16Z_arena_1_GoodCopBadC
     (rec / "recording_manifest.json").write_text(
         json.dumps(
             {
+                "source_recording_identity_profile": "palette.source_recording_identity.v2",
+                "recording_id": name,
+                "session_uuid": "session-test",
+                "camera_id": "2010093",
                 "recording_name": name,
                 "recording_type": "behavior",
                 "recording_subtype": "free",
@@ -64,7 +72,7 @@ def test_discover_recording_dirs_can_read_organize_log(tmp_path: Path) -> None:
     assert discovered == [rec.resolve()]
 
 
-def test_build_plans_resumes_incomplete_existing_analysis_zarr(tmp_path: Path) -> None:
+def test_build_plans_refuses_unprofiled_existing_directory(tmp_path: Path) -> None:
     rec = _recording(tmp_path)
     zarr_path = rec / "zarr" / f"{rec.name}_analysis.zarr"
     zarr_path.mkdir(parents=True)
@@ -73,14 +81,18 @@ def test_build_plans_resumes_incomplete_existing_analysis_zarr(tmp_path: Path) -
         [rec],
         import_stimulus=True,
         skip_existing=True,
-        allow_preflight_failures=False,
         check_stimulus=False,
     )
 
     assert len(plans) == 1
-    assert plans[0].status == "ok"
+    assert plans[0].status == "missing"
     assert plans[0].reason is not None
-    assert plans[0].reason.startswith("resuming incomplete analysis zarr:")
+
+
+def _current_archive(recording_dir: Path, zarr_path: Path) -> None:
+    manifest = json.loads((recording_dir / "recording_manifest.json").read_text())
+    root = zarr.open_group(str(zarr_path), mode="w", zarr_format=3, use_consolidated=False)
+    root.attrs.update(SourceRecordingIdentity.from_mapping(manifest).analysis_root_fields())
 
 
 def test_build_plans_skips_existing_analysis_only_after_completion_contract(
@@ -89,7 +101,7 @@ def test_build_plans_skips_existing_analysis_only_after_completion_contract(
 ) -> None:
     rec = _recording(tmp_path)
     zarr_path = rec / "zarr" / f"{rec.name}_analysis.zarr"
-    zarr_path.mkdir(parents=True)
+    _current_archive(rec, zarr_path)
     monkeypatch.setattr(
         mod,
         "_existing_analysis_complete",
@@ -100,7 +112,6 @@ def test_build_plans_skips_existing_analysis_only_after_completion_contract(
         [rec],
         import_stimulus=True,
         skip_existing=True,
-        allow_preflight_failures=False,
         check_stimulus=False,
     )
 
@@ -190,7 +201,7 @@ def test_main_apply_syncs_successful_import_when_registry_is_provided(monkeypatc
 def test_main_syncs_skipped_existing_zarr_when_registry_is_provided(monkeypatch, tmp_path: Path) -> None:
     rec = _recording(tmp_path)
     zarr_path = rec / "zarr" / f"{rec.name}_analysis.zarr"
-    zarr_path.mkdir(parents=True)
+    _current_archive(rec, zarr_path)
     registry_path = tmp_path / "registry.sqlite"
     gateway_calls: list[tuple[Path, Path, object, str]] = []
     manifest_before = (rec / "recording_manifest.json").read_bytes()
@@ -281,6 +292,10 @@ def test_main_recording_only_discovers_video_recording(monkeypatch, tmp_path: Pa
                 "recording_subtype": "free",
                 "behavior_mode": "free",
                 "artifact_schema_id": "video_only_v1",
+                "source_recording_identity_profile": "palette.source_recording_identity.v2",
+                "recording_id": rec.name,
+                "session_uuid": "session-test",
+                "camera_id": "2010093",
             }
         ),
         encoding="utf-8",

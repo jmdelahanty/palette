@@ -1,9 +1,9 @@
 # Recording Analysis Pipeline Contract
 <!-- contract-meta
-version: 4
+version: 5
 status: active
 implementation: implemented
-last_verified: 2026-07-24
+last_verified: 2026-09-06
 -->
 
 Purpose: define the canonical, operator-first contract for analysis processing per recording.
@@ -293,19 +293,27 @@ provenance.
   - stop immediately on first failed stage
   - return non-zero
   - report `failed_step` and `returncode` where available
-  - treat `recording_manifest.json` `preflight.status=fail` as a blocking
-    `failed_step=preflight_gate` unless `--allow-preflight-failures` is passed
+  - block recorded preflight failures/errors, including optional components
+    and tooling, even if a summary says pass; no override exists
+  - require current source identity and video/acquisition metadata; no automatic
+    legacy writer path or `--no-import-video-metadata` option exists
 - Batch orchestrator:
   - continue to next recording when one recording fails
   - summarize `ok/failed/skipped/missing`
-  - recordings with blocking manifest preflight failures are planned as
-    `missing` unless `--allow-preflight-failures` is passed
-  - return non-zero if any recording failed
+  - recordings with blocking manifest preflight failures are planned as `missing`
+  - applied batches return non-zero for any failed/missing recording or an empty
+    requested set; explicit organizer logs never fall back to directory discovery
+  - Citrus import requires a fresh unambiguous invocation log and acknowledgments
+    covering exactly the organized outputs; plan rows are not success evidence
 
 ## Idempotency and Data Safety
 
 - Import stage:
-  - archive creation is idempotent (`mode="a"` when archive exists)
+  - an existing directory is not proof of a supported or complete archive;
+    partial current-profile imports may resume only with matching source identity
+  - sealed imports are immutable; reuse requires a live receipt-bound source and
+    acquisition check, source-clock verification when applicable, canonical crop
+    validation when applicable, and current consolidated publication metadata
   - stimulus import defaults to skip when runs already exist unless `--stimulus-always`
 - Detect stage:
   - append-only detect runs; existing runs remain immutable

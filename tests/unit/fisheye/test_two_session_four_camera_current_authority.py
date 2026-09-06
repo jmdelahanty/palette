@@ -151,7 +151,6 @@ def _publish_analysis_imports(
         stimulus_run_name=None,
         stimulus_overwrite=False,
         stimulus_quiet=True,
-        allow_preflight_failures=True,
     )
     published: list[tuple[Path, importer.RecordingImportResult]] = []
     for recording_dir in recording_dirs:

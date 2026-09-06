@@ -31,7 +31,6 @@ def _opts() -> mod.RecordingImportOptions:
         stimulus_run_name=None,
         stimulus_overwrite=False,
         stimulus_quiet=True,
-        allow_preflight_failures=False,
     )
 
 
@@ -49,6 +48,10 @@ def _write_current_manifest(
         "recording_id": recording_id or recording_dir.name,
         "session_uuid": session_uuid,
         "camera_id": camera_id,
+        "recording_type": "behavior",
+        "recording_subtype": "free",
+        "behavior_mode": "free",
+        "artifact_schema_id": "behavior_v1",
         **context,
     }
     (recording_dir / "recording_manifest.json").write_text(
@@ -67,6 +70,61 @@ def _resolved_identity_claim() -> SourceRecordingIdentityClaim:
         }
     )
     return SourceRecordingIdentityClaim.create(identity)
+
+
+@pytest.mark.parametrize("field", [
+    "recording_type", "recording_subtype", "behavior_mode", "artifact_schema_id",
+])
+@pytest.mark.parametrize("value", [None, "", 17, []])
+def test_import_rejects_missing_or_malformed_context_before_write(
+    tmp_path: Path, monkeypatch, field: str, value: object,
+) -> None:
+    recording_dir = tmp_path / "recording"
+    _write_current_manifest(recording_dir, **{field: value})
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording_dir, h5_path=None,
+        cam_video=recording_dir / "full.mp4", zarr_path=recording_dir / "analysis.zarr",
+    )
+
+    def unexpected_write(*_args, **_kwargs):
+        raise AssertionError("invalid manifest context reached an archive write")
+
+    monkeypatch.setattr(mod.zarr, "open_group", unexpected_write)
+    with pytest.raises(ValueError, match=field):
+        mod.ensure_analysis_archive(plan)
+    assert not plan.zarr_path.exists()
+
+
+@pytest.mark.parametrize("context", [
+    {"recording_type": "invented"},
+    {"recording_subtype": "invented"},
+    {"behavior_mode": "embedded"},
+])
+def test_import_rejects_invalid_context_vocabulary(tmp_path: Path, context: dict) -> None:
+    recording_dir = tmp_path / "recording"
+    _write_current_manifest(recording_dir, **context)
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording_dir, h5_path=None,
+        cam_video=recording_dir / "full.mp4", zarr_path=recording_dir / "analysis.zarr",
+    )
+    with pytest.raises(ValueError, match="manifest context"):
+        mod.validate_recording_import_plan(plan)
+
+
+@pytest.mark.parametrize("selected", ["crop.mp4", "other.mp4"])
+def test_new_source_cannot_select_a_crop_or_undeclared_video(tmp_path: Path, selected: str) -> None:
+    recording_dir = tmp_path / "recording"
+    _write_current_manifest(recording_dir, video_streams={"streams": {
+        "full": {"video": "full.mp4", "output_kind": "full"},
+        "crop": {"video": "crop.mp4", "output_kind": "crop"},
+    }})
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording_dir, h5_path=None,
+        cam_video=recording_dir / selected, zarr_path=recording_dir / "analysis.zarr",
+    )
+    with pytest.raises(ValueError, match="source video"):
+        mod.validate_recording_import_plan(plan)
+    assert not plan.zarr_path.exists()
 
 
 def _acquisition_authority_updates() -> dict[str, object]:
@@ -121,6 +179,10 @@ def test_process_recording_import_returns_stimulus_failure(monkeypatch, tmp_path
     opts = _opts()
     opts.import_stimulus = True
     opts.stimulus_always = True
+    opts.import_video_metadata = True
+    _write_current_manifest(plan.recording_dir)
+    monkeypatch.setattr(mod, "git_identity", lambda **_kwargs: {"git_sha": "1" * 40, "git_dirty": False})
+    monkeypatch.setattr(mod, "apply_video_metadata", lambda _plan, **_kwargs: _acquisition_authority_updates())
 
     def _fake_stim(_plan: mod.RecordingAnalysisPlan, _opts: mod.RecordingImportOptions):
         return False, 5, ["stimulus"]
@@ -169,7 +231,7 @@ def test_run_stimulus_import_forwards_metadata_and_calibration_only(
     assert captured == {"cmd": cmd, "check": False}
 
 
-def test_stimulus_runs_present_detects_existing_run(monkeypatch, tmp_path: Path) -> None:
+def test_stimulus_runs_present_refuses_unmarked_legacy_run(monkeypatch, tmp_path: Path) -> None:
     class _FakeGroup:
         def __init__(
             self,
@@ -198,7 +260,7 @@ def test_stimulus_runs_present_detects_existing_run(monkeypatch, tmp_path: Path)
     )
     monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: fake_root)
 
-    assert mod.stimulus_runs_present(tmp_path / "sample_analysis.zarr")
+    assert not mod.stimulus_runs_present(tmp_path / "sample_analysis.zarr")
 
 
 def test_stimulus_runs_present_rejects_failed_strict_run(
@@ -288,7 +350,7 @@ def test_ensure_analysis_archive_sets_purpose(monkeypatch, tmp_path: Path) -> No
     )
 
 
-def test_ensure_analysis_archive_does_not_reclassify_existing_legacy_store(
+def test_ensure_analysis_archive_refuses_existing_legacy_store_without_mutation(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -312,9 +374,10 @@ def test_ensure_analysis_archive_does_not_reclassify_existing_legacy_store(
         zarr_path=zarr_path,
     )
 
-    mod.ensure_analysis_archive(plan)
+    with pytest.raises(SourceRecordingIdentityError):
+        mod.ensure_analysis_archive(plan)
 
-    assert mod.PALETTE_STORE_EPOCH_ATTR not in fake_root.attrs
+    assert fake_root.attrs == {}
 
 
 def test_ensure_analysis_archive_marks_recording_only_context(monkeypatch, tmp_path: Path) -> None:
@@ -365,6 +428,10 @@ def test_ensure_analysis_archive_copies_recording_manifest_context(monkeypatch, 
                 SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
                 "recording_id": recording_dir.name,
                 "session_uuid": "sickyfish_2026_02_23_16_23_35",
+                "recording_type": "behavior",
+                "recording_subtype": "embedded",
+                "behavior_mode": "embedded",
+                "artifact_schema_id": "behavior_v1",
                 "recording_name": "sickyfish_2026_02_23_16_23_35_cam2010093",
                 "organizer_recording_id": "sickyfish_source_family",
                 "session_start_iso8601_utc": "2026-02-23T21:23:35Z",
@@ -398,6 +465,9 @@ def test_ensure_analysis_archive_copies_recording_manifest_context(monkeypatch, 
     assert fake_root.attrs.get("num_dishes") == "1"
     assert fake_root.attrs.get("fish_per_dish") == "1"
     assert fake_root.attrs.get("session_start_iso8601_utc") == "2026-02-23T21:23:35Z"
+    assert fake_root.attrs["recording_subtype"] == "embedded"
+    assert fake_root.attrs["behavior_mode"] == "embedded"
+    assert fake_root.attrs["artifact_schema_id"] == "recording_analysis_v1"
 
 
 def test_ensure_analysis_archive_rejects_conflicting_camera_identity(
@@ -430,12 +500,19 @@ def test_ensure_analysis_archive_rejects_conflicting_camera_identity(
                 "recording_id": "rec",
                 "session_uuid": "session",
                 "camera_id": "2010093",
+                "recording_type": "behavior",
+                "recording_subtype": "free",
+                "behavior_mode": "free",
+                "artifact_schema_id": "behavior_v1",
             }
         ),
         encoding="utf-8",
     )
     zarr_path = recording_dir / "zarr" / "rec_analysis.zarr"
     zarr_path.mkdir(parents=True)
+    (zarr_path / "zarr.json").write_text(json.dumps({
+        "zarr_format": 3, "node_type": "group", "attributes": dict(_FakeGroup().attrs),
+    }))
     monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: _FakeGroup())
     plan = mod.RecordingAnalysisPlan(
         recording_dir=recording_dir,
@@ -537,10 +614,16 @@ def test_existing_current_analysis_archive_replays_exact_identity(
             "recording_id": manifest["recording_id"],
             "session_uuid": manifest["session_uuid"],
             "camera_id": manifest["camera_id"],
+            "recording_type": manifest["recording_type"],
+            "recording_subtype": manifest["recording_subtype"],
+            "behavior_mode": manifest["behavior_mode"],
             **SOURCE_ANALYSIS_CLASSIFICATION,
         }
     )
     fake_root = type("FakeRoot", (), {"attrs": attrs})()
+    (zarr_path / "zarr.json").write_text(json.dumps({
+        "zarr_format": 3, "node_type": "group", "attributes": dict(attrs),
+    }))
     monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
     monkeypatch.setattr(
         mod,
@@ -577,7 +660,7 @@ def test_existing_unprofiled_root_rejects_current_manifest(
     fake_root = type("FakeRoot", (), {"attrs": _FakeAttrs()})()
     monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
 
-    with pytest.raises(SourceRecordingIdentityError, match="unprofiled"):
+    with pytest.raises(SourceRecordingIdentityError):
         mod.ensure_analysis_archive(
             mod.RecordingAnalysisPlan(
                 recording_dir=recording_dir,
@@ -598,6 +681,7 @@ def test_apply_video_metadata_stamps_source_h5_fingerprint(monkeypatch, tmp_path
     zarr_path.parent.mkdir(parents=True)
     video.write_bytes(b"video")
     h5_path.write_bytes(b"h5")
+    _write_current_manifest(rec)
     root = zarr.open_group(str(zarr_path), mode="w", zarr_format=3)
     root.attrs.update(
         {
@@ -782,6 +866,10 @@ def test_ensure_analysis_archive_imports_acquisition_video_stream_inventory(
                 "recording_id": recording_dir.name,
                 "session_uuid": "source_session",
                 "camera_id": "2010093",
+                "recording_type": "behavior",
+                "recording_subtype": "free",
+                "behavior_mode": "free",
+                "artifact_schema_id": "behavior_v1",
                 "video_streams": {
                     "schema_id": "orange_runtime_video_streams_v1",
                     "frame_clock": "recording_frame_id",
@@ -861,6 +949,7 @@ def test_resolve_single_recording_plan_uses_default_paths(tmp_path: Path) -> Non
     h5 = rec / "raw" / "session.h5"
     video.touch()
     h5.touch()
+    _write_current_manifest(rec)
 
     plan = mod.resolve_single_recording_plan(recording_dir=rec)
 
@@ -876,6 +965,7 @@ def test_resolve_single_recording_plan_allows_missing_h5_when_not_required(tmp_p
     video = rec / "cams" / "Cam2010093_foo.mp4"
     video.touch()
 
+    _write_current_manifest(rec)
     plan = mod.resolve_single_recording_plan(recording_dir=rec, require_h5=False)
 
     assert plan.recording_dir == rec.resolve()
@@ -911,6 +1001,7 @@ def test_resolve_single_recording_plan_uses_manifest_full_video_to_disambiguate(
     (rec / "recording_manifest.json").write_text(
         json.dumps(
             {
+                **_write_current_manifest(rec, camera_id="2010096"),
                 "video_streams": {
                     "streams": {
                         "full": {"video": "cams/Cam2010096_full.mp4"},
@@ -934,6 +1025,7 @@ def test_resolve_single_recording_plan_fails_on_ambiguous_video(tmp_path: Path) 
     (rec / "cams" / "b.mp4").touch()
     (rec / "raw" / "session.h5").touch()
 
+    _write_current_manifest(rec)
     try:
         mod.resolve_single_recording_plan(recording_dir=rec)
     except ValueError as exc:
@@ -950,6 +1042,7 @@ def test_main_defaults_to_dry_run_and_does_not_create_archive(tmp_path: Path) ->
     (rec / "raw" / "session.h5").touch()
     out = rec / "zarr" / f"{rec.name}_analysis.zarr"
 
+    _write_current_manifest(rec)
     rc = mod.main(["--recording-dir", str(rec)])
 
     assert rc == 0
@@ -997,7 +1090,7 @@ def test_process_recording_import_rejects_stimulus_import_without_h5(monkeypatch
     assert "no H5" in (result.error or "")
 
 
-def test_process_recording_import_allows_failed_preflight_when_overridden(monkeypatch, tmp_path: Path) -> None:
+def test_process_recording_import_cannot_override_failed_preflight(monkeypatch, tmp_path: Path) -> None:
     recording_dir = tmp_path / "rec"
     recording_dir.mkdir()
     (recording_dir / "recording_manifest.json").write_text(
@@ -1023,8 +1116,9 @@ def test_process_recording_import_allows_failed_preflight_when_overridden(monkey
 
     result = mod.process_recording_import(plan, opts, logger=None)
 
-    assert result.ok
-    assert seen["ensure"] is True
+    assert not result.ok
+    assert result.failed_step == "preflight_gate"
+    assert seen["ensure"] is False
 
 
 def test_process_recording_import_mints_receipt_only_after_publication_steps(
@@ -1198,6 +1292,9 @@ def test_process_recording_import_does_not_rewrite_sealed_current_source(
         cam_video=recording_dir / "cams" / "Cam2010093.mp4",
         zarr_path=zarr_path,
     )
+    _write_current_manifest(recording_dir)
+    opts = _opts()
+    opts.import_video_metadata = True
     monkeypatch.setattr(
         mod,
         "load_source_recording_identity_profile",
@@ -1216,7 +1313,7 @@ def test_process_recording_import_does_not_rewrite_sealed_current_source(
         ),
     )
 
-    result = mod.process_recording_import(plan, _opts(), logger=None)
+    result = mod.process_recording_import(plan, opts, logger=None)
 
     assert result.ok is False
     assert result.failed_step == "recording_import_sealed"

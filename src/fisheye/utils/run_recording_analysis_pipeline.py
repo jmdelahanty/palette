@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from fisheye.registry.db import RegistryPaths
+from fisheye.registry.recording_identity_authority import load_verified_recording_import_receipt
 from fisheye.registry.shadow_publish import (
     shadow_synchronize_recording_import,
 )
@@ -44,6 +45,7 @@ from fisheye.utils.import_recording_analysis import (
     RecordingImportResult,
     process_recording_import,
     resolve_single_recording_plan,
+    validate_recording_import_plan,
 )
 
 
@@ -246,7 +248,14 @@ def process_recording_analysis_pipeline(
     if not sealed_replay:
         import_result = process_recording_import(plan, opts.import_opts, logger=logger)
     else:
-        import_result = RecordingImportResult(ok=True)
+        try:
+            validate_recording_import_plan(plan)
+            receipt = load_verified_recording_import_receipt(plan.zarr_path)
+        except Exception as exc:
+            return RecordingPipelineResult(
+                ok=False, failed_step="recording_import_preflight", error=str(exc),
+            )
+        import_result = RecordingImportResult(ok=True, receipt=receipt)
     if not import_result.ok:
         return RecordingPipelineResult(
             ok=False,
@@ -375,7 +384,6 @@ def _build_import_options(args: argparse.Namespace) -> RecordingImportOptions:
         stimulus_run_name=args.stimulus_run_name,
         stimulus_overwrite=bool(args.stimulus_overwrite),
         stimulus_quiet=bool(args.stimulus_quiet),
-        allow_preflight_failures=bool(args.allow_preflight_failures),
     )
 
 
@@ -446,12 +454,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Import source-video metadata into root/raw_video attrs (default).",
     )
     parser.add_argument(
-        "--no-import-video-metadata",
-        dest="import_video_metadata",
-        action="store_false",
-        help="Skip source-video metadata import.",
-    )
-    parser.add_argument(
         "--video-metadata-overwrite",
         action="store_true",
         help="Overwrite existing source-video metadata attrs when importing.",
@@ -479,11 +481,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--stimulus-run-name", type=str, help="Optional stimulus run name.")
     parser.add_argument("--stimulus-overwrite", action="store_true", help="Overwrite existing stimulus run name.")
     parser.add_argument("--stimulus-quiet", action="store_true", help="Suppress verbose stimulus import output.")
-    parser.add_argument(
-        "--allow-preflight-failures",
-        action="store_true",
-        help="Proceed even if recording_manifest.json marks preflight.status=fail.",
-    )
 
     parser.add_argument(
         "--refine-detect",
@@ -563,7 +560,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  output: {plan.zarr_path}")
     print("  model_source: registry")
     print(f"  import_stimulus: {bool(args.import_stimulus)}")
-    print(f"  allow_preflight_failures: {bool(args.allow_preflight_failures)}")
     print(f"  refine_detect: {bool(args.refine_detect)}")
     print(f"  keypoints: {bool(args.keypoints)}")
     print(f"  refine_keypoints: {bool(args.refine_keypoints)}")
