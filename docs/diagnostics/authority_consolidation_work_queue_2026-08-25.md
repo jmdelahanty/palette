@@ -285,6 +285,16 @@ and the source-of-truth consolidation plan.
 
 ### Stage 1 — Source import and recording identity (`RID-001`)
 
+2026-09-06 ingestion-validation companion: **in_progress**, owned by the Palette
+worker on `agent/palette/ingestion-validation-20260906`, based on exact commit
+`1bf9d9195fb026f7bb426c47ee01fdff99cb698d`. Corrections prepared for draft PR cover
+PTP complete-state classification, exact clock integer admission, and clipped
+parent/local frame correspondence. Focused tests pass; required remote CI must
+succeed before integration or merge readiness. This does not expand migration
+73, change source-ID origins, repair historical artifacts, or implement hardware
+synchronization. Scope, preservation evidence, and remaining gates are in the
+[ingestion validation handoff](ingestion_validation_handoff_2026-09-06.md).
+
 Primary surfaces: `shared/source_recording_identity.py`,
 `shared/recording_import_receipt.py`,
 `registry/recording_identity_authority.py`, `registry/shadow_publish.py`, and

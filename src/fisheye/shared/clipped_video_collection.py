@@ -15,6 +15,8 @@ import math
 from pathlib import Path
 from typing import Any, Mapping
 
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from fisheye.shared.import_source_fingerprint import source_stat_fingerprint_attrs
@@ -325,6 +327,32 @@ def _frame_index_units(path: Path) -> dict[tuple[str, str, int], dict[str, Any]]
     if missing:
         raise ValueError(f"recording_frame_index is missing columns: {missing}")
     table = pq.read_table(path, columns=sorted(required)).combine_chunks()
+    for name in sorted(required):
+        column = table[name]
+        if column.null_count:
+            raise ValueError(f"recording_frame_index {name} contains null values.")
+        if name in {"clip_index", "parent_frame_index", "clip_local_frame_index"}:
+            if not pa.types.is_integer(column.type):
+                raise ValueError(
+                    f"recording_frame_index {name} must be exact integers."
+                )
+            try:
+                column = column.cast(pa.int64(), safe=True)
+            except pa.ArrowInvalid as exc:
+                raise ValueError(
+                    f"recording_frame_index {name} exceeds int64 range."
+                ) from exc
+            table = table.set_column(table.schema.get_field_index(name), name, column)
+    # Preserve physical row order; validate the keyed parent/local relation.
+    try:
+        offsets = pc.subtract_checked(
+            table["parent_frame_index"], table["clip_local_frame_index"]
+        )
+    except pa.ArrowInvalid as exc:
+        raise ValueError(
+            "recording_frame_index parent/local offset overflows int64."
+        ) from exc
+    table = table.append_column("parent_local_offset", offsets)
     grouped = table.group_by(
         ["camera_serial", "clip_id", "clip_index", "video_path"]
     ).aggregate(
@@ -332,8 +360,11 @@ def _frame_index_units(path: Path) -> dict[tuple[str, str, int], dict[str, Any]]
             ("parent_frame_index", "min"),
             ("parent_frame_index", "max"),
             ("parent_frame_index", "count"),
+            ("parent_frame_index", "count_distinct"),
             ("clip_local_frame_index", "min"),
             ("clip_local_frame_index", "max"),
+            ("parent_local_offset", "min"),
+            ("parent_local_offset", "max"),
         ]
     )
     units: dict[tuple[str, str, int], dict[str, Any]] = {}
@@ -350,7 +381,10 @@ def _frame_index_units(path: Path) -> dict[tuple[str, str, int], dict[str, Any]]
         start = int(row["parent_frame_index_min"])
         stop = int(row["parent_frame_index_max"]) + 1
         count = int(row["parent_frame_index_count"])
-        if stop - start != count:
+        if (
+            stop - start != count
+            or int(row["parent_frame_index_count_distinct"]) != count
+        ):
             raise ValueError(
                 f"recording_frame_index parent frames are not contiguous for {key}."
             )
@@ -360,6 +394,13 @@ def _frame_index_units(path: Path) -> dict[tuple[str, str, int], dict[str, Any]]
         ):
             raise ValueError(
                 f"recording_frame_index clip-local frames are not dense for {key}."
+            )
+        if (
+            row["parent_local_offset_min"] != start
+            or row["parent_local_offset_max"] != start
+        ):
+            raise ValueError(
+                f"recording_frame_index parent/local frame correspondence is invalid for {key}."
             )
         units[key] = {
             "frame_start": start,
