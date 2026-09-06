@@ -6,6 +6,9 @@ import numpy as np
 import pytest
 
 from fisheye.analysis.chaser_distance_runs import ChaserDistanceWindow
+from fisheye.analysis_workflows.materializers import (
+    provider_epoch_behavior_summary as provider_epoch_behavior_summary_module,
+)
 from fisheye.analysis_workflows.materializers.provider_epoch_behavior_summary import (
     ProviderEpochBehaviorSummaryError,
     _bind_protocol_semantic_row_identity,
@@ -24,6 +27,148 @@ from fisheye.analysis_workflows.protocol_semantic_chaser_selection import (
     CHASER_WINDOW_ROLES,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+
+
+class _ExpectedSwimBoutLoader(RuntimeError):
+    pass
+
+
+def _patch_compute_result_to_reach_core_swim_bout_loader(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    selector_eligible: object,
+) -> None:
+    bout_source = SimpleNamespace(
+        binding={
+            "run_name": "bouts_1",
+            "completion_snapshot": {
+                "selector_eligible": selector_eligible,
+            },
+        }
+    )
+    provider = SimpleNamespace(
+        run_path="analysis/track_kinematics_runs/offline/motion_1",
+        canonical_bout_source=bout_source,
+    )
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        "resolve_exact_stimulus_epoch_selection",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        "bind_core_motion_and_bouts_from_roster",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        "bind_core_motion_track_source_handle",
+        lambda *_args, **_kwargs: provider,
+    )
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        "_track_slice",
+        lambda *_args, **_kwargs: slice(0, 1),
+    )
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        "open_zarr_root",
+        lambda *_args, **_kwargs: object(),
+    )
+
+
+def _call_compute_result_through_core_swim_bout_loader(tmp_path) -> None:
+    provider_epoch_behavior_summary_module._compute_result(
+        tmp_path / "recording.zarr",
+        run_name="summary_1",
+        epoch_run_name="epochs_1",
+        protocol_semantic_selection_run_name=None,
+        motion_run_path="analysis/track_kinematics_runs/offline/motion_1",
+        swim_bout_run_name="bouts_1",
+        track_id=0,
+        speed_level="speed_exponential",
+        core_authority_roster={"sealed": True},
+    )
+
+
+@pytest.mark.parametrize(
+    ("selector_eligible", "expected_loader_name", "unexpected_loader_name"),
+    [
+        (
+            True,
+            "load_default_swim_bout_tables",
+            "load_exact_selector_ineligible_default_swim_bout_tables",
+        ),
+        (
+            False,
+            "load_exact_selector_ineligible_default_swim_bout_tables",
+            "load_default_swim_bout_tables",
+        ),
+    ],
+)
+def test_compute_result_preserves_core_swim_bout_selector_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    selector_eligible: bool,
+    expected_loader_name: str,
+    unexpected_loader_name: str,
+) -> None:
+    _patch_compute_result_to_reach_core_swim_bout_loader(
+        monkeypatch,
+        selector_eligible=selector_eligible,
+    )
+
+    def expected_loader(*_args, **_kwargs):
+        raise _ExpectedSwimBoutLoader
+
+    def unexpected_loader(*_args, **_kwargs):
+        pytest.fail("The opposite swim-bout authority loader was called.")
+
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        expected_loader_name,
+        expected_loader,
+    )
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        unexpected_loader_name,
+        unexpected_loader,
+    )
+
+    with pytest.raises(_ExpectedSwimBoutLoader):
+        _call_compute_result_through_core_swim_bout_loader(tmp_path)
+
+
+@pytest.mark.parametrize("selector_eligible", [None, 0, "false"])
+def test_compute_result_rejects_invalid_core_swim_bout_selector_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    selector_eligible: object,
+) -> None:
+    _patch_compute_result_to_reach_core_swim_bout_loader(
+        monkeypatch,
+        selector_eligible=selector_eligible,
+    )
+
+    def unexpected_loader(*_args, **_kwargs):
+        pytest.fail("A swim-bout loader was called for invalid lifecycle evidence.")
+
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        "load_default_swim_bout_tables",
+        unexpected_loader,
+    )
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        "load_exact_selector_ineligible_default_swim_bout_tables",
+        unexpected_loader,
+    )
+
+    with pytest.raises(
+        ProviderEpochBehaviorSummaryError,
+        match="selector lifecycle",
+    ):
+        _call_compute_result_through_core_swim_bout_loader(tmp_path)
 
 
 def _window() -> ChaserDistanceWindow:
