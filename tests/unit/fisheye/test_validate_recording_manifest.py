@@ -3,10 +3,47 @@
 from pathlib import Path
 import json
 import sys
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.utils.validate_recording_manifest import main as validate_manifest_main
+from fisheye.shared.recording_manifest_context import (
+    recording_manifest_context_issues,
+    validate_recording_manifest_context,
+)
+
+
+@pytest.mark.parametrize("recording_type,subtype,mode", [
+    ("behavior", "free", "free"), ("behavior", "embedded", "embedded"),
+    ("microscopy", "lightsheet", "none"), ("microscopy", "confocal", "none"),
+    ("microscopy", "2p", "none"), ("histology", "section", "none"),
+    ("histology", "wholemount", "none"),
+])
+def test_manifest_context_preserves_product_vocabulary_without_mutation(
+    tmp_path: Path, recording_type: str, subtype: str, mode: str,
+) -> None:
+    payload = {
+        "recording_type": recording_type, "recording_subtype": subtype,
+        "behavior_mode": mode, "artifact_schema_id": "producer_schema_v1",
+    }
+    before = json.dumps(payload, sort_keys=True)
+    validate_recording_manifest_context(payload)
+    assert json.dumps(payload, sort_keys=True) == before
+    manifest_path = tmp_path / "recording_manifest.json"
+    manifest_path.write_text(before)
+    assert validate_manifest_main([str(manifest_path), "--no-rich"]) == 0
+    assert manifest_path.read_text() == before
+
+
+def test_manifest_context_retains_explicit_registry_vocabulary() -> None:
+    payload = {
+        "recording_type": "custom", "recording_subtype": "custom_subtype",
+        "behavior_mode": "none", "artifact_schema_id": "custom_v1",
+    }
+    assert recording_manifest_context_issues(
+        payload, allowed_types={"custom"}, allowed_subtypes={"custom": {"custom_subtype"}},
+    ) == []
 
 
 def test_validate_recording_manifest_apply_defaults_patches_missing_fields(tmp_path: Path) -> None:

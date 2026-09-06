@@ -50,6 +50,31 @@ def test_direct_cli_is_retired(capsys) -> None:
     assert "publish_sampled_training_base" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("manifest_text,reason", [
+    ('{"preflight": {"h5": {"optional_status": "fail"}}}', "h5_optional=fail"),
+    ('{"session_uuid": "first", "session_uuid": "second"}', "duplicate"),
+    ('{broken', "strict JSON"),
+])
+def test_sampled_constructor_refuses_invalid_manifest_before_media(
+    tmp_path: Path, monkeypatch, manifest_text: str, reason: str,
+) -> None:
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    (tmp_path / "recording_manifest.json").write_text(manifest_text)
+
+    def unexpected_probe(*args, **kwargs):
+        raise AssertionError("invalid manifest reached media probe")
+
+    monkeypatch.setattr(import_mod, "probe_video_colorimetry_attrs", unexpected_probe)
+    with pytest.raises(ValueError, match=reason):
+        import_sampled_training_pynvvc(
+            video_path=video, zarr_path=tmp_path / "training.zarr",
+            source_frame_count=10, frame_step=3, recording_dir=tmp_path,
+            require_cuda=False, reader_factory=_FakePynvvcReader,
+        )
+    assert not (tmp_path / "training.zarr").exists()
+
+
 def test_import_sampled_training_pynvvc_writes_luma_training_zarr(
     tmp_path: Path,
     monkeypatch,
@@ -84,6 +109,7 @@ def test_import_sampled_training_pynvvc_writes_luma_training_zarr(
                 "recording_type": "behavior",
                 "recording_subtype": "free",
                 "behavior_mode": "free",
+                "artifact_schema_id": "behavior_v1",
                 "protocol_name": "RedScare",
                 "arena_id": "1",
                 "camera_id": "2010093",

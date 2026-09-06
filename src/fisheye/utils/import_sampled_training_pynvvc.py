@@ -23,6 +23,8 @@ import yaml
 import zarr
 
 from fisheye.shared.acquisition_frame_clock import import_acquisition_frame_clock
+from fisheye.shared.recording_preflight import preflight_gate_reason, read_manifest_payload
+from fisheye.shared.recording_manifest_context import validate_recording_manifest_context
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
 from fisheye.shared.import_profile_contract import (
     IMPORT_PROFILE_SCHEMA_ID,
@@ -209,20 +211,16 @@ def _json_attr(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
-def _safe_read_json(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
 def _manifest_recording_attrs(recording_dir: Path | None) -> dict[str, Any]:
     if recording_dir is None:
         return {}
-    manifest = _safe_read_json(recording_dir / "recording_manifest.json")
-    if not manifest:
+    reason = preflight_gate_reason(recording_dir)
+    if reason is not None:
+        raise ValueError(reason)
+    manifest = read_manifest_payload(recording_dir)
+    if manifest is None:
         return {}
+    validate_recording_manifest_context(manifest)
 
     keys = (
         "recording_id",
@@ -458,6 +456,9 @@ def import_sampled_training_pynvvc(
         raise FileNotFoundError(f"Source video not found: {video_path}")
     if zarr_path.exists() and not overwrite:
         raise FileExistsError(f"Output Zarr already exists: {zarr_path}")
+    # A genuinely absent manifest is permitted by this sampled-training
+    # product; a present failed or malformed declaration is not absence.
+    _manifest_recording_attrs(recording_dir)
     if require_cuda and not torch.cuda.is_available():
         raise RuntimeError(
             "PyNvVC sampled training import requires CUDA-enabled torch; "

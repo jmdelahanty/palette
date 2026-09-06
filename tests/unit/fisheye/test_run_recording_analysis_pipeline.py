@@ -35,7 +35,6 @@ def _opts(tmp_path: Path) -> mod.RecordingPipelineOptions:
             stimulus_run_name=None,
             stimulus_overwrite=False,
             stimulus_quiet=True,
-            allow_preflight_failures=False,
         ),
     )
 
@@ -223,6 +222,7 @@ def test_main_defaults_to_dry_run_and_does_not_create_archive(monkeypatch, tmp_p
     (rec / "cams" / "Cam2010093_foo.mp4").touch()
     (rec / "raw" / "session.h5").touch()
     out = rec / "zarr" / f"{rec.name}_analysis.zarr"
+    _write_current_manifest(rec)
 
     def _unexpected_call(*_args, **_kwargs):
         raise AssertionError("process_recording_analysis_pipeline should not run in dry-run mode")
@@ -240,6 +240,7 @@ def test_main_recording_only_dry_run_allows_missing_h5(monkeypatch, tmp_path: Pa
     (rec / "cams").mkdir(parents=True, exist_ok=True)
     (rec / "cams" / "Cam2010093_foo.mp4").touch()
     out = rec / "zarr" / f"{rec.name}_analysis.zarr"
+    _write_current_manifest(rec)
 
     def _unexpected_call(*_args, **_kwargs):
         raise AssertionError("process_recording_analysis_pipeline should not run in dry-run mode")
@@ -258,6 +259,7 @@ def test_main_dry_run_with_register_does_not_open_registry(monkeypatch, tmp_path
     (rec / "raw").mkdir(parents=True, exist_ok=True)
     (rec / "cams" / "Cam2010093_foo.mp4").touch()
     (rec / "raw" / "session.h5").touch()
+    _write_current_manifest(rec)
 
     def _unexpected_publish(*_args, **_kwargs):
         raise AssertionError("Registry should not be published during dry-run")
@@ -267,6 +269,16 @@ def test_main_dry_run_with_register_does_not_open_registry(monkeypatch, tmp_path
     rc = mod.main(["--recording-dir", str(rec), "--register"])
 
     assert rc == 0
+
+
+def _write_current_manifest(recording_dir: Path) -> None:
+    (recording_dir / "recording_manifest.json").write_text(json.dumps({
+        "source_recording_identity_profile": "palette.source_recording_identity.v2",
+        "recording_id": recording_dir.name,
+        "session_uuid": "session-test", "camera_id": "2010093",
+        "recording_type": "behavior", "recording_subtype": "free",
+        "behavior_mode": "free", "artifact_schema_id": "behavior_v1",
+    }))
 
 
 def test_process_pipeline_rejects_current_manifest_without_register_before_import(
@@ -389,7 +401,7 @@ def test_process_pipeline_happy_path_runs_stages_in_order(monkeypatch, tmp_path:
     ]
 
 
-def test_process_pipeline_bound_current_import_skips_all_import_writers(
+def test_process_pipeline_receipt_path_claim_cannot_skip_intake_validation(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -449,9 +461,9 @@ def test_process_pipeline_bound_current_import_skips_all_import_writers(
         logger=None,
     )
 
-    assert result.ok is True
-    assert result.dataset_id == "rec:bound"
-    assert order == ["receipt_paths", "refresh", "detect", "refresh"]
+    assert result.ok is False
+    assert result.failed_step == "recording_import_preflight"
+    assert order == ["receipt_paths"]
 
 
 def test_process_pipeline_returns_detect_quality_failure(monkeypatch, tmp_path: Path) -> None:

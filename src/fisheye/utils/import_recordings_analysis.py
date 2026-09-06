@@ -32,8 +32,10 @@ from fisheye.utils.import_recording_analysis import (
     RecordingImportOptions,
     RecordingAnalysisPlan as SingleRecordingPlan,
     stimulus_runs_present,
+    validate_recording_import_plan,
 )
 from fisheye.shared.recording_preflight import preflight_gate_reason
+from fisheye.utils.import_organized_recordings_analysis import _existing_analysis_complete
 from fisheye.utils.run_recording_analysis_pipeline import (
     RecordingPipelineOptions,
     process_recording_analysis_pipeline,
@@ -131,7 +133,6 @@ def _build_plans(
     recursive: bool,
     skip_existing: bool,
     check_stimulus: bool,
-    allow_preflight_failures: bool = False,
     import_stimulus: bool = True,
 ) -> List[AnalysisPlan]:
     # Group by recording so we can detect multi-H5 (future multi-camera) layouts.
@@ -150,7 +151,7 @@ def _build_plans(
     plans: List[AnalysisPlan] = []
     for recording_dir in sorted(recording_dirs):
         h5_paths = sorted(h5_by_recording.get(recording_dir, []))
-        if len(h5_paths) > 1 and import_stimulus:
+        if len(h5_paths) > 1:
             reason = (
                 f"multiple raw H5 files ({len(h5_paths)}) in recording; "
                 "multi-camera analysis import is not yet supported by this command"
@@ -206,11 +207,18 @@ def _build_plans(
 
         gate_reason = preflight_gate_reason(
             recording_dir,
-            allow_failures=bool(allow_preflight_failures),
         )
 
         camera_id = meta.get("camera_id")
         cam_video, reason = _select_cam_video(recording_dir, camera_id)
+        if gate_reason is None and cam_video is not None:
+            try:
+                validate_recording_import_plan(SingleRecordingPlan(
+                    recording_dir=recording_dir, h5_path=h5_path,
+                    cam_video=cam_video, zarr_path=zarr_path,
+                ))
+            except ValueError as exc:
+                gate_reason = str(exc)
         status = "ok"
         if gate_reason is not None:
             status = "missing"
@@ -218,8 +226,14 @@ def _build_plans(
         elif cam_video is None:
             status = "missing"
         elif skip_existing and zarr_path.exists():
-            status = "skipped"
-            reason = "analysis zarr already exists"
+            complete, completion_reason = _existing_analysis_complete(
+                zarr_path, require_stimulus=import_stimulus,
+            )
+            if complete:
+                status = "skipped"
+                reason = completion_reason
+            else:
+                reason = f"incomplete analysis zarr: {completion_reason}"
 
         stimulus_present: Optional[bool] = None
         if check_stimulus and zarr_path.exists():
@@ -359,11 +373,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--stimulus-run-name", type=str, help="Optional stimulus run name.")
     parser.add_argument("--stimulus-overwrite", action="store_true", help="Overwrite existing stimulus run name.")
     parser.add_argument("--stimulus-quiet", action="store_true", help="Suppress verbose stimulus import output.")
-    parser.add_argument(
-        "--allow-preflight-failures",
-        action="store_true",
-        help="Proceed even if recording_manifest.json marks preflight.status=fail.",
-    )
 
     parser.add_argument(
         "--refine-detect",
@@ -454,7 +463,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             detect_config=str(args.detect_config) if args.detect_config else None,
             model_source="registry",
             import_stimulus=bool(args.import_stimulus),
-            allow_preflight_failures=bool(args.allow_preflight_failures),
             expected_subject_count=args.expected_subject_count,
             refine_detect=bool(args.refine_detect),
             keypoints=bool(args.keypoints),
@@ -473,7 +481,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         recursive=bool(args.recursive),
         skip_existing=skip_existing,
         check_stimulus=bool(args.import_stimulus),
-        allow_preflight_failures=bool(args.allow_preflight_failures),
         import_stimulus=bool(args.import_stimulus),
     )
 
@@ -527,7 +534,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             stimulus_run_name=args.stimulus_run_name,
             stimulus_overwrite=bool(args.stimulus_overwrite),
             stimulus_quiet=bool(args.stimulus_quiet),
-            allow_preflight_failures=bool(args.allow_preflight_failures),
         ),
     )
 
@@ -624,7 +630,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         logger.close()
 
-    return 0 if failed == 0 else 1
+    return 0 if failed == 0 and missing == 0 and bool(plans) else 1
 
 
 if __name__ == "__main__":  # pragma: no cover

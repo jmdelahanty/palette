@@ -17,19 +17,12 @@ except Exception:  # pragma: no cover - optional
     Table = None
 
 from fisheye.registry.db import Registry, RegistryPaths
-
-DEFAULT_ALLOWED_TYPES = {"behavior", "microscopy", "histology"}
-DEFAULT_ALLOWED_SUBTYPES: Dict[str, Set[str]] = {
-    "behavior": {"free", "embedded"},
-    "microscopy": {"lightsheet", "confocal", "2p"},
-    "histology": {"section", "wholemount"},
-}
-DEFAULT_ALLOWED_BEHAVIOR_MODES = {"free", "embedded", "none"}
-REQUIRED_FIELDS = (
-    "recording_type",
-    "recording_subtype",
-    "behavior_mode",
-    "artifact_schema_id",
+from fisheye.shared.recording_manifest_context import (
+    DEFAULT_ALLOWED_TYPES,
+    DEFAULT_ALLOWED_SUBTYPES,
+    DEFAULT_ALLOWED_BEHAVIOR_MODES,
+    REQUIRED_FIELDS,
+    recording_manifest_context_issues,
 )
 
 
@@ -186,61 +179,12 @@ def _validate_manifest(
         issues.append(ManifestIssue(manifest_path, "invalid_payload", "manifest root must be a JSON object"))
         return issues
 
-    values: Dict[str, Optional[str]] = {}
-    for field in REQUIRED_FIELDS:
-        raw = payload.get(field)
-        value = str(raw).strip() if raw is not None else ""
-        values[field] = value or None
-        if not value:
-            issues.append(ManifestIssue(manifest_path, "missing_required_field", field))
-
-    recording_type = values["recording_type"]
-    recording_subtype = values["recording_subtype"]
-    behavior_mode = values["behavior_mode"]
-
-    if recording_type and recording_type not in allowed_types:
-        issues.append(
-            ManifestIssue(
-                manifest_path,
-                "invalid_recording_type",
-                f"{recording_type} (allowed={','.join(sorted(allowed_types))})",
-            )
+    return [
+        ManifestIssue(manifest_path, code, detail)
+        for code, detail in recording_manifest_context_issues(
+            payload, allowed_types=allowed_types, allowed_subtypes=allowed_subtypes,
         )
-
-    if recording_type and recording_subtype:
-        allowed_for_type = allowed_subtypes.get(recording_type)
-        if allowed_for_type and recording_subtype not in allowed_for_type:
-            issues.append(
-                ManifestIssue(
-                    manifest_path,
-                    "invalid_recording_subtype",
-                    (
-                        f"type={recording_type} subtype={recording_subtype} "
-                        f"(allowed={','.join(sorted(allowed_for_type))})"
-                    ),
-                )
-            )
-
-    if behavior_mode and behavior_mode not in DEFAULT_ALLOWED_BEHAVIOR_MODES:
-        issues.append(
-            ManifestIssue(
-                manifest_path,
-                "invalid_behavior_mode",
-                f"{behavior_mode} (allowed={','.join(sorted(DEFAULT_ALLOWED_BEHAVIOR_MODES))})",
-            )
-        )
-
-    if recording_type == "behavior" and recording_subtype and behavior_mode:
-        if recording_subtype != behavior_mode:
-            issues.append(
-                ManifestIssue(
-                    manifest_path,
-                    "behavior_mode_mismatch",
-                    f"recording_subtype={recording_subtype} behavior_mode={behavior_mode}",
-                )
-            )
-
-    return issues
+    ]
 
 
 def _render_results(

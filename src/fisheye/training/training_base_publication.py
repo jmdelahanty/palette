@@ -17,6 +17,7 @@ from fisheye.shared.atomic_run_publisher import (
     tree_inventory,
 )
 from fisheye.shared.run_provenance import build_writer_run_provenance
+from fisheye.shared.recording_preflight import preflight_gate_reason
 from fisheye.shared.zarr_helpers import (
     archive_metadata_publication_lock,
     open_zarr_group_direct,
@@ -214,6 +215,9 @@ def publish_sampled_training_base(
     scratch = _require_node_local_scratch(Path(scratch_root))
     source_video = Path(video_path).expanduser().resolve()
     recording = Path(recording_dir).expanduser().resolve()
+    reason = preflight_gate_reason(recording)
+    if reason is not None:
+        raise ValueError(reason)
     source_h5 = Path(h5_path).expanduser().resolve() if h5_path is not None else None
     config = (
         Path(config_path).expanduser().resolve() if config_path is not None else None

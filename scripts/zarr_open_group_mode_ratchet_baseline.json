@@ -1,5 +1,5 @@
 {
-  "bare_call_count": 220,
+  "bare_call_count": 216,
   "entries": {
     "src/fisheye/analysis/analyze_goodcopbadcop_approach_avoidance.py::roles::735bd058ae5cee80f754": 1,
     "src/fisheye/analysis/analyze_goodcopbadcop_bout_kinematics_distance.py::load::d1aedb517384921480ea": 1,
@@ -171,9 +171,6 @@
     "src/fisheye/utils/finalize_refinement_artifacts.py::_finalize_row::f220d8b595bd80e76830": 1,
     "src/fisheye/utils/fix_refined_detect_lineage.py::main::9757c44ce6f77fd8d1c8": 1,
     "src/fisheye/utils/generate_review_list.py::_resolve_crop_run_status::42c9c744b7077c730974": 1,
-    "src/fisheye/utils/import_organized_recordings_analysis.py::_existing_analysis_complete::42c9c744b7077c730974": 1,
-    "src/fisheye/utils/import_recording_analysis.py::apply_acquisition_frame_clock::2e0f61b8d1129aa4ed34": 1,
-    "src/fisheye/utils/import_recording_analysis.py::apply_video_metadata::d2241f4c9e10c4079c66": 1,
     "src/fisheye/utils/import_recording_analysis.py::import_experiment_setup::d2241f4c9e10c4079c66": 1,
     "src/fisheye/utils/import_sampled_training_pynvvc.py::import_sampled_training_pynvvc::4d2990dcdf64f5fa5968": 1,
     "src/fisheye/utils/import_video_metadata.py::main::f120b23da35633be1e56": 1,
@@ -182,7 +179,6 @@
     "src/fisheye/utils/init_training_refined_detect_batch.py::_open_zarr_group::584240f3483ef8514509": 1,
     "src/fisheye/utils/inspect_keypoint_review_linkage.py::inspect_linkage::42c9c744b7077c730974": 1,
     "src/fisheye/utils/inspect_refined_detect_run.py::_open_root::42c9c744b7077c730974": 1,
-    "src/fisheye/utils/intake_video_only_recording.py::apply_manual_metadata::f120b23da35633be1e56": 1,
     "src/fisheye/utils/keypoint_profile.py::write_keypoint_profile._open_child_group::518da4a44538f833747b": 1,
     "src/fisheye/utils/keypoint_profile.py::write_keypoint_profile._open_child_group::67019c78c783a9e103dc": 1,
     "src/fisheye/utils/keypoint_retry.py::retry_failed_keypoints_yolo::06562a8d85b1b7bda5b1": 1,

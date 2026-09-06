@@ -4273,7 +4273,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-8341e7c3e2976fad"
+            "schema-writer-663b63d6e9c79789"
           ],
           "shape": "(len(frame_indices), ds_h, ds_w)"
         },
@@ -4347,7 +4347,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-05fa312d249e4740"
+            "schema-writer-db1afe8cb015e747"
           ],
           "shape": "(len(frame_indices), source_h, source_w)"
         },
@@ -5837,7 +5837,7 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-9d6f150f1edab621"
+            "schema-writer-3224d9f6a279de09"
           ],
           "shape": "shape(frame_indices)"
         },
@@ -71643,8 +71643,8 @@
       "dtype_expression": "'uint8'",
       "dynamic_name": false,
       "file": "src/fisheye/utils/import_sampled_training_pynvvc.py",
-      "line": 506,
-      "occurrence_id": "schema-writer-05fa312d249e4740",
+      "line": 507,
+      "occurrence_id": "schema-writer-db1afe8cb015e747",
       "path_pattern": "<zarr-root:str(temp_path)>/raw_video/images_full",
       "required": null,
       "shape_expression": "(len(frame_indices), source_h, source_w)",
@@ -71656,7 +71656,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-af33fbe4349f453c"
+      "writer_site_id": "writer-072db38678376e23"
     },
     {
       "access_pattern": "per_row",
@@ -71677,8 +71677,8 @@
       "dtype_expression": "'uint8'",
       "dynamic_name": false,
       "file": "src/fisheye/utils/import_sampled_training_pynvvc.py",
-      "line": 528,
-      "occurrence_id": "schema-writer-8341e7c3e2976fad",
+      "line": 529,
+      "occurrence_id": "schema-writer-663b63d6e9c79789",
       "path_pattern": "<zarr-root:str(temp_path)>/raw_video/images_ds",
       "required": null,
       "shape_expression": "(len(frame_indices), ds_h, ds_w)",
@@ -71690,7 +71690,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-c9d1289ad5bc1b6f"
+      "writer_site_id": "writer-6d6a65175f069bfe"
     },
     {
       "access_pattern": "windowed",
@@ -71711,8 +71711,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/import_sampled_training_pynvvc.py",
-      "line": 553,
-      "occurrence_id": "schema-writer-9d6f150f1edab621",
+      "line": 554,
+      "occurrence_id": "schema-writer-3224d9f6a279de09",
       "path_pattern": "<zarr-root:str(temp_path)>/raw_video/original_frame_indices",
       "required": null,
       "shape_expression": "shape(frame_indices)",
@@ -71724,7 +71724,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-08c6ceae6d2f7bc4"
+      "writer_site_id": "writer-ea41bbad6f769c8d"
     },
     {
       "access_pattern": "windowed",
@@ -74956,7 +74956,7 @@
     "parsed_writer_candidate_module_count": 236,
     "reader_required_array_declaration_count": 102,
     "resolved_writer_leaf_name_count": 630,
-    "scanned_python_module_count": 1707,
+    "scanned_python_module_count": 1708,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,

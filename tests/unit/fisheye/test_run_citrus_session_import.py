@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from fisheye.utils import run_citrus_session_import as import_mod
 from fisheye.utils.run_citrus_session_import import (
     CommandRecord,
@@ -78,7 +80,6 @@ def test_build_import_command_uses_organize_log_without_detect_or_refine(tmp_pat
         log_dir=tmp_path / "import_logs",
         apply=False,
         recording_only=True,
-        allow_preflight_failures=True,
         registry=tmp_path / "registry.sqlite",
     )
 
@@ -87,7 +88,7 @@ def test_build_import_command_uses_organize_log_without_detect_or_refine(tmp_pat
     assert str(tmp_path / "organize.jsonl") in command
     assert "--dry-run" in command
     assert "--recording-only" in command
-    assert "--allow-preflight-failures" in command
+    assert "--allow-preflight-failures" not in command
     assert "--registry" in command
     assert str(tmp_path / "registry.sqlite") in command
     assert "detect" not in " ".join(command)
@@ -107,7 +108,21 @@ def test_read_zarr_paths_from_import_log_deduplicates_and_skips_missing(tmp_path
     ]
     log_path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
 
-    assert _read_zarr_paths_from_import_log(log_path) == [zarr_a, zarr_b]
+    assert _read_zarr_paths_from_import_log(log_path) == [zarr_a]
+
+
+def test_new_log_selection_never_reuses_previous_invocation(tmp_path: Path) -> None:
+    previous = tmp_path / "import_previous.jsonl"
+    previous.write_text('{}\n')
+    assert import_mod._newest_jsonl(tmp_path, "import_*.jsonl", before={previous}) is None
+
+
+@pytest.mark.parametrize("payload", ['{', '[]', '{"event":"recording_failed"}'])
+def test_import_log_errors_cannot_be_ignored(tmp_path: Path, payload: str) -> None:
+    log = tmp_path / "import.jsonl"
+    log.write_text(payload + '\n')
+    with pytest.raises(ValueError):
+        _read_zarr_paths_from_import_log(log)
 
 
 def test_read_recording_dirs_from_organize_log_requires_recording_applied(tmp_path: Path) -> None:
