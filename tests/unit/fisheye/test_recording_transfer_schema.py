@@ -25,6 +25,31 @@ def test_shared_schema_is_valid_draft_2020_12() -> None:
     Draft202012Validator.check_schema(SCHEMA)
 
 
+def test_all_declared_schema_formats_have_active_checkers() -> None:
+    def declared_formats(value):
+        if isinstance(value, dict):
+            if "format" in value:
+                yield value["format"]
+            for nested in value.values():
+                yield from declared_formats(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                yield from declared_formats(nested)
+
+    assert set(declared_formats(SCHEMA)) <= set(VALIDATOR.format_checker.checkers)
+
+
+@pytest.mark.parametrize(
+    "timestamp", ["not-a-time", "2026-09-06", "2026-99-99T25:61:00Z"]
+)
+def test_schema_refuses_malformed_delivery_time(timestamp: str) -> None:
+    marker = json.loads(
+        (FIXTURES / "recording_transfer_v2/rolling" / MARKER_NAME).read_bytes()
+    )
+    marker["delivery"]["created_utc"] = timestamp
+    assert not VALIDATOR.is_valid(marker)
+
+
 @pytest.mark.parametrize("bundle", ["whole", "rolling", "failed_optional_proof"])
 @pytest.mark.parametrize("relative", [MARKER_NAME, SNAPSHOT_PATH])
 def test_exact_shared_envelopes_validate(bundle: str, relative: str) -> None:

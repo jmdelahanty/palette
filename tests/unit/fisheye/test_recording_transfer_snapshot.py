@@ -73,6 +73,33 @@ def write_json(path: Path, value: dict) -> None:
     path.write_bytes(canonical_bytes(value))
 
 
+@pytest.mark.parametrize("timestamp", ["2026-09-06 00:00:00Z", "20260906T00:00:00Z"])
+def test_marker_refuses_non_rfc3339_datetime_spellings(
+    tmp_path: Path, timestamp: str
+) -> None:
+    root = copy_bundle(tmp_path)
+    marker = json.loads((root / MARKER_NAME).read_bytes())
+    marker["delivery"]["created_utc"] = timestamp
+    write_json(root / MARKER_NAME, marker)
+    with pytest.raises(TransferSnapshotError, match="RFC3339"):
+        verify_transfer_snapshot(root)
+
+
+@pytest.mark.parametrize(
+    "timestamp", ["2026-09-06T00:00:00.123456Z", "2026-09-06t00:00:00z"]
+)
+def test_marker_accepts_rfc3339_utc_spellings_without_rewriting(
+    tmp_path: Path, timestamp: str
+) -> None:
+    root = copy_bundle(tmp_path)
+    marker = json.loads((root / MARKER_NAME).read_bytes())
+    marker["delivery"]["created_utc"] = timestamp
+    write_json(root / MARKER_NAME, marker)
+    before = (root / MARKER_NAME).read_bytes()
+    verify_transfer_snapshot(root)
+    assert (root / MARKER_NAME).read_bytes() == before
+
+
 def resign_snapshot(root: Path, snapshot: dict) -> None:
     data = canonical_bytes(snapshot)
     (root / SNAPSHOT_PATH).write_bytes(data)

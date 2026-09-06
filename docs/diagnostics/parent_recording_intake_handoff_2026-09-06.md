@@ -33,7 +33,7 @@ This document records evidence and compatibility decisions, not another queue.
 - Schema SHA-256:
   `65828a1e327a8cd1884c59d51f8422546a6f60d1f6abf2e3f9cd3d104dbb2df7`.
 - The user subsequently approved adding/installing `jsonschema` as a test
-  dependency. `jsonschema>=4.23,<5` is declared in the `dev` extra; the approved
+  dependency. `jsonschema[format-nongpl]>=4.23,<5` is declared in the `dev` extra; the approved
   installation resolved to 4.26.0 in `palette-py311`. Full Draft 2020-12 schema
   tests now exercise the pinned schema and envelopes, reconstructed snapshots,
   nested closure, and refusal cases (final results recorded below).
@@ -144,6 +144,14 @@ an invented human-review gate. No existing importer behavior was changed.
   versions: jsonschema 4.26.0, attrs 26.1.0, jsonschema-specifications 2025.9.1,
   referencing 0.37.0, and rpds-py 2026.6.3. No runtime import path now depends
   on jsonschema; it is a test-only dependency.
+- Follow-up format enforcement: the base jsonschema install lacked its optional
+  `date-time` checker. Four new regression cases first failed, then passed with
+  the approved `format-nongpl` extra. Tests now require every format declared by
+  the shared schema to have an active checker. Runtime marker syntax likewise
+  rejects non-RFC3339 ISO spellings while preserving valid lowercase `t`/`z`
+  and fractional UTC timestamps without rewriting source bytes. Final focused
+  validation passed **237 tests** (29 schema-engine, 88 transport/planner,
+  27 new parent-index, three legacy index, and 90 existing importer/identity).
 - Real tiny encoded-media diagnostic succeeded for two cameras, each with two
   full clips of two and one frames (plus retained crop children). The new
   index passed real ffprobe and the **unpatched** clipped-collection metadata
@@ -156,6 +164,13 @@ an invented human-review gate. No existing importer behavior was changed.
 - The user approved committing/pushing development branches. No new commit or
   push has occurred at this checkpoint; exact-commit CI remains unrun. The
   separate geometry worker branches do not enter this intake implementation.
+
+First published development revision:
+`51b5d394ccd01dbe47e91c8e8afb497e2526174e` in draft
+[PR 149](https://github.com/jmdelahanty/palette/pull/149), subsequently followed
+by the timestamp-format correction above. The PR head records the exact current
+revision and CI; a superseded run cannot validate its successor. These remain
+incomplete development changes, not a production import path.
 
 ## Remaining intake path
 

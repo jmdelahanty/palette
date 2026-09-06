@@ -772,7 +772,16 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
     for key in ("source_dir", "destination_dir", "created_utc"):
         identifier(delivery[key], f"delivery {key}")
     require(
-        dt.datetime.fromisoformat(delivery["created_utc"]).utcoffset()
+        re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}"
+            r"(?:\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})",
+            delivery["created_utc"],
+        )
+        is not None,
+        "delivery timestamp must use RFC3339 syntax",
+    )
+    require(
+        dt.datetime.fromisoformat(delivery["created_utc"].upper()).utcoffset()
         == dt.timedelta(0),
         "delivery timestamp must be UTC",
     )

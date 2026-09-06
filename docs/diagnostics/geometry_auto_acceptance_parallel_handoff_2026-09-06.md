@@ -81,3 +81,20 @@ commit IDs when created, and limits. At this checkpoint all new exact-commit
 required CI remains unrun. Locally passing tests and all-84 reference validity
 do not establish calibrated automatic acceptance. All new branches remain
 incomplete and not merge-ready; nothing is integrated, deployed, or activated.
+
+## Published development revisions
+
+The following separately owned commits were subsequently created and pushed;
+all worktrees were clean. Their draft PRs are for required CI, not authorization
+to integrate, merge, deploy, or activate:
+
+| Ingredient | Exact commit | Local focused evidence |
+| --- | --- | --- |
+| Reference catalog | `52d3ea01ed29d4dde9632ed5420356978338aed2` | 76 tests; live 84/84 bindings; draft PR 150 |
+| Shadow policy | `9d9440f9e48248534d50922d2830ab22442f070f` | 83 tests; 10 isolated cross-worktree diagnostics; draft PR 151 |
+| Rim recipe/metrics | `ac73a61067118fc1a41699267dfa376a15f4bac6` | 73 tests; draft PR publication follows push |
+
+These test counts include overlapping legacy regressions and must not be summed
+as distinct tests. The shadow adapter still lacks its metrics prerequisite in
+its own branch, deliberately failing closed. Neither independent local tests
+nor cross-worktree diagnostics are green integrated-candidate evidence.
