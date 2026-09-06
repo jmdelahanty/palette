@@ -95,9 +95,9 @@ tests alone are insufficient when required CI is part of the gate.
 
 | ID | Track | Status | Work and acceptance gate | Source evidence |
 |---|---|---|---|---|
-| GOV-001 | Plan governance | in_progress | Consolidate status here; stamp overlapping audits/queues as evidence or scoped companion work; integrate the documentation through a clean docs change with required CI green. | This document and the companion roster below. |
+| GOV-001 | Plan governance | in_progress | Consolidate status here; stamp overlapping audits/queues as evidence or scoped companion work. Ingestion audit #142 is integrated with all 24 post-merge checks successful. Final documentation/rules #145 is refreshed onto that validated main and requires its own 24-check candidate and post-merge evidence. Broader governance/admission implementation is not completed by landing audits. | This document, the companion roster, and the [documentation integration handoff](review_docs_rules_landing_handoff_2026-09-05.md#authorized-main-integration--september-6); [PR 145](https://github.com/jmdelahanty/palette/pull/145) records its exact head and current CI. |
 | ADM-001 | Shared admission | open | Define executable producer/profile declarations and one profile-neutral resolution result. Static capability and dynamic artifact checks must be methods of the same declaration, not duplicated planner grammar. | Clipped-eye audit Phases 1–2; source-of-truth plan Steps 1 and 6. |
-| INGEST-001 | Source ingestion enforcement | in_progress | Remove failure overrides and automatic legacy source-analysis intake; require verified immutable replay, exact invocation acknowledgments, declared stream validation, and required manifest context. Manual sampled training retains its own product contract but rejects guessed IDs and recorded failures. PR 147 is refreshed onto validated main `e60b1195`; its new exact candidate still requires all 24 checks before main integration. Broader intake catalog/AST closure and transfer-v2 adoption remain separately scoped. | [2026-09-06 enforcement handoff](ingestion_enforcement_handoff_2026-09-06.md) and [PR 147](https://github.com/jmdelahanty/palette/pull/147) record the exact candidate and current CI. No deployment or activation; documentation work remains independently reviewable. |
+| INGEST-001 | Source ingestion enforcement | in_progress | Scoped corrections are implemented, validated, and integrated: removed failure overrides and automatic legacy source-analysis intake; enforced immutable replay, exact invocation acknowledgments, declared streams, and required manifest context. Manual sampled training preserves its product contract while rejecting guessed IDs and recorded failures. PR 147 head `27864f5a` passed all 24 checks and merged as `e802818d`; all 24 post-merge checks passed. Broader intake catalog/AST closure, parent-level clipped intake, and transfer-v2 adoption remain separately scoped and incomplete. | [2026-09-06 enforcement handoff](ingestion_enforcement_handoff_2026-09-06.md); [PR 147](https://github.com/jmdelahanty/palette/pull/147); [post-merge CI 34051186036](https://github.com/jmdelahanty/palette/actions/runs/34051186036). No deployment or activation. |
 | ADM-002 | Shared admission | open | Add `admitted`, `pending_receipt`, and typed `blocked` node states. Reuse, scratch creation, submission, and publication require concrete admission; downstream nodes wait for real upstream receipts. | Clipped-eye audit Phase 2. |
 | ADM-003 | Inventory/proof | open | Generate entry point -> producer -> output profile -> resolver -> boundary test edges from executable declarations. At runtime, unknown blocks only the requested closure; CI rejects newly undeclared maintained production entry points. Reuse the graph schema for the future proof walker. | Pipeline survey, clipped-eye audit, source-of-truth plan Step 1. |
 | ACC-001 | Scientific acceptance | open | Define one immutable, digest-bound, use-scoped scientific acceptance receipt separate from technical completion, canonical validation, authority selection, and legacy review-status pointers. Preserve product-specific bundle manifests and use shared receipt mechanics. | Authority and scientific acceptance checklist Phases 1–2. |
@@ -293,19 +293,23 @@ an **uncommitted** draft in `/tmp/palette-review-docs-rules-20260905`, branch
 “September 6 audit reconciliation.” It now includes the completed instruction
 audit and joint plan, with dated corrections to unsafe recommendations,
 historical landing/CI claims, and scientific interpretation limits. The draft
-then had local documentation QA but no candidate CI. The preparation update
+then had local documentation QA but no candidate CI. The integration update
 below supersedes that publication status without replacing its audit evidence.
 
-Preparation update: documentation reconciliation is now separately published as
-draft [PR 145](https://github.com/jmdelahanty/palette/pull/145), exact
-`533095e10f2a321cb35b5b56c03182502c03e1c0`, with all 24 required checks
-successful in run `34029698481`. The independent ingestion audit is draft
-[PR 142](https://github.com/jmdelahanty/palette/pull/142), exact
-`9111f019a06b3f4a5146f65db9aa795ed89862ee`, with all 23 checks applicable to
-its main-based branch successful in run `34029703867`. Neither documentation
-package is integrated here or merged into main. Retargeting #145 after #140
-lands, and any new combined candidate, require fresh CI and separately
-authorized integration.
+Integration update, 2026-09-06: ingestion audit
+[PR 142](https://github.com/jmdelahanty/palette/pull/142) passed all 24 checks
+at `58aba4a8d144001b407f0f6c761462b97db5ed4f`, then merged as
+`04779a6b20512dc01f2a28b6cfb34d6b705a6744`; all 24 post-merge checks
+passed in run `34053687809`. Final documentation/rules
+[PR 145](https://github.com/jmdelahanty/palette/pull/145) now targets main and
+incorporates that exact validated commit into its previously green
+`533095e10f2a321cb35b5b56c03182502c03e1c0` preparation head. Its new
+combination requires fresh 24-check candidate and post-merge evidence; the
+live PR records that exact SHA and status. The
+[integration handoff](review_docs_rules_landing_handoff_2026-09-05.md#authorized-main-integration--september-6)
+pins all five preceding integrations. Main's existing ruleset now requires
+`ci-required` in addition to the original 23 checks, with no other protections
+changed. No deployment, activation, or cleanup accompanies this integration.
 
 - [x] Keep the four recovered keypoint aggregates and sealed dependents
   unmodified and unavailable to canonical downstream execution.

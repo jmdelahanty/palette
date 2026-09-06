@@ -19,6 +19,64 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
   archive authorities. See
   [cross_recording_analytics_export_design.md](cross_recording_analytics_export_design.md).
 
+## Storage Roots
+
+The storage and registry state in this section is a snapshot reported by the
+2026-09-03 review, not a fresh inventory or authorization to delete or migrate
+data. Re-verify live references and applicable storage contracts before acting;
+see [the measured review](diagnostics/store_measurements_selectors_and_training_membership_2026-09-03.md)
+and [its second opinion](diagnostics/review_wave_second_opinion_2026-09-04.md).
+
+All durable Palette data lives under `/groups/johnson/johnsonlab/jeremy/` (backed up and managed by
+HPC/IT). `/nvme1` is workstation scratch: its per-recording archives were deleted on purpose in
+2026-08/09, its merged training zarrs were copied to `/groups` on 2026-09-03, and no registry row
+references it any more. Do not point new tooling at `/nvme1`.
+
+| Root | Contents | Registry table(s) that point here |
+|---|---|---|
+| `recordings/<recording_id>/zarr/<recording_id>_{analysis,training}.zarr` | per-recording archives (run families, clips, sidecars) | `datasets` (`artifact_kind='source_recording'`) |
+| `training/datasets/<set_id>/…/<set_id>_merged.zarr` | merged training zarrs, one per training set, plus `<set_id>.manifest.json`, config yaml, data cards; `_index/` holds the card index and copy-verification digests | `datasets` (`artifact_kind='derived_training_merge'`), `training_runs.{config,manifest}_path` |
+| `models/<task>/<set_id>/<run_id>/` | trained model runs (layout below) | `training_runs`, `training_models`, `onnx_models`, `tensorrt_models` |
+| `registries/palette_registry.sqlite` | the canonical registry; `registries/backups/` holds validated pre-write backups | — |
+| `operations/` | operator records (run plans, snapshot manifests, canaries) | — |
+
+### Models tree
+
+`<task>` is one of `detect`, `pose`, `eye_masks`, `subject_masks`; `sam3/` holds base weights.
+`<set_id>` matches `training_sets.set_id` and the merged-zarr directory name under
+`training/datasets/`. `<run_id>` matches `training_runs.run_id`.
+
+```text
+models/
+  detect/<set_id>/<run_id>/            # ultralytics YOLO run
+    weights/best.pt                    # training_models.model_path
+    weights/best.pt.content_v1.json    # content-hash sidecar (fingerprint_artifact)
+    weights/last.pt
+    exports/onnx/<run_id>.onnx         # onnx_models.path
+    exports/tensorrt/<run_id>_fp16.engine   # tensorrt_models.path (per GPU class)
+    inputs/                            # copied set manifest + effective training yaml + train_invocation.json
+    args.yaml, results.csv, *_training_report.yaml, curve PNGs, batch previews
+  pose/<set_id>/<run_id>/              # same layout; adds Pose*_curve.png
+  subject_masks/<set_id>/<run_id>/     # UNet run
+    best_model.pt (+ .content_v1.json), last_model.pt
+    dataset_metadata.json, training_history.json, training_summary.json, validation_previews/
+  eye_masks/<set_id>/<run_id>/         # legacy-compat UNet run: best_model.pt, validation_previews/;
+                                       # the set dir also holds tensorboard/ and two empty sibling run dirs
+  sam3/sam3.pt (+ .content_v1.json)    # base SAM weights, not a registry run
+```
+
+Rules that hold today and should keep holding:
+
+- Every directory under `models/<task>/` is referenced by a `training_runs` row, and every
+  registry model, ONNX, and TensorRT path resolves into `models/`. Orphan run directories and
+  set-less runs were removed on 2026-09-03; keep it that way by registering before training
+  (`training/training_run_shared.record_registry_training_run`) and deleting registry row and
+  directory together.
+- `metrics_path` points at the run's `results.csv` (YOLO) or `training_summary.json` (UNet).
+- There is exactly one models tree. The `palette_models/` snapshot was deleted on 2026-09-03; its
+  manifest is kept under `operations/palette_models_snapshot_20260514/`.
+- `datasets_root` in the training-card tools means `training/datasets/`.
+
 ## Storage Matrix
 
 | Artifact | Canonical location | In zarr | Producer |
@@ -113,13 +171,13 @@ Practical implication:
 Check whether training-card plots are external files:
 
 ```bash
-find /nvme1/training/datasets -type d -name '*.data_card.plots' -maxdepth 4
+find /groups/johnson/johnsonlab/jeremy/training/datasets -type d -name '*.data_card.plots' -maxdepth 4
 ```
 
 Check whether zarr visual artifacts exist:
 
 ```bash
-find /nvme1/recordings -type d -path '*/visualizations/*_png' | head
+find /groups/johnson/johnsonlab/jeremy/recordings -type d -path '*/visualizations/*_png' | head
 ```
 
 Inventory one recording Zarr:

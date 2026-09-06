@@ -69,6 +69,113 @@
   must not alter production authority, and must be reported as not merge-ready
   until the required CI is green.
 
+## Collaborative Development and Contract Preservation
+
+<!-- collaborative-development-contract:v1 -->
+
+### Worktree and interface ownership
+
+- Before overlapping implementation work, reconcile the relevant worktrees'
+  exact commits, uncommitted changes, owners, prerequisites, and handoffs.
+  Recheck audit findings against those versions; an older checkout or review
+  must not overwrite stronger work already developed elsewhere.
+- Use separate worktrees for concurrent implementation. Do not switch, reset,
+  rebase, clean, or remove another worker's checkout or changes. Read-only
+  reviewers may share a checkout; coordinate ownership of review documents.
+- Agree one owner for each shared interface, receipt/digest grammar, and
+  integration branch. Parallel consumers should use that agreed interface;
+  resolve conflicting contract changes before integration rather than adding
+  competing helpers. Unrelated performance/scientific work need not stop.
+- Use `docs/diagnostics/authority_consolidation_work_queue_2026-08-25.md`
+  for overlapping authority/admission/consolidation status. Preserve separate
+  performance and scientific work queues. Audits and subtraction censuses are
+  evidence to reconcile, not additional independent status authorities or
+  permission to delete code without current caller/compatibility checks.
+
+### Preserve contracts before simplifying implementations
+
+- Classify a change as behavior-preserving extraction, performance/storage
+  optimization, enforcement correction, or scientific/schema/identity change.
+  State what must remain identical and what may change before implementation.
+  Do not hide semantic changes inside a cleanup or performance patch.
+- Capture preservation tests first: valid artifacts and golden identities,
+  plus malformed, tampered, stale, incomplete, and wrong-source/use cases.
+  Preserve valid workflows; deliberately tightened rejection behavior must be
+  identified and tested as an enforcement correction.
+- Preserve product-specific scientific validators, row/frame identity,
+  coordinates, validity, supplier sufficiency, and authority/acceptance rules.
+  Share repeated mechanics, not a weaker generic contract. Inventory existing
+  helpers and adopt or extend the appropriate owner instead of adding another
+  implementation or a catch-all `shared.primitives` module.
+- Preserve existing serialization and digest bytes wherever their contracts
+  promise stability. Do not conflate logical content, physical layout,
+  manifests, or execution attestations. New commits/timestamps/layouts can
+  legitimately change receipts; compare declared invariant fields, not whole
+  receipts indiscriminately. Never assume a digest survives rechunking.
+  Intentional persisted-grammar changes require an explicit version and
+  compatibility decision; do not rewrite historical evidence to fit them.
+- Preserve the camera/rig's scientific defaults. Represent changes through a
+  named/versioned applicable recipe, with effective parameters and permitted
+  overrides recorded through existing provenance machinery. Keep scientific
+  parameters separate from execution resources and physical storage settings;
+  preserve required source, model, producing-code, and environment bindings.
+- Receipt-based reuse or faster validation must establish the same required
+  claim under explicit immutable-identity/generation assumptions. Reject
+  stale/conflicting evidence; never invent a future digest or weaken a
+  validator to obtain a speedup. Require the concrete admission appropriate
+  to the consumer before reuse, execution, or submission.
+- Preserve bounded memory/I/O and physical write ownership under the rules
+  below. Benchmark comparable inputs and separate computation, data movement,
+  validation, and publication costs; faster runtime alone is not acceptance.
+
+### Stage adoption, integration, and removal separately
+
+- Prefer small changes: establish tests/interface, migrate one caller, prove
+  behavior, migrate remaining maintained callers, add scoped enforcement,
+  then remove executable copies or retain named compatibility adapters.
+  Do not combine extraction, digest-format migration, historical backfill,
+  production activation, and broad deletion in one change.
+- Test supported public paths through the real producer, publisher, resolver,
+  and unpatched consumer where applicable. Include refusal, ownership loss,
+  failed publication, and retry behavior; import identity or a helper-call
+  assertion alone does not prove enforcement.
+- Follow the Required CI and Integration Rule above for each incoming exact
+  commit. After integration, validate the resulting combined commit as well;
+  independently green branches do not establish a green combination.
+- When authorized canary evidence is needed, use commit-pinned deployments
+  and fresh selector-ineligible outputs under the existing deployment rules.
+  Keep historical mutation, migration, and production activation separately
+  scoped and authorized; never perform them as incidental cleanup.
+- Finish consolidation by migrating maintained callers and preventing new
+  bypasses with scoped import/AST checks and behavioral conformance tests.
+  Net line reduction, file splitting, or adding a helper is not completion.
+  Extend existing catalogs/ratchets rather than creating competing ones.
+
+### Report product completion precisely
+
+- Distinguish computation complete (validated numerical products), presentation
+  complete (validated required plots/specifications bound to those numerical
+  identities), and deliverable complete (all products required by the chosen
+  workflow are ready).
+- An independent presentation failure must remain visible and keep a
+  presentation-required deliverable incomplete without invalidating already
+  validated numerical products. Retry presentation independently where safe.
+  None of these claims alone establishes scientific acceptance or activation.
+- This distinction is not permission to rename persisted status fields,
+  bypass an existing stage contract, or manufacture completion evidence.
+  Change lifecycle schemas only through an explicit compatible/versioned plan.
+
+### Handoff requirements
+
+- Record the worktree/branch and exact commit, dirty/uncommitted scope, owner,
+  prerequisite commits, changed interfaces/contracts, preserved invariants,
+  intentional behavior/identity changes, tests/benchmarks/canary evidence,
+  every failing or unrun required check, and compatibility/removal work left.
+- Identify separately what is implemented, validated, integrated, deployed,
+  and activated. Keep status in the owning queue and link the handoff evidence.
+  These collaboration rules do not expand the user's authorization to commit,
+  push, install dependencies, deploy, or mutate production data.
+
 ## Authority Roles and Supplier Sufficiency
 
 - Require only the authorities declared by the consumer's contract. Do not

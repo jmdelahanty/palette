@@ -265,7 +265,7 @@ Palette's concrete command for this is:
 ```bash
 scripts/py -m fisheye.diagnostics.detect_compute_smoke \
   /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/cams/<camera>.mp4 \
-  --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
+  --model /groups/johnson/johnsonlab/jeremy/models/<model>/weights/best.pt \
   --decode-backend auto \
   --batch-size 4 \
   --max-batches 1 \
@@ -532,7 +532,7 @@ Dry-run planning for all clip-camera chains:
 ```bash
 scripts/py -m fisheye.utils.plan_clipped_detect_refine_workflow \
   /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording> \
-  --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/<run>/weights/best.pt \
+  --model /groups/johnson/johnsonlab/jeremy/models/detect/<run>/weights/best.pt \
   --workflow-id sleepyfish_detect_refine_smoke_YYYYMMDD \
   --output-json /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/derived/cluster_artifacts/detect_refine_plan.json
 ```
@@ -669,7 +669,7 @@ Measured all-clips smoke, 2026-05-17:
   camera `2010093`, 1,188,000 frames.
 - Decode backend: explicit `pynvvc_luma_rgb`.
 - Model:
-  `/groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/weights/best.pt`.
+  `/groups/johnson/johnsonlab/jeremy/models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/weights/best.pt`.
 - Submission checker result: `133/133` stages `ok`, including the finalizer.
 - Finalized collection:
   `experiment_index/finalized_runs/sleepyfish_cam2010093_allclips_20260517_01`.
@@ -732,7 +732,7 @@ Template for the next all-clips rerun:
 
 ```bash
 REC=/groups/johnson/johnsonlab/jeremy/palette_smoke/sleepyfish_2026_05_05_17_45_30_cam2010093
-MODEL=/groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/weights/best.pt
+MODEL=/groups/johnson/johnsonlab/jeremy/models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/weights/best.pt
 WORKFLOW_ID=sleepyfish_cam2010093_allclips_pynvvc_fixed_YYYYMMDD_01
 PLAN="$REC/derived/cluster_artifacts/detect_refine_plan_${WORKFLOW_ID}.json"
 RUN_DIR="$REC/derived/cluster_artifacts/detect_refine_submission_${WORKFLOW_ID}"

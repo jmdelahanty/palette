@@ -399,7 +399,7 @@ Compute-only detection smoke:
 ```bash
 scripts/py -m fisheye.diagnostics.detect_compute_smoke \
   /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/cams/<camera>.mp4 \
-  --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
+  --model /groups/johnson/johnsonlab/jeremy/models/<model>/weights/best.pt \
   --decode-backend auto \
   --batch-size 4 \
   --max-batches 1 \
@@ -412,7 +412,7 @@ one quoted `bsub` string:
 ```bash
 scripts/submit_detect_compute_smoke_bsub.sh \
   --video /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/cams/<camera>.mp4 \
-  --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
+  --model /groups/johnson/johnsonlab/jeremy/models/<model>/weights/best.pt \
   --config configs/fisheye/yolo_detect_config.yaml \
   --log-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/logs \
   --batch-size 16 \
@@ -446,7 +446,7 @@ frames before treating it as accepted for a recording family:
 ```bash
 scripts/submit_detect_decode_backend_parity_bsub.sh \
   --video /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/cams/<camera>.mp4 \
-  --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
+  --model /groups/johnson/johnsonlab/jeremy/models/<model>/weights/best.pt \
   --config configs/fisheye/yolo_detect_config.yaml \
   --backend-a decord_gpu \
   --backend-b pynvvc_nv12_rgb \
@@ -505,7 +505,7 @@ First implementation slice:
 scripts/py -m fisheye.utils.run_detection_artifact \
   /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/cams/<camera>.mp4 \
   --target-zarr /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/zarr/<recording>_analysis.zarr \
-  --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
+  --model /groups/johnson/johnsonlab/jeremy/models/<model>/weights/best.pt \
   --config configs/fisheye/yolo_detect_config.yaml \
   --decode-backend auto \
   --batch-size 16 \
@@ -530,7 +530,7 @@ and copy the resulting tarball back to PRFS:
 scripts/submit_detect_artifact_bsub.sh \
   --zarr /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/zarr/<recording>_analysis.zarr \
   --video /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/cams/<camera>.mp4 \
-  --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
+  --model /groups/johnson/johnsonlab/jeremy/models/<model>/weights/best.pt \
   --output-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts \
   --decode-backend auto \
   --batch-size 16
@@ -598,7 +598,7 @@ artifact manifest and summary:
 scripts/submit_detect_artifact_bsub.sh \
   --zarr /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/zarr/<recording>_analysis.zarr \
   --video /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/clips/clip_000000/Cam<serial>_<recording>.mp4 \
-  --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
+  --model /groups/johnson/johnsonlab/jeremy/models/<model>/weights/best.pt \
   --output-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts/<recording> \
   --workflow-id <workflow_id> \
   --recording-id <recording> \
