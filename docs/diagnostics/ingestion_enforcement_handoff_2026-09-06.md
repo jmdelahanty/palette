@@ -4,6 +4,30 @@ Status authority: `INGEST-001` in
 [the consolidation queue](authority_consolidation_work_queue_2026-08-25.md).
 This is evidence for that queue, not a separate completion authority.
 
+## Authorized main-integration refresh
+
+The user authorized this Palette integration sequence on 2026-09-06. PR 146
+landed as main `e60b1195592defc7323ef35fb952955ebd616d60`; all 24
+post-merge checks passed in
+[run 34048830865](https://github.com/jmdelahanty/palette/actions/runs/34048830865)
+before incorporation into this clean owned branch. Incoming ingestion head
+`089c1a930688d57e8e07c0ac25c5485b0ee36c05` also had all 24 checks successful.
+The conflict-free history-preserving merge changed no source, tests, scripts,
+or workflow content. It retains both parents' dated integration handoffs.
+Fresh combined validation: 732 tests across the recorded 40-module union passed
+in 64.73 seconds, with 12 standard consolidation warnings and no failures or
+skips. Generated census, file-size, contract-freshness, and whitespace gates
+passed. The owning queue now records the validated main integrations of the
+parser/map and clock corrections; this ingestion candidate remains pending CI.
+
+PR 147 now targets main and records the new exact candidate and current CI.
+That candidate must pass all 24 required checks before merge; prior green
+incoming commits are not combined-candidate acceptance. This section supersedes
+the historical preparation-only authorization/status below without changing
+the measured evidence, preservation decisions, or compatibility exclusions.
+No deployment, shared-checkout update, dependency installation, historical
+mutation, production activation, or transfer-v2 adoption is included.
+
 ## Validated-prerequisite combination
 
 The implementation snapshot below was committed as

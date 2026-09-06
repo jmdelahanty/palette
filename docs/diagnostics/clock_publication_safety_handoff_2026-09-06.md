@@ -1,5 +1,28 @@
 # Clock-publication safety — 2026-09-06
 
+## Authorized main-integration refresh
+
+The user authorized the Palette integration sequence on 2026-09-06. PR 143
+landed as main `ca27b33062699289731fe84e4e7f72558d2b69f2`; all 24
+post-merge checks passed in
+[run 34046580164](https://github.com/jmdelahanty/palette/actions/runs/34046580164)
+before this clean owned branch incorporated it. Incoming clock head
+`2fc409beb67dca48f15c30bec73867cd3633b1f7` also had all 24 checks successful.
+The history-preserving merge was conflict-free and changed no source, tests,
+workflow, or scripts. It retains the parent's dated integration handoff.
+Fresh combined validation: 419 focused tests passed in 32.84 seconds, with
+12 standard Zarr consolidation warnings and no failures or skips. Generated
+census, file-size, contract-freshness, and whitespace gates passed.
+
+PR 146 now targets main and records this refresh's exact commit and live CI.
+Its new combination must pass all 24 required checks, including the now-required
+success-only aggregate, before merge or use as the ingestion prerequisite.
+The prior green runs do not establish that result. This section supersedes
+preparation-only authorization/status statements below; historical evidence
+and preservation decisions retain their original scope. Deployment, shared
+checkout updates, dependency installation, historical repair, and production
+activation remain outside this task.
+
 ## Validated-prerequisite refresh
 
 The local implementation was committed as
