@@ -107,7 +107,7 @@ scripts/py -m fisheye.utils.intake_video_only_recording \
   --scratch-root /nvme1/palette_staging/sampled-training/<recording> \
   --frame-step 5000 \
   --skip-tail-frames 0 \
-  --session-uuid <recording> \
+  --session-uuid <acquisition-session-uuid> \
   --recording-id <recording> \
   --recording-name <recording> \
   --protocol-name sleepyfish \

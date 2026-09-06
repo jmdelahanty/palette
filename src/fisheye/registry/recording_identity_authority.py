@@ -797,7 +797,7 @@ def load_verified_recording_import_receipt(zarr_path: Path) -> RecordingImportRe
     if source is not None:
         # Reuse the clock owner's existing persisted grammar, including source
         # stat evidence and array digests. Never reconstruct a competing digest.
-        expected_clock = clock_contract.acquisition_frame_clock_sha256(clock_contract._build_record(source))
+        expected_clock = clock_contract.acquisition_frame_clock_source_sha256(source)
         if clock is None or clock.record_sha256 != expected_clock:
             raise RecordingIdentityAuthorityError("published clock differs from its current source")
         validate_direct_consolidated_subtree(

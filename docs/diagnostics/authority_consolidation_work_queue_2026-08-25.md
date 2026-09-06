@@ -97,7 +97,7 @@ tests alone are insufficient when required CI is part of the gate.
 |---|---|---|---|---|
 | GOV-001 | Plan governance | in_progress | Consolidate status here; stamp overlapping audits/queues as evidence or scoped companion work; integrate the documentation through a clean docs change with required CI green. | This document and the companion roster below. |
 | ADM-001 | Shared admission | open | Define executable producer/profile declarations and one profile-neutral resolution result. Static capability and dynamic artifact checks must be methods of the same declaration, not duplicated planner grammar. | Clipped-eye audit Phases 1–2; source-of-truth plan Steps 1 and 6. |
-| INGEST-001 | Source ingestion enforcement | in_progress | Remove failure overrides and automatic legacy source-analysis intake; require verified immutable replay, exact invocation acknowledgments, declared stream validation, and required manifest context. Manual sampled training retains its own product contract but rejects guessed IDs and recorded failures. The 373-test local regression passes; exact-commit CI and validated clock integration remain open. | [2026-09-06 enforcement handoff](ingestion_enforcement_handoff_2026-09-06.md). No deployment, activation, or transfer-v2 adoption; separate documentation work remains independently reviewable. |
+| INGEST-001 | Source ingestion enforcement | in_progress | Remove failure overrides and automatic legacy source-analysis intake; require verified immutable replay, exact invocation acknowledgments, declared stream validation, and required manifest context. Manual sampled training retains its own product contract but rejects guessed IDs and recorded failures. Green #146 is combined locally and its public clock-digest interface adopted; 732 combined tests pass. The resulting candidate still needs its own complete CI. | [2026-09-06 enforcement handoff](ingestion_enforcement_handoff_2026-09-06.md). No deployment, activation, or transfer-v2 adoption; separate documentation work remains independently reviewable. |
 | ADM-002 | Shared admission | open | Add `admitted`, `pending_receipt`, and typed `blocked` node states. Reuse, scratch creation, submission, and publication require concrete admission; downstream nodes wait for real upstream receipts. | Clipped-eye audit Phase 2. |
 | ADM-003 | Inventory/proof | open | Generate entry point -> producer -> output profile -> resolver -> boundary test edges from executable declarations. At runtime, unknown blocks only the requested closure; CI rejects newly undeclared maintained production entry points. Reuse the graph schema for the future proof walker. | Pipeline survey, clipped-eye audit, source-of-truth plan Step 1. |
 | ACC-001 | Scientific acceptance | open | Define one immutable, digest-bound, use-scoped scientific acceptance receipt separate from technical completion, canonical validation, authority selection, and legacy review-status pointers. Preserve product-specific bundle manifests and use shared receipt mechanics. | Authority and scientific acceptance checklist Phases 1–2. |
@@ -121,6 +121,7 @@ tests alone are insufficient when required CI is part of the gate.
 | REP-001 | Reporting/reuse | open | Make availability, reuse, registry readiness, visualization, export, and campaign handoff consume sealed admission results instead of path, name, `latest`, completion, or forced availability. | Pipeline survey and clipped-eye audit Phases 7–9. |
 | VIS-CHASER-001 | Visualization/reuse | in_progress | Replace literal minimal-versus-receipt-bound child-object equality with one closed-profile exact-identity validator shared by Marimo discovery and loading; prove the live v4 smoke and 80-recording metadata discovery without selector, legacy, candidate, or unconsolidated fallback. Mount missing persisted views and decide any additive digest-bound interactive descriptor in later packages; do not mutate or recompute the completed scientific cohort. | [`chaser_exact_successor_marimo_status_2026-08-26.md`](chaser_exact_successor_marimo_status_2026-08-26.md) and [`chaser_exact_successor_interactive_visualization_implementation_checklist_2026-08-27.md`](chaser_exact_successor_interactive_visualization_implementation_checklist_2026-08-27.md). |
 | RID-001 | Recording identity | in_progress | Finish the current-v2 registry writer boundary, receipt/consolidation races, durable operational evidence, subtraction, canary, and required CI in the ordered packages retained in the source-of-truth plan. Do not expand migration 73 with downstream admission semantics. | Source-of-truth consolidation plan §4.7. |
+| RID-CLOCK-001 | Clock publication | in_progress | Validate the owned clock payload before completion, preserve prior selectors/root visibility on failed publication, retain ineligible tombstones, and commit eligibility last through the shared activation owner. PR 146 exact `2fc409beb67dca48f15c30bec73867cd3633b1f7` has all 24 required checks successful and is combined into the local ingestion candidate. Main integration and activation remain open. | [Clock-publication safety handoff](clock_publication_safety_handoff_2026-09-06.md); [PR 146](https://github.com/jmdelahanty/palette/pull/146) records current candidate CI and the validated PR 143 prerequisite. |
 | TEST-001 | Boundary tests | in_progress | Add real production writer -> publisher -> full-strength resolver -> unpatched consumer tests for crop, keypoint, assignment/eye, track/motion/bout, and reporting/reuse boundaries, plus adversarial tamper and lifecycle cases. Make the inventory/boundary workflow required CI. | PRs 61–62 and 64 cover the targeted keypoint/rebinding/eye boundary; crop, track/motion/bout, reporting, and the dedicated CI gate remain open. |
 | NAME-001 | Terminology/lint | open | Reserve authority-claiming run-name tokens such as `canonical` and `authority` for producers declaring the matching output profile, and post-validate the claim. Do not globally reserve `v2`. Replace ambiguous prose `signed hybrid provider` with `provider-record-bound` or `digest- and row-signature-bound` except where quoting an existing schema identifier. | The misleading `keypoints_geometry_authority_*` incident and issuer-authentication review. |
 | SUB-001 | Subtraction | open | Remove adapters, fallbacks, duplicate selectors, and superseded validators only after their callers resolve through the supported shared interface and the deletion gates pass. | Redundancy campaign and subtraction queue. |
@@ -275,6 +276,37 @@ satisfied.
 Primary surfaces: this file, the clipped-eye audit, the crop-contract audit,
 and the source-of-truth consolidation plan.
 
+2026-09-06 audit disposition: retain the second-opinion corrections; blanket
+`latest` backfill, registry-only authority, and universal receipt rewriting
+remain rejected. At main `1bf9d919`, 13/14 historical bad-behavior probes still
+reproduce. Metadata-only swim-bout acceptance is now refused; six stage
+verifiers and execution-time reuse validation partially close earlier runtime
+findings, not every stage's admission boundary. Historical measurements and
+scientific claims are narrowed, not remeasured. Output ownership and strict
+metadata comparison remain early follow-ups, not fixes implemented here.
+
+At the initial audit checkpoint, the parallel documentation reconciliation was
+an **uncommitted** draft in `/tmp/palette-review-docs-rules-20260905`, branch
+`agent/palette/review-docs-rules-20260905`, exact base
+`6af66c5a6ba3b35ea0bf00cfc74add7bb22da2b2`. Its owning evidence is
+`docs/diagnostics/review_docs_rules_landing_handoff_2026-09-05.md`, section
+“September 6 audit reconciliation.” It now includes the completed instruction
+audit and joint plan, with dated corrections to unsafe recommendations,
+historical landing/CI claims, and scientific interpretation limits. The draft
+then had local documentation QA but no candidate CI. The preparation update
+below supersedes that publication status without replacing its audit evidence.
+
+Preparation update: documentation reconciliation is now separately published as
+draft [PR 145](https://github.com/jmdelahanty/palette/pull/145), exact
+`533095e10f2a321cb35b5b56c03182502c03e1c0`, with all 24 required checks
+successful in run `34029698481`. The independent ingestion audit is draft
+[PR 142](https://github.com/jmdelahanty/palette/pull/142), exact
+`9111f019a06b3f4a5146f65db9aa795ed89862ee`, with all 23 checks applicable to
+its main-based branch successful in run `34029703867`. Neither documentation
+package is integrated here or merged into main. Retargeting #145 after #140
+lands, and any new combined candidate, require fresh CI and separately
+authorized integration.
+
 - [x] Keep the four recovered keypoint aggregates and sealed dependents
   unmodified and unavailable to canonical downstream execution.
 - [x] Preserve read-only planning, inspection, proof-sufficiency checks, and
@@ -288,13 +320,37 @@ and the source-of-truth consolidation plan.
 
 2026-09-06 ingestion-validation companion: **in_progress**, owned by the Palette
 worker on `agent/palette/ingestion-validation-20260906`, based on exact commit
-`1bf9d9195fb026f7bb426c47ee01fdff99cb698d`. Corrections prepared for draft PR cover
+`1bf9d9195fb026f7bb426c47ee01fdff99cb698d`. Corrections in draft PR 143 cover
 PTP complete-state classification, exact clock integer admission, and clipped
-parent/local frame correspondence. Focused tests pass; required remote CI must
-succeed before integration or merge readiness. This does not expand migration
+parent/local frame correspondence. At the 2026-09-06 08:46 UTC checkpoint, its
+exact head `3a85a8c9215894945685eaba6f0055730392db44` had 23/23 successful checks
+but remained draft and unmerged. Integration remains open. This does not expand migration
 73, change source-ID origins, repair historical artifacts, or implement hardware
 synchronization. Scope, preservation evidence, and remaining gates are in the
 [ingestion validation handoff](ingestion_validation_handoff_2026-09-06.md).
+
+Preparation update: exact refreshed #143 head
+`eb224a216ac7774770b33de021c599b741ce7927` passed all 24 checks in run
+`34029117423` before its integration into the clock candidate. It includes
+validated #140 head `74926b21cb2e587b1caae151aaa9c4df91e592b8` and main
+`3d017867e79b14d11ddca3ee1916d50ac6499c78`. Main integration remains open.
+
+`RID-CLOCK-001` is the separately owned F3 follow-up on
+`agent/palette/clock-publication-safety-20260906`, worktree
+`/tmp/palette-clock-publication-safety-20260906`, with that exact PR 143 head as
+its prerequisite. Its enforcement correction preserves timestamp arrays,
+clock semantics, record/digest grammar, and the parser/frame-map corrections;
+it changes publication lifecycle and failed-attempt retry naming only. Local
+tests pass, including failed real-store publication -> retry -> consolidated
+unpatched timing consumer. The public source-digest helper preserves the same
+validated grammar for ingestion replay. Exact prepared #146 head
+`2fc409beb67dca48f15c30bec73867cd3633b1f7` passed all 24 checks in run
+`34030389103` before combination into the owned ingestion-enforcement candidate.
+That combined candidate still requires its own validation and CI. The user
+authorized PR preparation and CI, not main integration. No main merge, deployment,
+historical repair, or production activation was performed. The
+[clock-publication handoff](clock_publication_safety_handoff_2026-09-06.md)
+records compatibility, failure recovery, and remaining gates.
 
 Primary surfaces: `shared/source_recording_identity.py`,
 `shared/recording_import_receipt.py`,

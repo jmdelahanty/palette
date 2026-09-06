@@ -1,10 +1,45 @@
-# Ingestion enforcement: local incomplete handoff, 2026-09-06
+# Ingestion enforcement: prepared candidate handoff, 2026-09-06
 
 Status authority: `INGEST-001` in
 [the consolidation queue](authority_consolidation_work_queue_2026-08-25.md).
 This is evidence for that queue, not a separate completion authority.
 
-## Ownership, version, and authorization
+## Validated-prerequisite combination
+
+The implementation snapshot below was committed as
+`d74b49914a543505eed099d7aa4a40e8e17caa92`. The clean owned branch was then
+combined with clock-publication [PR 146](https://github.com/jmdelahanty/palette/pull/146)
+at exact `2fc409beb67dca48f15c30bec73867cd3633b1f7`, only after all 24
+required checks completed successfully in
+[run 34030389103](https://github.com/jmdelahanty/palette/actions/runs/34030389103).
+That prerequisite includes the validated #143 ingestion corrections, #140 CI
+gate, and main `3d017867e79b14d11ddca3ee1916d50ac6499c78`.
+
+Source and tests combined without conflicts. The one generated writer-census
+count conflict was resolved by regenerating the existing census from the
+combined source. Replay now calls the clock owner's public
+`acquisition_frame_clock_source_sha256` interface, preserving its existing
+record grammar and digest bytes; no private record builder is imported.
+
+Fresh combined validation passed: **732 tests across 40 modules in 59.85 s**, no
+failures or skips, with 12 standard Zarr consolidation warnings. The selection
+is the union of the 26 ingestion modules listed below, the clock handoff's
+13 modules, and `test_ci_required`, `test_ci_quality_gate_independence`,
+`test_agents_required_ci_policy`, `test_ci_pytest_shard`, and
+`test_ci_pytest_junit_summary`. Full repository collection found **11,718 tests**
+in 7.32 s, exit 0; collection is not full-suite execution. Import-linter kept
+both contracts (1,583 files, 7,231 dependencies). Generated census, registry
+schema reference, all scoped access/metadata ratchets, file-size, freshness,
+compilation, and shell-syntax checks passed. All 29 checked local links in the
+nine initially changed Markdown files resolve.
+
+The combined candidate still requires its own complete 24-check CI run. The
+draft PR records that resulting exact SHA and live CI; prerequisite success
+is not combined-candidate success. No documentation PR,
+other worker's incomplete branch, production data, or shared checkout was
+integrated or changed. Main merge, deployment, and activation remain separate.
+
+## Initial implementation snapshot: ownership, version, and authorization
 
 - Owner: current Palette root worker.
 - Worktree: `/tmp/palette-ingestion-enforcement-20260906`.
@@ -188,7 +223,7 @@ test_training_base_publication.py
 test_import_sampled_training_pynvvc.py
 ```
 
-## Required CI: all unrun for this patch
+## Required CI at the initial implementation snapshot
 
 The exact dirty patch has no CI run and is not complete or merge-ready. All 23
 required checks remain unrun: `generated artifacts`, `import boundaries`,
@@ -218,12 +253,11 @@ or every ingestion contract has been exhaustively enforced.
 - Parent-level clipped intake and producer transfer v2 adoption remain separate
   open work. Do not force the regular single-video source profile onto a clipped
   collection or claim a transfer receipt is Palette ingestion acceptance.
-- The replay helper currently uses the clock owner's existing private
-  `_build_record` grammar. The F3 branch now exposes a tested public
-  `acquisition_frame_clock_source_sha256` method using that exact grammar. Adopt
-  it only after that exact incoming clock commit passes required CI; the
-  unvalidated method was not copied here. F3 and this patch must then be tested
-  together. The broader metadata-equivalence audit remains separate.
+- The validated-prerequisite combination above adopts the clock owner's tested
+  public `acquisition_frame_clock_source_sha256` interface; the initial private
+  `_build_record` dependency is removed without changing digest grammar.
+  Combined validation is required. The broader metadata-equivalence audit
+  remains separate.
 - Recorded diagnostic summaries are not source-content seals. This change does
   not introduce mandatory diagnostics, full media decoding, or a new manifest/
   H5/clock aggregate receipt. Full producer-transfer-to-Palette-to-registry
@@ -274,7 +308,7 @@ cannot pass merely because schema/media validation fails for a different reason.
 Full schema-engine validation and true producer-to-Palette v2 end-to-end evidence
 remain open. The re-review made no external comment, review, or PR-state change.
 
-## Dirty scope
+## Initial implementation scope
 
 Source: `recording_identity_authority`, `acquisition_video_streams`,
 `recording_preflight`, new `recording_manifest_context`,
