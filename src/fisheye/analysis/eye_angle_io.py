@@ -39,6 +39,14 @@ from ..shared.zarr_run_completion import (
 )
 
 
+EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1 = (
+    "eye_angle_selector_eligible_v1"
+)
+EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1 = (
+    "eye_angle_selector_ineligible_canary_v1"
+)
+
+
 EYE_ANGLE_TIMESERIES_COLUMNS: tuple[str, ...] = (
     "left_eye_angle_deg",
     "left_eye_angle_deg_smoothed",
@@ -525,18 +533,27 @@ def _eye_angle_option_label(
     return " | ".join(pieces)
 
 
-def resolve_eye_angle_run(
+def _resolve_eye_angle_run_for_profile(
     root: zarr.Group,
     run_name: str | None = None,
     *,
     legacy_compatibility: bool = False,
+    expected_selector_eligible: bool,
 ) -> tuple[zarr.Group, str, str]:
-    """Resolve one complete eligible eye-angle run by name, path, or selector."""
+    """Resolve one exact lifecycle profile without cross-profile fallback."""
 
     parent = root.get(EYE_ANGLE_RUN_PARENT)
     if parent is None:
         raise EyeAngleIOError("No analysis/eye_angle_runs group found.")
 
+    if (
+        not expected_selector_eligible
+        and (run_name is None or str(run_name).strip().lower() in {"", "latest"})
+    ):
+        raise EyeAngleIOError(
+            "Selector-ineligible eye-angle authority requires one explicit run; "
+            "latest discovery is forbidden."
+        )
     if run_name is None or str(run_name).strip().lower() in {"", "latest"}:
         selected = resolve_latest_complete_run_name(
             parent,
@@ -570,9 +587,18 @@ def resolve_eye_angle_run(
         legacy_default=legacy_compatibility,
     ):
         raise EyeAngleIOError(f"Eye-angle run {resolved!r} is not complete.")
-    if not is_run_selector_eligible(run_group):
+    observed_eligible = run_group.attrs.get("stage_selector_eligible")
+    lifecycle_matches = observed_eligible is expected_selector_eligible
+    if (
+        expected_selector_eligible
+        and legacy_compatibility
+        and "stage_selector_eligible" not in run_group.attrs
+    ):
+        lifecycle_matches = True
+    if not lifecycle_matches:
+        expected = "eligible" if expected_selector_eligible else "ineligible"
         raise EyeAngleIOError(
-            f"Eye-angle run {resolved!r} is not selector-eligible."
+            f"Eye-angle run {resolved!r} is not selector-{expected}."
         )
     _require_eye_angle_contract_identity(
         _attrs_dict(run_group),
@@ -580,6 +606,36 @@ def resolve_eye_angle_run(
     )
     run_path = f"{EYE_ANGLE_RUN_PARENT}/{resolved}"
     return run_group, str(resolved), run_path
+
+
+def resolve_eye_angle_run(
+    root: zarr.Group,
+    run_name: str | None = None,
+    *,
+    legacy_compatibility: bool = False,
+) -> tuple[zarr.Group, str, str]:
+    """Resolve one complete eligible eye-angle run by name, path, or selector."""
+
+    return _resolve_eye_angle_run_for_profile(
+        root,
+        run_name,
+        legacy_compatibility=legacy_compatibility,
+        expected_selector_eligible=True,
+    )
+
+
+def resolve_completed_ineligible_eye_angle_run(
+    root: zarr.Group,
+    run_name: str,
+) -> tuple[zarr.Group, str, str]:
+    """Resolve one exact completed canary; never inspect a selector."""
+
+    return _resolve_eye_angle_run_for_profile(
+        root,
+        run_name,
+        legacy_compatibility=False,
+        expected_selector_eligible=False,
+    )
 
 
 def load_eye_angle_run_tables(
@@ -798,14 +854,28 @@ def catalog_eye_angle_series(
     run_name: str | None = None,
     prefer_frame: bool = True,
     legacy_compatibility: bool = False,
+    authority_profile_id: str = EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
 ) -> EyeAngleSeriesCatalog:
     """Inspect selectable eye-angle channels without reading dense value arrays."""
 
-    run_group, resolved_run, run_path = resolve_eye_angle_run(
-        root,
-        run_name,
-        legacy_compatibility=legacy_compatibility,
-    )
+    if authority_profile_id == EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1:
+        if not isinstance(run_name, str):
+            raise EyeAngleIOError(
+                "Selector-ineligible eye cataloging requires one explicit run."
+            )
+        run_group, resolved_run, run_path = (
+            resolve_completed_ineligible_eye_angle_run(root, run_name)
+        )
+    elif authority_profile_id == EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1:
+        run_group, resolved_run, run_path = resolve_eye_angle_run(
+            root,
+            run_name,
+            legacy_compatibility=legacy_compatibility,
+        )
+    else:
+        raise EyeAngleIOError(
+            f"Unsupported eye-angle authority profile {authority_profile_id!r}."
+        )
     _require_eye_angle_payload_contract(
         run_group,
         legacy_compatibility=legacy_compatibility,
@@ -1019,6 +1089,7 @@ def load_eye_angle_series_rows(
         "reason_codes",
     ),
     max_rows: int = 300_000,
+    authority_profile_id: str = EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
 ) -> EyeAngleSeriesWindow:
     """Read one exact bounded compact-v7 frame-row interval.
 
@@ -1046,6 +1117,7 @@ def load_eye_angle_series_rows(
         run_name=run_name,
         prefer_frame=True,
         legacy_compatibility=False,
+        authority_profile_id=authority_profile_id,
     )
     if catalog.row_axis != "frame":
         raise EyeAngleIOError(
@@ -1070,11 +1142,20 @@ def load_eye_angle_series_rows(
     if missing_qa:
         raise EyeAngleIOError(f"Unavailable eye-angle QA channels: {', '.join(missing_qa)}")
 
-    run_group, _resolved_run, run_path = resolve_eye_angle_run(
-        root,
-        catalog.run_name,
-        legacy_compatibility=False,
-    )
+    if authority_profile_id == EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1:
+        run_group, _resolved_run, run_path = (
+            resolve_completed_ineligible_eye_angle_run(root, catalog.run_name)
+        )
+    elif authority_profile_id == EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1:
+        run_group, _resolved_run, run_path = resolve_eye_angle_run(
+            root,
+            catalog.run_name,
+            legacy_compatibility=False,
+        )
+    else:  # pragma: no cover - catalog rejects first.
+        raise EyeAngleIOError(
+            f"Unsupported eye-angle authority profile {authority_profile_id!r}."
+        )
     row_slice = slice(start_row, stop_row)
     angle_array = run_group["frame_angles"]
     angle_index = _child_group(run_group, "angle_channel_index")
@@ -1385,6 +1466,8 @@ def roi_frame_indices(tables: EyeAngleRunTables, *, row_count: int) -> Optional[
 
 
 __all__ = [
+    "EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1",
+    "EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1",
     "EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2",
     "EYE_ANGLE_LAYOUT_HIERARCHICAL_V1",
     "EYE_ANGLE_RUN_PARENT",
@@ -1406,6 +1489,7 @@ __all__ = [
     "load_eye_gaze_frame_series",
     "optional_1d_array",
     "resolve_eye_angle_run",
+    "resolve_completed_ineligible_eye_angle_run",
     "roi_frame_indices",
     "roi_time_seconds",
 ]

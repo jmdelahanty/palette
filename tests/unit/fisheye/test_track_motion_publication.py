@@ -280,6 +280,7 @@ def _fresh_full_motion_run(
             "provenance": stage_provenance,
             "run_provenance": run_provenance,
             "palette_run_completion_status": "complete",
+            "palette_run_completed_at_utc": "2026-08-04T12:00:00+00:00",
             "stage_selector_eligible": False,
         }
     )

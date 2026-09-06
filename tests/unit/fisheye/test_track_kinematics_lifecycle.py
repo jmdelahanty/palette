@@ -136,6 +136,69 @@ def test_track_completion_validates_complete_while_ineligible_then_selects_last(
     ]
 
 
+def test_track_completion_canary_never_mutates_production_selectors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    root, parent, offline, run_name, run = _new_run(tmp_path, name="canary")
+    parent.attrs.update(
+        {
+            "latest": "offline/previous",
+            "latest_complete": "offline/previous",
+            "latest_offline": "previous",
+        }
+    )
+    offline.attrs["latest"] = "previous"
+    owner = run.attrs[mod.TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR]
+
+    def seal_motion(
+        authoritative_root,
+        sealed_run,
+        *,
+        expected_publication_owner_uuid,
+    ):
+        assert authoritative_root is root
+        assert expected_publication_owner_uuid == owner
+        assert sealed_run.attrs["stage_selector_eligible"] is False
+        assert sealed_run.attrs[mod.TRACK_KINEMATICS_PUBLICATION_PROFILE_ATTR] == (
+            mod.TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+        )
+        return SimpleNamespace(
+            tracks=(object(),),
+            assert_verified=lambda: None,
+        )
+
+    monkeypatch.setattr(
+        mod,
+        "_seal_and_load_track_motion_run_before_selection",
+        seal_motion,
+    )
+
+    activation = mod.mark_track_kinematics_run_complete(
+        root,
+        run,
+        run_name=run_name,
+        run_type="offline",
+        publication_owner_uuid=owner,
+        validate_complete_run=lambda _fresh_run: {"valid": True},
+        publication_profile_id=(
+            mod.TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+        ),
+    )
+
+    assert activation is None
+    assert parent.attrs["latest"] == "offline/previous"
+    assert parent.attrs["latest_complete"] == "offline/previous"
+    assert parent.attrs["latest_offline"] == "previous"
+    assert offline.attrs["latest"] == "previous"
+    completed = offline[run_name]
+    assert completed.attrs["palette_run_completion_status"] == "complete"
+    assert completed.attrs["stage_selector_eligible"] is False
+    assert completed.attrs[mod.TRACK_KINEMATICS_PUBLICATION_PROFILE_ATTR] == (
+        mod.TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+    )
+
+
 def test_deferred_track_commit_rebinds_and_preserves_post_receipt_metadata(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

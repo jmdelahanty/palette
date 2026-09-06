@@ -19,9 +19,13 @@ from typing import Any, Mapping
 
 from fisheye.analytics_exports.activity_spatial_time_bins import (
     BoundActivitySpatialSources,
+    SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
     bind_activity_spatial_sources,
 )
 from fisheye.analytics_exports.eye_trace_samples import (
+    EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
     bind_eye_trace_source,
     eye_trace_projection_contract,
 )
@@ -30,12 +34,16 @@ from fisheye.analytics_exports.kinematics_samples import (
     CORE_MOTION_PROJECTION_PROFILE_ID,
     CORE_MOTION_SOURCE_SURFACE_PROFILE_ID,
     KINEMATICS_SOURCE_SURFACE_PROFILE_ID,
+    TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
     bind_kinematics_samples_source,
     core_motion_projection_contract,
     kinematics_projection_contract,
 )
 from fisheye.analytics_exports.tail_trace_samples import (
     BoundTailTraceSources,
+    TAIL_KINEMATICS_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    TAIL_KINEMATICS_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
     bind_tail_trace_sources,
     tail_trace_projection_contract,
 )
@@ -82,10 +90,14 @@ from .validated_behavior_cohort_adapters import (
     validate_membership_current_sources,
 )
 from .validated_behavior_source_admission import (
-    CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE,
+    CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES,
     CORE_BEHAVIOR_EXECUTION_SCHEMA_ID,
     CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSION,
     bind_core_behavior_execution_report,
+)
+from .execution_profiles import (
+    PRODUCTION_EXECUTION_PROFILE_ID,
+    SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
 )
 
 CORE_BEHAVIOR_BUNDLE_ADAPTER_ID = "core_behavior_execution_report_v3"
@@ -337,6 +349,31 @@ def bind_core_behavior_cohort_sources(
     if acquisition.record.recording_id != expected_recording_id:
         _fail("Acquisition authority binds another recording.")
     runs = report["runs"]
+    execution_profile_id = report["execution_profile_id"]
+    if execution_profile_id == PRODUCTION_EXECUTION_PROFILE_ID:
+        track_authority_profile_id = (
+            TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+        )
+        eye_authority_profile_id = EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+        tail_authority_profile_id = (
+            TAIL_KINEMATICS_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+        )
+        bout_authority_profile_id = SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+    elif execution_profile_id == SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID:
+        track_authority_profile_id = (
+            TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+        )
+        eye_authority_profile_id = (
+            EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+        )
+        tail_authority_profile_id = (
+            TAIL_KINEMATICS_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+        )
+        bout_authority_profile_id = (
+            SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+        )
+    else:  # pragma: no cover - report admission is the closed profile gate
+        _fail(f"Unsupported core execution profile {execution_profile_id!r}.")
     track = bind_kinematics_samples_source(
         root,
         zarr_path=source_path,
@@ -348,6 +385,7 @@ def bind_core_behavior_cohort_sources(
             if selected_export_profile_id == CORE_BEHAVIOR_EXPORT_PROFILE_ID
             else KINEMATICS_SOURCE_SURFACE_PROFILE_ID
         ),
+        authority_profile_id=track_authority_profile_id,
     )
     if track.binding["run_path"] != runs["track_kinematics"]["run_path"]:
         _fail("Strict track binder resolved another execution-report run.")
@@ -356,6 +394,7 @@ def bind_core_behavior_cohort_sources(
         zarr_path=source_path,
         expected_recording_id=expected_recording_id,
         eye_angle_run=runs["eye_angles"]["run_name"],
+        authority_profile_id=eye_authority_profile_id,
     )
     if eye["run_path"] != runs["eye_angles"]["run_path"]:
         _fail("Strict eye binder resolved another execution-report run.")
@@ -367,6 +406,8 @@ def bind_core_behavior_cohort_sources(
         track_kinematics_run=runs["track_kinematics"]["run_name"],
         track_scope="offline",
         prebound_track_source=track,
+        tail_authority_profile_id=tail_authority_profile_id,
+        track_authority_profile_id=track_authority_profile_id,
     )
     if tail.binding["tail_run_path"] != runs["tail_kinematics"]["run_path"]:
         _fail("Strict tail binder resolved another execution-report run.")
@@ -390,6 +431,8 @@ def bind_core_behavior_cohort_sources(
         track_scope="offline",
         swim_bout_runs_by_track={track_ids[0]: runs["swim_bouts"]["run_name"]},
         prebound_track_source=track,
+        track_authority_profile_id=track_authority_profile_id,
+        swim_bout_authority_profile_id=bout_authority_profile_id,
     )
     bout_binding = bouts.bout_sources[track_ids[0]].binding
     if bout_binding["run_path"] != runs["swim_bouts"]["run_path"]:
@@ -502,7 +545,7 @@ def _complete_member(
     receipts = list(membership_member["admission_receipts"])
     if (
         len(receipts) != 1
-        or receipts[0]["role"] != CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE
+        or receipts[0]["role"] not in CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES
     ):
         _fail("Core-behavior bundle requires one execution-report admission receipt.")
     bound = bind_core_behavior_cohort_sources(
@@ -679,7 +722,7 @@ def core_authority_roster_from_bundle_set_member(
     receipts = list(bundle.get("receipt_bindings") or ())
     if (
         len(receipts) != 1
-        or receipts[0].get("role") != CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE
+        or receipts[0].get("role") not in CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES
     ):
         _fail("Core member lacks one exact execution-report admission receipt.")
     capabilities = _mapping(

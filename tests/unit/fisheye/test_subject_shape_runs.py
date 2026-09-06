@@ -18,6 +18,7 @@ from fisheye.analysis.subject_shape_storage import (
     validate_subject_shape_direct_consolidated_storage,
 )
 from fisheye.analysis_workflows.materializers import subject_shape as materializer
+from fisheye.analysis_workflows import runtime_verification as runtime_verification_mod
 from fisheye.analysis_workflows.runtime_verification import (
     verify_persisted_stage_output,
 )
@@ -898,6 +899,23 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
         source_path,
         run_path="analysis/subject_shape_runs/shape_byte_candidate",
     )
+    monkeypatch.setattr(
+        runtime_verification_mod,
+        "validate_subject_shape_direct_consolidated_storage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "candidate runtime verification reopened both archive metadata views"
+            )
+        ),
+    )
+    workflow_verification = verify_persisted_stage_output(
+        source_path,
+        "subject_shape",
+        requested_run="shape_byte_candidate",
+        dependency_runs={"refined_subject_masks": "r1"},
+        execution_profile_id="selector_ineligible_canary_v1",
+    )
+    assert workflow_verification.available is True
     compute = zarr.open_group(
         str(tmp_path / "candidate-scratch/compute.zarr"),
         mode="a",

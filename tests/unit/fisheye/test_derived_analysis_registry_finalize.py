@@ -187,7 +187,7 @@ def test_execution_receipt_finalizer_uses_exact_selected_runs(
     }
 
 
-@pytest.mark.parametrize("schema_version", (2, 3))
+@pytest.mark.parametrize("schema_version", (2, 3, 4))
 def test_execution_receipt_excludes_parquet_exports_from_stage_registry(
     tmp_path: Path,
     schema_version: int,
@@ -221,9 +221,31 @@ def test_execution_receipt_excludes_parquet_exports_from_stage_registry(
             }
         ],
     }
+    if schema_version == 4:
+        payload["execution_profile_id"] = "selector_activated_production_v1"
     receipt.write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
     assert mod._execution_report_requests(receipt) == []
+
+
+def test_selector_ineligible_execution_receipt_cannot_enter_registry_finalizer(
+    tmp_path: Path,
+) -> None:
+    receipt = tmp_path / "execution-canary-v4.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_id": "palette.analysis_workflow_execution",
+                "schema_version": 4,
+                "execution_profile_id": "selector_ineligible_canary_v1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="cannot be registry-finalized"):
+        mod._execution_report_requests(receipt)
 
 
 def test_execution_v3_finalizer_revalidates_bound_admission_receipt(

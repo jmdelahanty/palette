@@ -37,6 +37,8 @@ from ...analysis.tail_kinematics_runs import (
     SUBJECT_SHAPE_BODY_FRAME_ARRAY_NAMES,
     TAIL_KINEMATICS_COMPUTE_KERNEL,
     TAIL_KINEMATICS_SCHEMA_ID,
+    SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
     _resolve_tail_kinematics_sources,
     write_tail_kinematics_run_group,
 )
@@ -117,6 +119,7 @@ class TailKinematicsMaterializationPlan:
     scratch_root: Path
     staged_zarr: Path
     shape_run: str
+    subject_shape_authority_profile_id: str
     run_name: str
     row_count: int
     tail_angle_sample_count: int
@@ -157,6 +160,9 @@ class TailKinematicsMaterializationPlan:
             "scratch_root": str(self.scratch_root),
             "staged_zarr": str(self.staged_zarr),
             "shape_run": self.shape_run,
+            "subject_shape_authority_profile_id": (
+                self.subject_shape_authority_profile_id
+            ),
             "run_name": self.run_name,
             "row_count": int(self.row_count),
             "tail_angle_sample_count": int(self.tail_angle_sample_count),
@@ -359,6 +365,9 @@ def build_tail_kinematics_materialization_plan(
     execution_backend: str = "serial",
     num_workers: int = 1,
     storage_profile: StorageProfile | None = None,
+    subject_shape_authority_profile_id: str = (
+        SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+    ),
 ) -> TailKinematicsMaterializationPlan:
     """Build a read-only physical-file staging plan for one recording."""
 
@@ -401,7 +410,9 @@ def build_tail_kinematics_materialization_plan(
 
     root = open_zarr_root(source, mode="r")
     resolved_shape_run, shape_group, sources = _resolve_tail_kinematics_sources(
-        root, shape_run
+        root,
+        shape_run,
+        subject_shape_authority_profile_id=subject_shape_authority_profile_id,
     )
     target_run = (
         source / "analysis" / "tail_kinematics_runs" / _validate_run_name(run_name)
@@ -416,6 +427,7 @@ def build_tail_kinematics_materialization_plan(
         scratch_root=scratch,
         staged_zarr=scratch / "source-subset.zarr",
         shape_run=resolved_shape_run,
+        subject_shape_authority_profile_id=subject_shape_authority_profile_id,
         run_name=_validate_run_name(run_name),
         row_count=int(sources.row_count),
         tail_angle_sample_count=int(tail_angle_sample_count),
@@ -1101,6 +1113,9 @@ def materialize_tail_kinematics(
     execution_binding: Mapping[str, Any] | None = None,
     expected_source_logical_hashes: Mapping[str, Any] | None = None,
     publication_acceptance_validator: PublicationAcceptanceValidator | None = None,
+    subject_shape_authority_profile_id: str = (
+        SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+    ),
 ) -> dict[str, Any]:
     """Execute or plan the complete staged materialization workflow."""
 
@@ -1115,6 +1130,15 @@ def materialize_tail_kinematics(
     if execution_requested and storage_profile is None:
         raise ValueError(
             "Typed execution evidence requires one explicit storage candidate profile."
+        )
+    if (
+        subject_shape_authority_profile_id
+        == SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+        and storage_profile is None
+    ):
+        raise ValueError(
+            "A selector-ineligible subject-shape source requires a "
+            "selector-ineligible tail storage profile."
         )
     if execution_requested and not isinstance(execution_binding, Mapping):
         raise ValueError("Typed execution requires one nonempty execution binding.")
@@ -1134,6 +1158,9 @@ def materialize_tail_kinematics(
                 storage_profile.profile_id if storage_profile is not None else None
             ),
             "execution_requested": execution_requested,
+            "subject_shape_authority_profile_id": (
+                subject_shape_authority_profile_id
+            ),
         },
     )
     with telemetry.phase("plan"):
@@ -1148,6 +1175,9 @@ def materialize_tail_kinematics(
             execution_backend=execution_backend,
             num_workers=num_workers,
             storage_profile=storage_profile,
+            subject_shape_authority_profile_id=(
+                subject_shape_authority_profile_id
+            ),
         )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
@@ -1192,6 +1222,16 @@ def materialize_tail_kinematics(
                 _staged_input_integrity_receipt=staging[
                     "staged_input_integrity_receipt"
                 ],
+                **(
+                    {
+                        "subject_shape_authority_profile_id": (
+                            plan.subject_shape_authority_profile_id
+                        )
+                    }
+                    if plan.subject_shape_authority_profile_id
+                    != SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+                    else {}
+                ),
             )
         local_run = local_root["analysis"]["tail_kinematics_runs"][plan.run_name]
         local_run.attrs["node_local_source_staging"] = staging
@@ -1327,6 +1367,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--shape-run", help="Exact subject-shape source run; defaults to latest."
     )
     parser.add_argument(
+        "--subject-shape-authority-profile",
+        choices=(
+            SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+            SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+        ),
+        default=SUBJECT_SHAPE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    )
+    parser.add_argument(
         "--run-name", required=True, help="New authoritative tail-kinematics run name."
     )
     parser.add_argument(
@@ -1398,6 +1446,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             get_storage_profile(args.storage_profile)
             if args.storage_profile is not None
             else None
+        ),
+        subject_shape_authority_profile_id=(
+            args.subject_shape_authority_profile
         ),
     )
     if args.report is not None:

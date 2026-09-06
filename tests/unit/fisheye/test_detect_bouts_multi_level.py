@@ -19,6 +19,9 @@ from fisheye.analysis.detect_bouts_multi_level import (
     main,
     normalize_speed_level,
 )
+from fisheye.analysis.track_kinematics_io import (
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1,
+)
 
 
 def test_main_accepts_explicit_argv() -> None:
@@ -87,8 +90,14 @@ def _make_track_kinematics_archive(
         track_id: int = 0,
         *,
         track_kinematics_scope: str = "offline",
+        track_kinematics_publication_profile_id: str = (
+            TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1
+        ),
     ):
         assert track_kinematics_scope == "offline"
+        assert track_kinematics_publication_profile_id == (
+            TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1
+        )
         live_root = zarr.open_group(str(zarr_path), mode="r")
         live_track = live_root[
             "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0"
@@ -146,6 +155,9 @@ def _make_track_kinematics_archive(
             "n_frames": int(live_frames.size),
             "track_kinematics_run": "tk_1",
             "track_kinematics_scope": "offline",
+            "track_kinematics_publication_profile_id": (
+                track_kinematics_publication_profile_id
+            ),
             "source_track_path": track_path,
             "track_id": int(track_id),
             "positions_mm": np.asarray(live_track["positions_mm"][:]),

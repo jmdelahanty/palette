@@ -465,7 +465,6 @@ def _patch_bound_sources(monkeypatch: pytest.MonkeyPatch):
         run_attrs=run_attrs,
         signal_attrs={},
     )
-    monkeypatch.setattr(mod, "is_run_selector_eligible", lambda _run: True)
     monkeypatch.setattr(
         mod,
         "is_run_complete_in_parent",

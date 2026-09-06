@@ -23,6 +23,10 @@ from ..shared.zarr_run_completion import (
     mark_run_started,
     note_pending_latest,
     require_runs_parent,
+    RUN_COMPLETION_CONTRACT,
+    RUN_COMPLETION_CONTRACT_ATTR,
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_STATUS_COMPLETE,
 )
 from ..shared.system_metadata import get_environment_info
 from .api import TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA, build_tracking
@@ -32,6 +36,9 @@ from .run_manifest import (
     TRACKING_RUN_MANIFEST_DIGEST_ATTR,
     build_tracking_run_manifest,
     tracking_run_manifest_digest,
+    tracking_array_records,
+    validate_tracking_run_manifest,
+    TrackingRunManifestError,
 )
 
 
@@ -42,6 +49,12 @@ TRACKING_WARN_THRESHOLD_ROWS = 1
 TRACKING_WARN_THRESHOLD_PERCENT = 0.0
 TRACKING_BLOCK_THRESHOLD_ROWS = 10
 TRACKING_BLOCK_THRESHOLD_PERCENT = 1.0
+TRACKING_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1 = (
+    "tracking_selector_eligible_v1"
+)
+TRACKING_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1 = (
+    "tracking_selector_ineligible_canary_v1"
+)
 
 
 class TrackingConflictError(ValueError):
@@ -536,8 +549,10 @@ def resolve_tracking_run(
     expected_arena_assignment_run: Optional[str] = None,
     expected_source_rowset_path: Optional[str] = None,
     expected_source_rowset_fingerprint: RowsetFingerprint | None = None,
+    run_name: str | None = None,
+    authority_profile_id: str = TRACKING_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
 ) -> Tuple[str, zarr.Group]:
-    """Resolve the exact tracking run for a detection/refined-detection lineage."""
+    """Resolve one manifest-valid tracking authority with no profile fallback."""
 
     tracking_parent = root.get("tracking_runs")
     if tracking_parent is None:
@@ -545,11 +560,74 @@ def resolve_tracking_run(
             "No tracking_runs found in archive. Run fisheye.tracking.arena_assignment to create single-subject tracking."
         )
 
-    latest = _normalize_text(tracking_parent.attrs.get("latest")) if hasattr(tracking_parent, "attrs") else None
+    if authority_profile_id == TRACKING_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1:
+        expected_selector_eligible = True
+    elif (
+        authority_profile_id
+        == TRACKING_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+    ):
+        expected_selector_eligible = False
+        if not isinstance(run_name, str) or not run_name.strip():
+            raise ValueError(
+                "Selector-ineligible tracking authority requires one exact run name."
+            )
+    else:
+        raise ValueError(
+            f"Unsupported tracking authority profile {authority_profile_id!r}."
+        )
+
+    requested = str(run_name or "").strip()
+    if requested and (
+        requested in {"latest", "latest_complete", ".", ".."}
+        or "/" in requested
+        or "\\" in requested
+        or requested != run_name
+    ):
+        raise ValueError("Explicit tracking authority must be one exact child name.")
+    latest = (
+        _normalize_text(tracking_parent.attrs.get("latest"))
+        if hasattr(tracking_parent, "attrs")
+        else None
+    )
     matches: List[str] = []
 
-    for run_name in _sorted_group_keys(tracking_parent):
-        run_group = tracking_parent[run_name]
+    candidate_names = [requested] if requested else _sorted_group_keys(tracking_parent)
+    invalid_requested: str | None = None
+    for candidate_name in candidate_names:
+        if candidate_name not in tracking_parent:
+            invalid_requested = f"Tracking run {candidate_name!r} does not exist."
+            continue
+        run_group = tracking_parent[candidate_name]
+        manifest = run_group.attrs.get(TRACKING_RUN_MANIFEST_ATTR)
+        try:
+            validated = validate_tracking_run_manifest(
+                manifest,
+                expected_run_name=candidate_name,
+                expected_status=RUN_STATUS_COMPLETE,
+                expected_selector_eligible=expected_selector_eligible,
+            )
+            manifest_sha256 = validated["manifest_sha256"]
+            if (
+                run_group.attrs.get(TRACKING_RUN_MANIFEST_DIGEST_ATTR)
+                != manifest_sha256
+                or run_group.attrs.get(RUN_COMPLETION_CONTRACT_ATTR)
+                != RUN_COMPLETION_CONTRACT
+                or run_group.attrs.get(RUN_COMPLETION_STATUS_ATTR)
+                != RUN_STATUS_COMPLETE
+                or run_group.attrs.get("stage_selector_eligible")
+                is not expected_selector_eligible
+                or tracking_array_records(run_group)
+                != validated["payload"]["arrays"]
+            ):
+                raise TrackingRunManifestError(
+                    "tracking manifest, lifecycle, or live arrays are stale"
+                )
+        except (KeyError, TypeError, ValueError, TrackingRunManifestError) as exc:
+            if requested:
+                invalid_requested = (
+                    f"Tracking run {candidate_name!r} failed strict validation: {exc}"
+                )
+            continue
         source_detect = _normalize_text(run_group.attrs.get("source_detect_run")) if hasattr(run_group, "attrs") else None
         source_refined = _normalize_text(run_group.attrs.get("source_refined_run")) if hasattr(run_group, "attrs") else None
         source_arena_assignment = _normalize_text(run_group.attrs.get("source_arena_assignment_run")) if hasattr(run_group, "attrs") else None
@@ -572,9 +650,11 @@ def resolve_tracking_run(
             and source_rowset_fingerprint != expected_source_rowset_fingerprint.fingerprint
         ):
             continue
-        matches.append(run_name)
+        matches.append(candidate_name)
 
     if not matches:
+        if invalid_requested is not None:
+            raise ValueError(invalid_requested)
         expected_refined_text = expected_refined_run or "<none>"
         expected_arena_text = expected_arena_assignment_run or "<any>"
         expected_fingerprint_text = (
@@ -592,7 +672,17 @@ def resolve_tracking_run(
             "Rerun fisheye.tracking.arena_assignment for this lineage."
         )
 
-    chosen = latest if latest in matches else matches[-1]
+    if requested:
+        chosen = requested
+    elif latest in matches:
+        chosen = str(latest)
+    elif len(matches) == 1:
+        chosen = matches[0]
+    else:
+        raise ValueError(
+            "Multiple manifest-valid tracking runs match this lineage and no "
+            "matching latest selector disambiguates them; select one exact run."
+        )
     return chosen, tracking_parent[chosen]
 
 
@@ -607,6 +697,8 @@ def load_tracking_ids(
     expected_instance_key: np.ndarray | None = None,
     expected_source_rowset_fingerprint: RowsetFingerprint | None = None,
     return_metadata: bool = False,
+    run_name: str | None = None,
+    authority_profile_id: str = TRACKING_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
 ) -> Any:
     """Load source-bound track IDs for a detection rowset."""
 
@@ -617,6 +709,8 @@ def load_tracking_ids(
         expected_arena_assignment_run=expected_arena_assignment_run,
         expected_source_rowset_path=expected_source_rowset_path,
         expected_source_rowset_fingerprint=expected_source_rowset_fingerprint,
+        run_name=run_name,
+        authority_profile_id=authority_profile_id,
     )
 
     if "track_ids" not in run_group:
@@ -693,6 +787,8 @@ __all__ = [
     "UNASSIGNED_TRACK_ID",
     "TRACKING_QC_OK",
     "TRACKING_QC_WARN",
+    "TRACKING_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1",
+    "TRACKING_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1",
     "TRACKING_WARN_THRESHOLD_ROWS",
     "TRACKING_WARN_THRESHOLD_PERCENT",
     "TRACKING_BLOCK_THRESHOLD_ROWS",

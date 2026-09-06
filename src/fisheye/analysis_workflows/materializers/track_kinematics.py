@@ -12,6 +12,7 @@ pointers follow two fresh validations of that final-path binding.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -43,6 +44,16 @@ from ...shared.zarr_sharded_copy import (
 )
 from fisheye.shared.atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 from fisheye.shared.runtime_telemetry import PhaseTelemetry
+from fisheye.analysis_workflows.execution_profiles import (
+    PRODUCTION_EXECUTION_PROFILE_ID,
+    SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    resolve_workflow_execution_profile,
+    workflow_execution_profile_ids,
+)
+from fisheye.tracking.single_subject_per_arena import (
+    TRACKING_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    TRACKING_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+)
 
 
 MATERIALIZATION_SCHEMA_ID = "palette.track_kinematics_materialization.v3"
@@ -67,6 +78,8 @@ MANAGED_WRITER_ARGUMENTS = {
     "--offline-run-name",
     "--online-only",
     "--output-zarr-path",
+    "--tracking-run",
+    "--tracking-authority-profile",
 }
 
 
@@ -78,6 +91,8 @@ class TrackKinematicsMaterializationPlan:
     sharded_run: Path
     keypoint_run: str
     run_name: str
+    tracking_run: str | None
+    execution_profile_id: str
     output_shard_rows: int
     shard_workers: int
     writer_arguments: tuple[str, ...]
@@ -113,6 +128,8 @@ class TrackKinematicsMaterializationPlan:
             "target_run_path": str(self.target_run_path),
             "keypoint_run": self.keypoint_run,
             "run_name": self.run_name,
+            "tracking_run": self.tracking_run,
+            "execution_profile_id": self.execution_profile_id,
             "output_shard_rows": int(self.output_shard_rows),
             "shard_workers": int(self.shard_workers),
             "writer_arguments": list(self.writer_arguments),
@@ -135,6 +152,8 @@ def build_track_kinematics_materialization_plan(
     output_shard_rows: int = DEFAULT_OUTPUT_SHARD_ROWS,
     shard_workers: int = 1,
     writer_arguments: Sequence[str] = (),
+    tracking_run: str | None = None,
+    execution_profile_id: str = PRODUCTION_EXECUTION_PROFILE_ID,
 ) -> TrackKinematicsMaterializationPlan:
     """Build a read-only plan; no scratch or archive paths are created."""
 
@@ -149,6 +168,7 @@ def build_track_kinematics_materialization_plan(
     else:
         raise ValueError("Scratch root must not be inside the authoritative source Zarr.")
     name = _validate_run_name(run_name)
+    execution_profile = resolve_workflow_execution_profile(execution_profile_id)
     keypoints = str(keypoint_run).strip()
     if not keypoints:
         raise ValueError("keypoint_run is required.")
@@ -165,6 +185,31 @@ def build_track_kinematics_materialization_plan(
             "Track materializer owns these writer arguments: "
             + ", ".join(forbidden)
         )
+    tracking_name = (
+        _validate_run_name(tracking_run) if tracking_run is not None else None
+    )
+    if (
+        execution_profile.profile_id
+        == SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+        and tracking_name is None
+    ):
+        raise ValueError(
+            "Selector-ineligible track materialization requires one exact tracking run."
+        )
+    tracking_profile = (
+        TRACKING_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+        if execution_profile.profile_id
+        == SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+        else TRACKING_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
+    )
+    if tracking_name is not None:
+        forwarded = (
+            "--tracking-run",
+            tracking_name,
+            "--tracking-authority-profile",
+            tracking_profile,
+            *forwarded,
+        )
     target = source / "analysis" / "track_kinematics_runs" / "offline" / name
     if target.exists():
         raise FileExistsError(f"Refusing to replace existing authoritative run: {target}")
@@ -175,6 +220,8 @@ def build_track_kinematics_materialization_plan(
         sharded_run=scratch / "track-run-sharded",
         keypoint_run=keypoints,
         run_name=name,
+        tracking_run=tracking_name,
+        execution_profile_id=execution_profile.profile_id,
         output_shard_rows=int(output_shard_rows),
         shard_workers=int(shard_workers),
         writer_arguments=forwarded,
@@ -567,12 +614,20 @@ def publish_track_kinematics_run(
 ) -> dict[str, Any]:
     """Publish, bind final-path coordinates, validate, then update pointers."""
 
+    execution_profile = resolve_workflow_execution_profile(
+        plan.execution_profile_id
+    )
+    selector_ineligible_canary = (
+        execution_profile.profile_id
+        == SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+    )
     transaction = {
         "binding_complete": False,
         "completion_published": False,
         "publication_owner_uuid": None,
         "payload_integrity_receipt": None,
         "scientific_validation_receipt": None,
+        "selector_snapshot": None,
     }
     deferred_activation: list[Any] = []
 
@@ -676,7 +731,26 @@ def publish_track_kinematics_run(
             root.require_group("analysis"),
             "track_kinematics_runs",
         )
-        return track_parent, track_parent.require_group("offline")
+        offline_parent = track_parent.require_group("offline")
+        transaction["selector_snapshot"] = {
+            "root": {
+                name: (name in track_parent.attrs, copy.deepcopy(track_parent.attrs.get(name)))
+                for name in (
+                    "latest",
+                    "latest_complete",
+                    "latest_offline",
+                    "latest_pending",
+                    track_writer.TRACK_KINEMATICS_SELECTOR_OWNER_ATTR,
+                )
+            },
+            "offline": {
+                "latest": (
+                    "latest" in offline_parent.attrs,
+                    copy.deepcopy(offline_parent.attrs.get("latest")),
+                )
+            },
+        }
+        return track_parent, offline_parent
 
     def validate_completed_receipt(_fresh_run: zarr.Group) -> Mapping[str, Any]:
         structural = _validate_track_run(
@@ -863,10 +937,22 @@ def publish_track_kinematics_run(
             staged_scientific_validation=(
                 transaction["scientific_validation_receipt"]
             ),
-            defer_selector_eligibility=True,
-            deferred_activation_sink=retain_deferred_activation,
+            defer_selector_eligibility=not selector_ineligible_canary,
+            deferred_activation_sink=(
+                None if selector_ineligible_canary else retain_deferred_activation
+            ),
+            publication_profile_id=(
+                track_writer.TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+                if selector_ineligible_canary
+                else track_writer.TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1
+            ),
         )
-        if (
+        if selector_ineligible_canary:
+            if activation is not None or deferred_activation:
+                raise RuntimeError(
+                    "Track canary unexpectedly created an activation receipt."
+                )
+        elif (
             not callable(activation)
             or len(deferred_activation) != 1
             or deferred_activation[0] is not activation
@@ -913,6 +999,35 @@ def publish_track_kinematics_run(
     def verify(root: zarr.Group) -> None:
         pointer_parent = root["analysis/track_kinematics_runs"]
         pointer_offline = pointer_parent["offline"]
+        if selector_ineligible_canary:
+            run = pointer_offline[plan.run_name]
+            snapshot = transaction["selector_snapshot"]
+            if not isinstance(snapshot, Mapping):
+                raise RuntimeError("Track canary lacks its selector snapshot.")
+            current = {
+                "root": {
+                    name: (
+                        name in pointer_parent.attrs,
+                        copy.deepcopy(pointer_parent.attrs.get(name)),
+                    )
+                    for name in snapshot["root"]
+                },
+                "offline": {
+                    "latest": (
+                        "latest" in pointer_offline.attrs,
+                        copy.deepcopy(pointer_offline.attrs.get("latest")),
+                    )
+                },
+            }
+            if current != snapshot:
+                raise RuntimeError("Track canary changed a production selector.")
+            track_writer.load_completed_ineligible_bound_track_motion_run(root, run)
+            if (
+                run.attrs.get("palette_run_completion_status") != "complete"
+                or run.attrs.get("stage_selector_eligible") is not False
+            ):
+                raise RuntimeError("Track canary lifecycle is incomplete.")
+            return
         if (
             str(pointer_parent.attrs.get("latest")) != f"offline/{plan.run_name}"
             or str(pointer_parent.attrs.get("latest_complete")) != f"offline/{plan.run_name}"
@@ -961,8 +1076,10 @@ def publish_track_kinematics_run(
         prepare_parents=prepare,
         complete_run=complete,
         verify_pointers=verify,
-        activate_run=activate,
-        rollback_activation=rollback_activation,
+        activate_run=None if selector_ineligible_canary else activate,
+        rollback_activation=(
+            None if selector_ineligible_canary else rollback_activation
+        ),
         after_rename=after_rename,
         payload_metadata={
             "local_run_path": str(plan.local_run_path),
@@ -971,17 +1088,21 @@ def publish_track_kinematics_run(
             "materialization": json_attr_safe(materialization_payload),
         },
     )
-    authoritative_root = open_zarr_root(plan.source_zarr, mode="r")
-    result["registry_updated"] = emit_track_kinematics_stage_completion(
-        authoritative_root,
-        plan.source_zarr,
-        run_group=authoritative_root[
-            f"analysis/track_kinematics_runs/offline/{plan.run_name}"
-        ],
-        run_name=plan.run_name,
-        run_type="offline",
-        source="track_kinematics_atomic_materializer",
-    )
+    result["execution_profile_id"] = execution_profile.profile_id
+    if selector_ineligible_canary:
+        result["registry_updated"] = False
+    else:
+        authoritative_root = open_zarr_root(plan.source_zarr, mode="r")
+        result["registry_updated"] = emit_track_kinematics_stage_completion(
+            authoritative_root,
+            plan.source_zarr,
+            run_group=authoritative_root[
+                f"analysis/track_kinematics_runs/offline/{plan.run_name}"
+            ],
+            run_name=plan.run_name,
+            run_type="offline",
+            source="track_kinematics_atomic_materializer",
+        )
     return result
 
 
@@ -997,6 +1118,8 @@ def materialize_track_kinematics(
     copy_backend: str = "rsync",
     apply: bool = False,
     keep_scratch: bool = False,
+    tracking_run: str | None = None,
+    execution_profile_id: str = PRODUCTION_EXECUTION_PROFILE_ID,
 ) -> dict[str, Any]:
     telemetry = PhaseTelemetry(
         materializer="track_kinematics",
@@ -1004,6 +1127,7 @@ def materialize_track_kinematics(
             "requested_shard_workers": int(shard_workers),
             "output_shard_rows": int(output_shard_rows),
             "copy_backend": str(copy_backend),
+            "execution_profile_id": execution_profile_id,
         },
     )
     with telemetry.phase("materialization_plan"):
@@ -1015,6 +1139,8 @@ def materialize_track_kinematics(
             output_shard_rows=output_shard_rows,
             shard_workers=shard_workers,
             writer_arguments=writer_arguments,
+            tracking_run=tracking_run,
+            execution_profile_id=execution_profile_id,
         )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
@@ -1171,6 +1297,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("zarr_path", type=Path)
     parser.add_argument("--keypoint-run", required=True)
+    parser.add_argument("--tracking-run")
+    parser.add_argument(
+        "--execution-profile",
+        choices=workflow_execution_profile_ids(),
+        default=PRODUCTION_EXECUTION_PROFILE_ID,
+    )
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--scratch-root", type=Path)
     parser.add_argument("--output-shard-rows", type=int, default=DEFAULT_OUTPUT_SHARD_ROWS)
@@ -1204,6 +1336,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         copy_backend=args.copy_backend,
         apply=args.apply,
         keep_scratch=args.keep_scratch,
+        tracking_run=args.tracking_run,
+        execution_profile_id=args.execution_profile,
     )
     if args.report is not None:
         args.report.parent.mkdir(parents=True, exist_ok=True)

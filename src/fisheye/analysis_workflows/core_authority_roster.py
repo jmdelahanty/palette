@@ -54,9 +54,9 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_io import open_zarr_root
 
 from .validated_behavior_source_admission import (
-    CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE,
+    CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES,
     CORE_BEHAVIOR_EXECUTION_SCHEMA_ID,
-    CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSION,
+    CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSIONS,
 )
 
 CORE_AUTHORITY_ROSTER_SCHEMA_ID = "palette.core_behavior.authority_roster"
@@ -352,14 +352,14 @@ def build_core_authority_roster(
         "schema_version",
     }:
         _fail("Execution-report binding is not a closed admission receipt.")
-    if report.get("role") != CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE:
+    if report.get("role") not in CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES:
         _fail("Execution-report admission role is not the core workflow role.")
     _text(report.get("path"), label="execution-report path")
     _digest(report.get("file_sha256"), label="execution-report file digest")
     _digest(report.get("record_sha256"), label="execution-report record digest")
     if (
         report.get("schema_id") != CORE_BEHAVIOR_EXECUTION_SCHEMA_ID
-        or report.get("schema_version") != CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSION
+        or report.get("schema_version") not in CORE_BEHAVIOR_EXECUTION_SCHEMA_VERSIONS
     ):
         _fail("Execution-report admission schema is unsupported.")
 

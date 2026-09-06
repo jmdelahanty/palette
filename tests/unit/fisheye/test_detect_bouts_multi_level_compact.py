@@ -19,6 +19,9 @@ from fisheye.analysis.detect_bouts_multi_level import (
     _write_compact_v2_swim_bout_payloads,
     _bout_dtype,
 )
+from fisheye.analysis.track_kinematics_io import (
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1,
+)
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
 from fisheye.analysis.swim_bout_frame_axis import (
     FRAME_AXIS_CONTRACT_ATTR,
@@ -339,8 +342,14 @@ def test_detect_and_save_bouts_defaults_to_compact_v2_layout(tmp_path, monkeypat
         track_id,
         *,
         track_kinematics_scope="offline",
+        track_kinematics_publication_profile_id=(
+            TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1
+        ),
     ):
         assert track_kinematics_scope == "offline"
+        assert track_kinematics_publication_profile_id == (
+            TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1
+        )
         speeds = {
             "speed_raw_mm": speed,
             "speed_filtered_mm": speed,
@@ -363,6 +372,9 @@ def test_detect_and_save_bouts_defaults_to_compact_v2_layout(tmp_path, monkeypat
             "n_frames": frames.size,
             "track_kinematics_run": "tk_run",
             "track_kinematics_scope": "offline",
+            "track_kinematics_publication_profile_id": (
+                track_kinematics_publication_profile_id
+            ),
             "source_track_path": (
                 "analysis/track_kinematics_runs/offline/tk_run/tracks/id_0"
             ),

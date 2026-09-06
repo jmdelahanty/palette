@@ -51,7 +51,7 @@ from .validated_behavior_cohort_adapters import (
     validate_membership_current_sources,
 )
 from .validated_behavior_source_admission import (
-    CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE,
+    CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES,
     EXACT_CHASER_ADMISSION_ROLE,
     validate_admission_receipt_binding,
 )
@@ -804,6 +804,15 @@ def _validate_receipt_binding(value: object, *, field: str) -> dict[str, Any]:
     return record
 
 
+def _core_receipt_by_role(
+    receipts: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    selected = [receipts[role] for role in CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES if role in receipts]
+    if len(selected) != 1:
+        _fail("Composite requires exactly one installed core execution profile.")
+    return selected[0]
+
+
 def _validate_child_binding(value: object, *, field: str) -> dict[str, Any]:
     record = _plain(_mapping(value, field=field))
     if set(record) != {
@@ -1053,15 +1062,17 @@ def validate_core_chaser_composite_bundle(
         _validate_receipt_binding(item, field=f"source receipt {index}")
         for index, item in enumerate(receipts_raw)
     ]
+    observed_roles = {item["role"] for item in receipts}
+    core_roles = observed_roles.intersection(CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES)
     if [(item["role"], item["path"]) for item in receipts] != sorted(
         (item["role"], item["path"]) for item in receipts
-    ) or {item["role"] for item in receipts} != {
-        CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE,
-        EXACT_CHASER_ADMISSION_ROLE,
+    ) or len(core_roles) != 1 or observed_roles != core_roles | {
+        EXACT_CHASER_ADMISSION_ROLE
     }:
         _fail("Composite source receipt roles or ordering are inexact.")
     by_role = {item["role"]: item for item in receipts}
-    if by_role[CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE] != _plain(
+    core_receipt = _core_receipt_by_role(by_role)
+    if core_receipt != _plain(
         roster["execution_report_binding"]
     ):
         _fail("Composite core receipt differs from its authority roster.")
@@ -1137,7 +1148,7 @@ def validate_core_chaser_composite_bundle(
     normalized = {**record, "capabilities": capabilities, "record_sha256": persisted}
     if validate_current_sources:
         rebuilt = _resolve_content(
-            by_role[CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE]["path"],
+            core_receipt["path"],
             by_role[EXACT_CHASER_ADMISSION_ROLE]["path"],
             expected_analysis_zarr=archive,
             expected_recording_id=recording_id,
@@ -1203,8 +1214,9 @@ def ensure_core_chaser_composite_bundle(
             validate_current_sources=True,
         )
         receipts = {item["role"]: item for item in current["source_admission_receipts"]}
+        core_receipt = _core_receipt_by_role(receipts)
         if (
-            Path(receipts[CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE]["path"])
+            Path(core_receipt["path"])
             != Path(core_execution_report_path).expanduser().resolve()
             or Path(receipts[EXACT_CHASER_ADMISSION_ROLE]["path"])
             != Path(chaser_projection_receipt_path).expanduser().resolve()
