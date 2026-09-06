@@ -20,7 +20,7 @@ from fisheye.analysis_workflows import (
 from fisheye.analysis_workflows.execution_profiles import (
     SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
 )
-from fisheye.utils.plan_analysis_workflow import build_availability
+from fisheye.utils.plan_analysis_workflow import build_availability, build_plan_payload
 
 
 def _write_zarr_metadata(
@@ -368,6 +368,65 @@ def test_track_kinematics_plan_materializes_missing_tracking_authority() -> None
     assert plan.execution_order == ("tracks", "track_kinematics")
 
 
+@pytest.mark.parametrize(
+    "unavailable_reason",
+    (
+        "selected run metadata is missing",
+        "selected run is not selector-ineligible; literal False is required",
+    ),
+)
+def test_selector_ineligible_plan_blocks_unsupported_tracking_producer(
+    unavailable_reason: str,
+) -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    availability = {
+        "refined_keypoints": StageAvailability(
+            stage_id="refined_keypoints",
+            available=True,
+            run_name="canonical_clipped_candidate",
+            reason="complete exact candidate",
+        ),
+        "tracks": StageAvailability(
+            stage_id="tracks",
+            available=False,
+            run_name="tracking_candidate_typo",
+            reason=unavailable_reason,
+        ),
+        "track_kinematics": StageAvailability(
+            stage_id="track_kinematics",
+            available=False,
+            reason="explicit output is absent",
+        ),
+    }
+
+    canary = plan_analysis_workflow(
+        workflow,
+        availability,
+        targets=("track_kinematics",),
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+    production = plan_analysis_workflow(
+        workflow,
+        availability,
+        targets=("track_kinematics",),
+    )
+
+    assert canary.ready is False
+    assert canary.node_by_id["tracks"].action == "blocked"
+    assert "requires an existing exact named candidate" in (
+        canary.node_by_id["tracks"].reason
+    )
+    assert unavailable_reason in canary.node_by_id["tracks"].reason
+    assert canary.node_by_id["track_kinematics"].action == "blocked"
+    assert canary.execution_order == ()
+
+    # The correction is profile-scoped: production retains its supported
+    # missing-tracking materialization path.
+    assert production.ready is True
+    assert production.node_by_id["tracks"].action == "run"
+    assert production.execution_order == ("tracks", "track_kinematics")
+
+
 def test_availability_refuses_child_when_dependency_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -528,6 +587,7 @@ def _write_keypoint_crop_tracking_lineage(
     root: Path,
     *,
     tracking_crop: str,
+    selector_eligible: bool = True,
 ) -> None:
     _write_zarr_metadata(root)
     _write_zarr_metadata(
@@ -538,7 +598,7 @@ def _write_keypoint_crop_tracking_lineage(
         root / "keypoints_runs" / "canonical_a",
         {
             "palette_run_completion_status": "complete",
-            "stage_selector_eligible": True,
+            "stage_selector_eligible": selector_eligible,
             "source_crop_run": "crop_geometry_a",
             "keypoints_processed": 4,
         },
@@ -562,7 +622,7 @@ def _write_keypoint_crop_tracking_lineage(
         root / "tracking_runs" / "tracking_a",
         {
             "palette_run_completion_status": "complete",
-            "stage_selector_eligible": True,
+            "stage_selector_eligible": selector_eligible,
             "source_rowset_path": f"crop_runs/{tracking_crop}",
             "source_rowset_row_count": 4,
             "source_refined_run": "refined_a",
@@ -605,6 +665,82 @@ def test_workflow_availability_passes_keypoint_lineage_to_tracking_gate(
     assert statuses["tracks"].available is True
     assert statuses["tracks"].run_name == "tracking_a"
     assert "matches the selected keypoint crop lineage" in statuses["tracks"].reason
+
+
+def test_selector_ineligible_public_plan_blocks_missing_exact_tracking_candidate(
+    tmp_path: Path,
+) -> None:
+    _write_keypoint_crop_tracking_lineage(
+        tmp_path,
+        tracking_crop="crop_geometry_a",
+        selector_eligible=False,
+    )
+    workflow = load_analysis_workflow(
+        default_core_behavior_profile_path()
+    ).with_run_selection(
+        {
+            "refined_keypoints": "canonical_a",
+            "tracks": "tracking_candidate_typo",
+        }
+    )
+
+    payload = build_plan_payload(
+        workflow,
+        tmp_path,
+        targets=("track_kinematics",),
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+    plan = payload["plan"]
+    nodes = {node["node_id"]: node for node in plan["nodes"]}
+
+    assert payload["execution_profile_id"] == (
+        SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+    )
+    assert plan["ready"] is False
+    assert nodes["tracks"]["action"] == "blocked"
+    assert nodes["tracks"]["selected_run"] == "tracking_candidate_typo"
+    assert "selected run metadata is missing" in nodes["tracks"]["reason"]
+    assert nodes["track_kinematics"]["action"] == "blocked"
+
+
+def test_selector_ineligible_clipped_plan_reuses_exact_tracking_candidate(
+    tmp_path: Path,
+) -> None:
+    _write_keypoint_crop_tracking_lineage(
+        tmp_path,
+        tracking_crop="crop_geometry_a",
+        selector_eligible=False,
+    )
+    workflow = load_analysis_workflow(
+        default_core_behavior_profile_path()
+    ).with_run_selection(
+        {
+            "refined_keypoints": "canonical_a",
+            "tracks": "tracking_a",
+        }
+    )
+
+    statuses = build_availability(
+        workflow,
+        tmp_path,
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+    plan = plan_analysis_workflow(
+        workflow,
+        statuses,
+        targets=("track_kinematics",),
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+
+    assert statuses["refined_keypoints"].available is True
+    assert statuses["refined_keypoints"].run_name == "canonical_a"
+    assert statuses["tracks"].available is True
+    assert statuses["tracks"].run_name == "tracking_a"
+    assert plan.ready is True
+    assert plan.node_by_id["refined_keypoints"].action == "reuse"
+    assert plan.node_by_id["tracks"].action == "reuse"
+    assert plan.node_by_id["track_kinematics"].action == "run"
+    assert plan.execution_order == ("track_kinematics",)
 
 
 def test_keypoint_authority_resolver_accepts_clipped_canonical_passthrough(

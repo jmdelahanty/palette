@@ -7,6 +7,10 @@ from types import MappingProxyType
 from typing import Mapping, Sequence
 
 from .contracts import AnalysisWorkflow, WorkflowNode
+from .execution_profiles import (
+    PRODUCTION_EXECUTION_PROFILE_ID,
+    resolve_workflow_execution_profile,
+)
 
 
 @dataclass(frozen=True)
@@ -121,6 +125,7 @@ def plan_analysis_workflow(
     availability: Mapping[str, object],
     *,
     targets: Sequence[str] | None = None,
+    execution_profile_id: str = PRODUCTION_EXECUTION_PROFILE_ID,
 ) -> WorkflowPlan:
     """Plan selected targets without executing or opening array payloads.
 
@@ -130,6 +135,7 @@ def plan_analysis_workflow(
     or test-double availability later.
     """
 
+    execution_profile = resolve_workflow_execution_profile(execution_profile_id)
     selected_targets = tuple(str(value) for value in (targets or workflow.targets))
     closure = _target_closure(workflow, selected_targets)
     ordered = tuple(node_id for node_id in topological_order(workflow) if node_id in closure)
@@ -161,6 +167,21 @@ def plan_analysis_workflow(
                 )
             )
             reason = stage_reason
+        elif not execution_profile.supports_stage_producer(node.stage_id):
+            action = "blocked"
+            stage_reason = str(
+                getattr(
+                    stage_status,
+                    "reason",
+                    "required exact candidate is unavailable",
+                )
+            )
+            reason = (
+                f"execution profile {execution_profile.profile_id!r} requires an "
+                f"existing exact named candidate for stage {node.stage_id!r}; "
+                "its producer does not implement this lifecycle profile: "
+                f"{stage_reason}"
+            )
         else:
             action = "run"
             if node.kind == "export":
