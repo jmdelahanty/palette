@@ -1103,11 +1103,27 @@ def _compute_result(
             raise ProviderEpochBehaviorSummaryError(
                 "Core roster and requested swim-bout run disagree."
             )
-        swim_tables = load_default_swim_bout_tables(
-            root,
-            run_name=swim_bout_run_name,
-            legacy_compatibility=False,
-        )
+        completion_snapshot = bout_source.binding.get("completion_snapshot")
+        if not isinstance(completion_snapshot, Mapping):
+            raise ProviderEpochBehaviorSummaryError(
+                "Core swim-bout selector lifecycle is not supported."
+            )
+        selector_eligible = completion_snapshot.get("selector_eligible")
+        if selector_eligible is True:
+            swim_tables = load_default_swim_bout_tables(
+                root,
+                run_name=swim_bout_run_name,
+                legacy_compatibility=False,
+            )
+        elif selector_eligible is False:
+            swim_tables = load_exact_selector_ineligible_default_swim_bout_tables(
+                root,
+                run_name=swim_bout_run_name,
+            )
+        else:
+            raise ProviderEpochBehaviorSummaryError(
+                "Core swim-bout selector lifecycle is not supported."
+            )
         if (
             swim_tables.run_path != bout_source.binding["run_path"]
             or swim_tables.candidate.candidate_id != bout_source.binding["candidate_id"]
