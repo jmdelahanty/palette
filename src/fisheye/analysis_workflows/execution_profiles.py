@@ -25,6 +25,12 @@ class WorkflowExecutionProfile:
     expected_selector_eligible: bool
     selector_policy: str
     registry_policy: str
+    unsupported_producer_stage_ids: frozenset[str] = frozenset()
+
+    def supports_stage_producer(self, stage_id: str | None) -> bool:
+        """Return whether this lifecycle profile may create ``stage_id``."""
+
+        return stage_id is None or stage_id not in self.unsupported_producer_stage_ids
 
 
 _PROFILES: Mapping[str, WorkflowExecutionProfile] = MappingProxyType(

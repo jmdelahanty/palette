@@ -127,14 +127,23 @@ def build_plan_payload(
     forced_unavailable: Iterable[str] = (),
     execution_profile_id: str = PRODUCTION_EXECUTION_PROFILE_ID,
 ) -> dict[str, object]:
+    requested_materializations = tuple(
+        canonical_stage_id(value) for value in forced_unavailable
+    )
     availability = build_availability(
         workflow,
         zarr_path,
         forced_available=forced_available,
-        forced_unavailable=forced_unavailable,
+        forced_unavailable=requested_materializations,
         execution_profile_id=execution_profile_id,
     )
-    plan = plan_analysis_workflow(workflow, availability, targets=targets)
+    plan = plan_analysis_workflow(
+        workflow,
+        availability,
+        targets=targets,
+        execution_profile_id=execution_profile_id,
+        materialize_stage_ids=requested_materializations,
+    )
     return {
         "schema_id": "palette.analysis_workflow_plan",
         "schema_version": 1,

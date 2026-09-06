@@ -388,7 +388,7 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-cea6f97b0c311f86"
+            "schema-writer-90cf17c96da4ba84"
           ],
           "shape": "len(bbox_coords)"
         },
@@ -5622,7 +5622,7 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-68194034b4d5006d"
+            "schema-writer-56c459e3017fae0f"
           ],
           "shape": "(num_frames, n_masks)"
         },
@@ -60931,8 +60931,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/tracking/arena_assignment.py",
-      "line": 1064,
-      "occurrence_id": "schema-writer-cea6f97b0c311f86",
+      "line": 1085,
+      "occurrence_id": "schema-writer-90cf17c96da4ba84",
       "path_pattern": "<assign_group>/arena_ids",
       "required": null,
       "shape_expression": "len(bbox_coords)",
@@ -60944,7 +60944,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-1bf9d3e03c4735ad"
+      "writer_site_id": "writer-6136b091af606515"
     },
     {
       "access_pattern": "unclassified",
@@ -60965,8 +60965,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/tracking/arena_assignment.py",
-      "line": 1084,
-      "occurrence_id": "schema-writer-68194034b4d5006d",
+      "line": 1105,
+      "occurrence_id": "schema-writer-56c459e3017fae0f",
       "path_pattern": "<assign_group>/n_detections_per_arena",
       "required": null,
       "shape_expression": "(num_frames, n_masks)",
@@ -60978,7 +60978,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-8da9477e116cf7e7"
+      "writer_site_id": "writer-b7fd03a8fc3cef51"
     },
     {
       "access_pattern": "unclassified",

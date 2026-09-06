@@ -5,6 +5,26 @@ Local-validation snapshot, before publication: implemented and locally validated
 uncommitted and **not merge-ready**. The subsequent PR records the published
 candidate SHA and live CI status; this snapshot does not claim remote CI success.
 
+## Authorized Palette-only PR preparation
+
+The user authorized preparing the Palette PR sequence on 2026-09-06, including
+commits, pushes, and candidate CI. Merge to `main`, repository-rule changes,
+shared-checkout updates, deployment, and activation remain separate.
+
+The clean owned PR 140 worktree at
+`6b87f860348a893ad358f9b46d19e74fccc3db3f` was combined with exact current main
+`3d017867e79b14d11ddca3ee1916d50ac6499c78` using a history-preserving merge.
+Before combination, all 24 checks on the former and all 23 checks on the latter
+were verified completed/successful. The merge was conflict-free; it preserves
+the newer roster/tracking work already landed in main. No other worker's dirty
+changes were copied or modified.
+
+This updated candidate is incomplete until its own required checks succeed.
+All 23 prerequisite jobs listed below and `ci-required` must run successfully on
+the exact new candidate; the two incoming green runs do not establish that.
+The PR update records the resulting commit and CI run. The original evidence
+below remains a historical local-validation snapshot.
+
 ## Location and scope
 
 - Worktree: `/tmp/palette-ci-required-gate-20260906`.

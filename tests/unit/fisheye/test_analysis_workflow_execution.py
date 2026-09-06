@@ -963,6 +963,50 @@ def test_selector_ineligible_execution_renders_only_typed_candidate_commands(
     assert tail[tail.index("--num-workers") + 1] == "1"
 
 
+def test_selector_ineligible_execution_renders_candidate_tracking_lifecycle(
+    tmp_path: Path,
+) -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    availability = {
+        "refined_keypoints": _status(
+            "refined_keypoints",
+            available=True,
+            run_name="canonical_clipped_candidate",
+        ),
+        "tracks": _status(
+            "tracks",
+            available=False,
+            run_name="tracking_candidate_typo",
+        ),
+        "track_kinematics": _status("track_kinematics", available=False),
+    }
+    production_plan = plan_analysis_workflow(
+        workflow,
+        availability,
+        targets=("track_kinematics",),
+    )
+    assert production_plan.node_by_id["tracks"].action == "run"
+
+    execution = build_workflow_execution_plan(
+        workflow,
+        production_plan,
+        zarr_path=tmp_path / "analysis.zarr",
+        execution_id="profile_safe_tracking",
+        num_workers=1,
+        output_run_overrides={"tracks": "tracking_candidate"},
+        python_executable="scripts/py",
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+
+    tracks = execution.commands[0]
+    assert tracks.node_id == "tracks"
+    assert tracks.output_run == "tracking_candidate"
+    assert "--selector-ineligible" in tracks.argv
+    assert tracks.argv[tracks.argv.index("--source-keypoint-run") + 1] == (
+        "canonical_clipped_candidate"
+    )
+
+
 def test_execution_composes_clipped_tracking_and_active_mask_bundle(
     tmp_path: Path,
 ) -> None:
