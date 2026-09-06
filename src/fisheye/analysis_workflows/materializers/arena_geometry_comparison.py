@@ -393,6 +393,278 @@ def _gate_disagreement(
     }
 
 
+def build_arena_geometry_shadow_evaluation(
+    source_zarr: str | Path,
+    *,
+    acquisition_candidate_run: str,
+    fit_review_run: str,
+    detect_source_group_path: str,
+    policy: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Read immutable blind-fit evidence and evaluate an inactive policy.
+
+    Unlike the v1 human comparison path this consumes the unreviewed fit
+    package directly; no fake reviewer or manually approved Palette candidate
+    is required. It always records unresolved physical-edge semantics. No
+    archive write, geometry selection, acceptance receipt, or publication is
+    performed. The opt-in rim-metrics producer/validator is a prerequisite.
+    """
+    from fisheye.analysis_workflows.materializers import arena_geometry_candidates
+    from fisheye.analysis_workflows.materializers import arena_geometry_fit_review
+    from fisheye.shared.arena_geometry_auto_policy import (
+        EVIDENCE_SCHEMA_ID,
+        build_geometry_auto_policy,
+        evaluate_geometry_auto_policy,
+    )
+    from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+
+    archive = Path(source_zarr).expanduser().resolve()
+    root = open_zarr_root(archive, mode="r")
+    acquisition = _candidate_snapshot(
+        root,
+        run_name=acquisition_candidate_run,
+        expected_kind=ACQUISITION_CANDIDATE_KIND,
+    )
+    record = acquisition["record"]
+    # Reopen and hash every immutable fit artifact before inspecting metrics.
+    package = arena_geometry_fit_review.load_arena_geometry_fit_review_evidence(
+        archive,
+        run_name=fit_review_run,
+    )
+    report = json.loads(package.fit_report_bytes)
+    if (
+        report.get("schema_id") != arena_geometry_fit_review.PROBE_SCHEMA_ID
+        or report.get("schema_version") != 1
+        or report.get("status") != "provisional_visual_review_required"
+        or report.get("fit_frozen_before_acquisition_reveal") is not True
+        or (report.get("parameters") or {}).get(
+            "acquisition_geometry_available_to_fitter"
+        )
+        is not False
+        or (report.get("fit_evidence_contract") or {}).get(
+            "all_window_candidates_frozen"
+        )
+        is not True
+        or (report.get("fit_evidence_contract") or {}).get(
+            "candidate_geometry_revealed_to_acquisition_fit"
+        )
+        is not False
+    ):
+        raise ValueError("Shadow evaluation requires a valid frozen independent fit.")
+    source = report.get("source")
+    windows = report.get("windows")
+    if not isinstance(source, Mapping) or not isinstance(windows, Mapping):
+        raise ValueError("Shadow fit lacks source and temporal evidence.")
+    metrics = report.get("rim_metrics")
+    if not isinstance(metrics, Mapping):
+        raise ValueError(
+            "Shadow evaluation requires independently measured rim_metrics."
+        )
+    validator = getattr(arena_geometry_fit_review, "validate_rim_metrics", None)
+    consensus_validator = getattr(
+        arena_geometry_fit_review, "validate_rim_metrics_consensus", None
+    )
+    if validator is None or consensus_validator is None:
+        raise ValueError("The versioned rim-metrics validator is not available.")
+    validator(metrics, source=source, windows=windows)
+    consensus_validator(report.get("consensus_fit"), windows=windows)
+    coordinate, arena, video = (
+        arena_geometry_candidates._source_camera_candidate_binding(
+            archive,
+            expected_camera_serial=str(source.get("camera_serial") or ""),
+            fit_source=source,
+            arena_binding=record["arena_binding"],
+        )
+    )
+    if coordinate != record["coordinate_binding"] or arena != record["arena_binding"]:
+        raise ValueError(
+            "Shadow fit and acquisition coordinate/arena bindings disagree."
+        )
+    shape = source.get("image_shape_px") or {}
+    if (shape.get("width"), shape.get("height")) != (
+        coordinate["native_width_px"],
+        coordinate["native_height_px"],
+    ) or source.get("pixel_contract") != "orange.camera.mono8.full_frame.v1":
+        raise ValueError("Shadow fit source raster or pixel contract disagrees.")
+    mode = source.get("mode") or "single_video"
+    if mode == "single_video":
+        fingerprint = video.get("file_fingerprint") or {}
+        if (
+            source.get("frame_count") != video.get("total_frames")
+            or source.get("video_size_bytes") != fingerprint.get("size_bytes")
+            or Path(str(source.get("video_path"))).name != video.get("source_video")
+        ):
+            raise ValueError("Shadow fit does not bind the recording source video.")
+    elif mode != "clipped_recording":
+        raise ValueError("Unsupported shadow fit source layout.")
+    consensus = report.get("consensus_fit") or {}
+    if consensus.get("coordinate_space") != "camera_native_pixels":
+        raise ValueError("Shadow consensus must use native camera pixels.")
+    fitted = _circle(consensus, label="shadow independent fit")
+    selected = [
+        metrics["windows"][name]["candidates"][
+            metrics["windows"][name]["selected_candidate_id"]
+        ]
+        for name in ("early", "middle", "late")
+    ]
+    if any(item.get("radial_residual_p95_px") is None for item in selected):
+        raise ValueError("Independent selected rim has no measurable image support.")
+    physical = _circle(record["physical_inner_rim"], label="acquisition physical rim")
+    acquisition_gate = _circle(
+        record["valid_detection_region"], label="acquisition gate"
+    )
+    if package.acquisition_reveal_bytes is None:
+        raise ValueError(
+            "Shadow evaluation requires bound acquisition image-support evidence."
+        )
+    reveal = json.loads(package.acquisition_reveal_bytes)
+    support = reveal.get("acquisition_boundary_edge_support") or {}
+    if (
+        support.get("status") != "measured"
+        or support.get("fit_frozen_before_measurement") is not True
+        or support.get("coordinate_space") != "camera_native_pixels"
+        or _circle(support, label="acquisition image support") != physical
+        or _sha256_hex(
+            support.get("source_observation_sha256"), label="image-support observation"
+        )
+        != _sha256_hex(
+            record["acquisition_source"]["source_observation_sha256"],
+            label="producer observation",
+        )
+    ):
+        raise ValueError(
+            "Acquisition image support is missing, stale, or for the wrong circle."
+        )
+    support_windows = support.get("windows")
+    if not isinstance(support_windows, Mapping) or set(support_windows) != {
+        "early",
+        "middle",
+        "late",
+    }:
+        raise ValueError("Acquisition support lacks exact temporal coverage.")
+    for window in support_windows.values():
+        if (
+            not isinstance(window, Mapping)
+            or window.get("status") != "measured"
+            or window.get("geometry_frozen") is not True
+        ):
+            raise ValueError(
+                "Acquisition support contains incomplete temporal evidence."
+            )
+    detections = _detection_snapshot(
+        root,
+        source_group_path=detect_source_group_path,
+        coordinate_binding=coordinate,
+    )
+    centers = np.asarray(detections["centers"], dtype=np.float64)
+    if len(centers) == 0 or not np.isfinite(centers).all():
+        raise ValueError(
+            "Shadow boundary impact requires a nonempty finite exact detection rowset."
+        )
+    operational = _gate_disagreement(
+        detections,
+        acquisition_gate=acquisition_gate,
+        palette_gate=fitted,
+    )
+    temporal = metrics["temporal"]
+    evidence = {
+        "schema_id": EVIDENCE_SCHEMA_ID,
+        "schema_version": 1,
+        "source_bindings": {
+            "acquisition_candidate_record_sha256": acquisition[
+                "candidate_record_sha256"
+            ],
+            "fit_report_sha256": hashlib.sha256(package.fit_report_bytes).hexdigest(),
+            "detection_source_signature": detections["signature"],
+            "acquisition_observation_sha256": _sha256_hex(
+                record["acquisition_source"]["source_observation_sha256"],
+                label="producer observation",
+            ),
+            "coordinate_binding_sha256": canonical_json_sha256(coordinate),
+            "rim_metrics_sha256": canonical_json_sha256(metrics),
+            "scientific_recipe_sha256": canonical_json_sha256(
+                report.get("scientific_recipe")
+            ),
+        },
+        "applicability": {
+            "rig_id": arena["rig_id"],
+            "canvas_name": arena["canvas_name"],
+            "arena_id": arena["arena_id"],
+            "camera_serial": arena["camera_serial"],
+            "coordinate_profile_id": coordinate["profile_id"],
+            "native_width_px": coordinate["native_width_px"],
+            "native_height_px": coordinate["native_height_px"],
+        },
+        "semantic_compatibility": "projected_edges_unresolved",
+        "producer_geometry_valid": True,
+        "independent_fit_valid": True,
+        "coordinate_bindings_match": True,
+        "fit_frozen_before_acquisition_reveal": True,
+        "acquisition_gate": _circle_record(acquisition_gate),
+        "additional_palette_tolerance_px": 0.0,
+        "boundary_inclusion": "inclusive",
+        "same_feature_physical_boundary_metrics": None,
+        "metrics": {
+            "center_displacement_px": math.hypot(
+                fitted[0] - physical[0], fitted[1] - physical[1]
+            ),
+            "circle_iou": _circle_iou(acquisition_gate, fitted),
+            "gate_disagreement_fraction": operational[
+                "exclusive_disagreement_fraction"
+            ],
+            "acquisition_only_fraction": operational["acquisition_only_count"]
+            / len(centers),
+            "palette_only_fraction": operational["palette_only_count"] / len(centers),
+            "detection_row_count": len(centers),
+            "angular_support_fraction": min(
+                item["angular_support_fraction"] for item in selected
+            ),
+            "visible_angular_fraction": min(
+                item["visible_angular_fraction"] for item in selected
+            ),
+            "unsupported_arc_degrees": max(
+                item["longest_unsupported_arc_degrees"] for item in selected
+            ),
+            "radial_residual_p95_px": max(
+                item["radial_residual_p95_px"] for item in selected
+            ),
+            "quadrant_support_fraction": min(
+                value
+                for item in selected
+                for value in item["quadrant_support_fractions"]
+            ),
+            "between_window_center_displacement_px": temporal[
+                "center_max_pairwise_distance_px"
+            ],
+            "between_window_radius_range_px": temporal["radius_range_px"],
+            "rim_family_center_spread_px": temporal[
+                "rim_family_center_max_distance_px"
+            ],
+            "rim_family_radius_hausdorff_distance_px": temporal[
+                "rim_family_radius_hausdorff_distance_px"
+            ],
+            "rim_family_candidate_count": temporal["minimum_candidate_count"],
+            "acquisition_boundary_support_fraction": min(
+                item["angular_edge_support_fraction"]
+                for item in support_windows.values()
+            ),
+            "acquisition_boundary_radial_offset_px": max(
+                item["median_absolute_radial_offset_px"]
+                for item in support_windows.values()
+            ),
+        },
+    }
+    evaluation = evaluate_geometry_auto_policy(
+        policy=policy if policy is not None else build_geometry_auto_policy(),
+        evidence=evidence,
+    )
+    return {
+        "evaluation": evaluation,
+        "evidence": evidence,
+        "operational_gate_disagreement": operational,
+    }
+
+
 def _policy_record(policy_id: str) -> dict[str, Any]:
     if policy_id not in SUPPORTED_POLICY_IDS:
         raise ValueError(f"Unsupported geometry comparison policy: {policy_id!r}.")
