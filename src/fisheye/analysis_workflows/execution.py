@@ -893,6 +893,23 @@ def build_workflow_execution_plan(
         ]
         raise WorkflowExecutionError("workflow plan is blocked: " + ", ".join(blocked))
 
+    unsupported_producers = [
+        node
+        for node in workflow_plan.nodes
+        if node.action == "run"
+        and node.node_id in workflow_plan.execution_order
+        and not execution_profile.supports_stage_producer(node.stage_id)
+    ]
+    if unsupported_producers:
+        descriptions = ", ".join(
+            f"stage {node.stage_id!r} (node {node.node_id!r})"
+            for node in unsupported_producers
+        )
+        raise WorkflowExecutionError(
+            f"execution profile {execution_profile.profile_id!r} cannot produce "
+            f"{descriptions}; an existing exact named candidate is required"
+        )
+
     planned_by_id = workflow_plan.node_by_id
     workflow_nodes = workflow.node_by_id
     overrides: dict[str, str] = {}

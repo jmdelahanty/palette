@@ -25,6 +25,12 @@ class WorkflowExecutionProfile:
     expected_selector_eligible: bool
     selector_policy: str
     registry_policy: str
+    unsupported_producer_stage_ids: frozenset[str] = frozenset()
+
+    def supports_stage_producer(self, stage_id: str | None) -> bool:
+        """Return whether this lifecycle profile may create ``stage_id``."""
+
+        return stage_id is None or stage_id not in self.unsupported_producer_stage_ids
 
 
 _PROFILES: Mapping[str, WorkflowExecutionProfile] = MappingProxyType(
@@ -40,6 +46,11 @@ _PROFILES: Mapping[str, WorkflowExecutionProfile] = MappingProxyType(
             expected_selector_eligible=False,
             selector_policy="exact_named_candidates_parent_selectors_unchanged",
             registry_policy="disabled_selector_ineligible_canary",
+            # The maintained arena-assignment/tracking producer publishes a
+            # selector-eligible run.  Until that producer has its own complete
+            # candidate lifecycle, canaries must reuse one exact admitted track
+            # run for both full-acquisition and clipped recording rowsets.
+            unsupported_producer_stage_ids=frozenset({"tracks"}),
         ),
     }
 )

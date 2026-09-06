@@ -134,7 +134,12 @@ def build_plan_payload(
         forced_unavailable=forced_unavailable,
         execution_profile_id=execution_profile_id,
     )
-    plan = plan_analysis_workflow(workflow, availability, targets=targets)
+    plan = plan_analysis_workflow(
+        workflow,
+        availability,
+        targets=targets,
+        execution_profile_id=execution_profile_id,
+    )
     return {
         "schema_id": "palette.analysis_workflow_plan",
         "schema_version": 1,

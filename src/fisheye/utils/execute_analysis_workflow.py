@@ -687,6 +687,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             workflow,
             availability,
             targets=tuple(args.target),
+            execution_profile_id=args.execution_profile,
         )
         report_path = (
             args.report.expanduser().resolve() if args.report is not None else None
