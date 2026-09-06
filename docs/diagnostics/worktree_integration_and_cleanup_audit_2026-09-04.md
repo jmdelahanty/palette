@@ -1,10 +1,13 @@
 # Worktree, agent activity, and clean-main integration audit
 
-> Status correction added 2026-09-06: the unprotected-main finding below is
-> historical. The September 6 cross-check observed 23 strict required checks on
-> main; the separate success-only gate PR remains unmerged and not activated.
-> Worktree counts, process observations, and PR states below are not current
-> cleanup clearance. See the [September 6 reconciliation](review_docs_rules_landing_handoff_2026-09-05.md#september-6-audit-reconciliation) and owning queue before acting.
+> Integration update, 2026-09-06: the unprotected-main finding below is
+> historical. The success-only gate is merged and main's existing ruleset now
+> requires all 23 original checks plus `ci-required`, with strict current-base
+> validation and unchanged protections. Five scoped PRs have landed with
+> successful post-merge CI; #145 records the final documentation candidate.
+> See the [integration handoff](review_docs_rules_landing_handoff_2026-09-05.md#authorized-main-integration--september-6).
+> Worktree counts, process observations, and PR states below are dated evidence,
+> not current ownership or cleanup clearance. No cleanup was authorized.
 
 Date: 2026-09-04. Final main/PR observation: 22:39 EDT (2026-09-05 02:39 UTC). Worktree status snapshot: approximately 22:38 EDT. These are dated observations, not a live dashboard.
 

@@ -18,6 +18,9 @@ import zarr
 
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.import_video_metadata import probe_video_metadata
+from fisheye.shared.recording_preflight import preflight_gate_reason, read_manifest_payload
+from fisheye.shared.recording_manifest_context import validate_recording_manifest_context
+from fisheye.shared.source_recording_identity import require_source_identity_text
 
 
 DEFAULT_RECORDING_TYPE = "behavior"
@@ -88,10 +91,6 @@ def _merge_fields(
         if overwrite or current in (None, "", [], {}):
             merged[key] = value
     return merged
-
-
-def _default_session_uuid(*, recording_dir: Path, video_path: Path) -> str:
-    return _slugify(recording_dir.name or video_path.stem)
 
 
 def _default_recording_name(*, recording_dir: Path, video_path: Path) -> str:
@@ -248,10 +247,22 @@ def apply_manual_metadata(
     metadata: VideoOnlyRecordingMetadata,
     overwrite: bool,
 ) -> None:
+    require_source_identity_text(metadata.session_uuid, field="session_uuid")
+    require_source_identity_text(metadata.recording_id, field="recording_id")
+    validate_recording_manifest_context({
+        field: getattr(metadata, field)
+        for field in ("recording_type", "recording_subtype", "behavior_mode", "artifact_schema_id")
+    })
+    if metadata.artifact_schema_id.strip() == "recording_analysis_v1":
+        raise ValueError("Manual sampled training cannot claim recording_analysis_v1.")
     if not zarr_path.exists():
         raise FileNotFoundError(f"Zarr path not found: {zarr_path}")
 
-    root = zarr.open_group(str(zarr_path), mode="r+")
+    root = zarr.open_group(str(zarr_path), mode="r+", use_consolidated=False)
+    if root.attrs.get("zarr_purpose") != "training" or root.attrs.get("zarr_use") not in (None, "training"):
+        raise ValueError("Manual video-only metadata requires a training Zarr, never source analysis.")
+    if root.attrs.get("artifact_kind") == "source_recording":
+        raise ValueError("Manual training metadata cannot mutate a source-recording authority.")
     analysis_meta = root.require_group("analysis_metadata")
 
     root_updates = {
@@ -419,9 +430,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--session-uuid",
         type=str,
-        help="Stable session UUID / dataset identity. Defaults to a slug from recording_dir or video stem.",
+        required=True,
+        help="Explicit acquisition-session identity; never inferred from a directory or video name.",
     )
-    parser.add_argument("--recording-id", type=str, help="Optional explicit recording_id.")
+    parser.add_argument("--recording-id", type=str, required=True, help="Explicit per-recording identity, separate from the session.")
     parser.add_argument("--recording-name", type=str, help="Human-readable recording name.")
     parser.add_argument("--session-start-utc", type=str, help="Optional session start time in ISO 8601 UTC.")
     parser.add_argument("--recording-type", type=str, default=DEFAULT_RECORDING_TYPE)
@@ -456,11 +468,16 @@ def _build_metadata(
     recording_dir: Path,
     video_path: Path,
 ) -> VideoOnlyRecordingMetadata:
-    session_uuid = _normalize_text(args.session_uuid) or _default_session_uuid(
-        recording_dir=recording_dir,
-        video_path=video_path,
-    )
-    recording_id = _normalize_text(args.recording_id) or session_uuid
+    session_uuid = require_source_identity_text(args.session_uuid, field="session_uuid")
+    recording_id = require_source_identity_text(args.recording_id, field="recording_id")
+    validate_recording_manifest_context({
+        "recording_type": args.recording_type,
+        "recording_subtype": args.recording_subtype,
+        "behavior_mode": args.behavior_mode,
+        "artifact_schema_id": args.artifact_schema_id,
+    })
+    if args.artifact_schema_id.strip() == "recording_analysis_v1":
+        raise ValueError("Manual sampled training cannot claim recording_analysis_v1.")
     recording_name = _normalize_text(args.recording_name) or _default_recording_name(
         recording_dir=recording_dir,
         video_path=video_path,
@@ -470,10 +487,10 @@ def _build_metadata(
         recording_id=recording_id,
         recording_name=recording_name,
         session_start_iso8601_utc=_normalize_text(args.session_start_utc),
-        recording_type=_normalize_text(args.recording_type) or DEFAULT_RECORDING_TYPE,
-        recording_subtype=_normalize_text(args.recording_subtype) or DEFAULT_RECORDING_SUBTYPE,
-        behavior_mode=_normalize_text(args.behavior_mode) or DEFAULT_BEHAVIOR_MODE,
-        artifact_schema_id=_normalize_text(args.artifact_schema_id) or DEFAULT_ARTIFACT_SCHEMA_ID,
+        recording_type=args.recording_type.strip(),
+        recording_subtype=args.recording_subtype.strip(),
+        behavior_mode=args.behavior_mode.strip(),
+        artifact_schema_id=args.artifact_schema_id.strip(),
         dish_design=_normalize_text(args.dish_design),
         rig_id=_normalize_text(args.rig_id),
         arena_id=_normalize_text(args.arena_id),
@@ -538,10 +555,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     tentative_recording_dir = (
         args.recording_dir.expanduser().resolve() if args.recording_dir is not None else video_path.parent.resolve()
     )
-    tentative_session_uuid = _normalize_text(args.session_uuid) or _default_session_uuid(
-        recording_dir=tentative_recording_dir,
-        video_path=video_path,
-    )
+    try:
+        tentative_session_uuid = require_source_identity_text(args.session_uuid, field="session_uuid")
+    except ValueError as exc:
+        print(str(exc))
+        return 1
     zarr_path = (
         args.zarr_path.expanduser().resolve()
         if args.zarr_path is not None
@@ -552,7 +570,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         ).resolve()
     )
     recording_dir = _resolve_recording_dir(args, zarr_path=zarr_path, video_path=video_path)
-    metadata = _build_metadata(args, recording_dir=recording_dir, video_path=video_path)
+    reason = preflight_gate_reason(recording_dir)
+    if reason is not None:
+        print(reason)
+        return 1
+    try:
+        manifest = read_manifest_payload(recording_dir)
+        if manifest is not None:
+            validate_recording_manifest_context(manifest)
+        metadata = _build_metadata(args, recording_dir=recording_dir, video_path=video_path)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
 
     _print_plan(
         video_path=video_path,

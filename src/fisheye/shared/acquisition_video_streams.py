@@ -22,6 +22,7 @@ from fisheye.shared.acquisition_crop_stream_ledger import (
     publish_acquisition_crop_stream_ledger,
 )
 from fisheye.shared.import_video_metadata import probe_video_colorimetry_attrs
+from fisheye.shared.source_recording_identity import load_strict_json_object
 
 
 ACQUISITION_VIDEO_STREAMS_SCHEMA_ID = "palette.acquisition_video_streams.v1"
@@ -409,6 +410,60 @@ def _put_attrs(group: Any, updates: Mapping[str, Any]) -> None:
     group.attrs.put(attrs)
 
 
+def validate_acquisition_video_stream_inventory(
+    recording_dir: Path,
+    manifest: Mapping[str, Any],
+    *,
+    imported_at_utc: str | None = None,
+) -> dict[str, Any] | None:
+    """Admit declared streams for ingestion; diagnostic warnings are not approval.
+
+    Undeclared optional files stay optional. A declared file or stream may not
+    disappear, fail parsing, or conflict with observed media during ingestion.
+    The read-only inventory builder remains available for diagnostic reports.
+    """
+
+    if manifest.get("video_streams") is not None:
+        declared = manifest["video_streams"]
+        if not isinstance(declared, Mapping):
+            raise ValueError("acquisition video streams must be an object")
+        streams = declared.get("streams")
+        if not isinstance(streams, Mapping) or not streams:
+            raise ValueError("acquisition video stream declarations must be a nonempty object")
+        for key, stream in streams.items():
+            if not isinstance(key, str) or not key or not isinstance(stream, Mapping):
+                raise ValueError("acquisition video stream declaration is malformed")
+            video_path = _resolve_relative(recording_dir, stream.get("video"))
+            if key == "full" and "frame_clock_metadata" not in stream and video_path is not None:
+                conventional = video_path.with_name(f"{video_path.stem}_meta.csv")
+                if conventional.exists():
+                    raise ValueError("acquisition video stream full must explicitly bind its clock; conventional or crop-clock fallback is forbidden")
+            for field in _PATH_FIELDS:
+                if field not in stream:
+                    continue
+                path = _resolve_relative(recording_dir, stream[field])
+                if path is None or not path.is_file():
+                    raise ValueError(f"acquisition video stream {key}.{field} must name an existing file")
+                if field in {"summary", "status"}:
+                    try:
+                        payload = load_strict_json_object(path)
+                    except ValueError as exc:
+                        raise ValueError(f"acquisition video stream {key}.{field} is invalid: {exc}") from exc
+                    if str(payload.get("status", "")).strip().lower() in {"fail", "failed", "error"}:
+                        raise ValueError(f"acquisition video stream {key}.{field} records a failure")
+    inventory = build_acquisition_video_stream_inventory(
+        recording_dir, manifest, imported_at_utc=imported_at_utc,
+    )
+    if inventory is not None and inventory["inventory_status"] != "ok":
+        failures = {
+            key: {"missing": item["required_missing"], "warnings": item["warnings"]}
+            for key, item in inventory["streams"].items()
+            if item["availability_status"] != "ok"
+        }
+        raise ValueError(f"acquisition video stream inventory failed: {failures}")
+    return inventory
+
+
 def _reopen_group_direct(group: Any) -> Any:
     try:
         return zarr.open_group(
@@ -434,7 +489,7 @@ def write_acquisition_video_stream_inventory(
 ) -> dict[str, Any] | None:
     """Write manifest-declared acquisition video streams into an analysis zarr."""
 
-    inventory = build_acquisition_video_stream_inventory(
+    inventory = validate_acquisition_video_stream_inventory(
         recording_dir,
         manifest,
         imported_at_utc=imported_at_utc,

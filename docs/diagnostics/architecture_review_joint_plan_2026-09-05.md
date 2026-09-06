@@ -1,12 +1,15 @@
 # Joint plan for the architecture reviews
 
-> Status update added 2026-09-06: this plan and the completed instruction audit
-> are now in the uncommitted documentation draft. Main's unprotected state and
-> the two-verifier count below are historical: the cross-check found 23 strict
-> required checks, six stage-specific runtime verifiers, and execution-time
-> reuse validation. The success-only gate remains a separate unmerged PR.
-> Ownership inventories and rollout steps require current-base reconciliation;
-> see the [September 6 reconciliation](review_docs_rules_landing_handoff_2026-09-05.md#september-6-audit-reconciliation). This is not a new queue or merge-readiness claim.
+> Integration update, 2026-09-06: this plan and the completed instruction audit
+> are in [PR #145](https://github.com/jmdelahanty/palette/pull/145), refreshed
+> onto validated main `04779a6b20512dc01f2a28b6cfb34d6b705a6744` after
+> #140, #143, #146, #147, and #142 landed and passed their post-merge CI.
+> Main now requires all 23 original checks plus the success-only `ci-required`
+> aggregate. The unprotected-main and two-verifier observations below remain
+> historical; the September 6 cross-check found six stage-specific verifiers
+> and execution-time reuse validation. See the [integration handoff](review_docs_rules_landing_handoff_2026-09-05.md#authorized-main-integration--september-6)
+> and live PR for this candidate's exact head and CI. Ownership inventories
+> still need fresh reconciliation before new implementation or cleanup.
 
 Date: 2026-09-05, America/New_York. Read-only planning and blocker assessment;
 implementation, integration, remote administration, and production changes

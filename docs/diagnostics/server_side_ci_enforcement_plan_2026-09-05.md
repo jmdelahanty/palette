@@ -1,12 +1,22 @@
 # Server-side CI enforcement rollout for Palette
 
-> Status update added 2026-09-06: Phase A is now active, with 23 strict required
-> contexts on main. The success-only implementation is in unmerged
-> [PR #140](https://github.com/jmdelahanty/palette/pull/140); its 24 successful
-> checks did not activate it. The later refreshed head `74926b21` includes main
-> `3d017867` and passed all 24 checks; it is still unmerged. Do not recreate
-> Phase A or claim `ci-required` is required yet. The original proposal and
-> audit-time “not performed” statements remain below; see the [September 6 reconciliation](review_docs_rules_landing_handoff_2026-09-05.md#september-6-audit-reconciliation).
+> Integration update, 2026-09-06: Phase B is active. Main requires all original
+> 23 checks **plus `ci-required`**, with strict current-base checks and GitHub
+> Actions source app 15368. [PR #140](https://github.com/jmdelahanty/palette/pull/140)
+> merged as `3c98979be9bf4eb19db5a855950e53f8dcec563f`; all 24 post-merge
+> checks passed in [run 34044178789](https://github.com/jmdelahanty/palette/actions/runs/34044178789)
+> before the approved aggregate addition to existing ruleset `22372296` at
+> 16:23 UTC. No other protections or bypass settings changed. The ruleset and
+> effective main rules were read back and verified. See the
+> [integration evidence](review_docs_rules_landing_handoff_2026-09-05.md#authorized-main-integration--september-6).
+
+## Historical proposal — September 5
+
+The proposal, observed settings, and “not performed” statements below describe
+the September 5 audit, not the completed September 6 rollout. Do not recreate
+either phase. Subsequent successful ordinary protected merges provide positive
+server-side evidence; no intentionally failing/skipped disposable PR was created
+to claim the broader adversarial server-side acceptance described below.
 
 Date: 2026-09-05. Proposed configuration only: no GitHub settings or CI workflow were changed.
 

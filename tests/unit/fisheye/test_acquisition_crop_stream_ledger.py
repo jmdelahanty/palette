@@ -102,12 +102,10 @@ def test_cardinality_mismatch_fails_without_current_pointer(tmp_path: Path) -> N
     recording_dir, manifest = _fixture(tmp_path, frame_count=3)
     root = zarr.open_group(str(tmp_path / "analysis.zarr"), mode="w", zarr_format=3)
 
-    with pytest.raises(ValueError, match="row count 2 does not match frame_count 3"):
+    with pytest.raises(ValueError, match="metadata_row_count_mismatch"):
         write_acquisition_video_stream_inventory(root, recording_dir, manifest)
 
-    stream = root["analysis/acquisition_video_streams/streams/crop"]
-    assert stream.attrs["canonical_ledger_status"] == "failed"
-    assert "canonical_ledger_run" not in stream.attrs
+    assert "analysis/acquisition_video_streams" not in root
 
 
 def test_changed_source_refuses_to_replace_immutable_current_ledger(tmp_path: Path) -> None:

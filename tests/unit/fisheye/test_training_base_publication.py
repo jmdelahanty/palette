@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import numpy as np
 import pytest
@@ -137,6 +138,23 @@ def test_publish_sampled_training_base_is_atomic_and_ineligible(
     )
     assert len(config_artifact["sha256"]) == 64
     assert not list(destination.parent.glob(".*.publish_tmp.*"))
+
+
+def test_training_publication_refuses_failed_optional_diagnostic_before_decoder(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    inputs = _inputs(tmp_path)
+    (Path(inputs["recording_dir"]) / "recording_manifest.json").write_text(json.dumps({
+        "preflight": {"status": "pass", "h5": {"optional_status": "fail"}},
+    }))
+
+    def unexpected_import(**kwargs):
+        raise AssertionError("failed training input reached decoder")
+
+    monkeypatch.setattr(publication_mod, "import_sampled_training_pynvvc", unexpected_import)
+    with pytest.raises(ValueError, match="h5_optional=fail"):
+        publication_mod.publish_sampled_training_base(**inputs)
+    assert not Path(inputs["destination"]).exists()
 
 
 def test_validate_sampled_training_base_rejects_multi_frame_chunks(

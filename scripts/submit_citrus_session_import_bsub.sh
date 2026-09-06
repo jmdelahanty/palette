@@ -19,7 +19,6 @@ WRITER_LOCK_PATH="${PALETTE_REGISTRY_WRITER_LOCK_PATH:-/tmp/palette-registry-wri
 SHADOW_TEMP_ROOT="${PALETTE_REGISTRY_SHADOW_TEMP_ROOT:-/tmp/palette-registry-shadows}"
 SHADOW_BACKUP_DIR="${PALETTE_REGISTRY_SHADOW_BACKUP_DIR:-}"
 RECORDING_ONLY=0
-ALLOW_PREFLIGHT_FAILURES=0
 RUN_VIDEO_DIAGNOSTICS=1
 RUN_H5_DIAGNOSTICS=1
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -58,7 +57,6 @@ Options:
   --writer-host HOST             Designated registry writer host; required with --register
   --recording-only               Import Orange external_ipc video-only recordings
                                 without H5; selects the no-H5 organizer mode
-  --allow-preflight-failures     Do not block import on manifest preflight fail
   --run-video-diagnostics        Persist video preflight diagnostics in manifests (default)
   --no-run-video-diagnostics     Skip video preflight diagnostics
   --run-h5-diagnostics           Persist H5 preflight diagnostics in manifests (default)
@@ -85,7 +83,6 @@ while [[ $# -gt 0 ]]; do
     --registry) REGISTRY="$2"; shift 2;;
     --writer-host) WRITER_HOST="$2"; shift 2;;
     --recording-only) RECORDING_ONLY=1; shift;;
-    --allow-preflight-failures) ALLOW_PREFLIGHT_FAILURES=1; shift;;
     --run-video-diagnostics) RUN_VIDEO_DIAGNOSTICS=1; shift;;
     --no-run-video-diagnostics) RUN_VIDEO_DIAGNOSTICS=0; shift;;
     --run-h5-diagnostics) RUN_H5_DIAGNOSTICS=1; shift;;
@@ -192,7 +189,6 @@ export PALETTE_REGISTRY_SHADOW_BACKUP_DIR=${quoted_shadow_backup_dir}
 JOB_DRY_RUN=${JOB_DRY_RUN}
 REGISTER=${REGISTER}
 RECORDING_ONLY=${RECORDING_ONLY}
-ALLOW_PREFLIGHT_FAILURES=${ALLOW_PREFLIGHT_FAILURES}
 RUN_VIDEO_DIAGNOSTICS=${RUN_VIDEO_DIAGNOSTICS}
 RUN_H5_DIAGNOSTICS=${RUN_H5_DIAGNOSTICS}
 JOB_ID="\${LSB_JOBID:-manual}"
@@ -222,9 +218,6 @@ if [[ "\${REGISTER}" == "1" ]]; then
 fi
 if [[ "\${RECORDING_ONLY}" == "1" ]]; then
   cmd+=(--recording-only)
-fi
-if [[ "\${ALLOW_PREFLIGHT_FAILURES}" == "1" ]]; then
-  cmd+=(--allow-preflight-failures)
 fi
 if [[ "\${RUN_VIDEO_DIAGNOSTICS}" == "1" ]]; then
   cmd+=(--run-video-diagnostics)

@@ -1,6 +1,73 @@
 # Review documentation and collaboration rules: local landing handoff
 
-## Authorized PR preparation — September 6
+## Authorized main integration — September 6
+
+The user authorized the six-PR Palette integration sequence and separately
+approved adding `ci-required` to the existing main ruleset. The Palette root
+worker owns this final documentation branch and queue reconciliation at
+`/tmp/palette-review-docs-rules-20260905`, branch
+`agent/palette/review-docs-rules-20260905`. This section supersedes the earlier
+preparation-only authorization/status snapshots below, not their historical
+measurements, scientific conclusions, or source pins.
+
+The following exact candidates and their resulting main commits each passed
+all 24 required checks. No incoming commit was incorporated before its own
+required checks succeeded; each new combination was validated independently.
+
+| PR | Validated candidate head | Candidate CI | Main merge commit | Post-merge CI |
+| --- | --- | --- | --- | --- |
+| [140](https://github.com/jmdelahanty/palette/pull/140) | `74926b21cb2e587b1caae151aaa9c4df91e592b8` | [34028051914](https://github.com/jmdelahanty/palette/actions/runs/34028051914) | `3c98979be9bf4eb19db5a855950e53f8dcec563f` | [34044178789](https://github.com/jmdelahanty/palette/actions/runs/34044178789) |
+| [143](https://github.com/jmdelahanty/palette/pull/143) | `aba88dbfd2821ba087155fc46b2cbe7a7c129fc5` | [34045457741](https://github.com/jmdelahanty/palette/actions/runs/34045457741) | `ca27b33062699289731fe84e4e7f72558d2b69f2` | [34046580164](https://github.com/jmdelahanty/palette/actions/runs/34046580164) |
+| [146](https://github.com/jmdelahanty/palette/pull/146) | `569a33a51ace95ad2444f644ef8795a0c4fff0f6` | [34047772266](https://github.com/jmdelahanty/palette/actions/runs/34047772266) | `e60b1195592defc7323ef35fb952955ebd616d60` | [34048830865](https://github.com/jmdelahanty/palette/actions/runs/34048830865) |
+| [147](https://github.com/jmdelahanty/palette/pull/147) | `27864f5a2f8bba825582769ff8fc555dbb63ad6e` | [34050113052](https://github.com/jmdelahanty/palette/actions/runs/34050113052) | `e802818dc12cecee1b53e3cc65bae422f0d5fc83` | [34051186036](https://github.com/jmdelahanty/palette/actions/runs/34051186036) |
+| [142](https://github.com/jmdelahanty/palette/pull/142) | `58aba4a8d144001b407f0f6c761462b97db5ed4f` | [34052505990](https://github.com/jmdelahanty/palette/actions/runs/34052505990) | `04779a6b20512dc01f2a28b6cfb34d6b705a6744` | [34053687809](https://github.com/jmdelahanty/palette/actions/runs/34053687809) |
+
+The final #145 refresh combines clean preparation head
+`533095e10f2a321cb35b5b56c03182502c03e1c0` (all 24 checks successful in
+[run 34029698481](https://github.com/jmdelahanty/palette/actions/runs/34029698481))
+with the last validated main commit above, without rewriting history. Only
+generated census counts conflicted; the existing generator recomputed both
+files from the combined tree. Runtime source, tests, and CI workflows match
+that main commit. The AGENTS diff remains exactly the agreed 107-line
+collaboration section; the two read-only probes retain their prepared logic.
+Current status headers and the owning queue are reconciled here, while dated
+audit bodies, numerical tables, unavailable historical references, and all
+other workers' changes remain preserved.
+
+This refresh is documentation/contract-guidance work, not a scientific,
+persisted-identity, runtime-enforcement, or storage-format change. At this
+pre-commit checkpoint its fresh candidate CI is unrun. The
+[live PR 145 handoff](https://github.com/jmdelahanty/palette/pull/145) records
+the resulting exact SHA, local validation, candidate CI, and eventual merge
+and post-merge evidence. All 24 checks must succeed on the exact candidate
+before merge, and again on the resulting main commit; none is inapplicable.
+
+Fresh local validation: **151 tests passed in 1.05 seconds**, outside the
+sandbox through workstation `scripts/py`. Regenerated census verification,
+file-size ratchet, contract freshness, both probe compilations, and whitespace
+checks passed. All 25 local links in the five refreshed Markdown files
+resolve. The census diff against incoming main is only the module count,
+1709 to 1711, for the two diagnostic probes; array/writer entries are unchanged.
+
+At 16:23 UTC, after #140's post-merge run passed, existing ruleset `22372296`
+(`main-required-ci`) gained only the `ci-required` context. All original 23
+contexts remain required with GitHub Actions source app 15368, strict
+current-base behavior, exact `refs/heads/main` targeting, and an empty bypass
+list. Pull-request, deletion, and non-fast-forward protections are unchanged.
+Both ruleset and effective main rules were read back and matched the approved
+change. Positive ordinary protected merges and the gate's negative unit tests
+are evidence; no deliberately failing/skipped disposable PR was created, so
+the broader adversarial server-side acceptance plan is not claimed complete.
+
+Scoped ingestion-validation and clock-publication corrections are integrated
+and CI-validated; #147's scoped enforcement corrections are also integrated.
+Broader `RID-001` and `INGEST-001` catalog/adoption work remain open in the
+owning queue. Parent-level clipped intake and transfer-v2 adoption are separate
+follow-ups. No live-data sweep, historical repair, dependency installation,
+worktree cleanup, deployment, shared-checkout update, or production activation
+was performed. The original dirty checkout remains untouched.
+
+## Authorized PR preparation — September 6 (historical)
 
 The user authorized Palette-only implementation/review, commits, pushes, and CI
 for the relevant PRs and this separate documentation work. Main merges,

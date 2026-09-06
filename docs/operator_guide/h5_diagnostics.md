@@ -34,10 +34,11 @@ into them during `fisheye.utils.organize_recordings --apply` with
 `--run-h5-diagnostics`. When the organizer runs them, it records the result in
 `recording_manifest.json` under `preflight.h5`.
 
-Import commands still do not execute H5 diagnostics automatically, but they now
-honor the recorded manifest gate: `preflight.status=fail` blocks import by
-default, while `warn` does not. Use `--allow-preflight-failures` on the import
-command only when you intentionally want to bypass a failed recorded preflight.
+Import commands do not execute H5 diagnostics automatically. A recorded
+`fail`/`error` in the summary or any declared H5/video component, including
+optional/tooling checks, blocks import even when the summary says `pass` or
+`warn`. Malformed diagnostic evidence also blocks. A warning without a failure
+does not block import; there is no failure-override option.
 
 For repeatable real-data smoke checks, prefer the shared fixture and run
 layout documented in [test_data.md](test_data.md).

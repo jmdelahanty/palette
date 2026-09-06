@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
+
+from fisheye.shared.source_recording_identity import load_strict_json_object
 
 PRECHECK_NOT_RUN = "not_run"
 PRECHECK_PASS = "pass"
@@ -28,38 +29,25 @@ class RecordedPreflight:
 
 
 def _section_status_from_video(payload: Mapping[str, Any]) -> str:
-    status = str(payload.get("status") or "").strip()
-    if status:
-        return status
-    media_status = str(payload.get("media_status") or "").strip()
-    if media_status == PRECHECK_FAIL:
-        return PRECHECK_FAIL
-    if media_status == PRECHECK_WARN:
-        return PRECHECK_WARN
-    if media_status == PRECHECK_PASS:
-        return PRECHECK_PASS
-    return PRECHECK_NOT_RUN
+    return _combine_statuses(*(payload.get(key, PRECHECK_NOT_RUN) for key in (
+        "status", "media_status", "tooling_status",
+    )))
 
 
 def _section_status_from_h5(payload: Mapping[str, Any]) -> str:
-    status = str(payload.get("status") or "").strip()
-    if status:
-        return status
-    core_status = str(payload.get("core_status") or "").strip()
-    if core_status == PRECHECK_FAIL:
-        return PRECHECK_FAIL
-    if core_status == PRECHECK_WARN:
-        return PRECHECK_WARN
-    if core_status == PRECHECK_PASS:
-        return PRECHECK_PASS
-    return PRECHECK_NOT_RUN
+    return _combine_statuses(*(payload.get(key, PRECHECK_NOT_RUN) for key in (
+        "status", "core_status", "optional_status", "tooling_status",
+    )))
 
 
 def _combine_statuses(*statuses: str) -> str:
-    effective = [status for status in statuses if status and status != PRECHECK_NOT_RUN]
+    allowed = {PRECHECK_NOT_RUN, PRECHECK_PASS, PRECHECK_WARN, PRECHECK_FAIL, "error", "skip"}
+    if any(type(status) is not str or status not in allowed for status in statuses):
+        raise ValueError("preflight contains an invalid diagnostic status")
+    effective = [status for status in statuses if status not in {PRECHECK_NOT_RUN, "skip"}]
     if not effective:
         return PRECHECK_NOT_RUN
-    if PRECHECK_FAIL in effective:
+    if PRECHECK_FAIL in effective or "error" in effective:
         return PRECHECK_FAIL
     if PRECHECK_WARN in effective:
         return PRECHECK_WARN
@@ -136,10 +124,7 @@ def read_manifest_payload(recording_dir: Path) -> Optional[dict[str, Any]]:
     manifest_path = recording_dir / 'recording_manifest.json'
     if not manifest_path.exists():
         return None
-    payload = json.loads(manifest_path.read_text(encoding='utf-8'))
-    if not isinstance(payload, dict):
-        raise ValueError(f'manifest root must be a JSON object: {manifest_path}')
-    return payload
+    return load_strict_json_object(manifest_path)
 
 
 def read_recorded_preflight(recording_dir: Path) -> RecordedPreflight:
@@ -148,33 +133,41 @@ def read_recorded_preflight(recording_dir: Path) -> RecordedPreflight:
         return RecordedPreflight(manifest_path=manifest_path, manifest_exists=False, status=PRECHECK_NOT_RUN)
 
     try:
-        payload = json.loads(manifest_path.read_text(encoding='utf-8'))
+        payload = load_strict_json_object(manifest_path)
     except Exception as exc:
         return RecordedPreflight(
             manifest_path=manifest_path,
             manifest_exists=True,
-            status=PRECHECK_WARN,
+            status=PRECHECK_FAIL,
             error=f'failed to read manifest JSON: {exc}',
         )
 
-    if not isinstance(payload, dict):
-        return RecordedPreflight(
-            manifest_path=manifest_path,
-            manifest_exists=True,
-            status=PRECHECK_WARN,
-            error='manifest root must be a JSON object',
-        )
-
     preflight = payload.get('preflight')
-    if not isinstance(preflight, dict):
+    if preflight is None:
         return RecordedPreflight(manifest_path=manifest_path, manifest_exists=True, status=PRECHECK_NOT_RUN)
 
-    video = preflight.get('video') if isinstance(preflight.get('video'), dict) else None
-    h5 = preflight.get('h5') if isinstance(preflight.get('h5'), dict) else None
-    status = str(preflight.get('status') or '').strip() or _combine_statuses(
-        _section_status_from_video(video or {}),
-        _section_status_from_h5(h5 or {}),
-    )
+    try:
+        if not isinstance(preflight, dict):
+            raise ValueError('preflight must be a JSON object or null')
+        video = preflight.get('video')
+        h5 = preflight.get('h5')
+        for name, section in (("preflight", preflight), ("video", video), ("h5", h5)):
+            if section is None:
+                continue
+            if not isinstance(section, dict):
+                raise ValueError(f'{name} must be a JSON object or null')
+            if section.get('error') is not None:
+                raise ValueError(f'{name} recorded a diagnostic error: {section["error"]}')
+        status = _combine_statuses(
+            preflight.get('status', PRECHECK_NOT_RUN),
+            _section_status_from_video(video or {}),
+            _section_status_from_h5(h5 or {}),
+        )
+    except ValueError as exc:
+        return RecordedPreflight(
+            manifest_path=manifest_path, manifest_exists=True,
+            status=PRECHECK_FAIL, error=str(exc),
+        )
     return RecordedPreflight(
         manifest_path=manifest_path,
         manifest_exists=True,
@@ -193,11 +186,7 @@ def read_recorded_preflight(recording_dir: Path) -> RecordedPreflight:
 
 def preflight_gate_reason(
     recording_dir: Path,
-    *,
-    allow_failures: bool = False,
 ) -> Optional[str]:
-    if allow_failures:
-        return None
     preflight = read_recorded_preflight(recording_dir)
     if preflight.status != PRECHECK_FAIL:
         return None
@@ -207,5 +196,13 @@ def preflight_gate_reason(
         details.append(f'video_media={preflight.video_media_status}')
     if preflight.h5_core_status:
         details.append(f'h5_core={preflight.h5_core_status}')
+    if preflight.h5_optional_status:
+        details.append(f'h5_optional={preflight.h5_optional_status}')
+    if preflight.video_tooling_status:
+        details.append(f'video_tooling={preflight.video_tooling_status}')
+    if preflight.h5_tooling_status:
+        details.append(f'h5_tooling={preflight.h5_tooling_status}')
+    if preflight.error:
+        details.append(preflight.error)
     suffix = f" ({', '.join(details)})" if details else ''
     return f'preflight failed for {recording_dir}{suffix}'

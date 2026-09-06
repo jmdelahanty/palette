@@ -45,6 +45,10 @@ def _publish_current_import(
                 "session_uuid": "session-a",
                 "camera_id": "2010093",
                 "recording_name": "recording-a",
+                "recording_type": "behavior",
+                "recording_subtype": "free",
+                "behavior_mode": "free",
+                "artifact_schema_id": "behavior_v1",
             }
         ),
         encoding="utf-8",
@@ -63,7 +67,6 @@ def _publish_current_import(
         stimulus_run_name=None,
         stimulus_overwrite=False,
         stimulus_quiet=True,
-        allow_preflight_failures=True,
     )
 
     def probe(_path: Path, **_kwargs: object) -> dict[str, object]:
@@ -80,7 +83,11 @@ def _publish_current_import(
         }
 
     monkeypatch.setattr(importer, "probe_video_metadata", probe)
-    monkeypatch.setattr(importer, "apply_acquisition_frame_clock", lambda _plan: {})
+    # Exercise the real clock producer as well as authority/receipt publication.
+    video.with_name(f"{video.stem}_meta.csv").write_text(
+        "recording_frame_id,timestamp,timestamp_sys\n"
+        + "".join(f"{i + 1},{1_000_000_000 + i * 10_000_000},{2_000_000_000 + i * 10_000_000}\n" for i in range(100))
+    )
     monkeypatch.setattr(
         importer,
         "git_identity",
@@ -95,6 +102,52 @@ def _publish_current_import(
     assert result.ok is True, result
     assert result.receipt is not None
     return plan, result.receipt
+
+
+@pytest.mark.parametrize("damage", [
+    "none", "missing_receipt", "missing_authority", "stale_metadata",
+    "missing_clock", "tampered_clock", "changed_clock_source",
+    "missing_manifest_context",
+    "conflicting_root_context",
+])
+def test_batch_skip_requires_live_receipt_and_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str,
+) -> None:
+    from fisheye.utils.import_organized_recordings_analysis import _existing_analysis_complete
+
+    plan, receipt = _publish_current_import(tmp_path, monkeypatch)
+    if damage == "missing_receipt":
+        (plan.zarr_path / ".imports" / f"{receipt.receipt_sha256}.json").unlink()
+    elif damage == "missing_authority":
+        root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+        del root["analysis/acquisition_camera_frames/2010093"]
+    elif damage == "stale_metadata":
+        root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+        root["raw_video"].attrs["stale_generation_test"] = True
+    elif damage == "missing_clock":
+        root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+        del root["analysis/acquisition_frame_clock_runs"]
+    elif damage == "tampered_clock":
+        root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+        clock = root[str(root.attrs["acquisition_frame_clock_ref"])]
+        clock["camera_timestamp_ns"][1] = 123
+    elif damage == "changed_clock_source":
+        source = plan.cam_video.with_name(f"{plan.cam_video.stem}_meta.csv")
+        source.write_text(source.read_text().replace("1010000000", "1010000001"))
+    elif damage == "missing_manifest_context":
+        manifest_path = plan.recording_dir / "recording_manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        del manifest["recording_type"]
+        manifest_path.write_text(json.dumps(manifest))
+    elif damage == "conflicting_root_context":
+        root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+        root.attrs["recording_type"] = "microscopy"
+        from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
+        consolidate_metadata_capture_expected_warnings(str(plan.zarr_path))
+    complete, reason = _existing_analysis_complete(plan.zarr_path, require_stimulus=False)
+    assert complete is (damage == "none"), reason
+    if damage in {"missing_manifest_context", "conflicting_root_context"}:
+        assert "recording_type" in reason
 
 
 def _authority_row_counts(registry: Registry) -> dict[str, int]:
@@ -113,6 +166,79 @@ def _authority_row_counts(registry: Registry) -> dict[str, int]:
         )
         for table in tables
     }
+
+
+@pytest.mark.parametrize("damage", ["failed_optional_diagnostic", "missing_clock"])
+def test_sealed_pipeline_replay_refuses_failed_intake_before_registry_or_detection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str,
+) -> None:
+    from fisheye.utils import run_recording_analysis_pipeline as pipeline
+
+    plan, _receipt = _publish_current_import(tmp_path, monkeypatch)
+    if damage == "failed_optional_diagnostic":
+        path = plan.recording_dir / "recording_manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["preflight"] = {"status": "pass", "h5": {"optional_status": "fail"}}
+        path.write_text(json.dumps(manifest))
+    else:
+        root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+        del root["analysis/acquisition_frame_clock_runs"]
+    opts = SimpleNamespace(refine_keypoints=False, register=True, registry_path=tmp_path / "registry.sqlite")
+    monkeypatch.setattr(pipeline, "_sync_pipeline_registry", lambda **_: pytest.fail("invalid replay reached registry"))
+    monkeypatch.setattr(pipeline, "run_detect_registry_model", lambda *_: pytest.fail("invalid replay reached detection"))
+    result = pipeline.process_recording_analysis_pipeline(plan, opts)
+    assert result.ok is False
+    assert result.failed_step == "recording_import_preflight"
+
+
+def test_valid_sealed_pipeline_replay_verifies_before_detection_without_import_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fisheye.utils import run_recording_analysis_pipeline as pipeline
+
+    plan, receipt = _publish_current_import(tmp_path, monkeypatch)
+    registry_path = tmp_path / "registry.sqlite"
+    Registry(registry_path).close()
+    opts = SimpleNamespace(refine_keypoints=False, register=True, registry_path=registry_path)
+    monkeypatch.setattr(pipeline, "process_recording_import", lambda *_args, **_kwargs: pytest.fail("sealed replay invoked an import writer"))
+
+    def detect(*_):
+        registry = Registry(registry_path)
+        try:
+            rows = registry.conn.execute("SELECT receipt_sha256 FROM recording_import_receipt_bindings").fetchall()
+            assert [row[0] for row in rows] == [receipt.receipt_sha256]
+        finally:
+            registry.close()
+        # Stop outside the ingestion scope without running inference.
+        return False, 7, ["fixture-detect"]
+
+    monkeypatch.setattr(pipeline, "run_detect_registry_model", detect)
+    result = pipeline.process_recording_analysis_pipeline(plan, opts)
+    assert result.failed_step == "detect_yolo", result
+    assert result.returncode == 7
+
+
+@pytest.mark.parametrize("damage", ["none", "no_log", "no_acknowledgment", "wrong_output", "missing_receipt"])
+def test_citrus_acknowledgment_requires_real_live_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str,
+) -> None:
+    from fisheye.utils import run_citrus_session_import as citrus
+
+    plan, receipt = _publish_current_import(tmp_path, monkeypatch)
+    log = tmp_path / "import.jsonl"
+    output = tmp_path / "wrong.zarr" if damage == "wrong_output" else plan.zarr_path
+    event = "recording_plan" if damage == "no_acknowledgment" else "recording_ok"
+    log.write_text(json.dumps({"event": event, "zarr_path": str(output)}))
+    if damage == "missing_receipt":
+        (plan.zarr_path / ".imports" / f"{receipt.receipt_sha256}.json").unlink()
+    paths = citrus._read_zarr_paths_from_import_log(log)
+    kwargs = dict(import_log=None if damage == "no_log" else log,
+                  recording_dirs=[plan.recording_dir], zarr_paths=paths, recording_only=True)
+    if damage == "none":
+        citrus._verify_import_acknowledgments(**kwargs)
+    else:
+        with pytest.raises(ValueError):
+            citrus._verify_import_acknowledgments(**kwargs)
 
 
 def test_real_import_authority_receipt_binds_and_reopens(
