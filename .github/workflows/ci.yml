@@ -267,6 +267,16 @@ jobs:
           restore-keys: |
             palette-subject-mask-finalizer-fixture-v1-${{ runner.os }}-
 
+      - name: Run isolated subject-mask finalizer tests
+        if: steps.subject-mask-finalizer-fixture-owner.outputs.selected == 'true'
+        run: |
+          mkdir -p .ci-results
+          python -m pytest tests/unit/fisheye/test_finalize_subject_masks.py \
+            -q -m "not gpu" --durations=25 --durations-min=1.0 \
+            -o junit_family=legacy \
+            -o junit_duration_report=total \
+            --junitxml=".ci-results/pytest-shard-${{ matrix.shard }}.subject-mask-finalizer.xml"
+
       - name: Run non-GPU test shard
         run: |
           mkdir -p .ci-results
@@ -274,6 +284,7 @@ jobs:
             --shard-index "${{ matrix.shard }}" \
             --shard-count 16 \
             -- -q -m "not gpu" --durations=25 --durations-min=1.0 \
+            --deselect=tests/unit/fisheye/test_finalize_subject_masks.py \
             -o junit_family=legacy \
             -o junit_duration_report=total \
             --junitxml=".ci-results/pytest-shard-${{ matrix.shard }}.xml"
@@ -281,9 +292,14 @@ jobs:
       - name: Summarize per-file pytest durations
         if: always()
         run: |
-          if test -f ".ci-results/pytest-shard-${{ matrix.shard }}.xml"; then
+          junit_args=()
+          for report in ".ci-results/pytest-shard-${{ matrix.shard }}"*.xml; do
+            test -f "$report" || continue
+            junit_args+=(--junitxml "$report")
+          done
+          if test "${#junit_args[@]}" -gt 0; then
             python scripts/ci_pytest_junit_summary.py \
-              --junitxml ".ci-results/pytest-shard-${{ matrix.shard }}.xml" \
+              "${junit_args[@]}" \
               --shard-index "${{ matrix.shard }}" \
               --output ".ci-results/pytest-shard-${{ matrix.shard }}.json"
           fi

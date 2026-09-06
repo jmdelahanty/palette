@@ -55,6 +55,47 @@ def test_summary_aggregates_parameterized_cases_by_file(tmp_path: Path) -> None:
     }
 
 
+def test_summary_combines_isolated_and_remainder_reports(tmp_path: Path) -> None:
+    remainder = _write_junit(
+        tmp_path / "pytest-shard-4.xml",
+        """
+        <testsuite name="remainder">
+          <testcase classname="tests.unit.test_alpha" name="test_a"
+                    file="tests/unit/test_alpha.py" time="1.25" />
+        </testsuite>
+        """,
+    )
+    isolated = _write_junit(
+        tmp_path / "pytest-shard-4.subject-mask-finalizer.xml",
+        """
+        <testsuite name="isolated">
+          <testcase classname="tests.unit.test_finalize_subject_masks"
+                    name="test_finalizer"
+                    file="tests/unit/test_finalize_subject_masks.py" time="2.5" />
+        </testsuite>
+        """,
+    )
+
+    summary = summarize_junit_reports(
+        [remainder, isolated],
+        shard_index=4,
+    )
+
+    assert summary["source_reports"] == [isolated.name, remainder.name]
+    assert summary["testcase_count"] == 2
+    assert summary["duration_seconds"] == 3.75
+    assert summary["files"] == {
+        "tests/unit/test_alpha.py": {
+            "testcase_count": 1,
+            "duration_seconds": 1.25,
+        },
+        "tests/unit/test_finalize_subject_masks.py": {
+            "testcase_count": 1,
+            "duration_seconds": 2.5,
+        },
+    }
+
+
 @pytest.mark.parametrize(
     "classname",
     ["tests.unit.test_alpha", "tests.unit.test_alpha.TestCases"],
