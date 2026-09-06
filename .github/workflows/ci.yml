@@ -306,3 +306,43 @@ jobs:
         with:
           path: .pytest_cache/palette-subject-shape-fixture
           key: palette-subject-shape-fixture-v1-${{ runner.os }}-${{ github.sha }}
+
+  # Success-only gate: needs.tests.result alone cannot prove every matrix shard
+  # existed and succeeded. Inspect the exact run attempt's complete job inventory.
+  # On retry, use "Re-run all jobs"; partial attempts deliberately fail closed.
+  ci-required:
+    name: ci-required
+    if: always()
+    needs:
+      - generated-artifacts
+      - import-boundaries
+      - file-size-ratchet
+      - zarr-open-mode-ratchet
+      - observed-metadata-literals
+      - contract-freshness
+      - quality
+      - tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    env:
+      PALETTE_PYTHON: python
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Require successful evidence for every CI job
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_REQUIRED_NEEDS: ${{ toJSON(needs) }}
+          CI_REQUIRED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: scripts/py scripts/ci_required.py

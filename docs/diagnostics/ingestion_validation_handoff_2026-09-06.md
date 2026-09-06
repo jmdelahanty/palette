@@ -1,5 +1,30 @@
 # Ingestion validation corrections — 2026-09-06
 
+## Authorized candidate refresh
+
+The user authorized Palette-only PR preparation, commits, pushes, and CI on
+2026-09-06. Merge to main, repository-rule changes, deployments, shared-checkout
+updates, and production activation remain separate.
+
+The clean owned candidate at `3a85a8c9215894945685eaba6f0055730392db44`
+(all 23 required checks successful) was combined without conflicts with exact
+CI-gate head `74926b21cb2e587b1caae151aaa9c4df91e592b8` (all 24 checks
+completed/successful in [run 34028051914](https://github.com/jmdelahanty/palette/actions/runs/34028051914)).
+That prerequisite includes current main
+`3d017867e79b14d11ddca3ee1916d50ac6499c78`; its newer roster work is preserved.
+No dirty clock-publication, ingestion-enforcement, or documentation branch was
+integrated. This candidate now runs the success-only aggregate gate as well.
+
+The PR records the resulting exact commit and live CI. All 23 original checks
+listed below plus `ci-required` must succeed on this fresh combined candidate;
+the incoming green runs are not substitute evidence. Until then it remains
+incomplete and ineligible for integration into the next candidate. Historical
+implementation and test evidence below retain their original scope.
+
+Fresh combined validation: 281 ingestion/clock/map and CI-gate tests passed in
+9.06 seconds; generated census, file-size, contract-freshness, and working/index
+whitespace checks passed. Full remote CI remains required for the new commit.
+
 ## Scope and ownership
 
 Implementation and focused validation are prepared for draft-PR publication;

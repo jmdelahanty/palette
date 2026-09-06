@@ -1,5 +1,26 @@
 # Clock-publication safety — 2026-09-06
 
+## Validated-prerequisite refresh
+
+The local implementation was committed as
+`cc68c2828c4692728fe752f05f7a5491136c4943`. Its clean owned branch was
+then combined without conflicts with exact #143 head
+`eb224a216ac7774770b33de021c599b741ce7927`, after all 24 required checks
+completed successfully in
+[run 34029117423](https://github.com/jmdelahanty/palette/actions/runs/34029117423).
+That prerequisite already includes #140's validated success-only CI gate and
+main `3d017867e79b14d11ddca3ee1916d50ac6499c78`. No incomplete ingestion
+enforcement or documentation branch was integrated.
+
+The resulting clock candidate requires its own full 24-check run before it can
+be integrated into ingestion enforcement. Its draft PR records the resulting
+exact SHA and live CI. Main merge, deployment, and production activation remain
+separate. The implementation snapshot below retains its original base/evidence.
+
+Fresh combined validation: 419 focused clock/import/consumer and CI-gate tests
+passed in 28.38 seconds, with 12 standard consolidation warnings and no skips.
+Generated census, file-size, freshness, compilation, and diff checks passed.
+
 ## State and ownership
 
 Local implementation and validation are prepared, **not merge-ready**.
@@ -211,7 +232,7 @@ Every required remote check for these changes is **unrun**:
 - `active contract freshness`
 - `package and collection`
 - `non-gpu tests (shard 0)` through `non-gpu tests (shard 15)`
-- `ci-required` after the planned validated #143 refresh
+- `ci-required` inherited from the validated #143 refresh
 
 Local components do not substitute for those exact-commit required checks.
 Full non-GPU CI, wheel/non-editable installed-package validation, full test
