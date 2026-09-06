@@ -1,0 +1,301 @@
+{
+  "schema_id": "citrus.recording_transfer_v2.review_cases",
+  "schema_version": 1,
+  "paths": [
+    {
+      "value": "file.csv",
+      "artifact": true,
+      "directory": true
+    },
+    {
+      "value": "dir/file.csv",
+      "artifact": true,
+      "directory": true
+    },
+    {
+      "value": "dir",
+      "artifact": true,
+      "directory": true
+    },
+    {
+      "value": "a.b",
+      "artifact": true,
+      "directory": true
+    },
+    {
+      "value": "..name",
+      "artifact": true,
+      "directory": true
+    },
+    {
+      "value": "a/.../b",
+      "artifact": true,
+      "directory": true
+    },
+    {
+      "value": "name with spaces/file.csv",
+      "artifact": true,
+      "directory": true
+    },
+    {
+      "value": "é/鱼.csv",
+      "artifact": true,
+      "directory": true
+    },
+    {
+      "value": ". ",
+      "artifact": true,
+      "directory": true
+    },
+    {
+      "value": "a /b",
+      "artifact": true,
+      "directory": true
+    },
+    {
+      "value": "a/b",
+      "artifact": true,
+      "directory": true
+    },
+    {
+      "value": "a/. ",
+      "artifact": true,
+      "directory": true
+    },
+    {
+      "value": "",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "/",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": ".",
+      "artifact": false,
+      "directory": true
+    },
+    {
+      "value": "..",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "dir/",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "dir//file",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "./file",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "dir/./file",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "dir/../file",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "/absolute",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "a\\b",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "file\n",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "file\r",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "file\t",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "nul\u0000byte",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "a/\u001f",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "a /..",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "a/..\n",
+      "artifact": false,
+      "directory": false
+    },
+    {
+      "value": "a/.\n",
+      "artifact": false,
+      "directory": false
+    }
+  ],
+  "clip_contradictions": [
+    {
+      "name": "wrong_parent",
+      "set": {
+        "session_id": "wrong-parent"
+      }
+    },
+    {
+      "name": "incomplete_status",
+      "set": {
+        "status": "recording"
+      }
+    },
+    {
+      "name": "not_final",
+      "set": {
+        "final_clip": false
+      }
+    },
+    {
+      "name": "pending_rollover",
+      "set": {
+        "rollover": {
+          "pending_next_clip": true
+        }
+      }
+    },
+    {
+      "name": "not_drained",
+      "set": {
+        "drain_completed": false
+      }
+    },
+    {
+      "name": "combined",
+      "set": {
+        "session_id": "wrong-parent",
+        "status": "recording",
+        "final_clip": false,
+        "rollover": {
+          "pending_next_clip": true
+        }
+      }
+    }
+  ],
+  "finalization_contradictions": [
+    {
+      "name": "trailer_code",
+      "section": "container",
+      "set": {
+        "trailer_error_code": -5
+      }
+    },
+    {
+      "name": "trailer_message",
+      "section": "container",
+      "set": {
+        "trailer_error": "I/O failure"
+      }
+    },
+    {
+      "name": "trailer_both",
+      "section": "container",
+      "set": {
+        "trailer_error_code": -5,
+        "trailer_error": "I/O failure"
+      }
+    },
+    {
+      "name": "output_close_code",
+      "section": "container",
+      "set": {
+        "output_close_error_code": -5
+      }
+    },
+    {
+      "name": "output_close_message",
+      "section": "container",
+      "set": {
+        "output_close_error": "I/O failure"
+      }
+    },
+    {
+      "name": "output_close_both",
+      "section": "container",
+      "set": {
+        "output_close_error_code": -5,
+        "output_close_error": "I/O failure"
+      }
+    },
+    {
+      "name": "trailer_and_close",
+      "section": "container",
+      "set": {
+        "trailer_error_code": -5,
+        "trailer_error": "I/O failure",
+        "output_close_error_code": -5,
+        "output_close_error": "I/O failure"
+      }
+    },
+    {
+      "name": "file_size_error",
+      "section": "container",
+      "set": {
+        "file_size_error": "I/O failure"
+      }
+    },
+    {
+      "name": "mux_flush_message",
+      "section": "packet_writes",
+      "set": {
+        "muxer_flush_error": "I/O failure"
+      }
+    },
+    {
+      "name": "packet_write_code",
+      "section": "packet_writes",
+      "set": {
+        "first_write_error_code": -5
+      }
+    },
+    {
+      "name": "mux_flush_code",
+      "section": "packet_writes",
+      "set": {
+        "muxer_flush_error_code": -5
+      }
+    }
+  ],
+  "consumer_admission_case": {
+    "bundle": "failed_optional_proof",
+    "summary": {
+      "frame_identity_proof": {
+        "status": "failed",
+        "reason": "synthetic_explicit_failure"
+      }
+    },
+    "expected_transfer": "accept",
+    "expected_palette_admission": "refuse"
+  }
+}

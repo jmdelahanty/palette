@@ -61,6 +61,7 @@ gpu = [
 dev = [
   "black>=26.5,<27",
   "import-linter>=2,<3",
+  "jsonschema>=4.23,<5",
   "pytest>=8.4,<9",
   "plotly",
 ]
