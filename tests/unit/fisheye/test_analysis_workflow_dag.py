@@ -375,7 +375,7 @@ def test_track_kinematics_plan_materializes_missing_tracking_authority() -> None
         "selected run is not selector-ineligible; literal False is required",
     ),
 )
-def test_selector_ineligible_plan_blocks_unsupported_tracking_producer(
+def test_selector_ineligible_plan_requires_explicit_materialization_request(
     unavailable_reason: str,
 ) -> None:
     workflow = load_analysis_workflow(default_core_behavior_profile_path())
@@ -413,7 +413,7 @@ def test_selector_ineligible_plan_blocks_unsupported_tracking_producer(
 
     assert canary.ready is False
     assert canary.node_by_id["tracks"].action == "blocked"
-    assert "requires an existing exact named candidate" in (
+    assert "requires an explicit materialization request" in (
         canary.node_by_id["tracks"].reason
     )
     assert unavailable_reason in canary.node_by_id["tracks"].reason
@@ -425,6 +425,41 @@ def test_selector_ineligible_plan_blocks_unsupported_tracking_producer(
     assert production.ready is True
     assert production.node_by_id["tracks"].action == "run"
     assert production.execution_order == ("tracks", "track_kinematics")
+
+
+def test_selector_ineligible_plan_can_materialize_explicitly_forced_tracking() -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    availability = {
+        "refined_keypoints": StageAvailability(
+            stage_id="refined_keypoints",
+            available=True,
+            run_name="refined/active_candidate",
+            reason="active exact candidate",
+        ),
+        "tracks": StageAvailability(
+            stage_id="tracks",
+            available=False,
+            reason="declared unavailable by planner override",
+        ),
+        "track_kinematics": StageAvailability(
+            stage_id="track_kinematics",
+            available=False,
+            reason="declared unavailable by planner override",
+        ),
+    }
+
+    plan = plan_analysis_workflow(
+        workflow,
+        availability,
+        targets=("track_kinematics",),
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+        materialize_stage_ids=("tracks", "track_kinematics"),
+    )
+
+    assert plan.ready is True
+    assert plan.node_by_id["tracks"].action == "run"
+    assert plan.node_by_id["track_kinematics"].action == "run"
+    assert plan.execution_order == ("tracks", "track_kinematics")
 
 
 def test_availability_refuses_child_when_dependency_is_unavailable(
@@ -675,11 +710,36 @@ def test_selector_ineligible_public_plan_blocks_missing_exact_tracking_candidate
         tracking_crop="crop_geometry_a",
         selector_eligible=False,
     )
+    _write_zarr_metadata(
+        tmp_path,
+        {
+            "keypoint_bundle_authority_generation": 1,
+            "keypoint_bundle_authority": {
+                "schema_id": "palette.keypoint.bundle_authority",
+                "schema_version": 1,
+                "generation": 1,
+                "members": {
+                    "refined_keypoints": {
+                        "run_path": "refined_keypoints_runs/refined_a"
+                    }
+                },
+            },
+        },
+    )
+    _write_zarr_metadata(tmp_path / "refined_keypoints_runs")
+    _write_zarr_metadata(
+        tmp_path / "refined_keypoints_runs" / "refined_a",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+            "source_keypoints_run": "canonical_a",
+        },
+    )
     workflow = load_analysis_workflow(
         default_core_behavior_profile_path()
     ).with_run_selection(
         {
-            "refined_keypoints": "canonical_a",
+            "refined_keypoints": "refined/refined_a",
             "tracks": "tracking_candidate_typo",
         }
     )
@@ -703,7 +763,7 @@ def test_selector_ineligible_public_plan_blocks_missing_exact_tracking_candidate
     assert nodes["track_kinematics"]["action"] == "blocked"
 
 
-def test_selector_ineligible_clipped_plan_reuses_exact_tracking_candidate(
+def test_selector_ineligible_plan_rejects_non_active_raw_keypoint_candidate(
     tmp_path: Path,
 ) -> None:
     _write_keypoint_crop_tracking_lineage(
@@ -725,22 +785,103 @@ def test_selector_ineligible_clipped_plan_reuses_exact_tracking_candidate(
         tmp_path,
         execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
     )
+    assert statuses["refined_keypoints"].available is False
+    assert statuses["refined_keypoints"].run_name == "canonical_a"
+    assert "active refined keypoint-bundle" in statuses["refined_keypoints"].reason
+    assert statuses["tracks"].available is False
+    assert "workflow dependency inputs are unavailable" in statuses["tracks"].reason
+
+
+def test_selector_ineligible_plan_accepts_active_refined_motion_authority(
+    tmp_path: Path,
+) -> None:
+    _write_keypoint_crop_tracking_lineage(
+        tmp_path,
+        tracking_crop="crop_geometry_a",
+        selector_eligible=False,
+    )
+    _write_zarr_metadata(
+        tmp_path,
+        {
+            "keypoint_bundle_authority_generation": 1,
+            "keypoint_bundle_authority": {
+                "schema_id": "palette.keypoint.bundle_authority",
+                "schema_version": 1,
+                "generation": 1,
+                "members": {
+                    "refined_keypoints": {
+                        "run_path": "refined_keypoints_runs/refined_a"
+                    }
+                },
+            },
+        },
+    )
+    _write_zarr_metadata(tmp_path / "refined_keypoints_runs")
+    _write_zarr_metadata(
+        tmp_path / "refined_keypoints_runs" / "refined_a",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+            "source_keypoints_run": "canonical_a",
+        },
+    )
+    workflow = load_analysis_workflow(
+        default_core_behavior_profile_path()
+    ).with_run_selection(
+        {
+            "refined_keypoints": "refined/refined_a",
+            "tracks": "tracking_a",
+        }
+    )
+
+    statuses = build_availability(
+        workflow,
+        tmp_path,
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
     plan = plan_analysis_workflow(
         workflow,
         statuses,
         targets=("track_kinematics",),
         execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+        materialize_stage_ids=("track_kinematics",),
     )
 
     assert statuses["refined_keypoints"].available is True
-    assert statuses["refined_keypoints"].run_name == "canonical_a"
+    assert statuses["refined_keypoints"].run_name == "refined/refined_a"
     assert statuses["tracks"].available is True
     assert statuses["tracks"].run_name == "tracking_a"
     assert plan.ready is True
     assert plan.node_by_id["refined_keypoints"].action == "reuse"
     assert plan.node_by_id["tracks"].action == "reuse"
     assert plan.node_by_id["track_kinematics"].action == "run"
-    assert plan.execution_order == ("track_kinematics",)
+
+
+def test_core_tracking_gate_rejects_subject_position_tracking_authority(
+    tmp_path: Path,
+) -> None:
+    _write_zarr_metadata(tmp_path)
+    _write_zarr_metadata(tmp_path / "tracking_runs")
+    _write_zarr_metadata(
+        tmp_path / "tracking_runs" / "tracking_position_candidate",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+            "source_authority_kind": "subject_position_run",
+        },
+    )
+
+    status = discover_stage_availability(
+        tmp_path,
+        "tracks",
+        requested_run="tracking_position_candidate",
+        dependency_runs={"refined_keypoints": "canonical_candidate"},
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+
+    assert status.available is False
+    assert status.run_name == "tracking_position_candidate"
+    assert "cannot consume subject-position tracking authority" in status.reason
 
 
 def test_keypoint_authority_resolver_accepts_clipped_canonical_passthrough(

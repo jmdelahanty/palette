@@ -218,6 +218,12 @@ def _tracks_command(context: StageCommandContext) -> tuple[str, ...]:
             "single_subject_per_arena",
         )
     )
+    if (
+        context.execution_profile is not None
+        and context.execution_profile.profile_id
+        == SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+    ):
+        command.append("--selector-ineligible")
     return tuple(command)
 
 
