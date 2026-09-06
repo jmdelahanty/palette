@@ -59,11 +59,20 @@ from fisheye.analysis_workflows.core_chaser_relative_frame_adapter import (
     CoreChaserRelativeFrameAdapterError,
     prepare_core_chaser_relative_frame,
 )
+from fisheye.analytics_exports.activity_spatial_time_bins import (
+    SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+)
+from fisheye.analytics_exports.kinematics_samples import (
+    TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+    TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+)
 from fisheye.analytics_exports.validated_behavior_contracts import (
     CORE_TABLE_SPECS,
     compose_disjoint_table_specs,
 )
 from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import (
+    CANONICAL_SWIM_BOUTS_CAPABILITY,
     CORE_BEHAVIOR_CAPABILITY_KEYS,
     CROSS_GRAIN_JOIN_AUTHORITY,
     SUBJECT_BODY_FRAME_CAPABILITY,
@@ -122,6 +131,274 @@ def _report_binding(tmp_path: Path) -> dict[str, object]:
         "schema_id": "palette.analysis_workflow_execution",
         "schema_version": 3,
     }
+
+
+def _motion_bout_reopen_roster(
+    tmp_path: Path,
+    *,
+    track_mode: str,
+    track_selector_eligible: bool,
+    bout_mode: str,
+    bout_selector_eligible: bool,
+    track_status: str = "complete",
+    bout_status: str = "complete",
+) -> dict[str, object]:
+    capabilities = _capability_bindings(tmp_path)
+    zarr_path = str((tmp_path / "recording-a.zarr").resolve())
+    motion_source = _sealed(
+        schema_id="fixture.kinematics_samples.source",
+        schema_version=2,
+        recording_id="recording-a",
+        zarr_path=zarr_path,
+        run_path="analysis/track_kinematics_runs/offline/motion-a",
+        run_name="motion-a",
+        scope="offline",
+        tracks=[{"track_id": 7}],
+        selection_snapshot={
+            "mode": track_mode,
+            "parent_latest": "other-motion",
+            "parent_latest_complete": "other-motion",
+            "parent_latest_scope": "other-motion",
+            "scope_latest": "other-motion",
+            "parent_completion_epoch": 4,
+            "scope_completion_epoch": 3,
+        },
+        completion_snapshot={
+            "status": track_status,
+            "completed_at_utc": "2026-09-06T00:00:00Z",
+            "selector_eligible": track_selector_eligible,
+        },
+    )
+    capabilities["kinematics_samples"] = {
+        **capabilities["kinematics_samples"],
+        "profile_id": "core_motion_physical_v2",
+        "source_binding": motion_source,
+    }
+    bout_source = _sealed(
+        schema_id="fixture.canonical_swim_bouts.source",
+        schema_version=1,
+        recording_id="recording-a",
+        zarr_path=zarr_path,
+        run_path="analysis/swim_bout_runs/bouts-a",
+        run_name="bouts-a",
+        track_id=7,
+        selection_snapshot={
+            "mode": bout_mode,
+            "parent_latest": "other-bouts",
+            "parent_latest_complete": "other-bouts",
+            "parent_completion_epoch": 2,
+        },
+        completion_snapshot={
+            "status": bout_status,
+            "completed_at_utc": "2026-09-06T00:01:00Z",
+            "selector_eligible": bout_selector_eligible,
+        },
+    )
+    capabilities[CANONICAL_SWIM_BOUTS_CAPABILITY] = {
+        **capabilities[CANONICAL_SWIM_BOUTS_CAPABILITY],
+        "source_binding": bout_source,
+    }
+    return build_core_authority_roster(
+        recording_id="recording-a",
+        analysis_zarr=tmp_path / "recording-a.zarr",
+        execution_report_binding=_report_binding(tmp_path),
+        capability_bindings=capabilities,
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "track_mode",
+        "bout_mode",
+        "selector_eligible",
+        "expected_track_profile",
+        "expected_bout_profile",
+    ),
+    (
+        (
+            "explicit_run",
+            "explicit_per_track_run",
+            True,
+            TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+            SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1,
+        ),
+        (
+            "explicit_selector_ineligible_canary",
+            "explicit_selector_ineligible_canary_per_track_run",
+            False,
+            TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+            SWIM_BOUT_AUTHORITY_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+        ),
+    ),
+)
+def test_core_roster_reopen_forwards_the_sealed_authority_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    track_mode: str,
+    bout_mode: str,
+    selector_eligible: bool,
+    expected_track_profile: str,
+    expected_bout_profile: str,
+) -> None:
+    roster = _motion_bout_reopen_roster(
+        tmp_path,
+        track_mode=track_mode,
+        track_selector_eligible=selector_eligible,
+        bout_mode=bout_mode,
+        bout_selector_eligible=selector_eligible,
+    )
+    capabilities = roster["capability_bindings"]
+    expected_track = capabilities["kinematics_samples"]["source_binding"]
+    expected_bout = capabilities[CANONICAL_SWIM_BOUTS_CAPABILITY]["source_binding"]
+    root = object()
+    track = SimpleNamespace(binding=expected_track)
+    bout = SimpleNamespace(binding=expected_bout)
+    calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+    def open_root(*args: object, **kwargs: object) -> object:
+        calls.append(("open", args, kwargs))
+        return root
+
+    def bind_track(*args: object, **kwargs: object) -> object:
+        calls.append(("track", args, kwargs))
+        return track
+
+    def bind_bouts(*args: object, **kwargs: object) -> object:
+        calls.append(("bouts", args, kwargs))
+        return SimpleNamespace(bout_sources={7: bout})
+
+    identity = object()
+    monkeypatch.setattr(roster_module, "open_zarr_root", open_root)
+    monkeypatch.setattr(
+        roster_module,
+        "bind_kinematics_samples_source",
+        bind_track,
+    )
+    monkeypatch.setattr(roster_module, "bind_activity_spatial_sources", bind_bouts)
+    monkeypatch.setattr(
+        roster_module,
+        "core_roster_bout_identity",
+        lambda *args, **kwargs: identity,
+    )
+
+    observed = roster_module.bind_core_motion_and_bouts_from_roster(roster)
+
+    assert [name for name, _args, _kwargs in calls] == ["open", "track", "bouts"]
+    assert calls[1][2]["authority_profile_id"] == expected_track_profile
+    assert calls[2][2]["track_authority_profile_id"] == expected_track_profile
+    assert calls[2][2]["swim_bout_authority_profile_id"] == expected_bout_profile
+    assert calls[2][2]["prebound_track_source"] is track
+    assert observed.track is track
+    assert observed.bouts.bout_sources[7] is bout
+    assert observed.bout_identities[7] is identity
+
+
+@pytest.mark.parametrize(
+    (
+        "track_mode",
+        "track_selector_eligible",
+        "bout_mode",
+        "bout_selector_eligible",
+        "track_status",
+        "bout_status",
+        "error",
+    ),
+    (
+        (
+            "unknown_track_mode",
+            True,
+            "explicit_per_track_run",
+            True,
+            "complete",
+            "complete",
+            "Track-motion selection mode is unsupported",
+        ),
+        (
+            "explicit_run",
+            True,
+            "unknown_bout_mode",
+            True,
+            "complete",
+            "complete",
+            "Swim-bout selection mode is unsupported",
+        ),
+        (
+            "explicit_run",
+            False,
+            "explicit_per_track_run",
+            True,
+            "complete",
+            "complete",
+            "Track-motion selection and completion lifecycles differ",
+        ),
+        (
+            "explicit_run",
+            True,
+            "explicit_per_track_run",
+            False,
+            "complete",
+            "complete",
+            "Swim-bout selection and completion lifecycles differ",
+        ),
+        (
+            "explicit_selector_ineligible_canary",
+            False,
+            "explicit_per_track_run",
+            True,
+            "complete",
+            "complete",
+            "must share one authority lifecycle",
+        ),
+        (
+            "explicit_run",
+            True,
+            "explicit_selector_ineligible_canary_per_track_run",
+            False,
+            "complete",
+            "complete",
+            "must share one authority lifecycle",
+        ),
+        (
+            "explicit_selector_ineligible_canary",
+            False,
+            "explicit_selector_ineligible_canary_per_track_run",
+            False,
+            "running",
+            "complete",
+            "Track-motion source is not complete",
+        ),
+    ),
+)
+def test_core_roster_reopen_rejects_conflicting_lifecycle_before_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    track_mode: str,
+    track_selector_eligible: bool,
+    bout_mode: str,
+    bout_selector_eligible: bool,
+    track_status: str,
+    bout_status: str,
+    error: str,
+) -> None:
+    roster = _motion_bout_reopen_roster(
+        tmp_path,
+        track_mode=track_mode,
+        track_selector_eligible=track_selector_eligible,
+        bout_mode=bout_mode,
+        bout_selector_eligible=bout_selector_eligible,
+        track_status=track_status,
+        bout_status=bout_status,
+    )
+
+    def forbidden(*args: object, **kwargs: object) -> object:
+        pytest.fail("Lifecycle conflicts must fail before any source is opened.")
+
+    monkeypatch.setattr(roster_module, "open_zarr_root", forbidden)
+    monkeypatch.setattr(roster_module, "bind_kinematics_samples_source", forbidden)
+    monkeypatch.setattr(roster_module, "bind_activity_spatial_sources", forbidden)
+
+    with pytest.raises(CoreAuthorityRosterError, match=error):
+        roster_module.bind_core_motion_and_bouts_from_roster(roster)
 
 
 def test_core_authority_roster_is_deterministic_and_closed(tmp_path: Path) -> None:
@@ -1311,14 +1588,15 @@ def test_core_chaser_adapter_keeps_one_motion_authority_and_distinct_carrier_pro
 
     keypoint_authority = keypoint.manifest["source_authorities"]["fish_position"]
     detection_authority = detection.manifest["source_authorities"]["fish_position"]
-    assert keypoint_authority["source_authority_id"] == detection_authority[
-        "source_authority_id"
-    ]
+    assert (
+        keypoint_authority["source_authority_id"]
+        == detection_authority["source_authority_id"]
+    )
     assert keypoint_authority["source_digest"] == detection_authority["source_digest"]
     assert keypoint_authority["provider_id"] != detection_authority["provider_id"]
-    assert keypoint_authority["provider_digest"] != detection_authority[
-        "provider_digest"
-    ]
+    assert (
+        keypoint_authority["provider_digest"] != detection_authority["provider_digest"]
+    )
 
 
 def test_core_chaser_adapter_rejects_coordinate_authority_conflict(
