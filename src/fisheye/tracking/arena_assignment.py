@@ -51,6 +51,7 @@ from ..shared.zarr_run_completion import (
     require_runs_parent,
 )
 from ..shared.zarr_io import open_zarr_root
+from ..shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from .api import (
     TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA,
     available_tracking_methods,
@@ -646,6 +647,7 @@ def assign_arenas_spatial(
     tracking_method: Optional[str] = None,
     arena_assignment_run_name: Optional[str] = None,
     tracking_run_name: Optional[str] = None,
+    stage_selector_eligible: bool = True,
 ) -> Dict[str, Any]:
     """
     Assign detections to arenas based on spatial location (sub-dish ROIs).
@@ -670,6 +672,9 @@ def assign_arenas_spatial(
         source_keypoint_run: Optional canonical or ``refined/`` keypoint
             authority. Its exact source crop rowset is resolved fail-closed.
         tracking_method: Optional method registered by ``fisheye.tracking.api``.
+        stage_selector_eligible: Whether the arena-assignment and tracking runs
+            may update their parent selectors. Selector-ineligible runs require
+            exact names for both immutable outputs.
         
     Returns:
         Dictionary with summary statistics
@@ -686,6 +691,19 @@ def assign_arenas_spatial(
             ...
         ]
     """
+    if type(stage_selector_eligible) is not bool:
+        raise TypeError("stage_selector_eligible must be an exact bool.")
+    if not stage_selector_eligible:
+        if (
+            not isinstance(arena_assignment_run_name, str)
+            or _EXACT_RUN_NAME.fullmatch(arena_assignment_run_name) is None
+            or not isinstance(tracking_run_name, str)
+            or _EXACT_RUN_NAME.fullmatch(tracking_run_name) is None
+        ):
+            raise ValueError(
+                "Selector-ineligible arena assignment requires exact "
+                "arena-assignment and tracking output names."
+            )
     if console is None:
         console = Console()
     
@@ -863,7 +881,10 @@ def assign_arenas_spatial(
     arena_parent = root.get("arena_assignment_runs")
     if arena_parent is not None:
         mark_run_started(assign_group, run_name=run_group_name, stage="arena_assignment")
-        note_pending_latest(arena_parent, run_group_name)
+        if not stage_selector_eligible:
+            assign_group.attrs["stage_selector_eligible"] = False
+        else:
+            note_pending_latest(arena_parent, run_group_name)
     
     # Select detection data, preferring the canonical sparse refined surface when available.
     refined_parent = root.get('refined_detect_runs')
@@ -1194,7 +1215,7 @@ def assign_arenas_spatial(
     if arena_parent is not None:
         mark_run_complete(
             assign_group,
-            parent_group=arena_parent,
+            parent_group=(arena_parent if stage_selector_eligible else None),
             run_name=run_group_name,
             run_provenance=build_run_provenance_from_stage_record(provenance_record),
         )
@@ -1226,12 +1247,18 @@ def assign_arenas_spatial(
                     ),
                 ),
                 exact_run_name=tracking_run_name,
+                stage_selector_eligible=stage_selector_eligible,
                 console=console,
             )
         )
         tracks_status = "ok"
         tracks_reason = "present"
         tracks_method = selected_tracking_method
+        if not stage_selector_eligible:
+            # Candidate readers use the published consolidated generation.
+            # Both exact children are complete at this point, and no selector
+            # has moved, so consolidation is the final visibility step.
+            consolidate_metadata_capture_expected_warnings(zarr_path)
     except Exception as exc:
         track_run_name = None
         tracking_summary = {}
@@ -1440,6 +1467,14 @@ if __name__ == "__main__":
         choices=available_tracking_methods(),
         help="Tracking method to run after arena assignment (defaults to config or strict arena tracking).",
     )
+    parser.add_argument(
+        "--selector-ineligible",
+        action="store_true",
+        help=(
+            "Write exact-name arena-assignment and tracking candidates without "
+            "updating either parent selector."
+        ),
+    )
     
     args = parser.parse_args()
     
@@ -1459,6 +1494,7 @@ if __name__ == "__main__":
         tracking_method=args.tracking_method,
         arena_assignment_run_name=args.arena_run_name,
         tracking_run_name=args.tracking_run_name,
+        stage_selector_eligible=not args.selector_ineligible,
     )
     
     if results.get("status") == "missing":
