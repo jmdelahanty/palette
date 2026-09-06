@@ -40,6 +40,31 @@ TARGET_PLANE = "dish_top_rim"
 WINDOW_NAMES = ("early", "middle", "late")
 WINDOW_FRACTIONS = (0.10, 0.50, 0.90)
 CLIPPED_INDEX_SCHEMA_ID = "palette.orange_external_ipc_recording_clip_index.v1"
+TOP_RIM_RECIPE = "top_rim_preferred_v1"
+TOP_RIM_FIT_METHOD = "temporal_median_keyframe_only_top_rim_preferred_radial_family_v1"
+# These are provisional extraction settings, not promoted acceptance thresholds.
+TOP_RIM_PARAMETERS = {
+    "seed_fit_method": FIT_METHOD,
+    "angular_sample_count": 720,
+    "family_search_fraction_of_native_short_side": 0.08,
+    "family_search_max_radius_offset_px": 256.0,
+    "family_candidate_limit": 16,
+    "family_peak_min_separation_px": 4.0,
+    "family_profile_radial_step_px": 1.0,
+    "family_profile_min_median_gradient": 1.0,
+    "fixed_support_radial_band_px": 4.0,
+    "refinement_radial_band_px": 2.0,
+    "preferred_min_angular_support_fraction": 0.70,
+    "preferred_max_unsupported_arc_degrees": 90.0,
+    "preferred_max_radial_residual_p95_px": 4.0,
+    "preferred_max_center_offset_fraction_of_search_band": 0.25,
+    "gradient_support_percentile": 85.0,
+    "gradient_support_percentile_multiplier": 0.35,
+    "gradient_support_absolute_minimum": 1.0,
+    "gradient_kernel_border_margin_px": 5.0,
+    "low_support_flag_min_angular_support_fraction": 0.70,
+    "low_support_flag_min_quadrant_support_fraction": 0.50,
+}
 
 
 @dataclass(frozen=True)
@@ -82,8 +107,12 @@ class CircleFit:
     selected_candidate_id: str | None = None
     selection_reason: str = "median_consensus_v1"
     frozen_candidates: tuple[CircleCandidate, ...] = ()
+    intended_target_feature: str = TARGET_FEATURE
 
-    def to_json(self) -> dict[str, Any]:
+    def to_json(self, *, intended_target_feature: str | None = None) -> dict[str, Any]:
+        intended_target_feature = (
+            intended_target_feature or self.intended_target_feature
+        )
         return {
             "geometry": {
                 "type": "circle",
@@ -91,8 +120,8 @@ class CircleFit:
                 "radius_px": self.radius_px,
             },
             "coordinate_space": "camera_native_pixels",
-            "target_feature": TARGET_FEATURE,
-            "intended_target_feature": TARGET_FEATURE,
+            "target_feature": intended_target_feature,
+            "intended_target_feature": intended_target_feature,
             "observed_feature_classification": "unclassified_concentric_rim_edge",
             "target_plane": TARGET_PLANE,
             "angular_support_fraction": self.angular_support_fraction,
@@ -904,6 +933,301 @@ def fit_dish_circle(
     return fit, edge.astype(np.uint8)
 
 
+def _require_native_rim_image(image: np.ndarray) -> np.ndarray:
+    image = np.asarray(image)
+    if image.ndim != 2 or image.dtype != np.uint8 or min(image.shape) < 128:
+        raise ValueError("rim metrics require a native 2D uint8 image, at least 128px")
+    return image
+
+
+def _measure_rim_candidate_gradient(
+    gradient: np.ndarray,
+    candidate: CircleCandidate,
+    *,
+    support_cutoff: float | None = None,
+) -> dict[str, Any]:
+    height, width = gradient.shape
+    circle = (candidate.center_x_px, candidate.center_y_px, candidate.radius_px)
+    if any(
+        isinstance(value, (bool, np.bool_))
+        or not isinstance(value, (int, float, np.number))
+        or not math.isfinite(value)
+        for value in circle
+    ):
+        raise ValueError("rim candidate requires finite numeric geometry")
+    cx, cy, radius = circle
+    if radius <= 0 or radius > max(width, height):
+        raise ValueError("rim candidate requires a positive bounded radius")
+    if not (0 <= cx <= width - 1 and 0 <= cy <= height - 1):
+        raise ValueError("rim candidate center is outside native coordinates")
+    count = TOP_RIM_PARAMETERS["angular_sample_count"]
+    band = TOP_RIM_PARAMETERS["fixed_support_radial_band_px"]
+    angles = np.linspace(0, 2 * np.pi, count, endpoint=False)
+    # A radial sample is visible only if its entire search band plus the
+    # gradient kernel margin is in-frame. Border padding is never evidence.
+    visible = np.ones(count, dtype=bool)
+    for r in (radius - band, radius + band):
+        x, y = cx + r * np.cos(angles), cy + r * np.sin(angles)
+        margin = TOP_RIM_PARAMETERS["gradient_kernel_border_margin_px"]
+        visible &= (
+            (x >= margin)
+            & (x <= width - 1 - margin)
+            & (y >= margin)
+            & (y <= height - 1 - margin)
+        )
+    points, peaks = _radial_evidence(
+        gradient, circle, radial_band_px=band, angle_count=count
+    )
+    cutoff = (
+        _rim_gradient_support_cutoff(gradient)
+        if support_cutoff is None
+        else support_cutoff
+    )
+    supported = (peaks >= cutoff) & visible
+    offsets = np.abs(np.hypot(points[:, 0] - cx, points[:, 1] - cy) - radius)
+    longest, current = 0, 0
+    for missing in np.tile(~supported, 2):
+        current = current + 1 if missing else 0
+        longest = max(longest, current)
+    support = float(np.mean(supported))
+    flags = []
+    if not np.any(supported):
+        flags.append("no_support")
+    if not np.all(visible):
+        flags.append("clipped")
+    quadrants = [float(np.mean(part)) for part in np.split(supported, 4)]
+    if (
+        support < TOP_RIM_PARAMETERS["low_support_flag_min_angular_support_fraction"]
+        or min(quadrants)
+        < TOP_RIM_PARAMETERS["low_support_flag_min_quadrant_support_fraction"]
+    ):
+        flags.append("occluded_or_low_support")
+    return {
+        "geometry": candidate.to_json()["geometry"],
+        "coordinate_space": "camera_native_pixels",
+        "image_shape_px": {"height": height, "width": width},
+        "angular_sample_count": count,
+        "radial_band_px": band,
+        "gradient_support_cutoff": cutoff,
+        "angular_support_fraction": support,
+        "visible_angular_fraction": float(np.mean(visible)),
+        "longest_unsupported_arc_degrees": min(longest, count) * 360.0 / count,
+        "quadrant_support_fractions": quadrants,
+        "radial_residual_p95_px": (
+            float(np.percentile(offsets[supported], 95)) if np.any(supported) else None
+        ),
+        "median_absolute_radial_offset_px": (
+            float(np.median(offsets[supported])) if np.any(supported) else None
+        ),
+        "radial_gradient_median": (
+            float(np.median(peaks[supported])) if np.any(supported) else 0.0
+        ),
+        "quality_flags": flags,
+    }
+
+
+def measure_rim_candidate_metrics(
+    image: np.ndarray, candidate: CircleCandidate
+) -> dict[str, Any]:
+    """Measure a frozen native circle; do not fit toward any reference geometry."""
+
+    return _measure_rim_candidate_gradient(
+        _gradient_magnitude(_require_native_rim_image(image)), candidate
+    )
+
+
+def _rim_gradient_support_cutoff(gradient: np.ndarray) -> float:
+    params = TOP_RIM_PARAMETERS
+    return max(
+        float(np.percentile(gradient, params["gradient_support_percentile"]))
+        * params["gradient_support_percentile_multiplier"],
+        params["gradient_support_absolute_minimum"],
+    )
+
+
+def fit_dish_circle_top_rim_preferred(
+    composite: np.ndarray, *, coarse_max_dimension_px: int = 2048
+) -> tuple[CircleFit, np.ndarray]:
+    """Prefer a supported outer projected edge, without claiming its semantics.
+
+    Hough supplies only an independent center/radius search seed. A bounded
+    angular radial profile preserves separate image-edge families which the
+    historical wide-band refinement can collapse. Outermost is a *preference*,
+    not a classifier of the physical top rim, inner wall, or reflected edge.
+    """
+
+    image = _require_native_rim_image(composite)
+    seed, edge = fit_dish_circle(image, coarse_max_dimension_px=coarse_max_dimension_px)
+    gradient = _gradient_magnitude(image)
+    cutoff = _rim_gradient_support_cutoff(gradient)
+    params = TOP_RIM_PARAMETERS
+    band = min(
+        params["family_search_max_radius_offset_px"],
+        params["family_search_fraction_of_native_short_side"] * min(image.shape),
+    )
+    step = params["family_profile_radial_step_px"]
+    radii = np.arange(
+        max(1.0, seed.radius_px - band), seed.radius_px + band + step, step
+    )
+    angles = np.linspace(0, 2 * np.pi, params["angular_sample_count"], endpoint=False)
+    sampled = cv2.remap(
+        gradient,
+        (seed.center_x_px + radii[:, None] * np.cos(angles)).astype(np.float32),
+        (seed.center_y_px + radii[:, None] * np.sin(angles)).astype(np.float32),
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    profile = np.median(sampled, axis=1)
+    peaks = [
+        index
+        for index in range(1, len(radii) - 1)
+        if profile[index] > params["family_profile_min_median_gradient"]
+        and profile[index] >= profile[index - 1]
+        and profile[index] > profile[index + 1]
+    ]
+    peaks.sort(key=lambda index: (-float(profile[index]), float(radii[index])))
+    retained: list[int] = []
+    for index in peaks:
+        if all(
+            abs(radii[index] - radii[prior]) >= params["family_peak_min_separation_px"]
+            for prior in retained
+        ):
+            retained.append(index)
+        if len(retained) == params["family_candidate_limit"]:
+            break
+    candidates: list[CircleCandidate] = []
+    measurements = {}
+    for index in sorted(retained, key=lambda index: radii[index]):
+        circle, support, median, residual = _refine_and_score_circle(
+            gradient,
+            (seed.center_x_px, seed.center_y_px, float(radii[index])),
+            radial_band_px=params["refinement_radial_band_px"],
+        )
+        candidate = CircleCandidate(
+            f"radial_family_{len(candidates):03d}",
+            *circle,
+            support,
+            residual,
+            median,
+            median * (0.25 + support),
+        )
+        try:
+            metric = _measure_rim_candidate_gradient(
+                gradient, candidate, support_cutoff=cutoff
+            )
+        except ValueError:
+            continue
+        if metric["angular_support_fraction"] > 0:
+            candidates.append(candidate)
+            measurements[candidate.candidate_id] = metric
+    if not candidates:
+        raise RuntimeError(
+            "top-rim preferred recipe found no supported radial family candidates"
+        )
+    eligible = []
+    for candidate in candidates:
+        metric = measurements[candidate.candidate_id]
+        if (
+            metric["angular_support_fraction"]
+            >= params["preferred_min_angular_support_fraction"]
+            and metric["visible_angular_fraction"] == 1.0
+            and metric["longest_unsupported_arc_degrees"]
+            <= params["preferred_max_unsupported_arc_degrees"]
+            and metric["radial_residual_p95_px"]
+            <= params["preferred_max_radial_residual_p95_px"]
+            and math.hypot(
+                candidate.center_x_px - seed.center_x_px,
+                candidate.center_y_px - seed.center_y_px,
+            )
+            <= band * params["preferred_max_center_offset_fraction_of_search_band"]
+        ):
+            eligible.append(candidate)
+    selected = (
+        max(eligible, key=lambda c: c.radius_px)
+        if eligible
+        else max(candidates, key=lambda c: c.evidence_score)
+    )
+    reason = (
+        "outermost_supported_concentric_edge_top_rim_preference_v1"
+        if eligible
+        else "top_rim_preference_unresolved_no_eligible_edge_v1"
+    )
+    return (
+        CircleFit(
+            selected.center_x_px,
+            selected.center_y_px,
+            selected.radius_px,
+            selected.angular_support_fraction,
+            selected.median_radial_gradient,
+            len(candidates),
+            radial_residual_px=selected.radial_residual_px,
+            selected_candidate_id=selected.candidate_id,
+            selection_reason=reason,
+            frozen_candidates=tuple(candidates),
+            intended_target_feature="visible_dish_top_rim_edge",
+        ),
+        edge,
+    )
+
+
+def build_rim_metrics(
+    composites: Mapping[str, np.ndarray],
+    *,
+    fits: Mapping[str, CircleFit],
+    source: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Freeze blind support and temporal evidence for the shadow-policy consumer."""
+
+    from fisheye.analysis_workflows.materializers.arena_geometry_fit_review import (
+        RIM_METRICS_SCHEMA_ID,
+        rim_metrics_source_sha256,
+        summarize_rim_metric_temporal,
+        validate_rim_metrics,
+    )
+
+    if set(composites) != set(WINDOW_NAMES) or set(fits) != set(WINDOW_NAMES):
+        raise ValueError("rim metrics require exact early/middle/late windows")
+    measured, windows = {}, {}
+    for name in WINDOW_NAMES:
+        image = _require_native_rim_image(composites[name])
+        fit = fits[name]
+        gradient = _gradient_magnitude(image)
+        cutoff = _rim_gradient_support_cutoff(gradient)
+        digest = _sha256_bytes(image.tobytes(order="C"))
+        measured[name] = {
+            "composite_pixel_sha256": digest,
+            "selected_candidate_id": fit.selected_candidate_id,
+            "candidates": {
+                candidate.candidate_id: _measure_rim_candidate_gradient(
+                    gradient, candidate, support_cutoff=cutoff
+                )
+                for candidate in fit.frozen_candidates
+            },
+        }
+        windows[name] = {"fit": fit.to_json(), "composite_pixel_sha256": digest}
+    temporal = summarize_rim_metric_temporal(measured)
+    metrics = {
+        "schema_id": RIM_METRICS_SCHEMA_ID,
+        "schema_version": 1,
+        "status": "measured",
+        "source_binding_sha256": rim_metrics_source_sha256(source),
+        "semantic_correspondence": "projected_edges_unresolved",
+        "physical_feature_identified": False,
+        "windows": measured,
+        "temporal": temporal,
+        "quality_flags": ["projected_edges_unresolved"]
+        + (
+            ["temporal_variation_observed"]
+            if temporal["center_max_pairwise_distance_px"] > 0
+            or temporal["radius_range_px"] > 0
+            else []
+        ),
+    }
+    validate_rim_metrics(metrics, source=source, windows=windows)
+    return metrics
+
+
 def consensus_circle(fits: Sequence[CircleFit]) -> CircleFit:
     if len(fits) < 1:
         raise ValueError("at least one fit is required")
@@ -1524,6 +1848,11 @@ def _validate_probe_source_args(args: argparse.Namespace) -> str:
 
 def run_probe(args: argparse.Namespace) -> Path:
     source_mode = _validate_probe_source_args(args)
+    recipe = getattr(args, "fit_recipe", "legacy_v1")
+    if recipe not in ("legacy_v1", TOP_RIM_RECIPE):
+        raise ValueError("unsupported dish-rim scientific recipe")
+    top_preferred = recipe == TOP_RIM_RECIPE
+    target_feature = "visible_dish_top_rim_edge" if top_preferred else TARGET_FEATURE
     output_dir = Path(args.output_dir).expanduser().resolve()
     if output_dir.exists():
         raise FileExistsError(f"refusing existing output directory: {output_dir}")
@@ -1606,7 +1935,10 @@ def run_probe(args: argparse.Namespace) -> Path:
         fits: list[CircleFit] = []
         for spec in specs:
             composite = composites[spec.name]
-            fit, edge = fit_dish_circle(
+            fitter = (
+                fit_dish_circle_top_rim_preferred if top_preferred else fit_dish_circle
+            )
+            fit, edge = fitter(
                 composite, coarse_max_dimension_px=args.coarse_max_dimension_px
             )
             fits.append(fit)
@@ -1639,11 +1971,31 @@ def run_probe(args: argparse.Namespace) -> Path:
                 **_window_sampling_report(spec, decode=decode),
                 "decoded_luma_sequence_sha256": frame_hashes[spec.name],
                 "composite_pixel_sha256": _sha256_bytes(composite.tobytes(order="C")),
-                "fit": fit.to_json(),
+                "fit": fit.to_json(intended_target_feature=target_feature),
                 "files": files,
             }
 
         consensus = consensus_circle(fits)
+        if top_preferred:
+            from fisheye.analysis_workflows.materializers.arena_geometry_fit_review import (
+                select_rim_metrics_consensus_window,
+            )
+
+            # A representative observed circle avoids inventing an averaged
+            # radius when windows select different projected rim contours.
+            representative = dict(zip(WINDOW_NAMES, fits))[
+                select_rim_metrics_consensus_window(windows)
+            ]
+            consensus = CircleFit(
+                representative.center_x_px,
+                representative.center_y_px,
+                representative.radius_px,
+                representative.angular_support_fraction,
+                representative.median_radial_gradient,
+                sum(fit.candidate_count for fit in fits),
+                radial_residual_px=representative.radial_residual_px,
+                selection_reason="observed_window_medoid_no_radius_averaging_v1",
+            )
         temporal_stability = {
             "center_x_range": float(
                 max(fit.center_x_px for fit in fits)
@@ -1663,8 +2015,8 @@ def run_probe(args: argparse.Namespace) -> Path:
             "status": "provisional_visual_review_required",
             "created_at_utc": _utc_now(),
             "fit_frozen_before_acquisition_reveal": True,
-            "fit_method": FIT_METHOD,
-            "target_feature": TARGET_FEATURE,
+            "fit_method": TOP_RIM_FIT_METHOD if top_preferred else FIT_METHOD,
+            "target_feature": target_feature,
             "target_plane": TARGET_PLANE,
             "source": source_report,
             "parameters": {
@@ -1685,7 +2037,7 @@ def run_probe(args: argparse.Namespace) -> Path:
             },
             "decode": decode,
             "windows": windows,
-            "consensus_fit": consensus.to_json(),
+            "consensus_fit": consensus.to_json(intended_target_feature=target_feature),
             "temporal_stability_px": temporal_stability,
             "fit_evidence_contract": {
                 "all_window_candidates_frozen": True,
@@ -1709,6 +2061,21 @@ def run_probe(args: argparse.Namespace) -> Path:
                 "do_not_advance_without_visual_review",
             ],
         }
+        if top_preferred:
+            report["scientific_recipe"] = {
+                "recipe_id": TOP_RIM_RECIPE,
+                "recipe_version": 1,
+                "status": "experimental_shadow_only_not_calibrated",
+                "effective_parameters": dict(TOP_RIM_PARAMETERS),
+                "permitted_scientific_parameter_overrides": [],
+                "intended_target_feature": target_feature,
+                "physical_feature_identified": False,
+            }
+            report["rim_metrics"] = build_rim_metrics(
+                composites,
+                fits=dict(zip(WINDOW_NAMES, fits)),
+                source=source_report,
+            )
         fit_report_path = temporary / "fit_report.json"
         _atomic_json(fit_report_path, report)
 
@@ -1766,6 +2133,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--span-seconds", type=float, default=5.0)
     parser.add_argument("--coarse-max-dimension-px", type=int, default=2048)
+    parser.add_argument(
+        "--fit-recipe",
+        choices=("legacy_v1", TOP_RIM_RECIPE),
+        default="legacy_v1",
+        help="Opt-in scientific recipe; top-rim preference is experimental and does not classify physical rim edges.",
+    )
     return parser
 
 
