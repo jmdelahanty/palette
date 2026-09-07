@@ -10,10 +10,20 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from fisheye.analysis_workflows.core_motion_source_handle import (
+    CoreMotionSourceHandleError,
+    validate_core_motion_dependency_record,
+)
 from fisheye.analysis_workflows.exact_immutable_child_validation_receipt import (
     read_exact_immutable_child_validation_receipt,
 )
 from fisheye.analysis_workflows.materializers.provider_epoch_behavior_summary import (
+    ANALYSIS_CLASS_ID,
+    ANALYSIS_CLASS_VERSION,
+    CORE_EPOCH_BEHAVIOR_CONSUMER_ID,
+    CORE_EPOCH_REQUIRED_CAPABILITIES,
+    CORE_SEMANTIC_METHOD_VERSION,
+    CORE_SEMANTIC_SCHEMA_VERSION,
     MANIFEST_ATTR,
     MANIFEST_DIGEST_ATTR,
     METHOD_ID,
@@ -23,8 +33,16 @@ from fisheye.analysis_workflows.materializers.provider_epoch_behavior_summary im
     SEMANTIC_METHOD_VERSION,
     SEMANTIC_SCHEMA_VERSION,
 )
+from fisheye.analysis_workflows.provider_analysis_offers import (
+    ProviderAnalysisOfferError,
+    TemporalSelectionIdentity,
+)
 from fisheye.analysis_workflows.protocol_semantic_chaser_selection import (
     CHASER_WINDOW_ROLES,
+)
+from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import (
+    CANONICAL_SWIM_BOUTS_CAPABILITY,
+    KINEMATICS_SAMPLES_CAPABILITY,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.columnar import read_columnar_array_as_declared
@@ -42,7 +60,33 @@ from fisheye.shared.zarr_run_completion import (
 )
 
 VERIFICATION_MODE = "receipt_bound_targeted_array_rehash_v1"
+SEMANTIC_V2_PROFILE = "semantic_v2"
+CORE_SEMANTIC_V3_PROFILE = "core_semantic_v3"
 _HANDLE_SEAL = object()
+_SUPPORTED_PROFILES = MappingProxyType(
+    {
+        (SEMANTIC_SCHEMA_VERSION, SEMANTIC_METHOD_VERSION): SEMANTIC_V2_PROFILE,
+        (
+            CORE_SEMANTIC_SCHEMA_VERSION,
+            CORE_SEMANTIC_METHOD_VERSION,
+        ): CORE_SEMANTIC_V3_PROFILE,
+    }
+)
+_CORE_ANALYSIS_OFFER_FIELDS = frozenset(
+    {
+        "schema_id",
+        "schema_version",
+        "analysis_class_id",
+        "analysis_class_version",
+        "computation_id",
+        "computation_version",
+        "scientific_readiness",
+        "temporal_selection_sha256",
+        "core_motion_dependency",
+    }
+)
+_CORE_ANALYSIS_OFFER_SCHEMA_ID = "palette.core_epoch_behavior_summary.analysis_offer"
+_CORE_ANALYSIS_OFFER_SCHEMA_VERSION = 1
 _FORBIDDEN_NAMES = frozenset(
     {
         "latest",
@@ -107,6 +151,166 @@ def _integer(value: object, *, field: str, minimum: int = 0) -> int:
     return value
 
 
+def _summary_profile(
+    scientific: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    attrs: Mapping[str, Any],
+) -> str:
+    schema_version = scientific.get("schema_version")
+    method_version = manifest.get("method_version")
+    profile = (
+        _SUPPORTED_PROFILES.get((schema_version, method_version))
+        if type(schema_version) is int and type(method_version) is int
+        else None
+    )
+    if (
+        profile is None
+        or scientific.get("schema_id") != SCHEMA_ID
+        or manifest.get("method_id") != METHOD_ID
+        or attrs.get("schema_id") != SCHEMA_ID
+        or attrs.get("schema_version") != schema_version
+        or attrs.get("method_version") != method_version
+    ):
+        _fail("Semantic epoch summary identity or safety state is invalid.")
+    return str(profile)
+
+
+def _core_temporal_selection_sha256(
+    sources: Mapping[str, Any], *, recording_id: str
+) -> str:
+    epoch = _mapping(sources.get("epoch_selection"), field="epoch selection binding")
+    if set(epoch) != {"record", "sha256"}:
+        _fail("Core semantic epoch selection binding is inexact.")
+    resolved_sha256 = _digest(
+        epoch.get("sha256"), field="resolved epoch selection digest"
+    )
+    record = _mapping(epoch.get("record"), field="resolved epoch selection")
+    run = _mapping(record.get("run"), field="resolved epoch run")
+    timeline = _mapping(
+        record.get("source_timeline"), field="resolved epoch source timeline"
+    )
+    timing = _mapping(
+        record.get("recording_timing_authority"),
+        field="resolved epoch timing authority",
+    )
+    if (
+        record.get("selection_sha256") != resolved_sha256
+        or timeline.get("recording_id") != recording_id
+    ):
+        _fail("Core semantic epoch selection identity is inconsistent.")
+    try:
+        identity = TemporalSelectionIdentity(
+            selection_id="stimulus_epoch_compatibility.v1",
+            run_path=run.get("path"),
+            recording_id=recording_id,
+            source_timeline_sha256=record.get("source_timeline_digest"),
+            resolved_sha256=resolved_sha256,
+            timing_authority_sha256=timing.get("sha256"),
+        )
+    except ProviderAnalysisOfferError as exc:
+        raise ProviderEpochBehaviorSummarySourceError(
+            "Core semantic epoch selection identity is invalid."
+        ) from exc
+    return identity.sha256
+
+
+def _validate_core_analysis_offer(
+    offer: Mapping[str, Any],
+    *,
+    sources: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+    recording_id: str,
+    expected_analysis_zarr: Path | None,
+) -> None:
+    if (
+        set(offer) != _CORE_ANALYSIS_OFFER_FIELDS
+        or offer.get("schema_id") != _CORE_ANALYSIS_OFFER_SCHEMA_ID
+        or offer.get("schema_version") != _CORE_ANALYSIS_OFFER_SCHEMA_VERSION
+        or offer.get("analysis_class_id") != ANALYSIS_CLASS_ID
+        or offer.get("analysis_class_version") != ANALYSIS_CLASS_VERSION
+        or offer.get("computation_id") != METHOD_ID
+        or offer.get("computation_version") != CORE_SEMANTIC_METHOD_VERSION
+        or offer.get("scientific_readiness") != "ready"
+    ):
+        _fail("Semantic epoch summary core analysis offer is invalid.")
+    if set(sources) != {
+        "epoch_binding_mode",
+        "epoch_selection",
+        "core_motion",
+        "swim_bouts",
+        "protocol_semantic_selection",
+    }:
+        _fail("Semantic epoch summary core source roster is inexact.")
+    temporal_sha256 = _digest(
+        offer.get("temporal_selection_sha256"),
+        field="core analysis temporal-selection digest",
+    )
+    if temporal_sha256 != _core_temporal_selection_sha256(
+        sources, recording_id=recording_id
+    ):
+        _fail("Semantic epoch summary core temporal selection differs from source.")
+    try:
+        dependency = validate_core_motion_dependency_record(
+            offer.get("core_motion_dependency")
+        )
+    except CoreMotionSourceHandleError as exc:
+        raise ProviderEpochBehaviorSummarySourceError(
+            "Semantic epoch summary core motion dependency is invalid."
+        ) from exc
+    source_dependency = _mapping(
+        sources.get("core_motion"), field="core motion source binding"
+    )
+    if _plain(dependency) != _plain(source_dependency):
+        _fail(
+            "Semantic epoch summary core motion dependency differs from its source binding."
+        )
+    if dependency.get("recording_id") != recording_id:
+        _fail("Semantic epoch summary core motion belongs to another recording.")
+    if expected_analysis_zarr is not None and dependency.get("analysis_zarr") != str(
+        expected_analysis_zarr
+    ):
+        _fail("Semantic epoch summary core motion belongs to another archive.")
+    receipt = _mapping(
+        dependency.get("core_authority_consumption_receipt"),
+        field="core authority consumption receipt",
+    )
+    required_capabilities = receipt.get("required_capabilities")
+    if receipt.get(
+        "consumer_id"
+    ) != CORE_EPOCH_BEHAVIOR_CONSUMER_ID or required_capabilities != sorted(
+        CORE_EPOCH_REQUIRED_CAPABILITIES
+    ):
+        _fail("Semantic epoch summary core consumer receipt is incompatible.")
+    capability_digests = _mapping(
+        receipt.get("capability_binding_digests"),
+        field="core capability binding digests",
+    )
+    motion_capability = _mapping(
+        capability_digests.get(KINEMATICS_SAMPLES_CAPABILITY),
+        field="core motion capability binding",
+    )
+    bout_capability = _mapping(
+        capability_digests.get(CANONICAL_SWIM_BOUTS_CAPABILITY),
+        field="core swim-bout capability binding",
+    )
+    swim_bouts = _mapping(sources.get("swim_bouts"), field="swim-bout source")
+    track_id = _integer(parameters.get("track_id"), field="summary track ID")
+    if (
+        motion_capability.get("source_binding_sha256")
+        != dependency.get("motion_source_binding_sha256")
+        or bout_capability.get("source_binding_sha256")
+        != dependency.get("swim_bout_source_binding_sha256")
+        or swim_bouts.get("run_path") != dependency.get("swim_bout_run_path")
+        or swim_bouts.get("payload_sha256")
+        != dependency.get("swim_bout_source_binding_sha256")
+        or swim_bouts.get("source_track_motion_manifest_sha256")
+        != dependency.get("motion_manifest_sha256")
+        or swim_bouts.get("track_id") != dependency.get("track_id")
+        or track_id != dependency.get("track_id")
+    ):
+        _fail("Semantic epoch summary core motion/bout bindings disagree.")
+
+
 def _run_name(value: object) -> str:
     if (
         type(value) is not str
@@ -163,7 +367,8 @@ def _validate_manifest(
     run_name: str,
     expected_recording_id: str | None,
     expected_semantic_selection: Mapping[str, Any] | None,
-) -> tuple[Mapping[str, Any], Mapping[str, Mapping[str, Any]]]:
+    expected_analysis_zarr: Path | None,
+) -> tuple[Mapping[str, Any], Mapping[str, Mapping[str, Any]], str]:
     manifest = _mapping(attrs.get(MANIFEST_ATTR), field="summary manifest")
     manifest_digest = _digest(
         attrs.get(MANIFEST_DIGEST_ATTR), field="summary manifest digest"
@@ -175,17 +380,11 @@ def _validate_manifest(
     )
     parameters = _mapping(manifest.get("parameters"), field="summary parameters")
     sources = _mapping(manifest.get("sources"), field="summary sources")
+    summary_profile = _summary_profile(scientific, manifest, attrs)
     if (
-        scientific.get("schema_id") != SCHEMA_ID
-        or scientific.get("schema_version") != SEMANTIC_SCHEMA_VERSION
-        or manifest.get("method_id") != METHOD_ID
-        or manifest.get("method_version") != SEMANTIC_METHOD_VERSION
-        or manifest.get("epoch_binding_mode") != SEMANTIC_EPOCH_BINDING_MODE
+        manifest.get("epoch_binding_mode") != SEMANTIC_EPOCH_BINDING_MODE
         or manifest.get("run_path") != run_path
         or attrs.get("run_path") != run_path
-        or attrs.get("schema_id") != SCHEMA_ID
-        or attrs.get("schema_version") != SEMANTIC_SCHEMA_VERSION
-        or attrs.get("method_version") != SEMANTIC_METHOD_VERSION
         or attrs.get("epoch_binding_mode") != SEMANTIC_EPOCH_BINDING_MODE
         or attrs.get(RUN_COMPLETION_CONTRACT_ATTR) != RUN_COMPLETION_CONTRACT
         or attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
@@ -221,14 +420,25 @@ def _validate_manifest(
     if attrs.get("source_refs_sha256") != canonical_json_sha256(_plain(sources)):
         _fail("Semantic epoch summary source binding digest is stale.")
     offer = _mapping(attrs.get("analysis_offer"), field="analysis offer")
-    readiness = _mapping(offer.get("readiness"), field="analysis readiness")
-    if (
-        attrs.get("analysis_offer_sha256") != canonical_json_sha256(_plain(offer))
-        or manifest.get("analysis_offer_sha256") != attrs.get("analysis_offer_sha256")
-        or readiness.get("scientific") != "ready"
-        or offer.get("selector_eligible") is not False
-    ):
+    if attrs.get("analysis_offer_sha256") != canonical_json_sha256(
+        _plain(offer)
+    ) or manifest.get("analysis_offer_sha256") != attrs.get("analysis_offer_sha256"):
         _fail("Semantic epoch summary analysis offer is not scientifically ready.")
+    if summary_profile == SEMANTIC_V2_PROFILE:
+        readiness = _mapping(offer.get("readiness"), field="analysis readiness")
+        if (
+            readiness.get("scientific") != "ready"
+            or offer.get("selector_eligible") is not False
+        ):
+            _fail("Semantic epoch summary analysis offer is not scientifically ready.")
+    else:
+        _validate_core_analysis_offer(
+            offer,
+            sources=sources,
+            parameters=parameters,
+            recording_id=recording_id,
+            expected_analysis_zarr=expected_analysis_zarr,
+        )
     semantic = _mapping(
         sources.get("protocol_semantic_selection"),
         field="protocol-semantic selection binding",
@@ -263,7 +473,7 @@ def _validate_manifest(
         unsigned
     ):
         _fail("Semantic epoch summary payload digest is stale.")
-    return _freeze(_plain(manifest)), _declarations(manifest)
+    return _freeze(_plain(manifest)), _declarations(manifest), summary_profile
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -354,7 +564,7 @@ def load_provider_epoch_behavior_summary_source_handle(
     direct_validation_receipt: str | Path | None = None,
     required_array_paths: Collection[str] | None = None,
 ) -> ProviderEpochBehaviorSummarySourceHandle:
-    """Load one named schema-v2 summary without selector or legacy fallback."""
+    """Load one named semantic-v2 or core-semantic-v3 summary exactly."""
 
     if deep_audit and required_array_paths is not None:
         _fail("Deep audit cannot be combined with a targeted array roster.")
@@ -392,12 +602,13 @@ def load_provider_epoch_behavior_summary_source_handle(
         receipt_digest = str(receipt["record_sha256"])
         run = open_zarr_root(archive / run_path, mode="r", use_consolidated=False)
     attrs = dict(getattr(run, "attrs", {}))
-    manifest, declarations = _validate_manifest(
+    manifest, declarations, _ = _validate_manifest(
         attrs,
         run_path=run_path,
         run_name=name,
         expected_recording_id=expected_recording_id,
         expected_semantic_selection=expected_semantic_selection,
+        expected_analysis_zarr=archive,
     )
     if deep_audit:
         requested = set(declarations)
@@ -457,37 +668,49 @@ def validate_provider_epoch_behavior_summary_metadata(
     run_name: str,
     expected_recording_id: str | None = None,
     expected_semantic_selection: Mapping[str, Any] | None = None,
+    expected_analysis_zarr: str | Path | None = None,
 ) -> Mapping[str, Any]:
     """Validate metadata-only discovery evidence and return its exact binding."""
 
-    manifest, declarations = _validate_manifest(
+    manifest, declarations, summary_profile = _validate_manifest(
         attrs,
         run_path=run_path,
         run_name=run_name,
         expected_recording_id=expected_recording_id,
         expected_semantic_selection=expected_semantic_selection,
+        expected_analysis_zarr=(
+            None
+            if expected_analysis_zarr is None
+            else Path(expected_analysis_zarr).expanduser().resolve()
+        ),
     )
     sources = manifest["sources"]
-    return _freeze(
-        {
-            "run_path": run_path,
-            "manifest_sha256": canonical_json_sha256(_plain(manifest)),
-            "payload_digest": manifest["payload_digest"],
-            "source_protocol_semantic_selection": sources[
-                "protocol_semantic_selection"
-            ],
-            "source_provider_motion": sources["provider_motion"],
-            "source_swim_bouts": sources["swim_bouts"],
-            "parameters": manifest["parameters"],
-            "dimensions": manifest["dimensions"],
-            "array_declaration_count": len(declarations),
-        }
-    )
+    binding = {
+        "run_path": run_path,
+        "manifest_sha256": canonical_json_sha256(_plain(manifest)),
+        "payload_digest": manifest["payload_digest"],
+        "source_protocol_semantic_selection": sources["protocol_semantic_selection"],
+        "source_provider_motion": sources.get("provider_motion"),
+        "source_swim_bouts": sources["swim_bouts"],
+        "parameters": manifest["parameters"],
+        "dimensions": manifest["dimensions"],
+        "array_declaration_count": len(declarations),
+    }
+    if summary_profile == CORE_SEMANTIC_V3_PROFILE:
+        binding.update(
+            {
+                "summary_profile": summary_profile,
+                "source_core_motion": sources["core_motion"],
+            }
+        )
+    return _freeze(binding)
 
 
 __all__ = [
+    "CORE_SEMANTIC_V3_PROFILE",
     "ProviderEpochBehaviorSummarySourceError",
     "ProviderEpochBehaviorSummarySourceHandle",
+    "SEMANTIC_V2_PROFILE",
     "VERIFICATION_MODE",
     "load_provider_epoch_behavior_summary_source_handle",
     "validate_provider_epoch_behavior_summary_metadata",
