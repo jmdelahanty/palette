@@ -361,6 +361,15 @@ for contract changes, original-byte preservation, safety corrections and exact
 unrun gates. Combined unpatched synthetic acceptance, combined CI, deployment
 and activation remain distinct and incomplete. No production cleanup occurred.
 
+September 7 development integration: organizer `8b5ab93343930fef8f63a0d04c16e497752f5c68`
+and clipped importer `45a2a165cbfc597fb3d274694292db286eb51792` each passed all
+24 required checks before root combined them. The importer includes validated
+lease propagation through the nested stimulus writer. This combined revision
+still requires its own local validation, all 24 CI checks, and clean-code
+synthetic execution evidence; it is not yet merge-ready, deployed or activated.
+The [integration checkpoint](parent_recording_intake_handoff_2026-09-06.md#september-7-reviewed-development-integration)
+records exact inputs, ownership, fixture corrections and the remaining canary.
+
 2026-09-06 ingestion-validation companion: **complete for its scoped
 corrections**, owned by the Palette worker on
 `agent/palette/ingestion-validation-20260906`. PR 143 covers PTP complete-state

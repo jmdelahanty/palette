@@ -708,6 +708,41 @@ def load_acquisition_frame_clock_source(
     return None
 
 
+def load_clipped_acquisition_frame_clock_source(
+    recording_dir: str | Path,
+    *,
+    camera_id: str,
+    frame_index_path: str | Path,
+    expected_frame_count: int,
+) -> AcquisitionFrameClockSource:
+    """Load only the explicitly bound, complete clipped-recording frame index.
+
+    A clip-local CSV or a conventional sibling index cannot stand in for this
+    recording-wide source. The existing Parquet, validity, clock semantics and
+    persisted digest contracts remain unchanged.
+    """
+
+    root = Path(recording_dir).expanduser().resolve()
+    if not root.is_dir():
+        raise AcquisitionFrameClockError("Clipped recording directory is missing.")
+    if type(camera_id) is not str or not camera_id or camera_id != camera_id.strip():
+        raise AcquisitionFrameClockError("Clipped clock requires an exact camera_id.")
+    if type(expected_frame_count) is not int or expected_frame_count <= 0:
+        raise AcquisitionFrameClockError(
+            "Clipped clock requires a positive exact frame count."
+        )
+    path = Path(frame_index_path).expanduser()
+    path = (path if path.is_absolute() else root / path).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise AcquisitionFrameClockError(
+            "Clipped frame index must be an existing regular file inside the recording."
+        )
+    return _validate_source(
+        _load_parquet_source(path, recording_dir=root, camera_id=camera_id),
+        expected_frame_count=expected_frame_count,
+    )
+
+
 def _array_digests(source: AcquisitionFrameClockSource) -> dict[str, str]:
     return {
         name: _array_values_sha256(np.asarray(getattr(source, name)))
@@ -1335,6 +1370,7 @@ __all__ = [
     "acquisition_frame_clock_source_sha256",
     "import_acquisition_frame_clock",
     "load_acquisition_frame_clock_source",
+    "load_clipped_acquisition_frame_clock_source",
     "publish_acquisition_frame_clock",
     "resolve_acquisition_frame_clock",
 ]

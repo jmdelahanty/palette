@@ -362,3 +362,55 @@ controls. No deployment, installed poller mutation, main merge, production
 registry mutation, acquisition-machine cleanup or scientific activation is
 authorized or performed. Genuine acquisition canary coordination remains
 separate; synthetic Orange-shaped envelopes are not encoder/hardware evidence.
+
+## September 7 reviewed development integration
+
+Both incoming exact commits completed all 24 required CI checks before this
+integration: organizer `8b5ab93343930fef8f63a0d04c16e497752f5c68` (PR 149) and
+clipped importer `45a2a165cbfc597fb3d274694292db286eb51792` (PR 155). The latter
+includes the nested stimulus-writer lease correction, independently validated
+with 19 passing cases. Both worktrees were clean and their common prerequisite
+was `0cd250a58b26e5c56fcdf9926b2593eee643b1e9`. Only their existing generated
+writer census overlapped; its disjoint changes merged automatically and remain
+subject to the existing generator check. Root owns this development integration;
+the separate importer worktree is left unchanged at its reviewed commit.
+
+This merge is not a main merge, deployment, or production activation. All 24
+checks must run successfully for the resulting combined commit as well.
+Combined local tests and the clean-commit unpatched synthetic canary are next;
+neither is claimed complete at this pre-commit checkpoint.
+
+Before committing the combined tree, **368 focused tests passed in 58.32 s**
+across organizer, session/batch/ordinary importer, transfer/index, receipt,
+read-only registry, acquisition clock and both process-lifetime regressions.
+The generated census and whitespace checks also passed without further
+generated edits. Full required remote CI and the clean-commit canary remain
+unrun at this checkpoint.
+Combined local import boundaries, FPS/keypoint/tail/paradigm authority checks,
+file-size, Zarr modes, observed metadata, contract freshness and registry schema
+reference checks also passed. These are not a substitute for the remote checks.
+
+The fresh positive fixture is
+`/tmp/palette-citrus-encoded-transfer-20260906-cp9v8cmx`, and the separately
+reserved negative fixture is
+`/tmp/palette-citrus-encoded-transfer-20260906-g74o_er5`. Both came through the
+actual pinned Citrus CLI, validation and idempotent retry with snapshot
+`sha256:8f08c19b53b8a41b1c6e162abfff3a977fcdba2ef7c954f54fa5b5471763ef14`.
+The generator now uses the registered-mask reader's required exact asset
+locators and validates that reader before transfer. Earlier fixture evidence is
+preserved: its generic bundle/import succeeded, but a later registered-mask
+read correctly refused its insufficient locator layout. No validator was
+weakened and no historical artifact was rewritten to accommodate that fixture.
+
+The canary harness `/tmp/palette_transfer_parent_e2e_20260907.py` requires the
+exact clean combined commit and matching imported package path. It will invoke
+the maintained CLI with explicit `--transfer-v2 --recording-only --register`
+against a fresh isolated registry and destination, then check original-byte
+coverage, clock/crop/frame identity, actual receipts/admission, required geometry
+loadback, empty staging and byte-stable replay. A separate corruption control
+must preserve staging and leave the registry unchanged. This is the explicitly
+chosen recording-only workflow with retained synthetic H5/geometry context, not
+an authentic stimulus acquisition or Orange hardware/clock canary. Its final
+report is an external execution artifact under a fresh
+`/tmp/palette-parent-intake-e2e-20260907-*` directory, not a replacement status or
+scientific acceptance authority.
