@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 import pytest
+from matplotlib import pyplot as plt
+from matplotlib.text import Text
 
 from fisheye.utils import plot_chaser_detailed_successors as plot_module
 from fisheye.utils.plot_chaser_detailed_successors import (
@@ -114,9 +116,7 @@ class _Relative:
 
     def base_frame_chaser(self, name: str) -> np.ndarray:
         values = self.values[name]
-        return values.reshape(
-            (self.n_frames, self.n_chasers) + values.shape[1:]
-        )
+        return values.reshape((self.n_frames, self.n_chasers) + values.shape[1:])
 
     def base_array(self, name: str) -> np.ndarray:
         return self.values[name]
@@ -161,7 +161,9 @@ def _inputs() -> tuple[
             "trial_ordinal": np.asarray([1, 2], dtype=np.int64),
             "logged_trial_id": np.asarray([11, 12], dtype=np.int64),
             "chaser_identity_code": np.asarray([1, 1], dtype=np.int64),
-            "trigger_timestamp_ns": np.asarray([10_000_000, 30_000_000], dtype=np.int64),
+            "trigger_timestamp_ns": np.asarray(
+                [10_000_000, 30_000_000], dtype=np.int64
+            ),
             "trigger_timestamp_valid": np.asarray([True, True]),
             "logged_active_trial_member": active,
         },
@@ -171,7 +173,9 @@ def _inputs() -> tuple[
         "summary_chaser_identity_code": np.asarray([1, 1, 2, 2], dtype=np.int64),
         "summary_distance_bin_index": np.asarray([0, 1, 0, 1], dtype=np.int64),
         "summary_distance_bin_start_mm": np.asarray([0, 8, 0, 8], dtype=np.float64),
-        "summary_distance_bin_end_mm": np.asarray([8, np.inf, 8, np.inf], dtype=np.float64),
+        "summary_distance_bin_end_mm": np.asarray(
+            [8, np.inf, 8, np.inf], dtype=np.float64
+        ),
     }
     bout = _Successor(
         successor_kind="generalized_chaser_bout_response",
@@ -219,9 +223,7 @@ def _inputs() -> tuple[
             "event_peak_speed_mm_s": np.asarray([24.0]),
             "event_distance_at_onset_mm": np.asarray([10.0]),
             "event_recaptured": np.asarray([True]),
-            "sweep_speed_threshold_mm_s": np.asarray(
-                [10.0, 20.0, 10.0, 20.0]
-            ),
+            "sweep_speed_threshold_mm_s": np.asarray([10.0, 20.0, 10.0, 20.0]),
         },
     )
 
@@ -371,9 +373,12 @@ def test_render_detailed_bundle_writes_eighteen_files(tmp_path: Path) -> None:
 
     assert len(outputs) == 18
     assert all(path.is_file() and path.stat().st_size > 0 for path in outputs)
-    assert parameters["scientific_coordinates"]["bout_distance_bins"][1][
-        "end_mm_exclusive"
-    ] is None
+    assert (
+        parameters["scientific_coordinates"]["bout_distance_bins"][1][
+            "end_mm_exclusive"
+        ]
+        is None
+    )
     assert parameters["scientific_coordinates"]["provider_distance_cdf"][0][
         "cdf_thresholds_mm"
     ] == [5.0, 10.0]
@@ -418,11 +423,71 @@ def test_render_detailed_bundle_writes_eighteen_files(tmp_path: Path) -> None:
     ]
 
 
+def test_long_provider_ids_stay_in_provenance_and_out_of_visible_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    inputs = list(_inputs())
+    keypoint_id = "opaque-keypoint-authority:" + "a" * 96
+    detection_id = "opaque-detection-authority:" + "b" * 96
+    inputs[3].source_authorities["fish_position"]["provider_id"] = keypoint_id
+    inputs[4].source_authorities["fish_position"]["provider_id"] = detection_id
+    inputs[5].scientific_manifest["position_provider"]["provider_id"] = keypoint_id
+    inputs[6].scientific_manifest["position_provider"]["provider_id"] = detection_id
+    figures = []
+
+    def capture_figure(figure, output_stem):
+        figures.append(figure)
+        return output_stem.with_suffix(".png"), output_stem.with_suffix(".pdf")
+
+    monkeypatch.setattr(plot_module, "_save_figure", capture_figure)
+    try:
+        render_detailed_bundle(
+            *inputs,
+            output_dir=tmp_path,
+            bundle_name="semantic-provider-labels",
+            chaser_appearance=_appearance(),
+        )
+        visible_text = "\n".join(
+            artist.get_text()
+            for figure in figures
+            for artist in figure.findobj(match=Text)
+        )
+    finally:
+        for figure in figures:
+            plt.close(figure)
+
+    assert keypoint_id not in visible_text
+    assert detection_id not in visible_text
+    assert "Keypoint-derived position" in visible_text
+    assert "Detection-derived position" in visible_text
+
+    parameters = detailed_plot_parameters(
+        inputs[0],
+        inputs[1],
+        inputs[2],
+        inputs[3],
+        inputs[5],
+        inputs[6],
+        chaser_appearance=_appearance(),
+    )
+    display = parameters["rendering"]["position_provider_display"]
+    assert display["provider_id_parsing"] == "prohibited"
+    assert [record["provider_role"] for record in display["bindings"]] == [
+        "keypoint",
+        "detection",
+    ]
+    assert [record["provider_id"] for record in display["bindings"]] == [
+        keypoint_id,
+        detection_id,
+    ]
+
+
 def test_detailed_bundle_rejects_duplicate_position_provider() -> None:
     inputs = list(_inputs())
-    inputs[-1].scientific_manifest["position_provider"]["provider_id"] = (
-        "keypoint_anatomical_triad_mean.v1"
-    )
+    inputs[-1].scientific_manifest["position_provider"][
+        "provider_id"
+    ] = "keypoint_anatomical_triad_mean.v1"
 
     with pytest.raises(ChaserDetailedPlotError, match="distinct"):
         verify_detailed_plot_inputs(*inputs)
@@ -445,9 +510,7 @@ def test_detailed_bundle_rejects_mismatched_appearance_projection(
 
 def test_detailed_bundle_rejects_relative_frame_mismatch() -> None:
     inputs = list(_inputs())
-    inputs[0].scientific_manifest["source_relative_frame"]["manifest_sha256"] = (
-        "0" * 64
-    )
+    inputs[0].scientific_manifest["source_relative_frame"]["manifest_sha256"] = "0" * 64
 
     with pytest.raises(ChaserDetailedPlotError, match="relative-frame"):
         verify_detailed_plot_inputs(*inputs)
@@ -455,9 +518,9 @@ def test_detailed_bundle_rejects_relative_frame_mismatch() -> None:
 
 def test_detailed_bundle_rejects_mismatched_chaser_arrays() -> None:
     inputs = list(_inputs())
-    inputs[4].values["chaser_position_xy_px"] = inputs[4].values[
-        "chaser_position_xy_px"
-    ].copy()
+    inputs[4].values["chaser_position_xy_px"] = (
+        inputs[4].values["chaser_position_xy_px"].copy()
+    )
     inputs[4].values["chaser_position_xy_px"][0, 0] += 1.0
 
     with pytest.raises(ChaserDetailedPlotError, match="chaser/timing evidence"):
@@ -474,9 +537,9 @@ def test_detailed_bundle_rejects_mismatched_epoch_evidence() -> None:
 
 def test_detailed_bundle_rejects_nonrepeated_fish_position() -> None:
     inputs = list(_inputs())
-    inputs[3].values["fish_position_xy_px"] = inputs[3].values[
-        "fish_position_xy_px"
-    ].copy()
+    inputs[3].values["fish_position_xy_px"] = (
+        inputs[3].values["fish_position_xy_px"].copy()
+    )
     inputs[3].values["fish_position_xy_px"][1, 0] += 1.0
 
     with pytest.raises(ChaserDetailedPlotError, match="repeated identically"):
@@ -506,10 +569,7 @@ def test_detailed_bundle_accepts_frozen_manifest_bindings() -> None:
     inputs = list(_inputs())
     for relative in inputs[3:5]:
         relative.manifest = MappingProxyType(
-            {
-                key: MappingProxyType(value)
-                for key, value in relative.manifest.items()
-            }
+            {key: MappingProxyType(value) for key, value in relative.manifest.items()}
         )
     for radial in inputs[5:]:
         radial.scientific_manifest["sources"] = MappingProxyType(
@@ -573,61 +633,64 @@ def test_main_uses_receipt_bound_successor_array_rosters(
     monkeypatch.setattr(
         plot_module, "load_chaser_relative_frame_targeted_source_handle", load_relative
     )
-    monkeypatch.setattr(plot_module, "_load_exact_chaser_appearance", lambda _: _appearance())
+    monkeypatch.setattr(
+        plot_module, "_load_exact_chaser_appearance", lambda _: _appearance()
+    )
     monkeypatch.setattr(plot_module, "render_detailed_bundle", render_stub)
     monkeypatch.setattr(plot_module, "detailed_plot_parameters", lambda *_a, **_k: {})
 
     output_dir = tmp_path / "plots"
-    assert plot_module.main(
-        [
-            str(tmp_path / "analysis.zarr"),
-            "--run-name",
-            "successors-v1",
-            "--relative-frame-run",
-            "keypoint-relative-v1",
-            "--detection-relative-frame-run",
-            "detection-relative-v1",
-            "--keypoint-relative-frame-receipt",
-            str(tmp_path / "keypoint-relative.json"),
-            "--detection-relative-frame-receipt",
-            str(tmp_path / "detection-relative.json"),
-            "--controller-validation-receipt",
-            str(tmp_path / "controller.json"),
-            "--bout-validation-receipt",
-            str(tmp_path / "bout.json"),
-            "--escape-validation-receipt",
-            str(tmp_path / "escape.json"),
-            "--keypoint-radial-run",
-            "keypoint-radial-v1",
-            "--detection-radial-run",
-            "detection-radial-v1",
-            "--keypoint-radial-validation-receipt",
-            str(tmp_path / "keypoint-radial.json"),
-            "--detection-radial-validation-receipt",
-            str(tmp_path / "detection-radial.json"),
-            "--expected-recording-id",
-            "recording-1",
-            "--output-dir",
-            str(output_dir),
-            "--bundle-name",
-            "detailed-receipt-bound-v6",
-        ]
-    ) == 0
+    assert (
+        plot_module.main(
+            [
+                str(tmp_path / "analysis.zarr"),
+                "--run-name",
+                "successors-v1",
+                "--relative-frame-run",
+                "keypoint-relative-v1",
+                "--detection-relative-frame-run",
+                "detection-relative-v1",
+                "--keypoint-relative-frame-receipt",
+                str(tmp_path / "keypoint-relative.json"),
+                "--detection-relative-frame-receipt",
+                str(tmp_path / "detection-relative.json"),
+                "--controller-validation-receipt",
+                str(tmp_path / "controller.json"),
+                "--bout-validation-receipt",
+                str(tmp_path / "bout.json"),
+                "--escape-validation-receipt",
+                str(tmp_path / "escape.json"),
+                "--keypoint-radial-run",
+                "keypoint-radial-v1",
+                "--detection-radial-run",
+                "detection-radial-v1",
+                "--keypoint-radial-validation-receipt",
+                str(tmp_path / "keypoint-radial.json"),
+                "--detection-radial-validation-receipt",
+                str(tmp_path / "detection-radial.json"),
+                "--expected-recording-id",
+                "recording-1",
+                "--output-dir",
+                str(output_dir),
+                "--bundle-name",
+                "detailed-receipt-bound-v6",
+            ]
+        )
+        == 0
+    )
 
     assert len(calls) == 5
     for call in calls:
         assert call["deep_audit"] is False
         assert call["required_array_names"] == (
-            plot_module.DETAILED_SUCCESSOR_PLOT_ARRAY_NAMES[
-                call["successor_kind"]
-            ]
+            plot_module.DETAILED_SUCCESSOR_PLOT_ARRAY_NAMES[call["successor_kind"]]
         )
     receipt = json.loads(
         (output_dir / "detailed-receipt-bound-v6_receipt.json").read_text(
             encoding="utf-8"
         )
     )
-    assert receipt["schema_version"] == 6
+    assert receipt["schema_version"] == 7
     assert receipt["plot_policy"]["source_validation"] == {
         "successors": "receipt_bound_targeted_array_rehash_v1",
         "relative_frames": "receipt_bound_targeted_array_rehash_v1",

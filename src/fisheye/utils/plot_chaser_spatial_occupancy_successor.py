@@ -32,10 +32,13 @@ from fisheye.visualization.chaser_spatial_occupancy_display import (
     SpatialOccupancyDisplayPlan,
     build_spatial_occupancy_display_plan,
 )
-
+from fisheye.visualization.chaser_provider_display import (
+    POSITION_PROVIDER_DISPLAY_POLICY_ID,
+    paired_position_provider_display_bindings,
+)
 
 RECEIPT_SCHEMA_ID = "palette.analysis.chaser_spatial_occupancy.plot_receipt"
-RECEIPT_SCHEMA_VERSION = 4
+RECEIPT_SCHEMA_VERSION = 5
 PLOT_RECIPE_ID = DISPLAY_RECIPE_ID
 PLOT_DPI = 180
 PLOT_FIGURE_SIZE_INCHES = (15.0, 15.0)
@@ -224,6 +227,18 @@ def _plot_parameters(
         _fail("Spatial occupancy plot authorities are incomplete.")
     x_edges = np.asarray(values["x_edges"])
     y_edges = np.asarray(values["y_edges"])
+    provider_ids = tuple(
+        str(record["provider_id"]) for record in sources["position_providers"]
+    )
+    try:
+        provider_display = paired_position_provider_display_bindings(
+            provider_ids=provider_ids,
+            provider_roles=tuple(
+                values["provider_registry"][str(index)] for index in range(2)
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        _fail(f"Spatial occupancy provider display binding is invalid: {exc}")
     return {
         "scientific_coordinates": {
             "x_bin_edges_mm": [float(value) for value in x_edges],
@@ -234,9 +249,7 @@ def _plot_parameters(
             "arena_radius_mm": float(arena["radius_mm"]),
             "coordinate_orientation": "+x_right_+y_down",
             "epoch_order": ["chaser_pre", "chaser_training", "chaser_post"],
-            "provider_order": [
-                str(record["provider_id"]) for record in sources["position_providers"]
-            ],
+            "provider_order": list(provider_ids),
         },
         "display_recipe": plan.provenance_record(),
         "provider_epoch_denominators": {
@@ -259,6 +272,14 @@ def _plot_parameters(
             "y_axis_display": "reversed_to_preserve_+y_down_image_coordinates",
             "arena_outline_linewidth_points": 1.0,
             "constrained_layout": True,
+            "position_provider_display": {
+                "policy_id": POSITION_PROVIDER_DISPLAY_POLICY_ID,
+                "bindings": [
+                    binding.provenance_record() for binding in provider_display
+                ],
+                "provider_id_parsing": "prohibited",
+                "full_provider_identity_visible": False,
+            },
         },
     }
 
@@ -291,6 +312,13 @@ def _render_spatial_occupancy_mode(
     radius_mm = float(arena["radius_mm"])
     providers = handle.scientific_manifest["sources"]["position_providers"]
     provider_ids = [str(record["provider_id"]) for record in providers]
+    try:
+        provider_display = paired_position_provider_display_bindings(
+            provider_ids=provider_ids,
+            provider_roles=("keypoint", "detection"),
+        )
+    except ValueError as exc:
+        _fail(f"Spatial occupancy provider display binding is invalid: {exc}")
     epoch_labels = ("pre", "training", "post")
 
     figure, axes = plt.subplots(
@@ -340,8 +368,8 @@ def _render_spatial_occupancy_mode(
         ax.set_title(f"{epoch_label} · detection − keypoint")
 
     row_labels = (
-        f"keypoint\n{provider_ids[0]}",
-        f"detection\n{provider_ids[1]}",
+        provider_display[0].display_label,
+        provider_display[1].display_label,
         "provider difference\npercentage points/bin",
     )
     for row_index, row_label in enumerate(row_labels):
@@ -369,6 +397,7 @@ def _render_spatial_occupancy_mode(
         "selector-ineligible",
         fontsize=13,
     )
+
     output_stem.parent.mkdir(parents=True, exist_ok=True)
     png = output_stem.with_suffix(".png")
     pdf = output_stem.with_suffix(".pdf")

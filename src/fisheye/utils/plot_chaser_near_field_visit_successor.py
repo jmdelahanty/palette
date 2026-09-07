@@ -32,14 +32,22 @@ from fisheye.visualization.chaser_near_field_visits import (
     NearFieldVisitTrajectoryView,
     validated_near_field_visit_trajectory_view,
 )
-
+from fisheye.visualization.chaser_provider_display import (
+    POSITION_PROVIDER_DISPLAY_POLICY_ID,
+    PositionProviderDisplayBinding,
+    position_provider_display_binding,
+)
 
 RECEIPT_SCHEMA_ID = "palette.analysis.chaser_near_field_visits.plot_receipt"
-RECEIPT_SCHEMA_VERSION = 1
-PLOT_RECIPE_ID = "persisted_exact_near_field_visit_trajectories_v1"
+RECEIPT_SCHEMA_VERSION = 2
+PLOT_RECIPE_ID = "persisted_exact_near_field_visit_trajectories_v2"
 PLOT_DPI = 180
 PLOT_COLUMNS = 3
 PANEL_SIZE_INCHES = (5.2, 4.8)
+ARENA_DIRECTION_ANNOTATION = "toward arena centre"
+ARENA_DIRECTION_TEXT_X_FRACTION = 0.18
+ARENA_DIRECTION_TEXT_Y_FRACTION = -0.10
+ARENA_DIRECTION_ARROW_X_FRACTION = 0.92
 _RUN_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _VISIT_COLORS = (
     "#0072B2",
@@ -126,6 +134,7 @@ def _select(
 def near_field_visit_plot_parameters(
     view: NearFieldVisitTrajectoryView,
     *,
+    provider_display: PositionProviderDisplayBinding,
     panels: Sequence[NearFieldVisitPanel],
     visits: Sequence[NearFieldVisitTrajectory],
     epoch_role_codes: Collection[int] | None,
@@ -166,6 +175,7 @@ def near_field_visit_plot_parameters(
                         "epoch_role_code": panel.epoch_role_code,
                         "epoch_window_id": panel.epoch_window_id,
                         "chaser_identity_code": panel.chaser_identity_code,
+                        "chaser_identity": panel.chaser_identity,
                         "behavior_role_code": panel.behavior_role_code,
                     }
                     for panel in panels
@@ -195,6 +205,23 @@ def near_field_visit_plot_parameters(
                 "last_retained_marker": "triangle",
                 "cpa_marker": "x",
                 "distance_time_origin": "first_retained_visit_sample",
+                "arena_direction_annotation": {
+                    "label": ARENA_DIRECTION_ANNOTATION,
+                    "text_x_fraction_of_limit": ARENA_DIRECTION_TEXT_X_FRACTION,
+                    "text_y_fraction_of_limit": ARENA_DIRECTION_TEXT_Y_FRACTION,
+                    "arrow_x_fraction_of_limit": ARENA_DIRECTION_ARROW_X_FRACTION,
+                    "arrow_y_fraction_of_limit": 0.0,
+                },
+            },
+            "provider_display": {
+                "policy_id": POSITION_PROVIDER_DISPLAY_POLICY_ID,
+                "binding": provider_display.provenance_record(),
+                "provider_id_parsing": "prohibited",
+                "full_provider_identity_visible": False,
+                "panel_chaser_identity_display": (
+                    "numeric_identity_code_plus_sealed_behavior_role"
+                ),
+                "full_chaser_identity_visible": False,
             },
             "viewer_policy": {
                 "scientific_recomputation": False,
@@ -225,7 +252,7 @@ def _figure_grid(panel_count: int, columns: int) -> tuple[Any, np.ndarray]:
 def _panel_title(panel: NearFieldVisitPanel, displayed: int) -> str:
     return (
         f"{panel.epoch_role} · window {panel.epoch_window_id}\n"
-        f"{panel.chaser_identity} · {panel.behavior_role}\n"
+        f"chaser {panel.chaser_identity_code} · {panel.behavior_role}\n"
         f"persisted {panel.total_visit_count} · displayed {displayed} · "
         f"complete {panel.complete_visit_count} · censored {panel.censored_visit_count} · "
         f"short {panel.short_visit_count}"
@@ -256,6 +283,7 @@ def _trajectory_figure(
     panels: Sequence[NearFieldVisitPanel],
     visits: Sequence[NearFieldVisitTrajectory],
     *,
+    provider_display: PositionProviderDisplayBinding,
     limit_mm: float,
     columns: int,
 ) -> Any:
@@ -355,12 +383,16 @@ def _trajectory_figure(
             zorder=6,
         )
         axis.annotate(
-            "arena centre direction",
-            xy=(0.92 * limit_mm, 0.0),
-            xytext=(0.42 * limit_mm, -0.10 * limit_mm),
+            ARENA_DIRECTION_ANNOTATION,
+            xy=(ARENA_DIRECTION_ARROW_X_FRACTION * limit_mm, 0.0),
+            xytext=(
+                ARENA_DIRECTION_TEXT_X_FRACTION * limit_mm,
+                ARENA_DIRECTION_TEXT_Y_FRACTION * limit_mm,
+            ),
             arrowprops={"arrowstyle": "->", "color": "#555555"},
             fontsize=7,
             color="#555555",
+            ha="left",
         )
         axis.set_title(_panel_title(panel, len(selected)), fontsize=9)
         axis.set_xlim(-limit_mm, limit_mm)
@@ -405,8 +437,8 @@ def _trajectory_figure(
     )
     figure.suptitle(
         f"Exact near-field visit trajectories · {view.recording_id}\n"
-        f"position provider: {view.position_provider_id} · persisted membership and "
-        "canonical samples · no interpolation or role inference",
+        f"fish position: {provider_display.display_label} · persisted membership "
+        "and canonical samples · no interpolation or identifier inference",
         fontsize=13,
     )
     return figure
@@ -417,6 +449,7 @@ def _distance_figure(
     panels: Sequence[NearFieldVisitPanel],
     visits: Sequence[NearFieldVisitTrajectory],
     *,
+    provider_display: PositionProviderDisplayBinding,
     columns: int,
 ) -> Any:
     figure, axes = _figure_grid(len(panels), columns)
@@ -486,8 +519,8 @@ def _distance_figure(
     )
     figure.suptitle(
         f"Exact near-field visit distance traces · {view.recording_id}\n"
-        f"position provider: {view.position_provider_id} · time origin is each visit's "
-        "first retained sample; censored boundaries remain visible",
+        f"fish position: {provider_display.display_label} · time origin is each "
+        "visit's first retained sample; censored boundaries remain visible",
         fontsize=13,
     )
     return figure
@@ -525,6 +558,7 @@ def render_near_field_visit_trajectories(
     handle: Any,
     *,
     output_stem: str | Path,
+    provider_role: str,
     epoch_role_codes: Collection[int] | None = None,
     chaser_identity_codes: Collection[int] | None = None,
     include_censored: bool = True,
@@ -540,6 +574,13 @@ def render_near_field_visit_trajectories(
         view = validated_near_field_visit_trajectory_view(handle)
     except ChaserNearFieldVisitViewError as exc:
         raise ChaserNearFieldVisitPlotError(str(exc)) from exc
+    try:
+        provider_display = position_provider_display_binding(
+            provider_role=provider_role,
+            provider_id=view.position_provider_id,
+        )
+    except ValueError as exc:
+        _fail(f"Near-field provider display binding is invalid: {exc}")
     panels, visits = _select(
         view,
         epoch_role_codes=epoch_role_codes,
@@ -556,6 +597,7 @@ def render_near_field_visit_trajectories(
         _fail("Canonical axis limit must be finite and greater than the exit radius.")
     parameters = near_field_visit_plot_parameters(
         view,
+        provider_display=provider_display,
         panels=panels,
         visits=visits,
         epoch_role_codes=epoch_role_codes,
@@ -572,13 +614,20 @@ def render_near_field_visit_trajectories(
             view,
             panels,
             visits,
+            provider_display=provider_display,
             limit_mm=resolved_limit,
             columns=columns,
         ),
         stem.with_name(f"{stem.name}_trajectories"),
     )
     distance_files = _save_figure(
-        _distance_figure(view, panels, visits, columns=columns),
+        _distance_figure(
+            view,
+            panels,
+            visits,
+            provider_display=provider_display,
+            columns=columns,
+        ),
         stem.with_name(f"{stem.name}_distance_traces"),
     )
     return (*trajectory_files, *distance_files), parameters
@@ -591,6 +640,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--bundle-name")
     parser.add_argument("--expected-recording-id", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--provider-role",
+        required=True,
+        choices=("keypoint", "detection"),
+        help="Explicit semantic role; never inferred from a provider or run name.",
+    )
     parser.add_argument("--source-validation-receipt")
     parser.add_argument("--epoch-role-code", type=int, action="append")
     parser.add_argument("--chaser-identity-code", type=int, action="append")
@@ -637,6 +692,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     files, parameters = render_near_field_visit_trajectories(
         handle,
         output_stem=stem,
+        provider_role=args.provider_role,
         epoch_role_codes=args.epoch_role_code,
         chaser_identity_codes=args.chaser_identity_code,
         include_censored=not args.exclude_censored,
