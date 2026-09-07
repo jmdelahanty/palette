@@ -383,6 +383,29 @@ development branch remains incomplete and not merge-ready. This is validated
 synthetic execution, not live deployment, full stimulus-data acceptance,
 production activation, acquisition-source release or broader `INGEST-001` closure.
 
+September 7 full-stimulus extension: all 24 required checks passed on exact
+`a5a6ff6dd83df3f49a8f1ed7108ea6846ef3a298`. The clean, unpatched full-stimulus
+synthetic workflow then passed for two renderer-only camera parents, including
+exact event/protocol/calibration readback, two registered stimulus runs/four
+steps, all 41 staged files preserved before retirement, empty staging and
+byte-stable replay. A separately sealed malformed-H5 delivery failed stimulus
+import while retaining staging and unchanged registry bytes. See the
+[full-stimulus result](parent_recording_intake_handoff_2026-09-06.md#full-stimulus-synthetic-canary--september-7)
+for exact artifacts, hashes, recovery and scientific limits. No production code
+changed. This handoff/queue update is uncommitted documentation with future-head
+CI unrun; it does not change the producing receipts or authorize integration.
+Live acquisition, deployment/activation and broader `INGEST-001` remain open.
+
+September 7 evidence packaging is in progress on the same root-owned intake
+branch from CI-green `a5a6ff6dd83df3f49a8f1ed7108ea6846ef3a298`. The reusable
+test package preserves the actual producer/importer/readers and adds test-only
+custody guards; historical reports/source hashes are archived without rewriting
+producer identities. The acquisition readiness request is drafted but unsent.
+See the [packaging checkpoint](parent_recording_intake_handoff_2026-09-06.md#reusable-package-and-acquisition-readiness-draft--september-7).
+The packaged CLI's clean-commit canary and all 24 final-head CI checks remain
+unrun here. No production code, scientific defaults, live installation,
+acquisition capture, source release, production selector or authority changed.
+
 2026-09-06 ingestion-validation companion: **complete for its scoped
 corrections**, owned by the Palette worker on
 `agent/palette/ingestion-validation-20260906`. PR 143 covers PTP complete-state

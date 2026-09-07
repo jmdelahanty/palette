@@ -480,3 +480,155 @@ full stimulus-data canary, production registry/selector activation and broader
 `INGEST-001` closure are not claimed. No acquisition agent was needed for this
 synthetic test; a real acquisition run still needs pinned installed versions,
 authentic finalized source evidence, source custody and an authorized destination.
+
+## Full stimulus synthetic canary — September 7
+
+The user-authorized full-stimulus extension passed on clean producing commit
+`a5a6ff6dd83df3f49a8f1ed7108ea6846ef3a298` in
+`/tmp/palette-parent-clipped-intake-20260906`, branch
+`agent/palette/parent-clipped-intake-20260906`, owned by the root Palette worker.
+All 24 required checks for that exact commit passed; this supersedes the
+earlier CI-pending checkpoint. This extension is test-only: no production
+implementation, validator, scientific default, persisted grammar or identity
+contract changed. These handoff/queue additions are subsequent uncommitted
+documentation, not part of the clean producing commit or its CI evidence.
+
+The actual session CLI ran with `--transfer-v2 --apply --register` and neither
+`--recording-only` nor the stimulus metadata-only bypass. It exercised the
+ordinary batch importer, nested stimulus subprocess, publication, existing
+readers, isolated shadow-registry admission, staging retirement and saved-plan
+replay. The fresh source contains synthetic renderer-only H5 data using the
+supported semantic-v1 protocol grammar: three frame rows, four events and two
+steps per camera, plus selected calibration/display snapshots. Original H264,
+crop/blank rows, geometry, PTP-unqualified context and opaque bytes remain in
+scope. The two additional synthetic homography source artifacts bring staged
+coverage to **41 files**.
+
+- Positive execution report:
+  `/tmp/palette-parent-intake-e2e-20260907-txvsc9t1/e2e_report.json`;
+  SHA-256 `9fbb835670b159272f1b901989e3a3a98ba684912f970583555ea3a23d8cc1c0`.
+  Source fixture: `/tmp/palette-citrus-encoded-transfer-20260906-uor2oo3v`;
+  pinned Citrus snapshot:
+  `sha256:124553160c8f269c398ae202196cd8c3fc10fa734b8087d12ff0fa46d052400a`.
+- Cameras `02010093` and `02010094` both published complete stimulus runs.
+  Their exact H5 event/frame values, semantic JSON/trial-index bytes, selected
+  camera matrices, renderer snapshots and protocol step bindings passed
+  readback. The maintained stimulus event consumer, selected-calibration and
+  physical-coordinate readers, and registry extractor all ran unpatched.
+  Synthetic scale bindings validate storage/identity only, not real calibration.
+- The registry contains **two stimulus runs and four recording-step rows**.
+  Recording-import receipt digests are
+  `f13a187b620a65c980b381b6a643f5393dc67d7ab21ebe7a30ce585019a4bd64` and
+  `26f399601fff376db1d99bda7bde6aec82cd1a460c53d4a6d345f2a459544718`.
+  Both stimulus writer provenance records and import receipts bind the exact
+  clean producing commit above.
+- Every staged file matched all declared recording destinations by hash and
+  size before retirement. Staging is empty; original synthetic acquisition
+  copies remain unchanged and all retired material remains recoverable in the
+  recording folders/source fixture. Replay ran no importer and changed neither
+  parent bytes nor registry bytes.
+- The separate malformed-H5 control omitted required frame metadata **before**
+  the actual Citrus transfer was sealed. Transport verification passed, then
+  real Palette stimulus import refused with exit 1. Both failed candidates
+  remained selector-ineligible, no import receipt/admission was acknowledged,
+  staging and original sources stayed intact, and registry bytes were unchanged.
+  Report: `/tmp/palette-parent-intake-e2e-20260907-5sa_8n0p/e2e_report.json`;
+  SHA-256 `c32a3d1ceece8fb8ebabe069f543651adcca9307c58a703d90eb37029d6ee442`.
+  Its source fixture is `/tmp/palette-citrus-encoded-transfer-20260906-jm0jfwat`.
+- Both isolated registries passed complete integrity and foreign-key checks
+  through `scripts/py -m fisheye.utils.registry_integrity`, using Python SQLite
+  **3.52.0**. Each execution directory contains `registry_integrity.json`.
+
+The external harness is `/tmp/palette_transfer_parent_e2e_20260907.py`, SHA-256
+`4a45b3a90226d683d385a57a9053bdc85843816d6b47fbbbbf74790e2008a490`.
+The H5 builder is `/tmp/palette_stimulus_fixture_20260907.py`, SHA-256
+`3c3abad49510bcb8b81cf677e8ba8626a01d035f3a9c9f7d3eebcdb3de435ad2`.
+The producer report records the generator and base-fixture hashes. Earlier
+execution reports remain unchanged: initial verification probes incorrectly
+read event-specific columns as plain strings/generic structured columns and
+searched the supervisor log instead of the child log for the negative error.
+The final fresh runs above use the maintained event reader and actual child
+logs. No runtime contract was weakened to satisfy those harness assertions.
+
+This closes the bounded renderer-only full-stimulus synthetic test, not a
+chaser-coordinate canary, finalized semantic-v2 execution-index test, sealed
+stimulus-to-acquisition mapping claim, authentic hardware/clock validation,
+live deployment, acquisition-source release or production activation. No
+dependency installation, commit, push, deployment or production write occurred
+in this follow-up. Only this handoff and the owning queue are modified in the
+repository. Required checks for a future documentation commit remain unrun:
+generated artifacts, import boundaries, file-size ratchet, Zarr metadata modes,
+observed metadata literals, active contract freshness, package/collection,
+non-GPU shards 0–15 and `ci-required`. The green producing commit does not
+validate a future documentation commit or authorize integration/activation.
+
+Supplemental focused regression: **108 passed in 142.01 seconds**, outside the
+sandbox using the Palette Python wrapper. No test was skipped or failed:
+
+```bash
+scripts/py -m pytest \
+  tests/unit/fisheye/test_stimulus_import_lease.py \
+  tests/unit/fisheye/test_import_stimulus_to_zarr_paths.py \
+  tests/unit/fisheye/test_import_stimulus_to_zarr_context.py \
+  tests/unit/fisheye/test_registry_stimulus_metadata.py -q
+```
+
+All three external fixture/harness scripts passed `py_compile`; the two
+documentation changes passed `git diff --check`.
+
+## Reusable package and acquisition-readiness draft — September 7
+
+The user authorized checking in the reusable canary, archiving the evidence,
+drafting the acquisition-agent request, committing/pushing the changes and
+waiting for fresh required CI. The root worker continues in the same worktree
+and branch above, from exact CI-green prerequisite
+`a5a6ff6dd83df3f49a8f1ed7108ea6846ef3a298`. The two pre-existing documentation
+edits belong to this worker and are preserved. Other worktrees and geometry
+branches remain untouched. No acquisition message, real capture or deployment
+is authorized or performed by this packaging step.
+
+Classification: behavior-preserving extraction of the external **test tools**,
+plus explicitly scoped test-custody enforcement. The maintained package is
+[`tests/canaries/parent_intake`](../../tests/canaries/parent_intake/README.md).
+It removes machine-specific source-checkout defaults and requires an explicit
+Citrus source snapshot matching all four existing byte pins. It rejects
+optimized Python and noncanonical/non-synthetic locations, symlinks, shared
+hard links, special files and oversized fixture trees before runtime input
+mutation. Fresh valid fixture grammar, numerical/row identities, event readers,
+production import/receipt/registry validators and byte-preserving retirement
+remain unchanged. The canary uses its own bounded temporary destinations and
+registry; these safety limits do not change production admission.
+
+The [durable evidence archive](parent_intake_synthetic_canary_2026-09-07/README.md)
+contains byte-exact historical reports and non-executable source snapshots with
+`SHA256SUMS`; old absolute paths and producing identities were not rewritten.
+The old negative generator matches its recorded hash; missing earlier builder
+hash fields remain missing. This is a report archive, not a new status or
+admission authority and not a copy of disposable Zarr/media payloads.
+
+The [acquisition-agent request](acquisition_parent_intake_canary_request_2026-09-07.md)
+is explicitly **draft and unsent**. It requests installed versions, an existing
+representative finalized bundle or a capture proposal, source/frame/timing/H5/
+geometry facts and custody/destination planning. It does not approve acquiring,
+transferring, deploying, changing scientific defaults, releasing source copies
+or activating production authority.
+
+Initial package validation: 23 focused tests passed in 0.77 seconds; the earlier
+first collection attempt deliberately exposed the missing safety module before
+implementation. Full-suite collection then found 12,054 tests in 8.04 seconds,
+with the same explicit local U-Net registry module skip at
+`test_train_unet_subject_masks_registry.py:23` for this hostname's existing
+`torch._dynamo` import issue. This skip is deferred local evidence, not a
+successful substitute for that remote required shard. All local import-boundary,
+FPS/keypoint/tail/paradigm access, generated census, file-size, Zarr-mode,
+observed-metadata, managed-contract, registry-reference and Ruff checks passed.
+
+The package is locally implemented; a clean-commit invocation of the packaged
+CLI and final exact-head CI still need to run. All 24 new-head checks are unrun
+at this pre-commit checkpoint: generated artifacts, import boundaries,
+file-size ratchet, Zarr metadata modes, observed metadata literals, active
+contract freshness, package/collection, non-GPU shards 0–15 and `ci-required`.
+Do not describe the new package revision as complete or merge-ready until
+those exact-head checks succeed. Fresh canary reports will bind their actual
+clean producing commit; a later report-only commit does not change that code
+identity. No installation, main merge, shared-checkout update or activation.

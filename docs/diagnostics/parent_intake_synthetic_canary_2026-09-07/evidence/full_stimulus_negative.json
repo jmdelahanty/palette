@@ -1,0 +1,63 @@
+{
+  "commands": [
+    {
+      "argv": [
+        "/tmp/palette-parent-clipped-intake-20260906/scripts/py",
+        "-m",
+        "fisheye.utils.run_citrus_session_import",
+        "/tmp/palette-citrus-encoded-transfer-20260906-jm0jfwat/delivery",
+        "--transfer-v2",
+        "--apply",
+        "--recording-type",
+        "behavior",
+        "--recording-subtype",
+        "free",
+        "--behavior-mode",
+        "free",
+        "--dest-root",
+        "/tmp/palette-parent-intake-e2e-20260907-5sa_8n0p/recordings",
+        "--run-dir",
+        "/tmp/palette-parent-intake-e2e-20260907-5sa_8n0p/first-run",
+        "--register",
+        "--registry",
+        "/tmp/palette-parent-intake-e2e-20260907-5sa_8n0p/isolated_registry.sqlite"
+      ],
+      "returncode": 1,
+      "stderr": "bash: /home/delahantyj@hhmi.org/miniconda3/envs/palette-py311/lib/libtinfo.so.6: no version information available (required by bash)\nTransfer parent intake failed: parent importer exited with return code 1\n",
+      "stdout": ""
+    }
+  ],
+  "failed_stimulus_candidates": [
+    {
+      "completion_status": "failed",
+      "run_name": "stimulus_20260907_035554",
+      "selector_eligible": false,
+      "zarr": "/tmp/palette-parent-intake-e2e-20260907-5sa_8n0p/recordings/source_recording_fb681f490df5ab310b63e63e836137bc5841b5136040778972e8f76a67b512e4/zarr/source_recording_fb681f490df5ab310b63e63e836137bc5841b5136040778972e8f76a67b512e4_analysis.zarr"
+    },
+    {
+      "completion_status": "failed",
+      "run_name": "stimulus_20260907_035553",
+      "selector_eligible": false,
+      "zarr": "/tmp/palette-parent-intake-e2e-20260907-5sa_8n0p/recordings/source_recording_ae2264f1b70f4db856d785b7d3eb1879cfb872fd13a620e2ef0f782dd81b7c72/zarr/source_recording_ae2264f1b70f4db856d785b7d3eb1879cfb872fd13a620e2ef0f782dd81b7c72_analysis.zarr"
+    }
+  ],
+  "full_stimulus": true,
+  "harness": "/tmp/palette_transfer_parent_e2e_20260907.py",
+  "harness_sha256": "4a45b3a90226d683d385a57a9053bdc85843816d6b47fbbbbf74790e2008a490",
+  "importer_logs": {
+    "import_parents.stderr.txt": "Traceback (most recent call last):\n  File \"<frozen runpy>\", line 198, in _run_module_as_main\n  File \"<frozen runpy>\", line 88, in _run_code\n  File \"/tmp/palette-parent-clipped-intake-20260906/src/fisheye/analysis/import_stimulus_to_zarr.py\", line 3702, in <module>\n    main()\n  File \"/tmp/palette-parent-clipped-intake-20260906/src/fisheye/analysis/import_stimulus_to_zarr.py\", line 3690, in main\n    import_stimulus_to_zarr(\n  File \"/tmp/palette-parent-clipped-intake-20260906/src/fisheye/analysis/import_stimulus_to_zarr.py\", line 3051, in import_stimulus_to_zarr\n    return _import_stimulus_from_open_h5(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/palette-parent-clipped-intake-20260906/src/fisheye/analysis/import_stimulus_to_zarr.py\", line 3241, in _import_stimulus_from_open_h5\n    raise ValueError(\"Stimulus H5 missing /video_metadata/frame_metadata dataset.\")\nValueError: Stimulus H5 missing /video_metadata/frame_metadata dataset.\nTraceback (most recent call last):\n  File \"<frozen runpy>\", line 198, in _run_module_as_main\n  File \"<frozen runpy>\", line 88, in _run_code\n  File \"/tmp/palette-parent-clipped-intake-20260906/src/fisheye/analysis/import_stimulus_to_zarr.py\", line 3702, in <module>\n    main()\n  File \"/tmp/palette-parent-clipped-intake-20260906/src/fisheye/analysis/import_stimulus_to_zarr.py\", line 3690, in main\n    import_stimulus_to_zarr(\n  File \"/tmp/palette-parent-clipped-intake-20260906/src/fisheye/analysis/import_stimulus_to_zarr.py\", line 3051, in import_stimulus_to_zarr\n    return _import_stimulus_from_open_h5(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/palette-parent-clipped-intake-20260906/src/fisheye/analysis/import_stimulus_to_zarr.py\", line 3241, in _import_stimulus_from_open_h5\n    raise ValueError(\"Stimulus H5 missing /video_metadata/frame_metadata dataset.\")\nValueError: Stimulus H5 missing /video_metadata/frame_metadata dataset.\n",
+    "import_parents.stdout.txt": "[23:55:53] \u2713 Preserved classified Citrus renderer import_stimulus_to_zarr.py:218\n           snapshot metadata                                                    \n           /enums group not found in H5; skipping import_stimulus_to_zarr.py:218\n           enum import.                                                         \n[23:55:54] \u2713 Preserved classified Citrus renderer import_stimulus_to_zarr.py:218\n           snapshot metadata                                                    \n           /enums group not found in H5; skipping import_stimulus_to_zarr.py:218\n           enum import.                                                         \nLog file: /tmp/palette-parent-intake-e2e-20260907-5sa_8n0p/first-run/imports/import_organized_recordings_analysis_20260907T035551Z_1134736.jsonl\nRunning: /home/delahantyj@hhmi.org/miniconda3/envs/palette-py311/bin/python -m fisheye.analysis.import_stimulus_to_zarr /tmp/palette-parent-intake-e2e-20260907-5sa_8n0p/recordings/source_recording_ae2264f1b70f4db856d785b7d3eb1879cfb872fd13a620e2ef0f782dd81b7c72/raw/acquisition/synthetic_context_02010093.h5 /tmp/palette-parent-intake-e2e-20260907-5sa_8n0p/recordings/source_recording_ae2264f1b70f4db856d785b7d3eb1879cfb872fd13a620e2ef0f782dd81b7c72/zarr/source_recording_ae2264f1b70f4db856d785b7d3eb1879cfb872fd13a620e2ef0f782dd81b7c72_analysis.zarr\nImport failed for /tmp/palette-parent-intake-e2e-20260907-5sa_8n0p/recordings/source_recording_ae2264f1b70f4db856d785b7d3eb1879cfb872fd13a620e2ef0f782dd81b7c72: step=import_stimulus_to_zarr returncode=1 error=stimulus import failed\nRunning: /home/delahantyj@hhmi.org/miniconda3/envs/palette-py311/bin/python -m fisheye.analysis.import_stimulus_to_zarr /tmp/palette-parent-intake-e2e-20260907-5sa_8n0p/recordings/source_recording_fb681f490df5ab310b63e63e836137bc5841b5136040778972e8f76a67b512e4/raw/acquisition/synthetic_context_02010094.h5 /tmp/palette-parent-intake-e2e-20260907-5sa_8n0p/recordings/source_recording_fb681f490df5ab310b63e63e836137bc5841b5136040778972e8f76a67b512e4/zarr/source_recording_fb681f490df5ab310b63e63e836137bc5841b5136040778972e8f76a67b512e4_analysis.zarr\nImport failed for /tmp/palette-parent-intake-e2e-20260907-5sa_8n0p/recordings/source_recording_fb681f490df5ab310b63e63e836137bc5841b5136040778972e8f76a67b512e4: step=import_stimulus_to_zarr returncode=1 error=stimulus import failed\nSummary:\n  ok: 0\n  failed: 2\n  skipped: 0\n  missing: 0\n  registry_synced: 0\n  registry_failed: 0\n"
+  },
+  "isolated_registry_unchanged": true,
+  "negative_corruption": false,
+  "negative_stimulus": true,
+  "palette_commit": "a5a6ff6dd83df3f49a8f1ed7108ea6846ef3a298",
+  "palette_repo": "/tmp/palette-parent-clipped-intake-20260906",
+  "producer_report": "/tmp/palette-citrus-encoded-transfer-20260906-jm0jfwat/producer_smoke_report.json",
+  "producer_snapshot_id": "sha256:6e7e30d1dbdbc6a5a9db72917e5f846a18c1bbd0058a556f00006da95676acfc",
+  "scope": "synthetic renderer-only stimulus import with semantic-v1 protocol; no scientific/hardware acceptance",
+  "source_preserved": true,
+  "staging_preserved": true,
+  "status": "negative_control_refused_without_loss_or_admission",
+  "work_dir": "/tmp/palette-parent-intake-e2e-20260907-5sa_8n0p"
+}
