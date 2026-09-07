@@ -807,7 +807,11 @@ def _validate_receipt_binding(value: object, *, field: str) -> dict[str, Any]:
 def _core_receipt_by_role(
     receipts: Mapping[str, Mapping[str, Any]],
 ) -> Mapping[str, Any]:
-    selected = [receipts[role] for role in CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES if role in receipts]
+    selected = [
+        receipts[role]
+        for role in CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES
+        if role in receipts
+    ]
     if len(selected) != 1:
         _fail("Composite requires exactly one installed core execution profile.")
     return selected[0]
@@ -1064,17 +1068,16 @@ def validate_core_chaser_composite_bundle(
     ]
     observed_roles = {item["role"] for item in receipts}
     core_roles = observed_roles.intersection(CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES)
-    if [(item["role"], item["path"]) for item in receipts] != sorted(
-        (item["role"], item["path"]) for item in receipts
-    ) or len(core_roles) != 1 or observed_roles != core_roles | {
-        EXACT_CHASER_ADMISSION_ROLE
-    }:
+    if (
+        [(item["role"], item["path"]) for item in receipts]
+        != sorted((item["role"], item["path"]) for item in receipts)
+        or len(core_roles) != 1
+        or observed_roles != core_roles | {EXACT_CHASER_ADMISSION_ROLE}
+    ):
         _fail("Composite source receipt roles or ordering are inexact.")
     by_role = {item["role"]: item for item in receipts}
     core_receipt = _core_receipt_by_role(by_role)
-    if core_receipt != _plain(
-        roster["execution_report_binding"]
-    ):
+    if core_receipt != _plain(roster["execution_report_binding"]):
         _fail("Composite core receipt differs from its authority roster.")
     projection = _mapping(record.get("chaser_projection"), field="chaser_projection")
     if set(projection) != {
@@ -1381,10 +1384,13 @@ def validate_core_chaser_bundle_set_current_sources(
 
     contract = core_chaser_capability_contract()
     bundle_set = validate_validated_behavior_bundle_set(
-        value, membership=membership, capability_contract=contract
+        value,
+        membership=membership,
     )
     if _plain(bundle_set["bundle_profile"]) != _bundle_profile(contract):
         _fail("Bundle set does not declare the installed core-chaser profile.")
+    if _plain(bundle_set["capability_contract"]) != _plain(contract):
+        _fail("Core-chaser bundle set uses another capability contract.")
     members_by_id = {
         member["recording_id"]: member
         for member in validate_membership_current_sources(membership)["members"]

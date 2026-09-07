@@ -413,3 +413,75 @@ def test_composite_resolution_rejects_a_sampled_core_motion_projection(
             expected_analysis_zarr=tmp_path / "recording-a.zarr",
             expected_recording_id="recording-a",
         )
+
+
+def test_bundle_set_current_source_validation_uses_shared_validator_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = subject.core_chaser_capability_contract()
+    validated = {
+        "bundle_profile": subject._bundle_profile(contract),  # noqa: SLF001
+        "capability_contract": contract,
+        "members": [],
+    }
+    membership = {"members": []}
+    observed_calls: list[tuple[object, object]] = []
+
+    def validate(value: object, *, membership: object) -> dict[str, Any]:
+        observed_calls.append((value, membership))
+        return validated
+
+    monkeypatch.setattr(subject, "validate_validated_behavior_bundle_set", validate)
+    monkeypatch.setattr(
+        subject,
+        "validate_membership_current_sources",
+        lambda value: value,
+    )
+
+    value = {"fixture": "bundle-set"}
+    observed = subject.validate_core_chaser_bundle_set_current_sources(
+        value,
+        membership=membership,
+    )
+
+    assert observed is validated
+    assert observed_calls == [(value, membership)]
+
+
+def test_bundle_set_current_source_validation_rejects_another_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = subject.core_chaser_capability_contract()
+    other_body = {
+        key: value for key, value in contract.items() if key != "record_sha256"
+    }
+    other_body["profile_id"] = "another_core_chaser_contract_v1"
+    other_contract = {
+        **other_body,
+        "record_sha256": canonical_json_sha256(other_body),
+    }
+    validated = {
+        "bundle_profile": subject._bundle_profile(contract),  # noqa: SLF001
+        "capability_contract": other_contract,
+        "members": [],
+    }
+
+    monkeypatch.setattr(
+        subject,
+        "validate_validated_behavior_bundle_set",
+        lambda _value, **_kwargs: validated,
+    )
+    monkeypatch.setattr(
+        subject,
+        "validate_membership_current_sources",
+        lambda value: value,
+    )
+
+    with pytest.raises(
+        subject.CoreChaserCompositeBundleError,
+        match="another capability contract",
+    ):
+        subject.validate_core_chaser_bundle_set_current_sources(
+            {"fixture": "bundle-set"},
+            membership={"members": []},
+        )
