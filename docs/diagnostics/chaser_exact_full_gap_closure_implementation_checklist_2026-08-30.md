@@ -10,6 +10,15 @@ audited_commit: c89d689c36bc6088e5abd5495861c533caa25649
 
 ## Purpose
 
+September 7 status reconciliation: the
+[current post-inference/chaser evidence snapshot](post_inference_contract_and_chaser_analytics_status_2026-09-07.md)
+records a later computation- and presentation-complete full/single GoodBat
+canary at exact integrated commits. Earlier local/unpublished observations in
+this checklist retain their historical scope. That canary does not close
+unrelated generic-DAG, cohort, interactive-view, or exploratory strategy work.
+The header's older verification date and audited commit retain their original
+checkpoint meaning; this addendum is not a whole-checklist revalidation.
+
 Close every currently identified gap between the receipt-bound exact chaser
 successors, the established chaser scientific products, recording-local
 Marimo inspection, static publication, and cohort execution.

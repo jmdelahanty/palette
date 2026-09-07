@@ -8,9 +8,14 @@ implementation: specified-only
 -->
 
 Source: design discussion 2026-08-10, following the five-lens review
-(`design_review_findings_2026-08-09.md`). This is a roadmap/todo, not a contract.
-Nothing here is implemented. Each item becomes real via the component lifecycle
-recipe at the bottom.
+(`design_review_findings_2026-08-09.md`). This is a roadmap/todo, not a contract
+or implementation acceptance record. Later exploratory strategy, twin-null,
+role-contrast, and provenance code exists on unintegrated Claude branches; see
+the [September 7 code/contract reconciliation](post_inference_contract_and_chaser_analytics_status_2026-09-07.md#claude-chaser-extensions-included-in-this-account-not-yet-integrated).
+Those branches do not establish completion of this roadmap. Each selected item
+still needs its own scientific disposition and component lifecycle evidence.
+The original verification date above belongs to that proposal checkpoint;
+the September 7 link is a bounded status reconciliation, not a scientific rerun.
 
 ## Context: the existing suite, as classes
 

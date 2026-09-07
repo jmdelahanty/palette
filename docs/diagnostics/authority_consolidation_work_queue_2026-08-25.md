@@ -31,6 +31,18 @@ implementation status and ordering through `ACC-001`--`ACC-003` below.
 
 ## Governing execution contract
 
+September 7 evidence reconciliation: the
+[post-inference/chaser status snapshot](post_inference_contract_and_chaser_analytics_status_2026-09-07.md)
+audits main `fc6fea5fd937759f5ed21c79d13279b25c309e13`, published external
+contracts, stronger parent-intake work, and four unintegrated Claude analytics
+branches. It records the completed full/single GoodBat core/chaser numerical
+and presentation canary without closing broader `ADM`, `PROD`, `RES`, or `ACC`
+work. The admission states below remain the governing target contract, not a
+claim that the generic DAG implements them repository-wide. The report is
+companion evidence; this queue retains status ownership.
+The earlier `last_verified` date is retained for the original queue checkpoint;
+this bounded addendum does not revalidate every historical row.
+
 Planning is always read-only and returns a state for every node:
 
 - `admitted`: all concrete required inputs passed their full-strength profile

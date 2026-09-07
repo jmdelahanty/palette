@@ -3,7 +3,7 @@
 <!-- decision-meta
 status: accepted-design-review-synthesized-current-implementation-partial
 created: 2026-09-03
-last_updated: 2026-09-05
+last_updated: 2026-09-07
 baseline_commit: 07db267c
 review_checkpoint_commit: afbc1d0d6af822ca7cc4e3b051cdd9bc981df80c
 composite_checkpoint_commit: 2ae7701e
@@ -15,6 +15,16 @@ related: docs/validated_behavior_cohort_export_implementation_design_2026-08-31.
   docs/validated_recording_behavior_composition_design_2026-08-31.md,
   docs/cohort_release_workflow.md
 -->
+
+## September 7 implementation evidence
+
+The [post-inference/chaser status snapshot](diagnostics/post_inference_contract_and_chaser_analytics_status_2026-09-07.md)
+records the exact full/single GoodBat core/chaser canary: full validation of
+the 30-table composite export and 17 required PDFs, with scientific sources,
+selectors, and registry state preserved. This is selector-ineligible
+computation/presentation evidence, not cohort-wide acceptance or activation.
+The same snapshot reconciles the still-unmigrated generic consumers and Claude
+strategy/Sankey-related branches; their work is not completed by this canary.
 
 ## Question this design answers
 
@@ -1155,7 +1165,10 @@ inference from this static audit.
 - [ ] Prove one representative legacy/core bout pair equal or conflict through
       the normalized comparator. This is migration evidence, not an admission
       prerequisite for the maintained direct-core composite.
-- [ ] Validate one selector-ineligible canary before any maintained use.
+- [x] Validate one selector-ineligible canary before any maintained use:
+      [September 7 exact full/single evidence](diagnostics/post_inference_contract_and_chaser_analytics_status_2026-09-07.md#exact-corechaser-canary-evidence).
+      This closes the representative canary item only, not other profile or
+      cohort-release gates.
 
 ### Track D — migrate maintained paradigm consumers
 

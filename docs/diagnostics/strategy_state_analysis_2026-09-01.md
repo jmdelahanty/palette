@@ -1,5 +1,14 @@
 # Strategy-state analysis — individual pre→post change on the goodbatbadbat cohort
 
+> September 7 status: the [current code/contract/analytics inspection](post_inference_contract_and_chaser_analytics_status_2026-09-07.md#claude-chaser-extensions-included-in-this-account-not-yet-integrated)
+> confirms all four referenced Claude branches remain unintegrated, with no
+> PR/check-run evidence. The strategy code persists transition inputs but does
+> not supply a maintained receipt-bound Sankey renderer. The new core/chaser
+> canary is a different export; this historical cohort analysis has not been
+> rerun against it. Modernization will be reviewed item by item with the user.
+> The original metadata dates below describe the historical analysis checkpoint,
+> not a fresh statistical validation on September 7.
+
 > Interpretation correction added 2026-09-06: the reported statistics below
 > remain historical, exploratory, recording-level results without subject/batch
 > clustering adjustment. “Innate avoidance” and “passive-coping state” are
