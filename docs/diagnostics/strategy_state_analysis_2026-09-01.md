@@ -155,3 +155,47 @@ layout; twin-corrected distance endpoints remain the valid avoidance
 measures (the rotated null cancels side bias). The both-dot half-avoidance
 in (a) is itself a real, previously unquantified result: fish re-anchor
 their occupancy field to the dot pair's position.
+
+## Addendum (2026-09-07): what "avoidance barely loads on the split" means
+
+Per-feature cluster means from the committed run
+(`strategy-states-v001/strategy_cluster_means.parquet`, durable copy at
+`~/palette_figures/strategy_states_2026-09-01/`). Gap is punctuated minus
+explorer in pooled z-score units (one unit = one SD of that feature across
+all fish x epochs).
+
+| Feature | Explorer (n=122 fish-epochs) | Punctuated | Gap (SD) |
+|---|---|---|---|
+| occupancy_entropy | 5.84 bits | 3.92 bits | 1.83 |
+| bout_rate_per_min | 57.6 | 24.4 | 1.72 |
+| ibi_gt2s (fraction of pauses > 2 s) | 0.011 | 0.107 | 1.66 |
+| fish_wall_distance_p50_mm | 6.5 | 7.7 | 0.29 |
+| mean_abs_bout_net_heading_change_deg | 23.8 | 22.5 | 0.25 |
+| dist_excess (vs rotated twin, mm) | 4.1 | 2.2 | 0.22 |
+| nz_excess (near-zone fraction vs twin) | -0.007 | -0.006 | 0.05 |
+
+Reading: three locomotor features separate the clusters by well over one
+SD each; the two twin-corrected avoidance features separate them by a
+quarter SD or less, and near-zone excess is identical. The GMM splits
+along a PCA direction dominated by entropy, bout rate, and long-pause
+fraction; the avoidance features carry near-zero weight on it. No
+rotation of the split turns it into avoidant-vs-non-avoidant. Both
+clusters avoid the dot to a similar modest degree.
+
+Consequences:
+- The hypothesized avoidant / explorer / thigmotactic triad is not what
+  the population does in this feature space. Avoidance varies
+  continuously and nearly independently of the explorer/punctuated axis.
+- This is why the pre-to-post dissociation (result 6) is coherent:
+  training moves fish along the locomotor axis while twin-corrected
+  avoidance does not change, and the clusters were never about avoidance.
+- Scope of the claim: seven features, pooled z-scoring, ~80 fish, one rig.
+  Avoidance did not *organize the population* in these features. That is
+  not a claim that avoidance has no structure at finer spatial scales or
+  on other feature sets.
+- Design consequence (see `docs/analytics/cross_protocol_behavior_space_design.md`):
+  this is the empirical reason stimulus-blind locomotor features form the
+  cross-protocol atlas (L0) and stimulus-relative avoidance features live
+  in a separate class response space (L1). Mixing them in one fit did
+  not hurt here only because avoidance carried no weight; it would not be
+  safe to assume that elsewhere.

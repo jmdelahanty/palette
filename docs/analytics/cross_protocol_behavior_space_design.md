@@ -125,6 +125,15 @@ pre epoch. That makes the union of pre epochs across the store the natural
 reference set: it is large, it is stimulus-free by construction, and every
 future protocol contributes to it.
 
+**Empirical support for the L0/L1 split.** In the goodbatbadbat
+strategy-state run, the two population clusters differ by 1.7 to 1.8 SD on
+occupancy entropy, bout rate, and long-pause fraction, but by 0.05 to
+0.22 SD on the twin-corrected avoidance features (table in the 2026-09-07
+addendum of `docs/diagnostics/strategy_state_analysis_2026-09-01.md`).
+The population organizes along stimulus-blind locomotion; stimulus-
+relative avoidance varies continuously and nearly orthogonally to it.
+That is the L0 versus L1 distinction observed rather than assumed.
+
 L0 is the only level at which cross-protocol states and Sankey transitions
 are legitimate. "Explorer" and "punctuated" become fixed regions of a
 frozen space, so the same fish region means the same thing in a chaser
