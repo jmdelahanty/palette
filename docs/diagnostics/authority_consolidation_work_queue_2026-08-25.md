@@ -98,6 +98,7 @@ tests alone are insufficient when required CI is part of the gate.
 | GOV-001 | Plan governance | in_progress | Consolidate status here; stamp overlapping audits/queues as evidence or scoped companion work. Ingestion audit #142 is integrated with all 24 post-merge checks successful. Final documentation/rules #145 is refreshed onto that validated main and requires its own 24-check candidate and post-merge evidence. Broader governance/admission implementation is not completed by landing audits. | This document, the companion roster, and the [documentation integration handoff](review_docs_rules_landing_handoff_2026-09-05.md#authorized-main-integration--september-6); [PR 145](https://github.com/jmdelahanty/palette/pull/145) records its exact head and current CI. |
 | ADM-001 | Shared admission | open | Define executable producer/profile declarations and one profile-neutral resolution result. Static capability and dynamic artifact checks must be methods of the same declaration, not duplicated planner grammar. | Clipped-eye audit Phases 1–2; source-of-truth plan Steps 1 and 6. |
 | INGEST-001 | Source ingestion enforcement | in_progress | Scoped corrections are implemented, validated, and integrated: removed failure overrides and automatic legacy source-analysis intake; enforced immutable replay, exact invocation acknowledgments, declared streams, and required manifest context. Manual sampled training preserves its product contract while rejecting guessed IDs and recorded failures. PR 147 head `27864f5a` passed all 24 checks and merged as `e802818d`; all 24 post-merge checks passed. Broader intake catalog/AST closure, parent-level clipped intake, and transfer-v2 adoption remain separately scoped and incomplete. | [2026-09-06 enforcement handoff](ingestion_enforcement_handoff_2026-09-06.md); [PR 147](https://github.com/jmdelahanty/palette/pull/147); [post-merge CI 34051186036](https://github.com/jmdelahanty/palette/actions/runs/34051186036). No deployment or activation. |
+| GEOM-AUTO-001 | Geometry scientific policy | in_progress | User-authorized parallel implementation of a named top-rim-preferred blind probe recipe, additional agreement/image-support/stability/boundary-impact metrics, exact approved-reference catalog, and inactive shadow policy. Preserve historical labels/digests and unchanged acquisition gates; do not manufacture human review or enable uncalibrated thresholds. All new required CI is unrun; no policy activation or production writes. | [Parallel ownership and validation handoff](geometry_auto_acceptance_parallel_handoff_2026-09-06.md); existing registered-dish implementation checklist OQ4a/OQ5. |
 | ADM-002 | Shared admission | open | Add `admitted`, `pending_receipt`, and typed `blocked` node states. Reuse, scratch creation, submission, and publication require concrete admission; downstream nodes wait for real upstream receipts. | Clipped-eye audit Phase 2. |
 | ADM-003 | Inventory/proof | open | Generate entry point -> producer -> output profile -> resolver -> boundary test edges from executable declarations. At runtime, unknown blocks only the requested closure; CI rejects newly undeclared maintained production entry points. Reuse the graph schema for the future proof walker. | Pipeline survey, clipped-eye audit, source-of-truth plan Step 1. |
 | ACC-001 | Scientific acceptance | open | Define one immutable, digest-bound, use-scoped scientific acceptance receipt separate from technical completion, canonical validation, authority selection, and legacy review-status pointers. Preserve product-specific bundle manifests and use shared receipt mechanics. | Authority and scientific acceptance checklist Phases 1–2. |
@@ -321,6 +322,132 @@ changed. No deployment, activation, or cleanup accompanies this integration.
   plans only with evidence/disposition links.
 
 ### Stage 1 — Source import and recording identity (`RID-001`)
+
+2026-09-06 parent-intake follow-up under `INGEST-001`: implementation is now
+owned by the Palette root worker in `/tmp/palette-parent-clipped-intake-20260906`,
+branch `agent/palette/parent-clipped-intake-20260906`, based on fully validated
+main `925f8c6285499d39a99475945ba1732dba7f6834` (24 successful checks in
+run `34056284642`). The initial read-only transfer validator and parent planner
+are implemented locally, with 174 boundary and existing-importer tests passing.
+The live dispatcher, inventory-complete organization, import/registry integration,
+and snapshot-aware dispatch/retry remain unimplemented. The
+[parent-intake handoff](parent_recording_intake_handoff_2026-09-06.md) records
+source pins, preservation requirements, and outstanding validation. This is
+uncommitted work with candidate CI unrun, not deployed intake, completed broader
+`INGEST-001`, production activation, or source-cleanup authorization.
+
+September 6 user clarification supersedes the proposed copy-only organization:
+Palette staging is temporary, and **all** recording components must reach the
+organized recordings, leaving no payload in staging after successful intake.
+Acquisition-machine retention is separate. Root owns the complete-inventory
+destination accounting and recoverable move/finalization contract recorded in the
+[parent-intake handoff](parent_recording_intake_handoff_2026-09-06.md#user-clarification-staging-is-temporary-not-a-retained-source-archive).
+No copy-only preparation implementation or live cleanup was performed. The
+validator/index development is published in draft PR 149 at
+`0cd250a58b26e5c56fcdf9926b2593eee643b1e9`; required CI is still pending, and the
+organizer/importer/registry/finalization path remains incomplete.
+
+September 7 implementation checkpoint under the same owner: the base `0cd250a5`
+subsequently passed all 24 checks. Inventory-complete organization, explicit
+mapped parent indexes, opt-in session orchestration and receipt-gated durable
+staging retirement/replay are now implemented locally, with 197 focused and
+legacy tests passing. New-head CI and surviving-child crash-lease validation
+remain pending. The separately owned current clipped importer/admission
+prerequisite is published at `2f07800fcee9f5d161226b37d0e24ebdb4b78474` in draft
+[PR 155](https://github.com/jmdelahanty/palette/pull/155), with 452 local passes
+and required CI pending; it is not yet integrated into the organizer branch.
+See the [implementation handoff](parent_recording_intake_handoff_2026-09-06.md#september-7-implementation-inventory-complete-opt-in-workflow)
+for contract changes, original-byte preservation, safety corrections and exact
+unrun gates. Combined unpatched synthetic acceptance, combined CI, deployment
+and activation remain distinct and incomplete. No production cleanup occurred.
+
+September 7 development integration: organizer `8b5ab93343930fef8f63a0d04c16e497752f5c68`
+and clipped importer `45a2a165cbfc597fb3d274694292db286eb51792` each passed all
+24 required checks before root combined them. The importer includes validated
+lease propagation through the nested stimulus writer. This combined revision
+still requires its own local validation, all 24 CI checks, and clean-code
+synthetic execution evidence; it is not yet merge-ready, deployed or activated.
+The [integration checkpoint](parent_recording_intake_handoff_2026-09-06.md#september-7-reviewed-development-integration)
+records exact inputs, ownership, fixture corrections and the remaining canary.
+
+September 7 clean-code canary supersedes that canary-pending checkpoint: the
+actual maintained recording-only workflow passed on combined
+`27b48573b01834c09272e72cbe1988d594aeebde`, with two admitted parent recordings,
+all 39 staged files preserved at explicit destinations, empty staging, unchanged
+acquisition-source copies, and byte-stable replay. The independent corrupted
+delivery was refused without retirement or registry mutation. The
+[bounded result and artifact hashes](parent_recording_intake_handoff_2026-09-06.md#clean-combined-commit-synthetic-result--september-7)
+record exact receipts, Palette-runtime SQLite acceptance, limitations and
+remaining checks. Combined/follow-up required CI is still pending, so the
+development branch remains incomplete and not merge-ready. This is validated
+synthetic execution, not live deployment, full stimulus-data acceptance,
+production activation, acquisition-source release or broader `INGEST-001` closure.
+
+September 7 full-stimulus extension: all 24 required checks passed on exact
+`a5a6ff6dd83df3f49a8f1ed7108ea6846ef3a298`. The clean, unpatched full-stimulus
+synthetic workflow then passed for two renderer-only camera parents, including
+exact event/protocol/calibration readback, two registered stimulus runs/four
+steps, all 41 staged files preserved before retirement, empty staging and
+byte-stable replay. A separately sealed malformed-H5 delivery failed stimulus
+import while retaining staging and unchanged registry bytes. See the
+[full-stimulus result](parent_recording_intake_handoff_2026-09-06.md#full-stimulus-synthetic-canary--september-7)
+for exact artifacts, hashes, recovery and scientific limits. No production code
+changed. This handoff/queue update is uncommitted documentation with future-head
+CI unrun; it does not change the producing receipts or authorize integration.
+Live acquisition, deployment/activation and broader `INGEST-001` remain open.
+
+September 7 evidence packaging is in progress on the same root-owned intake
+branch from CI-green `a5a6ff6dd83df3f49a8f1ed7108ea6846ef3a298`. The reusable
+test package preserves the actual producer/importer/readers and adds test-only
+custody guards; historical reports/source hashes are archived without rewriting
+producer identities. The acquisition readiness request is drafted but unsent.
+See the [packaging checkpoint](parent_recording_intake_handoff_2026-09-06.md#reusable-package-and-acquisition-readiness-draft--september-7).
+The packaged CLI's clean-commit canary and all 24 final-head CI checks remain
+unrun here. No production code, scientific defaults, live installation,
+acquisition capture, source release, production selector or authority changed.
+
+September 7 packaged-CLI evidence supersedes that canary-pending checkpoint:
+all four fresh positive/refusal cases passed on clean
+`3f5aad3eb078ebb97af1648ac0120886fb6b250e`, preserving both existing modes and
+their custody/admission/replay gates. Reports, producing identities, original
+source snapshots and checksums are now retained in the
+[versioned evidence archive](parent_intake_synthetic_canary_2026-09-07/README.md#packaged-cli-validation).
+The follow-up changes only archive/docs, with all 24 final-head CI checks unrun
+at its pre-commit checkpoint; see exact-head [PR 149 checks](https://github.com/jmdelahanty/palette/pull/149/checks)
+before any integration. The acquisition request remains draft/unsent, and no
+real acquisition, deployment, live poller or production authority was changed.
+
+September 7 naming clarification: Orange (acquisition), Citrus (stimulation
+library) and Palette (analysis/intake) are separate repositories. The
+acquisition agent covers Orange/Citrus; repository names do not identify
+separate agent sessions. Use `cluster-login1-poller` for the cluster login-1
+polling/submission method and service, not "Citrus cluster agent" or "Citrus
+poller". See the [naming and compatibility checkpoint](parent_recording_intake_handoff_2026-09-06.md#repository-and-cluster-service-naming--september-7)
+and corrected [draft request](acquisition_parent_intake_canary_request_2026-09-07.md#repository-agent-and-service-names).
+The user authorized committing/pushing these root-owned documentation changes
+and waiting for fresh required CI. At this pre-commit checkpoint they are
+uncommitted on base `6f6417f49b29f582cefc21fc0adc51ac6705c9bc`, with all 24
+new-head checks unrun; see the linked handoff for the check inventory and
+exact-head [PR 149 checks](https://github.com/jmdelahanty/palette/pull/149/checks)
+before any integration. Existing SSH alias literals, workstation staging-marker
+script paths, historical evidence, runtime code and installations are unchanged. No
+compatibility migration, live service change or status-authority replacement
+is authorized by the terminology correction.
+
+September 7 CI reconciliation: naming commit
+`cb60279b2036e5cbb2447571d3150ca63a71596e` was pushed, but all 24 required
+checks remained unrun because its PR conflicted with newer `main`. With user
+approval, root incorporated exact CI-green main
+`fc6fea5fd937759f5ed21c79d13279b25c309e13` into the existing intake branch and
+regenerated the two conflicting census reports from combined source (1,717
+modules). All 304 focused regressions and the local static gates passed; no
+runtime file required manual resolution. At this pre-commit checkpoint the
+merge/docs are uncommitted and all 24 combined-head checks remain unrun, so this
+is not merge-ready. See the [reconciliation handoff](parent_recording_intake_handoff_2026-09-06.md#main-reconciliation-and-regenerated-inventories--september-7)
+for exact ownership, prerequisites, preservation and check inventory, and
+[PR 149 checks](https://github.com/jmdelahanty/palette/pull/149/checks) for final-head
+results. No PR merge, deployment, live poller change, real acquisition or
+production activation is included; the acquisition request remains draft/unsent.
 
 2026-09-06 ingestion-validation companion: **complete for its scoped
 corrections**, owned by the Palette worker on

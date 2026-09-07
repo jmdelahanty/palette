@@ -1,0 +1,516 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:citrus:recording-transfer:v2",
+  "title": "Parent-recording transfer snapshot and v2 completion marker",
+  "description": "Shape validation only. Verify digests, source manifest semantics, exact frame correspondence, membership, and finalization with the documented contract. Does not grant scientific/receipt admission.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/snapshot"
+    },
+    {
+      "$ref": "#/$defs/marker"
+    }
+  ],
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "size_bytes",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?![\\s\\S]*(?:^|/)\\.\\.?(?:/|(?![\\s\\S])))[^/\\\\\\u0000-\\u001f]+(?:/[^/\\\\\\u0000-\\u001f]+)*(?![\\s\\S])"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "frameMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recording_frame_id_field",
+        "recording_frame_id_base",
+        "frame_id_alias_present",
+        "video_frame_index_base",
+        "video_frame_index_rule",
+        "continuity_policy",
+        "timestamp_fields",
+        "timestamp_units",
+        "clock_validity",
+        "frame_count",
+        "first_recording_frame_id",
+        "last_recording_frame_id",
+        "recording_frame_id_gaps",
+        "gap_from_previous_output",
+        "row_correspondence_sha256",
+        "row_correspondence_digest_domain",
+        "correspondence_authority"
+      ],
+      "properties": {
+        "recording_frame_id_field": {
+          "const": "recording_frame_id"
+        },
+        "recording_frame_id_base": {
+          "type": "integer",
+          "const": 1
+        },
+        "frame_id_alias_present": {
+          "type": "boolean"
+        },
+        "video_frame_index_base": {
+          "type": "integer",
+          "const": 0
+        },
+        "video_frame_index_rule": {
+          "const": "metadata_row_order"
+        },
+        "continuity_policy": {
+          "const": "strictly_increasing_recording_id_subset"
+        },
+        "timestamp_fields": {
+          "type": "array",
+          "const": [
+            "timestamp",
+            "timestamp_sys"
+          ]
+        },
+        "timestamp_units": {
+          "const": "nanoseconds"
+        },
+        "clock_validity": {
+          "const": "not_evaluated_by_transfer"
+        },
+        "frame_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "first_recording_frame_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "last_recording_frame_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "recording_frame_id_gaps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "gap_from_previous_output": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "row_correspondence_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "row_correspondence_digest_domain": {
+          "const": "ascii_video_index_comma_recording_id_lf_v1"
+        },
+        "correspondence_authority": {
+          "const": "producer_metadata_row_order_with_packet_count_parity"
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_kind",
+        "role",
+        "video",
+        "metadata",
+        "container_finalization",
+        "frame_map",
+        "sidecars"
+      ],
+      "properties": {
+        "output_kind": {
+          "enum": [
+            "full",
+            "crop"
+          ]
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "video": {
+          "$ref": "#/$defs/artifact"
+        },
+        "metadata": {
+          "$ref": "#/$defs/artifact"
+        },
+        "container_finalization": {
+          "$ref": "#/$defs/artifact"
+        },
+        "frame_map": {
+          "$ref": "#/$defs/frameMap"
+        },
+        "sidecars": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["role", "artifact"],
+            "properties": {
+              "role": {"enum": ["keyframes", "perf", "sidecar_perf", "summary"]},
+              "artifact": {"$ref": "#/$defs/artifact"}
+            }
+          }
+        }
+      }
+    },
+    "clip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "clip_index",
+        "clip_id",
+        "directory",
+        "outputs"
+      ],
+      "properties": {
+        "clip_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "clip_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "directory": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?![\\s\\S]*(?:^|/)\\.\\.?(?:/|(?![\\s\\S])))[^/\\\\\\u0000-\\u001f]+(?:/[^/\\\\\\u0000-\\u001f]+)*(?![\\s\\S])"
+            },
+            {
+              "const": "."
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/output"
+          }
+        }
+      }
+    },
+    "parent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parent_key",
+        "clips"
+      ],
+      "properties": {
+        "parent_key": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "recording_id",
+            "camera_serial"
+          ],
+          "properties": {
+            "recording_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "camera_serial": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          }
+        },
+        "clips": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/clip"
+          }
+        }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "schema_version",
+        "canonicalization",
+        "recording_layout",
+        "recording_payload_kind",
+        "acquisition_session_id",
+        "parent_identity_policy",
+        "source_manifest",
+        "finalization",
+        "parents",
+        "inventory"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "citrus.recording_transfer_snapshot"
+        },
+        "schema_version": {
+          "type": "integer",
+          "const": 1
+        },
+        "canonicalization": {
+          "const": "json_sort_keys_ascii_compact_lf_v1"
+        },
+        "recording_layout": {
+          "enum": [
+            "single_video",
+            "rolling_clips"
+          ]
+        },
+        "recording_payload_kind": {
+          "enum": [
+            "citrus_h5",
+            "video_only"
+          ]
+        },
+        "acquisition_session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "parent_identity_policy": {
+          "const": "orange_session_id_and_camera_serial_v1"
+        },
+        "source_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "size_bytes",
+            "sha256",
+            "schema_id",
+            "schema_version"
+          ],
+          "properties": {
+            "path": {
+              "const": "recording_session.json"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "schema_id": {
+              "const": "orange.recording_session"
+            },
+            "schema_version": {
+              "type": "integer",
+              "const": 1
+            }
+          }
+        },
+        "finalization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "manifest_status",
+            "drain_completed",
+            "semantic_receipt_acceptance"
+          ],
+          "properties": {
+            "manifest_status": {
+              "const": "completed"
+            },
+            "drain_completed": {
+              "const": true
+            },
+            "semantic_receipt_acceptance": {
+              "const": "not_evaluated_by_transfer"
+            }
+          }
+        },
+        "parents": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/parent"
+          }
+        },
+        "inventory": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        }
+      }
+    },
+    "marker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "schema_version",
+        "status",
+        "required_consumer_profile",
+        "snapshot_id",
+        "snapshot",
+        "recording_layout",
+        "recording_payload_kind",
+        "acquisition_session_id",
+        "parent_recording_count",
+        "semantic_receipt_acceptance",
+        "delivery"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "citrus.transfer_completion_marker.v2"
+        },
+        "schema_version": {
+          "type": "integer",
+          "const": 2
+        },
+        "status": {
+          "const": "transfer_complete"
+        },
+        "required_consumer_profile": {
+          "const": "parent_recording_intake_v1"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "size_bytes",
+            "sha256",
+            "schema_id",
+            "schema_version"
+          ],
+          "properties": {
+            "path": {
+              "const": "_citrus_transfer/snapshot.json"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "schema_id": {
+              "const": "citrus.recording_transfer_snapshot"
+            },
+            "schema_version": {
+              "type": "integer",
+              "const": 1
+            }
+          }
+        },
+        "recording_layout": {
+          "enum": [
+            "single_video",
+            "rolling_clips"
+          ]
+        },
+        "recording_payload_kind": {
+          "enum": [
+            "citrus_h5",
+            "video_only"
+          ]
+        },
+        "acquisition_session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "parent_recording_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "semantic_receipt_acceptance": {
+          "const": "not_evaluated_by_transfer"
+        },
+        "delivery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "attempt_id",
+            "created_utc",
+            "source_dir",
+            "destination_dir",
+            "verification",
+            "source_retention"
+          ],
+          "properties": {
+            "attempt_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "created_utc": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "source_dir": {
+              "type": "string",
+              "minLength": 1
+            },
+            "destination_dir": {
+              "type": "string",
+              "minLength": 1
+            },
+            "verification": {
+              "const": "sha256_all_inventory_bytes"
+            },
+            "source_retention": {
+              "const": "retained_pending_consumer_receipt"
+            }
+          }
+        }
+      }
+    }
+  }
+}

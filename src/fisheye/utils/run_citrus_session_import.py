@@ -105,11 +105,17 @@ def build_import_command(
     return command
 
 
-def _run_command(command: Sequence[str], *, name: str, run_dir: Path) -> CommandRecord:
+def _run_command(command: Sequence[str], *, name: str, run_dir: Path,
+                 pass_fds: tuple[int, ...] = (), env: dict[str, str] | None = None) -> CommandRecord:
     stdout_path = run_dir / f"{name}.stdout.txt"
     stderr_path = run_dir / f"{name}.stderr.txt"
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        result = subprocess.run(list(command), stdout=stdout, stderr=stderr, check=False)
+        # Opt-in intake lends its lease to the actual writer, so SIGKILL of
+        # this supervisor cannot admit another concurrent writer. Legacy calls
+        # keep their original subprocess arguments and behavior.
+        result = subprocess.run(list(command), stdout=stdout, stderr=stderr, check=False,
+                                **({"pass_fds": pass_fds} if pass_fds else {}),
+                                **({"env": env} if env is not None else {}))
     return CommandRecord(
         name=name,
         command=list(command),
@@ -287,6 +293,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument("--registry", type=Path, help="Palette registry SQLite path used with --register.")
     parser.add_argument("--status-json", type=Path, help="Optional path for final status JSON.")
+    parser.add_argument("--transfer-v2", action="store_true", help="Opt in to closed rolling-transfer parent intake with verified staging retirement.")
+    parser.add_argument("--resume-transfer-plan", type=Path, help="Exact saved v2 organization plan for retry, including interrupted retirement.")
+    parser.add_argument("--recording-type", help="Explicit v2 recording context under the existing manifest vocabulary.")
+    parser.add_argument("--recording-subtype", help="Explicit v2 recording subtype.")
+    parser.add_argument("--behavior-mode", help="Explicit v2 behavior mode.")
 
     args = parser.parse_args(argv)
     if args.apply and args.dry_run:
@@ -295,6 +306,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.dry_run = True
     if args.register and args.registry is None:
         parser.error("--register requires --registry.")
+    if args.transfer_v2:
+        if args.resume_transfer_plan is None and not all((args.recording_type, args.recording_subtype, args.behavior_mode)):
+            parser.error("--transfer-v2 requires --recording-type, --recording-subtype and --behavior-mode.")
+        if args.run_video_diagnostics or args.run_h5_diagnostics:
+            parser.error("Optional legacy diagnostics are not supported by --transfer-v2; canonical import validation remains mandatory.")
+        from fisheye.utils.citrus_transfer_parent_workflow import run_transfer_parent_workflow
+        return run_transfer_parent_workflow(args)
+    if args.resume_transfer_plan is not None or any((args.recording_type, args.recording_subtype, args.behavior_mode)):
+        parser.error("Transfer context and resume arguments require --transfer-v2.")
     if not args.session_dir.exists():
         parser.error(f"session directory not found: {args.session_dir}")
     if not args.session_dir.is_dir():

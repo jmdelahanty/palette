@@ -44884,7 +44884,7 @@
       "enclosing_symbol": "fisheye.shared.acquisition_frame_clock:_publish_acquisition_frame_clock_locked",
       "file": "src/fisheye/shared/acquisition_frame_clock.py",
       "filters_expression": null,
-      "line": 1146,
+      "line": 1181,
       "parent_path_pattern": "<_owned_clock_run(root, run_name, owner)>",
       "path_pattern": "<_owned_clock_run(root, run_name, owner)>/<name>",
       "receiver_expression": null,
@@ -44892,7 +44892,7 @@
       "shape_expression": "shape(getattr(source, name))",
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-b5b5d81b3ba56334",
+      "site_id": "writer-5b10482f86c1a705",
       "status": "current",
       "status_basis": "packaged Palette module without a maintenance marker",
       "surface_class": "production",
@@ -69828,10 +69828,10 @@
     "direct_zarr_api_site_count": 658,
     "dynamic_or_unresolved_writer_site_count": 352,
     "manual_zarr_metadata_site_count": 1,
-    "parsed_writer_candidate_module_count": 236,
+    "parsed_writer_candidate_module_count": 237,
     "reader_required_array_declaration_count": 102,
     "resolved_writer_leaf_name_count": 630,
-    "scanned_python_module_count": 1712,
+    "scanned_python_module_count": 1717,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
@@ -69867,7 +69867,7 @@
     "writer_wrapper_call_site_count": 987
   },
   "wrapper_analysis": {
-    "function_definition_count": 6409,
+    "function_definition_count": 6415,
     "writer_function_count": 244,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",

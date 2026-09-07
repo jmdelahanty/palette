@@ -1,0 +1,365 @@
+"""Fresh synthetic envelopes + real H264 through the actual pinned Citrus CLI.
+
+Run only through Palette scripts/py. No Orange encoder evidence, acquisition
+clock qualification, scientific receipt, registry admission, or deployment is
+claimed. The script refuses existing output roots and never contacts staging.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import io
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+
+CITRUS_COMMIT = "e881f5258be83231b62a00a6f9c4e5fcd69cd548"
+CONTRACTS_COMMIT = "6cb56b4deae6a9a56bf4b3a3186168c15e91f542"
+PRODUCER_DEFAULT = Path("/tmp/citrus-pr3-rereview-20260906.oQK5ew")
+PALETTE_DEFAULT = Path("/tmp/palette-parent-clipped-intake-20260906")
+PINNED_FILES = {
+    "scripts/recording_transfer_v2.py": "2b64d27d424f9bc71fe3a893b0f0b8c940d79cd8e79d0d19000ce81a4384e081",
+    "scripts/recording_transfer_snapshot.py": "f158aca1b2cb7b046e6f667e99a202c9c074c4883594d7df502e81d237e68271",
+    "tests/recording_transfer_fixture.py": "71ff518bca11818b10e68bd69c82b31a691dbac4f63b3ccbefe2342ba2cae4d5",
+    "src/schemas/recording_transfer_v2.schema.json": "65828a1e327a8cd1884c59d51f8422546a6f60d1f6abf2e3f9cd3d104dbb2df7",
+}
+SESSION_ID = "synthetic-encoded-transfer-v2-20260906"
+CAMERAS = ["02010093", "02010094"]
+RATE = 2
+START_NS = 1700000000000000000
+FRAME_NS = 1000000000 // RATE
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def inventory(root: Path) -> list[dict]:
+    return [
+        {"path": path.relative_to(root).as_posix(), "size_bytes": path.stat().st_size,
+         "sha256": sha256(path)}
+        for path in sorted(root.rglob("*")) if path.is_file()
+    ]
+
+
+def add_synthetic_context(source: Path, write_json, *, stimulus: str = "none") -> list[dict]:
+    """Test H5/geometry custody; all contents are declared synthetic before seal."""
+    import h5py
+    from tests.unit.fisheye.test_recording_geometry import _rim_entry, _daily_camera
+    stimulus_evidence = []
+    for camera in CAMERAS:
+        h5_path = source / f"synthetic_context_{camera}.h5"
+        if stimulus != "none":
+            from palette_stimulus_fixture_20260907 import write_stimulus_h5
+            stimulus_evidence.append(write_stimulus_h5(h5_path, camera=camera, session_id=SESSION_ID,
+                start_ns=START_NS, frame_ns=FRAME_NS, missing_frames=stimulus == "missing-frame-metadata"))
+        else:
+            with h5py.File(h5_path, "w") as handle:
+                handle.attrs["camera_id"] = camera
+                handle.attrs["session_uuid"] = SESSION_ID
+    write_json(source / "ptp_sync_summary.json", {
+        "sync": {"camera_sync_enabled": False, "mode": "synthetic_no_sync"},
+        "cameras": {}, "fixture_kind": "synthetic_no_clock_qualification",
+    })
+    assets = source / "recording_geometry_assets"
+    assets.mkdir()
+    files, daily_cameras, camera_runtime, calibrations = [], {}, {}, {}
+    for camera in CAMERAS:
+        relative = f"cameras/Cam{camera}/daily_registration/rim_observation/observation.json"
+        (assets / relative).parent.mkdir(parents=True)
+        write_json(assets / relative, {
+            "schema_id": "orange.calibration.dish_top_rim_observation",
+            "camera_serial": camera, "synthetic_fixture": True,
+        })
+        digest = "sha256:" + sha256(assets / relative)
+        files.append({"relative_path": relative, "role": "daily_rim_observation",
+                      "required": True, "size_bytes": (assets / relative).stat().st_size,
+                      "sha256": digest})
+        entry = _rim_entry(camera=camera, source_sha=digest, gate_radius=12.0,
+                           source_path=f"/synthetic-fixtures/{relative}")
+        entry["camera"].update(width=32, height=32)
+        entry["accepted_mask"]["image_shape_px"] = {"width": 32, "height": 32}
+        for field, radius in (("accepted_inner_rim_boundary", 11.0), ("valid_detection_region", 12.0)):
+            entry[field]["geometry"].update(center_px={"x": 16.0, "y": 16.0}, radius_px=radius)
+        daily_cameras[camera] = _daily_camera(entry)
+        camera_runtime[camera] = {"coordinate_frame": {
+            "coordinate_space": "camera_native_pixels", "point_order": "xy", "units": "pixels",
+            "origin": {"name": "top_left_pixel", "x_px": 0, "y_px": 0},
+            "axes": {"x": {"positive_direction": "right"}, "y": {"positive_direction": "down"}},
+            "image_shape": {"width": 32, "height": 32},
+        }}
+        calibrations[camera] = {"dish_top_rim_observation": {"artifact_id": f"dishrim-{camera}", "sha256": digest}}
+    write_json(assets / "manifest.json", {
+        "schema_id": "orange.recording.geometry_assets", "schema_version": 1,
+        "status": "complete", "materialized_file_count": len(files), "files": files,
+    })
+    write_json(source / "recording_geometry_contract.json", {
+        "schema_id": "orange.recording.geometry_contract", "schema_version": 1, "status": "resolved",
+        "selection": {"rig_id": "synthetic-rig", "selected_canvas_name": "synthetic"},
+        "daily_registration_geometry": {
+            "mode": "selected_daily_registration", "status": "selected_resolved",
+            "registration": {"sha256": "sha256:" + "b" * 64,
+                "snapshot": {"registration_id": "synthetic-dailyreg", "valid_until_utc": "2026-09-08T00:00:00Z"}},
+            "cameras": daily_cameras,
+        },
+        "materialized_assets": {
+            "schema_id": "orange.recording.geometry_assets", "schema_version": 1, "status": "complete",
+            "relative_path": "recording_geometry_assets/manifest.json", "sha256": "sha256:" + sha256(assets / "manifest.json"),
+        },
+    })
+    write_json(source / "recording_snapshot.json", {
+        "schema_version": 2, "recording_id": SESSION_ID, "camera_runtime": camera_runtime,
+        "calibrations": calibrations, "recording_geometry_contract": {
+            "relative_path": "recording_geometry_contract.json",
+            "sha256": "sha256:" + sha256(source / "recording_geometry_contract.json"),
+        },
+    })
+    from fisheye.shared.recording_geometry import load_registered_dish_masks_from_recording_folder
+    geometry = load_registered_dish_masks_from_recording_folder(source, policy="required")
+    assert {key.camera_serial for key in geometry.masks} == set(CAMERAS)
+    return stimulus_evidence
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, help="Must not exist; default is a fresh /tmp directory")
+    parser.add_argument("--producer-repo", type=Path, default=PRODUCER_DEFAULT)
+    parser.add_argument("--palette-repo", type=Path, default=PALETTE_DEFAULT)
+    parser.add_argument("--with-context", action="store_true", help="Include declared synthetic H5/PTP/geometry context")
+    parser.add_argument("--stimulus", choices=("none", "renderer-only", "missing-frame-metadata"), default="none")
+    args = parser.parse_args()
+    if args.stimulus != "none" and not args.with_context:
+        parser.error("--stimulus requires --with-context")
+    producer = args.producer_repo.resolve(strict=True)
+    palette = args.palette_repo.resolve(strict=True)
+    palette_py = palette / "scripts/py"
+    actual_pins = {name: sha256(producer / name) for name in PINNED_FILES}
+    if actual_pins != PINNED_FILES:
+        raise RuntimeError(f"Pinned Citrus source bytes do not match {CITRUS_COMMIT}: {actual_pins}")
+    if args.output is None:
+        work = Path(tempfile.mkdtemp(prefix="palette-citrus-encoded-transfer-20260906-"))
+    else:
+        work = args.output.absolute()
+        if not work.is_relative_to(Path("/tmp")) or work == Path("/tmp"):
+            raise ValueError("Synthetic fixture output must be a fresh directory below /tmp")
+        work.mkdir(parents=False, exist_ok=False)
+    source = work / "source"
+    destination = work / "delivery"
+    evidence = work / "evidence"
+    evidence.mkdir()
+    sys.path.insert(0, str(producer / "tests"))
+    sys.path.insert(0, str(palette))
+    from recording_transfer_fixture import fixture, write_json, MARKER
+    manifest = fixture(source, rolling=True, cameras=2, clips=2, crop=True)
+    assert manifest["cameras"] == CAMERAS
+    manifest["session_id"] = SESSION_ID
+    # All payload references are relative; this is a declared synthetic root,
+    # not a live acquisition location and not the temporary output directory.
+    manifest["recording_folder"] = "/synthetic-fixtures/" + SESSION_ID
+    commands: list[dict] = []
+
+    def run(command: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess:
+        result = subprocess.run(command, cwd=palette, capture_output=True,
+                                text=True, timeout=timeout, check=False)
+        commands.append({"argv": command, "cwd": str(palette),
+                         "returncode": result.returncode,
+                         "stdout": result.stdout, "stderr": result.stderr})
+        if result.returncode != 0:
+            raise RuntimeError(f"Command failed: {command!r}\n{result.stderr}\n{result.stdout}")
+        return result
+
+    ffmpeg_version = run(["/usr/bin/ffmpeg", "-version"]).stdout.splitlines()[0]
+    ffprobe_version = run(["/usr/bin/ffprobe", "-version"]).stdout.splitlines()[0]
+    media = []
+    for clip in manifest["clips"]:
+        clip["session_id"] = SESSION_ID
+        for camera, outputs in clip["recording_outputs"].items():
+            for kind, output in outputs.items():
+                count = output["frame_count"]
+                first = output["first_recording_frame_id"]
+                last = output["last_recording_frame_id"]
+                assert count == (2 if clip["clip_index"] == 0 else 1)
+                video = source / output["video"]
+                filters = f"trim=start_frame={first - 1}:end_frame={last},setpts=PTS-STARTPTS"
+                if kind == "crop":
+                    filters += ",crop=16:16:8:8"
+                    if first <= 2 <= last:
+                        filters += f",drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='eq(n,{2-first})'"
+                run([
+                    "/usr/bin/ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                    "-y", "-f", "lavfi", "-i", "testsrc2=size=32x32:rate=2",
+                    "-vf", filters, "-frames:v", str(count), "-an", "-c:v", "libx264",
+                    "-threads", "1", "-pix_fmt", "yuv420p", "-bf", "0", "-g", "1",
+                    "-fflags", "+bitexact", "-flags:v", "+bitexact",
+                    "-map_metadata", "-1", str(video),
+                ])
+                probe = json.loads(run([
+                    "/usr/bin/ffprobe", "-v", "error", "-select_streams", "v:0",
+                    "-count_frames", "-count_packets", "-show_entries",
+                    "stream=codec_name,width,height,nb_read_frames,nb_read_packets,avg_frame_rate,pix_fmt:format=size,duration",
+                    "-of", "json", str(video),
+                ]).stdout)
+                stream = probe["streams"][0]
+                expected_size = 16 if kind == "crop" else 32
+                assert stream["codec_name"] == "h264"
+                assert int(stream["nb_read_frames"]) == int(stream["nb_read_packets"]) == count
+                assert stream["width"] == stream["height"] == expected_size
+                assert stream["avg_frame_rate"] == "2/1"
+                # Independent full decode, not just a declared count in a stub.
+                run(["/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-i", str(video),
+                     "-map", "0:v:0", "-f", "null", "-"])
+                metadata = source / output["metadata"]
+                with metadata.open(newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    columns = reader.fieldnames
+                    rows = list(reader)
+                assert len(rows) == count
+                if kind == "crop":
+                    columns = list(columns) + ["has_detection", "blank_frame", "crop_x", "crop_y", "crop_w", "crop_h",
+                                               "detection_x", "detection_y", "detection_w", "detection_h"]
+                for row in rows:
+                    frame = int(row["recording_frame_id"])
+                    assert int(row["frame_id"]) == frame
+                    row["timestamp"] = str(START_NS + (frame - 1) * FRAME_NS)
+                    row["timestamp_sys"] = str(START_NS + 10 + (frame - 1) * FRAME_NS)
+                    if kind == "crop":
+                        blank = frame == 2
+                        row.update(has_detection="0" if blank else "1", blank_frame="1" if blank else "0")
+                        for field, value in dict(crop_x=8, crop_y=8, crop_w=16, crop_h=16,
+                                                 detection_x=12, detection_y=12, detection_w=4, detection_h=4).items():
+                            row[field] = "" if blank else str(value)
+                text = io.StringIO(newline="")
+                writer = csv.DictWriter(text, fieldnames=columns, lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(rows)
+                metadata.write_text(text.getvalue(), encoding="utf-8")
+                final_path = source / (output["video"] + ".finalization.json")
+                final = json.loads(final_path.read_bytes())
+                final["container"]["file_size_bytes"] = video.stat().st_size
+                for field in ("submissions_accepted", "write_attempts", "packets_written"):
+                    final["packet_writes"][field] = count
+                write_json(final_path, final)
+                media.append({
+                    "camera_serial": camera, "clip_index": clip["clip_index"],
+                    "clip_id": clip["clip_id"], "output_kind": kind,
+                    "path": output["video"], "metadata": output["metadata"],
+                    "finalization": final_path.relative_to(source).as_posix(),
+                    "frame_count": count, "first_recording_frame_id": first,
+                    "last_recording_frame_id": last, "probe": probe,
+                    "decode_returncode": 0,
+                    "finalization_envelope_kind": "synthetic_not_Orange_encoder_evidence",
+                })
+    write_json(source / "recording_session.json", manifest)
+    stimulus_evidence = []
+    if args.with_context:
+        stimulus_evidence = add_synthetic_context(source, write_json, stimulus=args.stimulus)
+    (source / "fixture_notice.txt").write_text(
+        "SYNTHETIC TEST FIXTURE — NEVER SUBMIT TO PRODUCTION STAGING.\n"
+        "MP4 payloads are real tiny FFmpeg/libx264-generated videos.\n"
+        "recording_session.json and every *.finalization.json are SYNTHETIC\n"
+        "Orange-shaped test envelopes, NOT evidence emitted by an Orange encoder.\n"
+        "Frame/packet counts and file sizes were measured from these synthetic\n"
+        "videos; submission/write-operation success fields are synthetic test\n"
+        "declarations, not captured Orange lifecycle telemetry. Timestamps are\n"
+        "fabricated exact integers at 2 fps, NOT measured clocks or PTP proof.\n"
+        "The Citrus transfer CLI is real and pinned; its success proves only\n"
+        "the limited transport claim, not Palette/scientific/registry admission.\n",
+        encoding="utf-8",
+    )
+    context = source / "context"
+    context.mkdir()
+    (context / "synthetic_session_opaque_payload.bin").write_bytes(
+        b"SYNTHETIC OPAQUE SIDECAR\x00preserve all bytes\xff\r\n"
+    )
+    write_json(context / "synthetic_fixture_provenance.json", {
+        "fixture_kind": "synthetic_envelopes_with_actual_ffmpeg_encoded_h264",
+        "scientific_admission": False,
+        "orange_encoder_evidence": False,
+        "source_clock_evidence": "synthetic_unqualified",
+        "producer_commit": CITRUS_COMMIT,
+        "contracts_commit": CONTRACTS_COMMIT,
+        "synthetic_session_id": SESSION_ID,
+        "camera_serials": CAMERAS,
+        "clip_frame_counts": [2, 1],
+        "full_geometry": {"width": 32, "height": 32},
+        "crop_geometry": {"width": 16, "height": 16, "x": 8, "y": 8},
+        "timestamp_start_ns": START_NS,
+        "timestamp_increment_ns": FRAME_NS,
+        "finalization_declared_counts_basis": "measured_ffprobe_decoded_frames_and_packets",
+        "finalization_success_fields": "synthetic_not_recorded_Orange_operations",
+    })
+    before = inventory(source)
+    assert not (source / MARKER).exists()
+    assert not (source / "_citrus_transfer").exists()
+    assert not destination.exists()
+    producer_command = [str(palette_py), str(producer / "scripts/recording_transfer_v2.py"),
+                        "--source", str(source), "--destination", str(destination)]
+    first_transfer = run(producer_command)
+    assert before == inventory(source), "Producer mutated source payload"
+    marker_bytes = (destination / MARKER).read_bytes()
+    marker = json.loads(marker_bytes)
+    verify_command = [str(palette_py), str(producer / "scripts/recording_transfer_v2.py"),
+                      "--verify-only", "--destination", str(destination)]
+    verify = run(verify_command)
+    retry = run(producer_command)
+    assert marker_bytes == (destination / MARKER).read_bytes(), "Retry replaced original marker"
+    after = inventory(source)
+    assert before == after
+    snapshot = json.loads((destination / "_citrus_transfer/snapshot.json").read_bytes())
+    assert snapshot["inventory"] == before
+    assert marker["parent_recording_count"] == 2
+    assert snapshot["recording_layout"] == "rolling_clips"
+    assert snapshot["recording_payload_kind"] == ("citrus_h5" if args.with_context else "video_only")
+    assert [p["parent_key"]["camera_serial"] for p in snapshot["parents"]] == CAMERAS
+    assert all(len(p["clips"]) == 2 for p in snapshot["parents"])
+    for item in before:
+        assert sha256(destination / item["path"]) == item["sha256"]
+    write_json(evidence / "source_inventory_before.json", {"inventory": before})
+    write_json(evidence / "source_inventory_after.json", {"inventory": after})
+    write_json(evidence / "commands.json", {"commands": commands})
+    report = {
+        "status": "actual_pinned_citrus_transfer_and_loadback_passed",
+        "fixture_scope": "synthetic_Orange_envelopes_real_H264_no_scientific_admission",
+        "includes_synthetic_h5_ptp_geometry": args.with_context,
+        "stimulus_variant": args.stimulus,
+        "stimulus_evidence": stimulus_evidence,
+        "generator": str(Path(__file__).resolve()), "generator_sha256": sha256(Path(__file__)),
+        "work_dir": str(work), "source": str(source), "destination": str(destination),
+        "evidence_dir": str(evidence), "snapshot_id": marker["snapshot_id"],
+        "parent_count": 2, "camera_serials": CAMERAS, "clip_frame_counts_per_parent": [2, 1],
+        "producer_commit": CITRUS_COMMIT, "contracts_commit": CONTRACTS_COMMIT,
+        "producer_repo": str(producer), "producer_file_sha256": actual_pins,
+        "palette_python_wrapper": str(palette_py), "python_executable": sys.executable,
+        "ffmpeg_version": ffmpeg_version, "ffprobe_version": ffprobe_version,
+        "producer_cli_argv": producer_command, "verify_cli_argv": verify_command,
+        "producer_stdout": first_transfer.stdout, "verify_stdout": verify.stdout,
+        "retry_stdout": retry.stdout, "source_payload_unchanged": before == after,
+        "source_file_count": len(before), "source_retained": source.is_dir(),
+        "source_has_no_transfer_marker": not (source / MARKER).exists(),
+        "retry_preserved_marker_bytes": True, "all_inventory_files_preserved": True,
+        "media": media,
+        "limits": [
+            "Orange manifests/finalization envelopes are synthetic, not actual Orange encoder evidence.",
+            "Packet/frame/file-size measurements are real; lifecycle-operation fields are synthetic declarations.",
+            "Timestamps are exact synthetic integers, not clock validity, PTP, UTC, or hardware exposure evidence.",
+            "No Palette parent organization, import/receipt/profile admission, registry write, or downstream acceptance ran here.",
+            "No production input, staging/share update, acquisition deployment, selector activation, cleanup, install, or LSF job.",
+        ],
+    }
+    report_path = work / "producer_smoke_report.json"
+    write_json(report_path, report)
+    print(json.dumps({"status": report["status"], "work_dir": str(work),
+                      "source": str(source), "destination": str(destination),
+                      "report": str(report_path), "snapshot_id": marker["snapshot_id"]}))
+
+
+if __name__ == "__main__":
+    main()
