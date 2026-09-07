@@ -255,3 +255,155 @@ real-median replay and exact-commit CI for that follow-up remain pending at
 this snapshot. The CPU-only unpatched CLI limitation, calibration/locked
 holdout, clipped-layout equivalence, and automatic policy promotion remain
 outstanding; no arbitrary acceptance thresholds have been added.
+
+## Corrected real-median replay (September 6 evening update)
+
+The correction was committed by the integration owner as
+`20cb10acb65bf334e9cec1de0405ba15a74e435b`. The worktree was clean at that
+exact commit for both replay and invariant verification; only this handoff
+was edited afterward. No other worker's checkout, shared interface, queue,
+or production data was changed. The fit-review validator is unchanged from
+`ac73a61067118fc1a41699267dfa376a15f4bac6`.
+
+The authorized replay refit **only the three hash-verified native median
+PNGs** from the original immutable fit-review run. There were zero new video
+decodes and zero new source-video hash reads. The report explicitly preserves
+the original source/decode fields as sealed upstream lineage, not as a claim
+of new decoding. The original host-NVDEC adapter is retained under
+`upstream_canary_runtime_adapter`; the new `real_median_replay` block binds
+the exact producing commit, original report/run/record, and replay script
+SHA-256 `5e9d671cc860928a47ddf62c59109cba52cf711ce215286397e91df096e0ef1e`.
+This remains a real-median diagnostic, **not** validation of the unpatched
+device-output probe CLI, which remains blocked by CPU-only PyTorch.
+
+Replay, regenerated presentation, and the unpatched isolated fit-review
+planner/publisher/immutable loader passed in **29.98 s**, with peak process
+RSS **1,627,620 KiB**. The fresh package is
+`/tmp/palette-rim-real-canary-20260906.pxVuAn/corrected_median_replay_20cb10acb65b`;
+the fresh archive is the sibling `corrected_replay_20cb10acb65b_analysis.zarr`.
+Neither the original package nor its archive was overwritten.
+
+- New report SHA-256:
+  `007d84f4a00762bc65a66a521f2909ae647aecaec4a72dd1b250443db7497a1a`.
+- New immutable run: `arena-geometry-fit-review-1a135592e24c3dc42bde84cd`.
+- New record SHA-256:
+  `1a135592e24c3dc42bde84cd0e067a854016be7bd74c6de340361dd6cdcc8979`.
+- Result receipt: `corrected_replay_result_20cb10acb65b.json`, SHA-256
+  `f8aad0bd18f351a596789053d717edeb9a2e2ebdaf78e35924e4d659476ce547`.
+- Independent invariant receipt: `corrected_replay_invariants_20cb10acb65b.json`,
+  SHA-256 `773fe9523e4a23d59750e943d6c836e1b632d285b5aae455492e52780c9b697f`.
+
+The recipe SHA-256 intentionally changed from
+`68ddf60040dde02553a03d33835445df3afddd5c64bb836198fc9b5ffbc9f1f1` to
+`92612989eb6251a3a5655db2259321a339a3127160c766b08c15c1145dbbcc4b`.
+Removing only the new `radial_offset_measurement_method` parameter from the
+corrected recipe reproduces the old recipe object exactly. No cutoff or other
+scientific setting changed. Old threshold configurations must not silently
+reuse this corrected recipe identity.
+
+Invariant verification passed for the exact source/pixel binding, parameters,
+all 57 recorded sample indices and seek proofs, decoded-luma sequence hashes,
+all three encoded median PNG byte strings, all three native 4512×4512 uint8
+pixel hashes, and every frozen candidate geometry and legacy candidate score.
+Candidate metrics are also identical except for the two corrected radial
+offset measurements. The family-center spread and family-radius Hausdorff
+metrics therefore remain exactly unchanged. Both old and new packages passed
+the real immutable loader again using consolidated metadata; both remain
+`stage_selector_eligible=false`, with neither `latest` nor `latest_complete`.
+
+The corrected recipe selects `radial_family_009` in each window with reason
+`outermost_supported_concentric_edge_top_rim_preference_v1`:
+
+| Window | Radius (native px) | Measured angular support | Longest unsupported arc |
+| --- | ---: | ---: | ---: |
+| Early | 2225.758142 | 0.958333 | 2.0° |
+| Middle | 2229.243910 | 0.968056 | 1.5° |
+| Late | 2226.028356 | 0.948611 | 3.0° |
+
+All selected contours have visible-angular fraction 1.0, radial-offset p95
+exactly 4px, median absolute radial offset 3px, and no structural quality
+flags. Center maximum pairwise spread is 1.687204px and selected-radius range
+is 3.485768px. The unchanged family-center spread is 3.781447px and unchanged
+family-radius Hausdorff distance is 7.506270px. The observed medoid is the late
+window, center `(2258.80899956, 2240.61948571)`, radius `2226.02835597px`;
+no radius averaging was performed.
+
+The required 3600×1200 three-panel montage was regenerated, hash-validated,
+published, and visually inspected. Its SHA-256 is
+`d7b42117b366ea82cc5491df309d21aa8f1705241e33a0017168362947a13941`.
+The cyan overlay follows a consistent outer projected contour in the rim
+band, outside the strongest inner dark boundary. This inspection does not
+establish which physical dish surface produced that contour. In particular,
+an offset p95 at the sampling-band cap is a bounded measurement, not a
+calibrated goodness-of-fit guarantee; successful extraction eligibility and
+absence of structural flags are not scientific acceptance.
+
+Numerical diagnostic products and their required presentation are validated
+for this bounded replay. **Physical-top-rim identification, representative
+camera/registration calibration, frozen August 10 derivation, locked August
+11 holdout, operator-adjudicated failure controls, and whole/clipped-layout
+equivalence remain unrun.** No automatic acceptance or activation occurred.
+
+At the exact-code replay authorization, all 24 required CI checks on `20cb10ac`
+were unrun: generated artifacts; import boundaries; file-size ratchet; Zarr
+open metadata modes; observed metadata literals; active contract freshness;
+package and collection; non-GPU test shards 0–15; and `ci-required`. The
+integration owner tracks later remote results. This diagnostic does not
+substitute for those checks or authorize integration, shared-checkout update,
+deployment, threshold promotion, or production activation.
+
+## Required-CI failure diagnosis and test-only correction
+
+Required CI on `20cb10acb65bf334e9cec1de0405ba15a74e435b` subsequently failed
+non-GPU shard 10 at the preservation test's fixed SHA-256 assertion; the
+`ci-required` aggregate is also blocking. This is not dismissed as unrelated,
+and the commit remains ineligible for integration. The independent CI reviewer
+found that the committed legacy and corrected samplers return byte-identical
+arrays within the same runtime, while the fixed expected hash is sensitive
+to the numerical runtime/CPU dispatch. The CI and workstation environments
+also differ, so a workstation-specific numerical byte hash is not a portable
+acceptance contract.
+
+Before editing the test, a workstation reproduction with
+`NPY_DISABLE_CPU_FEATURES=AVX2,FMA3` failed the original assertion in 0.29 s:
+the actual digest was
+`f18438820ce618f9d54d4345453ff9d83274c4fb60e9a05cf82adda22c450c8a`,
+not the previously recorded local
+`f8741e0af57235058987c30dfa5f0ea44988e25f2b9a567c2a50b18d44d782db`.
+The earlier local hash in this handoff is retained as historical evidence,
+not relabeled as a cross-runtime invariant.
+
+The authorized correction changes **only the preservation test**, plus this
+handoff. It embeds the historical `_radial_evidence` algorithm from exact
+commit `ac73a61067118fc1a41699267dfa376a15f4bac6` as a clearly named frozen
+test oracle. Static AST comparison verified an identical signature and body,
+apart from the helper's name. The current production sampler is compared to
+that independent baseline under the same runtime using exact array shape,
+float64 dtype, and C-order byte equality. There is no numeric tolerance and
+no replacement fixed hash. Four inputs cover the original CI case, flat-band
+ties, a seeded gradient, and out-of-bounds sampling. The two existing exact
+radial-offset regression cases remain unchanged.
+
+Validation after this test-only change:
+
+- The complete seven-file focused rim/legacy/publication suite passed
+  **79 tests in 8.97 s** under normal CPU dispatch.
+- `NPY_DISABLE_CPU_FEATURES=AVX2,FMA3 scripts/py -m pytest
+  tests/unit/fisheye/test_dish_rim_offset_precision.py -q` passed
+  **6 tests in 0.25 s**.
+- Black formatting, Ruff lint, Python compilation, and diff whitespace checks
+  passed. All pytest and formatter runs used the workstation outside sandbox.
+
+No production metric or validator source was edited. Their SHA-256 values
+remain `5c76085c403bccb28c6bf297b24cd1782e5f9e45f4191d3d1113cab80a2e2248`
+and `f20890aa0765c4b89e246346135f8f4a59519aac66e5fdd1b70af6b74d145471`,
+respectively. The scientific-recipe identity and saved corrected-replay
+artifacts are unchanged; no new video, median, or publication replay occurred.
+
+At this handoff the test and accumulated handoff updates are uncommitted on
+`20cb10ac`. The integration owner must review, commit, push, and obtain all
+24 required successful checks on the new exact commit. Local green results
+do not replace the failed required checks on `20cb10ac` or establish remote
+CI success for this correction. No commit, push, integration, deployment,
+selector change, threshold promotion, or production activation was performed
+by this follow-up.
