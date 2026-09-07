@@ -370,6 +370,19 @@ synthetic execution evidence; it is not yet merge-ready, deployed or activated.
 The [integration checkpoint](parent_recording_intake_handoff_2026-09-06.md#september-7-reviewed-development-integration)
 records exact inputs, ownership, fixture corrections and the remaining canary.
 
+September 7 clean-code canary supersedes that canary-pending checkpoint: the
+actual maintained recording-only workflow passed on combined
+`27b48573b01834c09272e72cbe1988d594aeebde`, with two admitted parent recordings,
+all 39 staged files preserved at explicit destinations, empty staging, unchanged
+acquisition-source copies, and byte-stable replay. The independent corrupted
+delivery was refused without retirement or registry mutation. The
+[bounded result and artifact hashes](parent_recording_intake_handoff_2026-09-06.md#clean-combined-commit-synthetic-result--september-7)
+record exact receipts, Palette-runtime SQLite acceptance, limitations and
+remaining checks. Combined/follow-up required CI is still pending, so the
+development branch remains incomplete and not merge-ready. This is validated
+synthetic execution, not live deployment, full stimulus-data acceptance,
+production activation, acquisition-source release or broader `INGEST-001` closure.
+
 2026-09-06 ingestion-validation companion: **complete for its scoped
 corrections**, owned by the Palette worker on
 `agent/palette/ingestion-validation-20260906`. PR 143 covers PTP complete-state

@@ -414,3 +414,69 @@ an authentic stimulus acquisition or Orange hardware/clock canary. Its final
 report is an external execution artifact under a fresh
 `/tmp/palette-parent-intake-e2e-20260907-*` directory, not a replacement status or
 scientific acceptance authority.
+
+## Clean combined-commit synthetic result — September 7
+
+The complete explicitly recording-only synthetic workflow passed against clean
+combined code commit `27b48573b01834c09272e72cbe1988d594aeebde`. It invoked the
+actual maintained session CLI, ordinary batch/importer, publishers, receipt and
+registry readers without monkeypatching git identity or any runtime validator.
+The acquisition envelopes, H5 context and timing values were explicitly
+synthetic; the H264 media, pinned Citrus transfer execution and Palette import
+execution were real. This supersedes only the canary-pending statement above.
+
+- Positive report:
+  `/tmp/palette-parent-intake-e2e-20260907-qj248wc6/e2e_report.json`.
+  SHA-256: `ece0b01775b22d0082cc77b7716e42040b353d707705bd4f9cca0397418b6b28`.
+- Two exact parent cameras, `02010093` and `02010094`, each retained two full
+  clips and their crop children, three parent frames, original frame IDs and
+  timestamps, and one explicit blank crop row. Both canonical pixel-source
+  resolvers retained the two-file collection; neither manufactured a first-clip
+  single-video source. Clock and crop readers validated the published arrays.
+- Both actual receipt producers bind the clean combined commit above. Receipt
+  digests are `ae89b0ffaac78ab39639cddd35d551b39e31c510003b9cde3fa450ea483f668e`
+  and `83b0b0f16c4911672bd64a1ca3d779435a39a2980f30445ecb69c9421660560f`.
+  The isolated registry's existing shadow-publication path admitted both, and
+  the read-only registry resolver verified each exact receipt afterward.
+- Complete `PRAGMA integrity_check` and `PRAGMA foreign_key_check` passed
+  through `scripts/py -m fisheye.utils.registry_integrity`: `ok`, zero foreign
+  key issues, Python SQLite runtime **3.52.0**. Receipt:
+  `/tmp/palette-parent-intake-e2e-20260907-qj248wc6/registry_integrity.json`.
+- All **39** staged files, including H5, required geometry assets, original
+  producer manifests, opaque context, snapshot, completion marker and empty
+  transfer lock, matched their explicitly mapped recording destinations by
+  content hash and size. Only then were these synthetic staged files retired.
+  Staging is empty, while all original synthetic acquisition-source files
+  remain unchanged and available. Original control evidence is retained inside
+  the recording parents. There was no production or acquisition-machine cleanup.
+- Saved-plan replay passed after source retirement, ran no importer command,
+  retained the same two receipts, and left all parent bytes and registry bytes
+  unchanged. Required registered-mask geometry loadback passed for both cameras.
+- Separate negative report:
+  `/tmp/palette-parent-intake-e2e-20260907-0en8pw1d/e2e_report.json`.
+  SHA-256: `fa11b4a5fd84a84a757b53c4f767296c66f54c9928fa2f0d6ae2d13440c93835`.
+  Deliberate corruption of only that disposable delivery's opaque file caused
+  the real CLI to refuse with exit 1. It created no recording parents, removed
+  no staged files, and left the isolated registry and original acquisition
+  source unchanged. The failed delivery remains preserved as diagnostic evidence.
+
+The workflow is implemented and this bounded end-to-end canary is validated;
+the development branch is **not yet complete or merge-ready**. At this report's
+pre-commit checkpoint, combined-code CI run `34077759883` had six standalone
+successes, while package/collection and non-GPU shards 0–15 were running and
+`ci-required` was unrun. This documentation-only follow-up requires its own
+fresh required CI; successful predecessor checks cannot satisfy that gate.
+All 24 follow-up checks are initially unrun: generated artifacts, import
+boundaries, file-size ratchet, Zarr open metadata modes, observed metadata
+literals, active contract freshness, package and collection, non-GPU test
+shards 0–15, and `ci-required`. No source code or producing-artifact identity
+is changed by this documentation update, and the canary receipts remain bound
+to their actual producer commit rather than being rewritten to the follow-up.
+
+Remaining scope: complete required combined/follow-up CI, then obtain separate
+authorization and authentic acquisition-owner inputs for any real deployment
+or canary. Live poller rollout, acquisition-machine source-release acknowledgment,
+full stimulus-data canary, production registry/selector activation and broader
+`INGEST-001` closure are not claimed. No acquisition agent was needed for this
+synthetic test; a real acquisition run still needs pinned installed versions,
+authentic finalized source evidence, source custody and an authorized destination.
