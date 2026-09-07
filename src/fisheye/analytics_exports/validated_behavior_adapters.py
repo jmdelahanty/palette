@@ -975,11 +975,11 @@ def _chaser_occurrences_v2(
     return _complete_rows(augmented)
 
 
-def _semantic_epochs(
-    context: _RecordingContext,
+def _project_semantic_epoch_rows(
+    *,
+    common: Mapping[str, Any],
+    source: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], str | None]:
-    common = context.child_common("semantic_epochs")
-    source = context.bundle["source_bindings"]["semantic_epochs"]["source"]
     windows = list(source["position_suite_epochs"])
     bindings = {
         int(item["source_window_id"]): item for item in source["semantic_role_bindings"]
@@ -1030,6 +1030,15 @@ def _semantic_epochs(
             }
         )
     return _complete_rows(rows)
+
+
+def _semantic_epochs(
+    context: _RecordingContext,
+) -> tuple[list[dict[str, Any]], str | None]:
+    return _project_semantic_epoch_rows(
+        common=context.child_common("semantic_epochs"),
+        source=context.bundle["source_bindings"]["semantic_epochs"]["source"],
+    )
 
 
 def _controller_trials(
