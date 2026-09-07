@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from matplotlib import pyplot as plt
 
 from fisheye.utils import plot_composable_chaser_successors as plot_module
 from fisheye.utils.plot_composable_chaser_successors import (
@@ -73,14 +74,10 @@ def _handles() -> tuple[_Handle, _Handle, _Handle]:
             "sources": {
                 "controller_trial_payload_sha256": controller_digest,
                 "motion": {
-                    "relative_frame_projection": {
-                        "missing_relative_frame_count": 3
-                    }
+                    "relative_frame_projection": {"missing_relative_frame_count": 3}
                 },
             },
-            "identity_registries": {
-                "semantic_role": {"2": "chaser_training"}
-            },
+            "identity_registries": {"semantic_role": {"2": "chaser_training"}},
         },
         arrays={
             "summary_role_code": np.asarray([2, 2], dtype=np.uint8),
@@ -132,6 +129,74 @@ def test_render_dashboard_writes_png_and_pdf(tmp_path: Path) -> None:
         20.0,
     ]
     assert parameters["rendering"]["png_dpi"] == 180
+    assert parameters["rendering"]["trial_x_margin_fraction"] == 0.12
+
+
+def test_trial_labels_remain_inside_plot_for_short_trials_on_long_timeline() -> None:
+    controller, _bout, _escape = _handles()
+    controller.arrays.update(
+        {
+            "start_acquisition_frame_id": np.asarray([0, 30_000], dtype=np.int64),
+            "end_acquisition_frame_id_inclusive": np.asarray(
+                [999, 30_999], dtype=np.int64
+            ),
+            "trial_ordinal": np.asarray([1, 2], dtype=np.int32),
+            "logged_trial_id": np.asarray([11, 12], dtype=np.int64),
+            "chaser_identity_code": np.asarray([1, 1], dtype=np.uint16),
+            "gap_fraction": np.asarray([0.0, 0.1], dtype=np.float64),
+        }
+    )
+    figure, axis = plt.subplots(figsize=(7.5, 5.0))
+    try:
+        plot_module._trial_panel(axis, controller)
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        axes_bounds = axis.get_window_extent(renderer=renderer)
+        for label in axis.texts:
+            label_bounds = label.get_window_extent(renderer=renderer)
+            assert label_bounds.x0 >= axes_bounds.x0
+            assert label_bounds.x1 <= axes_bounds.x1
+    finally:
+        plt.close(figure)
+
+
+def test_bout_count_labels_do_not_overlap_for_coincident_series() -> None:
+    _controller, bout, _escape = _handles()
+    bout.arrays.update(
+        {
+            "summary_role_code": np.asarray([1, 1, 2, 2, 3, 3], dtype=np.uint8),
+            "summary_chaser_identity_code": np.asarray(
+                [1, 2, 1, 2, 1, 2], dtype=np.uint16
+            ),
+            "summary_distance_bin_index": np.zeros(6, dtype=np.int16),
+            "summary_distance_bin_start_mm": np.zeros(6, dtype=np.float32),
+            "summary_distance_bin_end_mm": np.full(6, 8.0, dtype=np.float32),
+            "summary_bout_rate_per_min": np.full(6, 100.0, dtype=np.float64),
+            "summary_bout_count": np.arange(1, 7, dtype=np.int64),
+        }
+    )
+    bout.scientific_manifest["identity_registries"]["semantic_role"] = {
+        "1": "chaser_pre",
+        "2": "chaser_training",
+        "3": "chaser_post",
+    }
+    figure, axis = plt.subplots(figsize=(7.5, 5.0))
+    try:
+        plot_module._bout_panel(axis, bout)
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        count_labels = [
+            label for label in axis.texts if label.get_text() in set("123456")
+        ]
+        assert len(count_labels) == 6
+        bounds = [label.get_window_extent(renderer=renderer) for label in count_labels]
+        assert all(
+            not left.overlaps(right)
+            for index, left in enumerate(bounds)
+            for right in bounds[index + 1 :]
+        )
+    finally:
+        plt.close(figure)
 
 
 def test_render_dashboard_rejects_stale_dependency(tmp_path: Path) -> None:
@@ -174,34 +239,39 @@ def test_main_uses_receipt_bound_targeted_array_rosters(
     monkeypatch.setattr(plot_module, "dashboard_plot_parameters", lambda *_: {})
 
     output_dir = tmp_path / "plots"
-    assert plot_module.main(
-        [
-            str(tmp_path / "analysis.zarr"),
-            "--run-name",
-            "successors-v1",
-            "--expected-recording-id",
-            "recording-1",
-            "--output-dir",
-            str(output_dir),
-            "--controller-validation-receipt",
-            str(tmp_path / "controller.json"),
-            "--bout-validation-receipt",
-            str(tmp_path / "bout.json"),
-            "--escape-validation-receipt",
-            str(tmp_path / "escape.json"),
-        ]
-    ) == 0
+    assert (
+        plot_module.main(
+            [
+                str(tmp_path / "analysis.zarr"),
+                "--run-name",
+                "successors-v1",
+                "--expected-recording-id",
+                "recording-1",
+                "--output-dir",
+                str(output_dir),
+                "--controller-validation-receipt",
+                str(tmp_path / "controller.json"),
+                "--bout-validation-receipt",
+                str(tmp_path / "bout.json"),
+                "--escape-validation-receipt",
+                str(tmp_path / "escape.json"),
+            ]
+        )
+        == 0
+    )
 
     assert len(calls) == 3
     for call in calls:
         assert call["deep_audit"] is False
-        assert call["required_array_names"] == plot_module._PLOT_ARRAY_NAMES[
-            call["successor_kind"]
-        ]
+        assert (
+            call["required_array_names"]
+            == plot_module._PLOT_ARRAY_NAMES[call["successor_kind"]]
+        )
     receipt = json.loads(
         (output_dir / "successors-v1_plot_receipt.json").read_text(encoding="utf-8")
     )
-    assert receipt["schema_version"] == 3
+    assert receipt["schema_version"] == 4
+    assert receipt["plot_recipe_id"] == "composable_chaser_dashboard_v3"
     assert receipt["plot_policy"]["source_validation"] == (
         "receipt_bound_targeted_array_rehash_v1"
     )

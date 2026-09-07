@@ -4,6 +4,56 @@ Status authority: `INGEST-001` in the
 [authority consolidation queue](authority_consolidation_work_queue_2026-08-25.md).
 This document records evidence and compatibility decisions, not another queue.
 
+## Main reconciliation and regenerated inventories — September 7
+
+The user authorized reconciling current CI-green `main` into the existing
+root-owned intake branch, regenerating its census artifacts, validating,
+committing/pushing and waiting for fresh CI. This does not authorize merging
+PR 149, deployment, live acquisition, poller installation or activation.
+
+- Owner/worktree/branch: Palette root worker,
+  `/tmp/palette-parent-clipped-intake-20260906`,
+  `agent/palette/parent-clipped-intake-20260906`.
+- Starting head: `cb60279b2036e5cbb2447571d3150ca63a71596e`, the pushed
+  naming-documentation commit. Its 24 required checks were unrun because the
+  PR conflicted with newer `main`; the previous green head had the same two
+  census conflicts. The naming correction did not introduce them.
+- Incoming prerequisite: exact `fc6fea5fd937759f5ed21c79d13279b25c309e13`,
+  verified as current `main` with all 24 checks successful in
+  [run 34131195011](https://github.com/jmdelahanty/palette/actions/runs/34131195011).
+  Relevant worktree commits and dirty scopes were rechecked before integration.
+  The original checkout's dirty instructions/documents and the chaser owner's
+  untracked outputs remain untouched; no other worker's uncommitted changes
+  were adopted.
+- Classification: behavior-preserving conflict resolution and documentation,
+  incorporating the already accepted mainline chaser/CI changes unchanged.
+  Only the two generated census files conflicted. The existing
+  `scripts/py -m fisheye.diagnostics.zarr_storage_census --write` generator
+  resolved them from the combined source: **1,717 scanned modules**. Its normal
+  source-location-derived IDs reflect the combined code; no historical
+  scientific identities, transfer digests, source bytes or canary receipts
+  were rewritten. No runtime file required manual conflict resolution.
+- Local combined-tree validation: **304 tests passed in 74.79 seconds** through
+  workstation `scripts/py` outside the sandbox. Coverage includes transfer
+  schema/snapshot, parent workflow, portable canary package, session importer,
+  organized import, staging finalization, clipped importer/receipt, source
+  identity, census, independent CI gates and JUnit summaries. Import boundaries,
+  FPS/keypoint-motion/tail/paradigm authority ratchets, file-size, explicit Zarr
+  modes, observed metadata literals, managed-contract freshness, registry schema
+  reference, regenerated-census freshness and whitespace checks passed.
+
+At this pre-commit checkpoint, the merge and this handoff/queue update remain
+uncommitted. All 24 combined-head required checks are unrun: generated artifacts,
+import boundaries, file-size ratchet, Zarr metadata modes, observed metadata
+literals, active contract freshness, package/collection, non-GPU shards 0–15
+and `ci-required`. The new head is **not merge-ready until all succeed**; consult
+the exact head and run in [PR 149 checks](https://github.com/jmdelahanty/palette/pull/149/checks).
+Earlier clean-code synthetic results remain bound to their original commits,
+not this reconciliation. The acquisition request remains draft/unsent; service
+alias migration, real-data canary, deployment and broader `INGEST-001` closure
+remain separately scoped and incomplete. No shared checkout or live service
+was changed, and no dependency was installed.
+
 ## Repository and cluster-service naming — September 7
 
 The user clarified these distinct identities:

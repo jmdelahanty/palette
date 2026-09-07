@@ -117,3 +117,33 @@ def test_core_mode_rejects_legacy_body_argument_before_reading(
 
     with pytest.raises(ValueError, match="cannot accept a legacy body-frame"):
         cli.run(args)
+
+
+def test_main_serializes_successful_result(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setattr(
+        cli,
+        "run",
+        lambda args: {
+            "status": "planned_no_writes",
+            "analysis_zarr": str(args.analysis_zarr),
+        },
+    )
+
+    result = cli.main(
+        [
+            str(tmp_path / "recording_analysis.zarr"),
+            "--proxy-run-name",
+            "proxy-a",
+            "--output-run-name",
+            "relative-a",
+            "--scratch-root",
+            str(tmp_path / "scratch"),
+            "--json",
+        ]
+    )
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "analysis_zarr": str((tmp_path / "recording_analysis.zarr").resolve()),
+        "status": "planned_no_writes",
+    }

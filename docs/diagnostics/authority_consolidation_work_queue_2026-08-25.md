@@ -434,6 +434,21 @@ script paths, historical evidence, runtime code and installations are unchanged.
 compatibility migration, live service change or status-authority replacement
 is authorized by the terminology correction.
 
+September 7 CI reconciliation: naming commit
+`cb60279b2036e5cbb2447571d3150ca63a71596e` was pushed, but all 24 required
+checks remained unrun because its PR conflicted with newer `main`. With user
+approval, root incorporated exact CI-green main
+`fc6fea5fd937759f5ed21c79d13279b25c309e13` into the existing intake branch and
+regenerated the two conflicting census reports from combined source (1,717
+modules). All 304 focused regressions and the local static gates passed; no
+runtime file required manual resolution. At this pre-commit checkpoint the
+merge/docs are uncommitted and all 24 combined-head checks remain unrun, so this
+is not merge-ready. See the [reconciliation handoff](parent_recording_intake_handoff_2026-09-06.md#main-reconciliation-and-regenerated-inventories--september-7)
+for exact ownership, prerequisites, preservation and check inventory, and
+[PR 149 checks](https://github.com/jmdelahanty/palette/pull/149/checks) for final-head
+results. No PR merge, deployment, live poller change, real acquisition or
+production activation is included; the acquisition request remains draft/unsent.
+
 2026-09-06 ingestion-validation companion: **complete for its scoped
 corrections**, owned by the Palette worker on
 `agent/palette/ingestion-validation-20260906`. PR 143 covers PTP complete-state

@@ -101,16 +101,16 @@ DETECTION_NEAR_FIELD_VISIT_RUN = (
     "goodbatbadbat_chaser_near_field_visits_detection_core_authority_20260905_v1"
 )
 KEYPOINT_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_near_field_visits_keypoint_core_authority_20260905_recipe_v1"
+    "goodbatbadbat_chaser_near_field_visits_keypoint_core_authority_20260905_recipe_v2"
 )
 DETECTION_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_near_field_visits_detection_core_authority_20260905_recipe_v1"
+    "goodbatbadbat_chaser_near_field_visits_detection_core_authority_20260905_recipe_v2"
 )
 NEAR_FIELD_VISIT_PROVIDER_POLICY = "both_exact_first_class_position_providers_v1"
 NEAR_FIELD_VISIT_RECEIPT_POLICY = (
     "independent_exact_child_receipts_existing_projection_unchanged_v1"
 )
-NEAR_FIELD_VISIT_PLOT_RECIPE_ID = "persisted_exact_near_field_visit_trajectories_v1"
+NEAR_FIELD_VISIT_PLOT_RECIPE_ID = "persisted_exact_near_field_visit_trajectories_v2"
 SPATIAL_OCCUPANCY_RUN = (
     "goodbatbadbat_chaser_spatial_occupancy_core_authority_20260905_v1"
 )
@@ -119,15 +119,16 @@ SPATIAL_OCCUPANCY_RECEIPT_BOUND_RUN = (
     "goodbatbadbat_chaser_spatial_occupancy_core_authority_receipt_bound_20260905_v1"
 )
 SPATIAL_OCCUPANCY_RECIPE_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_spatial_occupancy_core_authority_20260905_recipe_v1"
+    "goodbatbadbat_chaser_spatial_occupancy_core_authority_20260905_recipe_v2"
 )
 DASHBOARD_RECIPE_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_dashboard_core_authority_20260905_recipe_v1"
+    "goodbatbadbat_chaser_dashboard_core_authority_20260905_recipe_v2"
 )
+DASHBOARD_PLOT_RECIPE_ID = "composable_chaser_dashboard_v3"
 DETAILED_RECIPE_BUNDLE_NAME = (
-    "goodbatbadbat_chaser_detailed_core_authority_20260905_recipe_v1"
+    "goodbatbadbat_chaser_detailed_core_authority_20260905_recipe_v2"
 )
-DETAILED_PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v5"
+DETAILED_PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v6"
 BODY_ALIGNMENT_PLOT_RECIPE_ID = "persisted_anatomical_alignment_distance_bins_static_v2"
 RELATIVE_FRAME_VALIDATION_MODE = "reusable_direct_subtree_receipt_v1"
 EPOCH_ALIGNMENT_PROJECTION_RECEIPT_NAME = (
@@ -1624,7 +1625,7 @@ def successor_cohort_task(
                 **dict(previous["selection_policy"]),
                 "successor_of_task_sha256": previous_digest,
                 "relative_frame_validation": RELATIVE_FRAME_VALIDATION_MODE,
-                "plot_recipe_provenance": "self_contained_exact_parameters_v5",
+                "plot_recipe_provenance": "self_contained_exact_parameters_v6",
                 "near_field_visit_provider_policy": (NEAR_FIELD_VISIT_PROVIDER_POLICY),
                 "near_field_visit_receipt_policy": NEAR_FIELD_VISIT_RECEIPT_POLICY,
                 "near_field_visit_minimum_quality_sample_count": (
@@ -3071,6 +3072,8 @@ def run_one(
                             recording_id,
                             "--output-dir",
                             visit_plot_dir,
+                            "--provider-role",
+                            provider,
                             *(
                                 (
                                     "--source-validation-receipt",
@@ -3184,6 +3187,7 @@ def run_one(
         dashboard_receipt,
         recording_id=recording_id,
         require_self_contained_recipe=receipt_bound_relative,
+        expected_plot_recipe_id=DASHBOARD_PLOT_RECIPE_ID,
     ):
         stages.append({"stage": "dashboard_plots", "mode": "reused_exact_receipt"})
     else:
