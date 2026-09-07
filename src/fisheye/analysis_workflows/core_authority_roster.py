@@ -52,6 +52,8 @@ from fisheye.analytics_exports.activity_spatial_time_bins import (
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.subject_shape_coordinate_publication import (
     BoundSubjectShapeCoordinatePublication,
+    SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
+    load_completed_ineligible_subject_shape_coordinate_publication,
     load_persisted_subject_shape_coordinate_publication,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
@@ -704,9 +706,9 @@ def bind_subject_body_frame_from_core_roster(
 ) -> BoundSubjectShapeCoordinatePublication:
     """Reopen the roster-selected body authority through its strict loader.
 
-    The roster supplies the exact publication identity and the normal
-    subject-shape loader proves that immutable publication still matches it.
-    No selector or alternate body-frame grammar is consulted.
+    The roster supplies the exact publication identity and lifecycle, and the
+    matching subject-shape loader proves that immutable publication still
+    matches it. No selector or alternate body-frame grammar is consulted.
     """
 
     if (
@@ -726,10 +728,35 @@ def bind_subject_body_frame_from_core_roster(
         label="subject body-frame source binding",
     )
     run_path = _text(expected.get("run_path"), label="subject body-frame run path")
-    publication = load_persisted_subject_shape_coordinate_publication(
-        bound.root,
-        run_path,
+    completion = _mapping(
+        expected.get("completion_snapshot"),
+        label="subject body-frame completion snapshot",
     )
+    selector_eligible = completion.get("selector_eligible")
+    if type(selector_eligible) is not bool:
+        _fail("Subject body-frame selector eligibility must be an exact bool.")
+    if selector_eligible:
+        publication = load_persisted_subject_shape_coordinate_publication(
+            bound.root,
+            run_path,
+        )
+    else:
+        try:
+            run = bound.root[run_path]
+            owner = run.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise CoreAuthorityRosterError(
+                "Roster-selected subject-body candidate is unavailable."
+            ) from exc
+        expected_owner = _text(
+            owner,
+            label="subject body-frame publication owner",
+        )
+        publication = load_completed_ineligible_subject_shape_coordinate_publication(
+            bound.root,
+            run_path,
+            expected_publication_owner=expected_owner,
+        )
     observed = build_subject_body_frame_source_binding(publication)
     if _plain(observed) != _plain(expected):
         _fail("Live subject body-frame source differs from the selected roster.")
