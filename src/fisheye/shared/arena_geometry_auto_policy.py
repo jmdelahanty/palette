@@ -147,7 +147,7 @@ _APPLICABILITY_FIELDS = {
 }
 
 
-def _applicability(value: Any) -> None:
+def validate_geometry_policy_applicability(value: Any) -> None:
     scope = _exact(value, _APPLICABILITY_FIELDS, "applicability")
     for key in (
         "rig_id",
@@ -272,7 +272,7 @@ def validate_geometry_auto_policy(policy: Mapping[str, Any]) -> None:
     _digest(
         calibration["scientific_recipe_sha256"], "calibration.scientific_recipe_sha256"
     )
-    _applicability(calibration["applicability"])
+    validate_geometry_policy_applicability(calibration["applicability"])
     validation = (
         calibration["validation_manifest_sha256"],
         calibration["validation_result_sha256"],
@@ -311,7 +311,7 @@ def validate_geometry_shadow_evidence(evidence: Mapping[str, Any]) -> None:
     )
     for key, value in bindings.items():
         _digest(value, "source_bindings." + key)
-    _applicability(evidence["applicability"])
+    validate_geometry_policy_applicability(evidence["applicability"])
     for key in _PREREQUISITES:
         if type(evidence[key]) is not bool:
             raise ValueError(f"{key} must be an explicit boolean.")

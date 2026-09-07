@@ -151,7 +151,8 @@ repaired with the existing deterministic generator; final `--check` passed.
 
 ## Required work still unrun or incomplete
 
-No required remote CI for these changes has run. All 24 checks remain required:
+At the initial pre-commit checkpoint, no required remote CI for these changes
+had run. All 24 checks remained required:
 `generated artifacts`, `import boundaries`, `file-size ratchet`,
 `zarr open metadata modes`, `observed metadata literals`,
 `active contract freshness`, `package and collection`,
@@ -177,3 +178,254 @@ Future actual automatic acceptance must reconcile the existing shared
 acceptance owner and versioned operational activation contract separately.
 The current human-reviewed path stays supported. No compatibility removal or
 historical backfill is part of this change.
+
+## Read-only calibration planner follow-up
+
+This follow-up is uncommitted on exact HEAD
+`9d9440f9e48248534d50922d2830ab22442f070f` in the same owned worktree/branch.
+That commit contains the initial shadow-policy implementation and is the
+head coordinated by the root owner for draft PR 151. The root owns its remote
+CI status and all push/integration decisions. The new dirty scope is only:
+
+- `src/fisheye/cluster/arena_geometry_campaign.py`: additive calibration
+  planning/readiness functions and a read-only CLI branch;
+- `src/fisheye/shared/arena_geometry_auto_policy.py`: exposes the existing
+  applicability validator as `validate_geometry_policy_applicability`, with
+  unchanged validation semantics, scientific defaults, and persisted bytes;
+- `tests/unit/fisheye/test_geometry_calibration_readiness.py`: new tests;
+- this handoff.
+
+No separately owned implementation was copied, cherry-picked, or integrated.
+There is no new source module, catalog implementation, cohort manifest owner,
+acceptance receipt framework, or calibration/submission writer. Existing
+campaign planning and submission APIs remain unchanged. This is an additive
+versioned planning capability with strict evidence-accounting checks, not a
+change to existing geometry acceptance or scientific defaults.
+
+### Planner contract and usage
+
+The existing campaign owner now provides:
+
+- `build_geometry_calibration_plan(...)`: validates existing frozen-cohort
+  manifests through `cohorts.registry.validate_frozen_cohort`, freezes exact
+  derivation/validation membership and diagnostic evidence references, and
+  returns `palette.arena_geometry_calibration_plan.v1` with status `planned`;
+- `inspect_geometry_calibration_readiness(plan, phase="derivation", ...)`:
+  revalidates the exact plan and source manifest bytes, accounts for every
+  member and expected camera-registration cell, and returns
+  `palette.arena_geometry_calibration_readiness.v1` with status `readiness`.
+
+File references contain an absolute `path`, exact raw-file `sha256`, and an
+optional `json_path` list selecting an object inside that file. Reference
+normalization does not open a target; read barriers inspect filesystem metadata
+to identify symlinks and hardlinks without reading protected content. At the
+applicable inspection phase, a bounded single read verifies the actual bytes
+before parsing the object. The plan's own digest uses the existing canonical
+JSON digest owner; it is not a fabricated future artifact or receipt digest.
+
+The two existing frozen-cohort manifests own full membership. Every inventory
+row names its recording/parent identity, exact policy applicability,
+registration snapshot digest, scientific-recipe digest, expected shadow source
+bindings, optional metric reference, optional exact
+`acquisition_candidate_reference`, and optional historical comparison
+reference. A missing candidate reference remains visible as missing evidence.
+Missing rows and metrics remain in the denominator. Wrong
+recipe/camera/canvas/arena/coordinate scope, overlapping cohort members,
+cross-role registration reuse, clip pseudo-replication, duplicate exact
+detection sources, and unexpected inventory members are rejected.
+
+Both roles must declare the same exact camera/canvas/arena scopes and distinct
+registration snapshots. The explicit profile supports prospective frozen
+cohorts. The named `goodbatbadbat_oq5_2026_08_12` profile additionally requires
+36 August 10 derivation recordings and 28 August 11 validation recordings,
+four camera scopes, and the full four-camera by three-registration grid in
+each role. This verifies a declared historical design, not holdout freshness
+or scientific independence. The count is explicitly
+`expected_camera_registration_cell_count`, not validated independent cells.
+
+On the allowed read phase, the existing acquisition-candidate validator checks
+the exact candidate artifact. Its canonical digest, registration snapshot,
+camera/canvas/arena/native coordinate scope, acquisition observation, coordinate
+binding, and final acquisition gate must match the declared inventory and
+metric evidence. This validates the already-bound candidate source; it does
+not invent another upstream authority gate. Candidate validity still cannot
+prove attachment to a particular frozen cohort recording, so that missing
+member-source provenance remains explicit. `metric_references_valid` counts
+only the file/candidate bindings checked here;
+`member_source_bindings_validated` and
+`independent_camera_registration_cells_validated` remain zero. Rows retain
+`member_source_provenance_status="not_independently_verified"`.
+
+The diagnostic reference catalog may be supplied as an opaque exact reference;
+its contents are not opened or treated as an authority gate. Every plan must
+explicitly name real and injected negative-control IDs, but their existence
+or result-file presence never establishes successful fail-closed outcomes.
+
+The read-only commands write JSON to stdout only:
+
+```bash
+scripts/py -m fisheye.cluster.arena_geometry_campaign calibration freeze \
+  --input-json /absolute/path/calibration_inputs.json
+scripts/py -m fisheye.cluster.arena_geometry_campaign calibration readiness \
+  --input-json /absolute/path/saved_calibration_plan.json
+```
+
+Freeze inputs map directly to `build_geometry_calibration_plan` keyword
+arguments. Optional readiness input JSON may contain `policy_references`,
+`chronology_events`, and `negative_control_references` and is passed through
+`--readiness-inputs` together with its required exact
+`--readiness-inputs-sha256`. Missing either paired argument is a refusal before
+reading the metadata file. Explicit holdout inspection additionally uses
+`--phase validation`; there is no `--apply` mode for this command branch.
+
+### Holdout and claim boundaries
+
+Plan freezing and default derivation readiness do not open validation metric
+or review files, chronology artifacts, control results, or the diagnostic
+catalog. Missing evidence remains explicit instead of being silently excluded.
+Caller-provided frozen policy inputs may be evaluated on derivation metrics;
+the planner never selects thresholds or supplies numerical defaults. A shared
+pre-open barrier applies to metadata, policy, derivation, chronology, candidate,
+metric, historical-review, and control reads. Whole-file identity, not a
+`json_path` selector or caller-supplied input role, determines protection.
+The guard recognizes declared identical byte digests and filesystem aliases;
+CLI readiness-input artifacts use the same exact-reference guard. Known holdout-bearing files cannot
+be opened through another role while validation is locked. Controls remain
+unread until the same validation gate is satisfied. Authorized later compound
+file reads are reflected in both `validation_metrics_opened` and
+`validation_evidence_opened` when appropriate.
+
+This protection assumes stable referenced artifacts during inspection. It is
+not a filesystem capability system or proof against undisclosed copies with
+false digests or concurrent adversarial path replacement. No filesystem mtime
+is treated as a policy-freeze timestamp.
+
+Validation-phase reads require exact valid policy references covering every
+scope, a threshold-derivation artifact whose byte digest is bound by that
+policy, and recorded timestamp/subject-digest fields showing every policy
+freeze strictly before the earliest declared holdout observation. The policy
+must bind the actual frozen derivation manifest, matching scientific recipe,
+and applicable validation cohort; a freeze before the cohort's own recorded
+creation time is rejected. Future policy-freeze or chronology timestamps are
+also rejected against the actual `inspected_at_utc` captured for this readiness
+inspection. The derivation artifact's bytes are validated,
+but its threshold-selection method is not independently scientifically
+validated by this planner.
+
+Chronology event inputs select actual fields from digest-bound JSON artifacts;
+an `untouched` boolean cannot unlock validation. Event kinds distinguish
+threshold freeze, validation access, aggregate inspection, adjudication, and
+threshold tuning. These are **bound declarations**, not independent proof that
+earlier access was absent. `holdout_freshness` therefore remains `unknown` even
+with consistent declared chronology. Recorded threshold tuning on the holdout
+returns `fresh_holdout_required` and keeps validation metrics locked. An earlier
+recorded inspection also keeps reads locked when it predates threshold freeze.
+
+History was reconciled with the OQ4a/OQ5 plan and the September 6 read-only
+84-recording audit before this implementation. Existing August 11 aggregate
+inspection and historical manual comparisons are not erased, relabeled as
+unseen, or reused as new policy-specific adjudication. The August 6 clipped
+collection remains compatibility evidence, July 22 remains historical
+challenge evidence, and July 29/30 `not_configured` cases remain candidate real
+negative controls. No actual threshold calibration, holdout evaluation, new
+visual review, or live calibration-plan freeze was performed here.
+
+Historical comparison files go through the existing comparison validator and
+must bind the expected acquisition candidate. Their status remains
+`comparison_present_not_policy_specific_adjudication`. Control files remain
+`present_outcome_not_independently_validated`. All results retain
+`promotion_readiness="not_established"`, `scientific_acceptance_created=false`,
+`selection_performed=false`, and `false_automatic_pass_count=null`. Numeric
+threshold satisfaction cannot manufacture a false-pass denominator or review.
+
+### Follow-up validation and remaining work
+
+The initial expanded follow-up run passed **106 geometry/planner tests in 11.28
+seconds** on the workstation, including 23 new planner cases and all 83 prior
+focused preservation tests. This includes control-result presence and an
+actual historical comparison through its unpatched validator. The standalone
+23-case planner suite also passed in 0.76 seconds. All pytest runs used
+`scripts/py` outside the sandbox.
+
+Independent review subsequently found two holdout-read bypasses, unbound
+registration-cell claims, and acceptance of future chronology declarations.
+Those initial passing tests did not establish those boundaries. Seven new
+failing-first cases reproduced the findings on campaign SHA-256
+`707a7a5af7f2f68fa6c471b8a1401eb9717e15927443734e176aa09ecf712dfd`.
+The corrected planner adds whole-file barriers, exact existing candidate
+bindings, explicit missing member provenance, and actual inspection-time
+bounds. Its expanded **39-case planner suite passed in 0.94 seconds**, and
+the corrected **122-test focused regression passed in 9.70 seconds**. After
+matching the existing candidate validator's digest normalization and handling
+absent registration as an explicit refusal, the **66-test planner/campaign/
+policy set passed in 1.09 seconds**. That run preceded the final corrective
+re-review described below. Initial planner count-field
+names and inventory grammar were uncommitted drafts only; no stored historical
+artifact, shadow-policy v1 digest/default, or existing candidate/comparison
+contract was migrated.
+
+Corrective re-review confirmed the original API-read, registration, and
+future-chronology findings were fixed, then found a residual CLI copy-alias
+case: path/inode-only protection did not block a byte-identical holdout copy
+used as readiness metadata. An additional failing-first test reproduced that
+case. The CLI now requires an exact metadata-file digest and calls the same
+digest-aware reference reader as the API; the narrower path-only helper was
+removed. Tests cover refusal before opening both a missing-digest input and a
+correctly digest-bound holdout copy, plus the supported non-holdout metadata
+path through actual validation inspection.
+
+Final corrective checkpoint: **124 focused tests passed in 11.12 seconds**,
+including all 41 planner cases and the 83 existing focused preservation tests.
+The independent reviewer additionally ran the 68 planner/campaign/policy tests
+successfully in 1.09 seconds and repeated independent scratch probes from
+`/tmp/palette_geometry_calibration_review_fixed_probes_20260906.py`. All original
+holdout-read failures and the CLI-copy case now refuse before a protected file
+is opened. The exact candidate registration mismatch rejects all four
+synthetic recording rows; valid candidate references retain zero validated
+member-source and independent-cell counts and no acceptance claim. The reviewer
+reported no new blocking finding in this bounded re-review.
+
+The exact reviewed and tested source hashes are:
+
+- campaign: `74a60fb2b65418ca7df19b6376141f178516ff23d00c2a2906203348739d40ae`;
+- planner tests: `e56ffe69393086efd2cf3de0b472a4ad6e71d6fa8459d055456a44284cd51e89`;
+- shared policy: `e39970889a1677869642f271c426ed872c3b1eadd0d483fd1416573aaa20406d`.
+
+Only this handoff was updated after the final independent review. Exact
+declared-reference and stable-artifact assumptions, unknown prior holdout
+access, and missing recording-level attachment provenance remain explicit
+limits. This is not a live-data, production, calibration, or canary acceptance
+claim. All code remains uncommitted on the exact head stated above.
+
+Local Ruff lint/format, `py_compile`, both actual import-linter contracts,
+generated Zarr census `--check`, file-size ratchet, Zarr metadata-mode ratchet,
+observed metadata, managed contract freshness, FPS/keypoint-motion authority,
+tail receipt, paradigm authority, and whitespace checks passed. No generated
+census or ratchet baseline changed. An initial broader pytest command named
+two nonexistent test paths and collected no tests; the corrected explicit
+command passed 104 tests before the final two preservation cases were added.
+
+The final regression command was:
+
+```bash
+scripts/py -m pytest \
+  tests/unit/fisheye/test_geometry_calibration_readiness.py \
+  tests/unit/fisheye/test_arena_geometry_campaign.py \
+  tests/unit/fisheye/test_arena_geometry_auto_policy.py \
+  tests/unit/fisheye/test_arena_geometry_shadow_adapter.py \
+  tests/unit/fisheye/test_arena_geometry_candidates.py \
+  tests/unit/fisheye/test_arena_geometry_comparison.py \
+  tests/unit/fisheye/test_arena_geometry_fit_review.py \
+  tests/unit/fisheye/test_arena_geometry_selection_gate.py \
+  tests/unit/fisheye/test_arena_geometry_workflow.py \
+  tests/unit/fisheye/test_arena_geometry_dag.py -q
+```
+
+All 24 required remote checks listed above are **unrun for this uncommitted
+follow-up**. Package/wheel validation, full-suite collection, all 16 remote
+non-GPU shards, and the aggregate required gate remain pending on the eventual
+exact commit. Initial implementation CI does not validate the follow-up.
+This work is implemented and locally tested only: not integrated, deployed,
+activated, scientifically accepted, complete, or merge-ready. No dependency
+installation, push, cluster job, production write, selector change, historical
+mutation, or shared-checkout update was performed by this follow-up.
