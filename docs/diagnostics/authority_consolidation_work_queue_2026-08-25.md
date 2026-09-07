@@ -329,12 +329,37 @@ branch `agent/palette/parent-clipped-intake-20260906`, based on fully validated
 main `925f8c6285499d39a99475945ba1732dba7f6834` (24 successful checks in
 run `34056284642`). The initial read-only transfer validator and parent planner
 are implemented locally, with 174 boundary and existing-importer tests passing.
-The live dispatcher, copy-preserving organization, import/registry integration,
+The live dispatcher, inventory-complete organization, import/registry integration,
 and snapshot-aware dispatch/retry remain unimplemented. The
 [parent-intake handoff](parent_recording_intake_handoff_2026-09-06.md) records
 source pins, preservation requirements, and outstanding validation. This is
 uncommitted work with candidate CI unrun, not deployed intake, completed broader
 `INGEST-001`, production activation, or source-cleanup authorization.
+
+September 6 user clarification supersedes the proposed copy-only organization:
+Palette staging is temporary, and **all** recording components must reach the
+organized recordings, leaving no payload in staging after successful intake.
+Acquisition-machine retention is separate. Root owns the complete-inventory
+destination accounting and recoverable move/finalization contract recorded in the
+[parent-intake handoff](parent_recording_intake_handoff_2026-09-06.md#user-clarification-staging-is-temporary-not-a-retained-source-archive).
+No copy-only preparation implementation or live cleanup was performed. The
+validator/index development is published in draft PR 149 at
+`0cd250a58b26e5c56fcdf9926b2593eee643b1e9`; required CI is still pending, and the
+organizer/importer/registry/finalization path remains incomplete.
+
+September 7 implementation checkpoint under the same owner: the base `0cd250a5`
+subsequently passed all 24 checks. Inventory-complete organization, explicit
+mapped parent indexes, opt-in session orchestration and receipt-gated durable
+staging retirement/replay are now implemented locally, with 197 focused and
+legacy tests passing. New-head CI and surviving-child crash-lease validation
+remain pending. The separately owned current clipped importer/admission
+prerequisite is published at `2f07800fcee9f5d161226b37d0e24ebdb4b78474` in draft
+[PR 155](https://github.com/jmdelahanty/palette/pull/155), with 452 local passes
+and required CI pending; it is not yet integrated into the organizer branch.
+See the [implementation handoff](parent_recording_intake_handoff_2026-09-06.md#september-7-implementation-inventory-complete-opt-in-workflow)
+for contract changes, original-byte preservation, safety corrections and exact
+unrun gates. Combined unpatched synthetic acceptance, combined CI, deployment
+and activation remain distinct and incomplete. No production cleanup occurred.
 
 2026-09-06 ingestion-validation companion: **complete for its scoped
 corrections**, owned by the Palette worker on

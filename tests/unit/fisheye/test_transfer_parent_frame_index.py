@@ -17,6 +17,87 @@ from fisheye.utils.build_recording_frame_index import TABLE_SCHEMA
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures/recording_transfer_v2"
 
 
+def _organized(tmp_path):
+    from fisheye.utils import organize_transfer_recordings as organizer
+
+    root = _copy(tmp_path)
+    plan = organizer.build_transfer_organization_plan(
+        root,
+        destination_root=tmp_path / "recordings",
+        recording_type="behavior",
+        recording_subtype="free",
+        behavior_mode="free",
+    )
+    organizer.materialize_transfer_organization(plan)
+    parent = next(
+        item for item in plan["parents"] if item["identity"]["camera_id"] == "02010093"
+    )
+    return root, plan, Path(parent["destination_dir"])
+
+
+def test_organized_index_maps_live_parent_files_without_changing_original_bytes(
+    tmp_path,
+):
+    root, plan, parent = _organized(tmp_path)
+    before = _bytes(root)
+    output = parent / "derived/recording_frame_index"
+    result = indexer.build_transfer_parent_frame_index(
+        root,
+        camera_id="02010093",
+        output_dir=output,
+        organization_plan=plan,
+        batch_rows=1,
+    )
+    assert _bytes(root) == before
+    assert result["source_transfer"]["organization_plan_sha256"] == plan["plan_sha256"]
+    table = pq.read_table(output / "recording_frame_index.parquet")
+    assert table.schema == TABLE_SCHEMA
+    assert table["recording_frame_id"].to_pylist() == [1, 2, 3]
+    assert table["clip_local_frame_index"].to_pylist() == [0, 1, 0]
+    for row in table.to_pylist():
+        for field in ("video_path", "metadata_path", "clip_manifest_path"):
+            path = Path(row[field])
+            assert path.is_relative_to(parent)
+            assert path.is_file()
+        projected = json.loads(Path(row["clip_manifest_path"]).read_bytes())
+        assert projected["schema_id"] == "palette.transfer_organized_clip_projection.v1"
+        assert set(projected["recording_outputs"]) == {"02010093"}
+        for stream in projected["recording_outputs"]["02010093"].values():
+            assert (parent / stream["video"]).is_file()
+            assert (parent / stream["metadata"]).is_file()
+    clip_index = json.loads((output / "recording_clip_index.json").read_bytes())
+    assert (
+        clip_index["schema_id"] == "palette.orange_external_ipc_recording_clip_index.v1"
+    )
+    assert clip_index["mode"] == "rolling_clips"
+    assert clip_index["camera_ranges"]["02010093"]["total_frame_count"] == 3
+    assert len(clip_index["rows"]) == 2
+
+
+@pytest.mark.parametrize(
+    "failure", ["target_tamper", "outside_parent", "wrong_plan_source"]
+)
+def test_organized_index_refuses_mapping_conflicts(tmp_path, failure):
+    root, plan, parent = _organized(tmp_path)
+    output = parent / "derived/recording_frame_index"
+    if failure == "target_tamper":
+        target = next(p for p in parent.rglob("*.mp4"))
+        target.unlink()
+        target.write_bytes(b"different video")
+    elif failure == "outside_parent":
+        output = tmp_path / "wrong-index"
+    else:
+        root = Path(shutil.copytree(root, tmp_path / "another-source"))
+    with pytest.raises(ValueError):
+        indexer.build_transfer_parent_frame_index(
+            root,
+            camera_id="02010093",
+            output_dir=output,
+            organization_plan=plan,
+        )
+    assert not output.exists()
+
+
 def _copy(tmp_path: Path, name: str = "rolling") -> Path:
     return Path(shutil.copytree(FIXTURES / name, tmp_path / name))
 

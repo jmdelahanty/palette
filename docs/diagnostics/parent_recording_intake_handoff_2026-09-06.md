@@ -58,7 +58,10 @@ Required invariants:
   and full/crop outputs remain children, including a one-clip rolling recording.
 - Preserve original payload paths/bytes, source IDs, per-output local row
   order, timestamps, sidecars, original manifests, and existing digest domains.
-  Source retention is unchanged; successful import does not authorize deletion.
+  Original relative paths and bytes remain evidence; relocation into organized
+  storage must bind their new destinations explicitly. Acquisition-machine
+  retention and Palette staging are different lifecycles. The staging requirement
+  was clarified by the user below: no payload is left there after successful intake.
 - Snapshot identity, parent identity, transfer attempt, dispatch claim, and
   import/registry acceptance are separate claims. Changed content at the same
   path cannot reuse old success. Lost/ambiguous submission acknowledgment must
@@ -175,8 +178,8 @@ incomplete development changes, not a production import path.
 ## Remaining intake path
 
 These local slices are not the full intake path. Actual dispatcher/submission
-routing, snapshot-keyed claims and ambiguous acknowledgments, copy-preserving
-parent organization, integration of the new bounded frame index, clipped import
+routing, snapshot-keyed claims and ambiguous acknowledgments, inventory-complete
+parent organization with staging finalization, integration of the new bounded frame index, clipped import
 receipt publication/replay, registry integration, and producer-retention acknowledgment
 are still unimplemented. The read-only inspector is not a deployed dispatcher.
 
@@ -193,3 +196,169 @@ publication, ownership loss, and ambiguous acknowledgment/retry tests. Fake
 media in the shared structural fixtures cannot stand in for codec or scientific
 acceptance. Commit-bound producer evidence, candidate CI, integration, deployment,
 and activation must be reported separately.
+
+## User clarification: staging is temporary, not a retained source archive
+
+At the September 6 parallel-development follow-up, the user explicitly clarified
+that no copies should remain in staging after successful intake and that components
+not transferred into the recording are unintended behavior. This supersedes the
+earlier proposed copy-only preparation stage and ambiguous references to
+"copy-preserving" organization. That proposal was stopped before implementation;
+its new draft test was withdrawn. No live source or staging files were changed.
+
+The existing organizer is not globally copy-only: `PlannedFile.action` defaults
+to `move`, `_apply_plan` dispatches `shutil.move` versus `shutil.copy2`, and shared
+context can be explicitly copied. Its current selected-file plans do not establish
+that every member of a closed transfer inventory reaches organized storage. The
+new path must not declare successful organization from selected-file counts alone.
+
+The implementation contract is now:
+
+- Account for **every** transfer-inventory member plus the original snapshot and
+  completion-marker evidence. Bind explicit organized destinations and ownership;
+  never omit an unfamiliar component or discard it as incidental staging debris.
+- Keep one parent per exact session/camera, with full/crop streams and all clips
+  under that identity. Shared session context must have explicit durable placement
+  and bindings for all consuming parents; per-camera H5 assignment must use the
+  existing exact context/identity contract, not filename guesses.
+- Move staging payloads into organized storage as the successful lifecycle result.
+  A same-filesystem relocation or a verified cross-filesystem copy-then-retire
+  transaction may implement this; a permanently retained duplicate staging bundle
+  is not the result. Do not add an extra full-bundle preparation copy by default.
+- Verify complete destination coverage and bytes, parent identity, and the
+  applicable intake gates before finalizing removal of staging payloads. Preserve
+  original producer evidence without rewriting it to impersonate a new transfer.
+- Interrupted, conflicting, or failed attempts must remain recoverable and must
+  not report success or blindly remove residual files. Resume/finalization needs
+  exact generation and destination-ownership checks, not blanket directory cleanup.
+- Successful intake leaves no payload behind in staging. This does not itself
+  change acquisition-machine retention, nor authorize a live historical cleanup,
+  production rollout, or mutation of the installed poller.
+
+Root remains the organizer/interface and queue owner. The next implementation
+slice must establish complete destination-accounting and transaction/retry tests
+before mutation. Dispatcher, organizer, importer/registry, and staging finalization
+remain unimplemented; the two existing validator/index slices are not completion.
+
+At this clarification checkpoint, worktree HEAD is
+`0cd250a58b26e5c56fcdf9926b2593eee643b1e9`; only this handoff and the owning queue
+are modified locally. The proposed copy-only implementation is absent. PR 149
+has 14 successful required checks; non-GPU shards 1, 2, 3, 6, 8, 10, 11, 12, and
+15 are still running, and `ci-required` is unrun. No failures are reported at the
+21:51 UTC check. The uncommitted documentation clarification has no exact-commit
+CI yet. Neither checkpoint authorizes integration or deployment.
+
+## September 7 implementation: inventory-complete opt-in workflow
+
+This checkpoint supersedes the earlier unimplemented organizer/finalization
+status above; it does not claim the combined intake path is validated yet.
+Root owns worktree `/tmp/palette-parent-clipped-intake-20260906`, branch
+`agent/palette/parent-clipped-intake-20260906`, based on
+`0cd250a58b26e5c56fcdf9926b2593eee643b1e9`. All 24 required checks passed for
+that base; the changes described here are initially uncommitted with new-head
+CI unrun. Original-workspace changes and other workers' branches are preserved.
+
+Classification: additive supported intake layout plus enforcement corrections.
+Legacy organizer/import invocation defaults, exact session/camera identity,
+transport/snapshot golden serialization and existing receipt-v2 grammar remain
+unchanged. New organization-plan, source-mapping and projected-clip schemas
+explicitly describe Palette derivations; they never impersonate Orange evidence.
+
+Implemented here:
+
+- `organize_transfer_recordings.py` assigns all inventoried payloads and all
+  regular transfer-namespace controls to explicit recording destinations. This
+  includes Citrus's empty `transfer.lock`, which is outside its scientific
+  payload inventory, plus unfamiliar context. Preserved control bytes are
+  historical context, not a new scientific authority or active producer lease.
+- Same-filesystem hardlinks or bounded cross-device verified copies materialize
+  each exact parent. Shared context fans out to all parents. H5 files bind by
+  exact camera/session context. Geometry assets use their existing validator
+  and canonical bundle layout. An original root PTP summary is byte-preserved
+  at the clock owner's established `raw/ptp_sync_summary.json` locator.
+- The existing bounded index adapter accepts an explicitly validated
+  organization mapping, preserving actual full/crop roles, original frame and
+  timestamp values, and confined absolute index-row path grammar. Original
+  producer manifests remain unchanged; derived clip projections have their
+  own versioned Palette schema and explicit `output_kind`.
+- The maintained session runner has an explicit `--transfer-v2` branch with
+  mandatory existing scientific-context vocabulary. It calls the ordinary
+  batch importer, requires exact successful acknowledgments, and then rechecks
+  actual parent receipts, requested stimulus completion and optional registry
+  admission. Logs, snapshots and organizer state cannot substitute for admission.
+- Staging retirement uses an external digest-bound journal and exact file and
+  directory ownership. All parent payloads and import products are fsynced,
+  directory entries are fsynced bottom-up, and the initial retiring journal is
+  durable before the first source unlink. Every subsequent journal replacement
+  is durably ordered. Only recorded files and empty recorded directories are
+  retired; the source root is left empty. Partial and completed retries verify
+  the exact saved plan and live destinations without rebuilding missing source
+  control evidence.
+- Status paths are canonicalized, protected source/parent/coordinator/registry
+  aliases are refused, existing reports are not overwritten, and fresh output
+  is exclusively reserved with inode checks. A separate whole-workflow lease
+  excludes competing prepare/import/finalization invocations. The batch child
+  inherits that descriptor through `pass_fds`, with close-only release instead
+  of explicit unlocking. A real harmless-process SIGKILL regression first
+  reproduced the orphan-writer gap and now proves retries remain excluded
+  until the surviving batch writer exits. The root also forwards the opt-in
+  `PALETTE_RECORDING_IMPORT_LEASE_FD` environment binding; the incoming importer
+  owner is correcting propagation into the nested stimulus writer separately.
+
+Independent disposable review reproduced four original blockers: missing
+durability ordering, registry status overwrite, dot-dot source status overwrite,
+and overlapping importer invocations. Nine failure-first cases reproduced them;
+all then passed after corrections. The expanded focused and legacy suite passed
+**197 tests in 10.35 s**, including the separate failure-first actual-producer
+control-file case. Positive retirement unit cases deliberately stub admission
+and prove transaction mechanics only; they do not establish receipt admission.
+Final organizer suite including the crash regression: **198 passed, 8.82 s**;
+complete collection: **11,931 tests, 34.71 s**, one explicitly reported local
+collection skip: `test_train_unet_subject_masks_registry.py:23`, its existing
+hyphenated-hostname `torch._dynamo` import guard. A repeat with skip reasons
+confirmed that reason and collected 11,931 in 8.00 s; those U-Net registry tests
+remain unrun locally, and required remote CI must supply its applicable checks.
+Independent safety re-review passed **110 tests, 12.45 s** and closed the
+four original blockers plus the supervisor-to-batch lease gap. The nested
+stimulus-writer gap remains blocking until the incoming correction is validated.
+
+A fresh actual pinned Citrus CLI transfer with synthetic H5, PTP/geometry
+context and real H264 full/crop clips passed transfer, loadback and idempotent
+retry. Source snapshot is
+`sha256:9499bcff709999ee630c810df57cce48f8a16f96bd80213cb2197e91ac854f0d`;
+evidence is `/tmp/palette-citrus-encoded-transfer-20260906-2e72mlrr/producer_smoke_report.json`.
+Crop rows include a real encoded blank frame with explicit blank/detection
+flags; timestamps and all Orange-shaped envelopes remain declared synthetic.
+The actual organizer then prepared both parents and their indexes, and the
+unpatched collection builder with real ffprobe accepted both. Preparation-only
+evidence is `/tmp/palette-organized-parent-preflight-20260907-njzhinab/preflight_report.json`.
+This run left staging intact and did not run import/registry/retirement. The
+final combined canary must use fresh parent paths and clean producing code.
+
+Local static gates passed: import boundaries, FPS/keypoint-motion/tail/paradigm
+authority ratchets, file-size, explicit Zarr modes, observed metadata literals,
+managed contract freshness, registry schema reference and whitespace checks.
+The existing census generator updated only the scanned-module counts for the
+two new utility modules; generated checks passed. An initial incorrect attempt
+to invoke importlinter as a module failed before running it; its installed CLI
+entrypoint subsequently passed without an environment change.
+
+Separate prerequisite: clipped importer/admission owner work is committed and
+pushed at `2f07800fcee9f5d161226b37d0e24ebdb4b78474` in draft
+[PR 155](https://github.com/jmdelahanty/palette/pull/155). It has 452 local focused
+passes and is **not integrated here** while its required CI is pending. Its
+handoff is on that branch at
+`docs/diagnostics/clipped_import_receipt_handoff_2026-09-06.md`.
+
+Every required check remains unrun for this organizer change: generated
+artifacts; import boundaries; file-size ratchet; Zarr open metadata modes;
+observed metadata literals; active contract freshness; package and collection;
+non-GPU shards 0 through 15; and `ci-required`. Successful prerequisite checks
+must precede integration, and the combined exact commit requires its own green
+CI. The remaining evidence is the unpatched actual pinned Citrus transfer ->
+parent organizer/index -> current clipped importer -> clock/crop/receipt ->
+isolated registry -> staging retirement and replay test, including negative
+controls. No deployment, installed poller mutation, main merge, production
+registry mutation, acquisition-machine cleanup or scientific activation is
+authorized or performed. Genuine acquisition canary coordination remains
+separate; synthetic Orange-shaped envelopes are not encoder/hardware evidence.

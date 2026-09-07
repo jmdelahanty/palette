@@ -46,6 +46,7 @@ def build_transfer_parent_frame_index(
     output_dir: Path,
     batch_rows: int = 65536,
     dry_run: bool = False,
+    organization_plan: dict | None = None,
 ) -> dict:
     """Index a single exact parent without changing legacy index/digest grammar.
 
@@ -65,12 +66,36 @@ def build_transfer_parent_frame_index(
     require(len(matches) == 1, "camera_id does not select one exact parent")
     plan = matches[0]
     root = transfer.root
+    index_recording_root = root
+    organized_paths = None
+    if organization_plan is not None:
+        from fisheye.utils.organize_transfer_recordings import (
+            resolve_materialized_parent_sources,
+        )
+
+        require(
+            organization_plan.get("source_dir") == str(root),
+            "organization plan source differs",
+        )
+        require(
+            plan.recording_layout == "rolling_clips",
+            "organized collection indexing requires rolling_clips",
+        )
+        index_recording_root, organized_paths = resolve_materialized_parent_sources(
+            organization_plan,
+            camera_id=camera_id,
+        )
     output = Path(output_dir).absolute()
     require(
         not any(path.is_symlink() for path in (output, *output.parents)),
         "output destination contains a symlink",
     )
     output = output.resolve()
+    if organized_paths is not None:
+        require(
+            output == index_recording_root / "derived/recording_frame_index",
+            "organized index must use its exact parent index directory",
+        )
     require(
         output != root and root not in output.parents and output not in root.parents,
         "output must be separate from the immutable source tree",
@@ -97,12 +122,22 @@ def build_transfer_parent_frame_index(
         "recording_layout": plan.recording_layout,
         "recording_payload_kind": plan.recording_payload_kind,
     }
+    if organized_paths is not None:
+        binding.update(
+            {
+                "schema": "palette.recording_frame_index.organized_transfer_v2_source.v1",
+                "organized_recording_root": str(index_recording_root),
+                "organization_plan_sha256": organization_plan["plan_sha256"],
+                "source_to_organized_paths": organized_paths,
+            }
+        )
     writer = None
     rows: list[dict] = []
     row_count = max_buffered = 0
     inputs = []
     clip_rows = []
     source_files = []
+    projected_manifests = []
     output_identity = None
 
     def require_output_ownership() -> None:
@@ -144,22 +179,83 @@ def build_transfer_parent_frame_index(
             )
             clip_manifest = root / clip["directory"] / "clip_manifest.json"
             clip_manifest_text = str(clip_manifest) if clip_manifest.is_file() else None
+            recorded_metadata_path = metadata_path
+            if organized_paths is not None:
+                video_path = (
+                    index_recording_root / organized_paths[full["video"]["path"]]
+                )
+                recorded_metadata_path = (
+                    index_recording_root / organized_paths[full["metadata"]["path"]]
+                )
+                if keyframe is not None:
+                    keyframe = str(
+                        index_recording_root
+                        / organized_paths[Path(keyframe).relative_to(root).as_posix()]
+                    )
+                projection_path = (
+                    output / f"clip_{clip['clip_index']:06d}_projection.json"
+                )
+                clip_manifest_text = str(projection_path)
+                projected_outputs = {}
+                for item in clip["outputs"]:
+                    projected_outputs[item["output_kind"]] = {
+                        "output_kind": item["output_kind"],
+                        "video": organized_paths[item["video"]["path"]],
+                        "metadata": organized_paths[item["metadata"]["path"]],
+                        **{
+                            field: item["frame_map"][field]
+                            for field in (
+                                "frame_count",
+                                "first_recording_frame_id",
+                                "last_recording_frame_id",
+                            )
+                        },
+                    }
+                if not dry_run:
+                    require_output_ownership()
+                    write_json_atomic(
+                        projection_path,
+                        {
+                            "schema_id": "palette.transfer_organized_clip_projection.v1",
+                            "generated_by": MODULE_NAME,
+                            "source_transfer": binding,
+                            "original_clip_manifest": (
+                                file_ref(
+                                    root, clip_manifest.relative_to(root).as_posix()
+                                )
+                                if clip_manifest.is_file()
+                                else None
+                            ),
+                            "original_recording_session": file_ref(
+                                root, "recording_session.json"
+                            ),
+                            "clip_index": clip["clip_index"],
+                            "clip_id": clip["clip_id"],
+                            "recording_outputs": {camera_id: projected_outputs},
+                        },
+                        overwrite=False,
+                    )
+                    projected_manifests.append(file_ref(output, projection_path.name))
             constants = {
                 "session_id": plan.session_uuid,
                 "recording_id": plan.recording_id,
                 "producer": MODULE_NAME,
-                "recording_folder": str(root),
+                "recording_folder": str(index_recording_root),
                 "source_layout": plan.recording_layout,
                 "recording_backend_mode": plan.recording_layout,
                 "camera_serial": camera_id,
                 "clip_index": clip["clip_index"],
                 "clip_id": clip["clip_id"],
                 "video_path": str(video_path),
-                "metadata_path": str(metadata_path),
+                "metadata_path": str(recorded_metadata_path),
                 "keyframe_path": keyframe,
                 "clip_manifest_path": clip_manifest_text,
                 "clip_directory": clip["directory"],
-                "clip_recording_folder": str(root / clip["directory"]),
+                "clip_recording_folder": (
+                    str(video_path.parent)
+                    if organized_paths is not None
+                    else str(root / clip["directory"])
+                ),
             }
 
             def append(
@@ -217,6 +313,15 @@ def build_transfer_parent_frame_index(
         "source generation changed during indexing",
     )
     require_output_ownership()
+    if organized_paths is not None:
+        # Recheck the exact organized byte map after all rows were written.
+        resolved_root, resolved_paths = resolve_materialized_parent_sources(
+            organization_plan, camera_id=camera_id
+        )
+        require(
+            (resolved_root, resolved_paths) == (index_recording_root, organized_paths),
+            "organized source generation changed during indexing",
+        )
     # Index creation does not validate encoded media or clock suitability. These
     # remain independent gates in the actual source importer.
     manifest = {
@@ -231,7 +336,7 @@ def build_transfer_parent_frame_index(
         "source_authority": "recording_clip_index + per_clip_metadata_csv",
         "source_transfer": binding,
         "source_layout": plan.recording_layout,
-        "recording_folder": str(root),
+        "recording_folder": str(index_recording_root),
         "recording_id": plan.recording_id,
         "session_id": plan.session_uuid,
         "camera_serials": [camera_id],
@@ -256,6 +361,22 @@ def build_transfer_parent_frame_index(
     }
     if not dry_run:
         manifest["parquet_sha256"] = file_ref(output, parquet_path.name)["sha256"]
+        mapped_fields = {}
+        if organized_paths is not None:
+            manifest["projected_clip_manifests"] = projected_manifests
+            mapped_fields = {
+                "schema_id": "palette.orange_external_ipc_recording_clip_index.v1",
+                "mode": "rolling_clips",
+                "rows": clip_rows,
+                "camera_ranges": {
+                    camera_id: {
+                        "clip_count": len(clip_rows),
+                        "total_frame_count": row_count,
+                        "first_recording_frame_id": 1,
+                        "last_recording_frame_id": row_count,
+                    }
+                },
+            }
         write_json_atomic(
             clip_index_path,
             {
@@ -265,6 +386,7 @@ def build_transfer_parent_frame_index(
                 "recording_backend_mode": plan.recording_layout,
                 "source_transfer": binding,
                 "clips": clip_rows,
+                **mapped_fields,
             },
             overwrite=False,
         )
