@@ -8,6 +8,8 @@ This module intentionally excludes detect/refine orchestration. Use
 from __future__ import annotations
 
 import argparse
+import os
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -742,9 +744,32 @@ def _consolidate_current_source_publication(
         )
 
 
-def run_stimulus_import(plan: RecordingAnalysisPlan, opts: RecordingImportOptions) -> tuple[bool, int, List[str]]:
+def _stimulus_import_lease_fds() -> tuple[int, ...]:
+    """Keep an explicitly inherited workflow lease alive in the stimulus writer."""
+    variable = "PALETTE_RECORDING_IMPORT_LEASE_FD"
+    value = os.environ.get(variable)
+    if value is None:
+        return ()
+    if not value or not value.isascii() or not value.isdecimal():
+        raise ValueError(f"{variable} must be a decimal nonnegative file descriptor")
+    try:
+        descriptor = int(value)
+        metadata = os.fstat(descriptor)
+    except (OSError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"{variable} must name an open regular-file descriptor"
+        ) from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"{variable} must name an open regular-file descriptor")
+    return (descriptor,)
+
+
+def run_stimulus_import(
+    plan: RecordingAnalysisPlan, opts: RecordingImportOptions
+) -> tuple[bool, int, List[str]]:
     if plan.h5_path is None:
         return False, 2, ["missing_h5_for_stimulus_import"]
+    lease_fds = _stimulus_import_lease_fds()
     cmd = [
         sys.executable,
         "-m",
@@ -761,7 +786,10 @@ def run_stimulus_import(plan: RecordingAnalysisPlan, opts: RecordingImportOption
     if opts.stimulus_metadata_and_calibration_only:
         cmd.append("--metadata-and-calibration-only")
     print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, check=False)
+    subprocess_options: dict[str, Any] = {"check": False}
+    if lease_fds:
+        subprocess_options["pass_fds"] = lease_fds
+    result = subprocess.run(cmd, **subprocess_options)
     return result.returncode == 0, result.returncode, cmd
 
 

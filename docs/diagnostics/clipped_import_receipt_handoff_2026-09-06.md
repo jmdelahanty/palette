@@ -1,9 +1,55 @@
 # Clipped current-import admission handoff — 2026-09-06
 
-Status: implementation and focused local validation available for root review;
-not committed, integrated, deployed, activated, complete, or merge-ready.
-Required incoming and combined CI remain blocking until successful. Source
-edits are paused after the coordinated absolute-index-path review correction.
+Status: the base implementation was committed by root at
+`2f07800fcee9f5d161226b37d0e24ebdb4b78474` and pushed as draft PR 155. The narrow
+stimulus-lease correction below is uncommitted and paused for root review.
+Nothing here is integrated, deployed, activated, complete, or merge-ready;
+required incoming and combined CI remain blocking until successful.
+
+## Follow-up: inherited stimulus-writer lease — 2026-09-07
+
+- Reconciled clean follow-up base: `2f07800fcee9f5d161226b37d0e24ebdb4b78474`
+  in the same worktree/branch below. Root reported its CI pending at assignment;
+  that commit's checks cannot validate this subsequent uncommitted correction.
+- Owned dirty scope is only `utils/import_recording_analysis.py`, new
+  `test_stimulus_import_lease.py`, and this document. Root owns workflow-lock
+  acquisition and environment/descriptor forwarding into the batch/session
+  command. No independent commit, push, integration, or production mutation.
+- This is an explicit execution-safety enforcement correction, not a receipt,
+  scientific, coordinate, identity, or provenance-grammar change. The opt-in
+  environment interface is `PALETTE_RECORDING_IMPORT_LEASE_FD`. The actual
+  `run_stimulus_import` subprocess validates ASCII decimal/nonnegative input,
+  an open descriptor, and regular-file `os.fstat` mode, then forwards
+  `pass_fds=(fd,)`. Malformed, oversized, closed, directory, and pipe descriptors
+  are refused before launch. An absent variable preserves the exact historical
+  command and `check=False` subprocess kwargs. No process here acquires,
+  unlocks, or closes the inherited lease; lifetime remains with its owner and
+  inherited OS handles.
+- Preservation/regression evidence: the unmodified base first reproduced
+  concurrent retry admission after batch SIGKILL while a harmless stimulus leaf
+  remained alive (the expected flock-contention assertion failed). The same
+  real importer/subprocess test passes after the fix: the leaf holds exclusion
+  after batch death and outer-handle close, and retry acquires only after the
+  leaf finishes. Only the child module is replaced with a disposable harmless
+  writer; the importer function and subprocess boundary are not patched.
+- New unit coverage also verifies exact no-environment command/kwargs and no
+  close/unlock after child success, nonzero exit, or launch exception. Final
+  focused validation passed **128 tests in 18.94 s** across new lease tests and
+  ordinary/batch/clipped importer plus receipt preservation. Full collection
+  passed: **11,962 tests, 7.98 s**. All local static gates passed: two import
+  contracts; FPS/keypoint/tail/paradigm authority access; file-size; Zarr modes;
+  observed metadata; contract freshness; registry schema reference; generated
+  census; scoped formatting; compilation; and diff check. Generated artifacts
+  and baselines required no changes. All follow-up edits are now frozen.
+- Frozen source SHA-256: `utils/import_recording_analysis.py`
+  `8591d2b99593f270937753fa4eb6f513f1c885370b88e2bf9c67bb4034658c4b`.
+  New test SHA-256:
+  `defadefac3a80006a4a7b8b9f95e0a46c9122aabecb6f836113c8666e68d8252`.
+- All 24 remote required checks are unrun for the follow-up: generated
+  artifacts, import boundaries, file-size, Zarr metadata modes, observed
+  metadata literals, contract freshness, package/collection, non-GPU shards
+  0–15, and `ci-required`. Root must review, commit/push, obtain successful
+  incoming CI, then separately validate any authorized combined integration.
 
 ## Ownership and base
 
@@ -156,9 +202,9 @@ All pytest commands used `scripts/py` outside the workstation sandbox.
   full canonical bytes SHA-256 remains
   `be98ba4ddd2f0db2b2cc9db6ca5be754458b047fa05a752373e343acdeb132fb`.
 
-## Frozen source hashes
+## Base implementation source hashes
 
-SHA-256 after the coordinated path correction:
+SHA-256 after the coordinated path correction, before the lease follow-up:
 
 | Source under `src/fisheye/` | SHA-256 |
 | --- | --- |
