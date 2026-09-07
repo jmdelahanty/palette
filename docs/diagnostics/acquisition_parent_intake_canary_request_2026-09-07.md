@@ -6,6 +6,28 @@ Any capture or real-data canary needs separate user authorization and an agreed
 destination. Status remains `INGEST-001` in the
 [owning queue](authority_consolidation_work_queue_2026-08-25.md).
 
+## Repository, agent and service names
+
+User clarification, September 7: Orange is the acquisition repository, Citrus
+is the separate stimulation-library repository, and Palette is the separate
+analysis/intake repository. The acquisition agent is our current contact for
+both Orange and Citrus; those repository names do not imply separate AI
+sessions, machines or communication endpoints.
+
+Use **`cluster-login1-poller`** for the cluster login-1 polling/submission
+method and service previously called the "Citrus login-1 poller". It is not the
+Citrus stimulation library and is not itself an AI agent. This is the preferred
+descriptive name, not a claim that an SSH alias or installed service has already
+been renamed. The existing executable alias `login1-citrus-poller` remains a
+compatibility reference pending an explicitly authorized migration.
+
+For the proposed command center, distinguish repository, agent-session and
+service identities. Ask the acquisition agent about Orange/Citrus; report
+`cluster-login1-poller` as operational infrastructure through its confirmed
+owner, without inventing a separate persistent agent. Actual Citrus source,
+transfer-tool, schema and provenance references keep their original identities.
+See the [naming and compatibility checkpoint](parent_recording_intake_handoff_2026-09-06.md#repository-and-cluster-service-naming--september-7).
+
 ## Message to forward when approved
 
 Palette's synthetic rolling-clip intake now passes both recording-only and
@@ -13,7 +35,8 @@ renderer-only full-stimulus tests, including exact source-file preservation,
 registry admission, empty staging after acceptance, safe refusal, and replay.
 We want to plan one bounded test with authentic finalized acquisition outputs.
 Please provide the following information without changing installed software,
-scientific defaults, live pollers, source custody, or production selectors.
+scientific defaults, `cluster-login1-poller`, the workstation staging-marker
+poller, source custody, or production selectors.
 
 1. **Installed and candidate versions.** Report exact Orange, Citrus and shared
    contract commits/build identities; dirty state or packaged-source hashes;

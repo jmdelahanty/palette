@@ -417,6 +417,23 @@ at its pre-commit checkpoint; see exact-head [PR 149 checks](https://github.com/
 before any integration. The acquisition request remains draft/unsent, and no
 real acquisition, deployment, live poller or production authority was changed.
 
+September 7 naming clarification: Orange (acquisition), Citrus (stimulation
+library) and Palette (analysis/intake) are separate repositories. The
+acquisition agent covers Orange/Citrus; repository names do not identify
+separate agent sessions. Use `cluster-login1-poller` for the cluster login-1
+polling/submission method and service, not "Citrus cluster agent" or "Citrus
+poller". See the [naming and compatibility checkpoint](parent_recording_intake_handoff_2026-09-06.md#repository-and-cluster-service-naming--september-7)
+and corrected [draft request](acquisition_parent_intake_canary_request_2026-09-07.md#repository-agent-and-service-names).
+The user authorized committing/pushing these root-owned documentation changes
+and waiting for fresh required CI. At this pre-commit checkpoint they are
+uncommitted on base `6f6417f49b29f582cefc21fc0adc51ac6705c9bc`, with all 24
+new-head checks unrun; see the linked handoff for the check inventory and
+exact-head [PR 149 checks](https://github.com/jmdelahanty/palette/pull/149/checks)
+before any integration. Existing SSH alias literals, workstation staging-marker
+script paths, historical evidence, runtime code and installations are unchanged. No
+compatibility migration, live service change or status-authority replacement
+is authorized by the terminology correction.
+
 2026-09-06 ingestion-validation companion: **complete for its scoped
 corrections**, owned by the Palette worker on
 `agent/palette/ingestion-validation-20260906`. PR 143 covers PTP complete-state

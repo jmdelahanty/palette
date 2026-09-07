@@ -4,6 +4,63 @@ Status authority: `INGEST-001` in the
 [authority consolidation queue](authority_consolidation_work_queue_2026-08-25.md).
 This document records evidence and compatibility decisions, not another queue.
 
+## Repository and cluster-service naming — September 7
+
+The user clarified these distinct identities:
+
+| Name | Meaning |
+| --- | --- |
+| Orange | Acquisition repository; discussed through the acquisition agent. |
+| Citrus | Separate stimulation-library repository; also discussed through the acquisition agent. |
+| Palette | Separate analysis/intake repository. |
+| `cluster-login1-poller` | Preferred name for the cluster login-1 polling/submission method and service, formerly called the "Citrus login-1 poller". Not the Citrus repository or an AI-agent identity. |
+
+Repository, AI-agent session, execution host and operational service are
+different identities; do not assume a one-to-one mapping. In particular, the
+command-center proposal must not create a "Citrus cluster agent" merely from
+the old poller name. Its actual operational owner/session remains to be
+confirmed separately from the acquisition agent's Orange/Citrus remit.
+
+This checkpoint is a documentation-only terminology correction on the
+root-owned `agent/palette/parent-clipped-intake-20260906` worktree at
+`/tmp/palette-parent-clipped-intake-20260906`, based on exact
+`6f6417f49b29f582cefc21fc0adc51ac6705c9bc`. That base passed all 24 required CI
+checks. The user subsequently authorized committing/pushing these three
+documentation corrections and waiting for fresh CI. At this pre-commit
+checkpoint the naming edits are uncommitted, and all 24 new-head checks are
+unrun: generated artifacts, import boundaries, file-size ratchet, Zarr metadata
+modes, observed metadata literals, active contract freshness, package/collection,
+non-GPU shards 0–15 and `ci-required`. Consult exact-head
+[PR 149 checks](https://github.com/jmdelahanty/palette/pull/149/checks) for the
+result before any integration. No runtime behavior, data schema, persisted
+identity or digest changes; the acquisition request remains draft and unsent.
+
+Local validation before this documentation commit: `git diff --check`,
+file-size ratchet, managed-contract freshness, Zarr metadata modes and observed
+metadata literal checks passed. The portable canary-package suite passed all
+23 tests in 0.75 seconds through workstation `scripts/py` outside the sandbox.
+The diff contains no runtime, test, configuration or historical-evidence edits.
+These local results do not replace the required new-head CI checks above.
+
+The code inventory still finds `login1-citrus-poller` as an executable SSH
+default in deployment/submission scripts and Python consumers, with tests and
+historical commands referring to it. Keep that literal until an explicit
+compatibility migration verifies the new alias's target, credentials and
+restrictions, updates maintained callers/help/tests, and proves unchanged
+submission behavior with required CI. Existing `--submit-host` or
+`PALETTE_LSF_SUBMIT_HOST` overrides may be used where supported only after the
+selected alias is actually configured and validated. Do not replace an alias
+merely because the descriptive name changed.
+
+The separately recorded workstation staging-marker poller at
+`/home/delahantyj@hhmi.org/bin/citrus_staging_marker_poller.sh` is not renamed
+by this correction. Do not infer its execution location from the cluster
+service name or rewrite historical script paths, hashes, receipts or Citrus
+transfer/source provenance. SSH configuration, cron, installed scripts and
+running services remain untouched; any executable/installation rename needs
+its own authorized compatibility and rollout work. The broader intake and
+production-deployment scope remains unchanged.
+
 ## Initial implementation checkpoint
 
 - Owner: Palette root worker.
