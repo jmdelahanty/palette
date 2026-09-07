@@ -53,6 +53,7 @@ TOP_RIM_PARAMETERS = {
     "family_profile_radial_step_px": 1.0,
     "family_profile_min_median_gradient": 1.0,
     "fixed_support_radial_band_px": 4.0,
+    "radial_offset_measurement_method": "signed_sampling_grid_offset_v1",
     "refinement_radial_band_px": 2.0,
     "preferred_min_angular_support_fraction": 0.70,
     "preferred_max_unsupported_arc_degrees": 90.0,
@@ -687,7 +688,8 @@ def _radial_evidence(
     *,
     radial_band_px: float,
     angle_count: int = 1440,
-) -> tuple[np.ndarray, np.ndarray]:
+    return_radial_offsets: bool = False,
+) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray]:
     cx, cy, radius = circle
     angles = np.linspace(
         0.0, 2.0 * np.pi, angle_count, endpoint=False, dtype=np.float32
@@ -711,7 +713,13 @@ def _radial_evidence(
     points = np.column_stack(
         (cx + peak_radii * np.cos(angles), cy + peak_radii * np.sin(angles))
     )
-    return points.astype(np.float64), peaks.astype(np.float64)
+    evidence = points.astype(np.float64), peaks.astype(np.float64)
+    if return_radial_offsets:
+        # Use the chosen sampling-grid offsets, not lengths reconstructed
+        # from float32-angle points. The latter can escape the exact band by
+        # roundoff and incorrectly fail an inclusive eligibility boundary.
+        return *evidence, offsets[best_rows].astype(np.float64)
+    return evidence
 
 
 def _refine_and_score_circle(
@@ -975,8 +983,12 @@ def _measure_rim_candidate_gradient(
             & (y >= margin)
             & (y <= height - 1 - margin)
         )
-    points, peaks = _radial_evidence(
-        gradient, circle, radial_band_px=band, angle_count=count
+    _points, peaks, radial_offsets = _radial_evidence(
+        gradient,
+        circle,
+        radial_band_px=band,
+        angle_count=count,
+        return_radial_offsets=True,
     )
     cutoff = (
         _rim_gradient_support_cutoff(gradient)
@@ -984,7 +996,7 @@ def _measure_rim_candidate_gradient(
         else support_cutoff
     )
     supported = (peaks >= cutoff) & visible
-    offsets = np.abs(np.hypot(points[:, 0] - cx, points[:, 1] - cy) - radius)
+    offsets = np.abs(radial_offsets)
     longest, current = 0, 0
     for missing in np.tile(~supported, 2):
         current = current + 1 if missing else 0

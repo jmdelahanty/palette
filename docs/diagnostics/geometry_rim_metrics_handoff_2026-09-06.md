@@ -157,3 +157,101 @@ separate and unauthorized until their respective gates are satisfied.
 No compatibility removal is proposed. The legacy fitter/report remains the
 maintained default; policy activation and any historical remeasurement remain
 separately scoped work in the owning geometry queue.
+
+## Real-recording canary and numerical correction (later September 6 update)
+
+This section is a new evidence snapshot; the pre-commit snapshot above and all
+saved canary outputs remain unchanged. The exercised clean implementation was
+`ac73a61067118fc1a41699267dfa376a15f4bac6` (draft PR 152). Its remote CI status
+is tracked separately by the integration owner; no integration or promotion
+was performed by this canary.
+
+Source: `/groups/johnson/johnsonlab/jeremy/recordings/2026-08-10T17-20-55Z_arena_1_goodbatbadbat`,
+camera `2010093`, video `cams/Cam2010093_2026-08-10T17-20-55Z_arena_1.mp4`.
+The existing source-camera/pixel-authority loader and read-only media probe
+validated 152,035 frames, 100 Hz, native 4512×4512, HEVC `yuvj420p`, full-range
+`pc`, and pixel-frame identity
+`070aa3ebe2959a50a279bdfbe95779e99ff991cd71629edf83b3b93cea994050`.
+The exact 28,507,864,226-byte source hash is
+`ac7f298cdaf6cc63d01983cd3e258fcd126314c67e320db157b176335378967c`.
+
+All evidence is under `/tmp/palette-rim-real-canary-20260906.pxVuAn`:
+`preflight.json`, `unpatched_probe_result.json`, `unpatched_probe.log`,
+`host_frame_check.json`, `host_luma_parity.json`,
+`host_adapter_canary_result.json`, `legacy_common_median_comparison.json`,
+the frozen `host_adapter_top_rim_probe` package, and `isolated_analysis.zarr`.
+No recording, live analysis archive, registry, selector, or production data
+was written. Source size and modification time were checked unchanged.
+
+The **unpatched** device-output CLI failed in 1.82 s at `torch.from_dlpack`
+with `AssertionError: Torch not compiled with CUDA enabled`. The workstation
+has an RTX A6000 and PyNvVideoCodec 2.1.0, but `scripts/py` loads CPU-only
+PyTorch 2.7.1. No dependency installation was attempted.
+
+An explicitly approved external diagnostic adapter changed only NVDEC output
+placement to documented `usedevicememory=False`. Native NV12 output, direct
+Y-plane slicing, exact-seek proof, source hashing, sampling, fitting, package
+creation, planner, publisher, and loader were unchanged. Adapter SHA-256
+`fe30b8520fe1c0e9e65ba7538b935c45834351ff0258b7453a999875513562fb`
+was embedded **before** fit-report freezing; no synthetic pixels or fabricated
+seek proof were used. This does not validate the unpatched device-output CLI.
+
+The first sampled frame, 14975, is 4512×4512 uint8 with values 9–255. Its
+native luma bytes were identical to independent one-frame FFmpeg
+`extractplanes=y` output, SHA-256
+`735eb20fa9611e5bf69dd27511c8cf6fcef2abf503a0a4099ed728ee23adda87`.
+No RGB conversion, intensity remapping, resizing, or full-video decode occurred.
+
+Default scientific settings were preserved: early/middle/late five-second
+windows, maximum 21 declared samples, actual 19 samples/window, and 2048px
+coarse fitting. All 57 seeks landed on the exact declared target keyframe;
+each submitted three packets (171 total), including decoder latency. Decode
+took 39.21 s, probe/report/presentation took 101.04 s total, and isolated
+publication/loading finished at 106.08 s. Peak process RSS was 1,797,956 KiB;
+the largest uint8 window stack was 386,804,736 bytes and three medians total
+61,074,432 bytes. Whole-source hashing used the existing bounded 1MiB block
+reader; it was a 28.5GB provenance read, not an eager video decode.
+
+The real package and required three-panel montage were produced and visually
+inspected, then passed the unpatched fit-review planner/publisher/loader in
+isolated scratch. Report hash:
+`c6c57dd78df3f4c1d8224f0d238a11e3f8f4063102c671348d9e744f826532c1`.
+Immutable fit-review run: `arena-geometry-fit-review-9b620fee922ab3027c8940a9`;
+record hash `9b620fee922ab3027c8940a932a561108f1af54734bd77257178d643608e4920`.
+It remains selector-ineligible with no latest selectors. Pixel/PNG/source
+metric bindings and observed-medoid validation passed.
+
+However, the canary exposed a real eligibility defect: all candidates had
+p95 radial offsets approximately `4.00003..4.00005` pixels because distances
+were reconstructed from float32-angle points, although every radial sample
+lies on the exact `[-4,4]` pixel grid. The inclusive 4px extraction cutoff
+therefore incorrectly rejected every candidate. All three windows honestly
+recorded `top_rim_preference_unresolved_no_eligible_edge_v1`; this is not a
+successful physical-top-rim finding or an automatic acceptance.
+
+That saved result has selected-center spread 1.21954px, selected-radius range
+0.63624px, family-center spread 3.78145px, and family-radius Hausdorff distance
+7.50627px. A bounded legacy diagnostic on the **same three frozen medians**
+took 8.13 s: legacy radii were 2160.80494, 2160.24787, 2159.99877px versus
+the defective preferred/fallback radii 2154.08000, 2153.70895, 2153.44375px.
+These are algorithm-selected image contours, not physical-radius errors.
+
+The follow-up is a numerical measurement/enforcement correction, not threshold
+relaxation. New metrics read the exact selected signed radial-grid offsets
+from the existing sampler. Legacy callers still receive the identical two
+arrays; their combined golden SHA-256 remains
+`f8741e0af57235058987c30dfa5f0ea44988e25f2b9a567c2a50b18d44d782db`.
+The named effective parameter
+`radial_offset_measurement_method=signed_sampling_grid_offset_v1` explicitly
+changes the scientific-recipe digest, preventing old frozen threshold
+configuration from silently reusing corrected measurements. The 4px cutoff
+and all other scientific settings are unchanged. Historical outputs are not
+rewritten, and whole-receipt equality is not claimed for corrected outputs.
+
+The regression first reproduced the wrong value `4.000005910296061` on a small
+deterministic gradient. After correction, the focused suite including
+`test_dish_rim_offset_precision.py` passed **76 tests in 8.34s**. Corrected
+real-median replay and exact-commit CI for that follow-up remain pending at
+this snapshot. The CPU-only unpatched CLI limitation, calibration/locked
+holdout, clipped-layout equivalence, and automatic policy promotion remain
+outstanding; no arbitrary acceptance thresholds have been added.
