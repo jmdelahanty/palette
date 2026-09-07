@@ -632,3 +632,48 @@ Do not describe the new package revision as complete or merge-ready until
 those exact-head checks succeed. Fresh canary reports will bind their actual
 clean producing commit; a later report-only commit does not change that code
 identity. No installation, main merge, shared-checkout update or activation.
+
+### Clean packaged-CLI result
+
+All four maintained-module canaries passed on clean local code commit
+`3f5aad3eb078ebb97af1648ac0120886fb6b250e`: full-stimulus positive,
+missing-frame-metadata refusal, recording-only positive and transport-corruption
+refusal. This supersedes only the packaged-CLI-pending statement above. The
+[archived case table](parent_intake_synthetic_canary_2026-09-07/README.md#packaged-cli-validation)
+links the exact unmodified execution reports and source/SQLite evidence. The
+first package commit was intentionally not pushed before these local canaries;
+it was experimental and not merge-ready. The current follow-up adds only
+documentation, archive bytes and their checksum index, not executable changes.
+
+Both positives admitted the expected two parent recordings, preserved all
+41 (full-stimulus) / 39 (recording-only) delivered files before retirement,
+emptied staging, retained acquisition originals and replayed without changing
+parent or registry bytes. Full stimulus also read back the two runs/four steps,
+original event and frame columns, protocol semantic bytes, renderer snapshots,
+selected calibration and physical-frame fixture bindings. Both negative cases
+refused safely with unchanged registry bytes and retained staging/originals.
+All four Palette-runtime SQLite integrity receipts passed. No production data
+or acquisition-machine sources were retired.
+
+Full-stimulus fixture/run locations were
+`/tmp/palette-citrus-encoded-transfer-42a3bbok` /
+`/tmp/palette-parent-intake-e2e-vtinrn2x` and negative
+`/tmp/palette-citrus-encoded-transfer-ddce7h1n` /
+`/tmp/palette-parent-intake-e2e-cy1yjjcl`. Recording-only locations were
+`/tmp/palette-citrus-encoded-transfer-pjmi4w_z` /
+`/tmp/palette-parent-intake-e2e-4gm_mszi` and negative
+`/tmp/palette-citrus-encoded-transfer-5if1a9ik` /
+`/tmp/palette-parent-intake-e2e-aqlfbsz5`. These are historical execution locators,
+not permission to reuse successful/previously materialized fixture roots.
+
+The portable package suite passed again: **23 tests in 0.75 seconds**, including
+the historical archive checksum census. At this archive-only follow-up's
+pre-commit checkpoint, every final-head remote check remains unrun: generated
+artifacts, import boundaries, file-size ratchet, Zarr metadata modes, observed
+metadata literals, active contract freshness, package/collection, non-GPU
+shards 0–15 and `ci-required`. The exact pushed head and its final required CI
+must be checked independently in [PR 149](https://github.com/jmdelahanty/palette/pull/149/checks).
+There is no remaining local canary failure, but this checkpoint is not a
+merge-ready claim. The readiness draft remains unsent; no real-data run,
+acquisition deployment, live poller change, production activation or source
+release occurred. Broader `INGEST-001` and geometry calibration remain separate.

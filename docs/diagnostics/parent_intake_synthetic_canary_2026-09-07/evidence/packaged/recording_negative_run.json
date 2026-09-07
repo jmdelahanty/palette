@@ -1,0 +1,60 @@
+{
+  "commands": [
+    {
+      "argv": [
+        "/tmp/palette-parent-clipped-intake-20260906/scripts/py",
+        "-m",
+        "fisheye.utils.run_citrus_session_import",
+        "/tmp/palette-citrus-encoded-transfer-5if1a9ik/delivery",
+        "--transfer-v2",
+        "--apply",
+        "--recording-type",
+        "behavior",
+        "--recording-subtype",
+        "free",
+        "--behavior-mode",
+        "free",
+        "--dest-root",
+        "/tmp/palette-parent-intake-e2e-aqlfbsz5/recordings",
+        "--run-dir",
+        "/tmp/palette-parent-intake-e2e-aqlfbsz5/first-run",
+        "--register",
+        "--registry",
+        "/tmp/palette-parent-intake-e2e-aqlfbsz5/isolated_registry.sqlite",
+        "--recording-only"
+      ],
+      "returncode": 1,
+      "stderr": "bash: /home/delahantyj@hhmi.org/miniconda3/envs/palette-py311/lib/libtinfo.so.6: no version information available (required by bash)\nTransfer parent intake failed: snapshot schema, membership or source semantics mismatch\n",
+      "stdout": ""
+    },
+    {
+      "argv": [
+        "/tmp/palette-parent-clipped-intake-20260906/scripts/py",
+        "-m",
+        "fisheye.utils.registry_integrity",
+        "--registry",
+        "/tmp/palette-parent-intake-e2e-aqlfbsz5/isolated_registry.sqlite",
+        "--result-json",
+        "/tmp/palette-parent-intake-e2e-aqlfbsz5/registry_integrity.json"
+      ],
+      "returncode": 0,
+      "stderr": "bash: /home/delahantyj@hhmi.org/miniconda3/envs/palette-py311/lib/libtinfo.so.6: no version information available (required by bash)\n",
+      "stdout": "{\n  \"schema_id\": \"palette.registry_integrity_validation\",\n  \"schema_version\": 1,\n  \"status\": \"complete\",\n  \"validation\": {\n    \"foreign_key_issue_count\": 0,\n    \"integrity_check\": \"ok\",\n    \"path\": \"/tmp/palette-parent-intake-e2e-aqlfbsz5/isolated_registry.sqlite\",\n    \"python_executable\": \"/home/delahantyj@hhmi.org/miniconda3/envs/palette-py311/bin/python\",\n    \"sqlite_python_module_version\": \"2.6.0\",\n    \"sqlite_runtime_version\": \"3.52.0\",\n    \"validation_backend\": \"python_stdlib_sqlite3\"\n  }\n}\n"
+    }
+  ],
+  "full_stimulus": false,
+  "harness": "/tmp/palette-parent-clipped-intake-20260906/tests/canaries/parent_intake/run.py",
+  "harness_sha256": "bb47ff224f853661e67bee5e38b5044c11aeaf9380bca979346809a1d72ca12f",
+  "isolated_registry_unchanged": true,
+  "negative_corruption": true,
+  "negative_stimulus": false,
+  "palette_commit": "3f5aad3eb078ebb97af1648ac0120886fb6b250e",
+  "palette_repo": "/tmp/palette-parent-clipped-intake-20260906",
+  "producer_report": "/tmp/palette-citrus-encoded-transfer-5if1a9ik/producer_smoke_report.json",
+  "producer_snapshot_id": "sha256:8f08c19b53b8a41b1c6e162abfff3a977fcdba2ef7c954f54fa5b5471763ef14",
+  "scope": "synthetic recording-only intake with H5/geometry custody; no scientific/hardware acceptance",
+  "source_preserved": true,
+  "staging_preserved": true,
+  "status": "negative_control_refused_without_loss_or_admission",
+  "work_dir": "/tmp/palette-parent-intake-e2e-aqlfbsz5"
+}

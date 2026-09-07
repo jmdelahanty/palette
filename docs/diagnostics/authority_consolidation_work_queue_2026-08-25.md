@@ -406,6 +406,17 @@ The packaged CLI's clean-commit canary and all 24 final-head CI checks remain
 unrun here. No production code, scientific defaults, live installation,
 acquisition capture, source release, production selector or authority changed.
 
+September 7 packaged-CLI evidence supersedes that canary-pending checkpoint:
+all four fresh positive/refusal cases passed on clean
+`3f5aad3eb078ebb97af1648ac0120886fb6b250e`, preserving both existing modes and
+their custody/admission/replay gates. Reports, producing identities, original
+source snapshots and checksums are now retained in the
+[versioned evidence archive](parent_intake_synthetic_canary_2026-09-07/README.md#packaged-cli-validation).
+The follow-up changes only archive/docs, with all 24 final-head CI checks unrun
+at its pre-commit checkpoint; see exact-head [PR 149 checks](https://github.com/jmdelahanty/palette/pull/149/checks)
+before any integration. The acquisition request remains draft/unsent, and no
+real acquisition, deployment, live poller or production authority was changed.
+
 2026-09-06 ingestion-validation companion: **complete for its scoped
 corrections**, owned by the Palette worker on
 `agent/palette/ingestion-validation-20260906`. PR 143 covers PTP complete-state

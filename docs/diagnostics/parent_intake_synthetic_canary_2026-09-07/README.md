@@ -54,3 +54,30 @@ actual identities; old reports are never relabeled to a packaging commit.
 The [acquisition readiness request](../acquisition_parent_intake_canary_request_2026-09-07.md)
 is a draft only. No message, acquisition, transfer, deployment or production
 activation is authorized by this archive.
+
+## Packaged CLI validation
+
+All four fresh cases passed through the maintained module entry points on
+clean Palette `3f5aad3eb078ebb97af1648ac0120886fb6b250e`. No imported package,
+writer, receipt, registry or reader was patched. The subsequent archive-only
+commit does not change the executable package or these producing identities.
+
+| Case | Result |
+|---|---|
+| [Full stimulus](evidence/packaged/full_positive_run.json) | Two parents, two stimulus runs/four steps, all 41 staged files preserved and retired, byte-stable replay. |
+| [Missing H5 frame metadata](evidence/packaged/full_negative_run.json) | Expected refusal, failed stimulus candidates ineligible, staging/source retained, registry unchanged. |
+| [Recording-only](evidence/packaged/recording_positive_run.json) | Two parents, all 39 staged files preserved and retired, byte-stable replay. |
+| [Corrupted transport payload](evidence/packaged/recording_negative_run.json) | Expected refusal before parent creation, staging/source retained, registry unchanged. |
+
+Each case also has its exact `_producer.json` and `_registry_integrity.json`
+under `evidence/packaged/`, covered by `SHA256SUMS`. All four isolated registries
+passed complete integrity and foreign-key checks through Palette Python SQLite
+3.52.0. The runner SHA-256 is
+`bb47ff224f853661e67bee5e38b5044c11aeaf9380bca979346809a1d72ca12f`.
+Successful staged files remain recoverable in the generated recording folders
+and unchanged acquisition-source fixture; refused deliveries remain in place.
+
+Required CI is a separate gate. At the archive-follow-up pre-commit checkpoint
+all 24 final-head checks were unrun. Consult the exact head of
+[PR 149](https://github.com/jmdelahanty/palette/pull/149/checks) for that gate;
+the canary reports do not claim remote CI, merge or deployment acceptance.
