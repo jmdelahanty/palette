@@ -18,6 +18,13 @@ import numpy as np
 from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import (
     SUBJECT_BODY_FRAME_CAPABILITY,
 )
+from fisheye.shared.canonical_coordinate_publication import (
+    require_bound_canonical_coordinate_descriptor,
+)
+from fisheye.shared.pixel_frame_authority import (
+    BoundPixelFrameAuthority,
+    require_source_camera_pixel_frame_authority,
+)
 from fisheye.shared.subject_shape_coordinate_publication import (
     BoundSubjectShapeCoordinatePublication,
 )
@@ -129,6 +136,23 @@ class CoreSubjectBodyFrameSourceHandle:
     @property
     def axis_valid(self) -> np.ndarray:
         return self.array("body_frame/axis_valid")
+
+    @property
+    def source_camera_frame_authority(self) -> BoundPixelFrameAuthority:
+        """Return the exact source-camera pixel frame bound by body origin."""
+
+        self.assert_verified()
+        try:
+            origin = self._publication.descriptors["body_frame/origin_xy"]
+            descriptor = require_bound_canonical_coordinate_descriptor(origin)
+            return require_source_camera_pixel_frame_authority(
+                descriptor.reference_frame_authority
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CoreSubjectBodyFrameSourceHandleError(
+                "Core subject-body origin lacks one exact source-camera "
+                "pixel-frame authority."
+            ) from exc
 
     def array(self, path: str) -> np.ndarray:
         """Read one strict-publication surface without replaying its digest scan."""

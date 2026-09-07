@@ -14,6 +14,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from fisheye.analysis.track_kinematics import TRACK_MOTION_PUBLICATION_MANIFEST_ATTR
 from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import (
     CANONICAL_SWIM_BOUTS_CAPABILITY,
 )
@@ -126,6 +127,29 @@ def _binding_dtype(record: Mapping[str, Any]) -> np.dtype[Any]:
     )
 
 
+def _physical_authority_binding(
+    bound: BoundCoreMotionAndBouts,
+) -> dict[str, Any]:
+    """Recover the exact physical-frame pointer from the validated manifest."""
+
+    try:
+        manifest = bound.track.run_group.attrs[TRACK_MOTION_PUBLICATION_MANIFEST_ATTR]
+        physical = manifest["physical_authority"]
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise CoreMotionSourceHandleError(
+            "Selected core motion lacks its physical-authority manifest record."
+        ) from exc
+    if not isinstance(physical, Mapping):
+        _fail("Selected core-motion physical authority must be one mapping.")
+    record = _plain(physical)
+    expected = bound.track.binding.get("physical_authority_sha256")
+    if canonical_json_sha256(record) != expected:
+        _fail(
+            "Selected core-motion physical authority differs from its roster binding."
+        )
+    return record
+
+
 @dataclass(frozen=True, init=False, eq=False)
 class CoreMotionTrackSourceHandle:
     """One exact roster-selected track and its receipt-authorized arrays."""
@@ -141,6 +165,8 @@ class CoreMotionTrackSourceHandle:
     track_id: int
     sample_count: int
     source_sample_rate_hz: float
+    physical_authority_sha256: str
+    physical_authority: Mapping[str, Any]
     selected_surfaces: Mapping[str, Mapping[str, Any]]
     consumption_receipt: Mapping[str, Any]
     _bound: BoundCoreMotionAndBouts = field(repr=False, compare=False)
@@ -151,7 +177,11 @@ class CoreMotionTrackSourceHandle:
         if _verification_seal is not _HANDLE_SEAL:
             _fail("Core-motion handles can only be minted by the roster resolver.")
         for name, value in values.items():
-            if name in {"selected_surfaces", "consumption_receipt"}:
+            if name in {
+                "physical_authority",
+                "selected_surfaces",
+                "consumption_receipt",
+            }:
                 value = MappingProxyType(dict(value))
             object.__setattr__(self, name, value)
         object.__setattr__(self, "_verification_seal", _HANDLE_SEAL)
@@ -221,6 +251,12 @@ class CoreMotionTrackSourceHandle:
         )
         if self._bound.roster_sha256 != self.core_authority_roster_sha256:
             _fail("Core-motion handle and bound roster digests differ.")
+        current_physical = _physical_authority_binding(self._bound)
+        if (
+            current_physical != _plain(self.physical_authority)
+            or canonical_json_sha256(current_physical) != self.physical_authority_sha256
+        ):
+            _fail("Core-motion physical authority changed after handle binding.")
 
     def assert_current(self) -> None:
         """Compatibility spelling for receipt-backed immutable verification."""
@@ -269,6 +305,8 @@ def bind_core_motion_track_source_handle(
         track_id=track_id,
         sample_count=int(record["sample_count"]),
         source_sample_rate_hz=float(bound.track.binding["source_sample_rate_hz"]),
+        physical_authority_sha256=str(bound.track.binding["physical_authority_sha256"]),
+        physical_authority=_physical_authority_binding(bound),
         selected_surfaces=record["selected_surfaces"],
         consumption_receipt=receipt,
         _bound=bound,
