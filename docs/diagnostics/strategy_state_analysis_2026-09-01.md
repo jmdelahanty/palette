@@ -182,6 +182,34 @@ fraction; the avoidance features carry near-zero weight on it. No
 rotation of the split turns it into avoidant-vs-non-avoidant. Both
 clusters avoid the dot to a similar modest degree.
 
+**What distance excess and near-zone excess are.** Both are twin-corrected
+(`validated_behavior_twin_nulls.py`). The chaser's recorded trajectory is
+rotated about the arena centre by 60, 120, 180, 240, and 300 degrees; each
+copy is a virtual twin that moved like the real chaser, at the same wall
+distance and the same times, in a part of the dish the fish never saw it.
+Rotation 0 is the observed chaser and must reproduce the real summaries
+exactly (parity check).
+
+```
+distance_excess  = median distance to real chaser
+                 - mean over rotations of median distance to the twin
+nz_excess        = near-zone fraction (distance <= near_zone_radius_mm) for real chaser
+                 - mean over rotations of the same for the twin
+```
+
+Positive distance excess and negative near-zone excess mean avoidance;
+zero means the fish treats the dot's location like any other spot. The
+subtraction removes geometry that raw distance confounds (a wall-hugging
+fish is close to a wall-parked dot for reasons unrelated to the dot; a
+centre-dwelling fish is far from any dot). Explorers sit ~4 mm and
+punctuated fish ~2 mm farther from the real chaser than from its twins:
+both avoid modestly, and the gap is small against the spread across fish.
+Limitation: the twin assumes rotational symmetry of the arena apart from
+the dot; the CRA addendum below shows a stable right-side occupancy bias
+in this layout, so twins landing on the favoured side are imperfect
+controls. Excess is far better than raw distance but not free of that
+bias.
+
 Consequences:
 - The hypothesized avoidant / explorer / thigmotactic triad is not what
   the population does in this feature space. Avoidance varies
