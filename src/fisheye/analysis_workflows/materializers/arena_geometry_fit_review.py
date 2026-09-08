@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import tempfile
 from dataclasses import dataclass
@@ -57,6 +58,327 @@ REVIEW_PACKAGE_SCHEMA_ID = f"{PROBE_SCHEMA_ID}.review_package"
 ACQUISITION_REVEAL_SCHEMA_ID = f"{PROBE_SCHEMA_ID}.acquisition_reveal"
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+RIM_METRICS_SCHEMA_ID = "palette.diagnostics.dish_rim_metrics"
+
+
+def rim_metrics_source_sha256(source: Mapping[str, Any]) -> str:
+    """Bind the complete probe-native source record, not a camera-name subset."""
+
+    # Source identity is already JSON-native. Do not sanitize a non-finite
+    # number to null here: that would make two different source records bind.
+    return _sha256_bytes(
+        json.dumps(
+            source, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    )
+
+
+def summarize_rim_metric_temporal(windows: Mapping[str, Any]) -> dict[str, Any]:
+    """Summarize frozen selected circles; never average distinct rim edges."""
+
+    selected = [
+        window["candidates"][window["selected_candidate_id"]]["geometry"]
+        for window in windows.values()
+    ]
+    centers = [(item["center_px"]["x"], item["center_px"]["y"]) for item in selected]
+    radii = [item["radius_px"] for item in selected]
+    family_spread = []
+    radius_families = []
+    for window in windows.values():
+        family = [
+            item["geometry"]["center_px"] for item in window["candidates"].values()
+        ]
+        radius_families.append(
+            [item["geometry"]["radius_px"] for item in window["candidates"].values()]
+        )
+        family_spread.extend(
+            math.hypot(a["x"] - b["x"], a["y"] - b["y"]) for a in family for b in family
+        )
+    return {
+        "center_max_pairwise_distance_px": max(
+            math.dist(a, b) for a in centers for b in centers
+        ),
+        "radius_range_px": float(max(radii) - min(radii)),
+        "rim_family_center_max_distance_px": max(family_spread),
+        "rim_family_radius_hausdorff_distance_px": max(
+            min(abs(radius - other) for other in b)
+            for a in radius_families
+            for b in radius_families
+            for radius in a
+        ),
+        "minimum_candidate_count": min(
+            len(window["candidates"]) for window in windows.values()
+        ),
+    }
+
+
+def select_rim_metrics_consensus_window(windows: Mapping[str, Any]) -> str:
+    """Pick an observed medoid in stable early/middle/late tie-break order."""
+
+    names = ("early", "middle", "late")
+    vectors = {}
+    for name in names:
+        geometry = windows[name]["fit"]["geometry"]
+        vectors[name] = (
+            geometry["center_px"]["x"],
+            geometry["center_px"]["y"],
+            geometry["radius_px"],
+        )
+    return min(
+        names,
+        key=lambda name: sum(
+            math.dist(vectors[name], vector) for vector in vectors.values()
+        ),
+    )
+
+
+def validate_rim_metrics_consensus(
+    consensus: Mapping[str, Any], *, windows: Mapping[str, Any]
+) -> None:
+    """Require an actual measured representative, never an averaged rim radius."""
+
+    name = select_rim_metrics_consensus_window(windows)
+    if (
+        not isinstance(consensus, Mapping)
+        or consensus.get("geometry") != windows[name]["fit"]["geometry"]
+        or consensus.get("coordinate_space") != "camera_native_pixels"
+        or consensus.get("selection_reason")
+        != "observed_window_medoid_no_radius_averaging_v1"
+    ):
+        raise ValueError(
+            "Rim metrics consensus must be the exact observed window medoid."
+        )
+
+
+def _validate_optional_rim_metrics(report: Mapping[str, Any]) -> None:
+    recipe = report.get("scientific_recipe")
+    if "rim_metrics" not in report and recipe is None:
+        return
+    if (
+        not isinstance(recipe, Mapping)
+        or recipe.get("recipe_id") != "top_rim_preferred_v1"
+        or recipe.get("recipe_version") != 1
+        or recipe.get("status") != "experimental_shadow_only_not_calibrated"
+        or recipe.get("physical_feature_identified") is not False
+    ):
+        raise ValueError("Unsupported scientific recipe for rim metrics.")
+    validate_rim_metrics(
+        report.get("rim_metrics"),
+        source=report.get("source"),
+        windows=report.get("windows"),
+    )
+    validate_rim_metrics_consensus(
+        report.get("consensus_fit"), windows=report["windows"]
+    )
+
+
+def _validate_metric_composite_png(
+    payload: bytes, *, report: Mapping[str, Any], name: str
+) -> None:
+    """Bind bounded native mono8 median pixels to the metrics' exact input."""
+
+    import cv2
+
+    shape = report["source"]["image_shape_px"]
+    window = report["windows"][name]
+    if _sha256_bytes(payload) != window["files"]["temporal_median"]["sha256"]:
+        raise ValueError(
+            "Rim metric composite encoded digest disagrees with the frozen report."
+        )
+    if (
+        len(payload) < 29
+        or payload[:8] != _PNG_SIGNATURE
+        or int.from_bytes(payload[16:20], "big") != shape["width"]
+        or int.from_bytes(payload[20:24], "big") != shape["height"]
+        or payload[24:26] != b"\x08\x00"
+    ):
+        raise ValueError(
+            "Rim metric composite PNG is not the exact native mono8 raster."
+        )
+    image = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    if (
+        image is None
+        or image.shape != (shape["height"], shape["width"])
+        or image.dtype != np.uint8
+        or _sha256_bytes(image.tobytes(order="C"))
+        != report["windows"][name]["composite_pixel_sha256"]
+    ):
+        raise ValueError(
+            "Rim metric composite pixel digest disagrees with its evidence."
+        )
+
+
+def validate_rim_metrics(
+    metrics: Mapping[str, Any], *, source: Mapping[str, Any], windows: Mapping[str, Any]
+) -> None:
+    """Validate the opt-in extension against its immutable enclosing fit report.
+
+    Image measurements are content evidence, not acceptance or feature review.
+    The report digest must also be validated by the caller loading that report.
+    """
+
+    def finite(value: Any, *, minimum: float = 0.0, maximum: float = math.inf) -> float:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not minimum <= value <= maximum
+        ):
+            raise ValueError("Rim metrics require finite, bounded numeric evidence.")
+        return float(value)
+
+    if not isinstance(source, Mapping) or not isinstance(windows, Mapping):
+        raise ValueError("Rim metrics require source and window records.")
+    if (
+        not isinstance(metrics, Mapping)
+        or metrics.get("schema_id") != RIM_METRICS_SCHEMA_ID
+        or type(metrics.get("schema_version")) is not int
+        or metrics.get("schema_version") != 1
+        or metrics.get("status") != "measured"
+        or metrics.get("physical_feature_identified") is not False
+        or metrics.get("semantic_correspondence") != "projected_edges_unresolved"
+        or metrics.get("source_binding_sha256") != rim_metrics_source_sha256(source)
+    ):
+        raise ValueError("Unsupported or wrong-source rim metrics contract.")
+    shape = source.get("image_shape_px")
+    if not isinstance(shape, Mapping) or any(
+        type(shape.get(key)) is not int or shape[key] <= 0
+        for key in ("height", "width")
+    ):
+        raise ValueError("Rim metrics require exact native source dimensions.")
+    measured = metrics.get("windows")
+    names = {"early", "middle", "late"}
+    if (
+        not isinstance(measured, Mapping)
+        or set(measured) != names
+        or set(windows) != names
+    ):
+        raise ValueError("Rim metrics require exact early/middle/late windows.")
+    for name in names:
+        window, evidence = windows[name], measured[name]
+        if not isinstance(window, Mapping) or not isinstance(evidence, Mapping):
+            raise ValueError("Rim metrics window must be an object.")
+        digest = evidence.get("composite_pixel_sha256")
+        if (
+            not isinstance(digest, str)
+            or _SHA256_RE.fullmatch(digest) is None
+            or digest != window.get("composite_pixel_sha256")
+        ):
+            raise ValueError("Rim metrics composite content binding is stale.")
+        fit = window.get("fit")
+        if (
+            not isinstance(fit, Mapping)
+            or fit.get("coordinate_space") != "camera_native_pixels"
+        ):
+            raise ValueError("Rim metrics require a native-pixel fit.")
+        frozen = fit.get("frozen_candidates")
+        if (
+            not isinstance(frozen, list)
+            or not frozen
+            or not all(isinstance(c, Mapping) for c in frozen)
+        ):
+            raise ValueError("Rim metrics require every frozen candidate.")
+        identities = [candidate.get("candidate_id") for candidate in frozen]
+        if any(
+            not isinstance(identity, str) or not identity for identity in identities
+        ) or len(set(identities)) != len(identities):
+            raise ValueError("Rim metric candidate IDs are invalid or repeated.")
+        candidates = evidence.get("candidates")
+        selected = evidence.get("selected_candidate_id")
+        if (
+            not isinstance(candidates, Mapping)
+            or set(candidates) != set(identities)
+            or not isinstance(selected, str)
+            or selected not in candidates
+            or selected != fit.get("selected_candidate_id")
+            or type(fit.get("candidate_count")) is not int
+            or fit["candidate_count"] != len(frozen)
+        ):
+            raise ValueError(
+                "Rim metrics candidate or selected identity disagrees with frozen fit."
+            )
+        for frozen_candidate in frozen:
+            candidate = candidates[frozen_candidate["candidate_id"]]
+            if not isinstance(candidate, Mapping):
+                raise ValueError("Rim candidate metric must be an object.")
+            geometry = candidate.get("geometry")
+            if (
+                candidate.get("coordinate_space") != "camera_native_pixels"
+                or frozen_candidate.get("coordinate_space") != "camera_native_pixels"
+                or candidate.get("image_shape_px") != shape
+                or not isinstance(geometry, Mapping)
+                or geometry != frozen_candidate.get("geometry")
+                or geometry.get("type") != "circle"
+            ):
+                raise ValueError(
+                    "Rim metrics geometry or coordinate binding disagrees with frozen fit."
+                )
+            center = geometry.get("center_px")
+            if not isinstance(center, Mapping):
+                raise ValueError("Rim metrics require a circle center.")
+            finite(center.get("x"), maximum=shape["width"] - 1)
+            finite(center.get("y"), maximum=shape["height"] - 1)
+            if finite(geometry.get("radius_px"), maximum=max(shape.values())) <= 0:
+                raise ValueError("Rim metric radius must be positive.")
+            if selected == frozen_candidate["candidate_id"] and geometry != fit.get(
+                "geometry"
+            ):
+                raise ValueError("Rim metrics selected geometry disagrees with fit.")
+            support = finite(candidate.get("angular_support_fraction"), maximum=1.0)
+            visible = finite(candidate.get("visible_angular_fraction"), maximum=1.0)
+            if support > visible:
+                raise ValueError(
+                    "Rim metric support cannot exceed the visible angular domain."
+                )
+            if (
+                type(candidate.get("angular_sample_count")) is not int
+                or candidate["angular_sample_count"] != 720
+            ):
+                raise ValueError(
+                    "Rim metrics require the versioned 720 angular samples."
+                )
+            band = finite(candidate.get("radial_band_px"))
+            if band != 4.0:
+                raise ValueError(
+                    "Rim metrics require the versioned 4px radial support band."
+                )
+            finite(candidate.get("gradient_support_cutoff"))
+            finite(candidate.get("longest_unsupported_arc_degrees"), maximum=360.0)
+            finite(candidate.get("radial_gradient_median"))
+            for key in ("radial_residual_p95_px", "median_absolute_radial_offset_px"):
+                if support == 0 and candidate.get(key) is None:
+                    continue
+                finite(candidate.get(key), maximum=band + 1e-3)
+            quadrants = candidate.get("quadrant_support_fractions")
+            if not isinstance(quadrants, list) or len(quadrants) != 4:
+                raise ValueError("Rim metrics require four angular quadrants.")
+            for value in quadrants:
+                finite(value, maximum=1.0)
+            if not math.isclose(sum(quadrants) / 4.0, support, abs_tol=1e-12):
+                raise ValueError(
+                    "Rim metric quadrant support disagrees with angular support."
+                )
+            flags = candidate.get("quality_flags")
+            if not isinstance(flags, list) or not all(
+                isinstance(flag, str) for flag in flags
+            ):
+                raise ValueError("Rim metric quality flags must be explicit.")
+            if ("no_support" in flags) != (support == 0) or ("clipped" in flags) != (
+                visible < 1
+            ):
+                raise ValueError("Rim metric flags disagree with image support.")
+    temporal = metrics.get("temporal")
+    if (
+        not isinstance(temporal, Mapping)
+        or type(temporal.get("minimum_candidate_count")) is not int
+    ):
+        raise ValueError("Rim metrics require an exact temporal candidate count.")
+    for value in temporal.values():
+        finite(value)
+    if temporal != summarize_rim_metric_temporal(measured):
+        raise ValueError(
+            "Rim metrics temporal summary disagrees with frozen candidates."
+        )
 
 
 @dataclass(frozen=True)
@@ -306,6 +628,35 @@ def build_arena_geometry_fit_review_plan(
     source = fit_report.get("source")
     if not isinstance(source, Mapping):
         raise ValueError("Fit report lacks source identity.")
+    _validate_optional_rim_metrics(fit_report)
+    if "rim_metrics" in fit_report:
+        # New metric-bearing recipes retain the actual median pixels so the
+        # evidence can be remeasured after disposable probe scratch is gone.
+        for name in ("early", "middle", "late"):
+            binding = (
+                fit_report["windows"][name].get("files", {}).get("temporal_median")
+            )
+            if not isinstance(binding, Mapping):
+                raise ValueError(
+                    "Metric-bearing fit lacks its temporal median artifact."
+                )
+            artifacts.append(
+                _bound_artifact(
+                    role=f"metric_composite_{name}",
+                    source_path=_safe_source_file(
+                        package_dir,
+                        binding.get("path"),
+                        label=f"{name} temporal median",
+                    ),
+                    zarr_path=f"visualizations/metric_composite_{name}_png",
+                    media_type="image/png",
+                    expected_sha256=binding.get("sha256"),
+                )
+            )
+
+            _validate_metric_composite_png(
+                artifacts[-1].source_path.read_bytes(), report=fit_report, name=name
+            )
 
     record = _canonical_copy(
         {
@@ -483,6 +834,20 @@ def _validate_group(
             errors.append("review record artifacts missing")
         else:
             expected_visualizations: dict[str, Mapping[str, Any]] = {}
+            metric_report = {}
+            fit_artifact = artifacts.get("fit_report")
+            if isinstance(fit_artifact, Mapping):
+                metric_report = _read_json_bytes(
+                    _array_bytes(group, str(fit_artifact["zarr_path"])),
+                    label="fit report",
+                )
+            if "rim_metrics" in metric_report and any(
+                f"metric_composite_{name}" not in artifacts
+                for name in ("early", "middle", "late")
+            ):
+                errors.append(
+                    "metric-bearing fit lacks original temporal median artifacts"
+                )
             for role, raw in artifacts.items():
                 if not isinstance(raw, Mapping):
                     errors.append(f"artifact {role} is not an object")
@@ -512,6 +877,22 @@ def _validate_group(
                     expected_visualizations[path.removeprefix("visualizations/")] = raw
                 elif node_attrs.get("artifact_schema_id") != JSON_BYTES_SCHEMA_ID:
                     errors.append(f"artifact {role} JSON schema mismatch")
+                if role == "fit_report":
+                    try:
+                        _validate_optional_rim_metrics(
+                            _read_json_bytes(payload, label="fit report")
+                        )
+                    except (ValueError, KeyError, TypeError) as exc:
+                        errors.append(f"fit report rim metrics: {exc}")
+                if role.startswith("metric_composite_"):
+                    try:
+                        _validate_metric_composite_png(
+                            payload,
+                            report=metric_report,
+                            name=role.removeprefix("metric_composite_"),
+                        )
+                    except (ValueError, KeyError, TypeError) as exc:
+                        errors.append(f"metric composite pixels: {exc}")
             manifest = attrs.get("visualizations")
             if not isinstance(manifest, Mapping):
                 errors.append("visualization manifest missing")
