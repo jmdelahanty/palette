@@ -118,8 +118,7 @@ Figure: `wall_runs_by_transition.png`. Data: `per_fish_wall_by_transition.parque
 - ~~Dense immobility-based run definition~~ done (entry below).
 - Bench rig check for the arena 3 to 4 wall-peak shift: level, light
   gradient, visible edge features at each arena position.
-- Rerun with the acquisition physical-rim circle to bound the band-choice
-  sensitivity.
+- ~~Physical-rim sensitivity rerun~~ done, no conclusion moves (entry below).
 - Once GoodCopBadCop/batman/redscare are through the validated export,
   repeat as the first leave-protocol-out check of a boundary-family feature.
 
@@ -259,6 +258,56 @@ dish wall at each position.
    catch. A pre-epoch classifier would decode arena pair from wall
    fraction alone on this cohort.
 
+## 2026-09-09 — Physical-rim sensitivity check (band choice does not move any conclusion)
+
+Recomputed every wall fraction with the acquisition `physical_inner_rim`
+candidate circle from `analysis/arena_geometry_runs/<acquisition run>`
+instead of the human-reviewed visible-rim fit. Data:
+`physical_rim_sensitivity.parquet`, `circle_differences.parquet`.
+
+**How different the circles are.** Physical radius is 0.12 to 0.17 mm
+smaller (range −0.37 to +0.26 mm across recordings); centres differ by
+0.14 to 0.38 mm median, 0.85 mm max. Both circles are the same object to
+within a fish body width.
+
+**Headline numbers, reviewed versus physical:**
+
+| | Reviewed | Physical |
+|---|---|---|
+| Median wall fraction pre / training / post | 0.33 / 0.66 / 0.45 | 0.33 / 0.66 / 0.46 |
+| Pre, arenas 1 / 2 / 3 / 4 | 0.44 / 0.43 / 0.24 / 0.24 | 0.46 / 0.46 / 0.25 / 0.25 |
+| Converter − stayer post−pre delta, strat p | −0.20, p=0.003 | −0.19, p=0.010 |
+| Per recording-epoch Spearman | 0.973 | |
+| Median absolute difference | 0.007 | |
+| Recording-epochs with difference > 0.05 | 5 of 240 | |
+
+Every conclusion in this log survives. The arena effect is if anything
+slightly larger under the physical circle.
+
+**Two instructive outliers.**
+1. `2026-08-11T19-05-11Z_arena_3`, training epoch: reviewed 0.005 versus
+   physical 0.970. The fish was immobile 86% of the epoch at a distance
+   to the wall of 5.12 to 5.29 mm (5th to 95th percentile) under the
+   reviewed circle: parked on the 5 mm knife edge, so a 0.12 mm radius
+   change flips the whole epoch. Any hard band will do this to some fish;
+   the per-fish radial quantile or the full radial density (already
+   recommended above) is immune to it.
+2. `2026-08-10T17-54-26Z_arena_1`, training epoch: 29% of valid samples
+   fall outside the physical circle (0 outside the reviewed one). The
+   fish sat at 0.5 to 1 mm from the reviewed rim for most of the epoch;
+   a 0.23 mm smaller, 0.43 mm shifted circle pushes those samples out.
+   The reviewed fit is the better boundary for a wall-hugging fish, which
+   is the human reviewer's original decision ("acquisition fit close but
+   slightly misregistered") confirmed in data. Under any circle, samples
+   just outside the boundary should count as wall, not be dropped; the
+   current exclusion is a small bias against the most thigmotactic fish.
+
+**Decision recorded:** keep the reviewed visible-rim circle as the wall
+authority for this cohort; treat out-of-circle valid samples within one
+body width as wall rather than invalid in the future contract; retire the
+"band sensitivity" concern for absolute conclusions, but not for
+per-fish values at the band edge.
+
 ## What should become a pipeline product
 
 - Per-sample `centre_distance_mm`, `distance_to_boundary_mm`, `wall` flag,
@@ -268,4 +317,7 @@ dish wall at each position.
 - A per-bin table keyed by `analysis_role` and bin index with wall fraction
   and centre-distance summaries, sharing the band constant.
 - Band declared per export in mm and as a fraction of the reviewed radius,
-  so the uniform-area expectation travels with it across rigs.
+  so the uniform-area expectation travels with it across rigs; and a
+  per-fish radial-quantile form of the boundary feature alongside it.
+- Valid samples just outside the circle (within ~1 body width) count as
+  wall, not invalid.
