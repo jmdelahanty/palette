@@ -115,10 +115,9 @@ Figure: `wall_runs_by_transition.png`. Data: `per_fish_wall_by_transition.parque
 
 **Open follow-ups.**
 - ~~Pre-epoch disposition test with run length~~ done, null (entry below).
-- Replace the 5 s-bin run definition with dense run lengths, and define
-  runs on the smoothed-speed immobility criterion rather than position so
-  the locomotion and boundary components are measured separately by
-  construction.
+- ~~Dense immobility-based run definition~~ done (entry below).
+- Bench rig check for the arena 3 to 4 wall-peak shift: level, light
+  gradient, visible edge features at each arena position.
 - Rerun with the acquisition physical-rim circle to bound the band-choice
   sensitivity.
 - Once GoodCopBadCop/batman/redscare are through the validated export,
@@ -161,6 +160,104 @@ lives on the locomotor axis (entropy, bout rate, IBI tail), not on the
 boundary axis. Together with the post-epoch entry this closes the wall
 question for goodbatbadbat in both directions: converters are not wall
 fish before training and do not become wall fish after it.
+
+## 2026-09-09 — Dense immobility-based runs (locomotion and boundary separated by construction)
+
+**Definition.** Per frame from `provider_motion_samples` (keypoint, 100 fps):
+immobile = valid and `speed_smoothed_mm_s` < 1.0 (the repo's
+`DEFAULT_IMMOBILITY_SPEED_THRESHOLD_MM_S`); an immobile run is a contiguous
+immobile stretch >= 2 s; a run is "at wall" if >= 50% of its frames are in
+the 5 mm band. Wall fraction is then computed separately over mobile
+frames and over immobile frames. Note that at this threshold larval fish
+are immobile ~58% of the time (inter-bout pauses); the >= 2 s run filter
+is what isolates the long pauses. Data: `dense_immobility_runs.parquet`,
+`dense_immobility_deltas.parquet`. Figure: `dense_immobility_by_transition.png`.
+
+**Post epoch, E→P converters (16) vs E→E stayers (52), arena-stratified permutation p:**
+
+| Post metric (median) | Converters | Stayers | strat p |
+|---|---|---|---|
+| longest immobile run (s) | 20.2 | 2.3 | <0.0001 |
+| time in immobile runs >= 2 s (s) | 148 | 3 | <0.0001 |
+| immobile runs >= 5 s (count) | 6 | 0 | <0.0001 |
+| immobile-run time at wall (s) | 26 | 0 | <0.0001 |
+| immobile-run time in interior (s) | 53 | 0 | <0.0001 |
+| wall fraction while mobile | 0.43 | 0.49 | 0.51 |
+| wall fraction while immobile | 0.40 | 0.50 | 0.20 |
+
+Post minus pre: converters gain +0.10 immobile fraction (stayers −0.00,
+p<0.0001); converters lose −0.07 mobile-wall fraction while stayers gain
++0.13 (p=0.006); same sign and size for immobile-wall fraction (p=0.008).
+
+Reading. With locomotion and boundary measured separately, the picture is
+unambiguous: conversion is a ~50-fold increase in time spent in long
+pauses, and those pauses fall in the interior twice as often as at the
+wall. Neither the mobile nor the immobile wall fraction differs between
+converters and stayers in post. The earlier 5 s-bin "wall run" result was
+this immobility effect leaking through a position metric.
+
+**Pre epoch, same groups.** Immobile fraction identical (0.58 vs 0.58);
+long-run metrics show a weak converter lean (longest run 2.6 vs 0.0 s,
+strat p=0.06; time in runs strat p=0.03; run count strat p=1.0) that is
+inconsistent across metrics and far below the pre-cluster P vs E
+separation (P→P pre: longest run 16 s, time in runs 100 s). Consistent
+with the earlier null: the locomotor disposition is real but small, and
+it is not a boundary disposition.
+
+## 2026-09-09 — The arena difference: what it is and what it is not
+
+Concern raised: post wall fraction ~0.5 in arenas 1 to 2 versus ~0.34 in
+arenas 3 to 4. Diagnostics on the **pre epoch** (stimulus-free, so any
+difference is rig or fish, not protocol). Data:
+`pre_occupancy_anisotropy.parquet`, `pre_parked_chaser_positions.parquet`.
+Figure: `arena_occupancy_diagnostics.png`.
+
+What it is **not**:
+- Not geometry. Reviewed rim radius 40.94 to 40.96 mm and scale 52.3 to
+  52.8 px/mm across arenas; circle-fit spread ~1 px.
+- Not tracking. Valid-position fraction 0.995 to 0.999 in every arena.
+- Not the parked dot. Both chasers park 19.7 to 20.1 mm from the wall in
+  every arena.
+- Not a session or batch effect. Across the 20 sessions (4 arenas each),
+  the mean of arenas 1 to 2 exceeds the mean of arenas 3 to 4 in 18 of 20.
+  Kruskal across arenas: wall fraction p=0.0015, mobile-only wall fraction
+  p=0.0025, median centre distance p=0.005.
+
+What it **is**: a persistent, position-specific difference in how tightly
+fish hug the wall. The per-fish radial occupancy density peaks at 2 to
+3 mm from the wall in arenas 1 to 2 and at 4 to 7 mm, flatter and broader,
+in arenas 3 to 4; the 5 mm band cuts straight through the arena 3 to 4
+peak. Median centre distance is 35.2 mm in arenas 1 to 2 and 32.3 to
+33.4 mm in arenas 3 to 4. So arena 3 to 4 fish are not less boundary-bound
+in kind; they sit a few millimetres further in. Every arena also shows a
+shared directional bias of occupancy toward the upper-right of the image
+frame (circular mean −50 to −74 deg, Rayleigh p<0.01 in three of four),
+i.e. a common cue across the rig; the wall-band angular profiles differ
+per arena, which is what one expects if that cue is a fixed room or rig
+feature seen from four positions.
+
+Candidate causes, none testable from these exports: lighting or IR
+illumination gradient across the four arena positions, a meniscus or
+water-level difference in the dishes at positions 3 to 4, thermal
+gradient, or a visible edge feature (adjacent arena, rig frame) that the
+fish in positions 3 to 4 see differently. This needs a rig check at the
+bench: level, light meter, and a look at what is visible through the
+dish wall at each position.
+
+**Consequences.**
+1. Every wall statistic on this cohort must be arena-stratified or
+   arena-residualized. All headline results in this log already are.
+2. A fixed 5 mm band is the wrong feature contract across arenas. Two
+   robust alternatives, both to go into the phase-0 contract: (a) the
+   band expressed as a per-recording quantile of the radial occupancy
+   (e.g. fraction of time within the fish's own 25th-percentile
+   wall distance) and (b) the full radial density as the feature, with the
+   band derived downstream. The design doc's open question on wall
+   features in L0 is answered: include them only in residualized or
+   self-normalized form.
+3. This is precisely the effect the design doc's leakage test is meant to
+   catch. A pre-epoch classifier would decode arena pair from wall
+   fraction alone on this cohort.
 
 ## What should become a pipeline product
 
