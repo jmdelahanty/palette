@@ -162,6 +162,8 @@ def _track_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
         (
             "--keypoint-run",
             context.dependency_run("refined_keypoints"),
+            "--tracking-run",
+            context.dependency_run("tracks"),
             "--run-name",
             context.output_run,
             "--output-shard-rows",
@@ -190,8 +192,6 @@ def _track_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
         == SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
     ):
         command[4:4] = [
-            "--tracking-run",
-            context.dependency_run("tracks"),
             "--execution-profile",
             SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
         ]

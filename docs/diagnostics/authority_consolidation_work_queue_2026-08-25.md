@@ -130,6 +130,23 @@ tests alone are insufficient when required CI is part of the gate.
 silently skipped. When a dependency closes, update this queue before treating
 the dependent item as active.
 
+### Scoped DAG dependency-pinning correction — 2026-09-09
+
+Status: `in_progress`; owner: root implementation agent, branch
+`agent/palette/generic-dag-gap-review-20260909`, worktree
+`/tmp/palette-generic-dag-gap-review-20260909`, base
+`fc6fea5fd937759f5ed21c79d13279b25c309e13` plus the scoped changes recorded at
+the pre-CI implementation checkpoint. Commit, push, draft PR, and CI monitoring
+are now user-authorized; integration and deployment are not.
+Production motion commands now preserve the resolved tracking pin, and strict
+motion verification compares sealed tracking/keypoint sources with dependencies
+explicitly selected by the plan. Sealed-supplier branch closure is preserved.
+Focused local validation passed; required CI was unrun at this checkpoint.
+This is not integrated, deployed, activated, complete, or merge-ready and does
+not close the broader `ADM-*`, `RES-TRACK-001`, `REP-001`, or `TEST-001` work.
+See the [scoped implementation handoff](dag_motion_dependency_pinning_handoff_2026-09-09.md)
+for contracts, exact test evidence, all unrun CI checks, and remaining work.
+
 ## Targeted four-camera recovery plan — 2026-08-27
 
 This is an execution slice of the active queue, not a second plan of record.
