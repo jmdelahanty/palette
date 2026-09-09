@@ -114,9 +114,7 @@ Figure: `wall_runs_by_transition.png`. Data: `per_fish_wall_by_transition.parque
 `post_run_controls.parquet`.
 
 **Open follow-ups.**
-- Same analysis on the pre-epoch trace to ask whether pre wall-run length
-  predicts conversion (a disposition test in the boundary family; pre wall
-  fraction itself does not: p=0.52).
+- ~~Pre-epoch disposition test with run length~~ done, null (entry below).
 - Replace the 5 s-bin run definition with dense run lengths, and define
   runs on the smoothed-speed immobility criterion rather than position so
   the locomotion and boundary components are measured separately by
@@ -125,6 +123,44 @@ Figure: `wall_runs_by_transition.png`. Data: `per_fish_wall_by_transition.parque
   sensitivity.
 - Once GoodCopBadCop/batman/redscare are through the validated export,
   repeat as the first leave-protocol-out check of a boundary-family feature.
+
+## 2026-09-09 — Pre-epoch disposition test with run length (null)
+
+**Question:** does pre-epoch run structure (wall runs, interior runs,
+switching) predict which explorers convert, the way pre-epoch entropy and
+bout rate do (pre→responder LORO AUC 0.64 to 0.69 in the strategy-state
+doc)?
+
+Pre-explorers n=68 (16 converters, 52 stayers). Same 5 s-bin run
+definitions as the post entry. Data: `pre_disposition_runs.parquet`.
+
+| Pre-epoch metric | Conv median | Stay median | MWU p | Arena-strat p | AUC | ρ vs esc_frac |
+|---|---|---|---|---|---|---|
+| wall fraction | 0.35 | 0.34 | 0.52 | 0.79 | 0.55 | −0.22 (p=0.08) |
+| longest wall run (s) | 35 | 25 | 0.35 | 0.30 | 0.58 | −0.24 (p=0.048) |
+| longest interior run (s) | 55 | 50 | 0.90 | 0.65 | 0.51 | −0.02 |
+| longest run either side (s) | 65 | 60 | 0.67 | 0.69 | 0.54 | −0.08 |
+| time in runs ≥60 s (s) | 65 | 62 | 0.53 | 0.94 | 0.55 | −0.09 |
+| wall/interior switches | 30 | 28.5 | 0.66 | 0.76 | 0.54 | −0.06 |
+| late − early wall fraction | +0.15 | +0.02 | 0.042 | 0.19 | 0.67 | −0.21 (p=0.08) |
+
+Leave-one-out logistic on (longest run, switches, wall fraction):
+converter AUC 0.40; escape-dominant responder AUC 0.51. Sanity: the same
+run metrics separate pre-cluster punctuated from explorer at AUC 0.87
+(longest run) and 0.79 (switches), so the metrics carry signal; they just
+do not carry disposition.
+
+**Result: null.** Boundary-family run structure in the pre epoch does not
+predict conversion or escape responder class. The one nominal hit, a
+steeper pre-epoch wall ramp in converters, drops to p=0.19 under arena
+stratification and is one of seven tests. Treat it as noise unless it
+reappears in another cohort.
+
+Reading: the pre-disposition component of conversion identified earlier
+lives on the locomotor axis (entropy, bout rate, IBI tail), not on the
+boundary axis. Together with the post-epoch entry this closes the wall
+question for goodbatbadbat in both directions: converters are not wall
+fish before training and do not become wall fish after it.
 
 ## What should become a pipeline product
 
