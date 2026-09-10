@@ -31,6 +31,12 @@ from fisheye.analysis.track_kinematics import (
 from fisheye.analysis_workflows.position_body_frame_motion import (
     BoundTrackedProviderMotionInput,
 )
+from fisheye.analysis_workflows.provider_recording_timing_authority import (
+    PROVIDER_RECORDING_TIMING_AUTHORITY_SCHEMA_ID,
+    PROVIDER_RECORDING_TIMING_AUTHORITY_SCHEMA_VERSION,
+    ProviderRecordingTimingAuthority,
+    ProviderRecordingTimingAuthorityError,
+)
 from fisheye.analysis_workflows.tracking_source_handle import (
     TrackingSourceHandle,
     require_tracking_source_handle,
@@ -106,6 +112,11 @@ PROVIDER_TRACK_MOTION_PUBLICATION_POLICY = (
 )
 PROVIDER_TRACK_MOTION_RETRY_POLICY = "new_immutable_run_name_required"
 PROVIDER_TRACK_MOTION_COMPUTATION_ID = "track_motion_provider_successor.v1"
+PROVIDER_TRACK_MOTION_COMPUTATION_SCHEMA_ID = (
+    "palette.provider_track_motion_computation"
+)
+PROVIDER_TRACK_MOTION_LEGACY_COMPUTATION_SCHEMA_VERSION = 1
+PROVIDER_TRACK_MOTION_COMPUTATION_SCHEMA_VERSION = 2
 
 _RUN_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _SELECTOR_ATTRS = (
@@ -518,11 +529,14 @@ class PreparedProviderTrackMotion:
     source_authority_sha256: str
     tracked_input_record: Mapping[str, Any]
     tracked_input_sha256: str
-    tracking_source: TrackingSourceHandle = dataclass_field(
-        repr=False, compare=False
-    )
+    tracking_source: TrackingSourceHandle = dataclass_field(repr=False, compare=False)
     physical_authority_record: Mapping[str, Any] | None
     physical_authority_sha256: str | None
+    temporal_authority: ProviderRecordingTimingAuthority | None = dataclass_field(
+        repr=False, compare=False
+    )
+    temporal_authority_record: Mapping[str, Any] | None
+    temporal_authority_sha256: str | None
     computation_record: Mapping[str, Any]
     computation_sha256: str
 
@@ -663,6 +677,84 @@ def _validate_prepared_physical_binding(
     )
 
 
+def _validate_prepared_temporal_binding(
+    prepared: PreparedProviderTrackMotion,
+) -> None:
+    computation = _canonical_record(
+        _thaw(prepared.computation_record),
+        name="provider track-motion computation",
+    )
+    if canonical_json_sha256(computation) != prepared.computation_sha256:
+        raise ProviderTrackMotionError("Provider-motion computation digest is stale.")
+    timing = prepared.temporal_authority
+    has_record = prepared.temporal_authority_record is not None
+    has_digest = prepared.temporal_authority_sha256 is not None
+    if timing is None:
+        if has_record or has_digest or "temporal_authority" in computation:
+            raise ProviderTrackMotionError(
+                "Provider-motion temporal-authority binding is incomplete."
+            )
+        if (
+            computation.get("schema_id") != PROVIDER_TRACK_MOTION_COMPUTATION_SCHEMA_ID
+            or computation.get("schema_version")
+            != PROVIDER_TRACK_MOTION_LEGACY_COMPUTATION_SCHEMA_VERSION
+        ):
+            raise ProviderTrackMotionError(
+                "Timing-less provider motion must retain the legacy computation schema."
+            )
+        return
+    if type(timing) is not ProviderRecordingTimingAuthority or not (
+        has_record and has_digest
+    ):
+        raise ProviderTrackMotionError(
+            "Provider motion requires one loader-minted recording timing authority."
+        )
+    assert prepared.temporal_authority_record is not None
+    assert prepared.temporal_authority_sha256 is not None
+    try:
+        timing.assert_current()
+        timing.validate_source_frame_indices(
+            prepared.arrays["source_acquisition_frame_index"],
+            name="provider-motion source acquisition frames",
+        )
+    except ProviderRecordingTimingAuthorityError as exc:
+        raise ProviderTrackMotionError(
+            f"Provider recording timing authority is invalid or stale: {exc}"
+        ) from exc
+    if timing.analysis_zarr_path != prepared.tracking_source.analysis_zarr_path:
+        raise ProviderTrackMotionError(
+            "Provider recording timing authority belongs to another archive."
+        )
+    record = _canonical_record(
+        _thaw(prepared.temporal_authority_record),
+        name="provider recording timing authority",
+    )
+    expected_binding = {
+        "record": record,
+        "sha256": prepared.temporal_authority_sha256,
+    }
+    if (
+        record != _thaw(timing.record)
+        or prepared.temporal_authority_sha256 != timing.sha256
+        or canonical_json_sha256(record) != prepared.temporal_authority_sha256
+        or computation.get("temporal_authority") != expected_binding
+        or computation.get("schema_id") != PROVIDER_TRACK_MOTION_COMPUTATION_SCHEMA_ID
+        or computation.get("schema_version")
+        != PROVIDER_TRACK_MOTION_COMPUTATION_SCHEMA_VERSION
+    ):
+        raise ProviderTrackMotionError(
+            "Provider recording timing authority differs from its computation binding."
+        )
+    parameters = computation.get("parameters")
+    if (
+        not isinstance(parameters, Mapping)
+        or parameters.get("fps") != timing.nominal_fps
+    ):
+        raise ProviderTrackMotionError(
+            "Provider-motion computation FPS differs from the bound nominal FPS."
+        )
+
+
 def prepare_provider_track_motion(
     tracked: BoundTrackedProviderMotionInput,
     *,
@@ -675,6 +767,7 @@ def prepare_provider_track_motion(
     smoothing_alignment: str = "centered",
     savgol_polyorder: int = 3,
     allow_pixel_only: bool = False,
+    temporal_authority: ProviderRecordingTimingAuthority | None = None,
 ) -> PreparedProviderTrackMotion:
     """Compute one immutable calibrated successor from a sealed provider join.
 
@@ -703,6 +796,32 @@ def prepare_provider_track_motion(
         )
     if type(allow_pixel_only) is not bool:
         raise ProviderTrackMotionError("allow_pixel_only must be the exact boolean.")
+    if temporal_authority is not None:
+        if type(temporal_authority) is not ProviderRecordingTimingAuthority:
+            raise ProviderTrackMotionError(
+                "temporal_authority must be minted by the strict recording timing loader."
+            )
+        if temporal_authority.analysis_zarr_path != (
+            tracked.source_authority.analysis_zarr_path
+        ):
+            raise ProviderTrackMotionError(
+                "Provider recording timing authority belongs to another archive."
+            )
+        try:
+            temporal_authority.assert_current()
+            temporal_authority.validate_source_frame_indices(
+                tracked.source_authority.source_acquisition_frame_index,
+                name="provider-motion source acquisition frames",
+            )
+        except ProviderRecordingTimingAuthorityError as exc:
+            raise ProviderTrackMotionError(
+                f"Provider recording timing authority is invalid or stale: {exc}"
+            ) from exc
+        if float(fps) != temporal_authority.nominal_fps:
+            raise ProviderTrackMotionError(
+                "Provider-motion FPS differs from the recording timing authority's "
+                "nominal FPS."
+            )
     physical = _load_provider_physical_authority(
         tracked,
         allow_pixel_only=allow_pixel_only,
@@ -732,10 +851,25 @@ def prepare_provider_track_motion(
             arrays,
             mm_per_pixel=physical.mm_per_pixel,
         )
+    temporal_record = (
+        _canonical_record(
+            _thaw(temporal_authority.record),
+            name="provider recording timing authority",
+        )
+        if temporal_authority is not None
+        else None
+    )
+    temporal_digest = (
+        temporal_authority.sha256 if temporal_authority is not None else None
+    )
     computation = _canonical_record(
         {
-            "schema_id": "palette.provider_track_motion_computation",
-            "schema_version": 1,
+            "schema_id": PROVIDER_TRACK_MOTION_COMPUTATION_SCHEMA_ID,
+            "schema_version": (
+                PROVIDER_TRACK_MOTION_COMPUTATION_SCHEMA_VERSION
+                if temporal_authority is not None
+                else PROVIDER_TRACK_MOTION_LEGACY_COMPUTATION_SCHEMA_VERSION
+            ),
             "computation_id": PROVIDER_TRACK_MOTION_COMPUTATION_ID,
             "validity_profile": TRACK_SAMPLE_VALIDITY_INDEPENDENT_PROFILE,
             "linear_sample_reason_codes": dict(LINEAR_SAMPLE_REASON_CODES),
@@ -755,6 +889,16 @@ def prepare_provider_track_motion(
                 ),
                 "physical_authority_sha256": physical_digest,
             },
+            **(
+                {
+                    "temporal_authority": {
+                        "record": temporal_record,
+                        "sha256": temporal_digest,
+                    }
+                }
+                if temporal_record is not None
+                else {}
+            ),
             "implicit_fallback": "forbidden",
         },
         name="provider track-motion computation",
@@ -774,6 +918,11 @@ def prepare_provider_track_motion(
             _freeze(physical_record) if physical_record is not None else None
         ),
         physical_authority_sha256=physical_digest,
+        temporal_authority=temporal_authority,
+        temporal_authority_record=(
+            _freeze(temporal_record) if temporal_record is not None else None
+        ),
+        temporal_authority_sha256=temporal_digest,
         computation_record=_freeze(computation),
         computation_sha256=canonical_json_sha256(computation),
     )
@@ -982,6 +1131,7 @@ def plan_provider_track_motion_run(
     _validate_prepared_tracking_binding(prepared)
     _validate_arrays(prepared.arrays)
     _validate_prepared_physical_binding(prepared)
+    _validate_prepared_temporal_binding(prepared)
     source = Path(source_zarr).expanduser().resolve()
     if prepared.tracking_source.analysis_zarr_path != source:
         raise ProviderTrackMotionError(
@@ -1015,6 +1165,7 @@ def plan_provider_track_motion_run(
             "source_authority_sha256": prepared.source_authority_sha256,
             "tracked_input_sha256": prepared.tracked_input_sha256,
             "physical_authority_sha256": prepared.physical_authority_sha256,
+            "temporal_authority_sha256": prepared.temporal_authority_sha256,
             "computation_sha256": prepared.computation_sha256,
             "storage_profile_id": storage_profile.profile_id,
         },
@@ -1024,6 +1175,11 @@ def plan_provider_track_motion_run(
             **(
                 {"source_camera_physical_authority": prepared.physical_authority_sha256}
                 if prepared.physical_authority_sha256 is not None
+                else {}
+            ),
+            **(
+                {"recording_timing_authority": prepared.temporal_authority_sha256}
+                if prepared.temporal_authority_sha256 is not None
                 else {}
             ),
         },
@@ -1053,6 +1209,7 @@ def build_provider_track_motion_manifest(
         raise ProviderTrackMotionError("Unsupported provider-motion lifecycle status.")
     _validate_arrays(plan.prepared.arrays)
     _validate_prepared_physical_binding(plan.prepared)
+    _validate_prepared_temporal_binding(plan.prepared)
     array_records = [
         {
             "path": path,
@@ -1146,6 +1303,79 @@ def provider_track_motion_manifest_digest(manifest: Mapping[str, Any]) -> str:
     return str(manifest["payload_digest"])
 
 
+def _validate_computation_record(record: object) -> Mapping[str, Any]:
+    if not isinstance(record, Mapping):
+        raise ProviderTrackMotionError(
+            "Provider-motion computation record must be one object."
+        )
+    common_fields = {
+        "schema_id",
+        "schema_version",
+        "computation_id",
+        "validity_profile",
+        "linear_sample_reason_codes",
+        "angular_sample_reason_codes",
+        "transition_reason_codes",
+        "parameters",
+        "physical_outputs",
+        "implicit_fallback",
+    }
+    version = record.get("schema_version")
+    expected_fields = (
+        common_fields
+        if version == PROVIDER_TRACK_MOTION_LEGACY_COMPUTATION_SCHEMA_VERSION
+        else (
+            common_fields | {"temporal_authority"}
+            if version == PROVIDER_TRACK_MOTION_COMPUTATION_SCHEMA_VERSION
+            else set()
+        )
+    )
+    if (
+        record.get("schema_id") != PROVIDER_TRACK_MOTION_COMPUTATION_SCHEMA_ID
+        or set(record) != expected_fields
+        or record.get("computation_id") != PROVIDER_TRACK_MOTION_COMPUTATION_ID
+        or record.get("validity_profile") != TRACK_SAMPLE_VALIDITY_INDEPENDENT_PROFILE
+        or record.get("implicit_fallback") != "forbidden"
+    ):
+        raise ProviderTrackMotionError(
+            "Provider-motion computation schema or field set is invalid."
+        )
+    parameters = record.get("parameters")
+    fps = parameters.get("fps") if isinstance(parameters, Mapping) else None
+    if (
+        isinstance(fps, bool)
+        or not isinstance(fps, (int, float))
+        or not math.isfinite(float(fps))
+        or float(fps) <= 0
+    ):
+        raise ProviderTrackMotionError(
+            "Provider-motion computation has no valid numerical FPS."
+        )
+    if version == PROVIDER_TRACK_MOTION_COMPUTATION_SCHEMA_VERSION:
+        temporal = record["temporal_authority"]
+        if not isinstance(temporal, Mapping) or set(temporal) != {
+            "record",
+            "sha256",
+        }:
+            raise ProviderTrackMotionError(
+                "Provider-motion temporal-authority binding is not exact."
+            )
+        temporal_record = temporal["record"]
+        if (
+            not isinstance(temporal_record, Mapping)
+            or temporal_record.get("schema_id")
+            != PROVIDER_RECORDING_TIMING_AUTHORITY_SCHEMA_ID
+            or temporal_record.get("schema_version")
+            != PROVIDER_RECORDING_TIMING_AUTHORITY_SCHEMA_VERSION
+            or canonical_json_sha256(temporal_record) != temporal["sha256"]
+            or temporal_record.get("nominal_fps") != float(fps)
+        ):
+            raise ProviderTrackMotionError(
+                "Provider-motion temporal-authority record is invalid or stale."
+            )
+    return record
+
+
 def _validate_manifest(
     manifest: Mapping[str, Any],
     *,
@@ -1194,6 +1424,7 @@ def _validate_manifest(
             )
         if canonical_json_sha256(binding["record"]) != binding["sha256"]:
             raise ProviderTrackMotionError(f"Provider-motion {name} binding is stale.")
+    computation_record = _validate_computation_record(payload["computation"]["record"])
     physical = payload["physical_authority"]
     if not isinstance(physical, Mapping) or set(physical) != {
         "status",
@@ -1220,13 +1451,13 @@ def _validate_manifest(
             "Provider-motion physical-authority omission is not explicit."
         )
     if (
-        payload["computation"]["record"].get("validity_profile")
+        computation_record.get("validity_profile")
         != TRACK_SAMPLE_VALIDITY_INDEPENDENT_PROFILE
     ):
         raise ProviderTrackMotionError(
             "Provider-motion validity profile is not independent."
         )
-    physical_outputs = payload["computation"]["record"].get("physical_outputs")
+    physical_outputs = computation_record.get("physical_outputs")
     expected_physical_outputs = (
         {
             "status": "bound_typed_source_camera_mm_v1",
@@ -1466,6 +1697,7 @@ def validate_provider_track_motion_run(
 
 def _materialize_local(plan: ProviderTrackMotionRunPlan) -> dict[str, Any]:
     _validate_prepared_tracking_binding(plan.prepared)
+    _validate_prepared_temporal_binding(plan.prepared)
     if plan.local_zarr.exists():
         raise FileExistsError(
             f"Local provider-motion Zarr already exists: {plan.local_zarr}"
@@ -1529,6 +1761,7 @@ def publish_provider_track_motion_run(
 
     local = _materialize_local(plan)
     _validate_prepared_tracking_binding(plan.prepared)
+    _validate_prepared_temporal_binding(plan.prepared)
     acceptance: dict[str, Any] = {}
 
     def validate(path: Path) -> Mapping[str, Any]:
@@ -1551,6 +1784,7 @@ def publish_provider_track_motion_run(
 
     def complete(_root: Any, _parent: Any, run: Any) -> None:
         _validate_prepared_tracking_binding(plan.prepared)
+        _validate_prepared_temporal_binding(plan.prepared)
         mark_run_complete(
             run,
             parent_group=None,
@@ -1560,6 +1794,7 @@ def publish_provider_track_motion_run(
         run.attrs["stage_selector_eligible"] = False
 
     def verify(root: Any) -> None:
+        _validate_prepared_temporal_binding(plan.prepared)
         parent = _node(root, PROVIDER_TRACK_MOTION_PARENT_PATH)
         if _selector_snapshot(parent) != dict(plan.parent_selector_attrs):
             raise RuntimeError("Provider-motion publication changed parent selectors.")
@@ -1572,6 +1807,7 @@ def publish_provider_track_motion_run(
         )
 
     def finalize(_root: Any, _parent: Any, _run: Any) -> None:
+        _validate_prepared_temporal_binding(plan.prepared)
         validate_provider_track_motion_run(
             plan.source_zarr,
             plan.run_path,
@@ -1644,6 +1880,9 @@ def publish_provider_track_motion_run(
 
 
 __all__ = [
+    "PROVIDER_TRACK_MOTION_COMPUTATION_SCHEMA_ID",
+    "PROVIDER_TRACK_MOTION_COMPUTATION_SCHEMA_VERSION",
+    "PROVIDER_TRACK_MOTION_LEGACY_COMPUTATION_SCHEMA_VERSION",
     "PROVIDER_TRACK_MOTION_MANIFEST_ATTR",
     "PROVIDER_TRACK_MOTION_PARENT_PATH",
     "PROVIDER_TRACK_MOTION_SCHEMA_ID",
