@@ -21,7 +21,10 @@ from fisheye.analysis.track_kinematics_io import (
     TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
-from fisheye.shared.metadata import resolve_persisted_artifact_fps
+from fisheye.shared.metadata import (
+    resolve_persisted_artifact_fps,
+    resolve_persisted_artifact_fps_against_authority,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 PROVIDER_SWIM_BOUT_BINDING_SCHEMA_ID = (
@@ -74,7 +77,14 @@ def _whole_track_rows(provider: Any, *, track_id: int) -> slice:
         )
     index = int(matches[0])
     start, stop = int(offsets[index]), int(offsets[index + 1])
-    frame_count = np.asarray(provider.source_acquisition_frame_index).reshape(-1).size
+    raw_row_count = getattr(provider, "row_count", None)
+    if (
+        isinstance(raw_row_count, bool)
+        or not isinstance(raw_row_count, (int, np.integer))
+    ):
+        frame_count = np.asarray(provider.source_acquisition_frame_index).reshape(-1).size
+    else:
+        frame_count = int(raw_row_count)
     if start < 0 or stop < start or stop > frame_count:
         raise ProviderSwimBoutBindingError(
             "Provider-motion track offsets exceed the verified frame domain."
@@ -285,10 +295,12 @@ def validate_provider_swim_bout_binding(
                     f"Swim-bout provider read authority differs at {key!r}."
                 )
 
-    frames = np.asarray(
-        provider.source_acquisition_frame_index[selected_rows],
-        dtype=np.int64,
-    )
+    slice_reader = getattr(provider, "array_slice", None)
+    if callable(slice_reader):
+        raw_frames = slice_reader("source_acquisition_frame_index", selected_rows)
+    else:
+        raw_frames = provider.source_acquisition_frame_index[selected_rows]
+    frames = np.asarray(raw_frames, dtype=np.int64)
     frame_contract = attrs.get("frame_axis_contract")
     if not isinstance(frame_contract, Mapping):
         raise ProviderSwimBoutBindingError("Swim-bout frame-axis contract is absent.")
@@ -325,31 +337,46 @@ def validate_provider_swim_bout_binding(
                 "Swim-bout frame-axis contract digest is stale."
             )
 
-        if recording_root is None:
-            raise ProviderSwimBoutBindingError(
-                "Current strict swim-bout validation requires the recording root."
-            )
         temporal_authority = provider.temporal_authority_record
         provider_fps = (
             temporal_authority.get("nominal_fps")
             if isinstance(temporal_authority, Mapping)
             else None
         )
-        try:
-            bout_fps = resolve_persisted_artifact_fps(
-                recording_root,
-                attrs,
-                artifact_name=str(tables.run_path),
-            )
-        except ValueError as exc:
-            raise ProviderSwimBoutBindingError(
-                f"Swim-bout FPS binding is invalid: {exc}"
-            ) from exc
+        if recording_root is None:
+            # Receipt-bound provider handles have already admitted the live,
+            # selected immutable recording clock.  The bout-local value remains
+            # only a required mirror and must agree with that sealed authority.
+            try:
+                bout_fps = resolve_persisted_artifact_fps_against_authority(
+                    attrs,
+                    authoritative_fps=provider_fps,
+                    artifact_name=str(tables.run_path),
+                )
+            except ValueError as exc:
+                raise ProviderSwimBoutBindingError(
+                    f"Swim-bout FPS binding is invalid: {exc}"
+                ) from exc
+        else:
+            try:
+                bout_fps = resolve_persisted_artifact_fps(
+                    recording_root,
+                    attrs,
+                    artifact_name=str(tables.run_path),
+                )
+            except ValueError as exc:
+                raise ProviderSwimBoutBindingError(
+                    f"Swim-bout FPS binding is invalid: {exc}"
+                ) from exc
         if (
             isinstance(provider_fps, bool)
             or isinstance(bout_fps, bool)
             or not isinstance(provider_fps, (int, float))
             or not isinstance(bout_fps, (int, float))
+            or not math.isfinite(float(provider_fps))
+            or not math.isfinite(float(bout_fps))
+            or float(provider_fps) <= 0
+            or float(bout_fps) <= 0
             or not math.isclose(
                 float(provider_fps),
                 float(bout_fps),

@@ -378,6 +378,56 @@ def resolve_persisted_artifact_fps(
     return resolve_fps(root, explicit_fps=artifact_fps)
 
 
+def resolve_persisted_artifact_fps_against_authority(
+    artifact_attrs: Mapping[str, object],
+    *,
+    authoritative_fps: object,
+    artifact_name: str,
+) -> float:
+    """Validate an artifact FPS mirror against an already typed authority.
+
+    This is the non-root counterpart to :func:`resolve_persisted_artifact_fps`
+    for callers whose source handle has already admitted the recording clock.
+    The artifact-local field remains a required binding and never becomes a
+    fallback timing source.
+    """
+
+    name = str(artifact_name).strip()
+    if not name:
+        raise SourceVideoMetadataError("artifact_name must be one nonempty label.")
+    if not isinstance(artifact_attrs, Mapping):
+        raise SourceVideoMetadataError(f"{name} attributes must be an object.")
+    artifact_fps = artifact_attrs.get("fps")
+    if artifact_fps is None:
+        raise SourceVideoMetadataMissingError(
+            f"{name} must persist its recording-authority FPS binding."
+        )
+    for value, field_name in (
+        (authoritative_fps, "authoritative FPS"),
+        (artifact_fps, f"{name} FPS binding"),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) <= 0
+        ):
+            raise SourceVideoMetadataError(
+                f"{field_name} must be one positive finite number."
+            )
+    if not math.isclose(
+        float(artifact_fps),
+        float(authoritative_fps),
+        rel_tol=0.0,
+        abs_tol=1e-6,
+    ):
+        raise SourceVideoMetadataConflictError(
+            f"{name} FPS differs from its admitted recording authority: "
+            f"{float(artifact_fps)!r} != {float(authoritative_fps)!r}."
+        )
+    return float(authoritative_fps)
+
+
 def get_pipeline_type(root: zarr.Group) -> str:
     """
     Get pipeline type following unified spec.

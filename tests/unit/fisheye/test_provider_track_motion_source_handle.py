@@ -6,15 +6,22 @@ import numpy as np
 import pytest
 import zarr
 
+import fisheye.analysis_workflows.materializers.provider_track_motion as provider_writer
 from fisheye.analysis_workflows.materializers.provider_track_motion import (
+    PROVIDER_TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR,
+    PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR,
     plan_provider_track_motion_run,
     prepare_provider_track_motion,
     publish_provider_track_motion_run,
 )
 from fisheye.analysis_workflows.provider_track_motion_source_handle import (
+    PROVIDER_TRACK_MOTION_ATOMIC_COMPATIBILITY_RECEIPT_PROFILE,
+    PROVIDER_TRACK_MOTION_NATIVE_RECEIPT_PROFILE,
     ProviderTrackMotionSourceHandleError,
+    load_receipt_bound_provider_track_motion_source_handle,
     load_provider_track_motion_source_handle,
 )
+from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from tests.unit.fisheye.test_provider_track_motion_publication import (
     _install_fake_physical_authority,
     _timed_tracked,
@@ -68,6 +75,207 @@ def _load(archive, plan, **kwargs):  # type: ignore[no-untyped-def]
         **kwargs,
     )
 
+
+def _load_receipt_bound(archive, plan, **kwargs):  # type: ignore[no-untyped-def]
+    return load_receipt_bound_provider_track_motion_source_handle(
+        archive,
+        plan.run_path,
+        **kwargs,
+    )
+
+
+def test_receipt_bound_loader_preserves_eager_identity_and_reads_bounded_arrays(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    archive, plan, timing = _publish_timed_fixture(tmp_path, monkeypatch)
+    eager = _load(
+        archive,
+        plan,
+        require_authoritative_timing=True,
+    )
+    deep_calls: list[object] = []
+
+    def _forbid_deep_validation(*args, **kwargs):  # type: ignore[no-untyped-def]
+        deep_calls.append((args, kwargs))
+        raise AssertionError("receipt-bound load must not run the exhaustive validator")
+
+    monkeypatch.setattr(provider_writer, "_validate_run_group", _forbid_deep_validation)
+
+    handle = _load_receipt_bound(
+        archive,
+        plan,
+        expected_manifest_sha256=plan.manifest_sha256,
+        require_authoritative_timing=True,
+    )
+
+    assert deep_calls == []
+    assert handle.receipt_profile == PROVIDER_TRACK_MOTION_NATIVE_RECEIPT_PROFILE
+    assert handle.payload_integrity_receipt_sha256
+    assert handle.payload_validation_receipt_sha256
+    assert handle.verification_digest == eager.verification_digest
+    assert handle.provider_manifest_sha256 == eager.provider_manifest_sha256
+    assert handle.temporal_authority_sha256 == timing.sha256
+    assert handle.metadata_evidence["timing_authority"]["profile"] == (
+        "provider_bound_selected_immutable_clock_metadata_v1"
+    )
+    assert handle.available_arrays == tuple(sorted(eager.arrays))
+    np.testing.assert_array_equal(handle.track_ids, eager.track_ids)
+    np.testing.assert_array_equal(handle.track_row_offsets, eager.track_row_offsets)
+    np.testing.assert_array_equal(
+        handle.array_slice("positions_px", slice(1, 3)),
+        eager.positions_px[1:3],
+    )
+    with pytest.raises(ValueError):
+        handle.array_slice("positions_px", slice(0, 1))[0, 0] = 99.0
+    with pytest.raises(ProviderTrackMotionSourceHandleError, match="contiguous"):
+        handle.array_slice("positions_px", slice(0, 2, 2))
+
+    handle.assert_current()
+    assert deep_calls == []
+
+
+def test_receipt_bound_loader_rejects_changed_clock_selector_generation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    archive, plan, _timing = _publish_timed_fixture(tmp_path, monkeypatch)
+    clock_parent = zarr.open_group(
+        str(archive / "analysis" / "acquisition_frame_clock_runs"),
+        mode="r+",
+        zarr_format=3,
+        use_consolidated=False,
+    )
+    clock_parent.attrs["latest_complete"] = "another_clock"
+
+    with pytest.raises(
+        ProviderTrackMotionSourceHandleError,
+        match="selector generation",
+    ):
+        _load_receipt_bound(
+            archive,
+            plan,
+            require_authoritative_timing=True,
+        )
+
+
+def test_receipt_bound_loader_accepts_atomic_full_validation_compatibility(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        provider_writer,
+        "_stamp_provider_track_motion_payload_receipts",
+        lambda *_args, **_kwargs: {},
+    )
+    archive, plan, timing = _publish_timed_fixture(tmp_path, monkeypatch)
+
+    handle = _load_receipt_bound(
+        archive,
+        plan,
+        require_authoritative_timing=True,
+        timing_authority=timing,
+    )
+
+    assert handle.receipt_profile == (
+        PROVIDER_TRACK_MOTION_ATOMIC_COMPATIBILITY_RECEIPT_PROFILE
+    )
+    assert handle.payload_integrity_receipt_sha256 is None
+    assert handle.payload_validation_receipt_sha256 is None
+    assert handle.atomic_publication_receipt_sha256 == handle.receipt_digest
+
+
+def test_receipt_bound_loader_rejects_stale_metadata_and_atomic_receipt(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    archive, plan, timing = _publish_timed_fixture(tmp_path, monkeypatch)
+    direct = zarr.open_group(
+        str(archive), mode="r+", zarr_format=3, use_consolidated=False
+    )
+    run = direct[plan.run_path]
+    receipt = copy.deepcopy(dict(run.attrs["cluster_output_staging"]))
+    receipt["manifest_sha256"] = "0" * 64
+    run.attrs["cluster_output_staging"] = receipt
+
+    with pytest.raises(
+        ProviderTrackMotionSourceHandleError,
+        match="atomic publication receipt identity",
+    ):
+        _load_receipt_bound(
+            archive,
+            plan,
+            require_authoritative_timing=True,
+            timing_authority=timing,
+        )
+
+
+def test_receipt_bound_loader_rejects_incomplete_or_tampered_native_receipts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    archive, plan, timing = _publish_timed_fixture(tmp_path, monkeypatch)
+    direct = zarr.open_group(
+        str(archive), mode="r+", zarr_format=3, use_consolidated=False
+    )
+    run = direct[plan.run_path]
+    original_integrity = copy.deepcopy(
+        dict(run.attrs[PROVIDER_TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR])
+    )
+
+    del run.attrs[PROVIDER_TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR]
+    with pytest.raises(
+        ProviderTrackMotionSourceHandleError,
+        match="receipt pair is incomplete",
+    ):
+        _load_receipt_bound(
+            archive,
+            plan,
+            require_authoritative_timing=True,
+            timing_authority=timing,
+        )
+
+    run.attrs[PROVIDER_TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR] = original_integrity
+    validation = copy.deepcopy(
+        dict(run.attrs[PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR])
+    )
+    validation["scientific_manifest"]["sha256"] = "0" * 64
+    run.attrs[PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR] = validation
+    with pytest.raises(
+        ProviderTrackMotionSourceHandleError,
+        match="payload receipt validation failed",
+    ):
+        _load_receipt_bound(
+            archive,
+            plan,
+            require_authoritative_timing=True,
+            timing_authority=timing,
+        )
+
+
+def test_receipt_bound_loader_rejects_changed_provider_namespace_generation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    archive, plan, timing = _publish_timed_fixture(tmp_path, monkeypatch)
+    direct = zarr.open_group(
+        str(archive), mode="r+", zarr_format=3, use_consolidated=False
+    )
+    direct[provider_writer.PROVIDER_TRACK_MOTION_PARENT_PATH].attrs[
+        "post_publication_note"
+    ] = "changed"
+    consolidate_metadata_capture_expected_warnings(archive)
+
+    with pytest.raises(
+        ProviderTrackMotionSourceHandleError,
+        match="namespace generation",
+    ):
+        _load_receipt_bound(
+            archive,
+            plan,
+            require_authoritative_timing=True,
+            timing_authority=timing,
+        )
 
 def test_reads_exact_current_phase3_fixture_as_read_only_snapshot(
     tmp_path,

@@ -81,6 +81,13 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
 )
+from fisheye.shared.zarr_payload_receipt import (
+    DECODED_PAYLOAD_CANONICALIZATION,
+    build_payload_integrity_receipt,
+    build_payload_validation_receipt,
+    verify_payload_integrity_receipt,
+    verify_payload_validation_receipt,
+)
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1, StorageProfile
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
@@ -107,6 +114,22 @@ PROVIDER_TRACK_MOTION_STORAGE_PLAN_ATTR = "provider_track_motion_storage_plan"
 PROVIDER_TRACK_MOTION_PUBLICATION_ATTEMPT_ATTR = (
     "provider_track_motion_publication_attempt_uuid"
 )
+PROVIDER_TRACK_MOTION_PAYLOAD_RECEIPT_PROFILE_ATTR = (
+    "provider_track_motion_payload_receipt_profile"
+)
+PROVIDER_TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR = (
+    "provider_track_motion_payload_integrity_receipt"
+)
+PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR = (
+    "provider_track_motion_payload_validation_receipt"
+)
+PROVIDER_TRACK_MOTION_PAYLOAD_RECEIPT_PROFILE_V1 = (
+    "provider_track_motion_generic_payload_receipt_v1"
+)
+PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID = (
+    "palette.provider_track_motion.full_payload_validator"
+)
+PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION = 1
 PROVIDER_TRACK_MOTION_PUBLICATION_POLICY = (
     "provider_track_motion_atomic_nonpromoting_v1"
 )
@@ -1547,6 +1570,261 @@ def _fill_value(path: str) -> Any:
     return dtype.type(0)
 
 
+def _provider_payload_array_digests(
+    payload: Mapping[str, Any],
+) -> dict[str, str]:
+    records = payload.get("arrays")
+    if not isinstance(records, list):
+        raise ProviderTrackMotionError(
+            "Provider-motion payload receipt lacks its array roster."
+        )
+    result: dict[str, str] = {}
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise ProviderTrackMotionError(
+                "Provider-motion payload receipt array record is malformed."
+            )
+        path = record.get("path")
+        digest = record.get("sha256")
+        if (
+            type(path) is not str
+            or not path
+            or path in result
+            or type(digest) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            raise ProviderTrackMotionError(
+                "Provider-motion payload receipt array identity is invalid."
+            )
+        result[path] = digest
+    return dict(sorted(result.items()))
+
+
+def _provider_payload_numerical_policy(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "array_digest_source": (
+            "full_persisted_provider_validator_against_manifest_v1"
+        ),
+        "array_payload_canonicalization": DECODED_PAYLOAD_CANONICALIZATION,
+        "array_content_sha256": _provider_payload_array_digests(payload),
+        "closed_array_inventory": True,
+        "mutation_exclusion_contract": (
+            "exclusive_local_materialization_then_atomic_verified_copy_"
+            "selector_ineligible_immutable_publication_v1"
+        ),
+        "normal_load_physical_rehash": False,
+        "deep_audit_physical_rehash_available": True,
+    }
+
+
+def _provider_payload_copy_report(
+    arrays: Mapping[str, np.ndarray],
+) -> dict[str, Any]:
+    """Describe the exact prepared values accepted by the persisted validator."""
+
+    plans: list[dict[str, Any]] = []
+    static: list[dict[str, Any]] = []
+    for path, raw in sorted(arrays.items()):
+        values = np.ascontiguousarray(raw)
+        plans.append(
+            {
+                "path": path,
+                "dtype": np.dtype(values.dtype).str,
+                "shape": list(values.shape),
+            }
+        )
+        static.append(
+            {
+                "path": path,
+                "decoded_bytes": int(values.nbytes),
+                "decoded_sha256": sha256_array(values),
+            }
+        )
+    return {
+        "schema_id": "palette.zarr_sharded_run_copy.v1",
+        "status": "complete",
+        "exact_decoded_validation": True,
+        "arrays": plans,
+        "shards": [],
+        "static_arrays": static,
+    }
+
+
+def _stamp_provider_track_motion_payload_receipts(
+    run: Any,
+    run_path: Path,
+    *,
+    manifest: Mapping[str, Any],
+    arrays: Mapping[str, np.ndarray],
+) -> dict[str, Any]:
+    occupied = {
+        name
+        for name in (
+            PROVIDER_TRACK_MOTION_PAYLOAD_RECEIPT_PROFILE_ATTR,
+            PROVIDER_TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR,
+            PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR,
+        )
+        if name in run.attrs
+    }
+    if occupied:
+        raise ProviderTrackMotionError(
+            "Provider-motion payload receipt attributes are already occupied."
+        )
+    payload, _receipt = _validate_manifest(
+        manifest,
+        expected_run_name=run_path.name,
+        expected_status=RUN_STATUS_COMPLETE,
+    )
+    manifest_sha256 = provider_track_motion_manifest_digest(manifest)
+    integrity = build_payload_integrity_receipt(
+        run_path,
+        run_ref=f"/{payload['run_path']}",
+        decoded_copy_report=_provider_payload_copy_report(arrays),
+    )
+    validation = build_payload_validation_receipt(
+        integrity,
+        scientific_manifest_schema_id=PROVIDER_TRACK_MOTION_MANIFEST_SCHEMA_ID,
+        scientific_manifest_schema_version=(
+            PROVIDER_TRACK_MOTION_MANIFEST_SCHEMA_VERSION
+        ),
+        scientific_manifest_sha256=manifest_sha256,
+        validator_schema_id=PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID,
+        validator_schema_version=(
+            PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION
+        ),
+        numerical_policy=_provider_payload_numerical_policy(payload),
+    )
+    run.attrs[PROVIDER_TRACK_MOTION_PAYLOAD_RECEIPT_PROFILE_ATTR] = (
+        PROVIDER_TRACK_MOTION_PAYLOAD_RECEIPT_PROFILE_V1
+    )
+    run.attrs[PROVIDER_TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR] = json_attr_safe(
+        integrity
+    )
+    run.attrs[PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR] = json_attr_safe(
+        validation
+    )
+    if (
+        run.attrs.get(PROVIDER_TRACK_MOTION_PAYLOAD_RECEIPT_PROFILE_ATTR)
+        != PROVIDER_TRACK_MOTION_PAYLOAD_RECEIPT_PROFILE_V1
+        or run.attrs.get(PROVIDER_TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR)
+        != integrity
+        or run.attrs.get(PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR)
+        != validation
+    ):
+        raise ProviderTrackMotionError(
+            "Provider-motion payload receipts did not persist exactly."
+        )
+    return {
+        "profile": PROVIDER_TRACK_MOTION_PAYLOAD_RECEIPT_PROFILE_V1,
+        "integrity_receipt_sha256": integrity["record_sha256"],
+        "validation_receipt_sha256": validation["record_sha256"],
+    }
+
+
+def verify_provider_track_motion_payload_receipts(
+    run: Any,
+    run_path: str | Path,
+    *,
+    manifest: Mapping[str, Any],
+    verify_physical_payload: bool = False,
+) -> dict[str, Any] | None:
+    """Validate a native provider receipt pair without weakening legacy reads."""
+
+    names = (
+        PROVIDER_TRACK_MOTION_PAYLOAD_RECEIPT_PROFILE_ATTR,
+        PROVIDER_TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR,
+        PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR,
+    )
+    present = {name for name in names if name in run.attrs}
+    if not present:
+        return None
+    if present != set(names):
+        raise ProviderTrackMotionError(
+            "Provider-motion payload receipt pair is incomplete."
+        )
+    if (
+        run.attrs.get(PROVIDER_TRACK_MOTION_PAYLOAD_RECEIPT_PROFILE_ATTR)
+        != PROVIDER_TRACK_MOTION_PAYLOAD_RECEIPT_PROFILE_V1
+    ):
+        raise ProviderTrackMotionError(
+            "Provider-motion payload receipt profile is unsupported."
+        )
+    payload, _storage = _validate_manifest(
+        manifest,
+        expected_run_name=str(manifest["payload"]["run_name"]),
+        expected_status=RUN_STATUS_COMPLETE,
+    )
+    manifest_sha256 = provider_track_motion_manifest_digest(manifest)
+    try:
+        integrity = verify_payload_integrity_receipt(
+            run_path,
+            run.attrs[PROVIDER_TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR],
+            expected_run_ref=f"/{payload['run_path']}",
+            verify_physical_payload=verify_physical_payload,
+        )
+        validation = verify_payload_validation_receipt(
+            run.attrs[PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR],
+            integrity_receipt=integrity,
+            expected_scientific_manifest_sha256=manifest_sha256,
+            expected_validator_schema_id=(
+                PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID
+            ),
+            expected_validator_schema_version=(
+                PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION
+            ),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise ProviderTrackMotionError(
+            f"Provider-motion payload receipt validation failed: {exc}"
+        ) from exc
+    scientific_manifest = validation.get("scientific_manifest")
+    if scientific_manifest != {
+        "schema_id": PROVIDER_TRACK_MOTION_MANIFEST_SCHEMA_ID,
+        "schema_version": PROVIDER_TRACK_MOTION_MANIFEST_SCHEMA_VERSION,
+        "sha256": manifest_sha256,
+    }:
+        raise ProviderTrackMotionError(
+            "Provider-motion receipt binds another scientific manifest schema."
+        )
+    policy = validation.get("numerical_policy")
+    expected_policy = _provider_payload_numerical_policy(payload)
+    if policy != expected_policy:
+        raise ProviderTrackMotionError(
+            "Provider-motion payload receipt numerical policy changed."
+        )
+    decoded = integrity.get("decoded_payload")
+    decoded_arrays = decoded.get("arrays") if isinstance(decoded, Mapping) else None
+    records = payload["arrays"]
+    if not isinstance(decoded_arrays, list) or len(decoded_arrays) != len(records):
+        raise ProviderTrackMotionError(
+            "Provider-motion decoded receipt inventory is incomplete."
+        )
+    for decoded_record, manifest_record in zip(
+        decoded_arrays, records, strict=True
+    ):
+        leaves = decoded_record.get("leaves")
+        if (
+            decoded_record.get("path") != manifest_record["path"]
+            or decoded_record.get("dtype") != manifest_record["dtype"]
+            or decoded_record.get("shape") != manifest_record["shape"]
+            or not isinstance(leaves, list)
+            or len(leaves) != 1
+            or leaves[0].get("kind") != "whole_array"
+            or leaves[0].get("decoded_sha256") != manifest_record["sha256"]
+        ):
+            raise ProviderTrackMotionError(
+                "Provider-motion decoded receipt differs from its manifest arrays."
+            )
+    return {
+        "profile": PROVIDER_TRACK_MOTION_PAYLOAD_RECEIPT_PROFILE_V1,
+        "integrity_receipt_sha256": integrity["record_sha256"],
+        "validation_receipt_sha256": validation["record_sha256"],
+        "physical_payload_verified": bool(verify_physical_payload),
+    }
+
+
 def _write_arrays(run: Any, plan: ProviderTrackMotionRunPlan) -> None:
     entries = {entry.declaration.path: entry for entry in plan.storage_receipt.entries}
     for path, values in sorted(plan.prepared.arrays.items()):
@@ -1582,14 +1860,27 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def _validate_run_group(
+def _array_paths(group: Any, *, prefix: str = "") -> set[str]:
+    paths = {
+        f"{prefix}/{name}".strip("/") for name in group.array_keys()
+    }
+    for name in group.group_keys():
+        child_prefix = f"{prefix}/{name}".strip("/")
+        paths.update(_array_paths(group[name], prefix=child_prefix))
+    return paths
+
+
+def validate_provider_track_motion_run_metadata(
     run: Any,
-    run_path: Path,
+    run_path: str | Path,
     *,
     expected_run_name: str,
-    expected_status: str,
+    expected_status: str = RUN_STATUS_COMPLETE,
     expected_manifest_sha256: str | None = None,
 ) -> dict[str, Any]:
+    """Validate the complete provider declaration without reading array values."""
+
+    physical_path = Path(run_path).expanduser().resolve()
     manifest = run.attrs.get(PROVIDER_TRACK_MOTION_MANIFEST_ATTR)
     payload, receipt = _validate_manifest(
         manifest,
@@ -1599,18 +1890,30 @@ def _validate_run_group(
     digest = provider_track_motion_manifest_digest(manifest)
     if expected_manifest_sha256 is not None and digest != expected_manifest_sha256:
         raise ProviderTrackMotionError(
-            "Provider-motion manifest differs from the plan."
+            "Provider-motion manifest differs from the expected identity."
         )
     if (
-        run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != expected_status
+        run.attrs.get("schema_id") != PROVIDER_TRACK_MOTION_SCHEMA_ID
+        or run.attrs.get("schema_version") != PROVIDER_TRACK_MOTION_SCHEMA_VERSION
+        or run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != expected_status
         or run.attrs.get("stage_selector_eligible") is not False
         or run.attrs.get(PROVIDER_TRACK_MOTION_MANIFEST_DIGEST_ATTR) != digest
+        or run.attrs.get(PROVIDER_TRACK_MOTION_STORAGE_PLAN_ATTR)
+        != payload["physical_storage_plan"]
+        or run.attrs.get(PROVIDER_TRACK_MOTION_PUBLICATION_ATTEMPT_ATTR)
+        != payload["publication"]["publication_attempt_uuid"]
     ):
         raise ProviderTrackMotionError(
-            "Provider-motion run lifecycle attrs are invalid."
+            "Provider-motion run metadata or lifecycle attrs are invalid."
         )
-    arrays: dict[str, np.ndarray] = {}
-    records = {record["path"]: record for record in payload["arrays"]}
+    declared_paths = {
+        entry.declaration.path for entry in receipt.entries
+    }
+    observed_paths = _array_paths(run)
+    if observed_paths != declared_paths:
+        raise ProviderTrackMotionError(
+            "Provider-motion live array inventory differs from its manifest."
+        )
     for entry in receipt.entries:
         path = entry.declaration.path
         node = _node(run, path)
@@ -1618,9 +1921,6 @@ def _validate_run_group(
             raise ProviderTrackMotionError(
                 f"Provider-motion array {path!r} is missing."
             )
-        value = np.asarray(node[:])
-        if sha256_array(value) != records[path]["sha256"]:
-            raise ProviderTrackMotionError(f"Provider-motion array {path!r} is stale.")
         contract = entry.declaration.contract
         expected_semantics = {
             **({"units": contract.units} if contract.units is not None else {}),
@@ -1641,7 +1941,7 @@ def _validate_run_group(
                 f"Provider-motion array {path!r} semantic metadata is stale."
             )
         errors = validate_array_metadata_declaration_from_plan(
-            _read_json(run_path.joinpath(*path.split("/"))),
+            _read_json(physical_path.joinpath(*path.split("/"))),
             contract=entry.declaration.contract,
             plan=entry.plan,
             fill_value=_fill_value(path),
@@ -1650,6 +1950,56 @@ def _validate_run_group(
             raise ProviderTrackMotionError(
                 f"Provider-motion metadata failed for {path!r}: {errors!r}."
             )
+    receipt_evidence = verify_provider_track_motion_payload_receipts(
+        run,
+        physical_path,
+        manifest=manifest,
+        verify_physical_payload=False,
+    )
+    records = {record["path"]: record for record in payload["arrays"]}
+    return {
+        "valid": True,
+        "run_path": payload["run_path"],
+        "status": expected_status,
+        "row_count": int(records["track_sample_key"]["shape"][0]),
+        "track_count": int(records["track_ids"]["shape"][0]),
+        "per_second_count": int(
+            records["per_second/track_second_key"]["shape"][0]
+        ),
+        "manifest_sha256": digest,
+        "payload_receipt": receipt_evidence,
+    }
+
+
+def _validate_run_group(
+    run: Any,
+    run_path: Path,
+    *,
+    expected_run_name: str,
+    expected_status: str,
+    expected_manifest_sha256: str | None = None,
+) -> dict[str, Any]:
+    metadata = validate_provider_track_motion_run_metadata(
+        run,
+        run_path,
+        expected_run_name=expected_run_name,
+        expected_status=expected_status,
+        expected_manifest_sha256=expected_manifest_sha256,
+    )
+    manifest = run.attrs.get(PROVIDER_TRACK_MOTION_MANIFEST_ATTR)
+    payload, receipt = _validate_manifest(
+        manifest,
+        expected_run_name=expected_run_name,
+        expected_status=expected_status,
+    )
+    arrays: dict[str, np.ndarray] = {}
+    records = {record["path"]: record for record in payload["arrays"]}
+    for entry in receipt.entries:
+        path = entry.declaration.path
+        node = _node(run, path)
+        value = np.asarray(node[:])
+        if sha256_array(value) != records[path]["sha256"]:
+            raise ProviderTrackMotionError(f"Provider-motion array {path!r} is stale.")
         arrays[path] = value
     _validate_arrays(arrays)
     physical_binding = payload["physical_authority"]
@@ -1659,12 +2009,13 @@ def _validate_run_group(
             mm_per_pixel=float(physical_binding["record"]["mm_per_pixel"]),
         )
     return {
-        "valid": True,
-        "run_path": payload["run_path"],
-        "status": expected_status,
+        **{
+            key: value
+            for key, value in metadata.items()
+            if key not in {"per_second_count", "payload_receipt"}
+        },
         "row_count": int(arrays["track_sample_key"].shape[0]),
         "track_count": int(arrays["track_ids"].shape[0]),
-        "manifest_sha256": digest,
     }
 
 
@@ -1740,6 +2091,19 @@ def _materialize_local(plan: ProviderTrackMotionRunPlan) -> dict[str, Any]:
         plan.storage_receipt.as_manifest()
     )
     run.attrs["stage_selector_eligible"] = False
+    _validate_run_group(
+        run,
+        plan.local_run_path,
+        expected_run_name=plan.run_name,
+        expected_status=RUN_STATUS_COMPLETE,
+        expected_manifest_sha256=plan.manifest_sha256,
+    )
+    _stamp_provider_track_motion_payload_receipts(
+        run,
+        plan.local_run_path,
+        manifest=complete_manifest,
+        arrays=plan.prepared.arrays,
+    )
     consolidate_metadata_capture_expected_warnings(plan.local_zarr)
     validated = _validate_run_group(
         open_zarr_root(plan.local_zarr, mode="r", use_consolidated=True)[plan.run_path],
@@ -1884,6 +2248,10 @@ __all__ = [
     "PROVIDER_TRACK_MOTION_COMPUTATION_SCHEMA_VERSION",
     "PROVIDER_TRACK_MOTION_LEGACY_COMPUTATION_SCHEMA_VERSION",
     "PROVIDER_TRACK_MOTION_MANIFEST_ATTR",
+    "PROVIDER_TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR",
+    "PROVIDER_TRACK_MOTION_PAYLOAD_RECEIPT_PROFILE_ATTR",
+    "PROVIDER_TRACK_MOTION_PAYLOAD_RECEIPT_PROFILE_V1",
+    "PROVIDER_TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR",
     "PROVIDER_TRACK_MOTION_PARENT_PATH",
     "PROVIDER_TRACK_MOTION_SCHEMA_ID",
     "PROVIDER_TRACK_MOTION_SCHEMA_VERSION",
@@ -1896,4 +2264,6 @@ __all__ = [
     "provider_track_motion_manifest_digest",
     "publish_provider_track_motion_run",
     "validate_provider_track_motion_run",
+    "validate_provider_track_motion_run_metadata",
+    "verify_provider_track_motion_payload_receipts",
 ]
