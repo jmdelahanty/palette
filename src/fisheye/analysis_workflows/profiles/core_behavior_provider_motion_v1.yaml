@@ -1,0 +1,36 @@
+schema_id: palette.analysis_workflow
+schema_version: 2
+workflow_id: core_behavior_provider_motion_v1
+description: >-
+  Selector-ineligible provider-motion canary workflow. One exact sealed
+  provider-motion publication is sufficient for the swim-bout consumer; its
+  position, body-frame, tracking, keypoint, and mask lineage remains sealed.
+
+run_scopes:
+  track_kinematics: provider
+
+run_selection: {}
+
+targets:
+  - swim_bouts
+
+nodes:
+  - id: track_kinematics
+    kind: prerequisite
+    stage_id: track_kinematics
+    runnable: false
+    execution_policy: exact_sealed_provider_motion_canary
+    description: >-
+      One explicitly named complete provider-motion publication with
+      authoritative recording timing. Provider motion is selector-ineligible
+      and this profile never resolves or mutates a production selector.
+
+  - id: swim_bouts
+    kind: analysis
+    stage_id: swim_bouts
+    depends_on: [track_kinematics]
+    execution_policy: whole_recording_temporal_state
+    description: >-
+      Detect a selector-ineligible compact-v2 swim-bout candidate on the exact
+      provider-motion track while preserving its manifest, row identity,
+      frame axis, validity, physical authority, and recording timing bindings.

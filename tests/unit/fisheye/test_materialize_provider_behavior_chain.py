@@ -8,6 +8,9 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.analysis_workflows.execution_profiles import (
+    SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+)
 from fisheye.analysis_workflows.materializers.subject_position import (
     SubjectPositionPreparedInput,
     plan_subject_position_run,
@@ -23,6 +26,9 @@ from fisheye.analysis_workflows.protocol_semantic_chaser_selection_publication i
 )
 from fisheye.analysis_workflows.resolved_epoch_selection import (
     resolve_exact_stimulus_epoch_selection,
+)
+from fisheye.analysis_workflows.runtime_verification import (
+    verify_persisted_stage_output,
 )
 from fisheye.shared.coordinate_descriptor import (
     CanonicalFrameRecord,
@@ -59,6 +65,9 @@ from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
 from fisheye.utils import materialize_provider_behavior_chain as mod
+from tests.unit.fisheye.test_provider_swim_bout_binding import (
+    _fixture as _provider_swim_bout_fixture,
+)
 from tests.unit.fisheye.test_body_frame_source_handle import _published_fixture
 from tests.unit.fisheye.test_protocol_semantic_chaser_selection import (
     _chaser_bindings,
@@ -836,46 +845,18 @@ def test_swim_bout_reuse_rejects_another_motion_manifest(
 ) -> None:
     archive = tmp_path / "recording_analysis.zarr"
     archive.mkdir()
-    motion = SimpleNamespace(
-        run_name="motion_v1",
-        run_path="analysis/track_kinematics_runs/provider/motion_v1",
-        provider_manifest_sha256="a" * 64,
-        verification_digest="b" * 64,
-        row_count=3,
-        source_acquisition_frame_index=np.asarray([0, 1, 2], dtype=np.int64),
-    )
-    frame_sha256 = mod.canonical_frame_axis_sha256(
-        motion.source_acquisition_frame_index
-    )
-    tables = SimpleNamespace(
-        run_path="analysis/swim_bout_runs/bouts_v1",
-        run_attrs={
-            "lineage_hash": "c" * 64,
-            "source_track_kinematics_scope": "provider",
-            "source_track_kinematics_run": motion.run_name,
-            "source_track_motion_manifest_sha256": "d" * 64,
-            "track_id": 0,
-            "source_track_motion_authority": {
-                "motion_manifest_sha256": motion.provider_manifest_sha256,
-                "provider_verification_digest": motion.verification_digest,
-                "track_id": 0,
-                "track_row_start": 0,
-                "track_row_stop": motion.row_count,
-            },
-            "frame_axis_contract": {
-                "source_track_motion_manifest_sha256": (
-                    motion.provider_manifest_sha256
-                ),
-                "content_sha256": frame_sha256,
-            },
-        },
-    )
+    motion, tables = _provider_swim_bout_fixture()
+    tables.run_attrs["source_track_motion_manifest_sha256"] = "d" * 64
     monkeypatch.setattr(
         mod,
         "validate_direct_consolidated_subtree",
         lambda *args, **kwargs: None,
     )
-    monkeypatch.setattr(mod, "open_zarr_root", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        mod,
+        "open_zarr_root",
+        lambda *args, **kwargs: SimpleNamespace(attrs={"fps": 100.0}),
+    )
     monkeypatch.setattr(
         mod,
         "load_exact_selector_ineligible_default_swim_bout_tables",
@@ -1306,6 +1287,23 @@ def test_v4_real_zarr_chain_receipts_reuse_and_refuse_tampered_position(
     assert first["stages"]["motion"]["status"] == "published"
     assert first["stages"]["swim_bouts"]["status"] == "published"
     assert first["stages"]["epoch_summary"]["status"] == "published"
+    motion_verification = verify_persisted_stage_output(
+        archive,
+        "track_kinematics",
+        requested_run="provider/motion_v1",
+        dependency_runs={},
+        run_scope="provider",
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+    bout_verification = verify_persisted_stage_output(
+        archive,
+        "swim_bouts",
+        requested_run="bouts_v1",
+        dependency_runs={"track_kinematics": "provider/motion_v1"},
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+    assert motion_verification.available, motion_verification.reason
+    assert bout_verification.available, bout_verification.reason
 
     second = mod.materialize_chain(
         task,

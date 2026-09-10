@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import subprocess
 
 import pytest
 
+from fisheye.analysis.track_kinematics_io import (
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
+)
 from fisheye.analysis_workflows import (
     StageAvailability,
     WorkflowExecutionError,
@@ -13,6 +17,7 @@ from fisheye.analysis_workflows import (
     default_core_behavior_profile_path,
     load_analysis_workflow,
     plan_analysis_workflow,
+    provider_motion_core_behavior_profile_path,
 )
 from fisheye.utils.execute_analysis_workflow import execute_workflow_plan, main
 from fisheye.analysis_workflows.dag import NodePlan
@@ -22,6 +27,7 @@ from fisheye.analysis_workflows.execution import (
 )
 from fisheye.analysis_workflows.execution_profiles import (
     SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    resolve_workflow_execution_profile,
 )
 
 
@@ -217,6 +223,7 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
     )
     assert swim[swim.index("--track-kinematics-run") + 1] == "track_a"
     assert swim[swim.index("--run-name") + 1] == ("swim_bouts_canary_20260713_01")
+    assert "--track-kinematics-scope" not in swim
 
     visualization = commands["track_kinematics_visualization"]
     view = visualization.argv
@@ -307,6 +314,84 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
     assert shape[shape.index("--output-shard-rows") + 1] == "131072"
     assert shape[shape.index("--native-threads") + 1] == "1"
     assert "--apply" in shape
+
+
+def test_provider_motion_profile_renders_exact_provider_swim_bout_command(
+    tmp_path: Path,
+) -> None:
+    workflow = load_analysis_workflow(
+        provider_motion_core_behavior_profile_path()
+    ).with_run_selection({"track_kinematics": "motion_v2"})
+    plan = plan_analysis_workflow(
+        workflow,
+        {
+            "track_kinematics": _status(
+                "track_kinematics",
+                available=True,
+                run_name="provider/motion_v2",
+            ),
+            "swim_bouts": _status("swim_bouts", available=False),
+        },
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+        materialize_stage_ids=("swim_bouts",),
+    )
+
+    execution = build_workflow_execution_plan(
+        workflow,
+        plan,
+        zarr_path=tmp_path / "recording_analysis.zarr",
+        execution_id="provider_canary_1",
+        num_workers=2,
+        python_executable="/palette/python",
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+
+    assert [command.node_id for command in execution.commands] == ["swim_bouts"]
+    command = execution.commands[0]
+    assert command.dependency_runs == {"track_kinematics": "provider/motion_v2"}
+    assert command.argv[4] == "--selector-ineligible"
+    assert command.argv[command.argv.index("--track-kinematics-scope") + 1] == (
+        "provider"
+    )
+    assert command.argv[command.argv.index("--track-kinematics-run") + 1] == (
+        "motion_v2"
+    )
+    assert (
+        command.argv[command.argv.index("--track-kinematics-publication-profile") + 1]
+        == TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+    )
+
+
+@pytest.mark.parametrize(
+    "provider_run",
+    (
+        "provider/latest",
+        "provider/authoritative",
+        "provider/current",
+        "provider/default",
+        "provider/a/b",
+        "provider/../motion",
+        "provider/ motion",
+    ),
+)
+def test_provider_swim_bout_command_rejects_nonconcrete_dependency_run(
+    tmp_path: Path,
+    provider_run: str,
+) -> None:
+    context = _command_context(
+        tmp_path,
+        stage_id="swim_bouts",
+        dependencies={"track_kinematics": provider_run},
+    )
+    context = replace(
+        context,
+        execution_profile=resolve_workflow_execution_profile(
+            SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+        ),
+    )
+
+    with pytest.raises(WorkflowExecutionError, match="exact provider-motion run"):
+        STAGE_COMMAND_BUILDERS["swim_bouts"](context)
 
 
 def test_eye_angle_execution_cannot_render_without_external_receipt_root(

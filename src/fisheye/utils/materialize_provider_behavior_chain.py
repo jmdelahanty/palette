@@ -29,7 +29,6 @@ from fisheye.analysis.stimulus_epoch_schema import (
     stimulus_epoch_logical_content_sha256,
     validate_legacy_stimulus_epoch_source,
 )
-from fisheye.analysis.swim_bout_frame_axis import canonical_frame_axis_sha256
 from fisheye.analysis.swim_bout_io import (
     SwimBoutTables,
     load_exact_selector_ineligible_default_swim_bout_tables,
@@ -73,6 +72,11 @@ from fisheye.analysis_workflows.provider_recording_timing_authority import (
 from fisheye.analysis_workflows.provider_track_motion_source_handle import (
     load_provider_track_motion_source_handle,
 )
+from fisheye.analysis_workflows.provider_swim_bout_binding import (
+    PROVIDER_SWIM_BOUT_VALIDATION_PROFILE_CURRENT_STRICT_V1,
+    provider_swim_bout_content_sha256,
+    validate_provider_swim_bout_binding,
+)
 from fisheye.analysis_workflows.resolved_epoch_selection import (
     ResolvedEpochSelection,
     resolve_exact_stimulus_epoch_selection,
@@ -85,7 +89,6 @@ from fisheye.analysis_workflows.tracking_source_handle import (
     load_tracking_source_handle,
 )
 from fisheye.shared.anatomy_profile import load_anatomy_profile
-from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.json_safety import json_attr_safe, write_json_atomic
 from fisheye.shared.run_lineage_fingerprint import (
     canonical_lineage_json,
@@ -852,28 +855,7 @@ def _motion(
 
 
 def _swim_bout_content_sha256(tables: SwimBoutTables) -> str:
-    arrays = {
-        "bouts": tables.bouts,
-        "peak_events": tables.peak_events,
-        "inter_bout_intervals": tables.inter_bout_intervals,
-        "inter_bout_interval_histogram": tables.inter_bout_interval_histogram,
-        "global_metrics": tables.global_metrics,
-        "trials": tables.trials,
-        "bout_points": tables.bout_points,
-        **{f"series/{name}": value for name, value in tables.series.items()},
-    }
-    return canonical_json_sha256(
-        {
-            "run_path": tables.run_path,
-            "candidate_id": int(tables.candidate.candidate_id),
-            "signal_id": int(tables.signal.signal_id),
-            "lineage_hash": tables.run_attrs.get("lineage_hash"),
-            "arrays": {
-                name: array_values_sha256(np.asarray(value))
-                for name, value in sorted(arrays.items())
-            },
-        }
-    )
+    return provider_swim_bout_content_sha256(tables)
 
 
 def _load_matching_swim_bout(
@@ -884,37 +866,53 @@ def _load_matching_swim_bout(
 ) -> SwimBoutTables:
     run_path = f"analysis/swim_bout_runs/{run_name}"
     validate_direct_consolidated_subtree(archive, subtree_path=run_path)
+    consolidated_root = open_zarr_root(
+        archive,
+        mode="r",
+        use_consolidated=True,
+    )
+    direct_root = open_zarr_root(
+        archive,
+        mode="r",
+        use_consolidated=False,
+    )
     consolidated = load_exact_selector_ineligible_default_swim_bout_tables(
-        open_zarr_root(archive, mode="r", use_consolidated=True),
+        consolidated_root,
         run_name=run_name,
     )
     direct = load_exact_selector_ineligible_default_swim_bout_tables(
-        open_zarr_root(archive, mode="r", use_consolidated=False),
+        direct_root,
         run_name=run_name,
     )
-    attrs = consolidated.run_attrs
-    authority = attrs.get("source_track_motion_authority")
-    frame_axis = attrs.get("frame_axis_contract")
-    expected_frame_sha256 = canonical_frame_axis_sha256(
-        np.asarray(motion.source_acquisition_frame_index, dtype=np.int64)
-    )
+    try:
+        binding, _lineage, _frame = validate_provider_swim_bout_binding(
+            consolidated,
+            provider=motion,
+            track_id=0,
+            recording_root=consolidated_root,
+            validation_profile=(
+                PROVIDER_SWIM_BOUT_VALIDATION_PROFILE_CURRENT_STRICT_V1
+            ),
+        )
+        direct_binding, _direct_lineage, _direct_frame = (
+            validate_provider_swim_bout_binding(
+                direct,
+                provider=motion,
+                track_id=0,
+                recording_root=direct_root,
+                validation_profile=(
+                    PROVIDER_SWIM_BOUT_VALIDATION_PROFILE_CURRENT_STRICT_V1
+                ),
+            )
+        )
+    except ValueError as exc:
+        raise ProviderBehaviorChainError(
+            "Existing swim-bout output binds another provider-motion authority: "
+            f"{exc}"
+        ) from exc
     if (
         _swim_bout_content_sha256(direct) != _swim_bout_content_sha256(consolidated)
-        or attrs.get("source_track_kinematics_scope") != "provider"
-        or attrs.get("source_track_kinematics_run") != motion.run_name
-        or attrs.get("source_track_motion_manifest_sha256")
-        != motion.provider_manifest_sha256
-        or int(attrs.get("track_id", -1)) != 0
-        or not isinstance(authority, Mapping)
-        or authority.get("motion_manifest_sha256") != motion.provider_manifest_sha256
-        or authority.get("provider_verification_digest") != motion.verification_digest
-        or authority.get("track_id") != 0
-        or authority.get("track_row_start") != 0
-        or authority.get("track_row_stop") != motion.row_count
-        or not isinstance(frame_axis, Mapping)
-        or frame_axis.get("source_track_motion_manifest_sha256")
-        != motion.provider_manifest_sha256
-        or frame_axis.get("content_sha256") != expected_frame_sha256
+        or direct_binding != binding
     ):
         raise ProviderBehaviorChainError(
             "Existing swim-bout output binds another provider-motion authority."
