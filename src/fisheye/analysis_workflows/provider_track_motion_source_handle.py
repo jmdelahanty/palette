@@ -5,10 +5,11 @@ under ``analysis/track_kinematics_runs/provider/<run>``.  This module binds one
 caller-supplied concrete run and returns copied read-only arrays.  It never
 resolves a selector, chooses a fallback, or changes the archive.
 
-The current writer records the FPS supplied to the numerical computation, but
-does not yet bind that value to an immutable temporal-authority record.  The
-reader therefore exposes that state explicitly as a compatibility status and
-does not permit it to satisfy ``require_authoritative_timing=True``.
+Legacy computation-v1 runs record only their caller-supplied FPS and remain an
+explicit compatibility surface.  Computation-v2 runs bind the canonical
+recording timing authority; the reader reopens that live clock binding and
+validates the complete motion frame domain before reporting authoritative
+timing.
 """
 
 from __future__ import annotations
@@ -22,6 +23,11 @@ import numpy as np
 import zarr
 
 from fisheye.analysis_workflows.materializers import provider_track_motion as writer
+from fisheye.analysis_workflows.provider_recording_timing_authority import (
+    ProviderRecordingTimingAuthority,
+    ProviderRecordingTimingAuthorityError,
+    load_provider_recording_timing_authority,
+)
 from fisheye.shared.zarr.benchmark_runtime import sha256_array
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_io import open_zarr_root
@@ -159,15 +165,17 @@ def _binding(
 
 def _temporal_authority(
     computation: Mapping[str, Any],
-) -> tuple[Mapping[str, Any] | None, str | None, str, bool]:
-    """Expose timing evidence without upgrading it to live authority.
-
-    The current provider-motion writer has no source-clock binding.  A future
-    record can be retained for inspection once its own digest is valid, but a
-    digest-bound JSON object alone is not proof that the referenced frame clock
-    is present and current in this archive.  That later live-source verifier is
-    deliberately outside this compatibility reader.
-    """
+    *,
+    archive: Path,
+    use_consolidated: bool,
+) -> tuple[
+    Mapping[str, Any] | None,
+    str | None,
+    str,
+    bool,
+    ProviderRecordingTimingAuthority | None,
+]:
+    """Resolve a claimed timing binding against the live recording clock."""
 
     raw = computation.get("temporal_authority")
     if raw is None:
@@ -179,8 +187,9 @@ def _temporal_authority(
                 None,
                 "compatibility_caller_fps_only",
                 False,
+                None,
             )
-        return None, None, "missing", False
+        return None, None, "missing", False, None
     binding = _require_mapping(raw, name="provider temporal_authority")
     if set(binding) != {"record", "sha256"}:
         raise ProviderTrackMotionSourceHandleError(
@@ -196,11 +205,36 @@ def _temporal_authority(
         raise ProviderTrackMotionSourceHandleError(
             "Provider temporal_authority record digest is stale."
         )
+    try:
+        authority = load_provider_recording_timing_authority(
+            archive,
+            required=True,
+            use_consolidated=use_consolidated,
+            expected_sha256=digest,
+        )
+    except ProviderRecordingTimingAuthorityError as exc:
+        raise ProviderTrackMotionSourceHandleError(
+            f"Provider recording timing authority is stale or invalid: {exc}"
+        ) from exc
+    assert authority is not None
+    parameters = computation.get("parameters")
+    fps = parameters.get("fps") if isinstance(parameters, Mapping) else None
+    if (
+        _thaw(record) != _thaw(authority.record)
+        or isinstance(fps, bool)
+        or not isinstance(fps, (int, float))
+        or float(fps) != authority.nominal_fps
+    ):
+        raise ProviderTrackMotionSourceHandleError(
+            "Provider temporal-authority record or nominal FPS differs from the "
+            "live recording timing authority."
+        )
     return (
         _freeze(record),
         digest,
-        "bound_record_unverified_against_source_clock",
-        False,
+        "bound_live_recording_timing_authority",
+        True,
+        authority,
     )
 
 
@@ -655,8 +689,16 @@ def _load_once(
         raise ProviderTrackMotionSourceHandleError(
             "Provider physical authority binding is invalid."
         )
-    temporal_record, temporal_sha256, timing_status, timing_authoritative = (
-        _temporal_authority(computation_record)
+    (
+        temporal_record,
+        temporal_sha256,
+        timing_status,
+        timing_authoritative,
+        timing_authority,
+    ) = _temporal_authority(
+        computation_record,
+        archive=archive,
+        use_consolidated=use_consolidated,
     )
     if require_authoritative_timing and not timing_authoritative:
         raise ProviderTrackMotionSourceHandleError(
@@ -673,6 +715,14 @@ def _load_once(
         raise ProviderTrackMotionSourceHandleError(str(exc)) from exc
     _validate_lineage_and_offsets(arrays)
     _validate_independent_validity(arrays)
+    if timing_authority is not None:
+        try:
+            timing_authority.validate_source_frame_indices(
+                arrays["source_acquisition_frame_index"],
+                name="provider-motion source acquisition frames",
+            )
+        except ProviderRecordingTimingAuthorityError as exc:
+            raise ProviderTrackMotionSourceHandleError(str(exc)) from exc
     verification = _verification_digest(
         run_path=run_path,
         manifest_sha256=manifest_sha256,

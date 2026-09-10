@@ -492,6 +492,20 @@ Primary surfaces: `shared/observation_coordinate_publication.py`,
 
 - [ ] Make tracking request one profile-neutral position surface and eliminate
   crop-profile grammar from tracking consumers.
+  - 2026-09-10 bounded selector-ineligible caller-migration candidate
+    implemented and locally validated on
+    `agent/palette/provider-aware-core-workflow-20260910`, stacked on PR 161:
+    provider behavior-chain task v3 consumes one exact manifest-pinned
+    observation-position run, while v1/v2 preserve their keypoint-triad
+    compatibility adapter. Provider-motion computation v2 binds and reopens
+    live recording timing; every downstream reuse branch validates its exact
+    upstream lineage. Receipted task v4 adds a canonical task digest, seven
+    stage evidence digests, and a self-verifiable execution receipt while v3
+    result bytes remain compatible. A real persisted detection-position chain
+    publishes, fully reuses, and refuses direct position tampering. The
+    uncommitted slice has local 421-test evidence but required CI is unrun. It
+    does not migrate or activate the default core workflow; see
+    `provider_behavior_chain_position_input_handoff_2026-09-10.md`.
 - [ ] Support materialized, collection-successor compatibility, and sealed
   geometry-only lineage through full-strength resolver branches with exactly
   one selected branch.

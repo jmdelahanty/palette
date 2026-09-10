@@ -14,6 +14,7 @@ from fisheye.analysis.detect_bouts_multi_level import (
     _detect_bouts_from_speed,
     _duration_seconds_to_frames,
     _json_safe_attr_value,
+    _load_provider_track_motion_speeds,
     SWIM_BOUT_LAYOUT_HIERARCHICAL_V1,
     detect_and_save_bouts,
     main,
@@ -21,11 +22,70 @@ from fisheye.analysis.detect_bouts_multi_level import (
 )
 from fisheye.analysis.track_kinematics_io import (
     TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1,
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
 )
 
 
 def test_main_accepts_explicit_argv() -> None:
     assert main(["/definitely/missing/recording_analysis.zarr"]) == 1
+
+
+def test_provider_motion_adapter_declares_selector_ineligible_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    rows = 3
+    vectors = {
+        "source_acquisition_frame_index": np.arange(rows, dtype=np.int64),
+        "linear_sample_valid": np.ones(rows, dtype=bool),
+        "transition_valid": np.ones(rows, dtype=bool),
+        "positions_mm": np.zeros((rows, 2), dtype=np.float32),
+        "positions_px": np.zeros((rows, 2), dtype=np.float32),
+    }
+    for level in ("raw", "filtered", "smoothed", "averaged"):
+        vectors[f"speed_{level}_mm"] = np.zeros(rows, dtype=np.float32)
+    for level in ("raw", "filtered", "smoothed"):
+        for unit in ("mm", "px"):
+            vectors[f"frame_path_distance_{level}_{unit}"] = np.zeros(
+                rows, dtype=np.float32
+            )
+    vectors["delta_seconds"] = np.asarray([0.0, 0.01, 0.01], dtype=np.float32)
+    provider = type(
+        "Provider",
+        (),
+        {
+            "track_ids": np.asarray([0], dtype=np.int64),
+            "track_row_offsets": np.asarray([0, rows], dtype=np.int64),
+            "row_count": rows,
+            "run_name": "motion_v1",
+            "provider_manifest_sha256": "a" * 64,
+            "verification_digest": "b" * 64,
+            "physical_authority_sha256": "c" * 64,
+            "temporal_authority_status": "bound_live_recording_timing_authority",
+            "timing_is_authoritative": True,
+            "computation_record": {
+                "computation_id": "track_motion_provider_successor.v1",
+                "parameters": {"fps": 100.0, "pixel_to_mm": 0.1},
+            },
+            "array": lambda self, name: vectors[name],
+        },
+    )()
+    monkeypatch.setattr(
+        "fisheye.analysis_workflows.provider_track_motion_source_handle."
+        "load_provider_track_motion_source_handle",
+        lambda *args, **kwargs: provider,
+    )
+
+    _speeds, metadata = _load_provider_track_motion_speeds(
+        tmp_path / "recording_analysis.zarr",
+        "motion_v1",
+        track_id=0,
+    )
+
+    assert metadata["track_kinematics_scope"] == "provider"
+    assert metadata["track_kinematics_publication_profile_id"] == (
+        TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+    )
 
 
 def _write_array(group: zarr.Group, name: str, data: np.ndarray) -> None:

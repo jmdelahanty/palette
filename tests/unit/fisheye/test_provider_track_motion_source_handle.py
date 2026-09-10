@@ -15,9 +15,9 @@ from fisheye.analysis_workflows.provider_track_motion_source_handle import (
     ProviderTrackMotionSourceHandleError,
     load_provider_track_motion_source_handle,
 )
-from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from tests.unit.fisheye.test_provider_track_motion_publication import (
     _install_fake_physical_authority,
+    _timed_tracked,
     _tracked,
 )
 
@@ -40,6 +40,25 @@ def _publish_fixture(tmp_path, monkeypatch, *, physical: bool = False):  # type:
     )
     publish_provider_track_motion_run(plan, keep_scratch=True)
     return tracked.source_authority.analysis_zarr_path, plan
+
+
+def _publish_timed_fixture(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+    tracked, timing = _timed_tracked(tmp_path)
+    prepared = prepare_provider_track_motion(
+        tracked,
+        fps=10.0,
+        smooth_seconds=0.0,
+        allow_pixel_only=True,
+        temporal_authority=timing,
+    )
+    plan = plan_provider_track_motion_run(
+        tracked.source_authority.analysis_zarr_path,
+        prepared,
+        run_name="provider_motion_timed_reader_fixture",
+        scratch_root=tmp_path / "provider_motion_timed_reader_scratch",
+    )
+    publish_provider_track_motion_run(plan, keep_scratch=True)
+    return tracked.source_authority.analysis_zarr_path, plan, timing
 
 
 def _load(archive, plan, **kwargs):  # type: ignore[no-untyped-def]
@@ -215,50 +234,42 @@ def test_authoritative_timing_is_required_for_phase4_consumers(
         _load(
             archive,
             plan,
+            use_consolidated=False,
             require_authoritative_timing=True,
         )
 
 
-def test_digest_bound_temporal_record_is_not_upgraded_without_clock_revalidation(
+def test_live_digest_bound_temporal_record_is_authoritative(
     tmp_path,
     monkeypatch,
 ) -> None:
-    archive, plan = _publish_fixture(tmp_path, monkeypatch)
-    root = zarr.open_group(
+    archive, plan, timing = _publish_timed_fixture(tmp_path, monkeypatch)
+
+    handle = _load(
+        archive,
+        plan,
+        require_authoritative_timing=True,
+    )
+
+    assert handle.temporal_authority_status == "bound_live_recording_timing_authority"
+    assert handle.timing_is_authoritative is True
+    assert handle.temporal_authority_record == timing.record
+    assert handle.temporal_authority_sha256 == timing.sha256
+
+
+def test_bound_temporal_record_rejects_stale_live_clock(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    archive, plan, _timing = _publish_timed_fixture(tmp_path, monkeypatch)
+    direct = zarr.open_group(
         str(archive), mode="r+", zarr_format=3, use_consolidated=False
     )
-    run = root[plan.run_path]
-    manifest = copy.deepcopy(dict(run.attrs["provider_track_motion_manifest"]))
-    temporal_record = {
-        "schema_id": "palette.source_row_temporal_authority",
-        "schema_version": 1,
-        "record_ref": "/analysis/detection@source_row_temporal_authority",
-        "source_frame_index_sha256": "1" * 64,
-    }
-    computation = copy.deepcopy(manifest["payload"]["computation"]["record"])
-    computation["temporal_authority"] = {
-        "record": temporal_record,
-        "sha256": canonical_json_sha256(temporal_record),
-    }
-    manifest["payload"]["computation"] = {
-        "record": computation,
-        "sha256": canonical_json_sha256(computation),
-    }
-    manifest["payload_digest"] = canonical_json_sha256(manifest["payload"])
-    run.attrs["provider_track_motion_manifest"] = manifest
-    run.attrs["provider_track_motion_manifest_sha256"] = manifest["payload_digest"]
-
-    handle = _load(archive, plan, use_consolidated=False)
-
-    assert handle.temporal_authority_status == (
-        "bound_record_unverified_against_source_clock"
-    )
-    assert handle.timing_is_authoritative is False
-    assert handle.temporal_authority_sha256 == canonical_json_sha256(temporal_record)
+    direct.attrs["fps"] = 9.0
 
     with pytest.raises(
         ProviderTrackMotionSourceHandleError,
-        match="authoritative temporal authority",
+        match="recording timing",
     ):
         _load(
             archive,
