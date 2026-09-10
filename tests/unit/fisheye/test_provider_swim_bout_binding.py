@@ -139,6 +139,35 @@ def test_provider_swim_bout_binding_accepts_one_exact_whole_track() -> None:
     assert frame_sha256 == tables.run_attrs["frame_axis_contract"]["content_sha256"]
 
 
+def test_provider_swim_bout_binding_accepts_receipt_bound_timing_without_root() -> None:
+    provider, tables = _fixture()
+
+    binding, _lineage, _frame_sha256 = validate_provider_swim_bout_binding(
+        tables,
+        provider=provider,
+        track_id=0,
+        rows=slice(0, 3),
+        validation_profile=(PROVIDER_SWIM_BOUT_VALIDATION_PROFILE_CURRENT_STRICT_V1),
+    )
+
+    assert binding["run_name"] == "bouts_v2"
+
+
+def test_provider_swim_bout_binding_rootless_timing_rejects_local_fps_tamper() -> None:
+    provider, tables = _fixture()
+    tables.run_attrs["fps"] = 99.0
+
+    with pytest.raises(ProviderSwimBoutBindingError, match="FPS"):
+        validate_provider_swim_bout_binding(
+            tables,
+            provider=provider,
+            track_id=0,
+            validation_profile=(
+                PROVIDER_SWIM_BOUT_VALIDATION_PROFILE_CURRENT_STRICT_V1
+            ),
+        )
+
+
 @pytest.mark.parametrize(
     ("path", "value", "message"),
     (

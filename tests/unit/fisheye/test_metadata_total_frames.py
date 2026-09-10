@@ -11,6 +11,7 @@ from fisheye.shared.metadata import (
     get_video_source_path,
     resolve_fps,
     resolve_persisted_artifact_fps,
+    resolve_persisted_artifact_fps_against_authority,
 )
 from fisheye.shared.source_video_metadata import (
     SourceVideoMetadataConflictError,
@@ -301,5 +302,28 @@ def test_resolve_persisted_artifact_fps_requires_matching_recording_binding() ->
         resolve_persisted_artifact_fps(
             root,
             {"fps": 60.0},
+            artifact_name="analysis/swim_bout_runs/bouts_v1",
+        )
+
+
+def test_resolve_persisted_artifact_fps_against_admitted_authority() -> None:
+    assert (
+        resolve_persisted_artifact_fps_against_authority(
+            {"fps": 30.0},
+            authoritative_fps=30.0,
+            artifact_name="analysis/swim_bout_runs/bouts_v1",
+        )
+        == 30.0
+    )
+    with pytest.raises(SourceVideoMetadataMissingError, match="persist"):
+        resolve_persisted_artifact_fps_against_authority(
+            {},
+            authoritative_fps=30.0,
+            artifact_name="analysis/swim_bout_runs/bouts_v1",
+        )
+    with pytest.raises(SourceVideoMetadataConflictError, match="admitted"):
+        resolve_persisted_artifact_fps_against_authority(
+            {"fps": 60.0},
+            authoritative_fps=30.0,
             artifact_name="analysis/swim_bout_runs/bouts_v1",
         )

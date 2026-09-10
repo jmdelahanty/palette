@@ -33922,7 +33922,7 @@
       "enclosing_symbol": "fisheye.analysis_workflows.materializers.provider_track_motion:_write_arrays",
       "file": "src/fisheye/analysis_workflows/materializers/provider_track_motion.py",
       "filters_expression": null,
-      "line": 1566,
+      "line": 1844,
       "parent_path_pattern": "<parent>",
       "path_pattern": "<parent>/<leaf or path>",
       "receiver_expression": null,
@@ -33930,7 +33930,7 @@
       "shape_expression": null,
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-1140d23d3524591f",
+      "site_id": "writer-19b8d856b2f92a5e",
       "status": "current",
       "status_basis": "packaged Palette module without a maintenance marker",
       "surface_class": "production",
@@ -69867,7 +69867,7 @@
     "writer_wrapper_call_site_count": 987
   },
   "wrapper_analysis": {
-    "function_definition_count": 6411,
+    "function_definition_count": 6418,
     "writer_function_count": 244,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",
