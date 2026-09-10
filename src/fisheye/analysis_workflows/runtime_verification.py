@@ -439,7 +439,6 @@ def _verify_track_kinematics(
     session: RuntimeVerificationSession | None,
     execution_profile: WorkflowExecutionProfile,
 ) -> StageAvailability:
-    del dependency_runs
     if not availability.available or not availability.artifact_path:
         return availability
     try:
@@ -459,6 +458,33 @@ def _verify_track_kinematics(
                 raise ValueError("Track motion lacks its explicit canary profile.")
             bound = load_completed_ineligible_bound_track_motion_run(root, run)
         bound.assert_verified()
+        # Compare the already validated derivation, not another selector lookup.
+        # A reused authority may close its branch without separately selected
+        # ancestors; only dependencies actually resolved by this plan constrain it.
+        sources = bound.manifest["run_derivation"]["record"]["source_refs"]
+        for dependency, source_field in (
+            ("tracks", "source_tracking_path"),
+            ("refined_keypoints", "source_keypoint_path"),
+        ):
+            if dependency not in dependency_runs:
+                continue
+            source_path = sources.get(source_field)
+            if not isinstance(source_path, str):
+                raise ValueError(
+                    f"Track-motion publication lacks its {dependency!r} source binding."
+                )
+            family, _, name = source_path.partition("/")
+            # Availability encodes refined selections as refined/<run>, raw
+            # keypoints and tracks as <run>. Exact root-relative paths are also
+            # unambiguous, but raw/refined runs with the same leaf are distinct.
+            source_run = (
+                f"refined/{name}" if family == "refined_keypoints_runs" else name
+            )
+            if dependency_runs[dependency] not in (source_run, source_path):
+                raise ValueError(
+                    f"Track-motion source {dependency!r} {source_path!r} differs "
+                    f"from the plan selection {dependency_runs[dependency]!r}."
+                )
     except Exception as exc:
         return _failed_result(availability, label="track-motion", exc=exc)
     return _verified_result(

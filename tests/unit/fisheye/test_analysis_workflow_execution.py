@@ -897,6 +897,8 @@ def test_execution_renders_staged_track_kinematics_materializer(tmp_path: Path) 
     assert (
         command.argv[command.argv.index("--keypoint-run") + 1] == "refined/refined_kp_a"
     )
+    assert command.argv.count("--tracking-run") == 1
+    assert command.argv[command.argv.index("--tracking-run") + 1] == "tracking_a"
     assert command.argv[command.argv.index("--output-shard-rows") + 1] == "262144"
     assert command.argv[command.argv.index("--shard-workers") + 1] == "5"
     assert "--apply" in command.argv
@@ -948,6 +950,7 @@ def test_selector_ineligible_execution_renders_only_typed_candidate_commands(
     ]
     commands = {command.node_id: command.argv for command in execution.commands}
     motion = commands["track_kinematics"]
+    assert motion.count("--tracking-run") == 1
     assert motion[motion.index("--tracking-run") + 1] == "tracking_candidate"
     assert motion[motion.index("--execution-profile") + 1] == (
         SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
