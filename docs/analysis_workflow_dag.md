@@ -69,6 +69,15 @@ The workflow references canonical stage IDs rather than inventing a second
 stage vocabulary. Profile validation checks node IDs, targets, catalog
 dependencies represented inside the profile, and dependency cycles.
 
+Catalog and profile edges have different granularity. The catalog records the
+persisted/status relationship `arena_assignment -> tracks`. The packaged
+profile exposes `refined_keypoints -> tracks` because its `tracks` command is a
+composite adapter: it resolves the keypoint authority's exact crop rowset, runs
+arena assignment, and writes both an exact arena-assignment run and an exact
+tracking run. The catalog separately records `tracks -> track_kinematics` so a
+new tracking run invalidates motion and its downstream products; the executable
+profile passes both the exact keypoint and tracking selections to motion.
+
 ```mermaid
 flowchart LR
   RK[keypoint authority] --> TR[tracking identities]
@@ -203,6 +212,19 @@ is used only when the modern selection family is absent. An already complete
 track-kinematics run remains reusable when its declared keypoint and tracking
 dependencies resolve to exact available runs; those available ancestors are
 not recreated.
+
+This is the maintained crop-row compatibility lane, not the final
+provider-neutral position design. In that design, tracking consumes one exact
+`analysis/subject_position_runs/observation/<run>` through the typed position
+handle. Detection, keypoint, and subject-mask measurements are peer producers
+of that surface under distinct named estimator policies; tracking does not
+infer or prefer a source modality. Keypoints may independently provide the
+body-frame/heading surface used for angular motion. Moving the packaged core
+profile to this design requires an explicit position node, production selection
+and admission policy, and preservation evidence for the current
+crop/detection-centroid position plus keypoint-heading semantics. The existing
+selector-ineligible provider materializers are canary components, not grounds
+for silently treating refined keypoints as the production position default.
 
 The track-kinematics visualization stage writes the bounded PNG snapshot and
 interactive explorer contract inside its selected track-kinematics run. It
