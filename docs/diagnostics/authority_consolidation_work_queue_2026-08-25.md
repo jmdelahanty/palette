@@ -147,6 +147,22 @@ not close the broader `ADM-*`, `RES-TRACK-001`, `REP-001`, or `TEST-001` work.
 See the [scoped implementation handoff](dag_motion_dependency_pinning_handoff_2026-09-09.md)
 for contracts, exact test evidence, all unrun CI checks, and remaining work.
 
+### Scoped DAG catalog tracking alignment — 2026-09-10
+
+Status: `in_progress`; owner: root implementation agent, branch
+`agent/palette/dag-catalog-alignment-20260910`, worktree
+`/tmp/palette-dag-catalog-alignment-20260910`, clean base
+`6fd555d05a50dec82c85e5edc567159a0c491f4d`. The uncommitted bounded correction
+declares `tracks` as a direct input to `track_kinematics` and makes a new tracks
+run invalidate motion and all of its catalog descendants. It preserves the
+packaged profile's composite arena-assignment/tracking adapter and every
+scientific, identity, manifest, selector, and runtime execution contract.
+Focused local validation passed 134 distinct tests; all required new-change CI
+is unrun. This is not committed, integrated, deployed, activated, complete, or
+merge-ready, and it does not close `RES-TRACK-001`. See the
+[scoped handoff](dag_catalog_tracking_alignment_handoff_2026-09-10.md) for the
+provider-boundary decision, exact validation, and remaining work.
+
 ## Targeted four-camera recovery plan — 2026-08-27
 
 This is an execution slice of the active queue, not a second plan of record.
