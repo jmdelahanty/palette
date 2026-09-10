@@ -27,6 +27,9 @@ from fisheye.analysis_workflows.protocol_semantic_chaser_selection import (
     CHASER_WINDOW_ROLES,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from tests.unit.fisheye.test_provider_swim_bout_binding import (
+    _fixture as _provider_swim_bout_fixture,
+)
 
 
 class _ExpectedSwimBoutLoader(RuntimeError):
@@ -467,50 +470,18 @@ def test_source_binding_digest_normalizes_immutable_nested_mappings() -> None:
 
 
 def test_swim_bout_binding_requires_the_exact_provider_manifest_and_row_slice() -> None:
-    frames = np.arange(10, dtype=np.int64)
-    provider = SimpleNamespace(
-        run_name="motion_1",
-        provider_manifest_sha256="a" * 64,
-        verification_digest="b" * 64,
-        source_acquisition_frame_index=frames,
-    )
-    authority = {
-        "motion_manifest_sha256": "a" * 64,
-        "provider_verification_digest": "b" * 64,
-        "track_id": 0,
-        "track_row_start": 0,
-        "track_row_stop": 10,
-    }
-    from fisheye.analysis.swim_bout_frame_axis import canonical_frame_axis_sha256
-
-    tables = SimpleNamespace(
-        run_name="bouts_1",
-        run_path="analysis/swim_bout_runs/bouts_1",
-        run_attrs={
-            "source_track_kinematics_scope": "provider",
-            "source_track_kinematics_run": "motion_1",
-            "track_id": 0,
-            "source_track_motion_manifest_sha256": "a" * 64,
-            "source_track_motion_authority": authority,
-            "frame_axis_contract": {
-                "content_sha256": canonical_frame_axis_sha256(frames)
-            },
-            "lineage_hash": "c" * 64,
-        },
-        candidate=SimpleNamespace(candidate_id=0),
-        signal=SimpleNamespace(signal_id=4, speed_level="speed_exponential"),
-    )
+    provider, tables = _provider_swim_bout_fixture()
 
     binding, lineage, frame_digest = _swim_bout_binding(
         tables,
         provider=provider,
-        rows=slice(0, 10),
+        rows=slice(0, 3),
         track_id=0,
     )
 
-    assert lineage == "c" * 64
+    assert lineage == "d" * 64
     assert binding["source_track_motion_manifest_sha256"] == "a" * 64
-    assert binding["track_row_stop"] == 10
+    assert binding["track_row_stop"] == 3
     assert binding["frame_axis_sha256"] == frame_digest
 
     tables.run_attrs["source_track_motion_manifest_sha256"] = "d" * 64
@@ -518,7 +489,7 @@ def test_swim_bout_binding_requires_the_exact_provider_manifest_and_row_slice() 
         _swim_bout_binding(
             tables,
             provider=provider,
-            rows=slice(0, 10),
+            rows=slice(0, 3),
             track_id=0,
         )
 

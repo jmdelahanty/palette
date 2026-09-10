@@ -62,11 +62,24 @@ from fisheye.shared.tail_coordinate_publication import (
     load_tail_kinematics_coordinate_publication,
 )
 
-from .availability import StageAvailability, discover_stage_availability
+from .availability import (
+    PROVIDER_TRACK_KINEMATICS_RUN_PATTERN,
+    PROVIDER_TRACK_KINEMATICS_SELECTOR_NAMES,
+    StageAvailability,
+    discover_stage_availability,
+)
 from .execution_profiles import (
     PRODUCTION_EXECUTION_PROFILE_ID,
     WorkflowExecutionProfile,
     resolve_workflow_execution_profile,
+)
+from .provider_swim_bout_binding import (
+    PROVIDER_SWIM_BOUT_VALIDATION_PROFILE_CURRENT_STRICT_V1,
+    provider_swim_bout_content_sha256,
+    validate_provider_swim_bout_binding,
+)
+from .provider_track_motion_source_handle import (
+    load_provider_track_motion_source_handle,
 )
 from .tracking_source_handle import load_tracking_source_handle
 
@@ -161,8 +174,8 @@ def _verify_subject_shape(
                 raise ValueError(
                     "Selector-ineligible subject shape requires sealed payload receipts."
                 )
-            run, resolved, resolved_path, publication = resolve_canonical_subject_shape_run(
-                root, run_name
+            run, resolved, resolved_path, publication = (
+                resolve_canonical_subject_shape_run(root, run_name)
             )
             if (
                 resolved != run_name
@@ -339,9 +352,7 @@ def _verify_eye_angles(
             run_name=source_subject_shape_run,
             authority=source_authority,
             verify_payload=False,
-            expected_selector_eligible=(
-                execution_profile.expected_selector_eligible
-            ),
+            expected_selector_eligible=(execution_profile.expected_selector_eligible),
             publication_metadata_proof=(
                 session.subject_shape_metadata_proofs.get(source_subject_shape_run)
                 if session is not None
@@ -418,9 +429,7 @@ def _verify_tracks(
         handle = load_tracking_source_handle(
             zarr_path,
             availability.artifact_path,
-            expected_selector_eligible=(
-                execution_profile.expected_selector_eligible
-            ),
+            expected_selector_eligible=(execution_profile.expected_selector_eligible),
             use_consolidated=True,
         )
         handle.assert_verified()
@@ -441,6 +450,34 @@ def _verify_track_kinematics(
 ) -> StageAvailability:
     if not availability.available or not availability.artifact_path:
         return availability
+    if availability.artifact_path.startswith(
+        "analysis/track_kinematics_runs/provider/"
+    ):
+        try:
+            if dependency_runs:
+                raise ValueError(
+                    "Provider motion is a sealed supplier; its upstream lineage "
+                    "must not be separately selected by this workflow."
+                )
+            provider = load_provider_track_motion_source_handle(
+                zarr_path,
+                availability.artifact_path,
+                use_consolidated=True,
+                require_authoritative_timing=True,
+            )
+            provider.assert_verified()
+        except Exception as exc:
+            return _failed_result(
+                availability,
+                label="provider-motion",
+                exc=exc,
+            )
+        return _verified_result(
+            availability,
+            reason=(
+                "strict exact selector-ineligible provider-motion supplier is available"
+            ),
+        )
     try:
         root = (
             session.open_root(zarr_path)
@@ -503,30 +540,117 @@ def _verify_swim_bouts(
     run_name = availability.run_name
     if not availability.available or not isinstance(run_name, str):
         return availability
+    expected_track = dependency_runs.get("track_kinematics")
+    if not isinstance(expected_track, str) or not expected_track:
+        return _failed_result(
+            availability,
+            label="swim-bout",
+            exc=ValueError("Swim-bout verification requires exact track motion."),
+        )
+    if expected_track.startswith("provider/"):
+        provider_run = expected_track.removeprefix("provider/")
+        if (
+            PROVIDER_TRACK_KINEMATICS_RUN_PATTERN.fullmatch(provider_run) is None
+            or provider_run in PROVIDER_TRACK_KINEMATICS_SELECTOR_NAMES
+            or execution_profile.expected_selector_eligible is not False
+        ):
+            return _failed_result(
+                availability,
+                label="provider-motion-bound swim-bout",
+                exc=ValueError(
+                    "Provider swim-bout verification requires one exact "
+                    "selector-ineligible provider-motion run."
+                ),
+            )
+        try:
+            consolidated_root = open_zarr_root(
+                zarr_path,
+                mode="r",
+                use_consolidated=True,
+            )
+            direct_root = open_zarr_root(
+                zarr_path,
+                mode="r",
+                use_consolidated=False,
+            )
+            tables = load_exact_selector_ineligible_default_swim_bout_tables(
+                consolidated_root,
+                run_name=run_name,
+            )
+            direct_tables = load_exact_selector_ineligible_default_swim_bout_tables(
+                direct_root,
+                run_name=run_name,
+            )
+            provider = load_provider_track_motion_source_handle(
+                zarr_path,
+                f"analysis/track_kinematics_runs/provider/{provider_run}",
+                use_consolidated=True,
+                require_authoritative_timing=True,
+            )
+            binding, _lineage, _frames = validate_provider_swim_bout_binding(
+                tables,
+                provider=provider,
+                track_id=0,
+                recording_root=consolidated_root,
+                validation_profile=(
+                    PROVIDER_SWIM_BOUT_VALIDATION_PROFILE_CURRENT_STRICT_V1
+                ),
+            )
+            direct_binding, _direct_lineage, _direct_frames = (
+                validate_provider_swim_bout_binding(
+                    direct_tables,
+                    provider=provider,
+                    track_id=0,
+                    recording_root=direct_root,
+                    validation_profile=(
+                        PROVIDER_SWIM_BOUT_VALIDATION_PROFILE_CURRENT_STRICT_V1
+                    ),
+                )
+            )
+            if binding != direct_binding or provider_swim_bout_content_sha256(
+                tables
+            ) != provider_swim_bout_content_sha256(direct_tables):
+                raise ValueError(
+                    "Swim-bout direct metadata differs from its published "
+                    "consolidated generation."
+                )
+        except Exception as exc:
+            return _failed_result(
+                availability,
+                label="provider-motion-bound swim-bout",
+                exc=exc,
+            )
+        return _verified_result(
+            availability,
+            reason=(
+                "strict exact provider-motion-bound swim-bout authority is available"
+            ),
+        )
+
     try:
         root = (
             session.open_root(zarr_path)
             if session is not None
             else open_zarr_root(zarr_path, mode="r")
         )
-        if execution_profile.expected_selector_eligible:
+        tables = (
             load_default_swim_bout_tables(root, run_name=run_name)
-        else:
-            load_exact_selector_ineligible_default_swim_bout_tables(
+            if execution_profile.expected_selector_eligible
+            else load_exact_selector_ineligible_default_swim_bout_tables(
                 root,
                 run_name=run_name,
             )
-        run = root[f"analysis/swim_bout_runs/{run_name}"]
-        expected_track = dependency_runs.get("track_kinematics")
-        if not isinstance(expected_track, str) or not expected_track:
-            raise ValueError("Swim-bout verification requires exact track motion.")
-        if run.attrs.get("source_track_kinematics_run") != expected_track:
+        )
+        attrs = tables.run_attrs
+        if attrs.get("source_track_kinematics_run") != expected_track:
             raise ValueError("Swim-bout source track-motion run differs from the plan.")
         if not execution_profile.expected_selector_eligible and (
-            run.attrs.get("source_track_kinematics_publication_profile_id")
+            attrs.get("source_track_kinematics_publication_profile_id")
             != TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
         ):
-            raise ValueError("Swim-bout candidate did not consume candidate track motion.")
+            raise ValueError(
+                "Swim-bout candidate did not consume candidate track motion."
+            )
     except Exception as exc:
         return _failed_result(availability, label="swim-bout", exc=exc)
     return _verified_result(
@@ -590,6 +714,7 @@ def verify_persisted_stage_output(
     requested_run: str,
     dependency_runs: Mapping[str, str],
     session: RuntimeVerificationSession | None = None,
+    run_scope: str | None = None,
     execution_profile_id: str = PRODUCTION_EXECUTION_PROFILE_ID,
 ) -> StageAvailability:
     """Verify one exact completed workflow output through the shared gate."""
@@ -597,11 +722,19 @@ def verify_persisted_stage_output(
     archive = Path(zarr_path).expanduser().resolve()
     canonical = canonical_stage_id(stage_id)
     execution_profile = resolve_workflow_execution_profile(execution_profile_id)
+    effective_run_scope = run_scope
+    if (
+        effective_run_scope is None
+        and canonical == "track_kinematics"
+        and requested_run.startswith("provider/")
+    ):
+        effective_run_scope = "provider"
     availability = discover_stage_availability(
         archive,
         canonical,
         requested_run=requested_run,
         dependency_runs=dependency_runs,
+        run_scope=effective_run_scope,
         execution_profile_id=execution_profile.profile_id,
     )
     verifier = _RUNTIME_STAGE_VERIFIERS.get(canonical)

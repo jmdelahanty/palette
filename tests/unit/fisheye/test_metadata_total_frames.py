@@ -10,6 +10,7 @@ from fisheye.shared.metadata import (
     get_total_frames,
     get_video_source_path,
     resolve_fps,
+    resolve_persisted_artifact_fps,
 )
 from fisheye.shared.source_video_metadata import (
     SourceVideoMetadataConflictError,
@@ -269,3 +270,36 @@ def test_resolve_fps_rejects_explicit_canonical_conflict() -> None:
 
     with pytest.raises(SourceVideoMetadataConflictError, match="Explicit FPS"):
         resolve_fps(root, explicit_fps=60.0)
+
+
+def test_resolve_persisted_artifact_fps_requires_matching_recording_binding() -> None:
+    root = _Group(
+        attrs={
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_metadata.v2",
+                "layout": "single_video",
+                "fps": 30.0,
+            }
+        }
+    )
+
+    assert (
+        resolve_persisted_artifact_fps(
+            root,
+            {"fps": 30.0},
+            artifact_name="analysis/swim_bout_runs/bouts_v1",
+        )
+        == 30.0
+    )
+    with pytest.raises(SourceVideoMetadataMissingError, match="persist"):
+        resolve_persisted_artifact_fps(
+            root,
+            {},
+            artifact_name="analysis/swim_bout_runs/bouts_v1",
+        )
+    with pytest.raises(SourceVideoMetadataConflictError, match="Explicit FPS"):
+        resolve_persisted_artifact_fps(
+            root,
+            {"fps": 60.0},
+            artifact_name="analysis/swim_bout_runs/bouts_v1",
+        )

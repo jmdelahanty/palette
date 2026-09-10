@@ -352,6 +352,32 @@ def resolve_fps(
     return resolved
 
 
+def resolve_persisted_artifact_fps(
+    root: zarr.Group,
+    artifact_attrs: Mapping[str, object],
+    *,
+    artifact_name: str,
+) -> float:
+    """Validate one persisted artifact FPS against recording authority.
+
+    Artifact-local FPS is a required scientific binding, not an independent
+    timing source. Resolve it here so consumers do not read timing metadata
+    directly and a stale artifact mirror cannot replace the recording clock.
+    """
+
+    name = str(artifact_name).strip()
+    if not name:
+        raise SourceVideoMetadataError("artifact_name must be one nonempty label.")
+    if not isinstance(artifact_attrs, Mapping):
+        raise SourceVideoMetadataError(f"{name} attributes must be an object.")
+    artifact_fps = artifact_attrs.get("fps")
+    if artifact_fps is None:
+        raise SourceVideoMetadataMissingError(
+            f"{name} must persist its recording-authority FPS binding."
+        )
+    return resolve_fps(root, explicit_fps=artifact_fps)
+
+
 def get_pipeline_type(root: zarr.Group) -> str:
     """
     Get pipeline type following unified spec.

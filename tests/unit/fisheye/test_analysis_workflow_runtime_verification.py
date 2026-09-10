@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +25,12 @@ from tests.unit.fisheye.test_track_kinematics_coordinate_contract import _Writab
 from tests.unit.fisheye.test_track_motion_publication import (
     _clone_motion_run_template,
     _motion_run_template,
+)
+from tests.unit.fisheye.test_provider_swim_bout_binding import (
+    _fixture as _provider_swim_bout_fixture,
+)
+from tests.unit.fisheye.test_provider_track_motion_source_handle import (
+    _publish_timed_fixture as _publish_timed_provider_motion_fixture,
 )
 
 
@@ -80,6 +87,20 @@ def _publish_metadata(archive: Path, run, *, canary: bool = False, root=None) ->
             ),
             encoding="utf-8",
         )
+
+
+def _write_metadata(path: Path, attrs: dict[str, object] | None = None) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "zarr.json").write_text(
+        json.dumps(
+            {
+                "zarr_format": 3,
+                "node_type": "group",
+                "attributes": attrs or {},
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _verify(output, dependencies, *, canary=False, reuse=False):
@@ -194,6 +215,124 @@ def test_motion_reuse_preserves_sealed_branch_without_declared_ancestors(
     result = _verify(motion_output, {}, canary=canary, reuse=True)
 
     assert result.available, result.reason
+
+
+def test_provider_motion_verifier_accepts_exact_timed_selector_ineligible_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, plan, _timing = _publish_timed_provider_motion_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+
+    result = mod.verify_persisted_stage_output(
+        archive,
+        "track_kinematics",
+        requested_run=f"provider/{plan.run_name}",
+        run_scope="provider",
+        dependency_runs={},
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+
+    assert result.available, result.reason
+    assert result.run_name == f"provider/{plan.run_name}"
+    assert result.artifact_path == plan.run_path
+    assert "provider-motion" in result.reason
+
+
+def test_provider_swim_bout_verifier_uses_exact_motion_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    parent = archive / "analysis" / "swim_bout_runs"
+    _write_metadata(parent)
+    _write_metadata(
+        parent / "bouts_v2",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        },
+    )
+    provider, tables = _provider_swim_bout_fixture()
+    metadata_modes: list[bool] = []
+
+    def _open_root(*_args, **kwargs):
+        metadata_modes.append(kwargs["use_consolidated"])
+        return SimpleNamespace(attrs={"fps": 100.0})
+
+    monkeypatch.setattr(
+        mod,
+        "open_zarr_root",
+        _open_root,
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_exact_selector_ineligible_default_swim_bout_tables",
+        lambda *_args, **_kwargs: tables,
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_provider_track_motion_source_handle",
+        lambda *_args, **_kwargs: provider,
+    )
+
+    result = mod.verify_persisted_stage_output(
+        archive,
+        "swim_bouts",
+        requested_run="bouts_v2",
+        dependency_runs={"track_kinematics": "provider/motion_v2"},
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+
+    assert result.available, result.reason
+    assert "provider-motion-bound" in result.reason
+    assert metadata_modes == [True, False]
+
+
+def test_provider_swim_bout_verifier_rejects_wrong_motion_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    parent = archive / "analysis" / "swim_bout_runs"
+    _write_metadata(parent)
+    _write_metadata(
+        parent / "bouts_v2",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        },
+    )
+    provider, tables = _provider_swim_bout_fixture()
+    tables.run_attrs["source_track_motion_manifest_sha256"] = "e" * 64
+    monkeypatch.setattr(
+        mod,
+        "open_zarr_root",
+        lambda *_args, **_kwargs: SimpleNamespace(attrs={"fps": 100.0}),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_exact_selector_ineligible_default_swim_bout_tables",
+        lambda *_args, **_kwargs: tables,
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_provider_track_motion_source_handle",
+        lambda *_args, **_kwargs: provider,
+    )
+
+    result = mod.verify_persisted_stage_output(
+        archive,
+        "swim_bouts",
+        requested_run="bouts_v2",
+        dependency_runs={"track_kinematics": "provider/motion_v2"},
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+
+    assert not result.available
+    assert "manifest" in result.reason
 
 
 @pytest.mark.parametrize(

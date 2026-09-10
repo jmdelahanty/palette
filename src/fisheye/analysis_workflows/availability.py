@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path, PurePosixPath
+import re
 from typing import Mapping
 
 from fisheye.analysis_workflows.storage_contract_catalog import (
@@ -27,7 +28,6 @@ from .execution_profiles import (
     resolve_workflow_execution_profile,
 )
 
-
 STAGE_RUN_PARENTS: Mapping[str, tuple[str, ...]] = {
     # ``refined_keypoints`` is the workflow's curated keypoint-authority
     # dependency.  Its resolver below accepts either the refined member of an
@@ -40,6 +40,32 @@ STAGE_RUN_PARENTS: Mapping[str, tuple[str, ...]] = {
 }
 TRACK_KINEMATICS_VISUALIZATION_STAGE = "track_kinematics_visualization"
 TRACK_KINEMATICS_PARENT = "analysis/track_kinematics_runs/offline"
+PROVIDER_TRACK_KINEMATICS_PARENT = "analysis/track_kinematics_runs/provider"
+PROVIDER_TRACK_KINEMATICS_SCOPE = "provider"
+PROVIDER_TRACK_KINEMATICS_RUN_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+PROVIDER_TRACK_KINEMATICS_SELECTOR_ATTRS = frozenset(
+    {
+        "latest",
+        "latest_complete",
+        "latest_pending",
+        "latest_provider",
+        "authoritative_run",
+    }
+)
+PROVIDER_TRACK_KINEMATICS_SELECTOR_NAMES = frozenset(
+    {
+        "latest",
+        "latest_complete",
+        "latest_pending",
+        "latest_provider",
+        "authoritative_run",
+        "authoritative",
+        "current",
+        "default",
+        "fallback",
+        "selected",
+    }
+)
 TRACK_KINEMATICS_VISUALIZATION_PARENT = (
     "analysis/track_kinematics_visualization_runs/offline"
 )
@@ -48,18 +74,12 @@ TRACK_KINEMATICS_INTERACTIVE_ARTIFACT = (
 )
 TRACK_KINEMATICS_INTERACTIVE_RENDERER = "palette-track-kinematics-summary-v1"
 KEYPOINT_BUNDLE_AUTHORITY_ATTR = "keypoint_bundle_authority"
-KEYPOINT_BUNDLE_AUTHORITY_GENERATION_ATTR = (
-    "keypoint_bundle_authority_generation"
-)
+KEYPOINT_BUNDLE_AUTHORITY_GENERATION_ATTR = "keypoint_bundle_authority_generation"
 KEYPOINT_BUNDLE_AUTHORITY_LEASE_ATTR = "keypoint_bundle_authority_lease"
 SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR = "subject_mask_authority"
-SUBJECT_MASK_BUNDLE_AUTHORITY_GENERATION_ATTR = (
-    "subject_mask_authority_generation"
-)
+SUBJECT_MASK_BUNDLE_AUTHORITY_GENERATION_ATTR = "subject_mask_authority_generation"
 SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR = "subject_mask_authority_lease"
-SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR = (
-    "subject_mask_bundle_selector_eligible"
-)
+SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR = "subject_mask_bundle_selector_eligible"
 
 
 @dataclass(frozen=True)
@@ -184,9 +204,7 @@ def _resolve_metadata_run_name(
         parent_attrs=parent_attrs,
         child_names=_metadata_child_names(parent),
         child_attrs=lambda name: (
-            _attrs(parent / name)
-            if (parent / name / "zarr.json").is_file()
-            else None
+            _attrs(parent / name) if (parent / name / "zarr.json").is_file() else None
         ),
         legacy_default=False,
     )
@@ -213,9 +231,7 @@ def _available_selected_run(
     parent = root / relative_parent
     run_path = parent / run_name
     relative_run_path = f"{relative_parent}/{run_name}"
-    if not (parent / "zarr.json").is_file() or not (
-        run_path / "zarr.json"
-    ).is_file():
+    if not (parent / "zarr.json").is_file() or not (run_path / "zarr.json").is_file():
         return StageAvailability(
             stage_id=stage_id,
             available=False,
@@ -269,6 +285,123 @@ def _available_selected_run(
     )
 
 
+def _provider_track_kinematics_availability(
+    root: Path,
+    *,
+    requested_run: str | None,
+    execution_profile_id: str,
+) -> StageAvailability:
+    """Resolve one exact selector-ineligible provider-motion publication."""
+
+    execution_profile = resolve_workflow_execution_profile(execution_profile_id)
+    if execution_profile.expected_selector_eligible is not False:
+        return StageAvailability(
+            stage_id="track_kinematics",
+            available=False,
+            artifact_path=PROVIDER_TRACK_KINEMATICS_PARENT,
+            reason=(
+                "provider motion is a selector-ineligible canary supplier and "
+                "cannot satisfy a selector-activated production workflow"
+            ),
+        )
+
+    raw_requested = "" if requested_run is None else str(requested_run)
+    requested = raw_requested.strip()
+    if raw_requested != requested:
+        requested = ""
+    full_prefix = f"{PROVIDER_TRACK_KINEMATICS_PARENT}/"
+    encoded_prefix = f"{PROVIDER_TRACK_KINEMATICS_SCOPE}/"
+    if requested.startswith(full_prefix):
+        requested = requested[len(full_prefix) :]
+    elif requested.startswith(encoded_prefix):
+        requested = requested[len(encoded_prefix) :]
+    if (
+        not requested
+        or requested in PROVIDER_TRACK_KINEMATICS_SELECTOR_NAMES
+        or PROVIDER_TRACK_KINEMATICS_RUN_PATTERN.fullmatch(requested) is None
+    ):
+        return StageAvailability(
+            stage_id="track_kinematics",
+            available=False,
+            artifact_path=PROVIDER_TRACK_KINEMATICS_PARENT,
+            reason=(
+                "selector-ineligible execution requires one exact named "
+                "provider-motion run; selectors, fallbacks, and nested paths "
+                "are forbidden"
+            ),
+        )
+
+    encoded_run = f"{PROVIDER_TRACK_KINEMATICS_SCOPE}/{requested}"
+    relative_run_path = f"{PROVIDER_TRACK_KINEMATICS_PARENT}/{requested}"
+    parent = root / PROVIDER_TRACK_KINEMATICS_PARENT
+    run = parent / requested
+    if not (parent / "zarr.json").is_file():
+        return StageAvailability(
+            stage_id="track_kinematics",
+            available=False,
+            artifact_path=PROVIDER_TRACK_KINEMATICS_PARENT,
+            run_name=encoded_run,
+            reason="provider-motion run parent metadata is missing",
+        )
+    parent_attrs = _attrs(parent)
+    forbidden_selectors = sorted(
+        PROVIDER_TRACK_KINEMATICS_SELECTOR_ATTRS.intersection(parent_attrs)
+    )
+    if forbidden_selectors:
+        return StageAvailability(
+            stage_id="track_kinematics",
+            available=False,
+            artifact_path=PROVIDER_TRACK_KINEMATICS_PARENT,
+            run_name=encoded_run,
+            reason=(
+                "provider-motion namespace contains forbidden selector "
+                f"metadata: {forbidden_selectors!r}"
+            ),
+        )
+    if not (run / "zarr.json").is_file():
+        return StageAvailability(
+            stage_id="track_kinematics",
+            available=False,
+            artifact_path=relative_run_path,
+            run_name=encoded_run,
+            reason="selected provider-motion run metadata is missing",
+        )
+    run_attrs = _attrs(run)
+    if not is_run_complete_in_parent_attrs(
+        parent_attrs,
+        run_attrs,
+        legacy_default=False,
+    ):
+        return StageAvailability(
+            stage_id="track_kinematics",
+            available=False,
+            artifact_path=relative_run_path,
+            run_name=encoded_run,
+            reason="selected provider-motion run is not complete",
+            completion_status=_completion_status(run_attrs),
+        )
+    if run_attrs.get("stage_selector_eligible") is not False:
+        return StageAvailability(
+            stage_id="track_kinematics",
+            available=False,
+            artifact_path=relative_run_path,
+            run_name=encoded_run,
+            reason=(
+                "selected provider-motion run is not selector-ineligible; "
+                "literal False is required"
+            ),
+            completion_status=_completion_status(run_attrs),
+        )
+    return StageAvailability(
+        stage_id="track_kinematics",
+        available=True,
+        artifact_path=relative_run_path,
+        run_name=encoded_run,
+        reason="explicit complete selector-ineligible provider-motion run is available",
+        completion_status=_completion_status(run_attrs),
+    )
+
+
 def _active_keypoint_bundle_refined_path(
     root: Path,
     *,
@@ -289,9 +422,7 @@ def _active_keypoint_bundle_refined_path(
     ):
         return None
     members = authority.get("members")
-    refined = (
-        members.get("refined_keypoints") if isinstance(members, Mapping) else None
-    )
+    refined = members.get("refined_keypoints") if isinstance(members, Mapping) else None
     run_path = refined.get("run_path") if isinstance(refined, Mapping) else None
     if (
         not isinstance(run_path, str)
@@ -332,8 +463,8 @@ def _keypoint_authority_availability(
             available=False,
             reason="keypoint bundle activation lease is present",
         )
-    active_refined_path = (
-        _active_keypoint_bundle_refined_path(root, root_attrs=root_attrs)
+    active_refined_path = _active_keypoint_bundle_refined_path(
+        root, root_attrs=root_attrs
     )
     if authority_present and active_refined_path is None:
         return StageAvailability(
@@ -412,7 +543,9 @@ def _keypoint_authority_availability(
                 stage_id="refined_keypoints",
                 relative_parent=family,
                 run_name=name,
-                encoded_run_name=(f"refined/{name}" if family.startswith("refined_") else name),
+                encoded_run_name=(
+                    f"refined/{name}" if family.startswith("refined_") else name
+                ),
                 reason=selection_reason,
                 expected_selector_eligible=expected_selector_eligible,
             )
@@ -440,7 +573,9 @@ def _keypoint_authority_availability(
             stage_id="refined_keypoints",
             relative_parent=family,
             run_name=name,
-            encoded_run_name=(f"refined/{name}" if family.startswith("refined_") else name),
+            encoded_run_name=(
+                f"refined/{name}" if family.startswith("refined_") else name
+            ),
             reason=(
                 "persisted refined keypoint authority is available"
                 if family.startswith("refined_")
@@ -475,17 +610,15 @@ def _keypoint_crop_lineage(
             stage_id="tracks",
             available=False,
             reason=(
-                "selected keypoint dependency is unavailable: "
-                f"{keypoints.reason}"
+                "selected keypoint dependency is unavailable: " f"{keypoints.reason}"
             ),
         )
     keypoint_path = root / keypoints.artifact_path
     keypoint_attrs = _attrs(keypoint_path)
     family, keypoint_name = keypoints.artifact_path.split("/", 1)
     raw_attrs: Mapping[str, object] | None = None
-    if (
-        family == "refined_keypoints_runs"
-        and not isinstance(keypoint_attrs.get("run_manifest"), Mapping)
+    if family == "refined_keypoints_runs" and not isinstance(
+        keypoint_attrs.get("run_manifest"), Mapping
     ):
         raw_name = str(keypoint_attrs.get("source_keypoints_run") or "").strip()
         if not raw_name or "/" in raw_name:
@@ -498,9 +631,10 @@ def _keypoint_crop_lineage(
             )
         raw_parent = root / "keypoints_runs"
         raw_path = raw_parent / raw_name
-        if not (raw_parent / "zarr.json").is_file() or not (
-            raw_path / "zarr.json"
-        ).is_file():
+        if (
+            not (raw_parent / "zarr.json").is_file()
+            or not (raw_path / "zarr.json").is_file()
+        ):
             return StageAvailability(
                 stage_id="tracks",
                 available=False,
@@ -539,9 +673,10 @@ def _keypoint_crop_lineage(
 
     raw_parent = root / "keypoints_runs"
     raw_path = root / lineage.base_run_path
-    if not (raw_parent / "zarr.json").is_file() or not (
-        raw_path / "zarr.json"
-    ).is_file():
+    if (
+        not (raw_parent / "zarr.json").is_file()
+        or not (raw_path / "zarr.json").is_file()
+    ):
         return StageAvailability(
             stage_id="tracks",
             available=False,
@@ -875,9 +1010,10 @@ def _track_kinematics_visualization_availability(
     run_attrs = _attrs(run_path)
     status = _completion_status(run_attrs)
 
-    visualization_parent_relative = stage_run_relative_path(
-        TRACK_KINEMATICS_VISUALIZATION_STAGE, run_name
-    ) + "/tracks/id_0"
+    visualization_parent_relative = (
+        stage_run_relative_path(TRACK_KINEMATICS_VISUALIZATION_STAGE, run_name)
+        + "/tracks/id_0"
+    )
     visualization_parent = root / visualization_parent_relative
     if not (visualization_parent / "zarr.json").is_file():
         return StageAvailability(
@@ -956,8 +1092,7 @@ def _track_kinematics_visualization_availability(
         or motion_authority.get("track_id") != 0
         or not str(motion_authority.get("motion_manifest_sha256") or "").strip()
         or not str(
-            motion_authority.get("positions_px_coordinate_descriptor_sha256")
-            or ""
+            motion_authority.get("positions_px_coordinate_descriptor_sha256") or ""
         ).strip()
         or render_attrs.get("source_track_motion_authority") != motion_authority
         or render_attrs.get("track_id") != 0
@@ -1016,6 +1151,7 @@ def discover_stage_availability(
     *,
     requested_run: str | None = None,
     dependency_runs: Mapping[str, str] | None = None,
+    run_scope: str | None = None,
     execution_profile_id: str = PRODUCTION_EXECUTION_PROFILE_ID,
 ) -> StageAvailability:
     """Resolve one persisted run using direct ``zarr.json`` reads only."""
@@ -1023,6 +1159,19 @@ def discover_stage_availability(
     canonical = canonical_stage_id(stage_id)
     execution_profile = resolve_workflow_execution_profile(execution_profile_id)
     root = Path(zarr_path)
+    normalized_scope = None if run_scope is None else str(run_scope).strip().lower()
+    if normalized_scope is not None:
+        if canonical != "track_kinematics" or normalized_scope != (
+            PROVIDER_TRACK_KINEMATICS_SCOPE
+        ):
+            raise ValueError(
+                f"unsupported run scope {normalized_scope!r} for stage {canonical!r}"
+            )
+        return _provider_track_kinematics_availability(
+            root,
+            requested_run=requested_run,
+            execution_profile_id=execution_profile.profile_id,
+        )
     if canonical == "refined_keypoints":
         return _keypoint_authority_availability(
             root,
@@ -1071,18 +1220,14 @@ def discover_stage_availability(
             parent_attrs,
             requested_run,
             parent_relative_path=relative_parent,
-            expected_selector_eligible=(
-                execution_profile.expected_selector_eligible
-            ),
+            expected_selector_eligible=(execution_profile.expected_selector_eligible),
         )
         if run_name is None or selection_error is not None:
             return StageAvailability(
                 stage_id=canonical,
                 available=False,
                 artifact_path=(
-                    f"{relative_parent}/{run_name}"
-                    if run_name
-                    else relative_parent
+                    f"{relative_parent}/{run_name}" if run_name else relative_parent
                 ),
                 run_name=run_name,
                 reason=selection_error or "run selection failed",
