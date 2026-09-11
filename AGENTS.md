@@ -47,12 +47,20 @@
 
 ## Required CI and Integration Rule
 
-<!-- required-ci-integration-contract:v1 -->
+<!-- required-ci-integration-contract:v2 -->
 
 - A branch must not be merged, integrated into another merge candidate,
   fast-forwarded into the shared `/groups` checkout, used to activate a
   production selector/publication, or described as complete or merge-ready
   unless every required CI check for that change has completed successfully.
+- After a merge to `main`, the resulting integration is validated by either a
+  successful full CI run on the exact integrated commit or the successful
+  `main-integration` same-tree gate. The same-tree gate is sufficient only when
+  it proves that the merge's first parent is an ancestor of its exact green PR
+  head, the landed tree is identical to both that head and the attested tested
+  PR tree, the PR targeted the exact first parent on `main`, and the active
+  strict required-check ruleset has no bypass actors. Any mismatch or failure
+  requires a successful manual full CI run on the current exact `main` commit.
 - Failed, cancelled, timed-out, or accidentally skipped required checks are
   blocking. A check skipped because an earlier gate failed is unrun evidence,
   not a successful result. Do not dismiss a blocking result as pre-existing or
