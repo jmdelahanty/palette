@@ -22,6 +22,7 @@ from fisheye.analysis_workflows.validated_behavior_cohort import (
 from fisheye.analysis_workflows.core_behavior_cohort_adapter import (
     CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
     CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+    BOUT_KINEMATICS_EXPORT_PROFILE_ID,
     build_bundle_set_from_core_behavior_execution_reports,
     validate_core_behavior_bundle_set_current_sources,
 )
@@ -256,8 +257,7 @@ def _bundle_adapter_for_membership(membership: Mapping[str, Any]) -> str:
         if (
             EXACT_CHASER_ADMISSION_ROLE in roles
             and len(roles) == 2
-            and len(roles.intersection(CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES))
-            == 1
+            and len(roles.intersection(CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLES)) == 1
         ):
             adapters.add(CORE_CHASER_BUNDLE_ADAPTER_ID)
             continue
@@ -352,6 +352,11 @@ def _parser() -> argparse.ArgumentParser:
     bundle.add_argument("--bundle-root", type=Path, required=True)
     bundle.add_argument("--palette-commit", required=True)
     bundle.add_argument("--output-json", type=Path, required=True)
+    bundle.add_argument(
+        "--export-profile",
+        choices=(CORE_BEHAVIOR_EXPORT_PROFILE_ID, BOUT_KINEMATICS_EXPORT_PROFILE_ID),
+        help="Core-behavior export profile; omitted for the existing default.",
+    )
 
     validate_membership = subparsers.add_parser("validate-membership")
     validate_membership.add_argument("--membership", type=Path, required=True)
@@ -459,6 +464,7 @@ def _bundle_set_command(args: argparse.Namespace) -> dict[str, Any]:
         args.bundle_paths_json,
         membership_record_sha256=membership["record_sha256"],
     )
+    requested_export_profile = getattr(args, "export_profile", None)
     output = args.output_json.expanduser().resolve()
     existing_export_profile_id: str | None = None
     if output.exists():
@@ -473,6 +479,14 @@ def _bundle_set_command(args: argparse.Namespace) -> dict[str, Any]:
         created_at_utc = _utc_now()
     adapter_id = _bundle_adapter_for_membership(membership)
     if adapter_id == CORE_BEHAVIOR_BUNDLE_ADAPTER_ID:
+        if (
+            existing_export_profile_id is not None
+            and requested_export_profile is not None
+            and requested_export_profile != existing_export_profile_id
+        ):
+            raise ValidatedBehaviorCohortCliError(
+                "Existing bundle set belongs to another export profile."
+            )
         requested = build_bundle_set_from_core_behavior_execution_reports(
             bundle_set_id=args.bundle_set_id,
             membership=membership,
@@ -482,10 +496,16 @@ def _bundle_set_command(args: argparse.Namespace) -> dict[str, Any]:
             palette_commit=args.palette_commit,
             created_at_utc=created_at_utc,
             export_profile_id=(
-                existing_export_profile_id or CORE_BEHAVIOR_EXPORT_PROFILE_ID
+                existing_export_profile_id
+                or requested_export_profile
+                or CORE_BEHAVIOR_EXPORT_PROFILE_ID
             ),
         )
     elif adapter_id == CORE_CHASER_BUNDLE_ADAPTER_ID:
+        if requested_export_profile is not None:
+            raise ValidatedBehaviorCohortCliError(
+                "--export-profile applies only to core-behavior execution reports."
+            )
         requested = build_bundle_set_from_core_chaser_composite_bundles(
             bundle_set_id=args.bundle_set_id,
             membership=membership,
@@ -496,6 +516,10 @@ def _bundle_set_command(args: argparse.Namespace) -> dict[str, Any]:
             created_at_utc=created_at_utc,
         )
     else:
+        if requested_export_profile is not None:
+            raise ValidatedBehaviorCohortCliError(
+                "--export-profile applies only to core-behavior execution reports."
+            )
         requested = build_bundle_set_from_validated_recording_behavior_bundles(
             bundle_set_id=args.bundle_set_id,
             membership=membership,

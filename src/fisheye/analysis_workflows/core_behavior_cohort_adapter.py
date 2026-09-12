@@ -62,6 +62,16 @@ from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import
     SUBJECT_BODY_FRAME_SOURCE_PROFILE_ID,
     TAIL_TRACE_CAPABILITY,
 )
+from fisheye.analytics_exports.validated_behavior_bout_kinematics import (
+    BoundBoutKinematicsMetricsSource,
+    bind_bout_kinematics_metrics_source,
+)
+from fisheye.analytics_exports.validated_behavior_bout_kinematics_contracts import (
+    BOUT_KINEMATICS_CAPABILITY,
+    BOUT_KINEMATICS_CAPABILITY_KEYS,
+    BOUT_KINEMATICS_CAPABILITY_PROFILE_ID,
+    BOUT_KINEMATICS_EXPORT_PROFILE_ID,
+)
 from fisheye.shared.pixel_frame_authority import (
     BoundAcquisitionCameraFrame,
     load_persisted_acquisition_camera_authority,
@@ -104,7 +114,11 @@ CORE_BEHAVIOR_BUNDLE_ADAPTER_ID = "core_behavior_execution_report_v3"
 CORE_BEHAVIOR_BUNDLE_METHOD_ID = "strict_named_authority_bundle_v1"
 CORE_BEHAVIOR_BUNDLE_STATUS = "complete"
 SUPPORTED_CORE_BEHAVIOR_EXPORT_PROFILE_IDS = frozenset(
-    {CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1, CORE_BEHAVIOR_EXPORT_PROFILE_ID}
+    {
+        CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1,
+        CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+        BOUT_KINEMATICS_EXPORT_PROFILE_ID,
+    }
 )
 
 
@@ -142,6 +156,14 @@ def _require_export_profile_id(value: object) -> str:
     return profile_id
 
 
+def _capability_keys(export_profile_id: str) -> tuple[str, ...]:
+    return (
+        BOUT_KINEMATICS_CAPABILITY_KEYS
+        if export_profile_id == BOUT_KINEMATICS_EXPORT_PROFILE_ID
+        else CORE_BEHAVIOR_CAPABILITY_KEYS
+    )
+
+
 def core_behavior_capability_contract(
     export_profile_id: str = CORE_BEHAVIOR_EXPORT_PROFILE_ID,
 ) -> dict[str, Any]:
@@ -162,13 +184,17 @@ def core_behavior_capability_contract(
         _fail("Core-behavior capability-state vocabulary is incomplete.")
     profile_id = _require_export_profile_id(export_profile_id)
     capability_profile_id = (
-        CORE_BEHAVIOR_CAPABILITY_PROFILE_ID_V1
-        if profile_id == CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1
-        else CORE_BEHAVIOR_CAPABILITY_PROFILE_ID
+        BOUT_KINEMATICS_CAPABILITY_PROFILE_ID
+        if profile_id == BOUT_KINEMATICS_EXPORT_PROFILE_ID
+        else (
+            CORE_BEHAVIOR_CAPABILITY_PROFILE_ID_V1
+            if profile_id == CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1
+            else CORE_BEHAVIOR_CAPABILITY_PROFILE_ID
+        )
     )
     return build_capability_contract(
         profile_id=capability_profile_id,
-        keys=CORE_BEHAVIOR_CAPABILITY_KEYS,
+        keys=_capability_keys(profile_id),
         reason_codes_by_state=reasons,
     )
 
@@ -209,6 +235,29 @@ def canonical_swim_bout_projection_contract() -> dict[str, Any]:
             "peak_speed_source": "tables/bouts.peak_physical_speed_mm_s",
             "tortuosity_formula": "path_length_mm/net_displacement_mm_when_displacement_gt_1e-6_else_nan",
             "invalid_float_semantics": "source_ieee_nan_not_arrow_null",
+        }
+    )
+
+
+def bout_kinematics_projection_contract() -> dict[str, Any]:
+    """Declare the lossless, level-separated source-native metric projection."""
+
+    return _sealed(
+        {
+            "schema_id": "palette.bout_kinematics_metrics.projection",
+            "schema_version": 1,
+            "source_grain": "one_selected_swim_bout_per_analysis_level",
+            "output_tables": [
+                "bout_movement_metrics",
+                "bout_heading_metrics",
+                "bout_eye_gaze_metrics",
+            ],
+            "row_selection": "all_selected_bouts_all_four_required_levels",
+            "heading_levels": ["heading_raw", "heading_smoothed"],
+            "source_row_policy": "copy_all_native_fields_without_recomputation",
+            "fixed_text_policy": "decode_nul_padded_utf8_strip_bytes_suffix",
+            "invalid_float_semantics": "source_ieee_nan_not_arrow_null",
+            "validity_policy": "retain_all_native_measurement_validity_fields",
         }
     )
 
@@ -326,6 +375,9 @@ class BoundCoreBehaviorCohortSources:
     capability_bindings: Mapping[str, Mapping[str, Any]]
     core_authority_roster: Mapping[str, Any]
     bout_authority_identity: BoutAuthorityIdentity
+    bout_kinematics: BoundBoutKinematicsMetricsSource | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 def bind_core_behavior_cohort_sources(
@@ -343,6 +395,11 @@ def bind_core_behavior_cohort_sources(
         report_path,
         recording_id=expected_recording_id,
         analysis_zarr=source_path,
+        additional_stage_nodes=(
+            ("bout_kinematics",)
+            if selected_export_profile_id == BOUT_KINEMATICS_EXPORT_PROFILE_ID
+            else ()
+        ),
     )
     root = open_zarr_root(source_path, mode="r", use_consolidated=True)
     _ownership, acquisition = load_persisted_acquisition_camera_authority(root)
@@ -351,9 +408,7 @@ def bind_core_behavior_cohort_sources(
     runs = report["runs"]
     execution_profile_id = report["execution_profile_id"]
     if execution_profile_id == PRODUCTION_EXECUTION_PROFILE_ID:
-        track_authority_profile_id = (
-            TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
-        )
+        track_authority_profile_id = TRACK_MOTION_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
         eye_authority_profile_id = EYE_ANGLE_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
         tail_authority_profile_id = (
             TAIL_KINEMATICS_AUTHORITY_PROFILE_SELECTOR_ELIGIBLE_V1
@@ -381,9 +436,9 @@ def bind_core_behavior_cohort_sources(
         track_kinematics_run=runs["track_kinematics"]["run_name"],
         track_scope="offline",
         source_surface_profile_id=(
-            CORE_MOTION_SOURCE_SURFACE_PROFILE_ID
-            if selected_export_profile_id == CORE_BEHAVIOR_EXPORT_PROFILE_ID
-            else KINEMATICS_SOURCE_SURFACE_PROFILE_ID
+            KINEMATICS_SOURCE_SURFACE_PROFILE_ID
+            if selected_export_profile_id == CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1
+            else CORE_MOTION_SOURCE_SURFACE_PROFILE_ID
         ),
         authority_profile_id=track_authority_profile_id,
     )
@@ -517,6 +572,28 @@ def bind_core_behavior_cohort_sources(
         bout_source=bouts.bout_sources[track_ids[0]],
         track_binding=track.binding,
     )
+    bout_kinematics: BoundBoutKinematicsMetricsSource | None = None
+    if selected_export_profile_id == BOUT_KINEMATICS_EXPORT_PROFILE_ID:
+        bout_run = runs["bout_kinematics"]
+        bout_kinematics = bind_bout_kinematics_metrics_source(
+            root,
+            run_name=bout_run["run_name"],
+            run_path=bout_run["run_path"],
+            zarr_path=source_path,
+            track_binding=track.binding,
+            bout_binding=bout_binding,
+            eye_binding=eye,
+            canonical_bouts=bouts.bout_sources[track_ids[0]].events.bouts,
+            require_selector_eligible=(
+                execution_profile_id == PRODUCTION_EXECUTION_PROFILE_ID
+            ),
+        )
+        capability_bindings[BOUT_KINEMATICS_CAPABILITY] = _capability_binding(
+            profile_id="bout_kinematics_metrics_v1",
+            source_binding=bout_kinematics.binding,
+            projection_contract=bout_kinematics_projection_contract(),
+            join_authority_sha256=join_sha,
+        )
     return BoundCoreBehaviorCohortSources(
         report_path=Path(report_path).expanduser().resolve(),
         report_binding=binding,
@@ -533,6 +610,7 @@ def bind_core_behavior_cohort_sources(
         capability_bindings=capability_bindings,
         core_authority_roster=authority_roster,
         bout_authority_identity=bout_identity,
+        bout_kinematics=bout_kinematics,
     )
 
 
@@ -563,7 +641,7 @@ def _complete_member(
             "detail": None,
             "binding": _plain(bound.capability_bindings[key]),
         }
-        for key in CORE_BEHAVIOR_CAPABILITY_KEYS
+        for key in _capability_keys(export_profile_id)
     }
     inventory = {
         "execution_report": _plain(bound.report_binding),
@@ -589,7 +667,9 @@ def _complete_member(
     }
 
 
-def _nonadmitted_member(member: Mapping[str, Any]) -> dict[str, Any]:
+def _nonadmitted_member(
+    member: Mapping[str, Any], *, export_profile_id: str
+) -> dict[str, Any]:
     state = str(member["membership_state"])
     if state == "admitted":
         _fail("Admitted core-behavior members require one complete report.")
@@ -614,7 +694,7 @@ def _nonadmitted_member(member: Mapping[str, Any]) -> dict[str, Any]:
                 "detail": member["disposition_evidence"]["detail"],
                 "binding": None,
             }
-            for key in CORE_BEHAVIOR_CAPABILITY_KEYS
+            for key in _capability_keys(export_profile_id)
         },
     }
 
@@ -672,7 +752,9 @@ def build_bundle_set_from_core_behavior_execution_reports(
                 export_profile_id=selected_export_profile_id,
             )
             if member["membership_state"] == "admitted"
-            else _nonadmitted_member(member)
+            else _nonadmitted_member(
+                member, export_profile_id=selected_export_profile_id
+            )
         )
         for member in validated_membership["members"]
     ]
@@ -815,9 +897,11 @@ __all__ = [
     "SUPPORTED_CORE_BEHAVIOR_EXPORT_PROFILE_IDS",
     "TAIL_TRACE_CAPABILITY",
     "BoundCoreBehaviorCohortSources",
+    "BOUT_KINEMATICS_EXPORT_PROFILE_ID",
     "bind_core_behavior_cohort_sources",
     "build_bundle_set_from_core_behavior_execution_reports",
     "canonical_swim_bout_projection_contract",
+    "bout_kinematics_projection_contract",
     "core_behavior_capability_contract",
     "core_authority_roster_from_bundle_set_member",
     "subject_body_frame_projection_contract",
