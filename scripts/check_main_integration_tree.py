@@ -6,6 +6,8 @@ queue. It is intentionally fail closed. A failure means full CI must be run
 manually on the current exact ``main`` commit before integration is complete.
 
 Standard library only; the runner supplies git, gh and a read-only GH_TOKEN.
+Only the ruleset reads use a short-lived, repository-scoped App token, because
+GitHub omits bypass_actors from the response to read-only callers.
 """
 
 from __future__ import annotations
@@ -120,14 +122,16 @@ def _text(value: object, label: str) -> str:
     return value
 
 
-def command_output(args: list[str]) -> str:
+def command_output(args: list[str], *, token: str | None = None) -> str:
     try:
+        env = None if token is None else {**os.environ, "GH_TOKEN": token}
         return subprocess.run(
             args,
             check=True,
             capture_output=True,
             text=True,
             timeout=60,
+            env=env,
         ).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         raise IntegrationError(
@@ -170,9 +174,14 @@ def _gh_api_args(path: str, *, paginate: bool = False) -> list[str]:
     return [*args, path]
 
 
-def api_json(path: str, *, paginate: bool = False) -> object:
+def api_json(path: str, *, paginate: bool = False, token: str | None = None) -> object:
+    if token is not None and not token.strip():
+        raise IntegrationError("Missing ruleset credential")
     try:
-        return json.loads(command_output(_gh_api_args(path, paginate=paginate)))
+        args = _gh_api_args(path, paginate=paginate)
+        if token is None:
+            return json.loads(command_output(args))
+        return json.loads(command_output(args, token=token))
     except json.JSONDecodeError as exc:
         raise IntegrationError("Malformed GitHub API JSON") from exc
 
@@ -514,9 +523,12 @@ def verify(environ: Mapping[str, str]) -> dict[str, object]:
         ruleset_id=int(environ["PALETTE_MAIN_RULESET_ID"]),
         actions_app_id=int(environ["PALETTE_ACTIONS_APP_ID"]),
     )
+    ruleset_token = environ["PALETTE_RULESET_TOKEN"]
+    if not ruleset_token.strip():
+        raise IntegrationError("Missing ruleset credential")
     landed, head = validate_landed_commit(context)
     ruleset_path = f"repos/{context.repository}/rulesets/{context.ruleset_id}"
-    validate_ruleset(api_json(ruleset_path), context)
+    validate_ruleset(api_json(ruleset_path, token=ruleset_token), context)
 
     associated_path = (
         f"repos/{context.repository}/commits/{context.landed_sha}/pulls?per_page=100"
@@ -567,7 +579,7 @@ def verify(environ: Mapping[str, str]) -> dict[str, object]:
         )
     if validate_workflow_run(api_json(run_path), context, pull, ci) != ci:
         raise IntegrationError("CI run identity changed while evidence was read")
-    validate_ruleset(api_json(ruleset_path), context)
+    validate_ruleset(api_json(ruleset_path, token=ruleset_token), context)
     return {
         "landed_sha": context.landed_sha,
         "head_sha": pull.head_sha,

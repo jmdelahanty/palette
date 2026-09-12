@@ -263,6 +263,12 @@ def test_ruleset_identity_scope_and_bypass_are_exact(context, ruleset, change):
         gate.validate_ruleset(ruleset, context)
 
 
+def test_ruleset_hidden_bypass_field_is_not_treated_as_empty(context, ruleset):
+    ruleset.pop("bypass_actors")
+    with pytest.raises(gate.IntegrationError, match="bypass policy"):
+        gate.validate_ruleset(ruleset, context)
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -437,8 +443,8 @@ def test_verify_reads_exact_evidence_and_rechecks_immutable_claims(
     monkeypatch.setattr(gate, "validate_landed_commit", lambda _context: (landed, head))
     calls = []
 
-    def api(path, *, paginate=False):
-        calls.append((path, paginate))
+    def api(path, *, paginate=False, token=None):
+        calls.append((path, paginate, token))
         if "/rulesets/" in path:
             return ruleset
         if "/commits/" + LANDED_SHA + "/pulls" in path:
@@ -461,6 +467,7 @@ def test_verify_reads_exact_evidence_and_rechecks_immutable_claims(
             "GITHUB_EVENT_NAME": context.event,
             "PALETTE_MAIN_RULESET_ID": str(context.ruleset_id),
             "PALETTE_ACTIONS_APP_ID": str(context.actions_app_id),
+            "PALETTE_RULESET_TOKEN": "ruleset-only-token",
         }
     )
     assert result == {
@@ -473,9 +480,54 @@ def test_verify_reads_exact_evidence_and_rechecks_immutable_claims(
         "tested_sha": TESTED_SHA,
         "ruleset_id": context.ruleset_id,
     }
-    assert sum("/rulesets/" in path for path, _ in calls) == 2
-    assert sum("/check-runs?" in path for path, _ in calls) == 2
-    assert sum(path.endswith(f"/actions/runs/{RUN_ID}") for path, _ in calls) == 2
+    assert sum("/rulesets/" in path for path, _, _ in calls) == 2
+    assert sum("/check-runs?" in path for path, _, _ in calls) == 2
+    assert sum(path.endswith(f"/actions/runs/{RUN_ID}") for path, _, _ in calls) == 2
+    assert all(
+        token == ("ruleset-only-token" if "/rulesets/" in path else None)
+        for path, _, token in calls
+    )
+
+
+def test_ruleset_token_is_environment_only_and_never_logged(monkeypatch, capsys):
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, '{"bypass_actors": []}', "")
+
+    monkeypatch.setattr(gate.subprocess, "run", run)
+    assert gate.api_json("repos/jmdelahanty/palette/rulesets/1", token="secret") == {
+        "bypass_actors": []
+    }
+    args, kwargs = calls[0]
+    assert "secret" not in " ".join(args)
+    assert kwargs["env"]["GH_TOKEN"] == "secret"
+    assert "secret" not in capsys.readouterr().out
+
+
+def test_empty_ruleset_token_fails_closed():
+    with pytest.raises(gate.IntegrationError, match="ruleset credential"):
+        gate.api_json("repos/jmdelahanty/palette/rulesets/1", token="")
+
+
+def test_verify_requires_ruleset_credential_before_reading_git(monkeypatch, context):
+    monkeypatch.setattr(
+        gate,
+        "validate_landed_commit",
+        lambda _context: pytest.fail("Git must not be read without the App token"),
+    )
+    with pytest.raises(KeyError, match="PALETTE_RULESET_TOKEN"):
+        gate.verify(
+            {
+                "GITHUB_REPOSITORY": context.repository,
+                "GITHUB_SHA": context.landed_sha,
+                "GITHUB_REF": context.ref,
+                "GITHUB_EVENT_NAME": context.event,
+                "PALETTE_MAIN_RULESET_ID": str(context.ruleset_id),
+                "PALETTE_ACTIONS_APP_ID": str(context.actions_app_id),
+            }
+        )
 
 
 def test_cli_failure_is_fail_closed_without_secrets(monkeypatch, capsys):
@@ -537,9 +589,27 @@ def test_workflow_contract_uses_full_pr_ci_and_lightweight_main_gate_only():
         "uses": "actions/checkout@v4",
         "with": {"fetch-depth": 0, "persist-credentials": False},
     }
+    assert job["steps"][-2] == {
+        "name": "Create repository-scoped ruleset reader",
+        "id": "ruleset-token",
+        "uses": (
+            "actions/create-github-app-token@"
+            "bcd2ba49218906704ab6c1aa796996da409d3eb1"
+        ),
+        "with": {
+            "app-id": "${{ vars.PALETTE_RULESET_APP_ID }}",
+            "private-key": "${{ secrets.PALETTE_RULESET_APP_PRIVATE_KEY }}",
+            "owner": "${{ github.repository_owner }}",
+            "repositories": "palette",
+            "permission-administration": "write",
+        },
+    }
     assert job["steps"][-1] == {
         "name": "Verify exact green same-tree integration",
-        "env": {"GH_TOKEN": "${{ github.token }}"},
+        "env": {
+            "GH_TOKEN": "${{ github.token }}",
+            "PALETTE_RULESET_TOKEN": "${{ steps.ruleset-token.outputs.token }}",
+        },
         "run": "scripts/py scripts/check_main_integration_tree.py",
     }
     assert all(step.get("continue-on-error", False) is False for step in job["steps"])

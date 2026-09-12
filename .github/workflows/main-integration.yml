@@ -35,7 +35,18 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Create repository-scoped ruleset reader
+        id: ruleset-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ vars.PALETTE_RULESET_APP_ID }}
+          private-key: ${{ secrets.PALETTE_RULESET_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: palette
+          permission-administration: write
+
       - name: Verify exact green same-tree integration
         env:
           GH_TOKEN: ${{ github.token }}
+          PALETTE_RULESET_TOKEN: ${{ steps.ruleset-token.outputs.token }}
         run: scripts/py scripts/check_main_integration_tree.py
