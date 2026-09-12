@@ -56,7 +56,8 @@ The versioned `palette.unified_h5_native_storage` manifest binds every path,
 type, shape, payload hash, typed attribute value, original finalization receipt,
 admission summary, run identity, owner, and Palette producing-code provenance.
 This storage digest is **not** the H5 container-byte digest or an old Palette
-coordinate-product digest.
+coordinate-product digest. Writer input provenance uses the normalized source
+path already verified against the exact open H5 handle.
 
 The existing Palette physical planner and array factory choose regular local
 chunks (`scratch_compute_v1`, 1 MiB target). One importer owns all physical

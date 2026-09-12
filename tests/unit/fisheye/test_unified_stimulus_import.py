@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import h5py
 import numpy as np
 import pytest
@@ -111,6 +114,40 @@ def test_missing_external_receipt_does_not_create_destination(tmp_path):
             source_profile="unified_experimental_h5_v1",
         )
     assert not destination.exists()
+
+
+def test_expanded_source_path_is_bound_in_writer_provenance(tmp_path):
+    from fisheye.analysis.unified_stimulus_import import import_unified_from_open_h5
+
+    source = emit_fixture(tmp_path, "base")
+    receipt = write_receipt(tmp_path, "base")
+    destination = tmp_path / "expanded-source.zarr"
+    # Exercise the native preflight's path normalization without changing HOME
+    # or writing outside pytest's temporary directory. The legacy public path
+    # existence check still rejects unexpanded tilde arguments.
+    argument = Path("~") / os.path.relpath(source, Path.home())
+    assert argument.expanduser().resolve() == source.resolve()
+    with h5py.File(source, "r") as h5:
+        import_unified_from_open_h5(
+            h5,
+            source_h5=argument,
+            zarr_path=destination,
+            run_name="candidate",
+            overwrite=False,
+            finalization_receipt=receipt,
+        )
+    root = zarr.open_group(str(destination), mode="r", use_consolidated=True)
+    candidate = load_unified_stimulus_candidate(root, run_name="candidate")
+    artifacts = root["analysis/stimulus_runs/candidate"].attrs["run_provenance"][
+        "input_artifacts"
+    ]
+    assert artifacts == [
+        {
+            "path": str(source.resolve()),
+            "sha256": candidate.admission["source_sha256"],
+            "size_bytes": source.stat().st_size,
+        }
+    ]
 
 
 @pytest.mark.parametrize(

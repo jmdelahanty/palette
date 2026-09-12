@@ -137,7 +137,7 @@ def import_unified_from_open_h5(
             },
             input_artifacts=[
                 {
-                    "path": str(Path(source_h5).resolve()),
+                    "path": admission.source_identity["path"],
                     "sha256": admission.source_sha256,
                     "size_bytes": admission.source_identity["size_bytes"],
                 }
