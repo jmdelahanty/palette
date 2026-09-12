@@ -393,6 +393,26 @@ def test_attestation_job_log_record_is_unique_and_well_formed(attestation):
         gate.attestation_from_job_log(b"ci-required-attestation: not-json\n")
 
 
+def test_job_log_download_allows_ansi_without_weakening_attestation(
+    monkeypatch, attestation
+):
+    calls = []
+
+    def download(args):
+        calls.append(args)
+        return b"\x1b[36mcolored runner output\x1b[0m\n" + make_job_log(attestation)
+
+    monkeypatch.setattr(gate, "command_bytes", download)
+    path = "repos/jmdelahanty/palette/actions/jobs/123/logs"
+    assert gate.attestation_from_job_log(gate.api_job_log(path)) == attestation
+    assert len(calls) == 1
+    assert calls[0].count("--allow-escape-sequences") == 1
+    assert calls[0][-1] == path
+    assert "--allow-escape-sequences" not in gate._gh_api_args(
+        "repos/jmdelahanty/palette/rulesets/22372296"
+    )
+
+
 @pytest.mark.parametrize(
     "change",
     [
