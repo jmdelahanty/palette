@@ -3014,9 +3014,18 @@ def import_stimulus_to_zarr(
     verbose: bool,
     repair_chaser_gaps: bool = True,
     metadata_and_calibration_only: bool = False,
+    source_profile: str | None = None,
+    finalization_receipt: Path | None = None,
 ) -> str:
     """Main import routine."""
     console = Console() if verbose else None
+
+    if source_profile not in (None, "unified_experimental_h5_v1"):
+        raise ValueError(f"Unsupported explicit stimulus source profile: {source_profile!r}.")
+    if finalization_receipt is not None and source_profile is None:
+        raise ValueError("An external finalization receipt requires an explicit source profile.")
+    if source_profile is not None and (stimulus_h5 is None or metadata_and_calibration_only):
+        raise ValueError("Native unified import requires an explicit H5 and does not support metadata-only fallback.")
 
     resolved_h5: Optional[Path] = stimulus_h5
     if resolved_h5 is None:
@@ -3033,6 +3042,18 @@ def import_stimulus_to_zarr(
     # Keep this exact read-only handle alive through the final publication
     # recheck. No path reopen or cached preflight evidence is accepted.
     with h5py.File(resolved_h5.expanduser().resolve(), "r") as h5:
+        if source_profile == "unified_experimental_h5_v1":
+            from fisheye.analysis.unified_stimulus_import import import_unified_from_open_h5
+
+            return import_unified_from_open_h5(
+                h5, source_h5=resolved_h5, zarr_path=zarr_path, run_name=run_name,
+                overwrite=overwrite, finalization_receipt=finalization_receipt,
+            )
+        native_session = h5.get("/metadata/session")
+        if (
+            native_session is not None and "recording_artifact_profile" in native_session.attrs
+        ) or h5.attrs.get("development_schema_id") == "citrus.experimental_h5_core_writer_test":
+            raise ValueError("Native stimulus H5 requires explicit source_profile selection; legacy fallback is forbidden.")
         protocol_semantic_snapshot = read_protocol_semantic_snapshot(h5)
         protocol_execution_index = (
             read_protocol_execution_index(
@@ -3659,6 +3680,10 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("zarr_path", type=Path, help="Path to the Palette Zarr archive to update.")
     parser.add_argument("--run-name", help="Optional run name inside analysis/stimulus_runs/.")
+    parser.add_argument("--source-profile", choices=("unified_experimental_h5_v1",),
+                        help="Explicit native experimental profile; produces only a selector-ineligible candidate.")
+    parser.add_argument("--finalization-receipt", type=Path,
+                        help="External exact-H5 finalization receipt required by the native unified profile.")
     parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -3695,6 +3720,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         verbose=not args.quiet,
         repair_chaser_gaps=not args.skip_chaser_repair,
         metadata_and_calibration_only=bool(args.metadata_and_calibration_only),
+        source_profile=args.source_profile,
+        finalization_receipt=args.finalization_receipt,
     )
 
 
