@@ -1,0 +1,41 @@
+name: Main integration
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: main-integration-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  main-integration:
+    name: main-integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PALETTE_PYTHON: python
+      PALETTE_ACTIONS_APP_ID: "15368"
+      PALETTE_MAIN_RULESET_ID: "22372296"
+    steps:
+      - name: Check out exact integrated commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify exact green same-tree integration
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/py scripts/check_main_integration_tree.py
