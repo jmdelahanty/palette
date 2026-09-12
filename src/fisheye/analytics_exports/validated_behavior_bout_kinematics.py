@@ -17,6 +17,8 @@ import numpy as np
 from fisheye.shared.run_provenance import validate_run_provenance
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
+from .validated_behavior_bout_kinematics_contracts import source_dtype
+
 
 LEVELS = ("movement", "heading_raw", "heading_smoothed", "eye_gaze")
 SOURCE_SCHEMA_ID = "analysis.bout_kinematics_runs"
@@ -152,6 +154,32 @@ def _content_sha256(records: np.ndarray) -> str:
     return digest.hexdigest()
 
 
+def pack_bout_kinematics_metric_rows(
+    records_by_level: Mapping[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    """Discard compact layout columns and padding before sealing metric bytes."""
+
+    if set(records_by_level) != set(LEVELS):
+        _fail("Bout-kinematics run lacks its four required logical levels.")
+    packed_by_level: dict[str, np.ndarray] = {}
+    for level in LEVELS:
+        source = np.asarray(records_by_level[level])
+        native_level = "heading" if level.startswith("heading_") else level
+        dtype = source_dtype(native_level)
+        if source.ndim != 1 or source.dtype.names != dtype.names:
+            _fail(f"Bout-kinematics {level} metric field roster is not native.")
+        if any(
+            source.dtype.fields[name][0] != dtype.fields[name][0]
+            for name in dtype.names
+        ):
+            _fail(f"Bout-kinematics {level} metric field dtypes are not native.")
+        packed = np.empty(source.shape[0], dtype=dtype)
+        for name in dtype.names:
+            packed[name] = source[name]
+        packed_by_level[level] = packed
+    return packed_by_level
+
+
 @dataclass(frozen=True)
 class BoundBoutKinematicsMetricsSource:
     binding: Mapping[str, Any]
@@ -227,7 +255,8 @@ def bind_bout_kinematics_metrics_source(
         or attrs.get("source_track_id") != track_id
     ):
         _fail("Bout-kinematics run attrs disagree with its sealed source refs.")
-    records_by_level, _level_attrs, _table_attrs = resolve_bout_kinematics_tables(run)
+    logical_rows, _level_attrs, _table_attrs = resolve_bout_kinematics_tables(run)
+    records_by_level = pack_bout_kinematics_metric_rows(logical_rows)
     row_counts = validate_bout_kinematics_metric_rows(records_by_level, canonical_bouts)
     array_manifest = _mapping(
         attrs.get("array_schema_manifest"), field_name="bout array manifest"
@@ -275,6 +304,7 @@ __all__ = [
     "BoundBoutKinematicsMetricsSource",
     "BoutKinematicsExportSourceError",
     "bind_bout_kinematics_metrics_source",
+    "pack_bout_kinematics_metric_rows",
     "validate_bout_kinematics_metric_rows",
     "validate_bout_kinematics_run_provenance",
     "validate_bout_kinematics_source_refs",

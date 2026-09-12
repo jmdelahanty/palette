@@ -7,9 +7,14 @@ import pytest
 
 from fisheye.analytics_exports.validated_behavior_bout_kinematics import (
     BoutKinematicsExportSourceError,
+    _content_sha256,
+    pack_bout_kinematics_metric_rows,
     validate_bout_kinematics_metric_rows,
     validate_bout_kinematics_run_provenance,
     validate_bout_kinematics_source_refs,
+)
+from fisheye.analytics_exports.validated_behavior_bout_kinematics_contracts import (
+    source_dtype,
 )
 
 
@@ -90,6 +95,26 @@ def test_bout_metric_rows_match_each_selected_canonical_bout() -> None:
         "heading_smoothed": 2,
         "eye_gaze": 2,
     }
+
+
+def test_compact_layout_padding_is_excluded_from_metric_content_hashes() -> None:
+    def logical_rows(padding: bytes) -> dict[str, np.ndarray]:
+        result: dict[str, np.ndarray] = {}
+        for level in ("movement", "heading_raw", "heading_smoothed", "eye_gaze"):
+            native = source_dtype("heading" if level.startswith("heading_") else level)
+            compact = np.zeros(1, dtype=np.dtype([("dropped", "S132"), *native.descr]))
+            compact["dropped"] = padding
+            compact["bout_id"] = 7
+            result[level] = compact[list(native.names)].copy()
+        return result
+
+    first = pack_bout_kinematics_metric_rows(logical_rows(b"first layout bytes"))
+    second = pack_bout_kinematics_metric_rows(logical_rows(b"other layout bytes"))
+    for level, rows in first.items():
+        native = source_dtype("heading" if level.startswith("heading_") else level)
+        assert rows.dtype == native
+        assert rows.dtype.itemsize == native.itemsize
+        assert _content_sha256(rows) == _content_sha256(second[level])
 
 
 @pytest.mark.parametrize(
