@@ -158,7 +158,9 @@ def command_bytes(args: list[str]) -> bytes:
     return data
 
 
-def _gh_api_args(path: str, *, paginate: bool = False) -> list[str]:
+def _gh_api_args(
+    path: str, *, paginate: bool = False, allow_escape_sequences: bool = False
+) -> list[str]:
     args = [
         "gh",
         "api",
@@ -169,6 +171,8 @@ def _gh_api_args(path: str, *, paginate: bool = False) -> list[str]:
         "-H",
         "X-GitHub-Api-Version: 2022-11-28",
     ]
+    if allow_escape_sequences:
+        args.append("--allow-escape-sequences")
     if paginate:
         args.extend(["--paginate", "--slurp"])
     return [*args, path]
@@ -187,7 +191,9 @@ def api_json(path: str, *, paginate: bool = False, token: str | None = None) -> 
 
 
 def api_job_log(path: str) -> bytes:
-    return command_bytes(_gh_api_args(path))
+    # CI logs contain ANSI codes; gh otherwise refuses to emit them even to
+    # captured stdout. The attestation parser still requires one exact record.
+    return command_bytes(_gh_api_args(path, allow_escape_sequences=True))
 
 
 def commit_identity(sha: str) -> CommitIdentity:
