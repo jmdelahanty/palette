@@ -1647,7 +1647,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-54f3ddde8fe25326"
+            "schema-writer-8ec988ece17e91ed"
           ],
           "shape": "<unresolved>"
         },
@@ -3879,7 +3879,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-e8aed57469fc47aa"
+            "schema-writer-949a99e5081a626c"
           ],
           "shape": "shape(h5['/video_metadata/frame_metadata'][:])"
         },
@@ -4601,7 +4601,7 @@
         {
           "dtype": "bool",
           "occurrence_ids": [
-            "schema-writer-3e2039f5a74de4ab"
+            "schema-writer-aeffb4c5ad882f05"
           ],
           "shape": "frame_metadata.shape[0]"
         },
@@ -5920,7 +5920,8 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-7bdb0263711680f1"
+            "schema-writer-7bdb0263711680f1",
+            "schema-writer-d5db76435a5d6ea4"
           ],
           "shape": "<unresolved>"
         },
@@ -11131,7 +11132,7 @@
       "window_start_frame"
     ],
     "note": "Leaf-name coverage is orientation evidence only; dynamic paths and semantic reuse require manual review.",
-    "writer_leaf_name_count": 630,
+    "writer_leaf_name_count": 631,
     "writer_without_array_spec_leaf_names": [
       "acceleration",
       "acceleration_mm",
@@ -11378,6 +11379,7 @@
       "moving_grating_omr_per_fish",
       "moving_grating_omr_windows",
       "name",
+      "native_manifest_json_utf8",
       "near_zone_available_area_mm2",
       "near_zone_boundary_censor_event_count",
       "near_zone_censor_event_count",
@@ -27300,8 +27302,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 3271,
-      "occurrence_id": "schema-writer-e8aed57469fc47aa",
+      "line": 3292,
+      "occurrence_id": "schema-writer-949a99e5081a626c",
       "path_pattern": "<run_group>/video_metadata/frame_metadata",
       "required": null,
       "shape_expression": "shape(h5['/video_metadata/frame_metadata'][:])",
@@ -27313,7 +27315,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-0d001578d6dac2a9"
+      "writer_site_id": "writer-edb529a94df693bd"
     },
     {
       "access_pattern": "windowed",
@@ -27334,8 +27336,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 3297,
-      "occurrence_id": "schema-writer-70a9051e17f21187",
+      "line": 3318,
+      "occurrence_id": "schema-writer-dcf2657f050db0ac",
       "path_pattern": "<run_group>/video_metadata/camera_aligned_frame_metadata",
       "required": null,
       "shape_expression": "shape(camera_aligned_metadata)",
@@ -27347,7 +27349,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-47bc4c81467765cf"
+      "writer_site_id": "writer-0e99974ad9cf4357"
     },
     {
       "access_pattern": "unclassified",
@@ -27368,8 +27370,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 3305,
-      "occurrence_id": "schema-writer-3e2039f5a74de4ab",
+      "line": 3326,
+      "occurrence_id": "schema-writer-aeffb4c5ad882f05",
       "path_pattern": "<run_group>/interpolation_mask",
       "required": null,
       "shape_expression": "frame_metadata.shape[0]",
@@ -27381,7 +27383,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-4634445f365be57f"
+      "writer_site_id": "writer-dc64c670e38163af"
     },
     {
       "access_pattern": "unclassified",
@@ -27402,8 +27404,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 3313,
-      "occurrence_id": "schema-writer-d481e0ccd70e5263",
+      "line": 3334,
+      "occurrence_id": "schema-writer-6cfc65f7d527e53c",
       "path_pattern": "<run_group>/camera_aligned_interpolation_mask",
       "required": null,
       "shape_expression": "shape(interpolation_mask[camera_aligned_indices])",
@@ -27415,7 +27417,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-6936442917585c77"
+      "writer_site_id": "writer-9a3408f6a90d0e0c"
     },
     {
       "access_pattern": "unclassified",
@@ -27436,8 +27438,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 3338,
-      "occurrence_id": "schema-writer-54f3ddde8fe25326",
+      "line": 3359,
+      "occurrence_id": "schema-writer-8ec988ece17e91ed",
       "path_pattern": "<unresolved-parent>/chaser_states",
       "required": null,
       "shape_expression": null,
@@ -27449,7 +27451,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-729cbcc20068c425"
+      "writer_site_id": "writer-9c1ca5aa3eeb215f"
     },
     {
       "access_pattern": "unclassified",
@@ -27470,8 +27472,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 3339,
-      "occurrence_id": "schema-writer-27cc9c12fb139964",
+      "line": 3360,
+      "occurrence_id": "schema-writer-a44e4ed9257b6e16",
       "path_pattern": "<unresolved-parent>/bounding_boxes",
       "required": null,
       "shape_expression": null,
@@ -27483,7 +27485,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-72513160449583d0"
+      "writer_site_id": "writer-1c8bb3620bc4fb47"
     },
     {
       "access_pattern": "indexed",
@@ -27504,8 +27506,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 3366,
-      "occurrence_id": "schema-writer-caff20b42836f250",
+      "line": 3387,
+      "occurrence_id": "schema-writer-ca8e55f996822fc2",
       "path_pattern": "<run_group>/events/values",
       "required": null,
       "shape_expression": "shape(_ensure_utf8_column(values))",
@@ -27517,7 +27519,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-9a348b23ea3802bd"
+      "writer_site_id": "writer-55b832c784bc364c"
     },
     {
       "access_pattern": "unclassified",
@@ -44646,6 +44648,74 @@
       "write_lifecycle": "immutable_publication",
       "write_lifecycle_basis": "publication/compaction surface",
       "writer_site_id": "writer-c680d5061f3d9e88"
+    },
+    {
+      "access_pattern": "unclassified",
+      "access_pattern_basis": "no high-confidence static access rule",
+      "array_name": "payload",
+      "array_name_expression": "'payload'",
+      "canonical_contract_id": null,
+      "canonical_contract_version": null,
+      "consumer": "unclassified",
+      "consumer_basis": "consumer is not provable from static creation/declaration",
+      "contract_mapping_basis": "no initial catalog candidate for this leaf name",
+      "contract_mapping_status": "unmapped",
+      "declaration_symbol": "fisheye.shared.unified_h5.storage:write_native_candidate",
+      "declaring_stage": null,
+      "declaring_stage_basis": "stage is not statically bound at this writer call",
+      "description": "Schema evidence recovered from a physical writer call site.",
+      "dtype": null,
+      "dtype_expression": null,
+      "dynamic_name": false,
+      "file": "src/fisheye/shared/unified_h5/storage.py",
+      "line": 137,
+      "occurrence_id": "schema-writer-d5db76435a5d6ea4",
+      "path_pattern": "<group>/payload",
+      "required": null,
+      "shape_expression": null,
+      "shape_template": null,
+      "source_kind": "writer_observed_schema",
+      "stage_spec_symbol": null,
+      "status": "current",
+      "status_basis": "packaged Palette module without a maintenance marker",
+      "subgroup": null,
+      "write_lifecycle": "append_or_build_then_publish",
+      "write_lifecycle_basis": "production output; exact write mode unverified",
+      "writer_site_id": "writer-baff69b3501a13f6"
+    },
+    {
+      "access_pattern": "unclassified",
+      "access_pattern_basis": "no high-confidence static access rule",
+      "array_name": "native_manifest_json_utf8",
+      "array_name_expression": "MANIFEST_ARRAY",
+      "canonical_contract_id": null,
+      "canonical_contract_version": null,
+      "consumer": "unclassified",
+      "consumer_basis": "consumer is not provable from static creation/declaration",
+      "contract_mapping_basis": "no initial catalog candidate for this leaf name",
+      "contract_mapping_status": "unmapped",
+      "declaration_symbol": "fisheye.shared.unified_h5.storage:write_native_candidate",
+      "declaring_stage": null,
+      "declaring_stage_basis": "stage is not statically bound at this writer call",
+      "description": "Schema evidence recovered from a physical writer call site.",
+      "dtype": null,
+      "dtype_expression": null,
+      "dynamic_name": false,
+      "file": "src/fisheye/shared/unified_h5/storage.py",
+      "line": 144,
+      "occurrence_id": "schema-writer-5a4f1b06df578f19",
+      "path_pattern": "<run>/native_manifest_json_utf8",
+      "required": null,
+      "shape_expression": null,
+      "shape_template": null,
+      "source_kind": "writer_observed_schema",
+      "stage_spec_symbol": null,
+      "status": "current",
+      "status_basis": "packaged Palette module without a maintenance marker",
+      "subgroup": null,
+      "write_lifecycle": "append_or_build_then_publish",
+      "write_lifecycle_basis": "production output; exact write mode unverified",
+      "writer_site_id": "writer-308194dbbab278cd"
     },
     {
       "access_pattern": "windowed",
@@ -74951,32 +75021,32 @@
     "array_spec_unique_leaf_name_count": 270,
     "array_spec_unique_signature_count": 343,
     "direct_zarr_api_site_count": 658,
-    "dynamic_or_unresolved_writer_site_count": 352,
+    "dynamic_or_unresolved_writer_site_count": 353,
     "manual_zarr_metadata_site_count": 1,
-    "parsed_writer_candidate_module_count": 236,
+    "parsed_writer_candidate_module_count": 238,
     "reader_required_array_declaration_count": 102,
-    "resolved_writer_leaf_name_count": 630,
-    "scanned_python_module_count": 1716,
+    "resolved_writer_leaf_name_count": 631,
+    "scanned_python_module_count": 1735,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
-      "unmapped": 1770
+      "unmapped": 1772
     },
     "schema_occurrences_by_source_kind": {
       "array_spec_stage_binding": 306,
       "array_spec_unbound_declaration": 144,
       "reader_required_array_declaration": 102,
-      "writer_observed_schema": 1294
+      "writer_observed_schema": 1296
     },
-    "writer_site_count": 1646,
+    "writer_site_count": 1649,
     "writer_site_with_chunks_expression_count": 728,
     "writer_site_with_codec_expression_count": 15,
     "writer_site_with_shards_expression_count": 17,
     "writer_site_with_stage_classification_count": 489,
-    "writer_site_without_dtype_evidence_count": 1008,
-    "writer_site_without_shape_evidence_count": 163,
+    "writer_site_without_dtype_evidence_count": 1011,
+    "writer_site_without_shape_evidence_count": 166,
     "writer_sites_by_status": {
-      "current": 1511,
+      "current": 1514,
       "unclear": 135
     },
     "writer_sites_by_surface": {
@@ -74985,10 +75055,10 @@
       "diagnostic": 14,
       "legacy": 49,
       "migration_or_maintenance": 47,
-      "production": 1234,
+      "production": 1237,
       "publication": 73,
       "training": 180
     },
-    "writer_wrapper_call_site_count": 987
+    "writer_wrapper_call_site_count": 990
   }
 }

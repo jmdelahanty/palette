@@ -1,0 +1,98 @@
+{
+  "schema_id": "citrus.experimental_h5.geometry_definition",
+  "schema_version": 1,
+  "status": "development_not_production_admitted",
+  "input_path": "/geometry/correspondence/input",
+  "input_attributes": {
+    "arena_id": "utf8",
+    "camera_serial": "utf8",
+    "runtime_geometry_contract_ref": "utf8",
+    "runtime_geometry_contract_sha256": "utf8",
+    "calibration_authority_ref": "utf8",
+    "calibration_authority_sha256": "utf8",
+    "native_source_width_px": "<i8",
+    "native_source_height_px": "<i8",
+    "final_display_width_px": "<i8",
+    "final_display_height_px": "<i8",
+    "effective_arena_origin_x_px": "<f8",
+    "effective_arena_origin_y_px": "<f8"
+  },
+  "renderer_attributes": {
+    "arena_id": "utf8",
+    "active_stimulus_mode": "utf8",
+    "texture_origin": "utf8",
+    "evidence_kind": "utf8",
+    "texture_width_px": "<i8",
+    "texture_height_px": "<i8",
+    "texture_center_x": "<f8",
+    "texture_center_y": "<f8"
+  },
+  "matrices": {
+    "source_camera_to_final_display_homography": {
+      "dtype": "<f8",
+      "shape": [
+        3,
+        3
+      ],
+      "source_space": "source_camera_px",
+      "destination_space": "final_display_canvas_px",
+      "transform_direction": "source_camera_to_final_display"
+    },
+    "final_display_to_source_camera_homography": {
+      "dtype": "<f8",
+      "shape": [
+        3,
+        3
+      ],
+      "source_space": "final_display_canvas_px",
+      "destination_space": "source_camera_px",
+      "transform_direction": "final_display_to_source_camera"
+    }
+  },
+  "receipt_fields": [
+    "schema_id",
+    "schema_version",
+    "status",
+    "reason",
+    "input_ref",
+    "input_sha256",
+    "input_encoding",
+    "authority_ref",
+    "authority_sha256",
+    "runtime_ref",
+    "runtime_sha256",
+    "calibration_config_ref",
+    "calibration_config_sha256",
+    "presentation_ref",
+    "presentation_sha256",
+    "forward_reuses_calibration",
+    "scope",
+    "source_namespace_ref",
+    "source_namespace_sha256"
+  ],
+  "authority_fields": [
+    "schema_id",
+    "schema_version",
+    "coordinate_frame",
+    "origin",
+    "units",
+    "x_axis",
+    "y_axis",
+    "static_input_ref",
+    "renderer_claim_ref",
+    "runtime_geometry_contract_ref",
+    "calibration_authority_ref",
+    "source_camera_to_final_display_homography_ref",
+    "final_display_to_source_camera_homography_ref",
+    "transform_roles",
+    "presentation_mapping_ref",
+    "physical_readiness_source",
+    "source_namespace_ref"
+  ],
+  "input_encoding": "geometry_input_attributes_and_matrix_bytes_v1",
+  "receipt_scope": "static_internal_geometry_consistency_not_physical_registration_or_experiment_admission",
+  "reuse_rule": "existing forward role must be bit-identical; inverse is a distinct role even if equal; existing presentation must match exact contract bytes and digest claims",
+  "source_integer_policy": "signed int64 preserves submitted invalid negative dimensions; validated extents must be positive",
+  "missing_policy": "no zero/NaN inference; rejected typed floating inputs retain bits; absent required source references prevent component completion",
+  "source_reference_policy": "Input source claims retain current-format H5 reference bytes; canonical descriptors/receipts resolve through the exact stored geometry source namespace contract. Captured source JSON is never rewritten."
+}
