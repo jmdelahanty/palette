@@ -16,7 +16,6 @@ import numpy as np
 
 from fisheye.analysis_workflows.core_behavior_cohort_adapter import (
     CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
-    BoundCoreBehaviorCohortSources,
     bind_core_behavior_cohort_sources,
 )
 from fisheye.shared.json_safety import decode_null_terminated_text
@@ -47,6 +46,16 @@ from .validated_behavior_core_behavior_contracts import (
     SUBJECT_BODY_FRAME_CAPABILITY,
     SUBJECT_BODY_FRAME_SAMPLES_TABLE,
     TAIL_TRACE_CAPABILITY,
+)
+from .validated_behavior_bout_kinematics_contracts import (
+    BOUT_EYE_GAZE_TABLE,
+    BOUT_HEADING_TABLE,
+    BOUT_KINEMATICS_CAPABILITY,
+    BOUT_KINEMATICS_CAPABILITY_KEYS,
+    BOUT_KINEMATICS_EXPORT_PROFILE_ID,
+    BOUT_MOVEMENT_TABLE,
+    source_dtype,
+    source_field_name,
 )
 
 
@@ -107,6 +116,7 @@ class _CoreBehaviorContext:
         if self.export_profile_id not in {
             CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1,
             CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+            BOUT_KINEMATICS_EXPORT_PROFILE_ID,
         }:
             _fail("Core-behavior extractor received an unsupported export profile.")
         self.bound = bind_core_behavior_cohort_sources(
@@ -123,9 +133,14 @@ class _CoreBehaviorContext:
         capabilities = _mapping(
             bundle_member.get("capabilities"), field="bundle capabilities"
         )
-        if set(capabilities) != set(CORE_BEHAVIOR_CAPABILITY_KEYS):
+        capability_keys = (
+            BOUT_KINEMATICS_CAPABILITY_KEYS
+            if self.export_profile_id == BOUT_KINEMATICS_EXPORT_PROFILE_ID
+            else CORE_BEHAVIOR_CAPABILITY_KEYS
+        )
+        if set(capabilities) != set(capability_keys):
             _fail("Core-behavior bundle capability roster is inexact.")
-        for capability_id in CORE_BEHAVIOR_CAPABILITY_KEYS:
+        for capability_id in capability_keys:
             capability = _mapping(
                 capabilities[capability_id], field=f"capability {capability_id}"
             )
@@ -492,6 +507,84 @@ def _canonical_swim_bouts(
     return rows, None
 
 
+def _bout_metric_samples(
+    context: _CoreBehaviorContext,
+    *,
+    levels: tuple[str, ...],
+) -> ValidatedBehaviorBatchSource:
+    source = context.bound.bout_kinematics
+    if source is None:
+        _fail("Bout-metric projection requires the new bout-kinematics profile.")
+    capability = context.capability_binding(BOUT_KINEMATICS_CAPABILITY)
+    binding = _mapping(capability["source_binding"], field="bout source binding")
+    if _plain(binding) != _plain(source.binding):
+        _fail("Bout-metric source binding changed after admission.")
+    projection = _mapping(
+        capability["projection_contract"], field="bout projection contract"
+    )
+
+    def batches() -> Iterator[Mapping[str, Any]]:
+        for level in levels:
+            records = np.asarray(source.records_by_level[level])
+            native_level = "heading" if level.startswith("heading_") else level
+            dtype = source_dtype(native_level)
+            if records.dtype != dtype:
+                _fail(f"Bout-metric {level} dtype differs from the pinned contract.")
+            for start in range(0, len(records), context.row_group_rows):
+                chunk = records[start : start + context.row_group_rows]
+                count = len(chunk)
+                columns: dict[str, Any] = {
+                    **context.common_columns(count),
+                    "source_binding_sha256": _repeat(binding["payload_sha256"], count),
+                    "projection_contract_sha256": _repeat(
+                        projection["payload_sha256"], count
+                    ),
+                    "source_bout_kinematics_run": _repeat(binding["run_name"], count),
+                    "source_bout_kinematics_path": _repeat(binding["run_path"], count),
+                    "source_array_manifest_sha256": _repeat(
+                        binding["source_array_manifest_sha256"], count
+                    ),
+                    "source_metric_content_sha256": _repeat(
+                        binding["content_sha256_by_level"][level], count
+                    ),
+                    "track_id": _repeat(binding["source_track_id"], count),
+                    "source_signal_id": _repeat(binding["source_signal_id"], count),
+                }
+                if level.startswith("heading_"):
+                    columns["heading_level"] = _repeat(level, count)
+                for name in dtype.names or ():
+                    values = chunk[name]
+                    columns[source_field_name(name)] = (
+                        [
+                            decode_null_terminated_text(value, errors="strict")
+                            for value in values
+                        ]
+                        if values.dtype.kind == "S"
+                        else values
+                    )
+                yield columns
+
+    return _batch_source(batches())
+
+
+def _bout_movement_metrics(
+    context: _CoreBehaviorContext,
+) -> ValidatedBehaviorBatchSource:
+    return _bout_metric_samples(context, levels=("movement",))
+
+
+def _bout_heading_metrics(
+    context: _CoreBehaviorContext,
+) -> ValidatedBehaviorBatchSource:
+    return _bout_metric_samples(context, levels=("heading_raw", "heading_smoothed"))
+
+
+def _bout_eye_gaze_metrics(
+    context: _CoreBehaviorContext,
+) -> ValidatedBehaviorBatchSource:
+    return _bout_metric_samples(context, levels=("eye_gaze",))
+
+
 _PRODUCERS: Mapping[str, Callable[[_CoreBehaviorContext], Any]] = MappingProxyType(
     {
         KINEMATICS_SAMPLES_TABLE: _kinematics_samples,
@@ -502,9 +595,18 @@ _PRODUCERS: Mapping[str, Callable[[_CoreBehaviorContext], Any]] = MappingProxyTy
     }
 )
 
+_BOUT_PRODUCERS: Mapping[str, Callable[[_CoreBehaviorContext], Any]] = MappingProxyType(
+    {
+        BOUT_MOVEMENT_TABLE: _bout_movement_metrics,
+        BOUT_HEADING_TABLE: _bout_heading_metrics,
+        BOUT_EYE_GAZE_TABLE: _bout_eye_gaze_metrics,
+    }
+)
 
-def build_core_behavior_row_extractors() -> Mapping[str, Callable[..., Any]]:
-    """Return five extractors sharing one strict last-record source context."""
+
+def _build_row_extractors(
+    producers: Mapping[str, Callable[[_CoreBehaviorContext], Any]],
+) -> Mapping[str, Callable[..., Any]]:
 
     cache = _LastCoreBehaviorContext()
 
@@ -519,11 +621,24 @@ def build_core_behavior_row_extractors() -> Mapping[str, Callable[..., Any]]:
         return extract
 
     return MappingProxyType(
-        {name: wrap(producer) for name, producer in _PRODUCERS.items()}
+        {name: wrap(producer) for name, producer in producers.items()}
     )
+
+
+def build_core_behavior_row_extractors() -> Mapping[str, Callable[..., Any]]:
+    """Return the frozen five-grain v1/v2 extractor roster."""
+
+    return _build_row_extractors(_PRODUCERS)
+
+
+def build_core_behavior_bout_row_extractors() -> Mapping[str, Callable[..., Any]]:
+    """Return the additive bout-metric profile without changing older rosters."""
+
+    return _build_row_extractors({**_PRODUCERS, **_BOUT_PRODUCERS})
 
 
 __all__ = [
     "CoreBehaviorExportAdapterError",
+    "build_core_behavior_bout_row_extractors",
     "build_core_behavior_row_extractors",
 ]
