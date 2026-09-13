@@ -178,3 +178,24 @@ downstream production analysis adoption, parent-transfer dispatch, real-data
 canary, Citrus production admission/default change and companion retirement
 remain separate, explicit work. This candidate import must not imply those
 claims or make an experiment/profile-wide acceptance decision.
+
+## September 12 integration follow-up
+
+The user subsequently authorized merging PRs 168 and 169. PR 168's exact head
+`b6aef85ceeec0b062bc980230542e3a04a6e13b3` passed all 24 required checks in
+run `34719387296`, then merged as `7498ea029a41eb4f5592f571d801d63d754394f9`.
+Its exact `main-integration` gate passed in run `34733875255` before this branch
+incorporated that main commit. PR 169's incoming head
+`dc00de7c762d1d819a0cd920159f485ac7ff13c7` independently passed all 24 checks
+in run `34722320905`, plus 98 new and 116 legacy local tests.
+
+The root worker owns the combination in the same isolated PR 169 worktree and
+branch named above. The integration preserves both implementations and their
+contracts unchanged; its only merge conflicts were generated Zarr inventories,
+which are regenerated from the combined source. The original checkout, PR 168's
+worktree, and commit-pinned deployment are not modified. Fresh combined-head
+tests and all 24 required CI checks must pass before PR 169 merges; the exact
+combined commit and results are recorded on [PR 169](https://github.com/jmdelahanty/palette/pull/169).
+The resulting main commit must then pass its own integration gate. Merge
+authorization does not authorize deployment, shared-checkout advancement,
+registry mutation, or production activation.

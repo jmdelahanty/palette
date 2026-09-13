@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -60,6 +61,13 @@ from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import
     CORE_BEHAVIOR_TABLE_SPECS_V1,
     KINEMATICS_SAMPLES,
     KINEMATICS_SAMPLES_V1,
+)
+from fisheye.analytics_exports.validated_behavior_bout_kinematics_contracts import (
+    BOUT_EYE_GAZE_TABLE,
+    BOUT_HEADING_TABLE,
+    BOUT_KINEMATICS_EXPORT_PROFILE_ID,
+    BOUT_KINEMATICS_EXPORT_TABLE_SPECS,
+    BOUT_MOVEMENT_TABLE,
 )
 from fisheye.analytics_exports.validated_behavior_core_chaser_contracts import (
     CORE_CHASER_EXPORT_PROFILE_ID,
@@ -353,14 +361,83 @@ def test_completed_execution_report_is_typed_admission_not_name_authority(
         )
 
 
+def test_bout_profile_admits_the_extra_exact_report_selected_run(
+    tmp_path: Path,
+) -> None:
+    zarr_path, recording_id, report = _execution_report(tmp_path)
+    workflow = report["workflow"]
+    plan = report["execution_plan"]
+    results = report["node_results"]
+    assert isinstance(workflow, dict) and isinstance(plan, dict)
+    assert isinstance(results, list)
+    bout = "bout_kinematics"
+    workflow["nodes"].append(
+        {**copy.deepcopy(workflow["nodes"][0]), "id": bout, "stage_id": bout}
+    )
+    workflow["run_selection"][bout] = f"{bout}_run"
+    plan["workflow_plan"]["nodes"].append(
+        {
+            **copy.deepcopy(plan["workflow_plan"]["nodes"][0]),
+            "node_id": bout,
+            "stage_id": bout,
+        }
+    )
+    plan["output_runs"][bout] = f"{bout}_run"
+    result = copy.deepcopy(results[0])
+    result.update(node_id=bout, stage_id=bout, run_name=f"{bout}_run")
+    result["verification"].update(
+        run_name=f"{bout}_run",
+        stage_id=bout,
+        artifact_path=f"analysis/bout_kinematics_runs/{bout}_run",
+    )
+    results.append(result)
+
+    base = validate_core_behavior_execution_report(
+        report,
+        expected_analysis_zarr=zarr_path,
+        expected_recording_id=recording_id,
+    )
+    extended = validate_core_behavior_execution_report(
+        report,
+        expected_analysis_zarr=zarr_path,
+        expected_recording_id=recording_id,
+        additional_stage_nodes=(bout,),
+    )
+    assert bout not in base["runs"]
+    assert extended["runs"][bout]["run_path"] == (
+        "analysis/bout_kinematics_runs/bout_kinematics_run"
+    )
+    assert extended["record_sha256"] == base["record_sha256"]
+
+    report_path = tmp_path / "bout_report.json"
+    report_path.write_text(json.dumps(report, sort_keys=True) + "\n", encoding="utf-8")
+    binding, rebound = bind_core_behavior_execution_report(
+        report_path,
+        recording_id=recording_id,
+        analysis_zarr=zarr_path,
+        additional_stage_nodes=(bout,),
+    )
+    assert binding["record_sha256"] == rebound["record_sha256"]
+    assert rebound["runs"][bout] == extended["runs"][bout]
+
+    results[-1]["verification"]["artifact_path"] = "analysis/other/run"
+    with pytest.raises(
+        ValidatedBehaviorAdmissionError, match="artifact path is inexact"
+    ):
+        validate_core_behavior_execution_report(
+            report,
+            expected_analysis_zarr=zarr_path,
+            expected_recording_id=recording_id,
+            additional_stage_nodes=(bout,),
+        )
+
+
 def test_selector_ineligible_execution_report_binds_distinct_canary_role(
     tmp_path: Path,
 ) -> None:
     zarr_path, recording_id, report = _execution_report(tmp_path)
     report["schema_version"] = 4
-    report["execution_profile_id"] = (
-        SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
-    )
+    report["execution_profile_id"] = SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
     report["registry_write_mode"] = "disabled_selector_ineligible_canary"
     execution_plan = report["execution_plan"]  # type: ignore[assignment]
     execution_plan["schema_version"] = 4  # type: ignore[index]
@@ -458,6 +535,29 @@ def test_bundle_cli_dispatches_typed_roles_without_a_second_command() -> None:
         match="cannot mix scientific bundle profiles",
     ):
         bundle_cli._bundle_adapter_for_membership(mixed)  # noqa: SLF001
+
+
+def test_bundle_cli_exposes_the_versioned_bout_export_profile() -> None:
+    args = bundle_cli._parser().parse_args(  # noqa: SLF001
+        [
+            "bundle-set",
+            "--membership",
+            "/tmp/membership.json",
+            "--bundle-paths-json",
+            "/tmp/reports.json",
+            "--bundle-set-id",
+            "bout-profile",
+            "--bundle-root",
+            "/tmp/reports",
+            "--palette-commit",
+            "a" * 40,
+            "--output-json",
+            "/tmp/bundle-set.json",
+            "--export-profile",
+            BOUT_KINEMATICS_EXPORT_PROFILE_ID,
+        ]
+    )
+    assert args.export_profile == BOUT_KINEMATICS_EXPORT_PROFILE_ID
 
 
 def test_bundle_cli_dispatches_one_core_plus_chaser_profile_from_exact_roles() -> None:
@@ -846,6 +946,72 @@ def test_core_motion_v2_real_writer_publisher_unpatched_reader_round_trip(
     assert row["speed_filtered_mm_s"] == pytest.approx(4.0)
     assert row["signed_tangential_acceleration_mm_s2"] == pytest.approx(-2.0)
     assert row["cumulative_smoothed_path_distance_mm"] == pytest.approx(9.5)
+
+
+def test_bout_kinematics_profile_real_writer_publisher_reader_round_trip(
+    tmp_path: Path,
+) -> None:
+    specs = BOUT_KINEMATICS_EXPORT_TABLE_SPECS
+    plan_path, plan = _core_profile_plan(
+        tmp_path,
+        table_specs=specs,
+        export_profile_id=BOUT_KINEMATICS_EXPORT_PROFILE_ID,
+        capability_contract=core_behavior_capability_contract(
+            BOUT_KINEMATICS_EXPORT_PROFILE_ID
+        ),
+    )
+
+    def extractor(table_name: str) -> Any:
+        def rows(
+            plan_value: dict[str, Any],
+            member: dict[str, Any],
+            bundle_member: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], None]:
+            row = _fixture_scientific_row(
+                table_name=table_name,
+                plan=plan_value,
+                member=member,
+                bundle_member=bundle_member,
+                table_specs=specs,
+            )
+            if table_name == BOUT_HEADING_TABLE:
+                row["heading_level"] = "heading_raw"
+                row["net_delta_heading_deg"] = 15.0
+            return [row], None
+
+        return rows
+
+    scientific = set(SCIENTIFIC_TABLES) | {
+        BOUT_MOVEMENT_TABLE,
+        BOUT_HEADING_TABLE,
+        BOUT_EYE_GAZE_TABLE,
+    }
+    write_validated_behavior_recording_shard(
+        plan_path=plan_path,
+        member_ordinal=1,
+        table_specs=specs,
+        row_extractors={name: extractor(name) for name in scientific},
+        created_at_utc="2026-09-04T12:01:00Z",
+    )
+    published = publish_validated_behavior_cohort(
+        plan_path=plan_path,
+        table_specs=specs,
+        generation_id="bout-metric-boundary-generation-v1",
+        created_at_utc="2026-09-04T12:02:00Z",
+    )
+    dataset = ValidatedBehaviorExportDataset.open(
+        plan["publication_root"], plan["export_run_id"]
+    )
+    heading = dataset.table(BOUT_HEADING_TABLE).collect_bounded(max_rows=2).to_dicts()
+
+    assert published["status"] == "complete_selector_ineligible"
+    assert dataset.manifest["export_profile"]["profile_id"] == (
+        BOUT_KINEMATICS_EXPORT_PROFILE_ID
+    )
+    assert len(heading) == 1
+    assert heading[0]["heading_level"] == "heading_raw"
+    assert heading[0]["net_delta_heading_deg"] == pytest.approx(15.0)
+    assert set(dataset.table_names) == set(specs)
 
 
 def test_core_chaser_real_writer_publisher_unpatched_reader_round_trip(
