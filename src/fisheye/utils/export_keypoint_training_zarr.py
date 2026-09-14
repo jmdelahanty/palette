@@ -64,6 +64,9 @@ from fisheye.shared.zarr_helpers import (
 from fisheye.shared.zarr.refined_keypoint_manifest import (
     refined_keypoint_source_bindings_from_manifest,
 )
+from fisheye.shared.zarr.materialized_pose_training_source import (
+    inspect_materialized_pose_crop_source,
+)
 from fisheye.utils import prepare_keypoint_training_from_registry as prepare_pose
 from fisheye.shared.system_metadata import build_invocation_record
 from fisheye.training.config import PoseConfig
@@ -143,6 +146,8 @@ class PoseMergeSourceSpec:
     box_only_selected_mask: Optional[np.ndarray] = None
     row_gate_box_only_true: Optional[int] = None
     row_gate_box_only_selected: int = 0
+    source_kind: str = "legacy_crop_keypoints"
+    materialized_source_binding: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -1094,7 +1099,13 @@ def _resolve_row_gate_selection(
             refined_group = refined_parent[requested_refined]
             source_run = _resolve_refined_source_keypoint_run(refined_group)
             if source_run == keypoint_run:
-                ts = _as_text(refined_group.attrs.get("created_utc") or refined_group.attrs.get("timestamp_utc")) or ""
+                ts = (
+                    _as_text(
+                        refined_group.attrs.get("created_utc")
+                        or refined_group.attrs.get("timestamp_utc")
+                    )
+                    or ""
+                )
                 refined_candidates.append((ts, requested_refined, refined_group))
 
         if not refined_candidates:
@@ -1103,7 +1114,13 @@ def _resolve_row_gate_selection(
                 source_run = _resolve_refined_source_keypoint_run(refined_group)
                 if source_run != keypoint_run:
                     continue
-                ts = _as_text(refined_group.attrs.get("created_utc") or refined_group.attrs.get("timestamp_utc")) or ""
+                ts = (
+                    _as_text(
+                        refined_group.attrs.get("created_utc")
+                        or refined_group.attrs.get("timestamp_utc")
+                    )
+                    or ""
+                )
                 refined_candidates.append((ts, str(run_name), refined_group))
             refined_candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
 
@@ -1197,6 +1214,261 @@ def _resolve_refined_source_keypoint_run(refined_group: zarr.Group) -> Optional[
     return _as_text(raw_snapshot.get("run_id"))
 
 
+def _discover_materialized_pose_source(
+    *,
+    ordinal: int,
+    dataset: Dict[str, Any],
+    manifest_payload: Dict[str, Any],
+    source_zarr: Path,
+    manifest_skeleton: Tuple[Tuple[int, int], ...],
+    manifest_skeleton_id: Optional[str],
+    manifest_kpt_shape: Tuple[int, int],
+    expected_input_format: str,
+    transform_mode: str,
+    target_roi_hw: Optional[Tuple[int, int]],
+    dtype_policy: str,
+    row_gate_policy: str,
+) -> PoseMergeSourceSpec:
+    """Adapt a self-contained pose crop to the established merged source record."""
+
+    if row_gate_policy != "auto":
+        raise ValueError("Materialized pose sources require --row-gate-policy auto")
+    if expected_input_format != "gray" or dataset.get("input_format", "gray") != "gray":
+        raise ValueError("Materialized pose source requires gray input format")
+    if transform_mode != "strict":
+        raise ValueError("Materialized pose source requires strict ROI transform")
+    run_id = _as_text(dataset.get("materialized_crop_run"))
+    if not run_id or "/" in run_id or run_id.startswith("."):
+        raise ValueError("materialized_pose_crop source requires an exact run ID")
+    run_path = f"crop_runs/{run_id}"
+    if not (source_zarr / run_path / "zarr.json").is_file():
+        raise ValueError(
+            f"Materialized pose source run is missing: {source_zarr}/{run_path}"
+        )
+    run = _open_source_group_direct(source_zarr, run_path)
+    inspected = inspect_materialized_pose_crop_source(run, run_id=run_id)
+    expected_content = dataset.get("materialized_content")
+    actual_content = {
+        "schema_id": inspected.schema_id,
+        "schema_version": inspected.schema_version,
+        "pixel_sha256": inspected.pixel_sha256,
+        "keypoints_roi_sha256": inspected.keypoints_roi_sha256,
+        "keypoint_visibility_sha256": inspected.keypoint_visibility_sha256,
+        "source_row_lineage_sha256": inspected.source_row_lineage_sha256,
+    }
+    if not isinstance(expected_content, Mapping) or any(
+        expected_content.get(key) != value for key, value in actual_content.items()
+    ):
+        raise ValueError(
+            "Materialized pose source content differs from pinned manifest"
+        )
+    if target_roi_hw is not None and tuple(target_roi_hw) != inspected.roi_shape:
+        raise ValueError("Materialized pose ROI shape disagrees with target")
+
+    dataset_id = _as_text(dataset.get("dataset_id")) or _as_text(
+        dataset.get("session_uuid")
+    )
+    if not dataset_id:
+        raise ValueError(f"Materialized pose source {source_zarr} lacks dataset_id")
+    recording_id, leakage_group_id, leakage_group_source = _manifest_leakage_group(
+        dataset, dataset_id=dataset_id
+    )
+    bindings = inspected.source_bindings
+    source_crop_run = str(bindings["source_crop_run"])
+    source_keypoint_run = str(
+        bindings.get("source_keypoint_run") or bindings.get("refined_keypoint_run")
+    )
+    source_keypoint_group = str(
+        bindings.get("source_keypoint_group") or "refined_keypoints_runs"
+    )
+    bound_groups = []
+    for bound_path in (
+        f"crop_runs/{source_crop_run}",
+        f"{source_keypoint_group}/{source_keypoint_run}",
+    ):
+        if not (source_zarr / bound_path / "zarr.json").is_file():
+            raise ValueError(
+                f"Materialized pose source binding is missing: {bound_path}"
+            )
+        bound_groups.append(_open_source_group_direct(source_zarr, bound_path))
+    bound_crop, bound_keypoints = bound_groups
+    for row_name, bound_group, array_name in (
+        ("source_crop_row_ids", bound_crop, "roi_images"),
+        ("source_keypoint_row_ids", bound_keypoints, "keypoints_roi"),
+    ):
+        values = np.asarray(run[row_name][:], dtype=np.int64)
+        if array_name not in bound_group or (
+            values.size
+            and (
+                int(values.min()) < 0
+                or int(values.max()) >= int(bound_group[array_name].shape[0])
+            )
+        ):
+            raise ValueError(f"Materialized pose {row_name} escapes its bound run")
+    if inspected.schema_version == 3:
+        detection_id = str(bindings["source_detection_run"])
+        detection_path = f"refined_detect_runs/{detection_id}"
+        if not (source_zarr / detection_path / "zarr.json").is_file():
+            raise ValueError("Materialized pose legacy detection binding is missing")
+    source_type_resolved = _as_text(dataset.get("source_type_resolved"))
+    if source_type_resolved != "materialized_pose_crop":
+        raise ValueError(
+            f"Materialized pose source requires source_type_resolved='materialized_pose_crop': {source_type_resolved!r}"
+        )
+    bound_type = _as_text(bound_crop.attrs.get("detection_source_type"))
+
+    roi = run["roi_images"]
+    keypoints = run["keypoints_roi"]
+    source_rows = np.asarray(run["source_training_row_indices"][:], dtype=np.int64)
+    acquisition_frames = np.asarray(run["source_frame_indices"][:], dtype=np.int64)
+    if np.any(source_rows < 0) or np.any(acquisition_frames < 0):
+        raise ValueError("Materialized pose source has negative frame identity")
+    original_map_path = "raw_video/original_frame_indices"
+    if _source_array_metadata_exists(source_zarr, original_map_path):
+        original_map = np.asarray(
+            _open_source_array_direct(source_zarr, original_map_path)[:],
+            dtype=np.int64,
+        )
+        if source_rows.size and int(source_rows.max()) >= len(original_map):
+            raise ValueError("Materialized pose source row exceeds original frame map")
+        if not np.array_equal(original_map[source_rows], acquisition_frames):
+            raise ValueError("Materialized pose acquisition frame mapping disagrees")
+    else:
+        original_map_path = ""
+        if not np.array_equal(source_rows, acquisition_frames):
+            raise ValueError(
+                "Materialized pose frame identity needs an original frame map"
+            )
+    image_shape = tuple(int(v) for v in bindings.get("source_images_shape", ()))
+    if (
+        len(image_shape) != 3
+        or source_rows.size
+        and int(source_rows.max()) >= image_shape[0]
+    ):
+        raise ValueError(
+            "Materialized pose source image shape or row identity is invalid"
+        )
+    image_path = str(bindings.get("source_images_path") or "")
+    if not image_path or not _source_array_metadata_exists(source_zarr, image_path):
+        raise ValueError("Materialized pose source image binding is missing")
+    if tuple(_open_source_array_direct(source_zarr, image_path).shape) != image_shape:
+        raise ValueError("Materialized pose source image binding changed shape")
+
+    run_dtype = np.dtype(keypoints.dtype)
+    if dtype_policy == "float32_checked":
+        output_dtype = np.dtype(np.float32)
+        dtype_transform = (
+            "identity_float32"
+            if run_dtype == output_dtype
+            else "float64_to_float32_checked"
+        )
+    else:
+        output_dtype = run_dtype
+        dtype_transform = "identity_strict"
+    skeleton_id = inspected.skeleton_id
+    kpt_shape = (inspected.keypoint_count, 3)
+    if skeleton_id != manifest_skeleton_id or kpt_shape != manifest_kpt_shape:
+        raise ValueError(
+            "Materialized pose source skeleton identity disagrees with manifest"
+        )
+    labels = list(inspected.keypoint_labels)
+    if manifest_payload.get("keypoint_labels") not in (None, labels):
+        raise ValueError("Materialized pose labels disagree with manifest")
+    manifest_labels = manifest_payload.get("pose_schema", {}).get("keypoint_labels")
+    if manifest_labels is not None and list(manifest_labels) != labels:
+        raise ValueError("Materialized pose labels disagree with manifest pose schema")
+    dataset_labels = dataset.get("keypoint_labels")
+    if dataset_labels is not None and list(dataset_labels) != labels:
+        raise ValueError("Materialized pose labels disagree with dataset manifest row")
+    runtime_edges = resolve_ordered_skeleton_edges_from_attrs(
+        dict(run.attrs),
+        n_keypoints=inspected.keypoint_count,
+        allow_package_schema=True,
+    )
+    if runtime_edges.source == "none" or runtime_edges.edge_pairs != manifest_skeleton:
+        raise ValueError(
+            "Materialized pose source skeleton edges disagree with manifest"
+        )
+    skeleton = [list(edge) for edge in runtime_edges.edge_pairs]
+    signature = _format_skeleton_signature(skeleton_id=skeleton_id, kpt_shape=kpt_shape)
+    roi_contract_name = "materialized_pose_gray_uint8_exact_v1"
+    required_contract = _resolve_required_roi_pixel_contract_name(
+        manifest_payload=manifest_payload, dataset_payload=dataset
+    )
+    if required_contract and required_contract != roi_contract_name:
+        raise ValueError("Materialized pose ROI pixel contract mismatch")
+    dish_design, canvas_name, rig_id = _extract_identity(dataset)
+    return PoseMergeSourceSpec(
+        ordinal=ordinal,
+        dataset_name=str(dataset.get("name") or source_zarr.stem),
+        dataset_id=dataset_id,
+        source_zarr=source_zarr,
+        annotation_zarr=source_zarr,
+        source_crop_run=run_id,
+        keypoint_run=run_id,
+        source_type_resolved=source_type_resolved,
+        source_sample_count=inspected.row_count,
+        sample_count=inspected.row_count,
+        selected_indices=np.arange(inspected.row_count, dtype=np.int64),
+        recording_id=recording_id,
+        leakage_group_id=leakage_group_id,
+        leakage_group_source=leakage_group_source,
+        row_gate_policy="materialized_all_visible",
+        row_gate_refined_run=None,
+        row_gate_selected=inspected.row_count,
+        row_gate_total=inspected.row_count,
+        row_gate_raw_success_true=inspected.row_count,
+        row_gate_usable_true=inspected.row_count,
+        roi_path=f"{run_path}/roi_images",
+        bbox_path=f"{run_path}/bbox_img_xyxy",
+        keypoints_path=f"{run_path}/keypoints_roi",
+        success_path="",
+        frame_indices_path=f"{run_path}/source_training_row_indices",
+        source_acquisition_frame_index_path=f"{run_path}/source_frame_indices",
+        source_original_frame_map_path=original_map_path or None,
+        frame_mapping_method="direct_source_acquisition_frame_index",
+        detection_source_path=None,
+        roi_shape=inspected.roi_shape,
+        roi_dtype=np.dtype(roi.dtype),
+        roi_chunks=tuple(int(v) for v in roi.chunks),
+        roi_output_shape=inspected.roi_shape,
+        roi_transform_mode="strict",
+        roi_pad_before=(0, 0),
+        roi_pad_after=(0, 0),
+        roi_pixel_contract={
+            "name": roi_contract_name,
+            "channels": "gray",
+            "dtype": "uint8",
+        },
+        roi_pixel_contract_name=roi_contract_name,
+        keypoint_shape=(inspected.keypoint_count, 2),
+        keypoint_dtype=run_dtype,
+        keypoint_output_dtype=output_dtype,
+        keypoint_dtype_transform=dtype_transform,
+        keypoint_labels=labels,
+        skeleton=skeleton,
+        skeleton_id=skeleton_id,
+        kpt_shape=kpt_shape,
+        skeleton_signature=signature,
+        dish_design=dish_design,
+        canvas_name=canvas_name,
+        rig_id=rig_id,
+        source_kind="materialized_pose_crop",
+        materialized_source_binding={
+            "schema_id": inspected.schema_id,
+            "schema_version": inspected.schema_version,
+            "run_id": run_id,
+            "source_bindings": bindings,
+            "bound_crop_detection_source_type": bound_type,
+            "annotation_source_type": source_type_resolved,
+            "pixel_sha256": inspected.pixel_sha256,
+            "keypoints_roi_sha256": inspected.keypoints_roi_sha256,
+            "keypoint_visibility_sha256": inspected.keypoint_visibility_sha256,
+            "source_row_lineage_sha256": inspected.source_row_lineage_sha256,
+        },
+    )
+
+
 def _discover_merge_sources(
     manifest_payload: Dict[str, Any],
     *,
@@ -1254,7 +1526,9 @@ def _discover_merge_sources(
             "Keypoint training manifest pose_schema must persist the exact ordered skeleton edge list."
         )
     if manifest_kpt_shape is None:
-        raise ValueError("Keypoint training manifest pose_schema.kpt_shape is missing or invalid.")
+        raise ValueError(
+            "Keypoint training manifest pose_schema.kpt_shape is missing or invalid."
+        )
     manifest_skeleton = normalize_ordered_skeleton_edges(
         manifest_pose_schema.get("skeleton"),
         n_keypoints=int(manifest_kpt_shape[0]),
@@ -1272,6 +1546,28 @@ def _discover_merge_sources(
         if not zarr_path_raw:
             raise ValueError(f"datasets[{ordinal}] is missing zarr_path.")
         source_zarr = Path(str(zarr_path_raw))
+        source_kind = str(dataset.get("source_kind") or "legacy_crop_keypoints")
+        if source_kind == "materialized_pose_crop":
+            assert manifest_kpt_shape is not None
+            specs.append(
+                _discover_materialized_pose_source(
+                    ordinal=ordinal,
+                    dataset=dataset,
+                    manifest_payload=manifest_payload,
+                    source_zarr=source_zarr,
+                    manifest_skeleton=manifest_skeleton,
+                    manifest_skeleton_id=manifest_skeleton_id,
+                    manifest_kpt_shape=manifest_kpt_shape,
+                    expected_input_format=expected_input_format,
+                    transform_mode=transform_mode,
+                    target_roi_hw=target_roi_hw,
+                    dtype_policy=dtype_policy,
+                    row_gate_policy=row_gate_policy,
+                )
+            )
+            continue
+        if source_kind != "legacy_crop_keypoints":
+            raise ValueError(f"Unsupported merged pose source_kind: {source_kind!r}")
         root = zarr.open_group(str(source_zarr), mode="r", use_consolidated=False)
         annotation_zarr_raw = dataset.get("annotation_zarr_path")
         annotation_zarr = (
@@ -1280,9 +1576,7 @@ def _discover_merge_sources(
         annotation_root = (
             root
             if annotation_zarr == source_zarr
-            else zarr.open_group(
-                str(annotation_zarr), mode="r", use_consolidated=False
-            )
+            else zarr.open_group(str(annotation_zarr), mode="r", use_consolidated=False)
         )
 
         kp_parent = root.get("keypoints_runs")
@@ -1453,15 +1747,17 @@ def _discover_merge_sources(
         )
         dataset_keypoint_shape = tuple(int(v) for v in keypoints_arr.shape[1:])
         dataset_keypoint_dtype = np.dtype(keypoints_arr.dtype)
-        selected_indices, selected_box_only_mask, gate_stats = _resolve_row_gate_selection(
-            root=root,
-            dataset_payload=dataset,
-            keypoint_run=keypoint_run,
-            sample_count=source_sample_count,
-            success_arr=success_arr,
-            row_gate_policy=row_gate_policy,
-            source_zarr=source_zarr,
-            refined_root=annotation_root,
+        selected_indices, selected_box_only_mask, gate_stats = (
+            _resolve_row_gate_selection(
+                root=root,
+                dataset_payload=dataset,
+                keypoint_run=keypoint_run,
+                sample_count=source_sample_count,
+                success_arr=success_arr,
+                row_gate_policy=row_gate_policy,
+                source_zarr=source_zarr,
+                refined_root=annotation_root,
+            )
         )
 
         if len(dataset_roi_shape) not in {2, 3}:
@@ -1549,9 +1845,7 @@ def _discover_merge_sources(
             and refined_parent_name is not None
         ):
             refined_run_name = str(gate_stats["refined_run"])
-            refined_group = annotation_root[
-                f"{refined_parent_name}/{refined_run_name}"
-            ]
+            refined_group = annotation_root[f"{refined_parent_name}/{refined_run_name}"]
             if "keypoints_roi" in refined_group:
                 refined_keypoints_arr = refined_group["keypoints_roi"]
                 if int(refined_keypoints_arr.shape[0]) != source_sample_count:
@@ -1675,7 +1969,9 @@ def _discover_merge_sources(
             keypoint_run=f"{annotation_parent_name}/{annotation_run}",
             keypoint_count=int(dataset_keypoint_shape[0]),
         )
-        dataset_member = f"{dataset_id} (zarr={source_zarr}, keypoint_run={keypoint_run})"
+        dataset_member = (
+            f"{dataset_id} (zarr={source_zarr}, keypoint_run={keypoint_run})"
+        )
         label_signature = tuple(str(label) for label in dataset_labels)
         keypoint_label_members.setdefault(label_signature, []).append(dataset_member)
         if keypoint_labels is None:
@@ -1779,21 +2075,28 @@ def _discover_merge_sources(
             )
         )
 
-    if (
-        roi_shape is None
-        or roi_dtype is None
-        or keypoint_shape is None
-        or keypoint_dtype is None
-    ):
-        raise ValueError(
-            "Failed to resolve merged keypoint layout from manifest datasets."
-        )
-    if selected_skeleton_identity is None:
-        raise ValueError("Failed to resolve skeleton identity from manifest datasets.")
-    if keypoint_labels is None:
-        raise ValueError(
-            "Failed to resolve keypoint label metadata from manifest datasets."
-        )
+    first = specs[0]
+    roi_shape = first.roi_output_shape
+    roi_dtype = first.roi_dtype
+    roi_chunks = first.roi_chunks
+    keypoint_shape = first.keypoint_shape
+    keypoint_dtype = first.keypoint_output_dtype
+    keypoint_labels = first.keypoint_labels
+    selected_skeleton_identity = (first.skeleton_id, first.kpt_shape)
+    selected_skeleton_signature = first.skeleton_signature
+    for spec in specs:
+        if (
+            spec.roi_output_shape != roi_shape
+            or spec.roi_dtype != roi_dtype
+            or spec.keypoint_shape != keypoint_shape
+            or spec.keypoint_output_dtype != keypoint_dtype
+            or spec.keypoint_labels != keypoint_labels
+            or (spec.skeleton_id, spec.kpt_shape) != selected_skeleton_identity
+            or spec.skeleton != [list(edge) for edge in manifest_skeleton]
+        ):
+            raise ValueError(
+                f"Merged pose source {spec.dataset_id!r} disagrees with exact ROI or pose schema"
+            )
 
     return specs, {
         "roi_shape": roi_shape,
@@ -1802,7 +2105,9 @@ def _discover_merge_sources(
         "keypoint_shape": keypoint_shape,
         "keypoint_dtype": keypoint_dtype,
         "keypoint_labels": keypoint_labels,
-        "skeleton": [[int(source), int(target)] for source, target in manifest_skeleton],
+        "skeleton": [
+            [int(source), int(target)] for source, target in manifest_skeleton
+        ],
         "skeleton_id": selected_skeleton_identity[0],
         "kpt_shape": selected_skeleton_identity[1],
         "skeleton_signature": selected_skeleton_signature
@@ -1856,6 +2161,98 @@ def _pose_bbox_from_keypoints_px(
     center = np.clip((min_xy + max_xy) / 2.0, 0.0, 1.0)
     bbox_wh = np.clip(span + margin, 1e-6, 1.0)
     return np.concatenate([center, bbox_wh], axis=1).astype(np.float32)
+
+
+def _materialized_crop_bbox_norm(
+    boxes_img_xyxy: np.ndarray,
+    origins_xy: np.ndarray,
+    *,
+    roi_h: int,
+    roi_w: int,
+) -> np.ndarray:
+    """Map source detector boxes to the visible ROI intersection, in xywhn."""
+
+    boxes = np.asarray(boxes_img_xyxy, dtype=np.float64)
+    origins = np.asarray(origins_xy, dtype=np.float64)
+    if boxes.ndim != 2 or boxes.shape[1] != 4 or origins.shape != (len(boxes), 2):
+        raise ValueError("Materialized source box/origin shapes disagree")
+    if not np.isfinite(boxes).all() or not np.isfinite(origins).all():
+        raise ValueError("Materialized source box/origin contains non-finite values")
+    local_min = np.maximum(boxes[:, :2] - origins, 0)
+    local_max = np.minimum(boxes[:, 2:] - origins, [roi_w, roi_h])
+    extent = local_max - local_min
+    if np.any(extent <= 0):
+        raise ValueError("Materialized source box does not intersect its crop")
+    center = (local_min + local_max) / 2
+    return np.column_stack(
+        (
+            center[:, 0] / roi_w,
+            center[:, 1] / roi_h,
+            extent[:, 0] / roi_w,
+            extent[:, 1] / roi_h,
+        )
+    ).astype(np.float32)
+
+
+def _logical_materialized_pose_dataset_sha256(
+    root: zarr.Group,
+    *,
+    run_name: str,
+    manifest_sha256: str,
+    skeleton_id: str,
+    labels: Sequence[str],
+) -> str:
+    """Hash logical training content independently of Zarr chunking/layout."""
+
+    digest = sha256()
+    header = {
+        "schema_id": "palette.logical_materialized_pose_training_dataset",
+        "schema_version": 1,
+        "manifest_sha256": manifest_sha256,
+        "skeleton_id": skeleton_id,
+        "keypoint_labels": list(labels),
+        "visibility": "all_2_verified_from_source",
+    }
+    digest.update(json.dumps(header, sort_keys=True, separators=(",", ":")).encode())
+    for name in (
+        "source_dataset_id",
+        "source_zarr_path",
+        "source_kind",
+        "source_materialized_binding_json",
+    ):
+        values = [str(value) for value in root[f"source_index/{name}"][:]]
+        digest.update(name.encode())
+        digest.update(json.dumps(values, separators=(",", ":")).encode())
+    paths = [
+        f"crop_runs/{run_name}/roi_images",
+        f"crop_runs/{run_name}/bbox_norm_coords",
+        f"crop_runs/{run_name}/crop_bbox_norm_coords",
+        f"keypoints_runs/{run_name}/keypoints_roi",
+        f"keypoints_runs/{run_name}/detection_success",
+        "source_index/source_dataset_idx",
+        "source_index/source_sample_row_index",
+        "source_index/source_acquisition_frame_index",
+        "source_index/source_roi_idx",
+        "source_index/source_keypoint_row_id",
+        "source_index/source_crop_row_id",
+        "source_index/source_roi_origin_xy",
+        "source_index/source_bbox_img_xyxy",
+        "splits/train_indices",
+        "splits/val_indices",
+        "splits/test_indices",
+    ]
+    for path in paths:
+        array = root[path]
+        semantic_path = path.replace(run_name, "<merged_run>")
+        digest.update(semantic_path.encode())
+        digest.update(str(np.dtype(array.dtype)).encode())
+        digest.update(json.dumps(tuple(array.shape)).encode())
+        row_step = max(1, int(array.chunks[0]) if array.chunks else 1024)
+        for start in range(0, int(array.shape[0]), row_step):
+            digest.update(
+                np.ascontiguousarray(array[start : start + row_step]).tobytes()
+            )
+    return digest.hexdigest()
 
 
 def _checked_keypoints_float32(
@@ -1927,9 +2324,12 @@ def _export_merged(
         .strip()
         .lower()
     )
-    if requested_source_type not in prepare_pose.ALLOWED_KEYPOINT_CROP_SOURCE_TYPES:
+    allowed_source_types = prepare_pose.ALLOWED_KEYPOINT_CROP_SOURCE_TYPES | {
+        "materialized_pose_crop"
+    }
+    if requested_source_type not in allowed_source_types:
         raise ValueError(
-            "Keypoint merged export only supports reviewed refined/manual crop-source manifests; "
+            "Keypoint merged export only supports reviewed refined/manual or materialized pose crop sources; "
             f"observed source_type_requested={requested_source_type!r}."
         )
 
@@ -1955,22 +2355,31 @@ def _export_merged(
     # identity consumed by trainers and viewers.
     source_type = requested_source_type
     resolved_source_types = {spec.source_type_resolved for spec in source_specs}
-    unsupported_source_types = sorted(
-        resolved_source_types - prepare_pose.ALLOWED_KEYPOINT_CROP_SOURCE_TYPES
-    )
+    unsupported_source_types = sorted(resolved_source_types - allowed_source_types)
     if unsupported_source_types:
         raise ValueError(
-            "Keypoint merged export only supports reviewed refined/manual crop-source datasets; "
+            "Keypoint merged export has unsupported source types; "
             f"unsupported source_type values={unsupported_source_types!r}."
+        )
+    if "materialized_pose_crop" in resolved_source_types and (
+        resolved_source_types != {"materialized_pose_crop"}
+        or requested_source_type != "materialized_pose_crop"
+    ):
+        raise ValueError(
+            "Materialized pose crop export requires one truthful source type for every input"
         )
     merged_skeleton_id = _as_text(layout.get("skeleton_id"))
     merged_kpt_shape = _normalize_kpt_shape(layout.get("kpt_shape"))
     merged_skeleton = [list(edge) for edge in layout["skeleton"]]
-    merged_skeleton_signature = (
-        _as_text(layout.get("skeleton_signature"))
-        or _format_skeleton_signature(skeleton_id=merged_skeleton_id, kpt_shape=merged_kpt_shape)
+    merged_skeleton_signature = _as_text(
+        layout.get("skeleton_signature")
+    ) or _format_skeleton_signature(
+        skeleton_id=merged_skeleton_id, kpt_shape=merged_kpt_shape
     )
     total_samples = int(sum(spec.sample_count for spec in source_specs))
+    has_materialized_sources = any(
+        spec.source_kind == "materialized_pose_crop" for spec in source_specs
+    )
     row_gate_counts: Dict[str, int] = {}
     keypoint_cast_max_abs_error: Dict[str, float] = {}
 
@@ -2196,6 +2605,39 @@ def _export_merged(
         dtype=np.int32,
         chunks=vector_chunks,
     )
+    materialized_keypoint_row_dest = None
+    materialized_crop_row_dest = None
+    materialized_origin_dest = None
+    materialized_box_dest = None
+    if has_materialized_sources:
+        if storage_plans is None:
+            raise ValueError(
+                "Materialized pose sources require immutable merged v3 storage"
+            )
+        materialized_keypoint_row_dest = source_index_group.create_array(
+            "source_keypoint_row_id",
+            shape=(total_samples,),
+            dtype=np.int64,
+            chunks=vector_chunks,
+        )
+        materialized_crop_row_dest = source_index_group.create_array(
+            "source_crop_row_id",
+            shape=(total_samples,),
+            dtype=np.int64,
+            chunks=vector_chunks,
+        )
+        materialized_origin_dest = source_index_group.create_array(
+            "source_roi_origin_xy",
+            shape=(total_samples, 2),
+            dtype=np.int32,
+            chunks=(vector_chunks[0], 2),
+        )
+        materialized_box_dest = source_index_group.create_array(
+            "source_bbox_img_xyxy",
+            shape=(total_samples, 4),
+            dtype=np.float32,
+            chunks=(vector_chunks[0], 4),
+        )
 
     copy_total = total_samples * 2  # roi + keypoints arrays
     copy_progress = _copy_progress(copy_total)
@@ -2233,6 +2675,7 @@ def _export_merged(
             )
             roi_src = _open_source_array_direct(spec.source_zarr, spec.roi_path)
             selected = np.asarray(spec.selected_indices, dtype=np.int64)
+            materialized = spec.source_kind == "materialized_pose_crop"
             bbox_all = np.asarray(
                 _open_source_array_direct(spec.source_zarr, spec.bbox_path)[:],
                 dtype=np.float32,
@@ -2254,27 +2697,56 @@ def _export_merged(
                 keypoints_all = keypoints_source.astype(keypoint_dtype, copy=False)
                 cast_error = 0.0
             keypoint_cast_max_abs_error[spec.dataset_id] = float(cast_error)
-            success_all = np.asarray(
-                _open_source_array_direct(spec.annotation_zarr, spec.success_path)[:],
-                dtype=np.bool_,
-            )
-            source_refined_row_ids, source_detect_row_index = (
-                resolve_row_identity_arrays(
-                    annotation_group,
-                    crop_source_group,
-                    total_rois=spec.source_sample_count,
+            if materialized:
+                visibility = np.asarray(
+                    crop_source_group["keypoint_visibility"][:], dtype=np.uint8
                 )
-            )
+                if visibility.shape != (
+                    spec.source_sample_count,
+                    spec.keypoint_shape[0],
+                ) or not np.all(visibility == 2):
+                    raise ValueError(
+                        f"{spec.source_zarr}: merged pose v3 requires all materialized keypoints visible"
+                    )
+                success_all = np.ones(spec.source_sample_count, dtype=np.bool_)
+                source_refined_row_ids = np.full(
+                    spec.source_sample_count, -1, dtype=np.int64
+                )
+                source_detect_row_index = np.full(
+                    spec.source_sample_count, -1, dtype=np.int32
+                )
+            else:
+                success_all = np.asarray(
+                    _open_source_array_direct(spec.annotation_zarr, spec.success_path)[
+                        :
+                    ],
+                    dtype=np.bool_,
+                )
+                source_refined_row_ids, source_detect_row_index = (
+                    resolve_row_identity_arrays(
+                        annotation_group,
+                        crop_source_group,
+                        total_rois=spec.source_sample_count,
+                    )
+                )
             keypoints = keypoints_all[selected]
             success = success_all[selected]
-            crop_bbox = _take_crop_or_source_rows(
-                bbox_all,
-                selected,
-                source_detect_row_index=source_detect_row_index,
-                source_sample_count=spec.source_sample_count,
-                source_zarr=spec.source_zarr,
-                array_name=spec.bbox_path,
-            )
+            if materialized:
+                crop_bbox = _materialized_crop_bbox_norm(
+                    bbox_all[selected],
+                    np.asarray(crop_source_group["roi_coordinates_full"][:])[selected],
+                    roi_h=roi_h,
+                    roi_w=roi_w,
+                )
+            else:
+                crop_bbox = _take_crop_or_source_rows(
+                    bbox_all,
+                    selected,
+                    source_detect_row_index=source_detect_row_index,
+                    source_sample_count=spec.source_sample_count,
+                    source_zarr=spec.source_zarr,
+                    array_name=spec.bbox_path,
+                )
             local_total = int(spec.sample_count)
             box_only_mask = (
                 np.asarray(spec.box_only_selected_mask, dtype=np.bool_)
@@ -2449,6 +2921,53 @@ def _export_merged(
             src_detect_row_index_dest[offset : offset + local_total] = (
                 source_detect_row_index[selected]
             )
+            if materialized_keypoint_row_dest is not None:
+                assert materialized_crop_row_dest is not None
+                assert materialized_origin_dest is not None
+                assert materialized_box_dest is not None
+                if materialized:
+                    keypoint_rows = np.asarray(
+                        crop_source_group["source_keypoint_row_ids"][:],
+                        dtype=np.int64,
+                    )[selected]
+                    crop_rows = np.asarray(
+                        crop_source_group["source_crop_row_ids"][:],
+                        dtype=np.int64,
+                    )[selected]
+                    origins_xy = np.asarray(
+                        crop_source_group["roi_coordinates_full"][:],
+                        dtype=np.int32,
+                    )[selected]
+                    identity = np.column_stack(
+                        (
+                            keypoint_rows,
+                            crop_rows,
+                            source_sample_row_index,
+                            source_acquisition_frame_index,
+                        )
+                    )
+                    if (
+                        np.any(identity < 0)
+                        or len(np.unique(identity, axis=0)) != local_total
+                    ):
+                        raise ValueError(
+                            f"{spec.source_zarr}: materialized source has invalid or duplicate row identity"
+                        )
+                    materialized_keypoint_row_dest[offset : offset + local_total] = (
+                        keypoint_rows
+                    )
+                    materialized_crop_row_dest[offset : offset + local_total] = (
+                        crop_rows
+                    )
+                    materialized_origin_dest[offset : offset + local_total] = origins_xy
+                    materialized_box_dest[offset : offset + local_total] = bbox_all[
+                        selected
+                    ]
+                else:
+                    materialized_keypoint_row_dest[offset : offset + local_total] = -1
+                    materialized_crop_row_dest[offset : offset + local_total] = -1
+                    materialized_origin_dest[offset : offset + local_total] = -1
+                    materialized_box_dest[offset : offset + local_total] = np.nan
             incomplete_detection_lineage_rows += int(
                 np.count_nonzero(
                     (source_refined_row_ids[selected] < 0)
@@ -2512,6 +3031,40 @@ def _export_merged(
         "source_annotation_zarr_path",
         [str(spec.annotation_zarr) for spec in source_specs],
     )
+    if has_materialized_sources:
+        _write_string_array(
+            source_index_group,
+            "source_kind",
+            [spec.source_kind for spec in source_specs],
+        )
+        _write_string_array(
+            source_index_group,
+            "source_materialized_binding_json",
+            [
+                json.dumps(
+                    spec.materialized_source_binding,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if spec.materialized_source_binding is not None
+                else "null"
+                for spec in source_specs
+            ],
+        )
+        source_index_group.attrs["materialized_pose_source_contract"] = {
+            "schema_id": "palette.merged_materialized_pose_source_lineage",
+            "schema_version": 1,
+            "source_row_arrays": {
+                "keypoint": "source_index/source_keypoint_row_id",
+                "crop": "source_index/source_crop_row_id",
+                "training_frame": "source_index/source_sample_row_index",
+                "acquisition_frame": "source_index/source_acquisition_frame_index",
+                "roi_origin": "source_index/source_roi_origin_xy",
+                "detector_box": "source_index/source_bbox_img_xyxy",
+            },
+            "legacy_row_sentinel": -1,
+            "source_box_coordinates": "full_sensor_xyxy",
+        }
     _write_string_array(
         source_index_group,
         "source_roi_transform_json",
@@ -2614,7 +3167,11 @@ def _export_merged(
             "n_interpolated_detections": int(np.sum(det_source_dest[:] != 0)),
             "source_count": int(len(source_specs)),
             "bbox_norm_coords_semantics": "pose_xywhn_with_box_only_crop_fallback",
-            "crop_bbox_norm_coords_semantics": "crop_stage_provenance_xywhn",
+            "crop_bbox_norm_coords_semantics": (
+                "source_box_intersection_with_materialized_crop_xywhn"
+                if has_materialized_sources
+                else "crop_stage_provenance_xywhn"
+            ),
         }
     )
     keypoint_group.attrs.update(
@@ -2624,10 +3181,14 @@ def _export_merged(
             "keypoint_labels": keypoint_labels,
             "keypoint_skeleton": merged_skeleton,
             "skeleton_id": merged_skeleton_id,
-            "kpt_shape": list(merged_kpt_shape) if merged_kpt_shape is not None else None,
+            "kpt_shape": list(merged_kpt_shape)
+            if merged_kpt_shape is not None
+            else None,
             "pose_schema": {
                 "skeleton_id": merged_skeleton_id,
-                "kpt_shape": list(merged_kpt_shape) if merged_kpt_shape is not None else None,
+                "kpt_shape": list(merged_kpt_shape)
+                if merged_kpt_shape is not None
+                else None,
                 "keypoint_labels": keypoint_labels,
                 "skeleton": merged_skeleton,
             },
@@ -2673,13 +3234,29 @@ def _export_merged(
         "source_annotation_zarr_paths": [
             str(spec.annotation_zarr) for spec in source_specs
         ],
+        **(
+            {
+                "materialized_pose_source_contract": {
+                    "schema_id": "palette.merged_materialized_pose_source_lineage",
+                    "schema_version": 1,
+                    "all_keypoints_visible_required": True,
+                    "source_kinds": [spec.source_kind for spec in source_specs],
+                    "source_binding_array": "source_index/source_materialized_binding_json",
+                    "source_keypoint_visibility": "all_2_verified_at_export",
+                }
+            }
+            if has_materialized_sources
+            else {}
+        ),
         "skeleton_id": merged_skeleton_id,
         "kpt_shape": list(merged_kpt_shape) if merged_kpt_shape is not None else None,
         "keypoint_labels": keypoint_labels,
         "skeleton": merged_skeleton,
         "pose_schema": {
             "skeleton_id": merged_skeleton_id,
-            "kpt_shape": list(merged_kpt_shape) if merged_kpt_shape is not None else None,
+            "kpt_shape": list(merged_kpt_shape)
+            if merged_kpt_shape is not None
+            else None,
             "keypoint_labels": keypoint_labels,
             "skeleton": merged_skeleton,
         },
@@ -2688,7 +3265,9 @@ def _export_merged(
             {
                 "dataset_id": spec.dataset_id,
                 "skeleton_id": spec.skeleton_id,
-                "kpt_shape": list(spec.kpt_shape) if spec.kpt_shape is not None else None,
+                "kpt_shape": list(spec.kpt_shape)
+                if spec.kpt_shape is not None
+                else None,
                 "skeleton": [list(edge) for edge in spec.skeleton],
                 "signature": spec.skeleton_signature,
                 "zarr_path": str(spec.source_zarr),
@@ -2766,6 +3345,19 @@ def _export_merged(
             ),
         },
     }
+    if has_materialized_sources:
+        training_export["logical_dataset_hash"] = {
+            "schema_id": "palette.logical_materialized_pose_training_dataset",
+            "schema_version": 1,
+            "algorithm": "sha256",
+            "digest": _logical_materialized_pose_dataset_sha256(
+                out_root,
+                run_name=run_name,
+                manifest_sha256=training_export["manifest_sha256"],
+                skeleton_id=str(merged_skeleton_id),
+                labels=keypoint_labels,
+            ),
+        }
     out_root.attrs.update(
         {
             "zarr_purpose": "training",
@@ -3300,7 +3892,10 @@ def validate_merged_keypoint_training_zarr(
                         n_keypoints=int(merged_kpt_shape[0]),
                         field="training_export.pose_schema.skeleton",
                     )
-                    if merged_skeleton is not None and pose_schema_edges != merged_skeleton:
+                    if (
+                        merged_skeleton is not None
+                        and pose_schema_edges != merged_skeleton
+                    ):
                         errors.append(
                             "training_export.pose_schema.skeleton disagrees with training_export.skeleton."
                         )
@@ -3313,7 +3908,10 @@ def validate_merged_keypoint_training_zarr(
                     n_keypoints=int(merged_kpt_shape[0]),
                     field="keypoints run keypoint_skeleton",
                 )
-                if merged_skeleton is not None and keypoint_group_edges != merged_skeleton:
+                if (
+                    merged_skeleton is not None
+                    and keypoint_group_edges != merged_skeleton
+                ):
                     errors.append(
                         "keypoints run keypoint_skeleton disagrees with training_export.skeleton."
                     )
@@ -3330,7 +3928,10 @@ def validate_merged_keypoint_training_zarr(
                         n_keypoints=int(merged_kpt_shape[0]),
                         field="keypoints run pose_schema.skeleton",
                     )
-                    if merged_skeleton is not None and keypoint_pose_edges != merged_skeleton:
+                    if (
+                        merged_skeleton is not None
+                        and keypoint_pose_edges != merged_skeleton
+                    ):
                         errors.append(
                             "keypoints run pose_schema.skeleton disagrees with training_export.skeleton."
                         )
@@ -3420,7 +4021,10 @@ def validate_merged_keypoint_training_zarr(
                             n_keypoints=int(entry_kpt_shape[0]),
                             field=f"training_export.source_skeleton_signatures[{idx}].skeleton",
                         )
-                        if merged_skeleton is not None and entry_skeleton != merged_skeleton:
+                        if (
+                            merged_skeleton is not None
+                            and entry_skeleton != merged_skeleton
+                        ):
                             errors.append(
                                 "training_export source exact ordered skeleton disagrees with merged skeleton "
                                 f"for dataset '{entry_dataset_id}'."
@@ -3895,6 +4499,92 @@ def validate_merged_keypoint_training_zarr(
                             f"{frame_mapping_path}[{idx}] has an invalid mapping_method."
                         )
 
+    materialized_contract = (
+        training_export.get("materialized_pose_source_contract")
+        if isinstance(training_export, Mapping)
+        else None
+    )
+    if isinstance(materialized_contract, Mapping):
+        required_lineage = (
+            "source_kind",
+            "source_materialized_binding_json",
+            "source_keypoint_row_id",
+            "source_crop_row_id",
+            "source_roi_origin_xy",
+            "source_bbox_img_xyxy",
+        )
+        missing_lineage = [
+            name for name in required_lineage if name not in root["source_index"]
+        ]
+        if missing_lineage:
+            errors.append(f"materialized source lineage missing {missing_lineage!r}")
+        else:
+            source_kinds = [str(value) for value in root["source_index/source_kind"][:]]
+            if len(source_kinds) != int(source_dataset_id.shape[0]):
+                errors.append("materialized source kinds length mismatch")
+            elif source_dataset_idx.shape == (total_samples,):
+                kinds_per_row = np.asarray(source_kinds, dtype=object)[
+                    source_dataset_idx.astype(np.int64)
+                ]
+                materialized_rows = kinds_per_row == "materialized_pose_crop"
+                kp_rows = np.asarray(root["source_index/source_keypoint_row_id"][:])
+                crop_rows = np.asarray(root["source_index/source_crop_row_id"][:])
+                origins = np.asarray(root["source_index/source_roi_origin_xy"][:])
+                boxes = np.asarray(root["source_index/source_bbox_img_xyxy"][:])
+                if (
+                    kp_rows.shape != (total_samples,)
+                    or crop_rows.shape != (total_samples,)
+                    or origins.shape != (total_samples, 2)
+                    or boxes.shape != (total_samples, 4)
+                ):
+                    errors.append("materialized source row lineage shape mismatch")
+                elif np.any(materialized_rows):
+                    if (
+                        np.any(kp_rows[materialized_rows] < 0)
+                        or np.any(crop_rows[materialized_rows] < 0)
+                        or np.any(origins[materialized_rows] < 0)
+                        or not np.isfinite(boxes[materialized_rows]).all()
+                        or not np.all(detection_success[materialized_rows])
+                        or np.any(keypoint_box_only[materialized_rows])
+                    ):
+                        errors.append(
+                            "materialized source row provenance or supervision invalid"
+                        )
+            raw_bindings = root["source_index/source_materialized_binding_json"][:]
+            if len(raw_bindings) != len(source_kinds):
+                errors.append("materialized source bindings length mismatch")
+            else:
+                for kind, raw_binding in zip(source_kinds, raw_bindings):
+                    if kind != "materialized_pose_crop":
+                        continue
+                    try:
+                        binding = json.loads(str(raw_binding))
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        binding = None
+                    if (
+                        not isinstance(binding, Mapping)
+                        or binding.get("schema_id")
+                        != "palette.training.pose_head_materialized_crop"
+                        or not binding.get("run_id")
+                    ):
+                        errors.append("materialized source binding is invalid")
+        logical_hash = training_export.get("logical_dataset_hash")
+        if (
+            not isinstance(logical_hash, Mapping)
+            or logical_hash.get("schema_version") != 1
+        ):
+            errors.append("materialized pose logical dataset hash is missing")
+        elif not errors:
+            observed_hash = _logical_materialized_pose_dataset_sha256(
+                root,
+                run_name=str(crop_latest),
+                manifest_sha256=str(training_export.get("manifest_sha256")),
+                skeleton_id=str(merged_skeleton_id),
+                labels=list(training_export.get("keypoint_labels") or []),
+            )
+            if observed_hash != logical_hash.get("digest"):
+                errors.append("materialized pose logical dataset hash mismatch")
+
     if errors:
         raise ValueError(
             "Merged keypoint zarr validation failed:\n- " + "\n- ".join(errors)
@@ -3907,7 +4597,9 @@ def validate_merged_keypoint_training_zarr(
         "training_input_format": train_input_format,
         "skeleton_id": merged_skeleton_id,
         "kpt_shape": list(merged_kpt_shape) if merged_kpt_shape is not None else None,
-        "skeleton": [list(edge) for edge in merged_skeleton] if merged_skeleton is not None else None,
+        "skeleton": [list(edge) for edge in merged_skeleton]
+        if merged_skeleton is not None
+        else None,
         "skeleton_signature": merged_skeleton_signature,
         "total_samples": int(total_samples),
         "success_count": int(success_count),
@@ -4068,7 +4760,9 @@ def _build_merged_manifest_payload(
                     "resize_applied": False,
                 },
                 "skeleton_id": spec.skeleton_id,
-                "kpt_shape": list(spec.kpt_shape) if spec.kpt_shape is not None else None,
+                "kpt_shape": list(spec.kpt_shape)
+                if spec.kpt_shape is not None
+                else None,
                 "skeleton": [list(edge) for edge in spec.skeleton],
                 "skeleton_signature": spec.skeleton_signature,
                 "dish_design": spec.dish_design,
@@ -4107,7 +4801,9 @@ def _build_merged_manifest_payload(
         "keypoint_run_requested": "merged_export",
         "keypoint_run_resolved": run_name,
         "skeleton_id": merge_result.skeleton_id,
-        "kpt_shape": list(merge_result.kpt_shape) if merge_result.kpt_shape is not None else None,
+        "kpt_shape": list(merge_result.kpt_shape)
+        if merge_result.kpt_shape is not None
+        else None,
         "skeleton": [list(edge) for edge in merge_result.skeleton],
         "skeleton_signature": merge_result.skeleton_signature,
         "row_gate_policy": merge_result.row_gate_policy,
@@ -4143,7 +4839,9 @@ def _build_merged_manifest_payload(
     else:
         pose_schema_out = {}
     pose_schema_out["skeleton_id"] = merge_result.skeleton_id
-    pose_schema_out["kpt_shape"] = list(merge_result.kpt_shape) if merge_result.kpt_shape is not None else None
+    pose_schema_out["kpt_shape"] = (
+        list(merge_result.kpt_shape) if merge_result.kpt_shape is not None else None
+    )
     pose_schema_out["keypoint_labels"] = list(merge_result.keypoint_labels)
     pose_schema_out["skeleton"] = [list(edge) for edge in merge_result.skeleton]
     pose_schema_out["skeleton_signature"] = merge_result.skeleton_signature
@@ -4158,7 +4856,9 @@ def _build_merged_manifest_payload(
         "roi_pixel_contract_name": merged_roi_contract_name,
         "roi_pixel_contract_names": sorted(roi_contract_names),
         "skeleton_id": merge_result.skeleton_id,
-        "kpt_shape": list(merge_result.kpt_shape) if merge_result.kpt_shape is not None else None,
+        "kpt_shape": list(merge_result.kpt_shape)
+        if merge_result.kpt_shape is not None
+        else None,
         "skeleton": [list(edge) for edge in merge_result.skeleton],
         "skeleton_signature": merge_result.skeleton_signature,
         "row_gate_policy": merge_result.row_gate_policy,
@@ -4333,7 +5033,9 @@ def _write_merge_summary(
         "source_type": merge_result.source_type,
         "source_type_resolved_counts": dict(merge_result.source_type_counts),
         "skeleton_id": merge_result.skeleton_id,
-        "kpt_shape": list(merge_result.kpt_shape) if merge_result.kpt_shape is not None else None,
+        "kpt_shape": list(merge_result.kpt_shape)
+        if merge_result.kpt_shape is not None
+        else None,
         "skeleton": [list(edge) for edge in merge_result.skeleton],
         "skeleton_signature": merge_result.skeleton_signature,
         "row_gate_policy": merge_result.row_gate_policy,
@@ -4392,7 +5094,9 @@ def _write_merge_summary(
                     ),
                 },
                 "skeleton_id": spec.skeleton_id,
-                "kpt_shape": list(spec.kpt_shape) if spec.kpt_shape is not None else None,
+                "kpt_shape": list(spec.kpt_shape)
+                if spec.kpt_shape is not None
+                else None,
                 "skeleton": [list(edge) for edge in spec.skeleton],
                 "skeleton_signature": spec.skeleton_signature,
                 "dish_design": spec.dish_design,
@@ -4412,9 +5116,9 @@ def _add_arg(cmd: List[str], flag: str, value: Any) -> None:
     cmd.extend([flag, str(value)])
 
 
-def _load_keypoint_data_card_main() -> (
-    tuple[Optional[Callable[[Optional[List[str]]], int]], Optional[str]]
-):
+def _load_keypoint_data_card_main() -> tuple[
+    Optional[Callable[[Optional[List[str]]], int]], Optional[str]
+]:
     try:
         module = importlib.import_module(
             "fisheye.utils.aggregate_keypoint_training_data_card"

@@ -1,0 +1,59 @@
+train: ./
+val: ./
+nc: 1
+names:
+- fish
+task: pose
+kpt_shape:
+- 3
+- 3
+preprocessing:
+  spatial_transform: auto
+  padding_value_uint8: 0
+  channel_transform: luma_repeat_three
+  normalization: uint8_div_255
+  interpolation: none
+augmentation:
+  fliplr_keypoint_pairs:
+  - - eye_left
+    - eye_right
+  flipud_keypoint_pairs: []
+datasets:
+  head_192_traditional_v1_reuse_merged:
+    zarr_path: /groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/training/pose_head_merged_v1/pose_head_192_traditional_v1_reuse_v001/zarr/pose_head_192_traditional_v1_reuse_v001_merged.zarr
+    source_type: materialized_pose_crop
+    input_format: gray
+    keypoint_run: merged_export_20260914T135250Z
+    split:
+      train: 0.8
+      val: 0.2
+training_params:
+  model: /groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/training/pose_head_merged_v1/pose_head_192_traditional_v1_reuse_v001/pretrained/yolo11n-pose.pt
+  epochs: 100
+  batch: 64
+  imgsz: 192
+  lr0: 0.001
+  momentum: 0.9
+  weight_decay: 0.0005
+  patience: 100
+  optimizer: AdamW
+  pose: 12.0
+  kobj: 1.0
+  box: 7.5
+  cls: 0.5
+  dfl: 1.5
+  augment: false
+  hsv_h: 0.0
+  hsv_s: 0.0
+  hsv_v: 0.0
+  degrees: 0.0
+  translate: 0.0
+  scale: 0.0
+  shear: 0.0
+  perspective: 0.0
+  fliplr: 0.0
+  flipud: 0.0
+  erasing: 0.0
+  num_workers: 4
+  device: '0'
+random_seed: 42
