@@ -19,6 +19,21 @@ from .validated_behavior_cohort import validated_behavior_manifest_path
 from .validated_behavior_dataset import ValidatedBehaviorExportDataset
 from .validated_behavior_handoff import read_validated_behavior_handoff
 
+# Captured from cowsay -W 48; embedding it keeps email generation self-contained.
+_COWSAY_READY = "\n".join(
+    (
+        " ____________________________________________",
+        "/ Your data is ready! See the export details \\",
+        "\\ below.                                     /",
+        " --------------------------------------------",
+        "        \\   ^__^",
+        "         \\  (oo)\\_______",
+        "            (__)\\       )\\/\\",
+        "                ||----w |",
+        "                ||     ||",
+    )
+)
+
 
 @dataclass(frozen=True)
 class ExportAvailabilityAnnouncement:
@@ -122,6 +137,10 @@ def _render_html(
         'color:#263b47;line-height:1.5;max-width:720px">'
         '<h1 style="font-size:25px;color:#17384a;margin:0">Palette dataset available</h1>'
         '<p style="margin:8px 0 20px">A validated behavior dataset is ready for reading.</p>'
+        '<pre style="white-space:pre;overflow-x:auto;font-family:monospace;'
+        'font-size:13px;line-height:1.1">'
+        + escape(_COWSAY_READY)
+        + "</pre>"
         + "".join(sections)
         + "</main></body></html>"
     )
@@ -194,6 +213,8 @@ def prepare_validated_behavior_export_announcement(
     lines = [
         "PALETTE DATASET AVAILABLE",
         "A validated behavior dataset is ready for reading.",
+        "",
+        _COWSAY_READY,
         "",
         "DATASET",
         *text_fields(dataset_fields),

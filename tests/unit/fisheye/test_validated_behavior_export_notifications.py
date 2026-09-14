@@ -84,6 +84,8 @@ def test_preview_binds_exact_validated_export_without_delivery(
     assert code == 0
     assert calls == [(tmp_path, RUN_ID, True, False)]
     assert "reader@example.org" in output
+    assert "/ Your data is ready! See the export details \\" in output
+    assert "\\   ^__^" in output
     assert "DATASET\n" in output
     assert "ACCESS\n" in output
     assert "TABLES (2)\n- canonical_swim_bouts" in output
@@ -170,7 +172,12 @@ def test_explicit_delivery_uses_existing_outbox(
     plain = message.get_body(preferencelist=("plain",)).get_content()
     html = message.get_body(preferencelist=("html",)).get_content()
     assert "TABLES (2)\n- canonical_swim_bouts" in plain
+    assert "/ Your data is ready! See the export details \\" in plain
+    assert "\\   ^__^" in plain
     assert "SENDER NOTE\nReview <this> & reply." in plain
+    assert "<pre" in html
+    assert "Your data is ready! See the export details" in html
+    assert "\\   ^__^" in html
     assert "<h2" in html and ">Access</h2>" in html
     assert ">Tables</h2>" in html and ">Provenance</h2>" in html
     assert '<a href="https://example.org/guide?a=1&amp;b=2">' in html

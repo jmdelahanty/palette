@@ -3,7 +3,9 @@
 The one-shot notifier announces an **exact, validated export run**. It reads
 the selected manifest through `ValidatedBehaviorExportDataset.open` in receipt
 mode before composing a message. The email has Dataset, Access, Tables, How to
-read it, and Provenance sections in both plain text and formatted HTML. It does
+read it, and Provenance sections in both plain text and formatted HTML. Both
+parts include a default cowsay message above the dataset details; it is embedded
+in the template, so sending does not require a `cowsay` installation. It does
 not modify the export, grant access, or activate a production selector. Preview
 is the default and sends nothing.
 
