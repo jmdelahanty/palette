@@ -2,8 +2,10 @@
 
 The one-shot notifier announces an **exact, validated export run**. It reads
 the selected manifest through `ValidatedBehaviorExportDataset.open` in receipt
-mode before composing a message. It does not modify the export, grant access,
-or activate a production selector. Preview is the default and sends nothing.
+mode before composing a message. The email has Dataset, Access, Tables, How to
+read it, and Provenance sections in both plain text and formatted HTML. It does
+not modify the export, grant access, or activate a production selector. Preview
+is the default and sends nothing.
 
 For the current sleepyfish export, preview the message with a real recipient
 and a recipient-accessible handoff guide:

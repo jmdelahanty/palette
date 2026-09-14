@@ -87,6 +87,7 @@ class LabelingNotification:
     to_user: str
     subject: str
     text_body: str
+    html_body: str | None = None
 
 
 def send_labeler_added_notification(
@@ -281,6 +282,8 @@ def _build_email_message(
     if actor_user:
         message["X-Palette-Labeling-Actor"] = str(actor_user)
     message.set_content(notification.text_body)
+    if notification.html_body is not None:
+        message.add_alternative(notification.html_body, subtype="html")
     return message
 
 

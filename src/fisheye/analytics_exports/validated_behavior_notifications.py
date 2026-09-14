@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from email.utils import parseaddr
+from html import escape
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlparse
 
 from fisheye.labeling.notifications import (
     LabelingNotification,
@@ -52,6 +54,78 @@ def _recipients(values: Sequence[str]) -> tuple[str, ...]:
     return tuple(recipients)
 
 
+def _html_reference(value: str) -> str:
+    safe = escape(value)
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        parsed = None
+    if parsed is not None and parsed.scheme in {"http", "https"} and parsed.netloc:
+        return f'<a href="{safe}">{safe}</a>'
+    return f'<span style="overflow-wrap:anywhere">{safe}</span>'
+
+
+def _html_fields(fields: Sequence[tuple[str, str]]) -> str:
+    return "".join(
+        f'<p style="margin:0 0 8px"><strong>{escape(label)}:</strong> '
+        f"{_html_reference(value)}</p>"
+        for label, value in fields
+    )
+
+
+def _html_section(title: str, content: str) -> str:
+    return (
+        '<section style="margin:24px 0">'
+        f'<h2 style="font-size:18px;color:#17384a;margin:0 0 10px;'
+        f'padding-bottom:5px;border-bottom:1px solid #d6e0e5">{escape(title)}</h2>'
+        f"{content}</section>"
+    )
+
+
+def _render_html(
+    *,
+    dataset_fields: Sequence[tuple[str, str]],
+    access_fields: Sequence[tuple[str, str]],
+    table_names: Sequence[str],
+    provenance_fields: Sequence[tuple[str, str]],
+    note: str,
+) -> str:
+    table_items = "".join(
+        f"<li><code>{escape(name)}</code></li>" for name in table_names
+    )
+    reading = (
+        "<p>Open the exact manifest-selected publication with "
+        "<code>ValidatedBehaviorExportDataset.open(publication_root, export_run_id)</code>. "
+        "Use <code>table(name).collect_bounded(max_rows=...)</code> for a small sample "
+        "or <code>table(name).scan(...)</code> for a lazy query.</p>"
+    )
+    sections = [
+        _html_section("Dataset", _html_fields(dataset_fields)),
+        _html_section("Access", _html_fields(access_fields)),
+        _html_section(
+            "Tables", f'<ul style="margin:0;padding-left:22px">{table_items}</ul>'
+        ),
+        _html_section("How to read it", reading),
+        _html_section("Provenance", _html_fields(provenance_fields)),
+    ]
+    if note:
+        sections.append(_html_section("Sender note", f"<p>{escape(note)}</p>"))
+    sections.append(
+        '<p style="color:#52626b;font-size:13px;border-top:1px solid #d6e0e5;'
+        'padding-top:14px">This email does not grant filesystem access or activate a '
+        "production selector. If the access location differs from the validated "
+        "publication root, confirm that it refers to this manifest before reading it.</p>"
+    )
+    return (
+        '<!doctype html><html><body><main style="font-family:Arial,Helvetica,sans-serif;'
+        'color:#263b47;line-height:1.5;max-width:720px">'
+        '<h1 style="font-size:25px;color:#17384a;margin:0">Palette dataset available</h1>'
+        '<p style="margin:8px 0 20px">A validated behavior dataset is ready for reading.</p>'
+        + "".join(sections)
+        + "</main></body></html>"
+    )
+
+
 def prepare_validated_behavior_export_announcement(
     *,
     publication_root: str | Path,
@@ -82,34 +156,56 @@ def prepare_validated_behavior_export_announcement(
     digest = manifest["record_sha256"]
     location = location or str(root)
 
-    lines = [
-        "A validated Palette behavior dataset is available for reading.",
-        "",
-        f"Export run: {dataset.export_run_id}",
-        f"Profile: {profile}",
-        f"Publication status: {manifest['status']}",
-        f"Manifest record SHA-256: {digest}",
-        f"Manifest: {manifest_path}",
-        f"Validation mode: {dataset.validation_mode}",
-        f"Validated publication root: {root}",
-        f"Access location (provided by sender): {location}",
-        f"Tables: {', '.join(dataset.table_names)}",
+    dataset_fields = [
+        ("Export run", dataset.export_run_id),
+        ("Profile", str(profile)),
+        ("Publication status", str(manifest["status"])),
+    ]
+    access_fields = [
+        ("Location (provided by sender)", location),
+        ("Validated publication root", str(root)),
     ]
     if audience:
-        lines.append(f"Intended audience: {audience}")
+        access_fields.append(("Intended audience", audience))
     if handoff:
-        lines.append(f"Reading guide: {handoff}")
+        access_fields.append(("Reading guide", handoff))
     if access_note:
-        lines.append(f"Access instructions: {access_note}")
+        access_fields.append(("Access instructions", access_note))
+    provenance_fields = [
+        ("Manifest", str(manifest_path)),
+        ("Manifest record SHA-256", str(digest)),
+        ("Validation mode", dataset.validation_mode),
+    ]
+
+    def text_fields(fields: Sequence[tuple[str, str]]) -> list[str]:
+        return [f"{label}: {value}" for label, value in fields]
+
+    lines = [
+        "PALETTE DATASET AVAILABLE",
+        "A validated behavior dataset is ready for reading.",
+        "",
+        "DATASET",
+        *text_fields(dataset_fields),
+        "",
+        "ACCESS",
+        *text_fields(access_fields),
+        "",
+        f"TABLES ({len(dataset.table_names)})",
+        *(f"- {name}" for name in dataset.table_names),
+        "",
+        "HOW TO READ IT",
+        "Open the exact manifest-selected publication with "
+        "ValidatedBehaviorExportDataset.open(publication_root, export_run_id).",
+        "Use table(name).collect_bounded(max_rows=...) for a small sample "
+        "or table(name).scan(...) for a lazy query.",
+        "",
+        "PROVENANCE",
+        *text_fields(provenance_fields),
+    ]
     if note:
-        lines.append(f"Note: {note}")
+        lines.extend(["", "SENDER NOTE", note])
     lines.extend(
         [
-            "",
-            "Read the exact manifest-selected tables with Palette's "
-            "ValidatedBehaviorExportDataset.open(publication_root, export_run_id) "
-            "reader. Use table(name).collect_bounded(max_rows=...) for a small sample "
-            "or table(name).scan(...) for a lazy query.",
             "",
             "This message does not grant filesystem access or activate a production selector. "
             "If the access location differs from the validated publication root, "
@@ -122,6 +218,13 @@ def prepare_validated_behavior_export_announcement(
         to_user=dataset.export_run_id,
         subject=f"Palette dataset available: {dataset.export_run_id}",
         text_body="\n".join(lines),
+        html_body=_render_html(
+            dataset_fields=dataset_fields,
+            access_fields=access_fields,
+            table_names=dataset.table_names,
+            provenance_fields=provenance_fields,
+            note=note,
+        ),
     )
     return ExportAvailabilityAnnouncement(
         notification=notification,

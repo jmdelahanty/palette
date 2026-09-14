@@ -84,10 +84,15 @@ def test_preview_binds_exact_validated_export_without_delivery(
     assert code == 0
     assert calls == [(tmp_path, RUN_ID, True, False)]
     assert "reader@example.org" in output
+    assert "DATASET\n" in output
+    assert "ACCESS\n" in output
+    assert "TABLES (2)\n- canonical_swim_bouts" in output
+    assert "HOW TO READ IT\n" in output
+    assert "PROVENANCE\n" in output
     assert "Manifest record SHA-256: " + "a" * 64 in output
     assert "Validation mode: receipt" in output
     assert "Intended audience: Johnson Lab collaborators" in output
-    assert "Access location (provided by sender): /groups/shared/sleepyfish" in output
+    assert "Location (provided by sender): /groups/shared/sleepyfish" in output
     assert "Reading guide: https://example.org/sleepyfish-guide" in output
     assert "does not grant filesystem access" in output
 
@@ -139,6 +144,8 @@ def test_explicit_delivery_uses_existing_outbox(
         publication_root=tmp_path,
         export_run_id=RUN_ID,
         to=["reader@example.org", "colleague@example.org"],
+        handoff="https://example.org/guide?a=1&b=2",
+        note="Review <this> & reply.",
     )
     outbox = tmp_path / "outbox"
     result = deliver_validated_behavior_export_announcement(
@@ -159,7 +166,16 @@ def test_explicit_delivery_uses_existing_outbox(
     assert message["X-Palette-Labeling-Notification-Kind"] == (
         "validated_behavior_export_available"
     )
-    assert "canonical_swim_bouts" in message.get_content()
+    assert message.get_content_type() == "multipart/alternative"
+    plain = message.get_body(preferencelist=("plain",)).get_content()
+    html = message.get_body(preferencelist=("html",)).get_content()
+    assert "TABLES (2)\n- canonical_swim_bouts" in plain
+    assert "SENDER NOTE\nReview <this> & reply." in plain
+    assert "<h2" in html and ">Access</h2>" in html
+    assert ">Tables</h2>" in html and ">Provenance</h2>" in html
+    assert '<a href="https://example.org/guide?a=1&amp;b=2">' in html
+    assert "Review &lt;this&gt; &amp; reply." in html
+    assert "<this>" not in html
     assert (
         json.loads(Path(result["outbox_json_path"]).read_text())["status"] == "queued"
     )
