@@ -76,6 +76,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(announcement.notification.text_body)
         return 0
 
+    if not announcement.context["handoff_path"]:
+        raise ValueError(
+            "Delivery requires a published handoff companion or --handoff guide."
+        )
+
     config = LabelingNotificationConfig.from_env(mode=args.mode or "outbox")
     config = replace(
         config,

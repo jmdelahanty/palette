@@ -17,6 +17,7 @@ from fisheye.labeling.notifications import (
 
 from .validated_behavior_cohort import validated_behavior_manifest_path
 from .validated_behavior_dataset import ValidatedBehaviorExportDataset
+from .validated_behavior_handoff import read_validated_behavior_handoff
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,8 @@ def prepare_validated_behavior_export_announcement(
     profile = manifest["export_profile"]["profile_id"]
     digest = manifest["record_sha256"]
     location = location or str(root)
+    selected_handoff = read_validated_behavior_handoff(dataset)
+    selected_handoff_path = str(selected_handoff.path) if selected_handoff else ""
 
     dataset_fields = [
         ("Export run", dataset.export_run_id),
@@ -167,7 +170,11 @@ def prepare_validated_behavior_export_announcement(
     ]
     if audience:
         access_fields.append(("Intended audience", audience))
-    if handoff:
+    if selected_handoff_path:
+        access_fields.append(("Reading guide", selected_handoff_path))
+        if handoff and handoff != selected_handoff_path:
+            access_fields.append(("Additional reading guide", handoff))
+    elif handoff:
         access_fields.append(("Reading guide", handoff))
     if access_note:
         access_fields.append(("Access instructions", access_note))
@@ -176,6 +183,10 @@ def prepare_validated_behavior_export_announcement(
         ("Manifest record SHA-256", str(digest)),
         ("Validation mode", dataset.validation_mode),
     ]
+    if selected_handoff is not None:
+        provenance_fields.append(
+            ("Reading guide SHA-256", selected_handoff.document_sha256)
+        )
 
     def text_fields(fields: Sequence[tuple[str, str]]) -> list[str]:
         return [f"{label}: {value}" for label, value in fields]
@@ -235,6 +246,10 @@ def prepare_validated_behavior_export_announcement(
             "publication_root": str(root),
             "access_location": location,
             "profile_id": profile,
+            "handoff_path": selected_handoff_path or handoff,
+            "handoff_document_sha256": (
+                selected_handoff.document_sha256 if selected_handoff else None
+            ),
         },
     )
 

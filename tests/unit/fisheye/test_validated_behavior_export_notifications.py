@@ -202,6 +202,8 @@ def test_cli_delivery_defaults_to_outbox_even_if_labeling_uses_smtp(
             RUN_ID,
             "--to",
             "reader@example.org",
+            "--handoff",
+            "https://example.org/guide",
             "--deliver",
         ]
     )
@@ -209,6 +211,24 @@ def test_cli_delivery_defaults_to_outbox_even_if_labeling_uses_smtp(
     assert code == 0
     assert result["status"] == "queued"
     assert Path(result["outbox_eml_path"]).exists()
+
+
+def test_cli_refuses_delivery_when_no_guide_is_selected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reader_stub(monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="requires a published handoff"):
+        main(
+            [
+                "--publication-root",
+                str(tmp_path),
+                "--export-run-id",
+                RUN_ID,
+                "--to",
+                "reader@example.org",
+                "--deliver",
+            ]
+        )
 
 
 def test_explicit_smtp_delivery_uses_existing_relay_without_network(
