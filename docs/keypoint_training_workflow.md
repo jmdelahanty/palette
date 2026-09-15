@@ -280,12 +280,22 @@ configured learning-rate and momentum values while leaving the source
 configuration looking authoritative. The runtime receipt verifies the actual
 instantiated class and records its parameter groups.
 
-Every successful run writes `pose_training_runtime_receipt.json` beside the
-weights. Its digest is recorded in the training report and registry metrics. The
-receipt contains the starting-model digest and architecture, source and model
-input shapes, declared and effective arguments, instantiated optimizer groups,
-loader worker policy, active augmentation, and the observed first-batch tensor
-contract.
+Every successful run writes the v2 `pose_training_runtime_receipt.json` beside
+the weights. Its digest is recorded in the training report and registry metrics.
+The receipt contains the starting-model digest and architecture, durable and
+effective dataset paths, any verified node-local physical-tree digest, source
+and model input shapes, declared and effective arguments, instantiated
+optimizer groups, loader worker policy, active augmentation, and the observed
+first-batch tensor contract.
+
+`dataset_staging.mode: auto` is the maintained pose default. Eligible immutable
+merged exports on `/groups` or `/nrs` are copied to node-local scratch when their
+combined physical size is at most `max_total_size_gib` and the configured free
+space remains afterward. Palette hashes every source and staged file and admits
+the local copy only when the complete relative-path, size, and SHA-256 tree is
+identical. `required` fails if that contract cannot be met; `disabled` retains
+direct reads. Live per-recording training Zarrs are outside the automatic
+staging scope.
 
 Before a full run, inspect the exact configured loader without training:
 

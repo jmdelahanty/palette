@@ -18,6 +18,10 @@ augmentation:
   - - eye_left
     - eye_right
   flipud_keypoint_pairs: []
+dataset_staging:
+  mode: auto
+  max_total_size_gib: 8.0
+  min_free_space_gib_after_stage: 8.0
 datasets:
   head_192_traditional_v1_reuse_merged:
     zarr_path: /groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/training/pose_head_merged_v1/pose_head_192_traditional_v1_reuse_v001/zarr/pose_head_192_traditional_v1_reuse_v001_merged.zarr

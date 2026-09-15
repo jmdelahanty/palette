@@ -260,6 +260,17 @@ class PoseAugmentationConfig(BaseModel):
         return normalized
 
 
+class TrainingDatasetStagingConfig(BaseModel):
+    """Execution-only policy for verified node-local training inputs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["auto", "required", "disabled"] = "auto"
+    max_total_size_gib: float = Field(8.0, gt=0.0)
+    min_free_space_gib_after_stage: float = Field(8.0, ge=0.0)
+    scratch_root: Optional[Path] = None
+
+
 class EyeMaskTrainingParams(TrainingParams):
     """Training parameters for eye-mask segmentation pipelines."""
 
@@ -400,6 +411,9 @@ class PoseConfig(DetectConfig):
         default_factory=PosePreprocessingConfig
     )
     augmentation: PoseAugmentationConfig = Field(default_factory=PoseAugmentationConfig)
+    dataset_staging: TrainingDatasetStagingConfig = Field(
+        default_factory=TrainingDatasetStagingConfig
+    )
     # Compatibility section consumed by batch inference utilities, not training.
     keypoints: Optional[Dict[str, Any]] = None
 

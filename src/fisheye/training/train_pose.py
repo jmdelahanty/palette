@@ -62,6 +62,10 @@ from .training_console import (
     print_training_hyperparameters,
     print_training_start,
 )
+from .training_dataset_staging import (
+    StagedTrainingDatasets,
+    stage_training_datasets,
+)
 from .zarr_yolo_dataset_loader import (
     build_pose_zarr_dataset_config,
     create_zarr_dataset,
@@ -236,7 +240,7 @@ def _write_pose_runtime_receipt(state: dict[str, Any]) -> Optional[Path]:
         if key not in {"run_dir", "receipt_path", "receipt_sha256"}
     }
     document = {
-        "schema_id": "palette.pose_training_runtime_receipt.v1",
+        "schema_id": "palette.pose_training_runtime_receipt.v2",
         "payload": payload,
         "payload_sha256": canonical_json_sha256(payload),
     }
@@ -1674,6 +1678,31 @@ def _apply_pose_loader_training_param_overrides(training_params: dict) -> tuple[
     return params, loader_cfg
 
 
+def _stage_pose_training_config(
+    full_config: PoseConfig,
+) -> tuple[Any, StagedTrainingDatasets]:
+    """Apply the execution-only staging policy to a copy of the pose config."""
+
+    policy = full_config.dataset_staging
+    gib = 1024**3
+    staged = stage_training_datasets(
+        {
+            name: dataset.zarr_path
+            for name, dataset in full_config.datasets.items()
+        },
+        mode=policy.mode,
+        scratch_root=policy.scratch_root,
+        max_total_bytes=int(float(policy.max_total_size_gib) * gib),
+        min_free_bytes_after_stage=int(
+            float(policy.min_free_space_gib_after_stage) * gib
+        ),
+    )
+    effective = full_config.model_copy(deep=True)
+    for name, path in staged.effective_paths.items():
+        effective.datasets[name].zarr_path = path
+    return build_pose_zarr_dataset_config(effective), staged
+
+
 def _snapshot_training_inputs(
     *,
     run_dir: Path,
@@ -1751,6 +1780,7 @@ def main(args) -> int:
     pose_schema: Optional[Dict[str, Any]] = None
     manifest_authority: Optional[dict[str, Any]] = None
     manifest_authority_sha256: Optional[str] = None
+    staged_datasets: Optional[StagedTrainingDatasets] = None
 
     # Load and validate config
     global config
@@ -1883,6 +1913,50 @@ def main(args) -> int:
         )
         for name in missing_tracking:
             console.print(f"  - {name}")
+
+    try:
+        config, staged_datasets = _stage_pose_training_config(full_config)
+        staging_summary = staged_datasets.receipt["summary"]
+        staged_count = int(staging_summary["staged_dataset_count"])
+        if staged_count:
+            console.print(
+                "[cyan]Verified node-local training inputs:[/cyan] "
+                f"{staged_count} dataset(s), "
+                f"{int(staging_summary['candidate_total_bytes']) / 1024**3:.2f} GiB"
+            )
+        else:
+            actions = sorted(
+                {
+                    str(record.get("action"))
+                    for record in staged_datasets.receipt["datasets"].values()
+                }
+            )
+            console.print(
+                "[dim]Training dataset staging:[/dim] " + ", ".join(actions)
+            )
+    except Exception as exc:
+        console.print(f"[bold red]✗ Dataset staging failed:[/bold red] {exc}")
+        if args.log_registry:
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=registry_run_id,
+                set_id=effective_set_id,
+                config_path=config_path,
+                manifest_path=manifest_path,
+                model_path=None,
+                metrics_path=None,
+                status="failed",
+                final_metrics={
+                    "stage": "dataset_staging",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                pose_schema=pose_schema,
+                expected_manifest_sha256=manifest_authority_sha256,
+            )
+        return 1
    
     # Get training params
     declared_training_params = full_config.training_params.model_dump(
@@ -1955,6 +2029,7 @@ def main(args) -> int:
             "path": str(manifest_path) if manifest_path is not None else None,
             "sha256": manifest_authority_sha256,
         },
+        "dataset_staging": _jsonable_runtime_value(staged_datasets.receipt),
     }
     ZarrPoseTrainer.runtime_contract_state = pose_runtime_state
     
@@ -1979,6 +2054,7 @@ def main(args) -> int:
                 "model artifact after model initialization."
             )
     except Exception as exc:
+        staged_datasets.cleanup()
         if args.log_registry:
             _record_registry_training_run(
                 args=args,
@@ -2105,6 +2181,7 @@ def main(args) -> int:
                 pose_schema=pose_schema,
                 expected_manifest_sha256=manifest_authority_sha256,
             )
+        staged_datasets.cleanup()
         return 130
     except Exception as e:
         console.print(f"\n[bold red]✗ Training failed:[/bold red] {e}")
@@ -2129,9 +2206,11 @@ def main(args) -> int:
                 pose_schema=pose_schema,
                 expected_manifest_sha256=manifest_authority_sha256,
             )
+        staged_datasets.cleanup()
         return 1
     
     if "first_batch" not in pose_runtime_state:
+        staged_datasets.cleanup()
         raise RuntimeError(
             "Pose training finished without verifying an effective runtime batch."
         )
@@ -2185,6 +2264,7 @@ def main(args) -> int:
                 'optimizer': pose_runtime_state.get('optimizer_runtime'),
                 'first_batch': pose_runtime_state.get('first_batch'),
                 'loader': pose_runtime_state.get('loader'),
+                'dataset_staging': pose_runtime_state.get('dataset_staging'),
             },
             'final_training_losses': {
                 'box_loss': float(last_epoch_metrics.get('train/box_loss', 0)),
@@ -2357,6 +2437,7 @@ def main(args) -> int:
 
     console.print("[bold green]✓ Training Complete![/bold green]")
     console.print(f"[dim]Results saved to: {results.save_dir}[/dim]\n")
+    staged_datasets.cleanup()
     return 0
 
 
