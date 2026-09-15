@@ -358,7 +358,10 @@ def test_materialized_sources_use_existing_immutable_merge_contract(
         kpt_shape=(3, 3),
         target_roi_hw=(64, 64),
     )
-    assert PoseConfig.from_yaml(config_path).training_params.imgsz == 64
+    generated_config = PoseConfig.from_yaml(config_path)
+    assert generated_config.training_params.imgsz == 64
+    assert generated_config.dataset_staging.mode == "auto"
+    assert generated_config.dataset_staging.max_total_size_gib == 8.0
     crop_run = root["crop_runs"][result.run_name]
     crop_run["roi_images"][0, 0, 0] = 99
     with pytest.raises(ValueError, match="logical dataset hash mismatch"):
