@@ -1,0 +1,1648 @@
+{
+  "crop_recipe": {
+    "id": "pose_head_fixed_192_truncated_centroid_v1",
+    "no_resize_padding_rotation": true,
+    "size_px": 192,
+    "size_selection": "user_fixed_override_of_p95_1p3_ceil32_v1"
+  },
+  "datasets": [
+    {
+      "camera_id": "2010093",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T16-01-09Z_arena_1:z92f469b75d66",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:ea867e19-63b0-448c-ab3c-a15d0b015054",
+        "recording_started_utc": "2026-06-23T16-01-09Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "ea867e19-63b0-448c-ab3c-a15d0b015054"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "e6c2122dfab4864c493cb7eae9ada795adc805dfacac0eecfdac1ea1cd28159e",
+        "keypoints_roi_sha256": "a36b43ae9ca42f22ddc70ae6bf1398ac5000ab7871abc1da72be7aaea38f9525",
+        "pixel_sha256": "2ad9458b6c679faf4553fec60714b8e2712313609dd08d0b5e25099c890b3fff",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "0232ca7e9eb680efd7a760372647ebee7f5d5cb19d5aecba5500fe8a6abea02a"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T16-01-09Z_arena_1_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T16-01-09Z_arena_1_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-09Z_arena_1_RedScare/zarr/2026-06-23T16-01-09Z_arena_1_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010094",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T16-01-09Z_arena_2:zd538265d4b4e",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:47c8156e-0bbf-4916-bc63-d4f395141f96",
+        "recording_started_utc": "2026-06-23T16-01-09Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "47c8156e-0bbf-4916-bc63-d4f395141f96"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "534de54dcc0b1b6214c5b44fc594b443c4c1922d355d3273317277db52932de1",
+        "keypoints_roi_sha256": "fe37e01f8bb35280112a2183d7b7e07cb2b2f9d26f9c579c364a23e01c4ca72b",
+        "pixel_sha256": "d2f3c20059a409ca8323988c593d8bfeaa11c61eaeae05c123e987797f49c56f",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "49a123318032126076d5d4fa6e225099cd23c176140a3e6ea5d238a51fce5528"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T16-01-09Z_arena_2_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T16-01-09Z_arena_2_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-09Z_arena_2_RedScare/zarr/2026-06-23T16-01-09Z_arena_2_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010095",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T16-01-09Z_arena_3:zd51986c19042",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:56523d38-ee67-4233-a7a8-de732af7a472",
+        "recording_started_utc": "2026-06-23T16-01-09Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "56523d38-ee67-4233-a7a8-de732af7a472"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "50b1826f54db80723b54f31d86d782c3c7e42806f0c7799b6bc85fbde851c40f",
+        "keypoints_roi_sha256": "f70ae9ba812901383c825d9f275c178f9233958a2b21ba7984579cd48d1800b5",
+        "pixel_sha256": "7fc80e8608ebc9f1d06d46f4a5d6d34feb38431ef497a2b179c035bc732c3d6f",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "90b4fcabb5f029ae506b38ba747e42f909f9352500a2c80646bf2e9db5dcfa4d"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T16-01-09Z_arena_3_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T16-01-09Z_arena_3_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-09Z_arena_3_RedScare/zarr/2026-06-23T16-01-09Z_arena_3_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010096",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T16-01-10Z_arena_4:zfd621a14deb0",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:5c2b0619-de7f-49db-b450-14eab0055f92",
+        "recording_started_utc": "2026-06-23T16-01-10Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "5c2b0619-de7f-49db-b450-14eab0055f92"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "e6c2122dfab4864c493cb7eae9ada795adc805dfacac0eecfdac1ea1cd28159e",
+        "keypoints_roi_sha256": "de67e90e592cf083b88e483ba2b9969779122be1db98d7c699c5a75820fbb98c",
+        "pixel_sha256": "09c3311e20c34b94f0c67dcabf2e374031043032f2619bf68ba2bd600567a327",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "ba3376542f7f84f97bfdcb9bcb3978b6f4843d50ddb76fe6224fa268fc865f43"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T16-01-10Z_arena_4_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T16-01-10Z_arena_4_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-10Z_arena_4_RedScare/zarr/2026-06-23T16-01-10Z_arena_4_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010093",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T16-43-36Z_arena_1:ze322f7126920",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:938ff931-ca01-424b-9e77-b1ea67f1de82",
+        "recording_started_utc": "2026-06-23T16-43-36Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "938ff931-ca01-424b-9e77-b1ea67f1de82"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "e6c2122dfab4864c493cb7eae9ada795adc805dfacac0eecfdac1ea1cd28159e",
+        "keypoints_roi_sha256": "aa4cff50ec672590549ee34d0913feeb65d0811ccfff1fa7cb108f3c6051eae7",
+        "pixel_sha256": "a9aba5f704871e245fec4b1dc284833d8a86b942f1c37efe60c1b62a7a054ee8",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "289dd030acf58057a7cab18a85f629685dd92cd6189d3bd4fc2a17644e481892"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T16-43-36Z_arena_1_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T16-43-36Z_arena_1_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-43-36Z_arena_1_RedScare/zarr/2026-06-23T16-43-36Z_arena_1_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010094",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T16-43-36Z_arena_2:z389618509690",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:c2de756c-4a44-46ce-92a6-70be68d8b3d5",
+        "recording_started_utc": "2026-06-23T16-43-36Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "c2de756c-4a44-46ce-92a6-70be68d8b3d5"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "534de54dcc0b1b6214c5b44fc594b443c4c1922d355d3273317277db52932de1",
+        "keypoints_roi_sha256": "ab7f9506fbdc48bd83f4b8f7172ce06652bb50a7aa0d0ebf203af1daf37ab1b4",
+        "pixel_sha256": "cf05e43b78afc0653aca09808dfed8cc8ab87f0a5bd3bc4b4f17c5c25cc9cb4e",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "473cf475961f75ce71baf232ec15fa1047b2a4947da570cc618a761a0ef8f2a8"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T16-43-36Z_arena_2_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T16-43-36Z_arena_2_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-43-36Z_arena_2_RedScare/zarr/2026-06-23T16-43-36Z_arena_2_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010095",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T16-43-36Z_arena_3:z729a6c424abe",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:4b6fcd62-2764-4977-8abb-aba43cb66170",
+        "recording_started_utc": "2026-06-23T16-43-36Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "4b6fcd62-2764-4977-8abb-aba43cb66170"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "e6c2122dfab4864c493cb7eae9ada795adc805dfacac0eecfdac1ea1cd28159e",
+        "keypoints_roi_sha256": "ba654ab1b2304e6c6dbae3800d5e8d2fc0114daaf6574a6c8a46fb0b0356e32c",
+        "pixel_sha256": "8e1f4b29d8d4077b9e7bfba95181af7cf678e646b69246a1258b3e4308168f67",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "6e70ff772dfd324704ca661d15f4b5622326041b6d8c484aa4ba9f10b87c2f24"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T16-43-36Z_arena_3_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T16-43-36Z_arena_3_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-43-36Z_arena_3_RedScare/zarr/2026-06-23T16-43-36Z_arena_3_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010096",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T16-43-36Z_arena_4:za5fe2361bd57",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:8771b967-bb9b-480f-8eaf-f2118f427bcc",
+        "recording_started_utc": "2026-06-23T16-43-36Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "8771b967-bb9b-480f-8eaf-f2118f427bcc"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "534de54dcc0b1b6214c5b44fc594b443c4c1922d355d3273317277db52932de1",
+        "keypoints_roi_sha256": "5fabee2904984482da59adc60ffb757db883023304ced8db26eb05aff586069f",
+        "pixel_sha256": "61aa33b7c5465802b1eba0e78893348ee0cfeb18092e64d27b0502617d46f566",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "2b0e49f05f517c3a36637db3705dfcc4769a8cd2c2452639aca523deac19f650"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T16-43-36Z_arena_4_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T16-43-36Z_arena_4_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-43-36Z_arena_4_RedScare/zarr/2026-06-23T16-43-36Z_arena_4_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010093",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T17-16-51Z_arena_1:z6f1a9db7c1fe",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:d1a6808f-bcc9-42db-8678-a2db5c8a6ed8",
+        "recording_started_utc": "2026-06-23T17-16-51Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "d1a6808f-bcc9-42db-8678-a2db5c8a6ed8"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "50b1826f54db80723b54f31d86d782c3c7e42806f0c7799b6bc85fbde851c40f",
+        "keypoints_roi_sha256": "70f660d14fb7ee6e7e4bb8902ef46d309c100834dc91180e27bd1ebcc06a9f65",
+        "pixel_sha256": "6f373ac034bab85002c62d7e96f11e5db302090e282bc9a0c04cda5012c042de",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "b55d42321e50e4ed25dde770e01374e89c3bbd9f14f1ba1e9cb39d78b9bfbe55"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T17-16-51Z_arena_1_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T17-16-51Z_arena_1_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-16-51Z_arena_1_RedScare/zarr/2026-06-23T17-16-51Z_arena_1_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010094",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T17-16-51Z_arena_2:zf77fd1c3dac7",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:45ca456f-2f80-4987-91b5-e9d817637fdf",
+        "recording_started_utc": "2026-06-23T17-16-51Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "45ca456f-2f80-4987-91b5-e9d817637fdf"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "67c2181b0e0a78507bf9b149354e927930feb1a988bf925a90a30ebe2ecfb375",
+        "keypoints_roi_sha256": "21b934ec2c256682cd0d2bb5c948fa47b7b5726cf0ada5fa4197fca6805175d4",
+        "pixel_sha256": "ecb7bd8f52f3a61efd34281abff3371d0d41b48f71697cad524c8acbcb949c6a",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "9c396e47273f423c38a382d3780dad82dde089c6c35619b6e87e9d7f6e99131e"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T17-16-51Z_arena_2_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T17-16-51Z_arena_2_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-16-51Z_arena_2_RedScare/zarr/2026-06-23T17-16-51Z_arena_2_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010095",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T17-16-51Z_arena_3:zcb0899750de3",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:d9a87924-3482-4650-939c-43ca34c55074",
+        "recording_started_utc": "2026-06-23T17-16-51Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "d9a87924-3482-4650-939c-43ca34c55074"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "842974d6c1b1581b35a5015808260a56d033c02718a63c088bddfe2b93eed9e7",
+        "keypoints_roi_sha256": "cb77f52093dc8a1efd4c2e4bb4cb7fba77f129562e39e217e5663d4ca9cbc7fb",
+        "pixel_sha256": "ed1fd6062cf87de720d9e1fa9ea1bca369330dec1af34e6176fb5c078af44025",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "76496402219e0ae9654381e9c4b75f86ecb0cb8c82b63dd182ab27bdc164ce6e"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T17-16-51Z_arena_3_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T17-16-51Z_arena_3_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-16-51Z_arena_3_RedScare/zarr/2026-06-23T17-16-51Z_arena_3_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010096",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T17-16-51Z_arena_4:ze8beeb83a12a",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:5374e6f9-95fa-461f-ae88-1184f8421fcd",
+        "recording_started_utc": "2026-06-23T17-16-51Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "5374e6f9-95fa-461f-ae88-1184f8421fcd"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "19e3cf3a65ea21dc7bc374db44fbb24bd105987453430125ab831f45d6e637b2",
+        "keypoints_roi_sha256": "1f4ac5338e797d3e9f9902bb15cd1b57695a3135d28216340d5cbb716faf1a3e",
+        "pixel_sha256": "b8d313857b565a52353714e8bb1696d13e87ba3e66bf7a004e5eac3db29a914d",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "2560d1a8b35cf3761ed34bdc52f82e6ed007afb9cab6ead979478c40b8e0ef6c"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T17-16-51Z_arena_4_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T17-16-51Z_arena_4_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-16-51Z_arena_4_RedScare/zarr/2026-06-23T17-16-51Z_arena_4_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010093",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T17-57-12Z_arena_1:z557718a1bed8",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:854763f6-c763-4486-a895-38b61674c23f",
+        "recording_started_utc": "2026-06-23T17-57-12Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "854763f6-c763-4486-a895-38b61674c23f"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "8e506475528647040fc6a8edc76b746d06779d4ad78e571a02809bf8c631c55a",
+        "keypoints_roi_sha256": "8051f68f9103b50652a67a5a2ebf292e7d59f0a6971f4efc4be40ea154bed315",
+        "pixel_sha256": "d37507f8d5f502c9907ae664547ccfd614e5bf6cf60f0b4eabc3b6fcb40c5f6b",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "7c86949b3c98d8d20f781d57f751e1f499db8707691cb39a23678d57a367ea8f"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T17-57-12Z_arena_1_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T17-57-12Z_arena_1_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-57-12Z_arena_1_RedScare/zarr/2026-06-23T17-57-12Z_arena_1_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010094",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T17-57-12Z_arena_2:ze472bcd79dc9",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:218e28aa-c3ff-4429-b676-48a0f8057e2d",
+        "recording_started_utc": "2026-06-23T17-57-12Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "218e28aa-c3ff-4429-b676-48a0f8057e2d"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "50b1826f54db80723b54f31d86d782c3c7e42806f0c7799b6bc85fbde851c40f",
+        "keypoints_roi_sha256": "5cb0ee05056772d78399eacff272fa995bd6a24f0b9a57358e0fc4146f4fee9c",
+        "pixel_sha256": "49525b6256eb260eb5a46993ba078f3180abd4164c6b77f285c9c27f44e876ee",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "cf2ef1d915efbf1430216e496d438d3d34bb7f81adf6c19132560d4df2294f96"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T17-57-12Z_arena_2_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T17-57-12Z_arena_2_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-57-12Z_arena_2_RedScare/zarr/2026-06-23T17-57-12Z_arena_2_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010095",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T17-57-12Z_arena_3:zc88814883bdf",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:3d5e83c1-3f81-4568-8d0b-1585e8c75fcf",
+        "recording_started_utc": "2026-06-23T17-57-12Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "3d5e83c1-3f81-4568-8d0b-1585e8c75fcf"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "8e506475528647040fc6a8edc76b746d06779d4ad78e571a02809bf8c631c55a",
+        "keypoints_roi_sha256": "094c1ae3efb3219a9a1e8ede3d94e0d33b3f1c28d4086a90ceffc2151d5b4ae9",
+        "pixel_sha256": "ee7ba2a9f148436ba9430e7abe5f478f898d674ab5e138adb60761e7fbb28d02",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "41b76b874a0d6dca7d632ce07c2c4fcd43cc145d7f06bbc722922c908cb516af"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T17-57-12Z_arena_3_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T17-57-12Z_arena_3_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-57-12Z_arena_3_RedScare/zarr/2026-06-23T17-57-12Z_arena_3_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010096",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T17-57-12Z_arena_4:z8fc21ce574e8",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:c337767c-bc2f-4f6d-bfac-f46e87c6e7fe",
+        "recording_started_utc": "2026-06-23T17-57-12Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "c337767c-bc2f-4f6d-bfac-f46e87c6e7fe"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "c608189d3d73ed452b97dccffd43408a8cf4185c547355c8ba632ee1132c0b36",
+        "keypoints_roi_sha256": "95df8d1caaeddb0cc1ff10b1e2ad2add24b2ae9d3d6432de080c6ccebe2f06b9",
+        "pixel_sha256": "0750bbde9ce55fefd21ec0d5f1948abb7b2a114fe9a0b9aced54bb1e937b25e6",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "af037ab6308b5e86b2285c4af2b06b7c6b240a6cfd3cafe83477d6298ba05ad3"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T17-57-12Z_arena_4_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T17-57-12Z_arena_4_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-57-12Z_arena_4_RedScare/zarr/2026-06-23T17-57-12Z_arena_4_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010093",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T18-40-24Z_arena_1:za6aff3e0ac55",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:cdd74edb-39b8-4956-99b2-de5636750c44",
+        "recording_started_utc": "2026-06-23T18-40-24Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "cdd74edb-39b8-4956-99b2-de5636750c44"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "e6c2122dfab4864c493cb7eae9ada795adc805dfacac0eecfdac1ea1cd28159e",
+        "keypoints_roi_sha256": "00a5d9966677a7315f6163375403ff5e10c8e028d475f97f0be3df583ae196cf",
+        "pixel_sha256": "b36046447823a82d23079a759b539bf5de0cafa1338d66f10d1c389f0d45d60c",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "ba9284da6945ab9dd9f277478f2f9ced2068beb56abc3d3965ad100b06be645d"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T18-40-24Z_arena_1_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T18-40-24Z_arena_1_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T18-40-24Z_arena_1_RedScare/zarr/2026-06-23T18-40-24Z_arena_1_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010094",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T18-40-24Z_arena_2:z62b434fca011",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:cc5aba25-e050-4385-b0de-7e19167fe5b1",
+        "recording_started_utc": "2026-06-23T18-40-24Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "cc5aba25-e050-4385-b0de-7e19167fe5b1"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "534de54dcc0b1b6214c5b44fc594b443c4c1922d355d3273317277db52932de1",
+        "keypoints_roi_sha256": "9a002e9b5428245323035e34315558e1fd29439157982c0e20624617f9fc0bf1",
+        "pixel_sha256": "3aabcdd30368be2a8286ff5737a0f55b15f5e42a2ba629211ecb61463e5b25ee",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "14aa42027b2bce4c07e2d9c4f765ccbc5bd0d00267d0b7bcfc729dccce6fffa5"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T18-40-24Z_arena_2_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T18-40-24Z_arena_2_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T18-40-24Z_arena_2_RedScare/zarr/2026-06-23T18-40-24Z_arena_2_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010095",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T18-40-24Z_arena_3:z4b30e9cd9289",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:48cb8a5f-0c3c-47c8-ac99-920ac6c83181",
+        "recording_started_utc": "2026-06-23T18-40-24Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "48cb8a5f-0c3c-47c8-ac99-920ac6c83181"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "e6c2122dfab4864c493cb7eae9ada795adc805dfacac0eecfdac1ea1cd28159e",
+        "keypoints_roi_sha256": "265b6a90ea3fd8af80c2f0eb4a49c95d13671e97897218f2fcb234af3f522ebf",
+        "pixel_sha256": "7c5122b64f7ae12ff21c5b134cbae1bcc715e2290f67d41393d198a2ec0cf0b3",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "37638f71586ae9c8a6300c775c8f757e1dc771a9ad510013c5f1a7249645ac2f"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T18-40-24Z_arena_3_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T18-40-24Z_arena_3_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T18-40-24Z_arena_3_RedScare/zarr/2026-06-23T18-40-24Z_arena_3_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010096",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T18-40-24Z_arena_4:z3d364d7f8ced",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:254e48c2-b741-49f8-afd6-c2f5009c37a9",
+        "recording_started_utc": "2026-06-23T18-40-24Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "254e48c2-b741-49f8-afd6-c2f5009c37a9"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "842974d6c1b1581b35a5015808260a56d033c02718a63c088bddfe2b93eed9e7",
+        "keypoints_roi_sha256": "99281e5690fdd544a2ad9a0ab6808ba072cfae9f068a0b382a07eb11abc488a1",
+        "pixel_sha256": "6acacdc2c6461388b532f036ca73a93c421b98bd9d55c167123a8508da7c752a",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "46fe7f263126098443d964c4646c63d1f720f101f34caf90faaa925cc37b0f8c"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T18-40-24Z_arena_4_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T18-40-24Z_arena_4_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T18-40-24Z_arena_4_RedScare/zarr/2026-06-23T18-40-24Z_arena_4_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010093",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T20-56-02Z_arena_1:zb962d763bd65",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:cdd74edb-39b8-4956-99b2-de5636750c44",
+        "recording_started_utc": "2026-06-23T20-56-02Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "cdd74edb-39b8-4956-99b2-de5636750c44"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "7f54d772ed8f7dd026a8ef12d0e93c5cfdba4615abc383f3948bf58fe079abe1",
+        "keypoints_roi_sha256": "a3a8e2d45559a5ed77beb1dbaf9213d30a8ce277c3dc624039d01d094a1c4e41",
+        "pixel_sha256": "d5c9a09a1c5303e186657dc63bd1299f0c9c9d012d8e75da4d85c846101b9391",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "d038140c081e7bf4deacce7efc46eb462cf3490eee0d226e9c0139f39aabd62b"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T20-56-02Z_arena_1_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T20-56-02Z_arena_1_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T20-56-02Z_arena_1_RedScare/zarr/2026-06-23T20-56-02Z_arena_1_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010094",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T20-56-03Z_arena_2:z54fef8898f87",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:cc5aba25-e050-4385-b0de-7e19167fe5b1",
+        "recording_started_utc": "2026-06-23T20-56-03Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "cc5aba25-e050-4385-b0de-7e19167fe5b1"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "94eaf7d4e6c827592a9656feff61d60a232b167916f4df4e326c366f3f33c6fd",
+        "keypoints_roi_sha256": "5ff66b26c5ce7c26438bafb9c26c604fd10cbc7c030f3b8a2dfb91a88f551098",
+        "pixel_sha256": "d40e1c58f6b420750ec20bc3ea43404b4e5abd46bebfbfdc50c370a69154c47a",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "f19b777704d63373d0f33b3fff6351f071d8fae4c394ff221891ef9645dc753c"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T20-56-03Z_arena_2_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T20-56-03Z_arena_2_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T20-56-03Z_arena_2_RedScare/zarr/2026-06-23T20-56-03Z_arena_2_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010095",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T20-56-03Z_arena_3:z640bfc8c003f",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:48cb8a5f-0c3c-47c8-ac99-920ac6c83181",
+        "recording_started_utc": "2026-06-23T20-56-03Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "48cb8a5f-0c3c-47c8-ac99-920ac6c83181"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "e6c2122dfab4864c493cb7eae9ada795adc805dfacac0eecfdac1ea1cd28159e",
+        "keypoints_roi_sha256": "3ee9b3544b1072503062af4d5ee58a9ab92f36e6b63a44c004ef5caad125339c",
+        "pixel_sha256": "33a67988dea3bd3f264ae427f9037db5d0dea00c46603132c8d1fba64ba93bd0",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "c878957665a810c29a98513cddf8f5338857e818063f2973199a97a02f941df1"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T20-56-03Z_arena_3_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T20-56-03Z_arena_3_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T20-56-03Z_arena_3_RedScare/zarr/2026-06-23T20-56-03Z_arena_3_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010096",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T20-56-03Z_arena_4:z92dea09a10f9",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:254e48c2-b741-49f8-afd6-c2f5009c37a9",
+        "recording_started_utc": "2026-06-23T20-56-03Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "254e48c2-b741-49f8-afd6-c2f5009c37a9"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "7f54d772ed8f7dd026a8ef12d0e93c5cfdba4615abc383f3948bf58fe079abe1",
+        "keypoints_roi_sha256": "40996e8ac69936c4e2340f485cc16b6456b6485a336bc852abb4a789d8a6f22c",
+        "pixel_sha256": "1369a235a3ce328a4d049eae177d3265c369a784f9f47769d6e3993ab6d827b1",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "dd5fd63fd1de11f0b4817931d89de3394abb2163392ddb77da50596cec6e67a8"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T20-56-03Z_arena_4_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T20-56-03Z_arena_4_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T20-56-03Z_arena_4_RedScare/zarr/2026-06-23T20-56-03Z_arena_4_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010093",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T21-45-13Z_arena_1:z3cad00dbf08a",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:03b60619-da45-490d-a256-2199dadc892d",
+        "recording_started_utc": "2026-06-23T21-45-13Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "03b60619-da45-490d-a256-2199dadc892d"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "e6c2122dfab4864c493cb7eae9ada795adc805dfacac0eecfdac1ea1cd28159e",
+        "keypoints_roi_sha256": "56013ba720a5f126d7821f8e575d8b75d706bcc8cf18d18a9d570bb3451b59ec",
+        "pixel_sha256": "178defc439ecf56434745262e77180102f54f9a88830d1488f7965e00294e1ce",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "9a57988a575a20cedc755ece7537d6119ccb2cb16450fac0fdc308aba7351ae1"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T21-45-13Z_arena_1_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T21-45-13Z_arena_1_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T21-45-13Z_arena_1_RedScare/zarr/2026-06-23T21-45-13Z_arena_1_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010094",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T21-45-13Z_arena_2:z22f4e15e0da8",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:a2304af0-1546-4046-998c-41dc5af3f807",
+        "recording_started_utc": "2026-06-23T21-45-13Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "a2304af0-1546-4046-998c-41dc5af3f807"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "8e506475528647040fc6a8edc76b746d06779d4ad78e571a02809bf8c631c55a",
+        "keypoints_roi_sha256": "c83d5f5e378902d72745025c150efebd5c7998f7ff5bcaf9a4a8cc685fa8a1e8",
+        "pixel_sha256": "47d3beceace6bacae3585cf142f4701e1b73a8d2c4e4aff00b558653d8bacbe6",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "40b41881b4144cbb7b06aaebcf1e6ae18472a80ead1b17a5f42034891677c5ea"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T21-45-13Z_arena_2_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T21-45-13Z_arena_2_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T21-45-13Z_arena_2_RedScare/zarr/2026-06-23T21-45-13Z_arena_2_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010095",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T21-45-13Z_arena_3:z7592c0275767",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:32551d20-0056-4ee9-a54a-ea5a6c0b8734",
+        "recording_started_utc": "2026-06-23T21-45-13Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "32551d20-0056-4ee9-a54a-ea5a6c0b8734"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "67c2181b0e0a78507bf9b149354e927930feb1a988bf925a90a30ebe2ecfb375",
+        "keypoints_roi_sha256": "547e667464c289863207559b72682023d727e0bf2f835f8992d90709674bd7ad",
+        "pixel_sha256": "fa90d58bd7c4a0ec76d64e24a658800a80e2fe3036815ee356365f0656e44fc5",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "b3779d5c039a9840d15d70f8a1705347f6a2dd23cd422033743f49a13ac1c063"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T21-45-13Z_arena_3_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T21-45-13Z_arena_3_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T21-45-13Z_arena_3_RedScare/zarr/2026-06-23T21-45-13Z_arena_3_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010096",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-06-23T21-45-13Z_arena_4:zcbd97376b99f",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:a00257d7-4936-46c6-972b-19916c5eb23b",
+        "recording_started_utc": "2026-06-23T21-45-13Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "a00257d7-4936-46c6-972b-19916c5eb23b"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "67c2181b0e0a78507bf9b149354e927930feb1a988bf925a90a30ebe2ecfb375",
+        "keypoints_roi_sha256": "75951f0c65e8db6996e3ec689f4addf5970c69706a25c678535fb8bd5b994794",
+        "pixel_sha256": "5d2d0b6c9c624bcb21a79feebb1d66e5802e394c3ce1aa2c7978ba636c35ba6b",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "96ed7a1898b6dd16e6c12be21f0c125d7363c0684df88d152c054fae88c9136f"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-06-23T21-45-13Z_arena_4_RedScare_training",
+      "protocol_name": "RedScare",
+      "recording_id": "2026-06-23T21-45-13Z_arena_4_RedScare",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T21-45-13Z_arena_4_RedScare/zarr/2026-06-23T21-45-13Z_arena_4_RedScare_training.zarr"
+    },
+    {
+      "camera_id": "2010093",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-01T14-32-13Z_arena_1:ze6fbd9e55f52",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-01T14-32-13Z_arena_1:subject_0",
+        "recording_started_utc": "2026-07-01T14-32-13Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-01T14-32-13Z_arena_1:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "8e506475528647040fc6a8edc76b746d06779d4ad78e571a02809bf8c631c55a",
+        "keypoints_roi_sha256": "1f76c7f22e6f9a1d42403ecc138cf7b50470a43d9cd88f23c838feef50459d8f",
+        "pixel_sha256": "ee62f2ab2e312d642033c3f1cd8b1fd3bb61e2d8ef73c7c361b472b747cebdd7",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "b51607ea899bd1cf44e903118ede31c40d270bd1f6560f61da900fbe581b04c1"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-01T14-32-13Z_arena_1_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-01T14-32-13Z_arena_1_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T14-32-13Z_arena_1_DefaultScreen/zarr/2026-07-01T14-32-13Z_arena_1_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010094",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-01T14-32-13Z_arena_2:z83294b710f2b",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-01T14-32-13Z_arena_2:subject_0",
+        "recording_started_utc": "2026-07-01T14-32-13Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-01T14-32-13Z_arena_2:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "e6c2122dfab4864c493cb7eae9ada795adc805dfacac0eecfdac1ea1cd28159e",
+        "keypoints_roi_sha256": "62d1f81a601ddca5f4e15a39c9852d54eaf743df62f3f1a0731d1d68166aa4c8",
+        "pixel_sha256": "bb3bb7642b362bfe772dba10e5f3f72446b1a96d1d01af87f0065e2d09fafa27",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "254ad6aaaa34a1a9fd2afa9b8962a44b6ef0d10413ae3e69cfeac1e08fdc7c33"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-01T14-32-13Z_arena_2_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-01T14-32-13Z_arena_2_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T14-32-13Z_arena_2_DefaultScreen/zarr/2026-07-01T14-32-13Z_arena_2_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010095",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-01T14-32-13Z_arena_3:z7c4786b9b361",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-01T14-32-13Z_arena_3:subject_0",
+        "recording_started_utc": "2026-07-01T14-32-13Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-01T14-32-13Z_arena_3:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "f60b7bb3ecd7a9d61a6bc721e4facf0a51f6f6264e02df0a7a85098c69714d7e",
+        "keypoints_roi_sha256": "f35e6ec1318c64ebb97419e07768b71e35abc5c7a605ac60cf62c011c92cd3da",
+        "pixel_sha256": "de17f9f6235ac300b5cf979fb3efdaf789991201064b49016b05418fec7d0a50",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "5a8d19ce661706fba1bd997ba917829eb461e2b3afb25af3a117c07315a04de7"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-01T14-32-13Z_arena_3_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-01T14-32-13Z_arena_3_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T14-32-13Z_arena_3_DefaultScreen/zarr/2026-07-01T14-32-13Z_arena_3_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010096",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-01T14-32-13Z_arena_4:z80ce8be4bca8",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-01T14-32-13Z_arena_4:subject_0",
+        "recording_started_utc": "2026-07-01T14-32-13Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-01T14-32-13Z_arena_4:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "19e3cf3a65ea21dc7bc374db44fbb24bd105987453430125ab831f45d6e637b2",
+        "keypoints_roi_sha256": "a4c527472e206752b492c7af79c31e86b7f40f76a403fc52f3268fc17fcc02f0",
+        "pixel_sha256": "efd567a0fe8d10e9827691f9bb1361af37a7d58c3e9935b047ebea7e66a2233f",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "69698309bef04f0ba9187755ee7a6cbc152ab14b302853c491900598862b8ab5"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-01T14-32-13Z_arena_4_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-01T14-32-13Z_arena_4_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T14-32-13Z_arena_4_DefaultScreen/zarr/2026-07-01T14-32-13Z_arena_4_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010093",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-01T15-11-03Z_arena_1:z2daf0f10ceed",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-01T15-11-03Z_arena_1:subject_0",
+        "recording_started_utc": "2026-07-01T15-11-03Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-01T15-11-03Z_arena_1:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "e6c2122dfab4864c493cb7eae9ada795adc805dfacac0eecfdac1ea1cd28159e",
+        "keypoints_roi_sha256": "8ec0379c5b740463f6f58e844ae5d2af1072538acd97a0ca1c460266a7fa2aa3",
+        "pixel_sha256": "c7c493f17a7f9ae54d072f2608bc50d2ff910a7e888d264b5d7e7aaa151f4f73",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "7a367edbb0df6baf40b661948ee90617ad48881d65b03933784d69af59c430eb"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-01T15-11-03Z_arena_1_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-01T15-11-03Z_arena_1_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T15-11-03Z_arena_1_DefaultScreen/zarr/2026-07-01T15-11-03Z_arena_1_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010094",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-01T15-11-03Z_arena_2:z11049699a60d",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-01T15-11-03Z_arena_2:subject_0",
+        "recording_started_utc": "2026-07-01T15-11-03Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-01T15-11-03Z_arena_2:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "534de54dcc0b1b6214c5b44fc594b443c4c1922d355d3273317277db52932de1",
+        "keypoints_roi_sha256": "28958c2b2f38a88ceaac7a7c0ceb7ef33ff865987a581f8b79c5c92edf0ac66c",
+        "pixel_sha256": "b48c50fc7d1232812c2f4fd8e9f81df17f0a5a53a6857ea14e74d12abf29176d",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "86e6bc90a7c6a286b571ebefc1c0cfc033949395a5165e7eb2e6b376f892cec4"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-01T15-11-03Z_arena_2_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-01T15-11-03Z_arena_2_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T15-11-03Z_arena_2_DefaultScreen/zarr/2026-07-01T15-11-03Z_arena_2_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010095",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-01T15-11-03Z_arena_3:z53f6cb117bce",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-01T15-11-03Z_arena_3:subject_0",
+        "recording_started_utc": "2026-07-01T15-11-03Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-01T15-11-03Z_arena_3:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "7e6c94932cbf571529679453c7d6cf3f921b4dffdcf066c6abd72c81c2763116",
+        "keypoints_roi_sha256": "0a21c99d0b94b6a203a879464769d19c56420943c6804dd886ed1609ca1e22fc",
+        "pixel_sha256": "e90360254695665432195ee9ff8eec6b10023d0b425a494ae2db934fe8de3c0e",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "9071685a6806294179078811481692081d6917b9132721b7406bef989a22a94e"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-01T15-11-03Z_arena_3_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-01T15-11-03Z_arena_3_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T15-11-03Z_arena_3_DefaultScreen/zarr/2026-07-01T15-11-03Z_arena_3_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010096",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-01T15-11-03Z_arena_4:zd63fc8946f97",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-01T15-11-03Z_arena_4:subject_0",
+        "recording_started_utc": "2026-07-01T15-11-03Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-01T15-11-03Z_arena_4:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "67c2181b0e0a78507bf9b149354e927930feb1a988bf925a90a30ebe2ecfb375",
+        "keypoints_roi_sha256": "815177dfaa12b6ecc18b0f3fe7f1466af0c4ccfea3d981118841436c2afe2fcc",
+        "pixel_sha256": "0b8b900cf8d3288115b52331459ee5303f6444d1812148510189900bf423ac4a",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "92c2d368c7305cb92c0407f281f692e7add0acc0c91921704efb6713c2f18985"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-01T15-11-03Z_arena_4_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-01T15-11-03Z_arena_4_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T15-11-03Z_arena_4_DefaultScreen/zarr/2026-07-01T15-11-03Z_arena_4_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010093",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-02T14-56-00Z_arena_1:z02c14ecf9f7b",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-02T14-56-00Z_arena_1:subject_0",
+        "recording_started_utc": "2026-07-02T14-56-00Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-02T14-56-00Z_arena_1:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "2b16aa1d08319555e9d0192266f2f12dd26bf73395e24483cd16ef8feea3b32c",
+        "keypoints_roi_sha256": "a0afc722cc7dc138b833bd1f30174cdb69f2d0b9f332220701fedb86356e1be3",
+        "pixel_sha256": "c605983ec5bc78cefa46642a0dabb70d89dc748f7bae57e696c7cf4c2fbf3884",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "85eef199822084866d3100166404e68017a5eaa973ab38cf72937a552c375683"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-02T14-56-00Z_arena_1_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-02T14-56-00Z_arena_1_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T14-56-00Z_arena_1_DefaultScreen/zarr/2026-07-02T14-56-00Z_arena_1_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010094",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-02T14-56-00Z_arena_2:z84038ca87d7c",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-02T14-56-00Z_arena_2:subject_0",
+        "recording_started_utc": "2026-07-02T14-56-00Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-02T14-56-00Z_arena_2:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "534de54dcc0b1b6214c5b44fc594b443c4c1922d355d3273317277db52932de1",
+        "keypoints_roi_sha256": "ce33d29537c14f668edd4c4d397c5d2f12a373ba9ca9574283fbb1b9ceaad78e",
+        "pixel_sha256": "ceef959a2c056e7598c52faf1c9de4e8a678a1fb80c925b5ffc3c05d6066f4d3",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "6437bd8ab005597a79e53faf82285a0dcbaafa2a9027317c21b5a3c9ddd62044"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-02T14-56-00Z_arena_2_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-02T14-56-00Z_arena_2_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T14-56-00Z_arena_2_DefaultScreen/zarr/2026-07-02T14-56-00Z_arena_2_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010095",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-02T14-56-00Z_arena_3:z53182130f53e",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-02T14-56-00Z_arena_3:subject_0",
+        "recording_started_utc": "2026-07-02T14-56-00Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-02T14-56-00Z_arena_3:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "a8e26037b1097a52a66e56f1eb42fc15837fdadfc29de48f3416f00e36e2ddf2",
+        "keypoints_roi_sha256": "b7a7a38c281818b23f51c0ba445e8104a3b82354ba4a0a6e4a98cc432a233cad",
+        "pixel_sha256": "eddd448a0856d6d942cb07b250ec588db98efc3caf586d2802de8da91b131d80",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "2f5a21254698a019be7e9623db55f1351826b0e96f5d14f3cf14cc9b0c392d49"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-02T14-56-00Z_arena_3_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-02T14-56-00Z_arena_3_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T14-56-00Z_arena_3_DefaultScreen/zarr/2026-07-02T14-56-00Z_arena_3_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010096",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-02T14-56-00Z_arena_4:z175b4c6090d4",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-02T14-56-00Z_arena_4:subject_0",
+        "recording_started_utc": "2026-07-02T14-56-00Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-02T14-56-00Z_arena_4:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "40f66a9eb2ad061df0d53c95b1fb1eca39bad867c49d97b8b58896766aee2b72",
+        "keypoints_roi_sha256": "10663a6c42f4eaca3b52998f5061f472de46e8870b58c5f7dc54093cafb0353e",
+        "pixel_sha256": "4401c6adee699b2190e5595d5c9d2d8d9ce6a7902db4a19ee6722c2d73731a7c",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "de2b7df232a4b556d61d68c827d92acf941dff0c088482aee60dbdc405315692"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-02T14-56-00Z_arena_4_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-02T14-56-00Z_arena_4_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T14-56-00Z_arena_4_DefaultScreen/zarr/2026-07-02T14-56-00Z_arena_4_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010093",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-02T15-06-50Z_arena_1:z95bf68e509ca",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "acquisition_cohort:2026-07-02T15-06-50Z",
+        "recording_started_utc": "2026-07-02T15-06-50Z",
+        "source": "acquisition_start_fallback",
+        "subject_ids": []
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "b9088fbf4a9ee0076c2f5448e27d86d67717c56f7c008bdf3068a1cdd8610a66",
+        "keypoints_roi_sha256": "42f7a39c6186e78900e9b8d984361e35d652a64861d69e0d198142b983b52b42",
+        "pixel_sha256": "7a70282c28764a0b4e306e3154c792c75f38a7b7fd23a89a414fb7e5232ec922",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "8fd2c1d5322e4406af6460d42582e9fb306eece5f5d39c2e7022e4b7c35e96a9"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-02T15-06-50Z_arena_1_GoodCopBadCop_training",
+      "protocol_name": "GoodCopBadCop",
+      "recording_id": "2026-07-02T15-06-50Z_arena_1_GoodCopBadCop",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-06-50Z_arena_1_GoodCopBadCop/zarr/2026-07-02T15-06-50Z_arena_1_GoodCopBadCop_training.zarr"
+    },
+    {
+      "camera_id": "2010094",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-02T15-06-50Z_arena_2:zf7ef6b1c5ed4",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "acquisition_cohort:2026-07-02T15-06-50Z",
+        "recording_started_utc": "2026-07-02T15-06-50Z",
+        "source": "acquisition_start_fallback",
+        "subject_ids": []
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "3b1fd43144ce1558e3f915f0ec6fa5d9740ec4c8638dd2d88c3b9bb2d2dc0276",
+        "keypoints_roi_sha256": "7b37dea1765c808efe387604ad7bdbd2dca7881f6f51eab93a051f795fde81ea",
+        "pixel_sha256": "97d480bf0ca958eff5b9bdf6e28e1dec012a7bfa8b525547f73995e27b9858a6",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "21830acc9b93f9ae180df4848230107cb00c36e30ea00c6a5cc1b414ad1df007"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-02T15-06-50Z_arena_2_GoodCopBadCop_training",
+      "protocol_name": "GoodCopBadCop",
+      "recording_id": "2026-07-02T15-06-50Z_arena_2_GoodCopBadCop",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-06-50Z_arena_2_GoodCopBadCop/zarr/2026-07-02T15-06-50Z_arena_2_GoodCopBadCop_training.zarr"
+    },
+    {
+      "camera_id": "2010095",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-02T15-06-50Z_arena_3:zc3202ce5ec6d",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "acquisition_cohort:2026-07-02T15-06-50Z",
+        "recording_started_utc": "2026-07-02T15-06-50Z",
+        "source": "acquisition_start_fallback",
+        "subject_ids": []
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "d8714aa5db3ef747088b6f449a3fbbce6ec0ad20f44ea5e0954cf2054b4e0c3e",
+        "keypoints_roi_sha256": "955400dbfcff33666f271de482f5a1b906bef1fe84c7be30d29ceb992472c144",
+        "pixel_sha256": "4550b55ec09939f9dacad113ab76be6865d69a0c5727395fb50784aa17b46468",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "5f322a2368b407e43329604842c9cca74368de45dbf7d35f2bf10b424db0158b"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-02T15-06-50Z_arena_3_GoodCopBadCop_training",
+      "protocol_name": "GoodCopBadCop",
+      "recording_id": "2026-07-02T15-06-50Z_arena_3_GoodCopBadCop",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-06-50Z_arena_3_GoodCopBadCop/zarr/2026-07-02T15-06-50Z_arena_3_GoodCopBadCop_training.zarr"
+    },
+    {
+      "camera_id": "2010096",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-02T15-06-50Z_arena_4:zab6ffdeddd41",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "acquisition_cohort:2026-07-02T15-06-50Z",
+        "recording_started_utc": "2026-07-02T15-06-50Z",
+        "source": "acquisition_start_fallback",
+        "subject_ids": []
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "cdc0173d1e095b35d616f6bf0ae87d2371aeffd0ad91fc0c60a0ac9740ee5478",
+        "keypoints_roi_sha256": "0c56d1f856d0e9de6a95657b1a51e1a5e9b243050c436879d6d36318c4db2e7c",
+        "pixel_sha256": "17796c80c4a915abcc9e96bf4d465cfe540ba6afb8b407f244fd9b7a9942ccb9",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "ba330fa0f2f543a4e1a554311c62bb5f467d42e834f0af7e191371f3bdae1f46"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-02T15-06-50Z_arena_4_GoodCopBadCop_training",
+      "protocol_name": "GoodCopBadCop",
+      "recording_id": "2026-07-02T15-06-50Z_arena_4_GoodCopBadCop",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-06-50Z_arena_4_GoodCopBadCop/zarr/2026-07-02T15-06-50Z_arena_4_GoodCopBadCop_training.zarr"
+    },
+    {
+      "camera_id": "2010093",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-02T15-38-20Z_arena_1:z4497513350b7",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-02T15-38-20Z_arena_1:subject_0",
+        "recording_started_utc": "2026-07-02T15-38-20Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-02T15-38-20Z_arena_1:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "164cc8d0575301991f31b7b25e66e3e316739f2cb344a9ac458997908b2260af",
+        "keypoints_roi_sha256": "47d74c13cbbb4c92d7fd80a5926cd1319fd86c1f3e3b25f4ea49bc3fb0d98551",
+        "pixel_sha256": "182e0bcece9a725dc3004427e273490b1f1b4f88633e13859993b09de897d9ad",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "b7c15a05d09f1e7367c9424a7794aadc471096568021b902d69e310a0ee5f07e"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-02T15-38-20Z_arena_1_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-02T15-38-20Z_arena_1_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-38-20Z_arena_1_DefaultScreen/zarr/2026-07-02T15-38-20Z_arena_1_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010094",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-02T15-38-20Z_arena_2:zb3dc3d395e55",
+      "dish_design": "palm1",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-02T15-38-20Z_arena_2:subject_0",
+        "recording_started_utc": "2026-07-02T15-38-20Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-02T15-38-20Z_arena_2:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "164cc8d0575301991f31b7b25e66e3e316739f2cb344a9ac458997908b2260af",
+        "keypoints_roi_sha256": "c6ae6fffc38c36e2c9519fbab1a3b283e45536d05b01fa8014f35fa132957b79",
+        "pixel_sha256": "d81b137f20760af527e5548239212af385176de10271c0b8ee611701179b752f",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "859048bb1a1a6806c5029f16335567865a27dfce611d496ef1011dff1d94c905"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-02T15-38-20Z_arena_2_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-02T15-38-20Z_arena_2_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-38-20Z_arena_2_DefaultScreen/zarr/2026-07-02T15-38-20Z_arena_2_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010095",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-02T15-38-20Z_arena_3:z722a6a71cd40",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-02T15-38-20Z_arena_3:subject_0",
+        "recording_started_utc": "2026-07-02T15-38-20Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-02T15-38-20Z_arena_3:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "a7b52bcab98a4ff1611264c9e7ed69c75e011ab5876603862ae2f726d900b208",
+        "keypoints_roi_sha256": "e3b95a5a44f9f8fb14b84e60ee75b8290e394893c38e80e16649c6b3e99c49d7",
+        "pixel_sha256": "19efe95420633c1c7bc85ae395fe61d4fa3d27bfd2f923a46b00a0ec92f809bb",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "bb8a1f372e00c7bdba0212a255c25695efe2c467c716b0c9a06957b2f86be2f9"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-02T15-38-20Z_arena_3_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-02T15-38-20Z_arena_3_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-38-20Z_arena_3_DefaultScreen/zarr/2026-07-02T15-38-20Z_arena_3_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010096",
+      "canvas_name": "shadow",
+      "dataset_id": "2026-07-02T15-38-20Z_arena_4:zd6790de6cd8c",
+      "dish_design": "palm2",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2026-07-02T15-38-20Z_arena_4:subject_0",
+        "recording_started_utc": "2026-07-02T15-38-20Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2026-07-02T15-38-20Z_arena_4:subject_0"
+        ]
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "06279bf09f1a3a2b83088c67e670f12e474a81ac907fac6e581905d74cd627e5",
+        "keypoints_roi_sha256": "65984b21271cda723ae0514f2002e79e997bcc532ccd13355c8489a6d6a39287",
+        "pixel_sha256": "ba148888d99deebebc5f56022111b317f81aa0bd5042f2a7df60a45c38086079",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 2,
+        "source_row_lineage_sha256": "0cbfb075b802bfb56ff5ec462b26bfad92e490c80124bc3f03d40938bed0205d"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "2026-07-02T15-38-20Z_arena_4_DefaultScreen_training",
+      "protocol_name": "DefaultScreen",
+      "recording_id": "2026-07-02T15-38-20Z_arena_4_DefaultScreen",
+      "rig_id": "omnifin0",
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-38-20Z_arena_4_DefaultScreen/zarr/2026-07-02T15-38-20Z_arena_4_DefaultScreen_training.zarr"
+    },
+    {
+      "camera_id": "2010093",
+      "canvas_name": null,
+      "dataset_id": "sleepyfish_2026_05_05_17_45_30_cam2010093:z3fdd176a8abc",
+      "dish_design": "palm",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "acquisition_cohort:2026-05-05T21:45:30Z",
+        "recording_started_utc": "2026-05-05T21:45:30Z",
+        "source": "acquisition_start_fallback",
+        "subject_ids": []
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "1229d4b7c855859393eee0e5e68a94285dac6f709fcf20830b8138f11988ee49",
+        "keypoints_roi_sha256": "d3320daff3e91c880eef308c68d20bc4384d268974b48eab1f99ee170798ec25",
+        "pixel_sha256": "25975e01d2642f83fd292337f4442cc024e74cd38e0ab820199de1af5337b854",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 3,
+        "source_row_lineage_sha256": "6f8c16abaa71fdc9ad7fe288c02a6782d6f47ff60375bf71f6468407b436991b"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "sleepyfish_2026_05_05_17_45_30_cam2010093_clipped_training",
+      "protocol_name": "sleepyfish",
+      "recording_id": "sleepyfish_2026_05_05_17_45_30_cam2010093",
+      "rig_id": null,
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010093/zarr/sleepyfish_2026_05_05_17_45_30_cam2010093_clipped_training.zarr"
+    },
+    {
+      "camera_id": "2010094",
+      "canvas_name": null,
+      "dataset_id": "sleepyfish_2026_05_05_17_45_30_cam2010094",
+      "dish_design": "palm",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "acquisition_cohort:2026-05-05T21:45:30Z",
+        "recording_started_utc": "2026-05-05T21:45:30Z",
+        "source": "acquisition_start_fallback",
+        "subject_ids": []
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "40b1d508e96f78de5b5b19ed69e364ee2b0e69a050902930078ae04e98937ac3",
+        "keypoints_roi_sha256": "8cfdc61bb2c1e0983bf2bc2b6b384b287e9f4dfe2ea785edf44de1ec87236a8f",
+        "pixel_sha256": "cefb5492bdd2a52088b5f59ae0b9c645e69a675d3852e84b827dd01308941426",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 3,
+        "source_row_lineage_sha256": "dfda4fec03002ac4a7ec49d5df6c2f5cffad660d1f92fc5a9ef2a21fc9a0f4e9"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "sleepyfish_2026_05_05_17_45_30_cam2010094_clipped_training",
+      "protocol_name": "sleepyfish",
+      "recording_id": "sleepyfish_2026_05_05_17_45_30_cam2010094",
+      "rig_id": null,
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010094/zarr/sleepyfish_2026_05_05_17_45_30_cam2010094_clipped_training.zarr"
+    },
+    {
+      "camera_id": "2010095",
+      "canvas_name": null,
+      "dataset_id": "sleepyfish_2026_05_05_17_45_30_cam2010095",
+      "dish_design": "palm",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "acquisition_cohort:2026-05-05T21:45:30Z",
+        "recording_started_utc": "2026-05-05T21:45:30Z",
+        "source": "acquisition_start_fallback",
+        "subject_ids": []
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "55b90ae6d56c2551a8ee070fe11c4c956264c4a56ffe49df7860c2e837bb83ea",
+        "keypoints_roi_sha256": "e85cc6741702d56053b0feb2efa6b3b981ba4e1541ac8edbc39dfc2182567a0e",
+        "pixel_sha256": "18edc6e331c33b47f2a2ebb0b73f8f9d79c78f98cba5cf9f8f4f797d952f4871",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 3,
+        "source_row_lineage_sha256": "e65b23ee700c8b3dd48848c822e9e3b36db5f5a0e2e4d5cb70bb5fb0a21af4d7"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "sleepyfish_2026_05_05_17_45_30_cam2010095_clipped_training",
+      "protocol_name": "sleepyfish",
+      "recording_id": "sleepyfish_2026_05_05_17_45_30_cam2010095",
+      "rig_id": null,
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010095/zarr/sleepyfish_2026_05_05_17_45_30_cam2010095_clipped_training.zarr"
+    },
+    {
+      "camera_id": "2010096",
+      "canvas_name": null,
+      "dataset_id": "sleepyfish_2026_05_05_17_45_30_cam2010096",
+      "dish_design": "palm",
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "acquisition_cohort:2026-05-05T21:45:30Z",
+        "recording_started_utc": "2026-05-05T21:45:30Z",
+        "source": "acquisition_start_fallback",
+        "subject_ids": []
+      },
+      "materialized_content": {
+        "keypoint_visibility_sha256": "4869a24ff12cbb5defe2aa73d357ec039feb4a8a98d2621ba8f8e974cf9d0304",
+        "keypoints_roi_sha256": "a65448ab82da07215993312f36e66c6ee9b4f3c799120beff36cb1cf36a6be8a",
+        "pixel_sha256": "33a17582b104de82afe0e3d09ec05247533daa809abb7dd9afa2ccba8c0623bb",
+        "schema_id": "palette.training.pose_head_materialized_crop",
+        "schema_version": 3,
+        "source_row_lineage_sha256": "282dc0cd41fddc4b60b6f5d899f84f49bda0ad8c6c89760506aad22bb8b90b98"
+      },
+      "materialized_crop_run": "pose_head_192_traditional_v1_v001",
+      "name": "sleepyfish_2026_05_05_17_45_30_cam2010096_clipped_training",
+      "protocol_name": "sleepyfish",
+      "recording_id": "sleepyfish_2026_05_05_17_45_30_cam2010096",
+      "rig_id": null,
+      "source_kind": "materialized_pose_crop",
+      "source_type_resolved": "materialized_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010096/zarr/sleepyfish_2026_05_05_17_45_30_cam2010096_clipped_training.zarr"
+    }
+  ],
+  "expected_sample_count": 8870,
+  "expected_source_count": 52,
+  "input_format": "gray",
+  "manifest_schema_id": "palette.materialized_pose_training_source_manifest",
+  "manifest_schema_version": 1,
+  "pose_schema": {
+    "keypoint_labels": [
+      "swim_bladder",
+      "eye_left",
+      "eye_right"
+    ],
+    "kpt_shape": [
+      3,
+      3
+    ],
+    "skeleton": [
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        2
+      ],
+      [
+        1,
+        2
+      ]
+    ],
+    "skeleton_id": "pose_schema:traditional_v1"
+  },
+  "registry_grouping": {
+    "group_count": 42,
+    "registry_path": "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite",
+    "resolver": "fisheye.shared.training_leakage_groups.resolve_training_leakage_group",
+    "snapshot_sha256": "511da0c0071bb7d1327cb070d3bf9eb70b63bdd7a2fed86ec809dae3ce622954",
+    "source_count": 52
+  },
+  "set_id": "pose_head_192_traditional_v1_reuse_v001",
+  "set_name": "head_192_traditional_v1_reuse",
+  "set_version": 1,
+  "source_type": "materialized_pose_crop"
+}
