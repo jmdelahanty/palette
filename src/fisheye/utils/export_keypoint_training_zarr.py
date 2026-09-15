@@ -66,6 +66,7 @@ from fisheye.shared.zarr.refined_keypoint_manifest import (
 )
 from fisheye.shared.zarr.materialized_pose_training_source import (
     inspect_materialized_pose_crop_source,
+    inspect_recovered_pose_crop_source,
 )
 from fisheye.utils import prepare_keypoint_training_from_registry as prepare_pose
 from fisheye.shared.system_metadata import build_invocation_record
@@ -148,6 +149,9 @@ class PoseMergeSourceSpec:
     row_gate_box_only_selected: int = 0
     source_kind: str = "legacy_crop_keypoints"
     materialized_source_binding: Optional[Dict[str, Any]] = None
+    materialized_lineage_paths: Optional[Dict[str, str]] = None
+    materialized_origin_coordinate_system: Optional[str] = None
+    materialized_bbox_format: Optional[str] = None
 
 
 @dataclass
@@ -214,6 +218,9 @@ LEAKAGE_GROUP_SOURCES = {
     "acquisition_start_fallback",
     "recording_fallback",
 }
+MATERIALIZED_SOURCE_KINDS = frozenset(
+    {"materialized_pose_crop", "recovered_pose_crop"}
+)
 
 
 def _source_type_counts(values: Sequence[Any]) -> Dict[str, int]:
@@ -1466,6 +1473,221 @@ def _discover_materialized_pose_source(
             "keypoint_visibility_sha256": inspected.keypoint_visibility_sha256,
             "source_row_lineage_sha256": inspected.source_row_lineage_sha256,
         },
+        materialized_lineage_paths={
+            "keypoint_row": "source_keypoint_row_ids",
+            "crop_row": "source_crop_row_ids",
+            "training_frame": "source_training_row_indices",
+            "acquisition_frame": "source_frame_indices",
+            "roi_origin": "roi_coordinates_full",
+            "full_sensor_detector_box": "bbox_img_xyxy",
+        },
+        materialized_origin_coordinate_system="full_sensor_xy",
+        materialized_bbox_format="full_sensor_xyxy",
+    )
+
+
+def _discover_recovered_pose_crop_source(
+    *,
+    ordinal: int,
+    dataset: Dict[str, Any],
+    manifest_payload: Dict[str, Any],
+    source_zarr: Path,
+    manifest_skeleton: Tuple[Tuple[int, int], ...],
+    manifest_skeleton_id: Optional[str],
+    manifest_kpt_shape: Tuple[int, int],
+    expected_input_format: str,
+    transform_mode: str,
+    target_roi_hw: Optional[Tuple[int, int]],
+    dtype_policy: str,
+    row_gate_policy: str,
+) -> PoseMergeSourceSpec:
+    """Adapt an ROI-local recovered crop without inventing sensor geometry."""
+
+    if row_gate_policy != "auto":
+        raise ValueError("Recovered pose crop sources require --row-gate-policy auto")
+    if expected_input_format != "gray" or dataset.get("input_format", "gray") != "gray":
+        raise ValueError("Recovered pose crop source requires gray input format")
+    if transform_mode != "strict":
+        raise ValueError("Recovered pose crop source requires strict ROI transform")
+    run_id = _as_text(dataset.get("materialized_crop_run"))
+    if not run_id or "/" in run_id or run_id.startswith("."):
+        raise ValueError("recovered_pose_crop source requires an exact run ID")
+    run_path = f"crop_runs/{run_id}"
+    if not (source_zarr / run_path / "zarr.json").is_file():
+        raise ValueError(
+            f"Recovered pose crop source run is missing: {source_zarr}/{run_path}"
+        )
+    run = _open_source_group_direct(source_zarr, run_path)
+    inspected = inspect_recovered_pose_crop_source(run, run_id=run_id)
+    expected_content = dataset.get("materialized_content")
+    actual_content = {
+        "schema_id": inspected.schema_id,
+        "schema_version": inspected.schema_version,
+        "pixel_sha256": inspected.pixel_sha256,
+        "keypoints_roi_sha256": inspected.keypoints_roi_sha256,
+        "keypoint_visibility_sha256": inspected.keypoint_visibility_sha256,
+        "source_row_lineage_sha256": inspected.source_row_lineage_sha256,
+        "array_digest_index_sha256": inspected.array_digest_index_sha256,
+        "contract_sha256": inspected.contract_sha256,
+    }
+    if not isinstance(expected_content, Mapping) or any(
+        expected_content.get(key) != value for key, value in actual_content.items()
+    ):
+        raise ValueError("Recovered pose crop content differs from pinned manifest")
+    if target_roi_hw is not None and tuple(target_roi_hw) != inspected.roi_shape:
+        raise ValueError("Recovered pose crop ROI shape disagrees with target")
+
+    dataset_id = _as_text(dataset.get("dataset_id")) or _as_text(
+        dataset.get("session_uuid")
+    )
+    if not dataset_id:
+        raise ValueError(f"Recovered pose crop source {source_zarr} lacks dataset_id")
+    recording_id, leakage_group_id, leakage_group_source = _manifest_leakage_group(
+        dataset, dataset_id=dataset_id
+    )
+    source_type_resolved = _as_text(dataset.get("source_type_resolved"))
+    if source_type_resolved != "recovered_pose_crop":
+        raise ValueError(
+            "Recovered pose crop source requires "
+            "source_type_resolved='recovered_pose_crop'"
+        )
+
+    roi = run["roi_images"]
+    keypoints = run["keypoints_roi"]
+    visibility = np.asarray(run["keypoint_visibility"][:], dtype=np.uint8)
+    selected_indices = np.flatnonzero(np.all(visibility == 2, axis=1)).astype(
+        np.int64
+    )
+    if selected_indices.size == 0:
+        raise ValueError("Recovered pose crop source has no fully visible rows")
+    run_dtype = np.dtype(keypoints.dtype)
+    if dtype_policy == "float32_checked":
+        output_dtype = np.dtype(np.float32)
+        dtype_transform = (
+            "identity_float32"
+            if run_dtype == output_dtype
+            else "float64_to_float32_checked"
+        )
+    else:
+        output_dtype = run_dtype
+        dtype_transform = "identity_strict"
+
+    skeleton_id = inspected.skeleton_id
+    kpt_shape = (inspected.keypoint_count, 3)
+    if skeleton_id != manifest_skeleton_id or kpt_shape != manifest_kpt_shape:
+        raise ValueError(
+            "Recovered pose crop skeleton identity disagrees with manifest"
+        )
+    labels = list(inspected.keypoint_labels)
+    if manifest_payload.get("keypoint_labels") not in (None, labels):
+        raise ValueError("Recovered pose crop labels disagree with manifest")
+    manifest_labels = manifest_payload.get("pose_schema", {}).get("keypoint_labels")
+    if manifest_labels is not None and list(manifest_labels) != labels:
+        raise ValueError("Recovered pose labels disagree with manifest pose schema")
+    dataset_labels = dataset.get("keypoint_labels")
+    if dataset_labels is not None and list(dataset_labels) != labels:
+        raise ValueError("Recovered pose labels disagree with dataset manifest row")
+    runtime_edges = resolve_ordered_skeleton_edges_from_attrs(
+        dict(run.attrs),
+        n_keypoints=inspected.keypoint_count,
+        allow_package_schema=True,
+    )
+    if runtime_edges.source == "none" or runtime_edges.edge_pairs != manifest_skeleton:
+        raise ValueError(
+            "Recovered pose crop skeleton edges disagree with manifest"
+        )
+    skeleton = [list(edge) for edge in runtime_edges.edge_pairs]
+    signature = _format_skeleton_signature(skeleton_id=skeleton_id, kpt_shape=kpt_shape)
+    roi_contract_name = "materialized_pose_gray_uint8_exact_v1"
+    required_contract = _resolve_required_roi_pixel_contract_name(
+        manifest_payload=manifest_payload, dataset_payload=dataset
+    )
+    if required_contract and required_contract != roi_contract_name:
+        raise ValueError("Recovered pose crop ROI pixel contract mismatch")
+    dish_design, canvas_name, rig_id = _extract_identity(dataset)
+    excluded_count = int(inspected.row_count - selected_indices.size)
+    lineage_paths = {
+        "keypoint_row": "source_pose_local_row",
+        "crop_row": "source_detect_local_row",
+        "training_frame": "source_pose_local_row",
+        "acquisition_frame": "source_frame_idx",
+        "roi_origin": "roi_origin_xy_in_pose_512",
+        "normalized_detector_box": "source_bbox_norm_coords",
+        "pose_merged_row": "source_pose_merged_row",
+        "detect_merged_row": "source_detect_merged_row",
+    }
+    return PoseMergeSourceSpec(
+        ordinal=ordinal,
+        dataset_name=str(dataset.get("name") or source_zarr.stem),
+        dataset_id=dataset_id,
+        source_zarr=source_zarr,
+        annotation_zarr=source_zarr,
+        source_crop_run=run_id,
+        keypoint_run=run_id,
+        source_type_resolved=source_type_resolved,
+        source_sample_count=inspected.row_count,
+        sample_count=int(selected_indices.size),
+        selected_indices=selected_indices,
+        recording_id=recording_id,
+        leakage_group_id=leakage_group_id,
+        leakage_group_source=leakage_group_source,
+        row_gate_policy="recovered_materialized_all_visible",
+        row_gate_refined_run=None,
+        row_gate_selected=int(selected_indices.size),
+        row_gate_total=inspected.row_count,
+        row_gate_raw_success_true=inspected.row_count,
+        row_gate_usable_true=int(selected_indices.size),
+        roi_path=f"{run_path}/roi_images",
+        bbox_path=f"{run_path}/source_bbox_norm_coords",
+        keypoints_path=f"{run_path}/keypoints_roi",
+        success_path="",
+        frame_indices_path=f"{run_path}/source_pose_local_row",
+        source_acquisition_frame_index_path=f"{run_path}/source_frame_idx",
+        source_original_frame_map_path=None,
+        frame_mapping_method="recovered_source_frame_index",
+        detection_source_path=None,
+        roi_shape=inspected.roi_shape,
+        roi_dtype=np.dtype(roi.dtype),
+        roi_chunks=tuple(int(value) for value in roi.chunks),
+        roi_output_shape=inspected.roi_shape,
+        roi_transform_mode="strict",
+        roi_pad_before=(0, 0),
+        roi_pad_after=(0, 0),
+        roi_pixel_contract={
+            "name": roi_contract_name,
+            "channels": "gray",
+            "dtype": "uint8",
+        },
+        roi_pixel_contract_name=roi_contract_name,
+        keypoint_shape=(inspected.keypoint_count, 2),
+        keypoint_dtype=run_dtype,
+        keypoint_output_dtype=output_dtype,
+        keypoint_dtype_transform=dtype_transform,
+        keypoint_labels=labels,
+        skeleton=skeleton,
+        skeleton_id=skeleton_id,
+        kpt_shape=kpt_shape,
+        skeleton_signature=signature,
+        dish_design=dish_design,
+        canvas_name=canvas_name,
+        rig_id=rig_id,
+        source_kind="recovered_pose_crop",
+        materialized_source_binding={
+            **actual_content,
+            "run_id": run_id,
+            "source_bindings": inspected.source_bindings,
+            "annotation_source_type": source_type_resolved,
+            "source_coordinate_system": inspected.source_coordinate_system,
+            "sensor_pixel_origin_available": False,
+            "row_gate_policy": "all_keypoints_visibility_2",
+            "source_row_count": inspected.row_count,
+            "selected_row_count": int(selected_indices.size),
+            "excluded_partial_visibility_row_count": excluded_count,
+            "lineage_paths": lineage_paths,
+        },
+        materialized_lineage_paths=lineage_paths,
+        materialized_origin_coordinate_system=inspected.source_coordinate_system,
+        materialized_bbox_format="normalized_xywh_unknown_source_canvas",
     )
 
 
@@ -1551,6 +1773,25 @@ def _discover_merge_sources(
             assert manifest_kpt_shape is not None
             specs.append(
                 _discover_materialized_pose_source(
+                    ordinal=ordinal,
+                    dataset=dataset,
+                    manifest_payload=manifest_payload,
+                    source_zarr=source_zarr,
+                    manifest_skeleton=manifest_skeleton,
+                    manifest_skeleton_id=manifest_skeleton_id,
+                    manifest_kpt_shape=manifest_kpt_shape,
+                    expected_input_format=expected_input_format,
+                    transform_mode=transform_mode,
+                    target_roi_hw=target_roi_hw,
+                    dtype_policy=dtype_policy,
+                    row_gate_policy=row_gate_policy,
+                )
+            )
+            continue
+        if source_kind == "recovered_pose_crop":
+            assert manifest_kpt_shape is not None
+            specs.append(
+                _discover_recovered_pose_crop_source(
                     ordinal=ordinal,
                     dataset=dataset,
                     manifest_payload=manifest_payload,
@@ -2201,13 +2442,14 @@ def _logical_materialized_pose_dataset_sha256(
     manifest_sha256: str,
     skeleton_id: str,
     labels: Sequence[str],
+    lineage_schema_version: int = 1,
 ) -> str:
     """Hash logical training content independently of Zarr chunking/layout."""
 
     digest = sha256()
     header = {
         "schema_id": "palette.logical_materialized_pose_training_dataset",
-        "schema_version": 1,
+        "schema_version": int(lineage_schema_version),
         "manifest_sha256": manifest_sha256,
         "skeleton_id": skeleton_id,
         "keypoint_labels": list(labels),
@@ -2241,6 +2483,14 @@ def _logical_materialized_pose_dataset_sha256(
         "splits/val_indices",
         "splits/test_indices",
     ]
+    if lineage_schema_version >= 2:
+        paths.extend(
+            [
+                "source_index/source_bbox_norm_coords",
+                "source_index/source_pose_merged_row",
+                "source_index/source_detect_merged_row",
+            ]
+        )
     for path in paths:
         array = root[path]
         semantic_path = path.replace(run_name, "<merged_run>")
@@ -2325,11 +2575,13 @@ def _export_merged(
         .lower()
     )
     allowed_source_types = prepare_pose.ALLOWED_KEYPOINT_CROP_SOURCE_TYPES | {
-        "materialized_pose_crop"
+        "materialized_pose_crop",
+        "recovered_pose_crop",
     }
     if requested_source_type not in allowed_source_types:
         raise ValueError(
-            "Keypoint merged export only supports reviewed refined/manual or materialized pose crop sources; "
+            "Keypoint merged export only supports reviewed refined/manual or "
+            "validated materialized pose crop sources; "
             f"observed source_type_requested={requested_source_type!r}."
         )
 
@@ -2378,7 +2630,10 @@ def _export_merged(
     )
     total_samples = int(sum(spec.sample_count for spec in source_specs))
     has_materialized_sources = any(
-        spec.source_kind == "materialized_pose_crop" for spec in source_specs
+        spec.source_kind in MATERIALIZED_SOURCE_KINDS for spec in source_specs
+    )
+    has_recovered_sources = any(
+        spec.source_kind == "recovered_pose_crop" for spec in source_specs
     )
     row_gate_counts: Dict[str, int] = {}
     keypoint_cast_max_abs_error: Dict[str, float] = {}
@@ -2609,6 +2864,9 @@ def _export_merged(
     materialized_crop_row_dest = None
     materialized_origin_dest = None
     materialized_box_dest = None
+    recovered_bbox_norm_dest = None
+    recovered_pose_merged_row_dest = None
+    recovered_detect_merged_row_dest = None
     if has_materialized_sources:
         if storage_plans is None:
             raise ValueError(
@@ -2638,6 +2896,25 @@ def _export_merged(
             dtype=np.float32,
             chunks=(vector_chunks[0], 4),
         )
+        if has_recovered_sources:
+            recovered_bbox_norm_dest = source_index_group.create_array(
+                "source_bbox_norm_coords",
+                shape=(total_samples, 4),
+                dtype=np.float32,
+                chunks=(vector_chunks[0], 4),
+            )
+            recovered_pose_merged_row_dest = source_index_group.create_array(
+                "source_pose_merged_row",
+                shape=(total_samples,),
+                dtype=np.int64,
+                chunks=vector_chunks,
+            )
+            recovered_detect_merged_row_dest = source_index_group.create_array(
+                "source_detect_merged_row",
+                shape=(total_samples,),
+                dtype=np.int64,
+                chunks=vector_chunks,
+            )
 
     copy_total = total_samples * 2  # roi + keypoints arrays
     copy_progress = _copy_progress(copy_total)
@@ -2675,7 +2952,8 @@ def _export_merged(
             )
             roi_src = _open_source_array_direct(spec.source_zarr, spec.roi_path)
             selected = np.asarray(spec.selected_indices, dtype=np.int64)
-            materialized = spec.source_kind == "materialized_pose_crop"
+            materialized = spec.source_kind in MATERIALIZED_SOURCE_KINDS
+            recovered_materialized = spec.source_kind == "recovered_pose_crop"
             bbox_all = np.asarray(
                 _open_source_array_direct(spec.source_zarr, spec.bbox_path)[:],
                 dtype=np.float32,
@@ -2701,12 +2979,15 @@ def _export_merged(
                 visibility = np.asarray(
                     crop_source_group["keypoint_visibility"][:], dtype=np.uint8
                 )
+                expected_selected = np.flatnonzero(
+                    np.all(visibility == 2, axis=1)
+                ).astype(np.int64)
                 if visibility.shape != (
                     spec.source_sample_count,
                     spec.keypoint_shape[0],
-                ) or not np.all(visibility == 2):
+                ) or not np.array_equal(selected, expected_selected):
                     raise ValueError(
-                        f"{spec.source_zarr}: merged pose v3 requires all materialized keypoints visible"
+                        f"{spec.source_zarr}: materialized full-visibility row selection changed"
                     )
                 success_all = np.ones(spec.source_sample_count, dtype=np.bool_)
                 source_refined_row_ids = np.full(
@@ -2731,7 +3012,12 @@ def _export_merged(
                 )
             keypoints = keypoints_all[selected]
             success = success_all[selected]
-            if materialized:
+            if recovered_materialized:
+                # The recovered box is retained below as lineage. Its original
+                # normalization canvas cannot be proven, so it cannot become a
+                # crop-local training box.
+                crop_bbox = np.zeros((len(selected), 4), dtype=np.float32)
+            elif materialized:
                 crop_bbox = _materialized_crop_bbox_norm(
                     bbox_all[selected],
                     np.asarray(crop_source_group["roi_coordinates_full"][:])[selected],
@@ -2781,6 +3067,8 @@ def _export_merged(
                     roi_w=roi_w,
                 )
                 pose_bbox[full_idx] = pose_bbox_full
+            if recovered_materialized:
+                crop_bbox = pose_bbox.copy()
             box_only_idx = np.where(box_only_mask)[0]
             if box_only_idx.size > 0:
                 crop_bbox_box_only = crop_bbox[box_only_idx]
@@ -2926,16 +3214,23 @@ def _export_merged(
                 assert materialized_origin_dest is not None
                 assert materialized_box_dest is not None
                 if materialized:
+                    assert spec.materialized_lineage_paths is not None
                     keypoint_rows = np.asarray(
-                        crop_source_group["source_keypoint_row_ids"][:],
+                        crop_source_group[
+                            spec.materialized_lineage_paths["keypoint_row"]
+                        ][:],
                         dtype=np.int64,
                     )[selected]
                     crop_rows = np.asarray(
-                        crop_source_group["source_crop_row_ids"][:],
+                        crop_source_group[
+                            spec.materialized_lineage_paths["crop_row"]
+                        ][:],
                         dtype=np.int64,
                     )[selected]
                     origins_xy = np.asarray(
-                        crop_source_group["roi_coordinates_full"][:],
+                        crop_source_group[
+                            spec.materialized_lineage_paths["roi_origin"]
+                        ][:],
                         dtype=np.int32,
                     )[selected]
                     identity = np.column_stack(
@@ -2960,14 +3255,57 @@ def _export_merged(
                         crop_rows
                     )
                     materialized_origin_dest[offset : offset + local_total] = origins_xy
-                    materialized_box_dest[offset : offset + local_total] = bbox_all[
-                        selected
-                    ]
+                    if recovered_materialized:
+                        materialized_box_dest[offset : offset + local_total] = np.nan
+                        assert recovered_bbox_norm_dest is not None
+                        assert recovered_pose_merged_row_dest is not None
+                        assert recovered_detect_merged_row_dest is not None
+                        recovered_bbox_norm_dest[offset : offset + local_total] = (
+                            bbox_all[selected]
+                        )
+                        recovered_pose_merged_row_dest[
+                            offset : offset + local_total
+                        ] = np.asarray(
+                            crop_source_group[
+                                spec.materialized_lineage_paths["pose_merged_row"]
+                            ][:],
+                            dtype=np.int64,
+                        )[selected]
+                        recovered_detect_merged_row_dest[
+                            offset : offset + local_total
+                        ] = np.asarray(
+                            crop_source_group[
+                                spec.materialized_lineage_paths["detect_merged_row"]
+                            ][:],
+                            dtype=np.int64,
+                        )[selected]
+                    else:
+                        materialized_box_dest[offset : offset + local_total] = bbox_all[
+                            selected
+                        ]
+                        if recovered_bbox_norm_dest is not None:
+                            assert recovered_pose_merged_row_dest is not None
+                            assert recovered_detect_merged_row_dest is not None
+                            recovered_bbox_norm_dest[
+                                offset : offset + local_total
+                            ] = np.nan
+                            recovered_pose_merged_row_dest[
+                                offset : offset + local_total
+                            ] = -1
+                            recovered_detect_merged_row_dest[
+                                offset : offset + local_total
+                            ] = -1
                 else:
                     materialized_keypoint_row_dest[offset : offset + local_total] = -1
                     materialized_crop_row_dest[offset : offset + local_total] = -1
                     materialized_origin_dest[offset : offset + local_total] = -1
                     materialized_box_dest[offset : offset + local_total] = np.nan
+                    if recovered_bbox_norm_dest is not None:
+                        assert recovered_pose_merged_row_dest is not None
+                        assert recovered_detect_merged_row_dest is not None
+                        recovered_bbox_norm_dest[offset : offset + local_total] = np.nan
+                        recovered_pose_merged_row_dest[offset : offset + local_total] = -1
+                        recovered_detect_merged_row_dest[offset : offset + local_total] = -1
             incomplete_detection_lineage_rows += int(
                 np.count_nonzero(
                     (source_refined_row_ids[selected] < 0)
@@ -3053,7 +3391,7 @@ def _export_merged(
         )
         source_index_group.attrs["materialized_pose_source_contract"] = {
             "schema_id": "palette.merged_materialized_pose_source_lineage",
-            "schema_version": 1,
+            "schema_version": 2 if has_recovered_sources else 1,
             "source_row_arrays": {
                 "keypoint": "source_index/source_keypoint_row_id",
                 "crop": "source_index/source_crop_row_id",
@@ -3061,9 +3399,33 @@ def _export_merged(
                 "acquisition_frame": "source_index/source_acquisition_frame_index",
                 "roi_origin": "source_index/source_roi_origin_xy",
                 "detector_box": "source_index/source_bbox_img_xyxy",
+                **(
+                    {
+                        "normalized_detector_box": "source_index/source_bbox_norm_coords",
+                        "pose_merged_row": "source_index/source_pose_merged_row",
+                        "detect_merged_row": "source_index/source_detect_merged_row",
+                    }
+                    if has_recovered_sources
+                    else {}
+                ),
             },
             "legacy_row_sentinel": -1,
-            "source_box_coordinates": "full_sensor_xyxy",
+            **(
+                {
+                    "origin_coordinates_by_source_kind": {
+                        "materialized_pose_crop": "full_sensor_xy",
+                        "recovered_pose_crop": "recovered_pose_roi_512_xy",
+                    },
+                    "box_coordinates_by_source_kind": {
+                        "materialized_pose_crop": "full_sensor_xyxy",
+                        "recovered_pose_crop": (
+                            "normalized_xywh_unknown_source_canvas_lineage_only"
+                        ),
+                    },
+                }
+                if has_recovered_sources
+                else {"source_box_coordinates": "full_sensor_xyxy"}
+            ),
         }
     _write_string_array(
         source_index_group,
@@ -3145,10 +3507,14 @@ def _export_merged(
                 {
                     "frame_mapping_contract": "palette.training_source_frame_mapping.v1",
                     "source_sample_row_index_semantics": (
-                        "frame index in the source training archive local frame domain"
+                        "per-source row identity declared in source_frame_mapping_json"
+                        if has_recovered_sources
+                        else "frame index in the source training archive local frame domain"
                     ),
                     "source_acquisition_frame_index_semantics": (
-                        "frame index in the original acquisition-camera frame domain"
+                        "per-source frame identity declared in source_frame_mapping_json"
+                        if has_recovered_sources
+                        else "frame index in the original acquisition-camera frame domain"
                     ),
                     "leakage_group_contract": "subject_then_acquisition_then_recording_v1",
                 }
@@ -3168,9 +3534,25 @@ def _export_merged(
             "source_count": int(len(source_specs)),
             "bbox_norm_coords_semantics": "pose_xywhn_with_box_only_crop_fallback",
             "crop_bbox_norm_coords_semantics": (
-                "source_box_intersection_with_materialized_crop_xywhn"
+                "per_source_kind_declared"
+                if has_recovered_sources
+                else "source_box_intersection_with_materialized_crop_xywhn"
                 if has_materialized_sources
                 else "crop_stage_provenance_xywhn"
+            ),
+            **(
+                {
+                    "crop_bbox_norm_coords_semantics_by_source_kind": {
+                        "materialized_pose_crop": (
+                            "source_box_intersection_with_materialized_crop_xywhn"
+                        ),
+                        "recovered_pose_crop": (
+                            "pose_keypoint_envelope_xywhn_because_source_box_canvas_is_unrecoverable"
+                        ),
+                    }
+                }
+                if has_recovered_sources
+                else {}
             ),
         }
     )
@@ -3238,11 +3620,28 @@ def _export_merged(
             {
                 "materialized_pose_source_contract": {
                     "schema_id": "palette.merged_materialized_pose_source_lineage",
-                    "schema_version": 1,
+                    "schema_version": 2 if has_recovered_sources else 1,
                     "all_keypoints_visible_required": True,
                     "source_kinds": [spec.source_kind for spec in source_specs],
                     "source_binding_array": "source_index/source_materialized_binding_json",
                     "source_keypoint_visibility": "all_2_verified_at_export",
+                    **(
+                        {
+                            "partial_visibility_rows": "excluded_at_source_preflight",
+                            "recovered_geometry": {
+                                "sensor_pixel_origin_available": False,
+                                "source_origin_coordinates": (
+                                    "recovered_pose_roi_512_xy"
+                                ),
+                                "source_normalized_detector_box": (
+                                    "lineage_only_unknown_source_canvas"
+                                ),
+                                "trainer_crop_bbox": "pose_keypoint_envelope_xywhn",
+                            },
+                        }
+                        if has_recovered_sources
+                        else {}
+                    ),
                 }
             }
             if has_materialized_sources
@@ -3348,7 +3747,7 @@ def _export_merged(
     if has_materialized_sources:
         training_export["logical_dataset_hash"] = {
             "schema_id": "palette.logical_materialized_pose_training_dataset",
-            "schema_version": 1,
+            "schema_version": 2 if has_recovered_sources else 1,
             "algorithm": "sha256",
             "digest": _logical_materialized_pose_dataset_sha256(
                 out_root,
@@ -3356,6 +3755,7 @@ def _export_merged(
                 manifest_sha256=training_export["manifest_sha256"],
                 skeleton_id=str(merged_skeleton_id),
                 labels=keypoint_labels,
+                lineage_schema_version=2 if has_recovered_sources else 1,
             ),
         }
     out_root.attrs.update(
@@ -4494,6 +4894,7 @@ def validate_merged_keypoint_training_zarr(
                         "direct_source_acquisition_frame_index",
                         "raw_video_original_frame_indices_lookup",
                         "identity_fallback",
+                        "recovered_source_frame_index",
                     }:
                         errors.append(
                             f"{frame_mapping_path}[{idx}] has an invalid mapping_method."
@@ -4505,14 +4906,25 @@ def validate_merged_keypoint_training_zarr(
         else None
     )
     if isinstance(materialized_contract, Mapping):
-        required_lineage = (
+        materialized_contract_version = int(
+            materialized_contract.get("schema_version") or 1
+        )
+        required_lineage = [
             "source_kind",
             "source_materialized_binding_json",
             "source_keypoint_row_id",
             "source_crop_row_id",
             "source_roi_origin_xy",
             "source_bbox_img_xyxy",
-        )
+        ]
+        if materialized_contract_version >= 2:
+            required_lineage.extend(
+                [
+                    "source_bbox_norm_coords",
+                    "source_pose_merged_row",
+                    "source_detect_merged_row",
+                ]
+            )
         missing_lineage = [
             name for name in required_lineage if name not in root["source_index"]
         ]
@@ -4527,6 +4939,7 @@ def validate_merged_keypoint_training_zarr(
                     source_dataset_idx.astype(np.int64)
                 ]
                 materialized_rows = kinds_per_row == "materialized_pose_crop"
+                recovered_rows = kinds_per_row == "recovered_pose_crop"
                 kp_rows = np.asarray(root["source_index/source_keypoint_row_id"][:])
                 crop_rows = np.asarray(root["source_index/source_crop_row_id"][:])
                 origins = np.asarray(root["source_index/source_roi_origin_xy"][:])
@@ -4550,28 +4963,78 @@ def validate_merged_keypoint_training_zarr(
                         errors.append(
                             "materialized source row provenance or supervision invalid"
                         )
+                if materialized_contract_version >= 2 and np.any(recovered_rows):
+                    normalized_boxes = np.asarray(
+                        root["source_index/source_bbox_norm_coords"][:]
+                    )
+                    pose_merged_rows = np.asarray(
+                        root["source_index/source_pose_merged_row"][:]
+                    )
+                    detect_merged_rows = np.asarray(
+                        root["source_index/source_detect_merged_row"][:]
+                    )
+                    if (
+                        normalized_boxes.shape != (total_samples, 4)
+                        or pose_merged_rows.shape != (total_samples,)
+                        or detect_merged_rows.shape != (total_samples,)
+                    ):
+                        errors.append("recovered source row lineage shape mismatch")
+                    elif (
+                        np.any(kp_rows[recovered_rows] < 0)
+                        or np.any(crop_rows[recovered_rows] < 0)
+                        or np.any(origins[recovered_rows] < 0)
+                        or not np.isnan(boxes[recovered_rows]).all()
+                        or not np.isfinite(normalized_boxes[recovered_rows]).all()
+                        or np.any(normalized_boxes[recovered_rows, 2:] <= 0)
+                        or np.any(pose_merged_rows[recovered_rows] < 0)
+                        or np.any(detect_merged_rows[recovered_rows] < 0)
+                        or not np.all(detection_success[recovered_rows])
+                        or np.any(keypoint_box_only[recovered_rows])
+                    ):
+                        errors.append(
+                            "recovered source row provenance or supervision invalid"
+                        )
             raw_bindings = root["source_index/source_materialized_binding_json"][:]
             if len(raw_bindings) != len(source_kinds):
                 errors.append("materialized source bindings length mismatch")
             else:
                 for kind, raw_binding in zip(source_kinds, raw_bindings):
-                    if kind != "materialized_pose_crop":
+                    if kind not in MATERIALIZED_SOURCE_KINDS:
                         continue
                     try:
                         binding = json.loads(str(raw_binding))
                     except (TypeError, ValueError, json.JSONDecodeError):
                         binding = None
+                    expected_schema = (
+                        "palette.training.pose_head_materialized_crop"
+                        if kind == "materialized_pose_crop"
+                        else "palette.training.recovered_pose_head_crop_visibility.v1"
+                    )
                     if (
                         not isinstance(binding, Mapping)
-                        or binding.get("schema_id")
-                        != "palette.training.pose_head_materialized_crop"
+                        or binding.get("schema_id") != expected_schema
                         or not binding.get("run_id")
                     ):
                         errors.append("materialized source binding is invalid")
+                    elif kind == "recovered_pose_crop" and (
+                        binding.get("sensor_pixel_origin_available") is not False
+                        or binding.get("source_coordinate_system")
+                        != "recovered_pose_roi_512_xy"
+                        or binding.get("row_gate_policy")
+                        != "all_keypoints_visibility_2"
+                        or int(binding.get("selected_row_count") or -1)
+                        + int(
+                            binding.get("excluded_partial_visibility_row_count")
+                            or 0
+                        )
+                        != int(binding.get("source_row_count") or -1)
+                    ):
+                        errors.append("recovered source binding is invalid")
         logical_hash = training_export.get("logical_dataset_hash")
         if (
             not isinstance(logical_hash, Mapping)
-            or logical_hash.get("schema_version") != 1
+            or logical_hash.get("schema_version")
+            != materialized_contract_version
         ):
             errors.append("materialized pose logical dataset hash is missing")
         elif not errors:
@@ -4581,6 +5044,7 @@ def validate_merged_keypoint_training_zarr(
                 manifest_sha256=str(training_export.get("manifest_sha256")),
                 skeleton_id=str(merged_skeleton_id),
                 labels=list(training_export.get("keypoint_labels") or []),
+                lineage_schema_version=materialized_contract_version,
             )
             if observed_hash != logical_hash.get("digest"):
                 errors.append("materialized pose logical dataset hash mismatch")

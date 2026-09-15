@@ -765,10 +765,10 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-required-025d8ee0715a1a88",
+            "schema-required-454d52720f29691d",
             "schema-required-49e7bd9eff887a7e",
             "schema-required-c8429f2b384799db",
             "schema-required-ce391694415fd80d",
-            "schema-required-f0526ea4eb582749",
             "schema-writer-0c464260c515a642"
           ],
           "shape": "<unresolved>"
@@ -856,7 +856,7 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-8f0935521c6c5ee7"
+            "schema-writer-4f67e35b6b4beff0"
           ],
           "shape": "(total_samples, 4)"
         },
@@ -2041,14 +2041,14 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-required-64b744451f018c5f",
-            "schema-required-f46b117c44f272a1"
+            "schema-required-ddf1a45b7d6e8377"
           ],
           "shape": "<unresolved>"
         },
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-14bdd6df5bfc4466"
+            "schema-writer-e3c3f686972ec37c"
           ],
           "shape": "(total_samples, 4)"
         }
@@ -2379,7 +2379,7 @@
           "occurrence_ids": [
             "schema-required-7bfa6647438d2de3",
             "schema-required-8a98c5ee30a4c5ad",
-            "schema-required-b887bdbb2d64e1c5",
+            "schema-required-b49adb67a37ee632",
             "schema-writer-cdd04afe3fecb716",
             "schema-writer-ecf106f1d9523f09"
           ],
@@ -2439,7 +2439,7 @@
           "dtype": "int8",
           "occurrence_ids": [
             "schema-writer-357b1edbe92db9bf",
-            "schema-writer-fd19b1b92f95db49"
+            "schema-writer-94ade9872594a294"
           ],
           "shape": "(total_samples,)"
         },
@@ -2549,15 +2549,15 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-449d8aa01b74f996"
+            "schema-writer-a94538aa4e0fff16"
           ],
           "shape": "(total_samples,)"
         },
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-required-d1b29af96a08daa0",
-            "schema-required-ef6fcf1ec7fbc2c1"
+            "schema-required-86aec5b5651d52c6",
+            "schema-required-d1b29af96a08daa0"
           ],
           "shape": "<unresolved>"
         },
@@ -3590,10 +3590,10 @@
           "occurrence_ids": [
             "schema-required-40d4549ffb90ee92",
             "schema-required-4452ed2c95e0aeb8",
+            "schema-required-4d843dd7e3d530e0",
             "schema-required-4ffa745261ed84a9",
             "schema-required-8876e7840c0532c8",
             "schema-required-9bac30f3fd9b5940",
-            "schema-required-d6ad46ab7bfdc19c",
             "schema-required-e394324e26ed4b7e",
             "schema-writer-251a0ca610e787bc"
           ],
@@ -3795,8 +3795,8 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-c9a9c2037a9292c2",
-            "schema-writer-d1954617425bac1d"
+            "schema-writer-87944bd8a5937de9",
+            "schema-writer-c9a9c2037a9292c2"
           ],
           "shape": "(total_samples,)"
         },
@@ -4796,7 +4796,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-2acc6ad690fd495a"
+            "schema-writer-acc2ed2f59d43ab7"
           ],
           "shape": "(total_samples, *keypoint_shape)"
         },
@@ -4804,7 +4804,7 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-required-520a8d71f40325d6",
-            "schema-required-bfd88a659fa82eba"
+            "schema-required-aa8b1189eebd4e09"
           ],
           "shape": "<unresolved>"
         },
@@ -6949,7 +6949,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-25825201f1ea5afc",
+            "schema-writer-9de3086ddf04f21d",
             "schema-writer-b3b10fd879205303"
           ],
           "shape": "(total_samples, *roi_shape)"
@@ -6957,8 +6957,8 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
+            "schema-required-0b9d4588868f909c",
             "schema-required-493e7d755873454e",
-            "schema-required-f16477aa254cebbc",
             "schema-writer-1ae4e298b32635c4",
             "schema-writer-1bf240d4f2c7c689",
             "schema-writer-36e83bc6de3cfd9b",
@@ -7357,7 +7357,7 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-6d5fd4446e46f8f7"
+            "schema-writer-c9139efd1469abb0"
           ],
           "shape": "(total_samples,)"
         }
@@ -7708,7 +7708,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-20314dc6257e54fa",
+            "schema-writer-0a96d8c92ecded93",
             "schema-writer-a82271d68c5c0430"
           ],
           "shape": "shape([spec.dataset_id for spec in source_specs])"
@@ -7732,7 +7732,7 @@
           "dtype": "int32",
           "occurrence_ids": [
             "schema-writer-1f90c4fa50186c4a",
-            "schema-writer-721205940dacc10a",
+            "schema-writer-b2c0c39e410238a2",
             "schema-writer-eb6d8d7c46b07d4b"
           ],
           "shape": "(total_samples,)"
@@ -7792,8 +7792,8 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-743ad955300c1fc4",
-            "schema-writer-b6874ef9cd80a370"
+            "schema-writer-b6874ef9cd80a370",
+            "schema-writer-ea259d768306fbba"
           ],
           "shape": "(total_samples,)"
         },
@@ -7864,7 +7864,7 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-18d7ad0ba22b2719",
+            "schema-writer-69cdc8a8529355e0",
             "schema-writer-6dbeeda1913589f2",
             "schema-writer-cba81028e30a720a"
           ],
@@ -8120,7 +8120,7 @@
           "dtype": "int64",
           "occurrence_ids": [
             "schema-writer-1e7922e3a535e46f",
-            "schema-writer-bd35922b497bc604"
+            "schema-writer-6f0a97ec001fb931"
           ],
           "shape": "(total_samples,)"
         },
@@ -8192,7 +8192,7 @@
           "dtype": "int64",
           "occurrence_ids": [
             "schema-writer-606927cf24ff6c69",
-            "schema-writer-6bf85c86f87e465c"
+            "schema-writer-ed91d512f650b0ad"
           ],
           "shape": "(total_samples,)"
         }
@@ -8431,7 +8431,7 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-writer-1bd64c502b94536b",
-            "schema-writer-ccbad23a7ade5941"
+            "schema-writer-669ee6ea738f1be4"
           ],
           "shape": "shape([str(spec.source_zarr) for spec in source_specs])"
         }
@@ -11133,7 +11133,7 @@
       "window_start_frame"
     ],
     "note": "Leaf-name coverage is orientation evidence only; dynamic paths and semantic reuse require manual review.",
-    "writer_leaf_name_count": 637,
+    "writer_leaf_name_count": 640,
     "writer_without_array_spec_leaf_names": [
       "acceleration",
       "acceleration_mm",
@@ -11509,6 +11509,7 @@
       "source_acquisition_frame_index",
       "source_annotation_zarr_path",
       "source_bbox_img_xyxy",
+      "source_bbox_norm_coords",
       "source_bytes",
       "source_camera_normalized_to_image",
       "source_channel",
@@ -11523,6 +11524,7 @@
       "source_crop_xywh",
       "source_dataset_id",
       "source_dataset_idx",
+      "source_detect_merged_row",
       "source_end_event_frame",
       "source_end_event_name_bytes",
       "source_end_frame",
@@ -11547,6 +11549,7 @@
       "source_pixel_kind_codes",
       "source_point_count",
       "source_policy_bytes",
+      "source_pose_merged_row",
       "source_projection_mode",
       "source_proxy_crop_row_ids",
       "source_proxy_crop_run_index",
@@ -68654,8 +68657,8 @@
       "dtype_expression": "roi_dtype",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2483,
-      "occurrence_id": "schema-writer-25825201f1ea5afc",
+      "line": 2738,
+      "occurrence_id": "schema-writer-9de3086ddf04f21d",
       "path_pattern": "<require_runs_parent(out_root, 'crop_runs')>/<run_name>/roi_images",
       "required": null,
       "shape_expression": "(total_samples, *roi_shape)",
@@ -68667,7 +68670,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-fcbfa374c329c335"
+      "writer_site_id": "writer-e0fc7e4bafe44634"
     },
     {
       "access_pattern": "unclassified",
@@ -68688,8 +68691,8 @@
       "dtype_expression": "np.float32",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2491,
-      "occurrence_id": "schema-writer-8f0935521c6c5ee7",
+      "line": 2746,
+      "occurrence_id": "schema-writer-4f67e35b6b4beff0",
       "path_pattern": "<require_runs_parent(out_root, 'crop_runs')>/<run_name>/bbox_norm_coords",
       "required": null,
       "shape_expression": "(total_samples, 4)",
@@ -68701,7 +68704,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-e4df270d63fb04c0"
+      "writer_site_id": "writer-493706ac5af69858"
     },
     {
       "access_pattern": "unclassified",
@@ -68722,8 +68725,8 @@
       "dtype_expression": "np.float32",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2499,
-      "occurrence_id": "schema-writer-14bdd6df5bfc4466",
+      "line": 2754,
+      "occurrence_id": "schema-writer-e3c3f686972ec37c",
       "path_pattern": "<require_runs_parent(out_root, 'crop_runs')>/<run_name>/crop_bbox_norm_coords",
       "required": null,
       "shape_expression": "(total_samples, 4)",
@@ -68735,7 +68738,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-634dfc65d311be52"
+      "writer_site_id": "writer-f15b0056b7495382"
     },
     {
       "access_pattern": "windowed",
@@ -68756,8 +68759,8 @@
       "dtype_expression": "np.int64",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2507,
-      "occurrence_id": "schema-writer-d1954617425bac1d",
+      "line": 2762,
+      "occurrence_id": "schema-writer-87944bd8a5937de9",
       "path_pattern": "<require_runs_parent(out_root, 'crop_runs')>/<run_name>/frame_indices",
       "required": null,
       "shape_expression": "(total_samples,)",
@@ -68769,7 +68772,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-7d2c39a69efbf418"
+      "writer_site_id": "writer-1ebf91ea11a13c34"
     },
     {
       "access_pattern": "unclassified",
@@ -68790,8 +68793,8 @@
       "dtype_expression": "np.int8",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2515,
-      "occurrence_id": "schema-writer-fd19b1b92f95db49",
+      "line": 2770,
+      "occurrence_id": "schema-writer-94ade9872594a294",
       "path_pattern": "<require_runs_parent(out_root, 'crop_runs')>/<run_name>/detection_source",
       "required": null,
       "shape_expression": "(total_samples,)",
@@ -68803,7 +68806,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-ed5d02271153de45"
+      "writer_site_id": "writer-e1a19736ae1af823"
     },
     {
       "access_pattern": "windowed",
@@ -68824,8 +68827,8 @@
       "dtype_expression": "keypoint_dtype",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2523,
-      "occurrence_id": "schema-writer-2acc6ad690fd495a",
+      "line": 2778,
+      "occurrence_id": "schema-writer-acc2ed2f59d43ab7",
       "path_pattern": "<require_runs_parent(out_root, 'keypoints_runs')>/<run_name>/keypoints_roi",
       "required": null,
       "shape_expression": "(total_samples, *keypoint_shape)",
@@ -68837,7 +68840,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-253c1fb46e2c238f"
+      "writer_site_id": "writer-6ade4baf0003bea0"
     },
     {
       "access_pattern": "unclassified",
@@ -68858,8 +68861,8 @@
       "dtype_expression": "np.bool_",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2531,
-      "occurrence_id": "schema-writer-449d8aa01b74f996",
+      "line": 2786,
+      "occurrence_id": "schema-writer-a94538aa4e0fff16",
       "path_pattern": "<require_runs_parent(out_root, 'keypoints_runs')>/<run_name>/detection_success",
       "required": null,
       "shape_expression": "(total_samples,)",
@@ -68871,7 +68874,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-787940f8a6db7599"
+      "writer_site_id": "writer-2b16475ec5bef44f"
     },
     {
       "access_pattern": "windowed",
@@ -68892,8 +68895,8 @@
       "dtype_expression": "np.bool_",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2539,
-      "occurrence_id": "schema-writer-f0e572c2cf144b3f",
+      "line": 2794,
+      "occurrence_id": "schema-writer-8bf8813c3a2a3d75",
       "path_pattern": "<require_runs_parent(out_root, 'keypoints_runs')>/<run_name>/keypoint_box_only",
       "required": null,
       "shape_expression": "(total_samples,)",
@@ -68905,7 +68908,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-780fb35b89ae0029"
+      "writer_site_id": "writer-b251e804cff56391"
     },
     {
       "access_pattern": "unclassified",
@@ -68926,8 +68929,8 @@
       "dtype_expression": "np.int32",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2547,
-      "occurrence_id": "schema-writer-721205940dacc10a",
+      "line": 2802,
+      "occurrence_id": "schema-writer-b2c0c39e410238a2",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_dataset_idx",
       "required": null,
       "shape_expression": "(total_samples,)",
@@ -68939,7 +68942,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-8d0bc5e1379aec0a"
+      "writer_site_id": "writer-a036d04b56656700"
     },
     {
       "access_pattern": "windowed",
@@ -68960,8 +68963,8 @@
       "dtype_expression": "np.int64",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2559,
-      "occurrence_id": "schema-writer-229e76fc946572af",
+      "line": 2814,
+      "occurrence_id": "schema-writer-a4ec87e15bdb02cb",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_sample_row_index",
       "required": null,
       "shape_expression": "(total_samples,)",
@@ -68973,7 +68976,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-087422e09f23bcb2"
+      "writer_site_id": "writer-e1d05fedc3479d6f"
     },
     {
       "access_pattern": "windowed",
@@ -68994,8 +68997,8 @@
       "dtype_expression": "np.int64",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2567,
-      "occurrence_id": "schema-writer-6d5fd4446e46f8f7",
+      "line": 2822,
+      "occurrence_id": "schema-writer-c9139efd1469abb0",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_acquisition_frame_index",
       "required": null,
       "shape_expression": "(total_samples,)",
@@ -69007,7 +69010,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-0156940f28ee8471"
+      "writer_site_id": "writer-762d38ffe1b055f2"
     },
     {
       "access_pattern": "windowed",
@@ -69028,8 +69031,8 @@
       "dtype_expression": "np.int64",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2576,
-      "occurrence_id": "schema-writer-18d7ad0ba22b2719",
+      "line": 2831,
+      "occurrence_id": "schema-writer-69cdc8a8529355e0",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_frame_idx",
       "required": null,
       "shape_expression": "(total_samples,)",
@@ -69041,7 +69044,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-26c749a93796fbfc"
+      "writer_site_id": "writer-b107f72033bdca87"
     },
     {
       "access_pattern": "unclassified",
@@ -69062,8 +69065,8 @@
       "dtype_expression": "np.int64",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2584,
-      "occurrence_id": "schema-writer-6bf85c86f87e465c",
+      "line": 2839,
+      "occurrence_id": "schema-writer-ed91d512f650b0ad",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_roi_idx",
       "required": null,
       "shape_expression": "(total_samples,)",
@@ -69075,7 +69078,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-1b195c59233b744c"
+      "writer_site_id": "writer-4866deb072b53e8e"
     },
     {
       "access_pattern": "windowed",
@@ -69096,8 +69099,8 @@
       "dtype_expression": "np.int64",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2592,
-      "occurrence_id": "schema-writer-bd35922b497bc604",
+      "line": 2847,
+      "occurrence_id": "schema-writer-6f0a97ec001fb931",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_refined_row_ids",
       "required": null,
       "shape_expression": "(total_samples,)",
@@ -69109,7 +69112,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-bd3126d9739ac436"
+      "writer_site_id": "writer-da696e083e1f73f1"
     },
     {
       "access_pattern": "windowed",
@@ -69130,8 +69133,8 @@
       "dtype_expression": "np.int32",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2600,
-      "occurrence_id": "schema-writer-743ad955300c1fc4",
+      "line": 2855,
+      "occurrence_id": "schema-writer-ea259d768306fbba",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_detect_row_index",
       "required": null,
       "shape_expression": "(total_samples,)",
@@ -69143,7 +69146,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-7d4bee62c12ff871"
+      "writer_site_id": "writer-fc3b0980dd926699"
     },
     {
       "access_pattern": "windowed",
@@ -69164,8 +69167,8 @@
       "dtype_expression": "np.int64",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2617,
-      "occurrence_id": "schema-writer-961f761e5b2bfbda",
+      "line": 2875,
+      "occurrence_id": "schema-writer-bd77234552a77311",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_keypoint_row_id",
       "required": null,
       "shape_expression": "(total_samples,)",
@@ -69177,7 +69180,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-af4a09a433468547"
+      "writer_site_id": "writer-a940f31434cf4de2"
     },
     {
       "access_pattern": "windowed",
@@ -69198,8 +69201,8 @@
       "dtype_expression": "np.int64",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2623,
-      "occurrence_id": "schema-writer-8859abd5a5b2c2c9",
+      "line": 2881,
+      "occurrence_id": "schema-writer-39d8f49ac65b5a71",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_crop_row_id",
       "required": null,
       "shape_expression": "(total_samples,)",
@@ -69211,7 +69214,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-ba65d3ad1aa3dfe6"
+      "writer_site_id": "writer-8952a9e097418f86"
     },
     {
       "access_pattern": "unclassified",
@@ -69232,8 +69235,8 @@
       "dtype_expression": "np.int32",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2629,
-      "occurrence_id": "schema-writer-db8f2e0a7546b840",
+      "line": 2887,
+      "occurrence_id": "schema-writer-ca3689955ec27532",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_roi_origin_xy",
       "required": null,
       "shape_expression": "(total_samples, 2)",
@@ -69245,7 +69248,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-ab9735fedbde13cc"
+      "writer_site_id": "writer-d5e08b35e832d116"
     },
     {
       "access_pattern": "unclassified",
@@ -69266,8 +69269,8 @@
       "dtype_expression": "np.float32",
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 2635,
-      "occurrence_id": "schema-writer-7e216731bcf6e77e",
+      "line": 2893,
+      "occurrence_id": "schema-writer-c09c00781d877803",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_bbox_img_xyxy",
       "required": null,
       "shape_expression": "(total_samples, 4)",
@@ -69279,7 +69282,109 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-eda0551e0f48afa8"
+      "writer_site_id": "writer-59218dc5b6bbc471"
+    },
+    {
+      "access_pattern": "unclassified",
+      "access_pattern_basis": "no high-confidence static access rule",
+      "array_name": "source_bbox_norm_coords",
+      "array_name_expression": "'source_bbox_norm_coords'",
+      "canonical_contract_id": null,
+      "canonical_contract_version": null,
+      "consumer": "palette_training",
+      "consumer_basis": "training writer/reader surface",
+      "contract_mapping_basis": "no initial catalog candidate for this leaf name",
+      "contract_mapping_status": "unmapped",
+      "declaration_symbol": "fisheye.utils.export_keypoint_training_zarr:_export_merged",
+      "declaring_stage": null,
+      "declaring_stage_basis": "stage is not statically bound at this writer call",
+      "description": "Schema evidence recovered from a physical writer call site.",
+      "dtype": "float32",
+      "dtype_expression": "np.float32",
+      "dynamic_name": false,
+      "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
+      "line": 2900,
+      "occurrence_id": "schema-writer-d1d420f1fe28500d",
+      "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_bbox_norm_coords",
+      "required": null,
+      "shape_expression": "(total_samples, 4)",
+      "shape_template": null,
+      "source_kind": "writer_observed_schema",
+      "stage_spec_symbol": null,
+      "status": "current",
+      "status_basis": "module is a training reader/writer or training export",
+      "subgroup": null,
+      "write_lifecycle": "training_build_then_immutable",
+      "write_lifecycle_basis": "training artifact surface",
+      "writer_site_id": "writer-dd3fcbe54ece6dc1"
+    },
+    {
+      "access_pattern": "unclassified",
+      "access_pattern_basis": "no high-confidence static access rule",
+      "array_name": "source_pose_merged_row",
+      "array_name_expression": "'source_pose_merged_row'",
+      "canonical_contract_id": null,
+      "canonical_contract_version": null,
+      "consumer": "palette_training",
+      "consumer_basis": "training writer/reader surface",
+      "contract_mapping_basis": "no initial catalog candidate for this leaf name",
+      "contract_mapping_status": "unmapped",
+      "declaration_symbol": "fisheye.utils.export_keypoint_training_zarr:_export_merged",
+      "declaring_stage": null,
+      "declaring_stage_basis": "stage is not statically bound at this writer call",
+      "description": "Schema evidence recovered from a physical writer call site.",
+      "dtype": "int64",
+      "dtype_expression": "np.int64",
+      "dynamic_name": false,
+      "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
+      "line": 2906,
+      "occurrence_id": "schema-writer-9e3c67cdce0d14be",
+      "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_pose_merged_row",
+      "required": null,
+      "shape_expression": "(total_samples,)",
+      "shape_template": null,
+      "source_kind": "writer_observed_schema",
+      "stage_spec_symbol": null,
+      "status": "current",
+      "status_basis": "module is a training reader/writer or training export",
+      "subgroup": null,
+      "write_lifecycle": "training_build_then_immutable",
+      "write_lifecycle_basis": "training artifact surface",
+      "writer_site_id": "writer-dd57881d74e47604"
+    },
+    {
+      "access_pattern": "unclassified",
+      "access_pattern_basis": "no high-confidence static access rule",
+      "array_name": "source_detect_merged_row",
+      "array_name_expression": "'source_detect_merged_row'",
+      "canonical_contract_id": null,
+      "canonical_contract_version": null,
+      "consumer": "palette_training",
+      "consumer_basis": "training writer/reader surface",
+      "contract_mapping_basis": "no initial catalog candidate for this leaf name",
+      "contract_mapping_status": "unmapped",
+      "declaration_symbol": "fisheye.utils.export_keypoint_training_zarr:_export_merged",
+      "declaring_stage": null,
+      "declaring_stage_basis": "stage is not statically bound at this writer call",
+      "description": "Schema evidence recovered from a physical writer call site.",
+      "dtype": "int64",
+      "dtype_expression": "np.int64",
+      "dynamic_name": false,
+      "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
+      "line": 2912,
+      "occurrence_id": "schema-writer-fe13aca424deb2c6",
+      "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_detect_merged_row",
+      "required": null,
+      "shape_expression": "(total_samples,)",
+      "shape_template": null,
+      "source_kind": "writer_observed_schema",
+      "stage_spec_symbol": null,
+      "status": "current",
+      "status_basis": "module is a training reader/writer or training export",
+      "subgroup": null,
+      "write_lifecycle": "training_build_then_immutable",
+      "write_lifecycle_basis": "training artifact surface",
+      "writer_site_id": "writer-c4e3419851add8d0"
     },
     {
       "access_pattern": "unclassified",
@@ -69300,8 +69405,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3019,
-      "occurrence_id": "schema-writer-20314dc6257e54fa",
+      "line": 3357,
+      "occurrence_id": "schema-writer-0a96d8c92ecded93",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_dataset_id",
       "required": null,
       "shape_expression": "shape([spec.dataset_id for spec in source_specs])",
@@ -69313,7 +69418,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-f7a135948c667712"
+      "writer_site_id": "writer-ef2f361161d3728d"
     },
     {
       "access_pattern": "unclassified",
@@ -69334,8 +69439,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3024,
-      "occurrence_id": "schema-writer-ccbad23a7ade5941",
+      "line": 3362,
+      "occurrence_id": "schema-writer-669ee6ea738f1be4",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_zarr_path",
       "required": null,
       "shape_expression": "shape([str(spec.source_zarr) for spec in source_specs])",
@@ -69347,7 +69452,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-01469496632f4b1a"
+      "writer_site_id": "writer-8792d74d0dadfad7"
     },
     {
       "access_pattern": "unclassified",
@@ -69368,8 +69473,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3029,
-      "occurrence_id": "schema-writer-29c690e24a9465aa",
+      "line": 3367,
+      "occurrence_id": "schema-writer-fe3ae57feb572945",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_annotation_zarr_path",
       "required": null,
       "shape_expression": "shape([str(spec.annotation_zarr) for spec in source_specs])",
@@ -69381,7 +69486,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-56681834430bc147"
+      "writer_site_id": "writer-10dc7c200b89d0b6"
     },
     {
       "access_pattern": "unclassified",
@@ -69402,8 +69507,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3035,
-      "occurrence_id": "schema-writer-52d00628afa7b697",
+      "line": 3373,
+      "occurrence_id": "schema-writer-dbb10acee401f601",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_kind",
       "required": null,
       "shape_expression": "shape([spec.source_kind for spec in source_specs])",
@@ -69415,7 +69520,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-ff6fa1e9899f5181"
+      "writer_site_id": "writer-51e3c44ae61c56b4"
     },
     {
       "access_pattern": "unclassified",
@@ -69436,8 +69541,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3040,
-      "occurrence_id": "schema-writer-5d55cfe99b3e9727",
+      "line": 3378,
+      "occurrence_id": "schema-writer-b189a11987a49624",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_materialized_binding_json",
       "required": null,
       "shape_expression": "shape([json.dumps(spec.materialized_source_binding, sort_keys=True, separators=(',', ':')) if spec.materialized_source_binding is not None else 'null' for spec in source_specs])",
@@ -69449,7 +69554,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-84ab733848e2156d"
+      "writer_site_id": "writer-c6c2993bd02ecd28"
     },
     {
       "access_pattern": "unclassified",
@@ -69470,8 +69575,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3068,
-      "occurrence_id": "schema-writer-355c1acfb64687cb",
+      "line": 3430,
+      "occurrence_id": "schema-writer-6961a2a4f6cf0a7b",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_roi_transform_json",
       "required": null,
       "shape_expression": "shape([json.dumps({'schema_id': 'palette.training_roi_transform', 'schema_version': 1, 'mode': spec.roi_transform_mode, 'source_shape': list(spec.roi_shape), 'output_shape': list(spec.roi_output_shape), 'pad_before_yx': list(spec.roi_pad_before), 'pad_after_yx': list(spec.roi_pad_after), 'padding_value': 0, 'keypoint_translation_xy': [spec.roi_pad_before[1], spec.roi_pad_before[0]], 'resize_applied': False}, sort_keys=True, separators=(',', ':')) for spec in source_specs])",
@@ -69483,7 +69588,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-1b2a60d4510cf1db"
+      "writer_site_id": "writer-074c94c29663f81d"
     },
     {
       "access_pattern": "windowed",
@@ -69504,8 +69609,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3105,
-      "occurrence_id": "schema-writer-bfd121ddc6288a38",
+      "line": 3467,
+      "occurrence_id": "schema-writer-7148a75b76ab9b24",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/source_frame_mapping_json",
       "required": null,
       "shape_expression": "shape([json.dumps({'schema_id': 'palette.training_source_frame_mapping', 'schema_version': 1, 'recording_id': spec.recording_id, 'source_sample_row_index_path': spec.frame_indices_path or 'implicit_source_row_order', 'source_acquisition_frame_index_path': spec.source_acquisition_frame_index_path or spec.source_original_frame_map_path or 'identity_fallback', 'mapping_method': spec.frame_mapping_method}, sort_keys=True, separators=(',', ':')) for spec in source_specs])",
@@ -69517,7 +69622,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-d69f3a5ef5e1f2c5"
+      "writer_site_id": "writer-6b66b189c1591bd1"
     },
     {
       "access_pattern": "unclassified",
@@ -69538,8 +69643,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3129,
-      "occurrence_id": "schema-writer-e069d14ab8b53b5e",
+      "line": 3491,
+      "occurrence_id": "schema-writer-a2071ad223ef9515",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/leakage_group_id",
       "required": null,
       "shape_expression": "shape([str(spec.leakage_group_id) for spec in source_specs])",
@@ -69551,7 +69656,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-aa9ee479e3a47daf"
+      "writer_site_id": "writer-b2ff836b21ba6be2"
     },
     {
       "access_pattern": "unclassified",
@@ -69572,8 +69677,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3134,
-      "occurrence_id": "schema-writer-8d066c952f5c57a0",
+      "line": 3496,
+      "occurrence_id": "schema-writer-a2fafb00f93c0306",
       "path_pattern": "<zarr-root:str(out_zarr)>/source_index/leakage_group_source",
       "required": null,
       "shape_expression": "shape([str(spec.leakage_group_source) for spec in source_specs])",
@@ -69585,7 +69690,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-823a052a82a66a8d"
+      "writer_site_id": "writer-e3333b7a2869399a"
     },
     {
       "access_pattern": "unclassified",
@@ -69606,8 +69711,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3692,
-      "occurrence_id": "schema-required-f0526ea4eb582749",
+      "line": 4092,
+      "occurrence_id": "schema-required-454d52720f29691d",
       "path_pattern": "crop_runs/<run>/bbox_norm_coords",
       "required": true,
       "shape_expression": null,
@@ -69639,8 +69744,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3692,
-      "occurrence_id": "schema-required-f46b117c44f272a1",
+      "line": 4092,
+      "occurrence_id": "schema-required-ddf1a45b7d6e8377",
       "path_pattern": "crop_runs/<run>/crop_bbox_norm_coords",
       "required": true,
       "shape_expression": null,
@@ -69672,8 +69777,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3692,
-      "occurrence_id": "schema-required-b887bdbb2d64e1c5",
+      "line": 4092,
+      "occurrence_id": "schema-required-b49adb67a37ee632",
       "path_pattern": "crop_runs/<run>/detection_source",
       "required": true,
       "shape_expression": null,
@@ -69705,8 +69810,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3692,
-      "occurrence_id": "schema-required-d6ad46ab7bfdc19c",
+      "line": 4092,
+      "occurrence_id": "schema-required-4d843dd7e3d530e0",
       "path_pattern": "crop_runs/<run>/frame_indices",
       "required": true,
       "shape_expression": null,
@@ -69738,8 +69843,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3692,
-      "occurrence_id": "schema-required-f16477aa254cebbc",
+      "line": 4092,
+      "occurrence_id": "schema-required-0b9d4588868f909c",
       "path_pattern": "crop_runs/<run>/roi_images",
       "required": true,
       "shape_expression": null,
@@ -69771,8 +69876,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3702,
-      "occurrence_id": "schema-required-ef6fcf1ec7fbc2c1",
+      "line": 4102,
+      "occurrence_id": "schema-required-86aec5b5651d52c6",
       "path_pattern": "keypoints_runs/<run>/detection_success",
       "required": true,
       "shape_expression": null,
@@ -69804,8 +69909,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_keypoint_training_zarr.py",
-      "line": 3702,
-      "occurrence_id": "schema-required-bfd88a659fa82eba",
+      "line": 4102,
+      "occurrence_id": "schema-required-aa8b1189eebd4e09",
       "path_pattern": "keypoints_runs/<run>/keypoints_roi",
       "required": true,
       "shape_expression": null,
@@ -75265,33 +75370,33 @@
     "array_spec_declaration_count": 450,
     "array_spec_unique_leaf_name_count": 270,
     "array_spec_unique_signature_count": 343,
-    "direct_zarr_api_site_count": 667,
+    "direct_zarr_api_site_count": 670,
     "dynamic_or_unresolved_writer_site_count": 358,
     "manual_zarr_metadata_site_count": 1,
     "parsed_writer_candidate_module_count": 241,
     "reader_required_array_declaration_count": 102,
-    "resolved_writer_leaf_name_count": 637,
+    "resolved_writer_leaf_name_count": 640,
     "scanned_python_module_count": 1741,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
-      "unmapped": 1779
+      "unmapped": 1782
     },
     "schema_occurrences_by_source_kind": {
       "array_spec_stage_binding": 306,
       "array_spec_unbound_declaration": 144,
       "reader_required_array_declaration": 102,
-      "writer_observed_schema": 1303
+      "writer_observed_schema": 1306
     },
-    "writer_site_count": 1661,
-    "writer_site_with_chunks_expression_count": 735,
+    "writer_site_count": 1664,
+    "writer_site_with_chunks_expression_count": 738,
     "writer_site_with_codec_expression_count": 16,
     "writer_site_with_shards_expression_count": 17,
     "writer_site_with_stage_classification_count": 493,
     "writer_site_without_dtype_evidence_count": 1018,
     "writer_site_without_shape_evidence_count": 168,
     "writer_sites_by_status": {
-      "current": 1526,
+      "current": 1529,
       "unclear": 135
     },
     "writer_sites_by_surface": {
@@ -75302,7 +75407,7 @@
       "migration_or_maintenance": 47,
       "production": 1237,
       "publication": 73,
-      "training": 192
+      "training": 195
     },
     "writer_wrapper_call_site_count": 993
   }
