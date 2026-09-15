@@ -116,6 +116,15 @@ def _manifest(attrs: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return value
 
 
+def keypoint_source_crop_run_from_attributes(attrs: Mapping[str, Any]) -> str:
+    """Return the safe crop run explicitly bound by legacy keypoint metadata."""
+
+    return _run_name(
+        attrs.get("source_crop_run"),
+        label="keypoint source crop run",
+    )
+
+
 def keypoint_lineage_from_attributes(
     *,
     family: str,
@@ -256,10 +265,7 @@ def keypoint_lineage_from_attributes(
             crop_manifest_digest=source.manifest_digest,
         )
 
-    crop_name = _run_name(
-        attrs.get("source_crop_run"),
-        label="keypoint source crop run",
-    )
+    crop_name = keypoint_source_crop_run_from_attributes(attrs)
     row_count_value = attrs.get("keypoints_processed")
     row_count = (
         int(row_count_value)
@@ -678,6 +684,7 @@ __all__ = [
     "KeypointMotionAuthority",
     "KeypointMotionAuthorityError",
     "keypoint_lineage_from_attributes",
+    "keypoint_source_crop_run_from_attributes",
     "resolve_keypoint_lineage_authority",
     "resolve_keypoint_motion_authority",
 ]

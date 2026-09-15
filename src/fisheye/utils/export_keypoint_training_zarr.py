@@ -5285,6 +5285,11 @@ def _build_merged_manifest_payload(
     }
 
     payload = dict(manifest_payload)
+    # This exporter always produces a pose-training manifest.  Source manifests
+    # for materialized adapters may use their own schema and omit the generic
+    # task discriminator, but the trainer requires the finalized manifest to
+    # declare its task explicitly.
+    payload["task"] = "pose"
     payload["datasets"] = [merged_dataset]
     payload["output_manifest_path"] = str(out_manifest)
     payload["output_config_path"] = str(out_config)

@@ -6963,9 +6963,9 @@
             "schema-writer-1bf240d4f2c7c689",
             "schema-writer-36e83bc6de3cfd9b",
             "schema-writer-6ebc3cc49b499fb6",
+            "schema-writer-aad8890112ca8741",
             "schema-writer-abd50f97e68618df",
             "schema-writer-ac49645e5afb8100",
-            "schema-writer-aeb4920d605921cb",
             "schema-writer-bd26cd0955e64a30",
             "schema-writer-e5a8adbb73617b89"
           ],
@@ -62337,8 +62337,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/training/materialize_pose_head_crops.py",
-      "line": 413,
-      "occurrence_id": "schema-writer-aeb4920d605921cb",
+      "line": 416,
+      "occurrence_id": "schema-writer-aad8890112ca8741",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_id>/roi_images",
       "required": null,
       "shape_expression": null,
@@ -62350,7 +62350,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-8d7f25c0f615298c"
+      "writer_site_id": "writer-5bb4f66ba457825b"
     },
     {
       "access_pattern": "windowed",
@@ -75376,7 +75376,7 @@
     "parsed_writer_candidate_module_count": 241,
     "reader_required_array_declaration_count": 102,
     "resolved_writer_leaf_name_count": 640,
-    "scanned_python_module_count": 1741,
+    "scanned_python_module_count": 1742,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,

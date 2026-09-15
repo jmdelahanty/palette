@@ -27,6 +27,9 @@ from fisheye.shared.crop_roi_layout import (
     build_crop_roi_create_kwargs,
     crop_roi_layout_attrs,
 )
+from fisheye.shared.keypoint_motion_authority import (
+    keypoint_source_crop_run_from_attributes,
+)
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_helpers import (
     archive_metadata_publication_lock,
@@ -166,7 +169,7 @@ def build_pose_head_crop_plan(
         keypoint_parent, keypoints
     ) or not is_run_complete_in_parent(crop_parent, crop):
         raise ValueError("Both source runs must be complete")
-    if keypoints.attrs.get("source_crop_run") != crop_id:
+    if keypoint_source_crop_run_from_attributes(keypoints.attrs) != crop_id:
         raise ValueError("Keypoint run is not bound to the requested source crop run")
     labels = tuple(str(label) for label in keypoints.attrs.get("keypoint_labels", ()))
     source_skeleton_id = str(keypoints.attrs.get("skeleton_id") or "")
