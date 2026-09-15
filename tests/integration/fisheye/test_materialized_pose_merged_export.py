@@ -482,6 +482,23 @@ def test_recovered_source_excludes_partial_rows_and_preserves_roi_lineage(
     np.testing.assert_array_equal(
         loader[0]["keypoints"].reshape(1, 3, 3)[..., 2], 2
     )
+    config_path = tmp_path / "recovered_pose.yaml"
+    _write_merged_config(
+        source_config_path=None,
+        out_config=config_path,
+        merged_zarr=output,
+        dataset_name="recovered_pose_reuse",
+        source_type="recovered_pose_crop",
+        input_format="gray",
+        keypoint_run=run_name,
+        train_ratio=0.8,
+        val_ratio=0.2,
+        random_seed=7,
+        kpt_shape=(3, 3),
+        target_roi_hw=(64, 64),
+    )
+    parsed = PoseConfig.from_yaml(config_path)
+    assert next(iter(parsed.datasets.values())).source_type.value == "recovered_pose_crop"
 
 
 def test_recovered_source_refuses_tampered_lineage_and_review(tmp_path: Path) -> None:

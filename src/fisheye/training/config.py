@@ -21,6 +21,7 @@ class SourceType(str, Enum):
     INTERPOLATED = "interpolated"
     MANUAL = "manual"
     MATERIALIZED_POSE_CROP = "materialized_pose_crop"
+    RECOVERED_POSE_CROP = "recovered_pose_crop"
 
 
 class DatasetSplit(BaseModel):
