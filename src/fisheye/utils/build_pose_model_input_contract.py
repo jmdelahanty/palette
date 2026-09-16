@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and validate one historical pose-model input contract."""
+"""Build and validate one digest-bound pose-model input contract."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Sequence
 
 from fisheye.shared.pose_model_input_contract import (
     build_historical_pose_model_input_contract,
+    build_runtime_receipt_pose_model_input_contract,
     load_pose_model_input_contract,
 )
 
@@ -51,6 +52,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--training-args-relative-path", type=Path, default=Path("args.yaml")
     )
+    parser.add_argument(
+        "--training-runtime-receipt-relative-path",
+        type=Path,
+        help=(
+            "Loader-observed palette.pose_training_runtime_receipt.v2 artifact. "
+            "When supplied, build the v3 receipt-backed contract; otherwise build "
+            "the historical v1 contract."
+        ),
+    )
     parser.add_argument("--model-stride", type=int, required=True)
     parser.add_argument(
         "--runtime-ultralytics-version",
@@ -71,17 +81,26 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     package_root = args.model_package_root.expanduser().resolve()
-    document = build_historical_pose_model_input_contract(
-        set_id=args.model_set_id,
-        run_id=args.model_run_id,
-        model_package_root=package_root,
-        weights_relative_path=args.weights_relative_path,
-        training_manifest_relative_path=args.training_manifest_relative_path,
-        training_report_relative_path=args.training_report_relative_path,
-        training_args_relative_path=args.training_args_relative_path,
-        model_stride=int(args.model_stride),
-        runtime_ultralytics_versions=tuple(args.runtime_ultralytics_version),
-    )
+    common = {
+        "set_id": args.model_set_id,
+        "run_id": args.model_run_id,
+        "model_package_root": package_root,
+        "weights_relative_path": args.weights_relative_path,
+        "training_manifest_relative_path": args.training_manifest_relative_path,
+        "training_report_relative_path": args.training_report_relative_path,
+        "training_args_relative_path": args.training_args_relative_path,
+        "model_stride": int(args.model_stride),
+        "runtime_ultralytics_versions": tuple(args.runtime_ultralytics_version),
+    }
+    if args.training_runtime_receipt_relative_path is None:
+        document = build_historical_pose_model_input_contract(**common)
+    else:
+        document = build_runtime_receipt_pose_model_input_contract(
+            **common,
+            training_runtime_receipt_relative_path=(
+                args.training_runtime_receipt_relative_path
+            ),
+        )
     output = args.output.expanduser().resolve()
     if args.dry_run:
         print(json.dumps(document, indent=2, sort_keys=True))

@@ -36,6 +36,7 @@ from fisheye.shared.zarr.manifest_digest import (
 POSE_MODEL_INPUT_CONTRACT_SCHEMA_ID = "palette.pose_model_input_contract"
 POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION_V1 = 1
 POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION = 2
+POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION_RUNTIME_RECEIPT = 3
 POSE_MODEL_INPUT_CONTRACT_FILENAME = "pose_model_input_contract.json"
 SCALE_MATCHED_RUNTIME_PROFILE_ID = "scale_matched_center_pad_ultralytics_v1"
 SCALE_MATCHED_RUNTIME_CLASSIFICATION = "scale_matched_diagnostic_not_training_context"
@@ -47,9 +48,17 @@ POSE_PREPROCESSING_PROBE_PATTERN = "uint8_luma_mod_251_x3_y5_repeated_three_chan
 POSE_TENSOR_PREPROCESSING_PROBE_SCHEMA_ID = "palette.pose_tensor_preprocessing_probe"
 POSE_TENSOR_PREPROCESSING_PROBE_SCHEMA_VERSION = 1
 EMPIRICAL_RUNTIME_PROFILE_STATUSES = ("accepted", "rejected")
+RUNTIME_RECEIPT_TRAINING_SEMANTICS = "verified_pose_training_runtime_receipt_v2"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _uses_exact_runtime_profiles(schema_version: int) -> bool:
+    return schema_version in {
+        POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION,
+        POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION_RUNTIME_RECEIPT,
+    }
 
 
 class PoseModelInputContractError(ValueError):
@@ -265,7 +274,7 @@ class PoseModelInputContractBinding:
         native_height, native_width = (int(native_shape_hw[0]), int(native_shape_hw[1]))
         if native_height <= 0 or native_width <= 0:
             _fail("Native ROI shape must be positive.")
-        if self.schema_version == POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION:
+        if _uses_exact_runtime_profiles(self.schema_version):
             matching = tuple(
                 profile
                 for profile in self.runtime_profiles
@@ -548,9 +557,9 @@ def validate_pose_runtime_compatibility(
 ) -> dict[str, Any]:
     """Fail unless this runtime reproduces an explicitly reviewed adapter."""
 
-    if binding.schema_version == POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION:
+    if _uses_exact_runtime_profiles(binding.schema_version):
         if runtime_plan is None:
-            _fail("A v2 pose contract requires its exact selected runtime plan.")
+            _fail("An exact-profile pose contract requires its selected runtime plan.")
         approved_versions = runtime_plan.runtime_ultralytics_versions
         expected_probe = dict(runtime_plan.preprocessing_probe)
     else:
@@ -596,6 +605,129 @@ def validate_pose_runtime_compatibility(
         "approved_runtime_ultralytics_versions": list(approved_versions),
         "preprocessing_probe": observed,
     }
+
+
+def _validate_training_runtime_receipt(
+    document: Mapping[str, Any],
+    *,
+    training_manifest_sha256: str,
+    source_shape_hw: tuple[int, int],
+    network_shape_hw: tuple[int, int],
+    training_rect: bool,
+    training_multi_scale: bool,
+) -> None:
+    """Validate the v2 receipt that directly observed the custom pose loader."""
+
+    top = _exact_fields(
+        document,
+        fields={"schema_id", "payload", "payload_sha256"},
+        field="training runtime receipt",
+    )
+    if top["schema_id"] != "palette.pose_training_runtime_receipt.v2":
+        _fail("Training runtime receipt schema identity is unsupported.")
+    payload = top["payload"]
+    if type(payload) is not dict:
+        _fail("Training runtime receipt payload must be one mapping.")
+    if _required_sha256(
+        top["payload_sha256"], field="training runtime receipt payload_sha256"
+    ) != canonical_json_sha256(payload):
+        _fail("Training runtime receipt payload digest is stale.")
+    if payload.get("status") != "verified":
+        _fail("Training runtime receipt is not verified.")
+
+    manifest = payload.get("training_manifest")
+    if (
+        not isinstance(manifest, Mapping)
+        or manifest.get("sha256") != training_manifest_sha256
+    ):
+        _fail("Training runtime receipt binds a different training manifest.")
+    if _shape(
+        payload.get("model_input_shape_hw"),
+        field="training runtime receipt model_input_shape_hw",
+    ) != network_shape_hw:
+        _fail("Training runtime receipt model shape differs from the contract.")
+
+    if payload.get("preprocessing_contract") != {
+        "spatial_transform": "auto",
+        "padding_value_uint8": 0,
+        "channel_transform": "luma_repeat_three",
+        "normalization": "uint8_div_255",
+        "interpolation": "none",
+    }:
+        _fail("Training runtime receipt preprocessing contract is unsupported.")
+
+    arguments = payload.get("effective_arguments")
+    effective = arguments.get("effective") if isinstance(arguments, Mapping) else None
+    if (
+        not isinstance(arguments, Mapping)
+        or arguments.get("status") != "exact_match"
+        or not isinstance(effective, Mapping)
+        or effective.get("imgsz") != network_shape_hw[0]
+        or effective.get("rect") is not training_rect
+        or effective.get("multi_scale") is not training_multi_scale
+        or effective.get("augment") is not False
+    ):
+        _fail("Training runtime receipt effective geometry arguments disagree.")
+
+    if source_shape_hw != network_shape_hw:
+        _fail("Receipt-backed exact deployment requires source and network shapes to match.")
+    datasets = payload.get("datasets")
+    if not isinstance(datasets, Mapping) or set(datasets) != {"train", "val"}:
+        _fail("Training runtime receipt must bind exact train and val preprocessing.")
+    for split in ("train", "val"):
+        split_payload = datasets[split]
+        if (
+            not isinstance(split_payload, Mapping)
+            or split_payload.get("schema_id")
+            != "palette.pose_training_preprocessing_runtime.v2"
+            or split_payload.get("augmentation_enabled") is not False
+            or split_payload.get("channel_transform") != "luma_repeat_three"
+            or split_payload.get("normalization") != "uint8_div_255"
+            or split_payload.get("padding_value_uint8") != 0
+            or _shape(
+                split_payload.get("model_input_shape_hw"),
+                field=f"training runtime receipt {split} model_input_shape_hw",
+            )
+            != network_shape_hw
+        ):
+            _fail(f"Training runtime receipt {split} preprocessing disagrees.")
+        sources = split_payload.get("sources")
+        if not isinstance(sources, Mapping) or not sources:
+            _fail(f"Training runtime receipt {split} sources are missing.")
+        for transform in sources.values():
+            if (
+                not isinstance(transform, Mapping)
+                or transform.get("name") != "identity"
+                or tuple(transform.get("native_shape_hw") or ()) != source_shape_hw
+                or tuple(transform.get("model_shape_hw") or ()) != network_shape_hw
+                or any(
+                    transform.get(name) != 0
+                    for name in ("pad_top", "pad_bottom", "pad_left", "pad_right")
+                )
+            ):
+                _fail(
+                    f"Training runtime receipt {split} source transform is not exact identity."
+                )
+
+    first_batch = payload.get("first_batch")
+    raw_shape = first_batch.get("raw_shape_nchw") if isinstance(first_batch, Mapping) else None
+    normalized_shape = (
+        first_batch.get("normalized_shape_nchw")
+        if isinstance(first_batch, Mapping)
+        else None
+    )
+    if (
+        not isinstance(first_batch, Mapping)
+        or first_batch.get("status") != "verified"
+        or first_batch.get("raw_dtype") != "uint8"
+        or first_batch.get("normalized_dtype") != "float32"
+        or not isinstance(raw_shape, list)
+        or not isinstance(normalized_shape, list)
+        or len(raw_shape) != 4
+        or raw_shape != normalized_shape
+        or raw_shape[1:] != [3, *network_shape_hw]
+    ):
+        _fail("Training runtime receipt first-batch tensor evidence disagrees.")
 
 
 def _validate_runtime_profile(
@@ -905,6 +1037,7 @@ def load_pose_model_input_contract(
         not in {
             POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION_V1,
             POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION,
+            POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION_RUNTIME_RECEIPT,
         }
         or top["digest_algorithm"] != CANONICAL_JSON_DIGEST_ALGORITHM
     ):
@@ -945,14 +1078,19 @@ def load_pose_model_input_contract(
     resolved_model = model_path.expanduser().resolve()
     package_root = _model_package_root(resolved_model, weights_relative)
 
+    evidence_roles = (
+        ("training_manifest", "training_report", "training_args", "training_runtime_receipt")
+        if schema_version == POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION_RUNTIME_RECEIPT
+        else ("training_manifest", "training_report", "training_args")
+    )
     evidence = _exact_fields(
         payload["evidence"],
-        fields={"training_manifest", "training_report", "training_args"},
+        fields=set(evidence_roles),
         field="payload.evidence",
     )
     artifacts: dict[str, Path] = {"weights": resolved_model}
     expected_hashes: dict[str, str] = {"weights": weights_sha256}
-    for role in ("training_manifest", "training_report", "training_args"):
+    for role in evidence_roles:
         relative, digest = _relative_artifact(evidence[role], field=f"evidence.{role}")
         artifacts[role] = (package_root / relative).resolve()
         expected_hashes[role] = digest
@@ -1008,9 +1146,12 @@ def load_pose_model_input_contract(
             "Historical pose deployment currently requires rect=false and "
             "multi_scale=false."
         )
-    if training["training_semantics"] != (
-        "augmented_training_pipeline_with_deterministic_validation_imgsz_reference"
-    ):
+    expected_training_semantics = (
+        RUNTIME_RECEIPT_TRAINING_SEMANTICS
+        if schema_version == POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION_RUNTIME_RECEIPT
+        else "augmented_training_pipeline_with_deterministic_validation_imgsz_reference"
+    )
+    if training["training_semantics"] != expected_training_semantics:
         _fail("Training preprocessing semantics are unsupported.")
 
     manifest = _read_json(artifacts["training_manifest"], field="training manifest")
@@ -1018,8 +1159,9 @@ def load_pose_model_input_contract(
         _fail("Training manifest task differs from the pose model contract.")
     if manifest.get("set_id") != set_id:
         _fail("Training manifest set_id differs from the model contract.")
-    if tuple(manifest.get("imgsz") or ()) != network_shape:
-        _fail("Training manifest imgsz differs from the model contract.")
+    if schema_version != POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION_RUNTIME_RECEIPT:
+        if tuple(manifest.get("imgsz") or ()) != network_shape:
+            _fail("Training manifest imgsz differs from the model contract.")
     if manifest.get("input_format") != input_format:
         _fail("Training manifest input_format differs from the model contract.")
     if manifest.get("roi_pixel_contract_name") != pixel_contract:
@@ -1061,6 +1203,19 @@ def load_pose_model_input_contract(
         ultralytics_version
     ):
         _fail("Training report Ultralytics version differs from the model contract.")
+
+    if schema_version == POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION_RUNTIME_RECEIPT:
+        _validate_training_runtime_receipt(
+            _read_json(
+                artifacts["training_runtime_receipt"],
+                field="training runtime receipt",
+            ),
+            training_manifest_sha256=expected_hashes["training_manifest"],
+            source_shape_hw=source_shape,
+            network_shape_hw=network_shape,
+            training_rect=training_rect,
+            training_multi_scale=training_multi_scale,
+        )
 
     if schema_version == POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION_V1:
         runtime_profile = _validate_runtime_profile(
@@ -1269,6 +1424,172 @@ def build_historical_pose_model_input_contract(
     }
 
 
+def build_runtime_receipt_pose_model_input_contract(
+    *,
+    set_id: str,
+    run_id: str,
+    model_package_root: Path,
+    weights_relative_path: Path,
+    training_manifest_relative_path: Path,
+    training_report_relative_path: Path,
+    training_args_relative_path: Path,
+    training_runtime_receipt_relative_path: Path,
+    model_stride: int,
+    runtime_ultralytics_versions: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Build a v3 contract from the loader-observed pose training receipt."""
+
+    root = model_package_root.expanduser().resolve()
+    relative_paths = {
+        "weights": weights_relative_path,
+        "training_manifest": training_manifest_relative_path,
+        "training_report": training_report_relative_path,
+        "training_args": training_args_relative_path,
+        "training_runtime_receipt": training_runtime_receipt_relative_path,
+    }
+    resolved: dict[str, Path] = {}
+    for role, raw_path in relative_paths.items():
+        relative, _ = _relative_artifact(
+            {"relative_path": str(raw_path), "sha256": "0" * 64},
+            field=role,
+        )
+        resolved[role] = (root / relative).resolve()
+        if root not in resolved[role].parents or not resolved[role].is_file():
+            _fail(f"Model artifact is missing or outside package: {resolved[role]}.")
+
+    manifest = _read_json(resolved["training_manifest"], field="training manifest")
+    report = _read_yaml_evidence(resolved["training_report"], field="training report")
+    args = _read_yaml_evidence(resolved["training_args"], field="training args")
+    receipt = _read_json(
+        resolved["training_runtime_receipt"], field="training runtime receipt"
+    )
+    source_shapes = _report_source_shapes(report)
+    if len(source_shapes) != 1:
+        _fail("Training report does not have one source ROI shape.")
+    source_shape = next(iter(source_shapes))
+    network_shape = _shape(
+        receipt.get("payload", {}).get("model_input_shape_hw"),
+        field="training runtime receipt model_input_shape_hw",
+    )
+    if source_shape != network_shape:
+        _fail("Receipt-backed deployment requires exact source and network geometry.")
+    if manifest.get("task") != "pose" or manifest.get("set_id") != set_id:
+        _fail("Training manifest task or set differs from the requested model.")
+    args_imgsz = _evidence_int(args.get("imgsz"), field="training args imgsz")
+    if network_shape != (args_imgsz, args_imgsz):
+        _fail("Training args and runtime receipt disagree on model extent.")
+    training_rect = _evidence_bool(args.get("rect"), field="training args rect")
+    training_multi_scale = _evidence_bool(
+        args.get("multi_scale"), field="training args multi_scale"
+    )
+    if training_rect or training_multi_scale:
+        _fail("Receipt-backed pose deployment requires rect=false and multi_scale=false.")
+    report_params = report.get("training_params")
+    if (
+        not isinstance(report_params, Mapping)
+        or _evidence_int(report_params.get("imgsz"), field="training report imgsz")
+        != network_shape[0]
+        or _evidence_bool(report_params.get("rect"), field="training report rect")
+        != training_rect
+    ):
+        _fail("Training report geometry disagrees with the runtime receipt.")
+    history = report.get("training_history")
+    version = _required_text(
+        history.get("ultralytics_version") if isinstance(history, Mapping) else None,
+        field="training report ultralytics_version",
+    )
+    if importlib.metadata.version("ultralytics") != version:
+        _fail(
+            "Receipt-backed preprocessing reference must be built under the training "
+            f"Ultralytics version {version!r}."
+        )
+    if type(model_stride) is not int or model_stride <= 0:
+        _fail("model_stride must be a positive exact integer assertion.")
+
+    def artifact(role: str) -> dict[str, str]:
+        return {
+            "relative_path": str(relative_paths[role]),
+            "sha256": _sha256_file(resolved[role]),
+        }
+
+    _validate_training_runtime_receipt(
+        receipt,
+        training_manifest_sha256=artifact("training_manifest")["sha256"],
+        source_shape_hw=source_shape,
+        network_shape_hw=network_shape,
+        training_rect=training_rect,
+        training_multi_scale=training_multi_scale,
+    )
+    approved_versions = tuple(
+        sorted(
+            {
+                version,
+                *(
+                    _required_text(item, field="runtime Ultralytics version")
+                    for item in runtime_ultralytics_versions
+                ),
+            }
+        )
+    )
+    first_batch = receipt["payload"]["first_batch"]
+    batch_rows = int(first_batch["raw_shape_nchw"][0])
+    profile = build_empirical_pose_runtime_profile(
+        profile_id=(
+            f"training_runtime_receipt_{network_shape[0]}x{network_shape[1]}_"
+            "tensor_identity_v1"
+        ),
+        status="accepted",
+        classification="training_runtime_receipt_verified_exact_native_identity",
+        native_shape_hw=source_shape,
+        submitted_shape_hw=source_shape,
+        network_shape_hw=network_shape,
+        model_stride=model_stride,
+        input_mode="tensor",
+        runtime_ultralytics_versions=approved_versions,
+        evidence_id="pose_training_runtime_receipt_v2_first_batch",
+        evidence_artifact_path=str(training_runtime_receipt_relative_path),
+        evidence_receipt_sha256=artifact("training_runtime_receipt")["sha256"],
+        evidence_total_rows=batch_rows,
+        evidence_successful_rows=batch_rows,
+    )
+    payload = {
+        "status": "complete",
+        "model": {
+            "set_id": _required_text(set_id, field="set_id"),
+            "run_id": _required_text(run_id, field="run_id"),
+            "weights": artifact("weights"),
+        },
+        "evidence": {
+            role: artifact(role)
+            for role in (
+                "training_manifest",
+                "training_report",
+                "training_args",
+                "training_runtime_receipt",
+            )
+        },
+        "training_input": {
+            "source_roi_shape_hw": list(source_shape),
+            "network_shape_hw": list(network_shape),
+            "input_format": manifest.get("input_format"),
+            "roi_pixel_contract_name": manifest.get("roi_pixel_contract_name"),
+            "ultralytics_version": version,
+            "model_stride": int(model_stride),
+            "training_rect": training_rect,
+            "training_multi_scale": training_multi_scale,
+            "training_semantics": RUNTIME_RECEIPT_TRAINING_SEMANTICS,
+        },
+        "runtime_profiles": [profile],
+    }
+    return {
+        "schema_id": POSE_MODEL_INPUT_CONTRACT_SCHEMA_ID,
+        "schema_version": POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION_RUNTIME_RECEIPT,
+        "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
+        "payload_digest": canonical_json_sha256(payload),
+        "payload": payload,
+    }
+
+
 def build_empirical_pose_runtime_profile(
     *,
     profile_id: str,
@@ -1427,6 +1748,7 @@ __all__ = [
     "POSE_MODEL_INPUT_CONTRACT_FILENAME",
     "POSE_MODEL_INPUT_CONTRACT_SCHEMA_ID",
     "POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION",
+    "POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION_RUNTIME_RECEIPT",
     "POSE_MODEL_INPUT_CONTRACT_SCHEMA_VERSION_V1",
     "POSE_PREPROCESSING_PROBE_SCHEMA_ID",
     "POSE_PREPROCESSING_PROBE_SCHEMA_VERSION",
@@ -1436,6 +1758,7 @@ __all__ = [
     "SCALE_MATCHED_RUNTIME_CLASSIFICATION",
     "SCALE_MATCHED_RUNTIME_PROFILE_ID",
     "build_historical_pose_model_input_contract",
+    "build_runtime_receipt_pose_model_input_contract",
     "build_empirical_pose_runtime_profile",
     "build_pose_model_input_contract_v2",
     "build_pose_preprocessing_equivalence_probe",
