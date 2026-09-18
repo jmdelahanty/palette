@@ -279,7 +279,7 @@
       const reviewWarning = completionGuard.ready ? "" :
         "<p><b>Action needed</b> Set component review before completing this task.</p>";
       document.getElementById("summary").innerHTML =
-        "<p><b>ROI</b> " + payload.roi_idx + " / <b>frame</b> " + (payload.frame_idx ?? "") + "</p>" +
+        "<p><b>ROI</b> " + payload.roi_idx + " / <b>" + (payload.frame_index_domain === "legacy_training_sample_row" ? "source training row" : "frame") + "</b> " + (payload.frame_idx ?? "") + "</p>" +
         "<p><b>Position</b> " + (state.position + 1) + " of " + state.total + "</p>" +
         "<p><b>Component</b> " + payload.component_name + "</p>" +
         "<p><b>Run</b> " + payload.refined_run + "</p>" +
@@ -698,4 +698,3 @@
       }
     });
     loadCurrent();
-  
