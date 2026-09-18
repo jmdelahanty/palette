@@ -6,6 +6,10 @@ The immutable seed retains the original per-landmark origin after manual edits.
 
 import numpy as np
 
+from fisheye.shared.keypoint_motion_authority import (
+    keypoint_source_crop_run_from_attributes,
+)
+
 from fisheye.shared.recovered_training_review_contract import (
     COORDINATE_SYSTEM,
     REVIEW_SCHEMA,
@@ -32,7 +36,8 @@ def is_recovered_roi_review(root, refined, crop):
         or crop.attrs.get("sensor_pixel_origin_available") is not False
         or crop.attrs.get("frame_index_domain") != "legacy_training_sample_row"
         or refined.attrs.get("source_bindings") != crop.attrs.get("source_bindings")
-        or refined.attrs.get("source_crop_run") != str(crop.path).split("/")[-1]
+        or keypoint_source_crop_run_from_attributes(refined.attrs)
+        != str(crop.path).split("/")[-1]
         or any(
             initial_contract_digest(g) != g.attrs.get("initial_contract_sha256")
             for g in (crop, refined)
