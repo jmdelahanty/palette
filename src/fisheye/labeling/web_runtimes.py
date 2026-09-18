@@ -638,6 +638,7 @@ def _keypoint_runtime_state(runtime: KeypointRuntimeSession, backend_module: Any
         "summary": summary,
         "review_status": dict(review_status) if isinstance(review_status, Mapping) else None,
         "immutable_base": bool(session.immutable_base),
+        "recovered_roi_only": bool(getattr(session, "recovered_roi_only", False)),
         "edit_storage": "delta_generation" if session.immutable_base else "in_place",
         "delta_run": str(session.delta_run) if session.delta_run is not None else None,
         "delta_generation": (
@@ -1110,6 +1111,7 @@ def _subject_mask_current_payload(
         "position": int(runtime.position),
         "component_name": runtime.component_name,
         "source_run": str(runtime.source.run_name),
+        "frame_index_domain": runtime.source.group.attrs.get("frame_index_domain"),
         "refined_run": str(runtime.refined.run_name),
         "component_source": {
             "source_stage": runtime.component_source_stage,

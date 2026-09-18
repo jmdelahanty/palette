@@ -10,6 +10,7 @@
     let maskOverlayCtx = maskOverlayCanvas.getContext("2d");
     let maskOverlayDirty = true;
     let maskOverlayDirtyRect = null;
+    let maskView = "overlay";
     let drawScheduled = false;
     let drawing = false;
     let lassoMode = false;
@@ -146,20 +147,29 @@
       };
     }
 
+    function setMaskView(value) {
+      maskView = value === "binary" ? "binary" : "overlay";
+      document.getElementById("mask-view").value = maskView;
+      markMaskOverlayDirty();
+      scheduleDraw();
+    }
+
     function rebuildMaskOverlay() {
       if (!mask || !maskWidth || !maskHeight) return;
+      const binary = maskView === "binary";
       const resized = maskOverlayCanvas.width !== maskWidth || maskOverlayCanvas.height !== maskHeight;
       if (maskOverlayCanvas.width !== maskWidth) maskOverlayCanvas.width = maskWidth;
       if (maskOverlayCanvas.height !== maskHeight) maskOverlayCanvas.height = maskHeight;
       if (resized || !maskOverlayDirtyRect) {
         const overlay = new ImageData(maskWidth, maskHeight);
         for (let i = 0; i < mask.length; i++) {
-          if (!mask[i]) continue;
+          if (!mask[i] && !binary) continue;
           const dst = i * 4;
-          overlay.data[dst] = 0;
-          overlay.data[dst + 1] = 200;
-          overlay.data[dst + 2] = 148;
-          overlay.data[dst + 3] = 118;
+          const value = mask[i] ? 255 : 0;
+          overlay.data[dst] = binary ? value : 0;
+          overlay.data[dst + 1] = binary ? value : 200;
+          overlay.data[dst + 2] = binary ? value : 148;
+          overlay.data[dst + 3] = binary ? 255 : 118;
         }
         maskOverlayCtx.putImageData(overlay, 0, 0);
       } else {
@@ -171,12 +181,13 @@
         for (let yy = 0; yy < h; yy++) {
           for (let xx = 0; xx < w; xx++) {
             const src = (y0 + yy) * maskWidth + (x0 + xx);
-            if (!mask[src]) continue;
+            if (!mask[src] && !binary) continue;
             const dst = (yy * w + xx) * 4;
-            overlay.data[dst] = 0;
-            overlay.data[dst + 1] = 200;
-            overlay.data[dst + 2] = 148;
-            overlay.data[dst + 3] = 118;
+            const value = mask[src] ? 255 : 0;
+            overlay.data[dst] = binary ? value : 0;
+            overlay.data[dst + 1] = binary ? value : 200;
+            overlay.data[dst + 2] = binary ? value : 148;
+            overlay.data[dst + 3] = binary ? 255 : 118;
           }
         }
         maskOverlayCtx.putImageData(overlay, x0, y0);
@@ -279,7 +290,7 @@
       const reviewWarning = completionGuard.ready ? "" :
         "<p><b>Action needed</b> Set component review before completing this task.</p>";
       document.getElementById("summary").innerHTML =
-        "<p><b>ROI</b> " + payload.roi_idx + " / <b>frame</b> " + (payload.frame_idx ?? "") + "</p>" +
+        "<p><b>ROI</b> " + payload.roi_idx + " / <b>" + (payload.frame_index_domain === "legacy_training_sample_row" ? "source training row" : "frame") + "</b> " + (payload.frame_idx ?? "") + "</p>" +
         "<p><b>Position</b> " + (state.position + 1) + " of " + state.total + "</p>" +
         "<p><b>Component</b> " + payload.component_name + "</p>" +
         "<p><b>Run</b> " + payload.refined_run + "</p>" +
@@ -698,4 +709,3 @@
       }
     });
     loadCurrent();
-  

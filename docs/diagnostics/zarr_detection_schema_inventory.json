@@ -3301,7 +3301,7 @@
       "dtypes": [
         "uint64"
       ],
-      "occurrence_count": 18,
+      "occurrence_count": 20,
       "path_patterns": [
         "<crop_group>/instance_key",
         "<require_runs_parent(root, 'crop_runs')>/<resolved_proxy_run>/instance_key",
@@ -3373,7 +3373,7 @@
       "dtypes": [
         "int64"
       ],
-      "occurrence_count": 18,
+      "occurrence_count": 19,
       "path_patterns": [
         "<crop_group>/source_refined_row_ids",
         "<require_runs_parent(root, 'crop_runs')>/<resolved_proxy_run>/source_refined_row_ids",
@@ -5576,6 +5576,57 @@
       "line": 813,
       "path_pattern": "<root.get('subject_mask_runs')>/<str(output_run)>/detection_source",
       "shape_expression": "shape(np.asarray(detection_source_arr[:], dtype=np.int8) if detection_source_arr is not None else np.zeros((roi_count,), dtype=np.int8))",
+      "shape_template": null,
+      "status": "current"
+    },
+    {
+      "affiliation_basis": "shared detection identity/lineage leaf",
+      "affiliation_role": "downstream_detection_lineage",
+      "array_name": "instance_key",
+      "array_name_expression": "'instance_key'",
+      "declaring_stage": "crop",
+      "dtype": null,
+      "dtype_expression": null,
+      "evidence_id": "schema-required-02bb72ead60b3d8e",
+      "evidence_kind": "reader_required_array_declaration",
+      "file": "src/fisheye/shared/crop_row_rebase.py",
+      "line": 21,
+      "path_pattern": "crop_runs/<run>/instance_key",
+      "shape_expression": null,
+      "shape_template": null,
+      "status": "current"
+    },
+    {
+      "affiliation_basis": "shared detection identity/lineage leaf",
+      "affiliation_role": "downstream_detection_lineage",
+      "array_name": "source_refined_row_ids",
+      "array_name_expression": "'source_refined_row_ids'",
+      "declaring_stage": "crop",
+      "dtype": null,
+      "dtype_expression": null,
+      "evidence_id": "schema-required-51a33fb66479f981",
+      "evidence_kind": "reader_required_array_declaration",
+      "file": "src/fisheye/shared/crop_row_rebase.py",
+      "line": 21,
+      "path_pattern": "crop_runs/<run>/source_refined_row_ids",
+      "shape_expression": null,
+      "shape_template": null,
+      "status": "current"
+    },
+    {
+      "affiliation_basis": "shared detection identity/lineage leaf",
+      "affiliation_role": "downstream_detection_lineage",
+      "array_name": "instance_key",
+      "array_name_expression": "'instance_key'",
+      "declaring_stage": "crop",
+      "dtype": null,
+      "dtype_expression": null,
+      "evidence_id": "schema-required-059ea305e570cc3f",
+      "evidence_kind": "reader_required_array_declaration",
+      "file": "src/fisheye/shared/subject_position_keypoint_source.py",
+      "line": 118,
+      "path_pattern": "crop_runs/<run>/instance_key",
+      "shape_expression": null,
       "shape_template": null,
       "status": "current"
     },
@@ -8528,11 +8579,11 @@
       "detection_implementation": 22,
       "detection_quality": 5,
       "detection_training": 27,
-      "downstream_detection_lineage": 97,
+      "downstream_detection_lineage": 100,
       "refined_detect": 50,
       "refined_detection": 25
     },
-    "schema_evidence_count": 289,
+    "schema_evidence_count": 292,
     "unresolved_conflict_count": 13,
     "writer_evidence_count": 209
   },

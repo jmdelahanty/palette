@@ -25,6 +25,12 @@
       return keypointPalette[Math.abs(Number(index) || 0) % keypointPalette.length];
     }
 
+    function decodeKeypoints(values) {
+      // JSON null is a missing landmark; Number(null) would invent (0, 0).
+      return values.map((point) => point.map((v) =>
+        typeof v === "number" && Number.isFinite(v) ? v : NaN));
+    }
+
     function setStatus(text, isError=false) {
       const node = document.getElementById("status");
       node.textContent = text;
@@ -116,7 +122,8 @@
         const label = payload.labels[index] || String(index + 1);
         const marker = index === activePoint ? "▶ " : "";
         const color = keypointColor(index);
-        return `<div class="point-row"><b><span style="display:inline-block;width:0.75em;height:0.75em;border-radius:999px;background:${color};margin-right:0.4em;border:1px solid rgba(0,0,0,.24);"></span>${marker}${label}</b><span>${Number.isFinite(x) ? x.toFixed(1) : "nan"}, ${Number.isFinite(y) ? y.toFixed(1) : "nan"}</span></div>`;
+        const coordinates = Number.isFinite(x) && Number.isFinite(y) ? `${x.toFixed(1)}, ${y.toFixed(1)}` : "missing";
+        return `<div class="point-row" role="button" tabindex="0" data-point-index="${index}"><b><span style="display:inline-block;width:0.75em;height:0.75em;border-radius:999px;background:${color};margin-right:0.4em;border:1px solid rgba(0,0,0,.24);"></span>${marker}${label}</b><span>${coordinates}</span></div>`;
       }).join("");
       document.getElementById("points").innerHTML = rows;
     }
@@ -124,15 +131,19 @@
     function renderSummary() {
       const state = payload.state || {};
       const immutableDeltaReview = Boolean(state.immutable_base) && state.edit_storage === "delta_generation";
+      const recoveredReview = Boolean(state.recovered_roi_only);
       const mutableReviewControls = document.getElementById("mutable-review-controls");
       const immutableReviewNote = document.getElementById("immutable-delta-review-note");
-      if (mutableReviewControls) mutableReviewControls.hidden = immutableDeltaReview;
-      if (immutableReviewNote) immutableReviewNote.hidden = !immutableDeltaReview;
+      if (mutableReviewControls) mutableReviewControls.hidden = immutableDeltaReview || recoveredReview;
+      if (immutableReviewNote) {
+        immutableReviewNote.hidden = !immutableDeltaReview && !recoveredReview;
+        if (recoveredReview) immutableReviewNote.textContent = "Recovered training labels are saved per row. Registry approval and export are separate steps.";
+      }
       const editStorage = immutableDeltaReview
         ? `delta ${state.delta_run || ""}/${state.delta_generation || ""}`
         : "mutable run";
       document.getElementById("summary").innerHTML = `
-        <p><b>ROI</b> ${payload.roi_idx} / <b>frame</b> ${payload.frame_idx}</p>
+        <p><b>ROI</b> ${payload.roi_idx} / <b>${payload.frame_index_domain === "legacy_training_sample_row" ? "source training row" : "frame"}</b> ${payload.frame_idx}</p>
         <p><b>Position</b> ${state.position + 1} of ${state.total}</p>
         <p><b>Run</b> ${state.refined_run || ""}</p>
         <p><b>Edit storage</b> ${editStorage}</p>
@@ -150,8 +161,8 @@
     async function loadCurrent() {
       try {
         payload = await api("/roi/current");
-        points = payload.points.map((p) => [Number(p[0]), Number(p[1])]);
-        activePoint = -1;
+        points = decodeKeypoints(payload.points);
+        activePoint = points.findIndex((p) => p.some((v) => !Number.isFinite(v)));
         prepareImageSurface();
         renderSummary();
         renderPoints();
@@ -177,6 +188,9 @@
 
     async function save(advance) {
       try {
+        if (points.some((point) => point.some((v) => !Number.isFinite(v)))) {
+          throw new Error("Place every missing landmark before saving this row.");
+        }
         const result = await api("/save", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
@@ -274,8 +288,8 @@
 
     function resetPoints() {
       if (!payload) return;
-      points = payload.points.map((point) => [Number(point[0]), Number(point[1])]);
-      activePoint = -1;
+      points = decodeKeypoints(payload.points);
+      activePoint = points.findIndex((p) => p.some((v) => !Number.isFinite(v)));
       renderPoints();
       draw();
       setStatus("Reset points from current ROI.");
@@ -287,12 +301,13 @@
       const [canvasX, canvasY] = canvasPoint(event);
       const [x, y] = canvasToImage(canvasX, canvasY);
       const nearest = nearestPoint(x, y);
-      if (nearest >= 0) {
+      const placingMissing = activePoint >= 0 && points[activePoint].some((v) => !Number.isFinite(v));
+      if (nearest >= 0 && !placingMissing) {
         activePoint = nearest;
       }
       dragging = activePoint >= 0;
       if (dragging) {
-        points[activePoint] = [Math.max(0, Math.min(canvas.width - 1, x)), Math.max(0, Math.min(canvas.height - 1, y))];
+        points[activePoint] = [Math.max(0, Math.min(viewport.imageWidth - 1, x)), Math.max(0, Math.min(viewport.imageHeight - 1, y))];
         renderPoints();
         draw();
       }
@@ -307,6 +322,15 @@
       draw();
     });
     window.addEventListener("mouseup", () => { dragging = false; viewport.endPan(); });
+    function selectPointRow(event) {
+      if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return;
+      const row = event.target.closest("[data-point-index]");
+      if (!row) return;
+      event.preventDefault();
+      setActivePoint(Number(row.dataset.pointIndex));
+    }
+    document.getElementById("points").addEventListener("click", selectPointRow);
+    document.getElementById("points").addEventListener("keydown", selectPointRow);
     canvas.addEventListener("wheel", viewport.handleWheel, {passive: false});
     window.addEventListener("keydown", (event) => {
       const targetTag = event.target?.tagName?.toLowerCase();

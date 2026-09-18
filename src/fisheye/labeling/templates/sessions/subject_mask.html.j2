@@ -146,6 +146,12 @@
       </div>
       <aside class="panel">
         <div id="summary" class="meta"></div>
+        <label for="mask-view">View</label>
+        <select id="mask-view" onchange="setMaskView(this.value)" aria-describedby="mask-view-help">
+          <option value="overlay">Image + mask</option>
+          <option value="binary">Binary mask</option>
+        </select>
+        <p id="mask-view-help" class="meta">Binary view shows the selected label in white and background in black. Paint, erase, and lasso work in either view.</p>
         <div class="buttons">
           <button type="button" onclick="nav(-1)">Previous</button>
           <button type="button" onclick="nav(1)">Next</button>
