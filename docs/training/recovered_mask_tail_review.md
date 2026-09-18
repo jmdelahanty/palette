@@ -110,6 +110,11 @@ No new merged export or model training is performed by recovery. A future
 export adapter must consume this explicit schema and its eligibility/visibility
 checks; these runs do not masquerade as the existing head-only crop product.
 
+In the mask editor, choose **View → Binary mask** to inspect the selected label
+as white foreground on black background. Painting, erasing, and lasso editing
+work in both views. Switching views preserves unsaved mask edits and the current
+zoom; the selected view stays active while navigating between ROIs.
+
 Mask corrections stay in dense editable masks. To regenerate from corrected
 masks, use a **new** version and add:
 
