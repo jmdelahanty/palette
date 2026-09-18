@@ -76,14 +76,20 @@ def test_producer_opens_in_existing_mask_and_pose_editors(review_archive):
         editor.apply_review_status(session, state="approved")
     assert "authoritative_run" not in root["refined_keypoints_runs"].attrs
     payload = editor.load_roi_payload(session, 0)
-    assert payload["points"][14:] == [[None, None]] * 4
+    assert payload["points"][14:18] == [[None, None]] * 4
+    assert len(payload["points"]) == 19
+    assert payload["labels"][-1] == "snout_tip"
     assert payload["frame_idx"] == 15
     assert "roi_coordinates_full" not in session.crop
     seed_before = array_hashes(root[paths["seed"]])
     points = session.kp_roi_arr[0]
     with pytest.raises(ValueError, match="incomplete"):
         editor.save_roi_correction(session, position=0, points=points)
-    points[14:] = [[74, 43], [80, 46], [54, 43], [48, 46]]
+    points[14:18] = [[74, 43], [80, 46], [54, 43], [48, 46]]
+    missing_snout = points.copy()
+    missing_snout[18] = np.nan
+    with pytest.raises(ValueError, match="incomplete"):
+        editor.save_roi_correction(session, position=0, points=missing_snout)
     outside = points.copy()
     outside[-1, 0] = 128
     with pytest.raises(ValueError, match="inside the crop"):
@@ -91,16 +97,18 @@ def test_producer_opens_in_existing_mask_and_pose_editors(review_archive):
     saved = editor.save_roi_correction(session, position=0, points=points)
     assert saved["geometry_ok"]
     assert session.refined["training_eligible"][:].tolist() == [True, False]
-    assert (
-        session.refined["keypoint_origin"][0].tolist() == [1] * 3 + [2] * 11 + [3] * 4
-    )
-    assert (
-        session.refined["keypoint_manual_edit"][0].tolist() == [False] * 14 + [True] * 4
-    )
+    assert session.refined["keypoint_origin"][0].tolist() == [1] * 3 + [2] * 11 + [
+        3
+    ] * 4 + [2]
+    assert session.refined["keypoint_manual_edit"][0].tolist() == [False] * 14 + [
+        True
+    ] * 4 + [False]
     assert array_hashes(root[paths["seed"]]) == seed_before
     points[4, 0] += 1
+    points[18, 1] += 1
     editor.save_roi_correction(session, position=0, points=points)
     assert session.refined["keypoint_origin"][0, 4] == 3
+    assert session.refined["keypoint_origin"][0, 18] == 3
     reopened = editor.resolve_review_session(
         str(path), refined_run=paths["pose_edit"].split("/")[1], include_all=True
     )

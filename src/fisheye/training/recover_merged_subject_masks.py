@@ -47,6 +47,11 @@ from fisheye.training.recovered_subject_mask_source import (
     read_recovered_mask_source,
     use_refined_mask_snapshot,
 )
+from fisheye.training.mask_tail_keypoints import (
+    LEGACY_SCHEMA_NAME,
+    SCHEMA_NAME,
+    recipe_for_schema,
+)
 
 
 def validate_initial_payload(path):
@@ -67,6 +72,12 @@ def validate_initial_payload(path):
 
 def review_tasks(archive, recording_id, result, version):
     paths = result["paths"]
+    count = result.get("keypoint_count", 18)
+    snout_note = (
+        " Snout tip derived from the body contour; review its placement."
+        if count == 19
+        else ""
+    )
     common = {
         "recording_id": recording_id,
         "zarr_use": "training",
@@ -85,13 +96,18 @@ def review_tasks(archive, recording_id, result, version):
     tasks = [
         {
             **common,
-            "task_id": f"{recording_id}-tail18-{version}",
+            "task_id": f"{recording_id}-tail{count}-{version}",
             "workflow_kind": "keypoints",
             "stage_group": "refined_keypoints_runs",
             "run_name": paths["pose_edit"].split("/")[1],
-            "title": "Add pectoral fin landmarks and review derived tail points",
+            "title": (
+                "Review snout and tail; add pectoral fin landmarks (19 points)"
+                if count == 19
+                else "Add pectoral fin landmarks and review derived tail points"
+            ),
             "priority": 80,
-            "notes": "Head3 recovered; tail11 derived; fin4 missing. Keep all points inside the crop. Failed tail rows need mask review or manual landmarks.",
+            "notes": "Head3 recovered; tail11 derived; fin4 missing. Keep all points inside the crop. Failed rows need mask review or manual landmarks."
+            + snout_note,
             "scope": {
                 **scope,
                 "refined_run": paths["pose_edit"].split("/")[1],
@@ -109,7 +125,7 @@ def review_tasks(archive, recording_id, result, version):
                 "component_name": "subject_body",
                 "stage_group": "refined_subject_masks_runs",
                 "run_name": paths["mask_edit"].split("/")[1],
-                "title": "Inspect masks on rows where tail derivation failed",
+                "title": "Inspect masks on rows where landmark derivation failed",
                 "priority": 90,
                 "notes": "Targeted diagnostic queue; completion is not evidence that every mask row was re-reviewed. Original pixels and failure details are preserved. Regenerate a new pose version after mask corrections.",
                 "scope": {
@@ -136,7 +152,9 @@ def recover_subject_masks(
     resume=False,
     legacy_unconsolidated_source=False,
     refined_mask_run=None,
+    pose_schema=SCHEMA_NAME,
 ):
+    recipe_for_schema(pose_schema)
     archive, merged = archive.resolve(), merged.resolve()
     paths = run_paths(version)
     if not resume and any((archive / path).exists() for path in paths.values()):
@@ -161,6 +179,7 @@ def recover_subject_masks(
             "row_count": len(arrays["roi_images"]),
             "paths": paths,
             "source_bindings": binding,
+            "pose_schema": pose_schema,
         }
     with tempfile.TemporaryDirectory(
         prefix="palette-mask-recovery-", dir=scratch_root
@@ -172,7 +191,9 @@ def recover_subject_masks(
         root.attrs.update(
             {"zarr_purpose": "training", "recording_id": binding["recording_id"]}
         )
-        result = build_review_payload(root, arrays, labels, binding, version=version)
+        result = build_review_payload(
+            root, arrays, labels, binding, version=version, pose_schema=pose_schema
+        )
         publications = []
         for path in paths.values():
             family, name = path.split("/")
@@ -280,6 +301,12 @@ def main(argv=None):
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--pose-schema",
+        choices=(SCHEMA_NAME, LEGACY_SCHEMA_NAME),
+        default=SCHEMA_NAME,
+        help="Pose schema; the default includes snout_tip. v1 is legacy compatibility only.",
+    )
     parser.add_argument(
         "--refined-mask-run",
         help="Derive a new version from previously corrected dense masks",

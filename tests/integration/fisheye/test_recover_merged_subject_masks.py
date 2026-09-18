@@ -109,6 +109,9 @@ def test_recovery_publication_preserves_selectors_and_refuses_edited_resume(sour
     assert root["crop_runs"].attrs["latest"] == "prior"
     assert root["crop_runs"].attrs["authoritative_run"] == "prior"
     assert result["row_count"] == 2
+    assert result["pose_schema"] == "head_tail11_fins_v2"
+    assert root[result["paths"]["pose_edit"]]["keypoints_roi"].shape == (2, 19, 2)
+    assert "tail19" in result["tasks"][0]["task_id"]
     assert not root[result["paths"]["pose_edit"]]["training_eligible"][:].any()
     resumed = recover_subject_masks(
         archive=archive, merged=merged, version="v1", apply=True, resume=True
@@ -135,7 +138,11 @@ def test_new_version_can_use_corrected_dense_masks_without_overwriting_old_seed(
 ):
     archive, merged = sources
     first = recover_subject_masks(
-        archive=archive, merged=merged, version="v1", apply=True
+        archive=archive,
+        merged=merged,
+        version="v1",
+        apply=True,
+        pose_schema="head_tail11_fins_v1",
     )
     root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
     mask_path = first["paths"]["mask_edit"]
@@ -152,6 +159,10 @@ def test_new_version_can_use_corrected_dense_masks_without_overwriting_old_seed(
     assert refreshed[second["paths"]["mask"]]["masks_roi"][0, 0, 1, 1] == 1
     assert not refreshed[second["paths"]["seed"]]["tail_valid"][0]
     assert second["source_bindings"]["refined_mask_snapshot"]["run_path"] == mask_path
+    assert refreshed[first["paths"]["seed"]]["keypoints_roi"].shape == (2, 18, 2)
+    assert refreshed[second["paths"]["seed"]]["keypoints_roi"].shape == (2, 19, 2)
+    assert not refreshed[second["paths"]["seed"]]["snout_valid"][0]
+    assert refreshed[second["paths"]["seed"]]["snout_valid"][1]
 
 
 def test_failed_publication_can_resume_without_changing_previous_children(

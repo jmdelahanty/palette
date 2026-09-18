@@ -7,6 +7,7 @@ import numpy as np
 from fisheye.analysis.subject_shape_runs import (
     BodyFrameBatch,
     CENTERLINE_SAMPLE_COUNT,
+    SNOUT_TIP_METHOD,
     _compute_caudal_anchor_batch,
     _compute_centerline_batch,
     _compute_snout_tip_batch,
@@ -20,9 +21,11 @@ from fisheye.analysis.subject_shape_spline import (
 from fisheye.shared.subject_shape_coordinate_publication import (
     derive_canonical_subject_shape_body_frame,
 )
+from fisheye.shared.detect_reason_codec import encode_reason_bytes
 
-SCHEMA_NAME = "head_tail11_fins_v1"
-RECIPE = {
+LEGACY_SCHEMA_NAME = "head_tail11_fins_v1"
+SCHEMA_NAME = "head_tail11_fins_v2"
+LEGACY_RECIPE = {
     "id": "recovered_head_oriented_subject_shape_tail11_arclength_v1",
     "orientation": "existing_head3_camera_y_down_axes_in_roi",
     "centerline": "subject_shape_snout_extended_longest_skeleton_endpoint_path",
@@ -36,13 +39,33 @@ RECIPE = {
     "mask_cleanup": "none",
     "outside_body_policy": "fail_row",
 }
+RECIPE = {
+    **LEGACY_RECIPE,
+    "id": "recovered_head_oriented_subject_shape_snout_tail11_arclength_v2",
+    "snout_tip_estimator": SNOUT_TIP_METHOD,
+    "snout_projection_tolerance_px": 1.0,
+}
 ORIGIN_CODES = {"missing": 0, "recovered_head": 1, "mask_derived": 2, "manual": 3}
 
 
+def recipe_for_schema(schema_name):
+    if schema_name == LEGACY_SCHEMA_NAME:
+        return LEGACY_RECIPE
+    if schema_name == SCHEMA_NAME:
+        return RECIPE
+    raise ValueError(f"Unsupported recovered pose schema: {schema_name}")
+
+
 def derive_tail_seed(
-    masks: np.ndarray, mask_labels: tuple[str, ...], head_points: np.ndarray
+    masks: np.ndarray,
+    mask_labels: tuple[str, ...],
+    head_points: np.ndarray,
+    *,
+    schema_name: str = SCHEMA_NAME,
 ) -> dict[str, np.ndarray]:
     """Keep every row, preserve head coordinates, leave fins/failures as NaNs."""
+    recipe = recipe_for_schema(schema_name)
+    include_snout = schema_name == SCHEMA_NAME
     masks, head = np.asarray(masks), np.asarray(head_points)
     if (
         masks.ndim != 4
@@ -65,7 +88,12 @@ def derive_tail_seed(
             np.isfinite(head).all(axis=2),
         )
     )
-    snout = _compute_snout_tip_batch(body, frame, source_body_qc=None)
+    snout = _compute_snout_tip_batch(
+        body,
+        frame,
+        source_body_qc=None,
+        projection_tolerance_px=recipe.get("snout_projection_tolerance_px", 1.0),
+    )
     anchor = _compute_caudal_anchor_batch(swim, frame)
     center = _compute_centerline_batch(
         body, frame, anchor, snout_tip=snout, crop_to_foreground=True
@@ -85,9 +113,10 @@ def derive_tail_seed(
         tail_sample_count=11,
     )
     n, _, h, w = masks.shape
-    points = np.full((n, 18, 2), np.nan, dtype=head.dtype)
+    point_count = 19 if include_snout else 18
+    points = np.full((n, point_count, 2), np.nan, dtype=head.dtype)
     points[:, :3] = head
-    origins = np.zeros((n, 18), dtype=np.uint8)
+    origins = np.zeros((n, point_count), dtype=np.uint8)
     origins[:, :3] = np.where(np.isfinite(head).all(axis=2), 1, 0)
     valid = np.zeros(n, dtype=bool)
     reasons = np.asarray(spline.tail_sample_failure_reasons, dtype=object).copy()
@@ -111,7 +140,7 @@ def derive_tail_seed(
             xy, u, arc = sample_spline_segment_by_arclength(
                 (knots, control.T, degree),
                 start_u=start,
-                integration_samples=RECIPE["integration_samples"],
+                integration_samples=recipe["integration_samples"],
             )
         except ValueError as exc:
             reasons[row] = f"tail_sampling_failed:{exc}"
@@ -128,7 +157,7 @@ def derive_tail_seed(
         points[row, 3:14] = xy
         origins[row, 3:14] = ORIGIN_CODES["mask_derived"]
         valid[row], reasons[row], length[row], parameters[row] = True, "ok", arc, u
-    return {
+    result = {
         "keypoints_roi": points,
         "keypoint_origin": origins,
         "tail_valid": valid,
@@ -139,3 +168,22 @@ def derive_tail_seed(
         "swim_caudal_anchor_xy": anchor.point_xy,
         "training_eligible": np.zeros(n, dtype=bool),
     }
+    if include_snout:
+        snout_valid = snout.valid & np.isfinite(snout.point_xy).all(axis=1)
+        inside = (
+            (snout.point_xy >= 0).all(axis=1)
+            & (snout.point_xy[:, 0] < w)
+            & (snout.point_xy[:, 1] < h)
+        )
+        snout_reasons = _decode_reason_rows(snout.failure_reason_bytes).copy()
+        snout_reasons[snout_valid & ~inside] = "snout_outside_crop"
+        snout_valid &= inside
+        points[snout_valid, 18] = snout.point_xy[snout_valid]
+        origins[snout_valid, 18] = ORIGIN_CODES["mask_derived"]
+        result.update(
+            {
+                "snout_valid": snout_valid,
+                "snout_failure_reason_bytes": encode_reason_bytes(snout_reasons),
+            }
+        )
+    return result

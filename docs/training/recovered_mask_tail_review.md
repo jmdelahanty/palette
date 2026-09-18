@@ -6,12 +6,19 @@ the historical sampled training-row key, then verifies identical crop pixels
 and matching crop boxes (absolute tolerance `1e-7`, no relative tolerance).
 Repeated images are allowed; ambiguous or missing row identities are rejected.
 
-The new `head_tail11_fins_v1` skeleton contains 18 points:
+The default `head_tail11_fins_v2` skeleton contains 19 points:
 
 - Existing `swim_bladder`, `eye_left`, `eye_right`, preserving indices 0–2.
 - `tail_base`, `tail_point_01` through `tail_point_09`, `tail_tip`.
 - Right and left pectoral fin insertion and tip, using the names from
   `traditional_v3`.
+- `snout_tip`, also using the existing `traditional_v3` name.
+
+Version 2 appends `snout_tip` at index 18, preserving all 18 indices from
+`head_tail11_fins_v1`. The earlier schema remains available for historical
+artifacts; it is never reinterpreted as a 19-point skeleton. New versions use
+v2 by default. `--pose-schema head_tail11_fins_v1` is an explicit compatibility
+option for historical reproduction/resume.
 
 This is a scientific/schema addition with a crop-only review compatibility
 path. The existing three- and ten-point schemas, analytics sampling defaults,
@@ -35,6 +42,12 @@ arc length. The intended stations are 0%, 10%, …, 100% of tail length;
 integration is numerical, not an assertion of exact analytic distances.
 The recipe records this resolution, spline degree/smoothing, intermediate
 polyline base, contour anchor, output spline parameters, and arc length.
+
+The snout uses the maintained subject-shape estimator: select the body-contour
+point nearest the anatomical midline among candidates within one pixel of the
+most forward contour projection. This is a mask-derived label for review;
+its validity and failure reason are retained separately from tail validity.
+Missing, fragmented, invalid, or out-of-crop snout estimates remain unannotated.
 
 No mask cleanup is performed. Fragmentation, missing/ambiguous geometry, body
 border contact, and tail stations outside the body produce retained rows with
@@ -102,10 +115,11 @@ scripts/py -m fisheye.labeling.web --store /path/to/labeling.sqlite \
 
 Use the viewer from this implementation: older versions require sensor origins
 and convert missing landmarks to zero. Click a landmark name to select it, then
-place it in the image; `[` and `]` also cycle through all 18 points. Initial load
+place it in the image; `[` and `]` also cycle through all 19 points. Initial load
 and reset select the first missing point. Saving requires every point to be
 finite and inside the crop. `training_eligible` is false until a complete save
 passes the existing head-geometry QC. Rejecting/clearing a row clears eligibility.
+The required points include the snout; a row with a missing snout is incomplete.
 No new merged export or model training is performed by recovery. A future
 export adapter must consume this explicit schema and its eligibility/visibility
 checks; these runs do not masquerade as the existing head-only crop product.

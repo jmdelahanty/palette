@@ -7,6 +7,7 @@ from scipy import integrate, interpolate
 from fisheye.shared.pose_schema import schema_from_package
 from fisheye.analysis.subject_shape_spline import sample_spline_segment_by_arclength
 from fisheye.training.mask_tail_keypoints import derive_tail_seed
+from fisheye.shared.detect_reason_codec import decode_reason_bytes
 
 
 def test_schema_preserves_head_indices_and_has_eleven_tail_stations():
@@ -21,6 +22,15 @@ def test_schema_preserves_head_indices_and_has_eleven_tail_stations():
         schema.node_names[14:] == schema_from_package("traditional_v3").node_names[6:]
     )
     assert schema.num_keypoints == 18
+
+
+def test_snout_schema_extends_existing_indices_without_reinterpreting_v1():
+    legacy = schema_from_package("head_tail11_fins_v1")
+    current = schema_from_package("head_tail11_fins_v2")
+    assert current.node_names[:-1] == legacy.node_names
+    assert current.node_names[-1] == "snout_tip"
+    assert current.num_keypoints == 19
+    assert [18, 1] in current.edges and [18, 2] in current.edges
 
 
 def test_spline_stations_are_arclength_spaced_not_parameter_spaced():
@@ -70,15 +80,49 @@ def test_seed_keeps_head_exact_and_fins_missing_and_reports_fragmentation():
     )
     assert result["tail_valid"].tolist() == [True]
     np.testing.assert_array_equal(result["keypoints_roi"][:, :3], head)
-    assert np.isnan(result["keypoints_roi"][:, 14:]).all()
+    assert np.isnan(result["keypoints_roi"][:, 14:18]).all()
+    # The contour is at the pixel edge, half a pixel before the first body row.
+    np.testing.assert_allclose(result["keypoints_roi"][0, 18], [64, 11.5])
+    assert result["snout_valid"].tolist() == [True]
+    assert decode_reason_bytes(result["snout_failure_reason_bytes"]).tolist() == ["ok"]
     assert not result["training_eligible"].any()
-    assert result["keypoint_origin"][0].tolist() == [1] * 3 + [2] * 11 + [0] * 4
+    assert result["keypoint_origin"][0].tolist() == [1] * 3 + [2] * 11 + [0] * 4 + [2]
+    legacy = derive_tail_seed(
+        masks,
+        ("subject_body", "eyes_union", "swim_bladder"),
+        head,
+        schema_name="head_tail11_fins_v1",
+    )
+    np.testing.assert_array_equal(
+        result["keypoints_roi"][:, :18], legacy["keypoints_roi"]
+    )
+    np.testing.assert_array_equal(
+        result["keypoint_origin"][:, :18], legacy["keypoint_origin"]
+    )
+    assert "snout_valid" not in legacy
     np.testing.assert_array_equal(masks, before)
     masks[0, 0, 1, 1] = 1
     failed = derive_tail_seed(
         masks, ("subject_body", "eyes_union", "swim_bladder"), head
     )
     assert not failed["tail_valid"][0]
+    assert not failed["snout_valid"][0]
+    assert (
+        decode_reason_bytes(failed["snout_failure_reason_bytes"])[0]
+        == "fragmented_subject_body_mask"
+    )
     assert failed["tail_failure_reason"][0] == "fragmented_subject_body_mask"
     assert np.isnan(failed["keypoints_roi"][0, 3:]).all()
     np.testing.assert_array_equal(failed["keypoints_roi"][:, :3], head)
+
+
+def test_valid_snout_is_retained_when_tail_cannot_be_anchored():
+    masks, head = _fish()
+    masks[:, 2] = 0
+    result = derive_tail_seed(
+        masks, ("subject_body", "eyes_union", "swim_bladder"), head
+    )
+    assert result["snout_valid"][0]
+    assert not result["tail_valid"][0]
+    assert np.isnan(result["keypoints_roi"][0, 3:14]).all()
+    assert np.isfinite(result["keypoints_roi"][0, 18]).all()

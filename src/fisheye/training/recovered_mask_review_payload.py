@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from fisheye.shared.detect_reason_codec import write_reason_columns
+from fisheye.shared.detect_reason_codec import decode_reason_bytes, write_reason_columns
 from fisheye.shared.refined_subject_mask_mutation import (
     stamp_refined_subject_mask_editable_draft,
 )
@@ -21,9 +21,9 @@ from fisheye.shared.zarr_run_completion import (
 )
 from fisheye.training.mask_tail_keypoints import (
     ORIGIN_CODES,
-    RECIPE,
     SCHEMA_NAME,
     derive_tail_seed,
+    recipe_for_schema,
 )
 from fisheye.training.recover_merged_training_recording import _sha256_array
 from fisheye.tune.refined_subject_mask_review import prepare_refined_subject_run
@@ -76,7 +76,12 @@ def _array(group, name, data):
     group.create_array(name, data=values, chunks=chunks)
 
 
-def build_review_payload(root, arrays, labels, binding, *, version):
+def build_review_payload(
+    root, arrays, labels, binding, *, version, pose_schema=SCHEMA_NAME
+):
+    recipe = recipe_for_schema(pose_schema)
+    _, schema = _schema_to_attr_payload(pose_schema)
+    point_count = len(schema["keypoint_labels"])
     paths = run_paths(version)
     n = len(arrays["roi_images"])
     lineage = {
@@ -103,7 +108,7 @@ def build_review_payload(root, arrays, labels, binding, *, version):
     }
     provenance = build_writer_run_provenance(
         command="fisheye.training.recover_merged_subject_masks",
-        params={"recipe": RECIPE, "version": version},
+        params={"recipe": recipe, "version": version, "pose_schema": pose_schema},
         input_run_ids={"merged_masks": binding["mask_run"]},
     )
 
@@ -155,16 +160,18 @@ def build_review_payload(root, arrays, labels, binding, *, version):
             _array(mask, name, arrays[name])
 
     derived = derive_tail_seed(
-        arrays["masks_roi"], labels, arrays["head_keypoints_roi"]
+        arrays["masks_roi"],
+        labels,
+        arrays["head_keypoints_roi"],
+        schema_name=pose_schema,
     )
-    _, schema = _schema_to_attr_payload(SCHEMA_NAME)
     attrs = {
         "pose_schema": schema,
         "skeleton_id": schema["skeleton_id"],
         "keypoint_labels": schema["keypoint_labels"],
-        "kpt_shape": [18, 2],
+        "kpt_shape": [point_count, 2],
         "keypoint_origin_codes": ORIGIN_CODES,
-        "derivation_recipe": RECIPE,
+        "derivation_recipe": recipe,
         "source_subject_mask_run": paths["mask"].split("/")[1],
         "source_mask_sha256": _sha256_array(arrays["masks_roi"]),
         "source_seed_run": paths["seed"].split("/")[1],
@@ -191,10 +198,15 @@ def build_review_payload(root, arrays, labels, binding, *, version):
         ],
         dtype=object,
     )
+    snout_reasons = None
+    if "snout_valid" in derived:
+        snout_reasons = decode_reason_bytes(derived["snout_failure_reason_bytes"])
+        for i in np.flatnonzero(~derived["snout_valid"]):
+            reasons[i] += f"|snout_derivation_failed:{snout_reasons[i]}"
     values = {
         **lineage,
         **{k: v for k, v in derived.items() if k != "tail_failure_reason"},
-        "keypoint_manual_edit": np.zeros((n, 18), dtype=bool),
+        "keypoint_manual_edit": np.zeros((n, point_count), dtype=bool),
         "keypoint_confidences": np.where(
             np.isfinite(derived["keypoints_roi"]).all(axis=2), 1.0, np.nan
         ).astype(np.float32),
@@ -260,14 +272,26 @@ def build_review_payload(root, arrays, labels, binding, *, version):
             "source_merged_row": int(arrays["source_merged_row"][i]),
             "source_pose_local_row": int(arrays["source_pose_local_row"][i]),
             "source_frame_idx": int(arrays["frame_indices"][i]),
-            "reason": str(reason),
+            "reason": (
+                str(reason)
+                if not derived["tail_valid"][i]
+                else f"snout_derivation_failed:{snout_reasons[i]}"
+            ),
         }
         for i, reason in enumerate(derived["tail_failure_reason"])
         if not derived["tail_valid"][i]
+        or (snout_reasons is not None and not derived["snout_valid"][i])
     ]
     return {
         "paths": paths,
         "row_count": n,
+        "pose_schema": pose_schema,
+        "keypoint_count": point_count,
+        **(
+            {"snout_valid_count": int(derived["snout_valid"].sum())}
+            if snout_reasons is not None
+            else {}
+        ),
         "tail_valid_count": int(derived["tail_valid"].sum()),
         "training_eligible_count": 0,
         "failures": failures,
