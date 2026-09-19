@@ -1134,6 +1134,12 @@ def _make_handler(state: ServerState):
         server_version = "PaletteLabelingWork/0.1"
         sys_version = ""
 
+        def handle_one_request(self) -> None:
+            try:
+                super().handle_one_request()
+            finally:
+                state.store.close_thread_connection()
+
         def _handle_flask_if_claimed(self) -> bool:
             return handle_with_flask_if_claimed(self, flask_app)
 
