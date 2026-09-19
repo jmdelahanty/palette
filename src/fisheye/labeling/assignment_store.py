@@ -14,10 +14,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
+from . import checkpoint_store as _checkpoint_store
+
 
 STORE_ENV_VAR = "PALETTE_LABELING_STORE_PATH"
 DEFAULT_STORE_PATH = "~/.palette/labeling_work.sqlite"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 LABELING_USER_ROLES = ("labeler", "operator", "admin")
 LABELING_USER_STATUSES = ("active", "inactive")
 ADMIN_REVIEW_STATES = (
@@ -68,6 +70,14 @@ def _row_to_dict(row: sqlite3.Row | Mapping[str, object]) -> dict[str, object]:
             out[key[:-5] if key.endswith("_json") else key] = decoded
             out.pop(key, None)
     return out
+
+
+def session_checkpoint_snapshot_row_sha256(
+    checkpoint: Mapping[str, object],
+) -> str:
+    """Return the store-owned digest for one immutable checkpoint snapshot row."""
+
+    return _checkpoint_store.compatible_snapshot_row_sha256(checkpoint)
 
 
 def _is_user_summary_sensitive_key(key: object) -> bool:
@@ -193,43 +203,64 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         self._conn: sqlite3.Connection | None = None
         self._local = threading.local()
         self._connection_lock = threading.RLock()
-        self._connections: list[sqlite3.Connection] = []
+        self._connections: set[sqlite3.Connection] = set()
+        self._initialize_lock = threading.RLock()
+        self._initialized = False
+        self._closed = False
 
     @property
     def conn(self) -> sqlite3.Connection:
-        if str(self.path) == ":memory:":
-            with self._connection_lock:
+        with self._connection_lock:
+            if self._closed:
+                raise RuntimeError("LabelingStore is closed.")
+            if str(self.path) == ":memory:":
                 if self._conn is None:
                     self._conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=30.0)
                     self._conn.row_factory = sqlite3.Row
                     self._conn.execute("PRAGMA foreign_keys = ON;")
                     self._conn.execute("PRAGMA busy_timeout = 30000;")
                 return self._conn
-        conn = getattr(self._local, "conn", None)
-        if conn is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=30.0)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA foreign_keys = ON;")
-            conn.execute("PRAGMA busy_timeout = 30000;")
-            with self._connection_lock:
-                self._connections.append(conn)
-            self._local.conn = conn
-        return conn
+            conn = getattr(self._local, "conn", None)
+            if conn is None:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=30.0)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA foreign_keys = ON;")
+                conn.execute("PRAGMA busy_timeout = 30000;")
+                self._connections.add(conn)
+                self._local.conn = conn
+            return conn
 
     def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[override]
         self.close()
 
     def close(self) -> None:
+        with self._initialize_lock:
+            with self._connection_lock:
+                if self._closed:
+                    return
+                self._closed = True
+                if self._conn is not None:
+                    self._conn.close()
+                    self._conn = None
+                for conn in self._connections:
+                    conn.close()
+                self._connections.clear()
+                if hasattr(self._local, "conn"):
+                    delattr(self._local, "conn")
+
+    def close_thread_connection(self) -> None:
+        """Close only the current request/thread's file-backed connection."""
+
+        if str(self.path) == ":memory:":
+            return
         with self._connection_lock:
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
-            for conn in self._connections:
-                conn.close()
-            self._connections.clear()
-            if hasattr(self._local, "conn"):
-                delattr(self._local, "conn")
+            conn = getattr(self._local, "conn", None)
+            if conn is None:
+                return
+            delattr(self._local, "conn")
+            self._connections.discard(conn)
+            conn.close()
 
     def backup_to(self, destination: str | Path, *, overwrite: bool = False) -> dict[str, object]:
         """Write a SQLite-consistent backup of the sidecar store."""
@@ -251,7 +282,39 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         }
 
     def initialize(self) -> None:
-        cur = self.conn.cursor()
+        if self._closed:
+            raise RuntimeError("LabelingStore is closed.")
+        if self._initialized:
+            return
+        with self._initialize_lock:
+            if self._initialized:
+                return
+            self._initialize_schema(self.conn)
+            self._initialized = True
+
+    def _initialize_schema(self, conn: sqlite3.Connection) -> None:
+        meta_exists = conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'labeling_schema_meta';
+            """
+        ).fetchone()
+        if meta_exists is not None:
+            version_row = conn.execute(
+                "SELECT value FROM labeling_schema_meta WHERE key = 'schema_version';"
+            ).fetchone()
+            if version_row is not None:
+                try:
+                    stored_version = int(version_row["value"])
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError("Labeling store schema_version is invalid.") from exc
+                if stored_version > SCHEMA_VERSION:
+                    raise RuntimeError(
+                        "Labeling store schema is newer than supported: "
+                        f"database={stored_version}, supported={SCHEMA_VERSION}."
+                    )
+        cur = conn.cursor()
         cur.executescript(
             """
             CREATE TABLE IF NOT EXISTS labeling_schema_meta (
@@ -370,6 +433,7 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 component_name TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 metadata_json TEXT,
+                snapshot_row_sha256 TEXT NOT NULL,
                 state TEXT NOT NULL DEFAULT 'active',
                 created_at_utc TEXT NOT NULL,
                 updated_at_utc TEXT NOT NULL,
@@ -380,6 +444,24 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 UNIQUE(task_id, roi_idx, component_name),
                 FOREIGN KEY(task_id) REFERENCES labeling_tasks(task_id) ON DELETE CASCADE,
                 FOREIGN KEY(session_id) REFERENCES labeling_sessions(session_id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS labeling_checkpoint_apply_receipts (
+                apply_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                component_name TEXT NOT NULL,
+                state TEXT NOT NULL,
+                checkpoint_count INTEGER NOT NULL,
+                checkpoints_json TEXT NOT NULL,
+                claimed_at_utc TEXT NOT NULL,
+                applied_at_utc TEXT,
+                edit_revision_before INTEGER,
+                edit_revision_after INTEGER,
+                released_checkpoint_count INTEGER NOT NULL DEFAULT 0,
+                checkpoint_snapshot_sha256 TEXT,
+                secondary_effects_state TEXT NOT NULL DEFAULT 'complete',
+                secondary_effects_completed_at_utc TEXT,
+                FOREIGN KEY(task_id) REFERENCES labeling_tasks(task_id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS labeling_admin_reviews (
@@ -416,10 +498,72 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 ON labeling_session_checkpoints(task_id, state, updated_at_utc);
             CREATE INDEX IF NOT EXISTS idx_labeling_session_checkpoints_apply
                 ON labeling_session_checkpoints(task_id, apply_id, state);
+            CREATE INDEX IF NOT EXISTS idx_labeling_checkpoint_apply_receipts_task
+                ON labeling_checkpoint_apply_receipts(task_id, state, applied_at_utc);
             CREATE INDEX IF NOT EXISTS idx_labeling_admin_reviews_state
                 ON labeling_admin_reviews(state, updated_at_utc);
             CREATE INDEX IF NOT EXISTS idx_labeling_admin_reviews_recording
                 ON labeling_admin_reviews(recording_id, state);
+            """
+        )
+        checkpoint_columns = {
+            str(row["name"])
+            for row in conn.execute(
+                "PRAGMA table_info(labeling_session_checkpoints);"
+            ).fetchall()
+        }
+        if "snapshot_row_sha256" not in checkpoint_columns:
+            conn.execute(
+                "ALTER TABLE labeling_session_checkpoints "
+                "ADD COLUMN snapshot_row_sha256 TEXT;"
+            )
+        receipt_columns = {
+            str(row["name"])
+            for row in conn.execute(
+                "PRAGMA table_info(labeling_checkpoint_apply_receipts);"
+            ).fetchall()
+        }
+        if "secondary_effects_state" not in receipt_columns:
+            conn.execute(
+                "ALTER TABLE labeling_checkpoint_apply_receipts "
+                "ADD COLUMN secondary_effects_state TEXT NOT NULL DEFAULT 'complete';"
+            )
+        if "checkpoint_snapshot_sha256" not in receipt_columns:
+            conn.execute(
+                "ALTER TABLE labeling_checkpoint_apply_receipts "
+                "ADD COLUMN checkpoint_snapshot_sha256 TEXT;"
+            )
+        if "secondary_effects_completed_at_utc" not in receipt_columns:
+            conn.execute(
+                "ALTER TABLE labeling_checkpoint_apply_receipts "
+                "ADD COLUMN secondary_effects_completed_at_utc TEXT;"
+            )
+        conn.execute(
+            """
+            UPDATE labeling_checkpoint_apply_receipts
+            SET secondary_effects_state = 'not_ready',
+                secondary_effects_completed_at_utc = NULL
+            WHERE state = 'applying' AND secondary_effects_state = 'complete';
+            """
+        )
+        _checkpoint_store.backfill_checkpoint_snapshot_digests(conn)
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_labeling_session_checkpoints_snapshot_order
+            ON labeling_session_checkpoints(
+                task_id, component_name, state, updated_at_utc, roi_idx,
+                checkpoint_id, apply_id, snapshot_row_sha256
+            );
+            """
+        )
+        _checkpoint_store.backfill_legacy_apply_receipts(conn)
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_labeling_checkpoint_apply_effects_pending
+            ON labeling_checkpoint_apply_receipts(
+                task_id, component_name, state, secondary_effects_state,
+                applied_at_utc, apply_id
+            );
             """
         )
         now = utc_now()
@@ -455,7 +599,33 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
             """,
             (str(SCHEMA_VERSION),),
         )
-        self.conn.commit()
+        conn.commit()
+
+    @staticmethod
+    def _ensure_assignment_user(
+        conn: sqlite3.Connection,
+        *,
+        assignee_user: str,
+        assignment_status: str,
+        assigned_at_utc: str,
+    ) -> bool:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO labeling_users (
+                user_id, display_name, email, role, status,
+                created_at_utc, updated_at_utc, notes
+            )
+            VALUES (?, NULL, NULL, 'labeler', ?, ?, ?,
+                    'Auto-created from existing recording assignments.');
+            """,
+            (
+                str(assignee_user),
+                "active" if str(assignment_status) == "active" else "inactive",
+                str(assigned_at_utc),
+                utc_now(),
+            ),
+        )
+        return int(cur.rowcount or 0) == 1
 
     def get_admin_review(self, task_id: str) -> dict[str, object] | None:
         self.initialize()
@@ -771,6 +941,13 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 "notes": notes_value,
             }
             if existing_target == target:
+                self._ensure_assignment_user(
+                    self.conn,
+                    assignee_user=assignee_user,
+                    assignment_status=status_value,
+                    assigned_at_utc=str(existing.get("assigned_at_utc") or utc_now()),
+                )
+                self.conn.commit()
                 return existing
         else:
             existing_target = None
@@ -817,6 +994,12 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 status_value,
                 notes_value,
             ),
+        )
+        self._ensure_assignment_user(
+            self.conn,
+            assignee_user=assignee_user,
+            assignment_status=status_value,
+            assigned_at_utc=now,
         )
         self.conn.commit()
         row = self.get_assignment(recording_id)
@@ -892,7 +1075,16 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                     before_user != assignee_user or before_status != requested_status
                 )
                 if existing_target == target:
-                    conn.rollback()
+                    user_created = self._ensure_assignment_user(
+                        conn,
+                        assignee_user=assignee_user,
+                        assignment_status=requested_status,
+                        assigned_at_utc=str(before_assignment.get("assigned_at_utc") or utc_now()),
+                    )
+                    if user_created:
+                        conn.commit()
+                    else:
+                        conn.rollback()
                     assignment = before_assignment
                     closed_sessions: list[dict[str, object]] = []
                     assignment_event_required = False
@@ -941,6 +1133,12 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                             requested_status,
                             notes_value,
                         ),
+                    )
+                    self._ensure_assignment_user(
+                        conn,
+                        assignee_user=assignee_user,
+                        assignment_status=requested_status,
+                        assigned_at_utc=now,
                     )
                     assignment_row = conn.execute(
                         "SELECT * FROM recording_assignments WHERE recording_id = ?;",
@@ -2029,85 +2227,21 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         """Persist the latest unapplied browser checkpoint for one task row/component."""
 
         self.initialize()
-        session_id_value = str(session_id)
-        task_id_value = str(task_id)
-        recording_id_value = str(recording_id)
-        user_value = str(user)
-        workflow_kind_value = str(workflow_kind)
-        target_run_path_value = str(target_run_path)
-        source_rowset_path_value = _normalize_optional_text(source_rowset_path)
-        component_name_value = str(component_name)
-        roi_idx_value = int(roi_idx)
-        revision_value = int(target_edit_revision)
-        now = utc_now()
-        existing = self.get_session_checkpoint(
-            task_id=task_id_value,
-            roi_idx=roi_idx_value,
-            component_name=component_name_value,
-            state=None,
+        return _checkpoint_store.upsert_checkpoint(
+            self.conn,
+            session_id=session_id,
+            task_id=task_id,
+            recording_id=recording_id,
+            user=user,
+            workflow_kind=workflow_kind,
+            target_run_path=target_run_path,
+            target_edit_revision=target_edit_revision,
+            source_rowset_path=source_rowset_path,
+            roi_idx=roi_idx,
+            component_name=component_name,
+            payload=payload,
+            metadata=metadata,
         )
-        if existing and str(existing.get("state") or "") == "applying":
-            raise RuntimeError(
-                "This row already has a checkpoint being applied to Zarr. "
-                "Wait for that apply to finish before saving this same row again."
-            )
-        checkpoint_id = str(existing.get("checkpoint_id")) if existing else str(uuid.uuid4())
-        created_at_utc = str(existing.get("created_at_utc")) if existing else now
-        self.conn.execute(
-            """
-            INSERT INTO labeling_session_checkpoints (
-                checkpoint_id, session_id, task_id, recording_id, user, workflow_kind,
-                target_run_path, target_edit_revision, source_rowset_path,
-                roi_idx, component_name, payload_json, metadata_json, state,
-                created_at_utc, updated_at_utc, applied_at_utc, apply_id,
-                edit_revision_before, edit_revision_after
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, NULL, NULL, NULL)
-            ON CONFLICT(task_id, roi_idx, component_name) DO UPDATE SET
-                session_id = excluded.session_id,
-                recording_id = excluded.recording_id,
-                user = excluded.user,
-                workflow_kind = excluded.workflow_kind,
-                target_run_path = excluded.target_run_path,
-                target_edit_revision = excluded.target_edit_revision,
-                source_rowset_path = excluded.source_rowset_path,
-                payload_json = excluded.payload_json,
-                metadata_json = excluded.metadata_json,
-                state = 'active',
-                updated_at_utc = excluded.updated_at_utc,
-                applied_at_utc = NULL,
-                apply_id = NULL,
-                edit_revision_before = NULL,
-                edit_revision_after = NULL;
-            """,
-            (
-                checkpoint_id,
-                session_id_value,
-                task_id_value,
-                recording_id_value,
-                user_value,
-                workflow_kind_value,
-                target_run_path_value,
-                revision_value,
-                source_rowset_path_value,
-                roi_idx_value,
-                component_name_value,
-                _json_dumps(dict(payload)),
-                _json_dumps(dict(metadata or {})),
-                created_at_utc,
-                now,
-            ),
-        )
-        self.conn.commit()
-        row = self.get_session_checkpoint(
-            task_id=task_id_value,
-            roi_idx=roi_idx_value,
-            component_name=component_name_value,
-            state="active",
-        )
-        if row is None:
-            raise RuntimeError("Failed to persist labeling session checkpoint.")
-        return row
 
     def get_session_checkpoint(
         self,
@@ -2133,7 +2267,7 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
             params.append(str(state))
         sql.append("LIMIT 1;")
         row = self.conn.execute(" ".join(sql), params).fetchone()
-        return _row_to_dict(row) if row is not None else None
+        return _checkpoint_store.checkpoint_row(row) if row is not None else None
 
     def list_session_checkpoints(
         self,
@@ -2156,10 +2290,10 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         if apply_id is not None:
             sql.append("AND apply_id = ?")
             params.append(str(apply_id))
-        sql.append("ORDER BY updated_at_utc ASC LIMIT ?")
+        sql.append("ORDER BY updated_at_utc ASC, roi_idx ASC, checkpoint_id ASC LIMIT ?")
         params.append(max(1, int(limit)))
         rows = self.conn.execute(" ".join(sql), params).fetchall()
-        return [_row_to_dict(row) for row in rows]
+        return [_checkpoint_store.checkpoint_row(row) for row in rows]
 
     def count_unapplied_session_checkpoints(
         self,
@@ -2179,6 +2313,42 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         row = self.conn.execute(" ".join(sql), params).fetchone()
         return int(row["n"] if row is not None else 0)
 
+    def list_session_checkpoint_snapshot_descriptors(
+        self,
+        *,
+        task_id: str,
+        state: str,
+        component_name: str,
+        limit: int = 1000,
+    ) -> list[dict[str, object]]:
+        """Read a bounded checkpoint window without parsing its JSON payloads."""
+
+        self.initialize()
+        return _checkpoint_store.list_checkpoint_snapshot_descriptors(
+            self.conn,
+            task_id=task_id,
+            state=state,
+            component_name=component_name,
+            limit=limit,
+        )
+
+    def count_session_checkpoints(
+        self,
+        *,
+        task_id: str,
+        state: str,
+        component_name: str,
+    ) -> int:
+        """Count checkpoints for one exact state/component binding."""
+
+        self.initialize()
+        return _checkpoint_store.count_checkpoints(
+            self.conn,
+            task_id=task_id,
+            state=state,
+            component_name=component_name,
+        )
+
     def claim_session_checkpoints_for_apply(
         self,
         *,
@@ -2186,48 +2356,18 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         component_name: str,
         apply_id: str,
         limit: int = 1000,
+        checkpoint_snapshot_sha256: str | None = None,
     ) -> list[dict[str, object]]:
-        """Atomically claim current active checkpoints for one canonical apply snapshot."""
+        """Atomically claim or replay one canonical apply snapshot."""
 
         self.initialize()
-        task_id_value = str(task_id)
-        component_name_value = str(component_name)
-        apply_id_value = str(apply_id)
-        rows = self.conn.execute(
-            """
-            SELECT checkpoint_id
-            FROM labeling_session_checkpoints
-            WHERE task_id = ?
-              AND component_name = ?
-              AND state = 'active'
-            ORDER BY updated_at_utc ASC
-            LIMIT ?;
-            """,
-            (task_id_value, component_name_value, max(1, int(limit))),
-        ).fetchall()
-        ids = [str(row["checkpoint_id"]) for row in rows]
-        if not ids:
-            return []
-        now = utc_now()
-        placeholders = ", ".join("?" for _ in ids)
-        self.conn.execute(
-            f"""
-            UPDATE labeling_session_checkpoints
-            SET state = 'applying',
-                apply_id = ?,
-                updated_at_utc = ?
-            WHERE checkpoint_id IN ({placeholders})
-              AND state = 'active';
-            """,
-            [apply_id_value, now, *ids],
-        )
-        self.conn.commit()
-        return self.list_session_checkpoints(
-            task_id=task_id_value,
-            state="applying",
-            component_name=component_name_value,
-            apply_id=apply_id_value,
+        return _checkpoint_store.claim_checkpoints(
+            self.conn,
+            task_id=task_id,
+            component_name=component_name,
+            apply_id=apply_id,
             limit=limit,
+            checkpoint_snapshot_sha256=checkpoint_snapshot_sha256,
         )
 
     def release_session_checkpoints_apply(
@@ -2239,21 +2379,11 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         """Return an unapplied claimed snapshot to active state after a pre-write failure."""
 
         self.initialize()
-        now = utc_now()
-        cur = self.conn.execute(
-            """
-            UPDATE labeling_session_checkpoints
-            SET state = 'active',
-                apply_id = NULL,
-                updated_at_utc = ?
-            WHERE task_id = ?
-              AND apply_id = ?
-              AND state = 'applying';
-            """,
-            (now, str(task_id), str(apply_id)),
+        return _checkpoint_store.release_checkpoints(
+            self.conn,
+            task_id=task_id,
+            apply_id=apply_id,
         )
-        self.conn.commit()
-        return int(cur.rowcount or 0)
 
     def get_applied_session_checkpoints_by_apply_id(
         self,
@@ -2262,18 +2392,60 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         apply_id: str,
     ) -> list[dict[str, object]]:
         self.initialize()
-        rows = self.conn.execute(
-            """
-            SELECT *
-            FROM labeling_session_checkpoints
-            WHERE task_id = ?
-              AND apply_id = ?
-              AND state = 'applied'
-            ORDER BY applied_at_utc ASC, roi_idx ASC, component_name ASC;
-            """,
-            (str(task_id), str(apply_id)),
-        ).fetchall()
-        return [_row_to_dict(row) for row in rows]
+        return _checkpoint_store.get_applied_checkpoints(
+            self.conn,
+            task_id=task_id,
+            apply_id=apply_id,
+        )
+
+    def list_pending_session_checkpoint_apply_effects(
+        self,
+        *,
+        task_id: str,
+        component_name: str,
+        limit: int = 1000,
+    ) -> list[dict[str, object]]:
+        """List applied receipt summaries awaiting audit/registry effects."""
+
+        self.initialize()
+        return _checkpoint_store.list_pending_apply_effects(
+            self.conn,
+            task_id=task_id,
+            component_name=component_name,
+            limit=limit,
+        )
+
+    def count_pending_session_checkpoint_apply_effects(
+        self,
+        *,
+        task_id: str,
+        component_name: str | None = None,
+    ) -> int:
+        """Count applied receipts whose audit/registry effects remain pending."""
+
+        self.initialize()
+        return _checkpoint_store.count_pending_apply_effects(
+            self.conn,
+            task_id=task_id,
+            component_name=component_name,
+        )
+
+    def mark_session_checkpoint_apply_effects_complete(
+        self,
+        *,
+        task_id: str,
+        component_name: str,
+        apply_id: str,
+    ) -> bool:
+        """Mark one applied receipt's audit/registry effects complete."""
+
+        self.initialize()
+        return _checkpoint_store.mark_apply_effects_complete(
+            self.conn,
+            task_id=task_id,
+            component_name=component_name,
+            apply_id=apply_id,
+        )
 
     def mark_session_checkpoints_applied(
         self,
@@ -2282,37 +2454,17 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         apply_id: str,
         edit_revision_before: int,
         edit_revision_after: int,
+        require_secondary_effects: bool = False,
     ) -> int:
         self.initialize()
-        ids = [str(value) for value in checkpoint_ids if str(value)]
-        if not ids:
-            return 0
-        now = utc_now()
-        placeholders = ", ".join("?" for _ in ids)
-        params: list[object] = [
-            str(apply_id),
-            int(edit_revision_before),
-            int(edit_revision_after),
-            now,
-            *ids,
-        ]
-        cur = self.conn.execute(
-            f"""
-            UPDATE labeling_session_checkpoints
-            SET state = 'applied',
-                apply_id = ?,
-                edit_revision_before = ?,
-                edit_revision_after = ?,
-                applied_at_utc = ?,
-                updated_at_utc = ?
-            WHERE checkpoint_id IN ({placeholders})
-              AND apply_id = ?
-              AND state = 'applying';
-            """,
-            [params[0], params[1], params[2], params[3], params[3], *ids, str(apply_id)],
+        return _checkpoint_store.mark_checkpoints_applied(
+            self.conn,
+            checkpoint_ids=checkpoint_ids,
+            apply_id=apply_id,
+            edit_revision_before=edit_revision_before,
+            edit_revision_after=edit_revision_after,
+            require_secondary_effects=require_secondary_effects,
         )
-        self.conn.commit()
-        return int(cur.rowcount or 0)
 
     def list_sessions(
         self,
