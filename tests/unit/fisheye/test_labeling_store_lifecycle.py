@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import sqlite3
 import threading
 import time
@@ -8,10 +11,15 @@ import urllib.request
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import Mapping
 
 import pytest
 
-from fisheye.labeling.assignment_store import SCHEMA_VERSION, LabelingStore
+from fisheye.labeling.assignment_store import (
+    SCHEMA_VERSION,
+    LabelingStore,
+    session_checkpoint_snapshot_row_sha256,
+)
 from fisheye.labeling.web import ServerConfig, ServerState, _make_handler
 
 
@@ -92,6 +100,32 @@ def _checkpoint_kwargs(lease: object, *, roi_idx: int = 7, value: int = 1) -> di
         "payload": {"schema": "palette.keypoint_checkpoint.v1", "value": value},
         "metadata": {"row_identity": {"roi_idx": roi_idx}},
     }
+
+
+def _snapshot_row_sha256(row: Mapping[str, object]) -> str:
+    snapshot = {
+        "schema": "palette.labeling_session_checkpoint_snapshot_row.v1",
+        "checkpoint_id": str(row["checkpoint_id"]),
+        "task_id": str(row["task_id"]),
+        "recording_id": str(row["recording_id"]),
+        "user": str(row["user"]),
+        "workflow_kind": str(row["workflow_kind"]),
+        "target_run_path": str(row["target_run_path"]),
+        "target_edit_revision": int(row["target_edit_revision"] or 0),
+        "source_rowset_path": str(row["source_rowset_path"] or ""),
+        "roi_idx": int(row["roi_idx"] or 0),
+        "component_name": str(row["component_name"]),
+        "payload": row["payload"],
+        "metadata": row["metadata"],
+    }
+    canonical = json.dumps(
+        snapshot,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def test_initialize_bootstraps_once_and_assignment_still_creates_user(tmp_path, monkeypatch):
@@ -306,6 +340,218 @@ def test_hot_path_optimization_preserves_session_permission_checks(tmp_path):
         store.close()
 
 
+def test_checkpoint_snapshot_descriptors_match_claim_and_same_row_save_changes_digest(tmp_path):
+    store, lease = _checkpoint_store(tmp_path)
+    try:
+        later = store.upsert_session_checkpoint(
+            **_checkpoint_kwargs(lease, roi_idx=7, value=1),
+        )
+        earlier = store.upsert_session_checkpoint(
+            **_checkpoint_kwargs(lease, roi_idx=8, value=2),
+        )
+        store.conn.execute(
+            "UPDATE labeling_session_checkpoints SET updated_at_utc = ? WHERE checkpoint_id = ?;",
+            ("2026-09-19T12:00:02+00:00", later["checkpoint_id"]),
+        )
+        store.conn.execute(
+            "UPDATE labeling_session_checkpoints SET updated_at_utc = ? WHERE checkpoint_id = ?;",
+            ("2026-09-19T12:00:01+00:00", earlier["checkpoint_id"]),
+        )
+        store.conn.commit()
+
+        before = store.list_session_checkpoint_snapshot_descriptors(
+            task_id="task-a",
+            state="active",
+            component_name="keypoints",
+        )
+        assert [row["checkpoint_id"] for row in before] == [
+            earlier["checkpoint_id"],
+            later["checkpoint_id"],
+        ]
+        assert all(
+            set(row)
+            == {
+                "checkpoint_id",
+                "roi_idx",
+                "updated_at_utc",
+                "state",
+                "apply_id",
+                "snapshot_row_sha256",
+            }
+            for row in before
+        )
+        assert store.count_session_checkpoints(
+            task_id="task-a",
+            state="active",
+            component_name="keypoints",
+        ) == 2
+        assert store.count_session_checkpoints(
+            task_id="task-a",
+            state="applying",
+            component_name="keypoints",
+        ) == 0
+
+        changed = store.upsert_session_checkpoint(
+            **{
+                **_checkpoint_kwargs(lease, roi_idx=7, value=3),
+                "payload": {
+                    "schema": "palette.keypoint_checkpoint.v1",
+                    "label": "café",
+                    "nullable": None,
+                    "value": 3,
+                },
+            }
+        )
+        assert changed["checkpoint_id"] == later["checkpoint_id"]
+        assert changed["snapshot_row_sha256"] != later["snapshot_row_sha256"]
+        assert changed["snapshot_row_sha256"] == _snapshot_row_sha256(changed)
+        assert changed["snapshot_row_sha256"] == session_checkpoint_snapshot_row_sha256(
+            changed
+        )
+
+        descriptors = store.list_session_checkpoint_snapshot_descriptors(
+            task_id="task-a",
+            state="active",
+            component_name="keypoints",
+        )
+        with pytest.raises(ValueError, match="lowercase SHA-256"):
+            store.claim_session_checkpoints_for_apply(
+                task_id="task-a",
+                component_name="keypoints",
+                apply_id="invalid-digest-apply",
+                checkpoint_snapshot_sha256="ABC",
+            )
+        claimed = store.claim_session_checkpoints_for_apply(
+            task_id="task-a",
+            component_name="keypoints",
+            apply_id="descriptor-apply",
+        )
+        assert [
+            (row["checkpoint_id"], row["snapshot_row_sha256"])
+            for row in claimed
+        ] == [
+            (row["checkpoint_id"], row["snapshot_row_sha256"])
+            for row in descriptors
+        ]
+        assert all(row["snapshot_row_sha256"] == _snapshot_row_sha256(row) for row in claimed)
+        applying = store.list_session_checkpoint_snapshot_descriptors(
+            task_id="task-a",
+            state="applying",
+            component_name="keypoints",
+        )
+        assert [row["checkpoint_id"] for row in applying] == [
+            row["checkpoint_id"] for row in claimed
+        ]
+        assert store.count_session_checkpoints(
+            task_id="task-a",
+            state="active",
+            component_name="keypoints",
+        ) == 0
+        assert store.count_session_checkpoints(
+            task_id="task-a",
+            state="applying",
+            component_name="keypoints",
+        ) == 2
+    finally:
+        store.close()
+
+
+def test_checkpoint_snapshot_digest_preserves_generic_nonfinite_json_grammar(tmp_path):
+    store, lease = _checkpoint_store(tmp_path)
+    try:
+        checkpoint = store.upsert_session_checkpoint(
+            **{
+                **_checkpoint_kwargs(lease),
+                "payload": {
+                    "schema": "palette.generic_checkpoint.v1",
+                    "confidence": float("nan"),
+                },
+            }
+        )
+        assert checkpoint["payload"]["confidence"] != checkpoint["payload"]["confidence"]
+        assert checkpoint["snapshot_row_sha256"] == session_checkpoint_snapshot_row_sha256(
+            checkpoint
+        )
+        assert store.count_unapplied_session_checkpoints(task_id="task-a") == 1
+    finally:
+        store.close()
+
+
+def test_dense_mask_checkpoint_digest_preserves_payload_bytes(tmp_path):
+    store = LabelingStore(tmp_path / "labeling.sqlite")
+    store.assign_recording(recording_id="rec-mask", assignee_user="alice")
+    store.upsert_task(
+        task_id="task-mask",
+        recording_id="rec-mask",
+        workflow_kind="subject_mask_component",
+        component_name="body",
+    )
+    lease = store.create_session(task_id="task-mask", user="alice", ttl_seconds=600)
+    pixels = bytes((row + column) % 2 for row in range(256) for column in range(256))
+    payload = {
+        "schema": "palette.web_labeling_subject_mask_checkpoint_payload.v1",
+        "payload_kind": "dense_roi_replacement_mask",
+        "mask": {
+            "shape": [256, 256],
+            "channels": 1,
+            "dtype": "uint8",
+            "encoding": "base64_raw",
+            "pixels": base64.b64encode(pixels).decode("ascii"),
+        },
+    }
+    metadata = {
+        "schema": "palette.web_labeling_subject_mask_checkpoint_metadata.v1",
+        "row_identity": {"roi_idx": 17, "source_frame_idx": 41},
+        "component_name": "body",
+        "target_run_path": "/runs/refined-subject-mask-a",
+        "source_rowset_path": "/runs/source-subject-mask-a",
+    }
+    expected_payload_json = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    try:
+        checkpoint = store.upsert_session_checkpoint(
+            session_id=lease.session_id,
+            task_id="task-mask",
+            recording_id="rec-mask",
+            user="alice",
+            workflow_kind="subject_mask_component",
+            target_run_path="/runs/refined-subject-mask-a",
+            target_edit_revision=9,
+            source_rowset_path="/runs/source-subject-mask-a",
+            roi_idx=17,
+            component_name="body",
+            payload=payload,
+            metadata=metadata,
+        )
+        stored = store.conn.execute(
+            "SELECT payload_json FROM labeling_session_checkpoints WHERE checkpoint_id = ?;",
+            (checkpoint["checkpoint_id"],),
+        ).fetchone()
+        assert stored["payload_json"] == expected_payload_json
+        assert checkpoint["snapshot_row_sha256"] == _snapshot_row_sha256(checkpoint)
+        descriptors = store.list_session_checkpoint_snapshot_descriptors(
+            task_id="task-mask",
+            state="active",
+            component_name="body",
+        )
+        assert descriptors == [
+            {
+                "checkpoint_id": checkpoint["checkpoint_id"],
+                "roi_idx": 17,
+                "updated_at_utc": checkpoint["updated_at_utc"],
+                "state": "active",
+                "apply_id": None,
+                "snapshot_row_sha256": checkpoint["snapshot_row_sha256"],
+            }
+        ]
+    finally:
+        store.close()
+
+
 def test_checkpoint_claim_is_exclusive_and_same_apply_id_replays_exact_snapshot(tmp_path):
     store, lease = _checkpoint_store(tmp_path)
     try:
@@ -435,6 +681,10 @@ def test_applied_checkpoint_receipt_survives_reopen_and_later_row_save(tmp_path)
         edit_revision_before=3,
         edit_revision_after=4,
     ) == 1
+    assert store.count_pending_session_checkpoint_apply_effects(
+        task_id="task-a",
+        component_name="keypoints",
+    ) == 0
     store.close()
 
     reopened = LabelingStore(store_path)
@@ -445,6 +695,7 @@ def test_applied_checkpoint_receipt_survives_reopen_and_later_row_save(tmp_path)
         )
         assert len(prior) == 1
         assert prior[0]["payload"] == {"schema": "palette.keypoint_checkpoint.v1", "value": 1}
+        assert prior[0]["secondary_effects_state"] == "complete"
         reopened.upsert_session_checkpoint(**_checkpoint_kwargs(lease, value=2))
 
         replay = reopened.get_applied_session_checkpoints_by_apply_id(
@@ -465,6 +716,98 @@ def test_applied_checkpoint_receipt_survives_reopen_and_later_row_save(tmp_path)
         )
         assert active is not None
         assert active["payload"]["value"] == 2
+    finally:
+        reopened.close()
+
+
+def test_applied_checkpoint_secondary_effects_are_durable_strict_and_idempotent(tmp_path):
+    store, lease = _checkpoint_store(tmp_path)
+    store_path = store.path
+    checkpoint = store.upsert_session_checkpoint(**_checkpoint_kwargs(lease))
+    expected_snapshot_sha256 = "a" * 64
+    claimed = store.claim_session_checkpoints_for_apply(
+        task_id="task-a",
+        component_name="keypoints",
+        apply_id="effects-apply",
+        checkpoint_snapshot_sha256=expected_snapshot_sha256,
+    )
+    assert [row["checkpoint_id"] for row in claimed] == [checkpoint["checkpoint_id"]]
+    replayed_claim = store.claim_session_checkpoints_for_apply(
+        task_id="task-a",
+        component_name="keypoints",
+        apply_id="effects-apply",
+        checkpoint_snapshot_sha256=expected_snapshot_sha256,
+    )
+    assert [row["checkpoint_id"] for row in replayed_claim] == [
+        checkpoint["checkpoint_id"]
+    ]
+    with pytest.raises(RuntimeError, match="different checkpoint snapshot digest"):
+        store.claim_session_checkpoints_for_apply(
+            task_id="task-a",
+            component_name="keypoints",
+            apply_id="effects-apply",
+            checkpoint_snapshot_sha256="b" * 64,
+        )
+    assert store.mark_session_checkpoints_applied(
+        checkpoint_ids=[checkpoint["checkpoint_id"]],
+        apply_id="effects-apply",
+        edit_revision_before=3,
+        edit_revision_after=4,
+        require_secondary_effects=True,
+    ) == 1
+    assert store.count_pending_session_checkpoint_apply_effects(
+        task_id="task-a",
+        component_name="keypoints",
+    ) == 1
+    pending = store.list_pending_session_checkpoint_apply_effects(
+        task_id="task-a",
+        component_name="keypoints",
+    )
+    assert len(pending) == 1
+    assert pending[0]["apply_id"] == "effects-apply"
+    assert pending[0]["secondary_effects_state"] == "pending"
+    assert pending[0]["checkpoint_snapshot_sha256"] == expected_snapshot_sha256
+    assert pending[0]["checkpoint_count"] == 1
+    assert "checkpoints_json" not in pending[0]
+    store.close()
+
+    reopened = LabelingStore(store_path)
+    try:
+        assert reopened.count_pending_session_checkpoint_apply_effects(
+            task_id="task-a",
+            component_name="keypoints",
+        ) == 1
+        replay = reopened.get_applied_session_checkpoints_by_apply_id(
+            task_id="task-a",
+            apply_id="effects-apply",
+        )
+        assert [row["checkpoint_id"] for row in replay] == [checkpoint["checkpoint_id"]]
+        with pytest.raises(RuntimeError, match="different checkpoint task"):
+            reopened.mark_session_checkpoint_apply_effects_complete(
+                task_id="wrong-task",
+                component_name="keypoints",
+                apply_id="effects-apply",
+            )
+        with pytest.raises(RuntimeError, match="different checkpoint component"):
+            reopened.mark_session_checkpoint_apply_effects_complete(
+                task_id="task-a",
+                component_name="body",
+                apply_id="effects-apply",
+            )
+        assert reopened.mark_session_checkpoint_apply_effects_complete(
+            task_id="task-a",
+            component_name="keypoints",
+            apply_id="effects-apply",
+        ) is True
+        assert reopened.mark_session_checkpoint_apply_effects_complete(
+            task_id="task-a",
+            component_name="keypoints",
+            apply_id="effects-apply",
+        ) is False
+        assert reopened.count_pending_session_checkpoint_apply_effects(
+            task_id="task-a",
+            component_name="keypoints",
+        ) == 0
     finally:
         reopened.close()
 
@@ -555,9 +898,13 @@ def test_checkpoint_finalize_sql_failure_rolls_back_receipt_and_rows(tmp_path):
             )
 
         receipt = store.conn.execute(
-            "SELECT state FROM labeling_checkpoint_apply_receipts WHERE apply_id = 'apply-failure';"
+            "SELECT state, secondary_effects_state "
+            "FROM labeling_checkpoint_apply_receipts WHERE apply_id = 'apply-failure';"
         ).fetchone()
-        assert receipt["state"] == "applying"
+        assert dict(receipt) == {
+            "state": "applying",
+            "secondary_effects_state": "not_ready",
+        }
         assert store.get_applied_session_checkpoints_by_apply_id(
             task_id="task-a",
             apply_id="apply-failure",
@@ -639,11 +986,15 @@ def test_v6_sidecar_migration_preserves_mask_checkpoint_and_keypoint_audit_bytes
             (event["event_id"],),
         ),
     }
+    store.conn.execute("DROP TABLE labeling_checkpoint_apply_receipts;")
+    store.conn.execute("DROP INDEX idx_labeling_session_checkpoints_snapshot_order;")
+    store.conn.execute(
+        "ALTER TABLE labeling_session_checkpoints DROP COLUMN snapshot_row_sha256;"
+    )
     before = {
         name: dict(store.conn.execute(sql, params).fetchone())
         for name, (sql, params) in identity_sql.items()
     }
-    store.conn.execute("DROP TABLE labeling_checkpoint_apply_receipts;")
     store.conn.execute(
         "UPDATE labeling_schema_meta SET value = '6' WHERE key = 'schema_version';"
     )
@@ -657,7 +1008,10 @@ def test_v6_sidecar_migration_preserves_mask_checkpoint_and_keypoint_audit_bytes
             name: dict(reopened.conn.execute(sql, params).fetchone())
             for name, (sql, params) in identity_sql.items()
         }
-        assert after == before
+        assert {
+            name: {key: row[key] for key in before[name]}
+            for name, row in after.items()
+        } == before
         assert after["event"]["target_json"] == before["event"]["target_json"]
         assert after["event"]["before_json"] == before["event"]["before_json"]
         assert after["event"]["after_json"] == before["event"]["after_json"]
@@ -675,15 +1029,180 @@ def test_v6_sidecar_migration_preserves_mask_checkpoint_and_keypoint_audit_bytes
             "roi_idx": 17,
             "source_frame_idx": 41,
         }
+        assert replay[0]["snapshot_row_sha256"] == _snapshot_row_sha256(replay[0])
         receipt = reopened.conn.execute(
-            "SELECT state, checkpoint_count FROM labeling_checkpoint_apply_receipts "
+            "SELECT state, checkpoint_count, secondary_effects_state "
+            "FROM labeling_checkpoint_apply_receipts "
             "WHERE apply_id = 'legacy-mask-apply';"
         ).fetchone()
-        assert dict(receipt) == {"state": "applied", "checkpoint_count": 1}
+        assert dict(receipt) == {
+            "state": "applied",
+            "checkpoint_count": 1,
+            "secondary_effects_state": "complete",
+        }
+        assert reopened.count_pending_session_checkpoint_apply_effects(
+            task_id="task-mask",
+            component_name="body",
+        ) == 0
         version = reopened.conn.execute(
             "SELECT value FROM labeling_schema_meta WHERE key = 'schema_version';"
         ).fetchone()["value"]
         assert version == str(SCHEMA_VERSION)
+    finally:
+        reopened.close()
+
+
+def test_v7_sidecar_migration_backfills_current_and_historical_snapshot_digests(tmp_path):
+    store, lease = _checkpoint_store(tmp_path)
+    store_path = store.path
+    checkpoint = store.upsert_session_checkpoint(
+        **{
+            **_checkpoint_kwargs(lease),
+            "payload": {
+                "schema": "palette.keypoint_checkpoint.v1",
+                "point": [12.5, None],
+            },
+        }
+    )
+    store.claim_session_checkpoints_for_apply(
+        task_id="task-a",
+        component_name="keypoints",
+        apply_id="v7-applied",
+    )
+    store.mark_session_checkpoints_applied(
+        checkpoint_ids=[checkpoint["checkpoint_id"]],
+        apply_id="v7-applied",
+        edit_revision_before=3,
+        edit_revision_after=4,
+    )
+    receipt = store.conn.execute(
+        "SELECT checkpoints_json FROM labeling_checkpoint_apply_receipts WHERE apply_id = ?;",
+        ("v7-applied",),
+    ).fetchone()
+    historical = json.loads(receipt["checkpoints_json"])
+    historical[0].pop("snapshot_row_sha256", None)
+    legacy_receipt_json = json.dumps(
+        historical,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    store.conn.execute(
+        "UPDATE labeling_checkpoint_apply_receipts SET checkpoints_json = ? WHERE apply_id = ?;",
+        (legacy_receipt_json, "v7-applied"),
+    )
+    store.conn.execute("DROP INDEX idx_labeling_session_checkpoints_snapshot_order;")
+    store.conn.execute("DROP INDEX idx_labeling_checkpoint_apply_effects_pending;")
+    store.conn.execute(
+        "ALTER TABLE labeling_checkpoint_apply_receipts "
+        "DROP COLUMN checkpoint_snapshot_sha256;"
+    )
+    store.conn.execute(
+        "ALTER TABLE labeling_checkpoint_apply_receipts "
+        "DROP COLUMN secondary_effects_completed_at_utc;"
+    )
+    store.conn.execute(
+        "ALTER TABLE labeling_checkpoint_apply_receipts "
+        "DROP COLUMN secondary_effects_state;"
+    )
+    store.conn.execute(
+        "ALTER TABLE labeling_session_checkpoints DROP COLUMN snapshot_row_sha256;"
+    )
+    store.conn.execute(
+        "UPDATE labeling_schema_meta SET value = '7' WHERE key = 'schema_version';"
+    )
+    store.conn.commit()
+    store.close()
+
+    reopened = LabelingStore(store_path)
+    try:
+        reopened.initialize()
+        current = reopened.get_session_checkpoint(
+            task_id="task-a",
+            roi_idx=7,
+            component_name="keypoints",
+            state="applied",
+        )
+        assert current is not None
+        assert current["snapshot_row_sha256"] == _snapshot_row_sha256(current)
+        replay = reopened.get_applied_session_checkpoints_by_apply_id(
+            task_id="task-a",
+            apply_id="v7-applied",
+        )
+        assert len(replay) == 1
+        assert replay[0]["snapshot_row_sha256"] == _snapshot_row_sha256(replay[0])
+        stored_receipt_json = reopened.conn.execute(
+            "SELECT checkpoints_json FROM labeling_checkpoint_apply_receipts WHERE apply_id = ?;",
+            ("v7-applied",),
+        ).fetchone()["checkpoints_json"]
+        assert stored_receipt_json == legacy_receipt_json
+        receipt_effects_state = reopened.conn.execute(
+            "SELECT secondary_effects_state FROM labeling_checkpoint_apply_receipts "
+            "WHERE apply_id = ?;",
+            ("v7-applied",),
+        ).fetchone()["secondary_effects_state"]
+        assert receipt_effects_state == "complete"
+        version = reopened.conn.execute(
+            "SELECT value FROM labeling_schema_meta WHERE key = 'schema_version';"
+        ).fetchone()["value"]
+        assert version == str(SCHEMA_VERSION)
+    finally:
+        reopened.close()
+
+
+def test_v7_nonfinite_checkpoint_migration_remains_openable(tmp_path):
+    store, lease = _checkpoint_store(tmp_path)
+    store_path = store.path
+    checkpoint = store.upsert_session_checkpoint(**_checkpoint_kwargs(lease))
+    store.conn.execute(
+        "UPDATE labeling_session_checkpoints SET payload_json = ? WHERE checkpoint_id = ?;",
+        (
+            '{"confidence":NaN,"schema":"palette.legacy_checkpoint.v1"}',
+            checkpoint["checkpoint_id"],
+        ),
+    )
+    store.conn.execute("DROP INDEX idx_labeling_session_checkpoints_snapshot_order;")
+    store.conn.execute("DROP INDEX idx_labeling_checkpoint_apply_effects_pending;")
+    store.conn.execute(
+        "ALTER TABLE labeling_checkpoint_apply_receipts "
+        "DROP COLUMN checkpoint_snapshot_sha256;"
+    )
+    store.conn.execute(
+        "ALTER TABLE labeling_checkpoint_apply_receipts "
+        "DROP COLUMN secondary_effects_completed_at_utc;"
+    )
+    store.conn.execute(
+        "ALTER TABLE labeling_checkpoint_apply_receipts "
+        "DROP COLUMN secondary_effects_state;"
+    )
+    store.conn.execute(
+        "ALTER TABLE labeling_session_checkpoints DROP COLUMN snapshot_row_sha256;"
+    )
+    store.conn.execute(
+        "UPDATE labeling_schema_meta SET value = '7' WHERE key = 'schema_version';"
+    )
+    store.conn.commit()
+    store.close()
+
+    reopened = LabelingStore(store_path)
+    try:
+        reopened.initialize()
+        current = reopened.get_session_checkpoint(
+            task_id="task-a",
+            roi_idx=7,
+            component_name="keypoints",
+        )
+        assert current is not None
+        assert current["payload"]["confidence"] != current["payload"]["confidence"]
+        assert current["snapshot_row_sha256"] == session_checkpoint_snapshot_row_sha256(
+            current
+        )
+        descriptor = reopened.list_session_checkpoint_snapshot_descriptors(
+            task_id="task-a",
+            state="active",
+            component_name="keypoints",
+        )
+        assert descriptor[0]["snapshot_row_sha256"] == current["snapshot_row_sha256"]
     finally:
         reopened.close()
 
@@ -721,37 +1240,55 @@ def test_apply_id_cannot_be_reused_for_another_task(tmp_path):
 def test_checkpoint_batches_over_default_limit_match_preview_and_cover_all_rows(tmp_path):
     store, lease = _checkpoint_store(tmp_path)
     now = "2026-09-19T12:00:00+00:00"
-    rows = [
-        (
-            f"checkpoint-{roi_idx:04d}",
-            lease.session_id,
-            "task-a",
-            "rec-a",
-            "alice",
-            "keypoints",
-            "/runs/refined-keypoints-a",
-            3,
-            "/runs/source-keypoints-a",
-            roi_idx,
-            "keypoints",
-            '{"schema":"palette.keypoint_checkpoint.v1","value":1}',
-            "{}",
-            "active",
-            now,
-            now,
+    rows = []
+    for roi_idx in range(1005):
+        checkpoint_id = f"checkpoint-{roi_idx:04d}"
+        snapshot = {
+            "checkpoint_id": checkpoint_id,
+            "task_id": "task-a",
+            "recording_id": "rec-a",
+            "user": "alice",
+            "workflow_kind": "keypoints",
+            "target_run_path": "/runs/refined-keypoints-a",
+            "target_edit_revision": 3,
+            "source_rowset_path": "/runs/source-keypoints-a",
+            "roi_idx": roi_idx,
+            "component_name": "keypoints",
+            "payload": {"schema": "palette.keypoint_checkpoint.v1", "value": 1},
+            "metadata": {},
+        }
+        rows.append(
+            (
+                checkpoint_id,
+                lease.session_id,
+                "task-a",
+                "rec-a",
+                "alice",
+                "keypoints",
+                "/runs/refined-keypoints-a",
+                3,
+                "/runs/source-keypoints-a",
+                roi_idx,
+                "keypoints",
+                '{"schema":"palette.keypoint_checkpoint.v1","value":1}',
+                "{}",
+                _snapshot_row_sha256(snapshot),
+                "active",
+                now,
+                now,
+            )
         )
-        for roi_idx in range(1005)
-    ]
     try:
         store.conn.executemany(
             """
             INSERT INTO labeling_session_checkpoints (
                 checkpoint_id, session_id, task_id, recording_id, user, workflow_kind,
                 target_run_path, target_edit_revision, source_rowset_path,
-                roi_idx, component_name, payload_json, metadata_json, state,
+                roi_idx, component_name, payload_json, metadata_json,
+                snapshot_row_sha256, state,
                 created_at_utc, updated_at_utc, applied_at_utc, apply_id,
                 edit_revision_before, edit_revision_after
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL);
             """,
             rows,
         )
@@ -772,6 +1309,16 @@ def test_checkpoint_batches_over_default_limit_match_preview_and_cover_all_rows(
             row["checkpoint_id"] for row in first_preview
         ]
         assert len(first_claim) == 1000
+        assert store.count_session_checkpoints(
+            task_id="task-a",
+            state="active",
+            component_name="keypoints",
+        ) == 5
+        assert store.count_session_checkpoints(
+            task_id="task-a",
+            state="applying",
+            component_name="keypoints",
+        ) == 1000
         assert store.mark_session_checkpoints_applied(
             checkpoint_ids=[str(row["checkpoint_id"]) for row in first_claim],
             apply_id="apply-batch-1",

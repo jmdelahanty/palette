@@ -19,7 +19,7 @@ from . import checkpoint_store as _checkpoint_store
 
 STORE_ENV_VAR = "PALETTE_LABELING_STORE_PATH"
 DEFAULT_STORE_PATH = "~/.palette/labeling_work.sqlite"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 LABELING_USER_ROLES = ("labeler", "operator", "admin")
 LABELING_USER_STATUSES = ("active", "inactive")
 ADMIN_REVIEW_STATES = (
@@ -70,6 +70,14 @@ def _row_to_dict(row: sqlite3.Row | Mapping[str, object]) -> dict[str, object]:
             out[key[:-5] if key.endswith("_json") else key] = decoded
             out.pop(key, None)
     return out
+
+
+def session_checkpoint_snapshot_row_sha256(
+    checkpoint: Mapping[str, object],
+) -> str:
+    """Return the store-owned digest for one immutable checkpoint snapshot row."""
+
+    return _checkpoint_store.compatible_snapshot_row_sha256(checkpoint)
 
 
 def _is_user_summary_sensitive_key(key: object) -> bool:
@@ -425,6 +433,7 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 component_name TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 metadata_json TEXT,
+                snapshot_row_sha256 TEXT NOT NULL,
                 state TEXT NOT NULL DEFAULT 'active',
                 created_at_utc TEXT NOT NULL,
                 updated_at_utc TEXT NOT NULL,
@@ -449,6 +458,9 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 edit_revision_before INTEGER,
                 edit_revision_after INTEGER,
                 released_checkpoint_count INTEGER NOT NULL DEFAULT 0,
+                checkpoint_snapshot_sha256 TEXT,
+                secondary_effects_state TEXT NOT NULL DEFAULT 'complete',
+                secondary_effects_completed_at_utc TEXT,
                 FOREIGN KEY(task_id) REFERENCES labeling_tasks(task_id) ON DELETE CASCADE
             );
 
@@ -494,7 +506,66 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 ON labeling_admin_reviews(recording_id, state);
             """
         )
+        checkpoint_columns = {
+            str(row["name"])
+            for row in conn.execute(
+                "PRAGMA table_info(labeling_session_checkpoints);"
+            ).fetchall()
+        }
+        if "snapshot_row_sha256" not in checkpoint_columns:
+            conn.execute(
+                "ALTER TABLE labeling_session_checkpoints "
+                "ADD COLUMN snapshot_row_sha256 TEXT;"
+            )
+        receipt_columns = {
+            str(row["name"])
+            for row in conn.execute(
+                "PRAGMA table_info(labeling_checkpoint_apply_receipts);"
+            ).fetchall()
+        }
+        if "secondary_effects_state" not in receipt_columns:
+            conn.execute(
+                "ALTER TABLE labeling_checkpoint_apply_receipts "
+                "ADD COLUMN secondary_effects_state TEXT NOT NULL DEFAULT 'complete';"
+            )
+        if "checkpoint_snapshot_sha256" not in receipt_columns:
+            conn.execute(
+                "ALTER TABLE labeling_checkpoint_apply_receipts "
+                "ADD COLUMN checkpoint_snapshot_sha256 TEXT;"
+            )
+        if "secondary_effects_completed_at_utc" not in receipt_columns:
+            conn.execute(
+                "ALTER TABLE labeling_checkpoint_apply_receipts "
+                "ADD COLUMN secondary_effects_completed_at_utc TEXT;"
+            )
+        conn.execute(
+            """
+            UPDATE labeling_checkpoint_apply_receipts
+            SET secondary_effects_state = 'not_ready',
+                secondary_effects_completed_at_utc = NULL
+            WHERE state = 'applying' AND secondary_effects_state = 'complete';
+            """
+        )
+        _checkpoint_store.backfill_checkpoint_snapshot_digests(conn)
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_labeling_session_checkpoints_snapshot_order
+            ON labeling_session_checkpoints(
+                task_id, component_name, state, updated_at_utc, roi_idx,
+                checkpoint_id, apply_id, snapshot_row_sha256
+            );
+            """
+        )
         _checkpoint_store.backfill_legacy_apply_receipts(conn)
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_labeling_checkpoint_apply_effects_pending
+            ON labeling_checkpoint_apply_receipts(
+                task_id, component_name, state, secondary_effects_state,
+                applied_at_utc, apply_id
+            );
+            """
+        )
         now = utc_now()
         cur.execute(
             """
@@ -2196,7 +2267,7 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
             params.append(str(state))
         sql.append("LIMIT 1;")
         row = self.conn.execute(" ".join(sql), params).fetchone()
-        return _row_to_dict(row) if row is not None else None
+        return _checkpoint_store.checkpoint_row(row) if row is not None else None
 
     def list_session_checkpoints(
         self,
@@ -2222,7 +2293,7 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         sql.append("ORDER BY updated_at_utc ASC, roi_idx ASC, checkpoint_id ASC LIMIT ?")
         params.append(max(1, int(limit)))
         rows = self.conn.execute(" ".join(sql), params).fetchall()
-        return [_row_to_dict(row) for row in rows]
+        return [_checkpoint_store.checkpoint_row(row) for row in rows]
 
     def count_unapplied_session_checkpoints(
         self,
@@ -2242,6 +2313,42 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         row = self.conn.execute(" ".join(sql), params).fetchone()
         return int(row["n"] if row is not None else 0)
 
+    def list_session_checkpoint_snapshot_descriptors(
+        self,
+        *,
+        task_id: str,
+        state: str,
+        component_name: str,
+        limit: int = 1000,
+    ) -> list[dict[str, object]]:
+        """Read a bounded checkpoint window without parsing its JSON payloads."""
+
+        self.initialize()
+        return _checkpoint_store.list_checkpoint_snapshot_descriptors(
+            self.conn,
+            task_id=task_id,
+            state=state,
+            component_name=component_name,
+            limit=limit,
+        )
+
+    def count_session_checkpoints(
+        self,
+        *,
+        task_id: str,
+        state: str,
+        component_name: str,
+    ) -> int:
+        """Count checkpoints for one exact state/component binding."""
+
+        self.initialize()
+        return _checkpoint_store.count_checkpoints(
+            self.conn,
+            task_id=task_id,
+            state=state,
+            component_name=component_name,
+        )
+
     def claim_session_checkpoints_for_apply(
         self,
         *,
@@ -2249,6 +2356,7 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         component_name: str,
         apply_id: str,
         limit: int = 1000,
+        checkpoint_snapshot_sha256: str | None = None,
     ) -> list[dict[str, object]]:
         """Atomically claim or replay one canonical apply snapshot."""
 
@@ -2259,6 +2367,7 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
             component_name=component_name,
             apply_id=apply_id,
             limit=limit,
+            checkpoint_snapshot_sha256=checkpoint_snapshot_sha256,
         )
 
     def release_session_checkpoints_apply(
@@ -2289,6 +2398,55 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
             apply_id=apply_id,
         )
 
+    def list_pending_session_checkpoint_apply_effects(
+        self,
+        *,
+        task_id: str,
+        component_name: str,
+        limit: int = 1000,
+    ) -> list[dict[str, object]]:
+        """List applied receipt summaries awaiting audit/registry effects."""
+
+        self.initialize()
+        return _checkpoint_store.list_pending_apply_effects(
+            self.conn,
+            task_id=task_id,
+            component_name=component_name,
+            limit=limit,
+        )
+
+    def count_pending_session_checkpoint_apply_effects(
+        self,
+        *,
+        task_id: str,
+        component_name: str | None = None,
+    ) -> int:
+        """Count applied receipts whose audit/registry effects remain pending."""
+
+        self.initialize()
+        return _checkpoint_store.count_pending_apply_effects(
+            self.conn,
+            task_id=task_id,
+            component_name=component_name,
+        )
+
+    def mark_session_checkpoint_apply_effects_complete(
+        self,
+        *,
+        task_id: str,
+        component_name: str,
+        apply_id: str,
+    ) -> bool:
+        """Mark one applied receipt's audit/registry effects complete."""
+
+        self.initialize()
+        return _checkpoint_store.mark_apply_effects_complete(
+            self.conn,
+            task_id=task_id,
+            component_name=component_name,
+            apply_id=apply_id,
+        )
+
     def mark_session_checkpoints_applied(
         self,
         *,
@@ -2296,6 +2454,7 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         apply_id: str,
         edit_revision_before: int,
         edit_revision_after: int,
+        require_secondary_effects: bool = False,
     ) -> int:
         self.initialize()
         return _checkpoint_store.mark_checkpoints_applied(
@@ -2304,6 +2463,7 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
             apply_id=apply_id,
             edit_revision_before=edit_revision_before,
             edit_revision_after=edit_revision_after,
+            require_secondary_effects=require_secondary_effects,
         )
 
     def list_sessions(
