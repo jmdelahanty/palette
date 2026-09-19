@@ -6,12 +6,16 @@ import hmac
 import json
 import re
 import sqlite3
+import threading
 import uuid
-from dataclasses import dataclass
+from contextlib import nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import numpy as np
+
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 from .web_responses import _decode_uint8_payload, _raw_array_payload
 
@@ -35,6 +39,11 @@ class KeypointRuntimeSession:
     auto_advance_on_save: bool = False
     target_token: str | None = None
     target_token_position: int | None = None
+    summary_cache: dict[str, object] | None = None
+    task_roi_indices: np.ndarray | None = None
+    task_scope_sha256: str | None = None
+    request_generation: int = 0
+    request_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
 @dataclass
 class DetectRuntimeSession:
@@ -196,6 +205,8 @@ def _get_keypoint_runtime(state: Any, session: Mapping[str, object]) -> Keypoint
         review_intended_use=str(scope.get("review_intended_use") or "").strip() or None,
         review_notes=str(scope.get("review_notes") or "").strip() or None,
         auto_advance_on_save=_bool_from_scope(scope, "auto_advance_on_save", default=False),
+        task_roi_indices=np.asarray(review_session.failures, dtype=np.int64).copy(),
+        task_scope_sha256=canonical_json_sha256(dict(scope)),
     )
     _refresh_keypoint_queue(runtime, backend_module)
     state.keypoint_sessions[session_id] = runtime
@@ -602,7 +613,18 @@ def _require_browser_mutation_target_token(runtime: object, body: Mapping[str, o
         raise ValueError("Stale or invalid target_token; reload the current target before saving.")
 
 
-def _keypoint_runtime_state(runtime: KeypointRuntimeSession, backend_module: Any) -> dict[str, object]:
+def _keypoint_runtime_request_lock(runtime: object):
+    """Serialize navigation and checkpoint admission for one browser runtime."""
+
+    return getattr(runtime, "request_lock", nullcontext())
+
+
+def _keypoint_runtime_state(
+    runtime: KeypointRuntimeSession,
+    backend_module: Any,
+    *,
+    store: "LabelingStore | None" = None,
+) -> dict[str, object]:
     session = runtime.review_session
     total = int(session.failures.size)
     current: dict[str, object] = {}
@@ -614,13 +636,15 @@ def _keypoint_runtime_state(runtime: KeypointRuntimeSession, backend_module: Any
             "roi_idx": roi_idx,
             "frame_idx": int(session.frame_indices[roi_idx]),
         }
-    summary: dict[str, object]
-    try:
-        summary = dict(backend_module.review_session_summary(session))
-    except Exception as exc:
-        summary = {"error": str(exc)}
+    summary = runtime.summary_cache
+    if summary is None:
+        try:
+            summary = dict(backend_module.review_session_summary(session))
+        except Exception as exc:
+            summary = {"error": str(exc)}
+        runtime.summary_cache = summary
     review_status = session.refined.attrs.get("keypoint_review_status")
-    return dict(_redact_labeler_runtime_payload({
+    state = {
         "session_id": runtime.session_id,
         "task_id": runtime.task_id,
         "recording_id": runtime.recording_id,
@@ -647,7 +671,12 @@ def _keypoint_runtime_state(runtime: KeypointRuntimeSession, backend_module: Any
             else None
         ),
         "auto_advance_on_save": bool(runtime.auto_advance_on_save),
-    }))
+    }
+    if store is not None:
+        from .web_keypoint_checkpoints import keypoint_checkpoint_state
+
+        state.update(keypoint_checkpoint_state(store, runtime))
+    return dict(_redact_labeler_runtime_payload(state))
 
 def _refresh_keypoint_queue(runtime: KeypointRuntimeSession, backend_module: Any) -> None:
     runtime.review_session.failures = backend_module.filter_review_rois(

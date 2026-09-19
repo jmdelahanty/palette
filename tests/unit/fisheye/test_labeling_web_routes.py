@@ -13,6 +13,7 @@ import numpy as np
 
 from fisheye.labeling import web as labeling_web
 from fisheye.labeling.assignment_store import LabelingStore
+from fisheye.labeling.admin_registry import _admin_keypoint_review_rows
 
 
 @contextmanager
@@ -3824,10 +3825,15 @@ def test_admin_summary_includes_dashboard_user_readiness(tmp_path):
         expected_keypoint_write_contract = {
             "save_method": "POST",
             "save_endpoint": "/api/sessions/{session_id}/keypoints/save",
+            "apply_endpoint": "/api/sessions/{session_id}/keypoints/apply",
             "payload_fields": ["points", "advance", "target_token"],
             "required_fields": ["points", "target_token"],
-            "response_fields": ["ok", "result", "state"],
-            "audit_event": "save_keypoints",
+            "response_fields": ["ok", "result", "state", "roi"],
+            "save_semantics": "mutable_and_recovered_rows_checkpoint_to_labeling_sqlite_without_canonical_write",
+            "apply_semantics": "validate_and_apply_one_idempotent_checkpoint_snapshot_to_canonical_zarr",
+            "immutable_compatibility": "immutable_base_browser_save_uses_existing_direct_delta_partition_writer_without_apply",
+            "audit_event": "checkpoint_keypoints",
+            "canonical_apply_audit_event": "apply_keypoint_session_checkpoints",
             "audit_provenance": {
                 "event_store": "labeling_task_events",
                 "required_event_fields": [
@@ -3846,18 +3852,22 @@ def test_admin_summary_includes_dashboard_user_readiness(tmp_path):
                 "mutation_summary_fields": ["target", "before", "after"],
             },
             "retry_policy": {
-                "data_write_semantics": "replace_target_payload",
-                "same_payload_retry_safe": True,
-                "audit_semantics": "append_only",
-                "duplicate_audit_events_possible": True,
-                "client_idempotency_key_supported": False,
-                "retry_guidance": "If the browser loses the response after submitting, reopening the task and saving the same target payload again should leave the label data in the same state, but records another audit event.",
+                "checkpoint_same_row_semantics": "replace_latest_active_row_checkpoint",
+                "apply_id_required": True,
+                "apply_id_binds_checkpoint_snapshot_digest": True,
+                "same_apply_id_retry_returns_receipt_or_resumes_owned_snapshot": True,
             },
-            "registry_refresh": True,
+            "registry_refresh_on_checkpoint_save": False,
+            "registry_refresh_on_successful_apply": True,
             "guard": "session_for_user",
         }
         for key, value in expected_keypoint_write_contract.items():
-            assert browser_workflows["keypoints"]["write_contract"][key] == value
+            actual = browser_workflows["keypoints"]["write_contract"][key]
+            if key == "retry_policy":
+                for retry_key, retry_value in value.items():
+                    assert actual[retry_key] == retry_value
+            else:
+                assert actual == value
         assert browser_workflows["detect_training"]["write_contract"]["save_endpoint"] == (
             "/api/sessions/{session_id}/detect/save"
         )
@@ -4620,6 +4630,439 @@ def test_subject_mask_state_route_uses_cached_runtime_without_real_zarr(tmp_path
         store.close()
 
 
+class _KeypointRouteGroup(dict[str, object]):
+    def __init__(self, *args, attrs=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.attrs = attrs or {}
+
+
+def _mutable_keypoint_route_session(tmp_path):
+    archive = tmp_path / "mutable-keypoints.zarr"
+    archive.mkdir()
+    refined = _KeypointRouteGroup(
+        {
+            "keypoints_roi": np.full((2, 1, 2), np.nan, dtype=np.float64),
+            "reason": np.asarray(["needs_review", "needs_review"], dtype=object),
+        },
+        attrs={"initial_contract_digest": "refined-contract-a"},
+    )
+    crop = _KeypointRouteGroup(attrs={"initial_contract_digest": "crop-contract-a"})
+    root = _KeypointRouteGroup(attrs={"recording_id": "rec-a"})
+    return SimpleNamespace(
+        failures=np.asarray([0, 1], dtype=np.int64),
+        frame_indices=np.asarray([42, 43], dtype=np.int64),
+        refined=refined,
+        crop=crop,
+        root=root,
+        immutable_base=False,
+        recovered_roi_only=False,
+        delta_run=None,
+        delta_generation=None,
+        zarr_path=str(archive),
+        refined_run="refined-a",
+        crop_run="crop-a",
+        keypoint_labels=("snout",),
+        keypoint_count=1,
+        source_refined_row_ids=np.asarray([100, 101], dtype=np.int64),
+        source_detect_row_index=np.asarray([200, 201], dtype=np.int64),
+        instance_keys=None,
+        kp_roi_arr=refined["keypoints_roi"],
+        reason_arr=refined["reason"],
+        kp_img_arr=None,
+        kp_norm_arr=None,
+        heading_arr=None,
+        confidence_arr=None,
+        conf_arr=None,
+        triangle_area_arr=None,
+        min_angle_arr=None,
+        triangle_angles_arr=None,
+        refined_success_arr=None,
+        flip_corrected_arr=None,
+        quality_labels_arr=None,
+        confidence_valid_arr=None,
+        geometry_valid_arr=None,
+        usable_arr=None,
+        edit_applied_arr=None,
+        heading_finite_arr=None,
+        heading_usable_arr=None,
+        detection_source_arr=None,
+        min_triangle_angle=0.0,
+        min_triangle_area=0.0,
+        max_triangle_area=None,
+        confidence_threshold=0.0,
+        roi_diagonal=None,
+        norm_factor=np.asarray([1.0, 1.0], dtype=np.float64),
+        head_triangle_indices=(0,),
+        manual_qc_policy=None,
+        derived_metric_storage=None,
+    )
+
+
+def _install_mutable_keypoint_route_backend(monkeypatch, *, failure=None):
+    failure_state = failure if failure is not None else {"real_apply_failures": 0}
+
+    def load_roi_payload(session, position=0):
+        roi_idx = int(session.failures[int(position)])
+        point = np.asarray(session.kp_roi_arr[roi_idx], dtype=np.float64)[0]
+        return {
+            "roi_idx": roi_idx,
+            "position": int(position),
+            "total": int(session.failures.size),
+            "frame_idx": int(session.frame_indices[roi_idx]),
+            "labels": ["snout"],
+            "points": [
+                [
+                    float(point[0]) if np.isfinite(point[0]) else None,
+                    float(point[1]) if np.isfinite(point[1]) else None,
+                ]
+            ],
+            "reason": str(session.reason_arr[roi_idx]),
+            "status": {
+                "source_refined_row_id": int(session.source_refined_row_ids[roi_idx]),
+                "source_detect_row_index": int(session.source_detect_row_index[roi_idx]),
+            },
+        }
+
+    def save_roi_correction(session, *, position=0, points=None):
+        roi_idx = int(session.failures[int(position)])
+        session.kp_roi_arr[roi_idx] = np.asarray(points, dtype=np.float64)
+        session.reason_arr[roi_idx] = "manual_correction"
+        if (
+            type(session.root).__name__ != "_DryRunRoot"
+            and int(failure_state.get("real_apply_failures", 0)) > 0
+        ):
+            failure_state["real_apply_failures"] = int(
+                failure_state["real_apply_failures"]
+            ) - 1
+            raise RuntimeError("injected real apply failure")
+        return {
+            "roi_idx": roi_idx,
+            "frame_idx": int(session.frame_indices[roi_idx]),
+            "changed": True,
+            "reason_updated": True,
+            "stale_touched": 0,
+            "readback": {
+                "roi_idx": roi_idx,
+                "frame_idx": int(session.frame_indices[roi_idx]),
+                "reason": str(session.reason_arr[roi_idx]),
+                "status": {
+                    "source_refined_row_id": int(
+                        session.source_refined_row_ids[roi_idx]
+                    ),
+                    "source_detect_row_index": int(
+                        session.source_detect_row_index[roi_idx]
+                    ),
+                },
+            },
+        }
+
+    _fake_module(
+        monkeypatch,
+        "fisheye.tune.keypoint_review_backend",
+        review_session_summary=lambda session: {"summary": "ok"},
+        load_roi_payload=load_roi_payload,
+        save_roi_correction=save_roi_correction,
+        apply_review_status=lambda session, **kwargs: {
+            "review_status": {"state": kwargs["state"]}
+        },
+    )
+    return failure_state
+
+
+def test_mutable_keypoint_http_checkpoint_apply_and_pending_gates(
+    tmp_path, monkeypatch
+):
+    _install_mutable_keypoint_route_backend(monkeypatch)
+    store = LabelingStore(tmp_path / "labeling_work.sqlite")
+    try:
+        store.initialize()
+        store.assign_recording(recording_id="rec-a", assignee_user="alice")
+        store.upsert_task(
+            task_id="task-a", recording_id="rec-a", workflow_kind="keypoints"
+        )
+        lease = store.create_session(task_id="task-a", user="alice", ttl_seconds=600)
+        review_session = _mutable_keypoint_route_session(tmp_path)
+
+        def configure(state):
+            state.keypoint_sessions[lease.session_id] = labeling_web.KeypointRuntimeSession(
+                session_id=lease.session_id,
+                task_id="task-a",
+                recording_id="rec-a",
+                user="alice",
+                review_session=review_session,
+                task_roi_indices=np.asarray([0, 1], dtype=np.int64),
+            )
+
+        with _running_server(store, user="alice", configure_state=configure) as base_url:
+            state_status, initial = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/keypoints/state"
+            )
+            token = initial["state"]["target_token"]
+            save_status, saved = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/keypoints/save",
+                method="POST",
+                payload={
+                    "points": [[5.0, 6.0]],
+                    "target_token": token,
+                    "save_mode": "direct",
+                },
+            )
+            canonical_after_checkpoint = np.asarray(
+                review_session.kp_roi_arr[0]
+            ).copy()
+            review_status, review_blocked = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/keypoints/review-status",
+                method="POST",
+                payload={"state": "approved", "target_token": token},
+            )
+            complete_status, complete_blocked = _json_request(
+                base_url,
+                "/api/tasks/task-a/complete",
+                method="POST",
+                payload={"session_id": lease.session_id, "expected_user": "alice"},
+            )
+            wrong_status, wrong = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/keypoints/apply",
+                method="POST",
+                payload={
+                    "apply_id": "apply-wrong",
+                    "checkpoint_snapshot_sha256": "0" * 64,
+                    "target_token": token,
+                },
+            )
+            digest = saved["state"]["checkpoint_snapshot_sha256"]
+            apply_status, applied = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/keypoints/apply",
+                method="POST",
+                payload={
+                    "apply_id": "apply-good",
+                    "checkpoint_snapshot_sha256": digest,
+                    "target_token": token,
+                },
+            )
+            retry_status, retried = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/keypoints/apply",
+                method="POST",
+                payload={
+                    "apply_id": "apply-good",
+                    "checkpoint_snapshot_sha256": digest,
+                    "target_token": token,
+                },
+            )
+
+        assert state_status == 200
+        assert save_status == 200
+        assert saved["result"]["save_mode"] == "checkpoint_v1"
+        assert saved["result"]["canonical_zarr_mutated"] is False
+        assert saved["result"]["applied"] is False
+        assert saved["roi"]["points"] == [[5.0, 6.0]]
+        assert saved["roi"]["session_checkpoint"]["applied"] is False
+        assert np.isnan(canonical_after_checkpoint).all()
+        assert review_status == 409
+        assert review_blocked["error"] == "unapplied_session_edits"
+        assert complete_status == 409
+        assert complete_blocked["error"] == "unapplied_session_edits"
+        assert wrong_status == 409
+        assert wrong["safe_prewrite_rejection"] is True
+        assert wrong["retain_apply_id"] is False
+        assert wrong["apply_retry_disposition"] == "fresh_snapshot_required"
+        assert apply_status == 200
+        assert applied["result"]["applied"] is True
+        assert applied["result"]["applied_checkpoint_count"] == 1
+        assert applied["result"]["row_results"][0]["row_identity"] == {
+            "roi_idx": 0,
+            "frame_idx": 42,
+            "source_refined_row_id": 100,
+            "source_detect_row_index": 200,
+        }
+        assert applied["roi"]["points"] == [[5.0, 6.0]]
+        assert retry_status == 200
+        assert retried["result"]["already_applied"] is True
+        assert store.list_events(
+            task_id="task-a", event_type="checkpoint_keypoints"
+        )
+        apply_events = store.list_events(
+            task_id="task-a", event_type="apply_keypoint_session_checkpoints"
+        )
+        assert apply_events[0]["after"]["row_results"][0]["frame_idx"] == 42
+        projected = _admin_keypoint_review_rows(apply_events)
+        assert projected[0]["canonical_applied"] is True
+        assert projected[0]["frame_idx"] == 42
+        assert projected[0]["row_identity"]["source_refined_row_id"] == 100
+    finally:
+        store.close()
+
+
+def test_mutable_keypoint_http_apply_uncertainty_retains_id(tmp_path, monkeypatch):
+    failure = _install_mutable_keypoint_route_backend(
+        monkeypatch, failure={"real_apply_failures": 1}
+    )
+    store = LabelingStore(tmp_path / "labeling_work.sqlite")
+    try:
+        store.initialize()
+        store.assign_recording(recording_id="rec-a", assignee_user="alice")
+        store.upsert_task(
+            task_id="task-a", recording_id="rec-a", workflow_kind="keypoints"
+        )
+        lease = store.create_session(task_id="task-a", user="alice", ttl_seconds=600)
+        review_session = _mutable_keypoint_route_session(tmp_path)
+
+        def configure(state):
+            state.keypoint_sessions[lease.session_id] = labeling_web.KeypointRuntimeSession(
+                session_id=lease.session_id,
+                task_id="task-a",
+                recording_id="rec-a",
+                user="alice",
+                review_session=review_session,
+                task_roi_indices=np.asarray([0, 1], dtype=np.int64),
+            )
+
+        with _running_server(store, user="alice", configure_state=configure) as base_url:
+            _, initial = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/keypoints/state"
+            )
+            token = initial["state"]["target_token"]
+            _, saved = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/keypoints/save",
+                method="POST",
+                payload={"points": [[7.0, 8.0]], "target_token": token},
+            )
+            digest = saved["state"]["checkpoint_snapshot_sha256"]
+            failed_status, failed = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/keypoints/apply",
+                method="POST",
+                payload={
+                    "apply_id": "apply-recover",
+                    "checkpoint_snapshot_sha256": digest,
+                    "target_token": token,
+                },
+            )
+            recovered_status, recovered = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/keypoints/apply",
+                method="POST",
+                payload={
+                    "apply_id": "apply-recover",
+                    "checkpoint_snapshot_sha256": digest,
+                    "target_token": token,
+                },
+            )
+
+        assert failure["real_apply_failures"] == 0
+        assert failed_status == 409
+        assert failed["safe_prewrite_rejection"] is False
+        assert failed["retain_apply_id"] is True
+        assert failed["apply_retry_disposition"] == "retry_same_snapshot"
+        assert failed["state"]["resumable_apply_id"] == "apply-recover"
+        assert failed["state"]["resumable_checkpoint_snapshot_sha256"] == digest
+        assert recovered_status == 200
+        assert recovered["result"]["applied"] is True
+        assert recovered["result"]["edit_revision_after"] == 1
+    finally:
+        store.close()
+
+
+def test_mutable_keypoint_http_post_apply_audit_failure_retries_same_receipt(
+    tmp_path, monkeypatch
+):
+    _install_mutable_keypoint_route_backend(monkeypatch)
+    store = LabelingStore(tmp_path / "labeling_work.sqlite")
+    try:
+        store.initialize()
+        store.assign_recording(recording_id="rec-a", assignee_user="alice")
+        store.upsert_task(
+            task_id="task-a", recording_id="rec-a", workflow_kind="keypoints"
+        )
+        lease = store.create_session(task_id="task-a", user="alice", ttl_seconds=600)
+        review_session = _mutable_keypoint_route_session(tmp_path)
+
+        def configure(state):
+            state.keypoint_sessions[lease.session_id] = labeling_web.KeypointRuntimeSession(
+                session_id=lease.session_id,
+                task_id="task-a",
+                recording_id="rec-a",
+                user="alice",
+                review_session=review_session,
+                task_roi_indices=np.asarray([0, 1], dtype=np.int64),
+            )
+
+        with _running_server(store, user="alice", configure_state=configure) as base_url:
+            _, initial = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/keypoints/state"
+            )
+            token = initial["state"]["target_token"]
+            _, saved = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/keypoints/save",
+                method="POST",
+                payload={"points": [[9.0, 10.0]], "target_token": token},
+            )
+            digest = saved["state"]["checkpoint_snapshot_sha256"]
+            original_record_event = store.record_event
+            fail_apply_event = True
+
+            def record_event_once(**kwargs):
+                nonlocal fail_apply_event
+                if (
+                    fail_apply_event
+                    and kwargs.get("event_type")
+                    == "apply_keypoint_session_checkpoints"
+                ):
+                    fail_apply_event = False
+                    raise RuntimeError("injected apply audit failure")
+                return original_record_event(**kwargs)
+
+            store.record_event = record_event_once  # type: ignore[method-assign]
+            failed_status, failed = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/keypoints/apply",
+                method="POST",
+                payload={
+                    "apply_id": "apply-audit-retry",
+                    "checkpoint_snapshot_sha256": digest,
+                    "target_token": token,
+                },
+            )
+            retry_status, retried = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/keypoints/apply",
+                method="POST",
+                payload={
+                    "apply_id": "apply-audit-retry",
+                    "checkpoint_snapshot_sha256": digest,
+                    "target_token": token,
+                },
+            )
+
+        assert failed_status == 409
+        assert failed["error"] == "keypoint_apply_secondary_effect_error"
+        assert failed["canonical_apply_succeeded"] is True
+        assert failed["retain_apply_id"] is True
+        assert failed["apply_retry_disposition"] == "retry_same_snapshot"
+        assert failed["result"]["row_results"][0]["readback"]["status"] == {
+            "source_refined_row_id": 100,
+            "source_detect_row_index": 200,
+        }
+        assert retry_status == 200
+        assert retried["result"]["already_applied"] is True
+        assert retried["result"]["row_results"] == failed["result"]["row_results"]
+        assert len(
+            store.list_events(
+                task_id="task-a",
+                event_type="apply_keypoint_session_checkpoints",
+            )
+        ) == 1
+    finally:
+        store.close()
+
+
 def test_keypoint_nav_and_save_routes_record_audit_event_without_real_zarr(tmp_path, monkeypatch):
     _fake_module(
         monkeypatch,
@@ -4653,9 +5096,9 @@ def test_keypoint_nav_and_save_routes_record_audit_event_without_real_zarr(tmp_p
                 failures=np.asarray([0, 1], dtype=np.int32),
                 frame_indices=np.asarray([42, 43], dtype=np.int32),
                 refined=SimpleNamespace(attrs={}),
-                immutable_base=False,
-                delta_run=None,
-                delta_generation=None,
+                immutable_base=True,
+                delta_run="delta-review-a",
+                delta_generation=1,
                 zarr_path="/tmp/fake.zarr",
                 refined_run="refined-a",
                 crop_run="crop-a",
@@ -4787,6 +5230,9 @@ def test_keypoint_nav_and_save_routes_record_audit_event_without_real_zarr(tmp_p
         assert save_status == 200
         assert save_payload["ok"] is True
         assert save_payload["result"]["changed"] is True
+        assert save_payload["result"]["save_mode"] == "immutable_delta_direct_v1"
+        assert save_payload["result"]["saved"] is True
+        assert save_payload["result"]["applied"] is True
         assert "zarr_path" not in save_payload["result"]
         assert "source_path" not in save_payload["result"]["readback"]
         assert "/tmp/fake.zarr" not in json.dumps(save_payload)

@@ -322,6 +322,7 @@ from .web_runtimes import (
     _get_subject_mask_runtime,
     _get_video_detect_parent_frame,
     _get_video_detect_runtime,
+    _keypoint_runtime_request_lock,
     _next_browser_nav_position,
     _require_browser_mutation_target_token,
     _keypoint_runtime_state,
@@ -340,6 +341,16 @@ from .web_runtimes import (
     _video_detect_frame_payload,
     _video_detect_runtime_state,
 )
+from .web_keypoint_checkpoints import (
+    KeypointCheckpointConflict,
+    count_unfinished_keypoint_checkpoint_edits,
+    current_keypoint_payload,
+)
+from .web_keypoint_checkpoint_routes import (
+    action_keypoint_request,
+    apply_keypoint_request,
+    save_keypoint_request,
+)
 from .web_signed_links import (
     _effective_signed_link_ttl_seconds,
     _signed_invite_path,
@@ -350,10 +361,6 @@ from .web_signed_links import (
     _verify_signed_task_link_token,
 )
 from .web_policy import (
-    BROWSER_CLIENT_AUTHORITY,
-    BROWSER_MUTATION_AUDIT_PROVENANCE,
-    BROWSER_MUTATION_RETRY_POLICY,
-    BROWSER_WORKFLOW_SERVER_WRITE_CONTRACT,
     _browser_mutation_target_contract_policy,
     _browser_mutation_write_contract_policy,
     _browser_mutation_write_policy,
@@ -886,13 +893,13 @@ def _refresh_registry_for_scope(
     zarr_path: str | None = None,
     dataset_id: str | None = None,
     zarr_use: str | None = None,
-) -> None:
+) -> bool:
     registry_path = str(scope.get("registry_path") or "").strip()
     resolved_dataset_id = str(dataset_id or scope.get("dataset_id") or "").strip()
     resolved_zarr_path = str(zarr_path or scope.get("zarr_path") or "").strip()
     resolved_zarr_use = str(zarr_use or scope.get("zarr_use") or "").strip() or None
     if not registry_path or not resolved_dataset_id or not resolved_zarr_path:
-        return
+        return True
     try:
         from fisheye.registry.db import Registry
 
@@ -930,7 +937,7 @@ def _refresh_registry_for_scope(
                     )
                 )
             else:
-                return
+                return True
         finally:
             registry.close()
         store.record_event(
@@ -946,6 +953,7 @@ def _refresh_registry_for_scope(
             },
             after={"counts": counts},
         )
+        return True
     except Exception as exc:
         store.record_event(
             task_id=task_id,
@@ -960,6 +968,7 @@ def _refresh_registry_for_scope(
             },
             after={"error": "registry_refresh_failed", "details": str(exc)},
         )
+        return False
 
 
 def _project_approved_keypoint_review_to_recording_step_status(
@@ -1686,15 +1695,25 @@ def _make_handler(state: ServerState):
 
             keypoint_path = suffix[len("/keypoints") :]
             if keypoint_path == "/state":
-                self._write_json({"ok": True, "state": _keypoint_runtime_state(runtime, backend_module)})
+                self._write_json({"ok": True, "state": _keypoint_runtime_state(runtime, backend_module, store=state.store)})
                 return True
             if keypoint_path == "/roi/current":
                 try:
-                    payload = dict(backend_module.load_roi_payload(runtime.review_session, position=runtime.position))
-                    payload["state"] = _keypoint_runtime_state(runtime, backend_module)
-                    payload["ok"] = True
+                    payload = current_keypoint_payload(
+                        state.store,
+                        runtime,
+                        backend_module,
+                        state_payload=_keypoint_runtime_state(
+                            runtime, backend_module, store=state.store
+                        ),
+                    )
                 except Exception as exc:
-                    self._write_json(_format_error("roi_load_error", details=_labeler_safe_error_details(exc), status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
+                    status = (
+                        HTTPStatus.CONFLICT
+                        if isinstance(exc, KeypointCheckpointConflict)
+                        else HTTPStatus.NOT_FOUND
+                    )
+                    self._write_json(_format_error("roi_load_error", details=_labeler_safe_error_details(exc), status=status), status=status)
                     return True
                 self._write_json(_redact_labeler_runtime_payload(payload))
                 return True
@@ -1714,16 +1733,23 @@ def _make_handler(state: ServerState):
             keypoint_path = suffix[len("/keypoints") :]
             if keypoint_path == "/nav":
                 try:
-                    total = int(runtime.review_session.failures.size)
-                    runtime.position = _next_browser_nav_position(
-                        current_position=runtime.position,
-                        total=total,
-                        body=body,
-                    )
+                    with _keypoint_runtime_request_lock(runtime):
+                        total = int(runtime.review_session.failures.size)
+                        runtime.position = _next_browser_nav_position(
+                            current_position=runtime.position,
+                            total=total,
+                            body=body,
+                        )
+                        runtime.request_generation = int(
+                            getattr(runtime, "request_generation", 0)
+                        ) + 1
+                        response_state = _keypoint_runtime_state(
+                            runtime, backend_module, store=state.store
+                        )
                 except (TypeError, ValueError) as exc:
                     self._write_json(_format_error("nav_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
                     return True
-                self._write_json({"ok": True, "state": _keypoint_runtime_state(runtime, backend_module)})
+                self._write_json({"ok": True, "state": response_state})
                 return True
 
             if keypoint_path == "/save":
@@ -1732,125 +1758,70 @@ def _make_handler(state: ServerState):
                 if "points" not in body:
                     self._write_json(_format_error("payload_validation", details="Missing points."), status=HTTPStatus.BAD_REQUEST)
                     return True
-                try:
-                    before = dict(backend_module.load_roi_payload(runtime.review_session, position=runtime.position))
-                    result = backend_module.save_roi_correction(
-                        runtime.review_session,
-                        position=runtime.position,
-                        points=body.get("points"),  # type: ignore[arg-type]
-                    )
-                    target = {
-                        "roi_idx": result.get("roi_idx"),
-                        "frame_idx": result.get("frame_idx"),
-                        "refined_run": str(runtime.review_session.refined_run),
-                        "crop_run": str(runtime.review_session.crop_run),
-                    }
-                    mutation_event = state.store.record_event(
-                        task_id=runtime.task_id,
-                        recording_id=runtime.recording_id,
-                        user=user,
-                        event_type="save_keypoints",
-                        target=target,
-                        before={
-                            "roi_idx": before.get("roi_idx"),
-                            "frame_idx": before.get("frame_idx"),
-                            "points": before.get("points"),
-                            "reason": before.get("reason"),
-                            "status": before.get("status"),
-                        },
-                        after={
-                            "changed": result.get("changed"),
-                            "reason_updated": result.get("reason_updated"),
-                            "readback": result.get("readback"),
-                        },
-                    )
-                    _refresh_registry_for_scope(
-                        store=state.store,
-                        task_id=runtime.task_id,
-                        recording_id=runtime.recording_id,
-                        user=user,
-                        workflow_kind="keypoints",
-                        scope=_session_scope(session),
-                        zarr_path=str(runtime.review_session.zarr_path),
-                        dataset_id=str(session.get("dataset_id") or "") or None,
-                        zarr_use=str(session.get("zarr_use") or "") or None,
-                    )
-                    _advance_keypoint(runtime, advance=bool(body.get("advance", runtime.auto_advance_on_save)))
-                except Exception as exc:
-                    self._write_json(_format_error("save_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
-                    return True
-                self._write_json(
-                    _redact_labeler_runtime_payload(
-                        {
-                            "ok": True,
-                            "result": result,
-                            "mutation": _browser_mutation_response_metadata(
-                                workflow_kind="keypoints",
-                                session=session,
-                                mutation_event=mutation_event,
-                                operator_validation_mutation_gate=_runtime_operator_validation_mutation_gate(state.config),
-                            ),
-                            "state": _keypoint_runtime_state(runtime, backend_module),
-                        }
-                    )
+                response, status = save_keypoint_request(
+                    store=state.store,
+                    runtime=runtime,
+                    backend_module=backend_module,
+                    session=session,
+                    user=user,
+                    body=body,
+                    operator_validation_mutation_gate=_runtime_operator_validation_mutation_gate(state.config),
+                    refresh_registry=_refresh_registry_for_scope,
                 )
+                self._write_json(response, status=status)
+                return True
+
+            if keypoint_path == "/apply":
+                if self._reject_browser_mutation_preflight(session, body, runtime):
+                    return True
+                response, status = apply_keypoint_request(
+                    store=state.store,
+                    runtime=runtime,
+                    backend_module=backend_module,
+                    session=session,
+                    user=user,
+                    body=body,
+                    operator_validation_mutation_gate=_runtime_operator_validation_mutation_gate(state.config),
+                    refresh_registry=_refresh_registry_for_scope,
+                )
+                self._write_json(response, status=status)
                 return True
 
             if keypoint_path == "/action":
                 if self._reject_browser_mutation_preflight(session, body, runtime):
                     return True
-                action = str(body.get("action") or "").strip()
-                try:
-                    if action == "mark_no_keypoints":
-                        result = backend_module.mark_no_keypoints(runtime.review_session, position=runtime.position)
-                    elif action == "mark_detection_issue":
-                        result = backend_module.mark_detection_issue(runtime.review_session, position=runtime.position)
-                    elif action == "clear_failure_label":
-                        result = backend_module.clear_failure_label(runtime.review_session, position=runtime.position)
-                    else:
-                        raise ValueError(f"Unsupported keypoint action: {action}")
-                    mutation_event = state.store.record_event(
-                        task_id=runtime.task_id,
-                        recording_id=runtime.recording_id,
-                        user=user,
-                        event_type=f"keypoint_{action}",
-                        target={"roi_idx": result.get("roi_idx"), "frame_idx": result.get("frame_idx")},
-                        after=result,
-                    )
-                    _refresh_registry_for_scope(
-                        store=state.store,
-                        task_id=runtime.task_id,
-                        recording_id=runtime.recording_id,
-                        user=user,
-                        workflow_kind="keypoints",
-                        scope=_session_scope(session),
-                        zarr_path=str(runtime.review_session.zarr_path),
-                        dataset_id=str(session.get("dataset_id") or "") or None,
-                        zarr_use=str(session.get("zarr_use") or "") or None,
-                    )
-                    _advance_keypoint(runtime, advance=bool(body.get("advance", runtime.auto_advance_on_save)))
-                except Exception as exc:
-                    self._write_json(_format_error("keypoint_action_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
-                    return True
-                self._write_json(
-                    _redact_labeler_runtime_payload(
-                        {
-                            "ok": True,
-                            "result": result,
-                            "mutation": _browser_mutation_response_metadata(
-                                workflow_kind="keypoints",
-                                session=session,
-                                mutation_event=mutation_event,
-                                operator_validation_mutation_gate=_runtime_operator_validation_mutation_gate(state.config),
-                            ),
-                            "state": _keypoint_runtime_state(runtime, backend_module),
-                        }
-                    )
+                response, status = action_keypoint_request(
+                    store=state.store,
+                    runtime=runtime,
+                    backend_module=backend_module,
+                    session=session,
+                    user=user,
+                    body=body,
+                    operator_validation_mutation_gate=_runtime_operator_validation_mutation_gate(state.config),
+                    refresh_registry=_refresh_registry_for_scope,
                 )
+                self._write_json(response, status=status)
                 return True
 
             if keypoint_path == "/review-status":
                 if self._reject_browser_mutation_preflight(session, body, runtime):
+                    return True
+                unapplied_count = count_unfinished_keypoint_checkpoint_edits(
+                    state.store, task_id=runtime.task_id
+                )
+                if int(unapplied_count) > 0:
+                    self._write_json(
+                        _format_error(
+                            "unapplied_session_edits",
+                            details="Apply saved keypoint edits to Zarr before changing review status.",
+                            status=HTTPStatus.CONFLICT,
+                            extra={
+                                "unapplied_session_edit_count": int(unapplied_count),
+                                "required_action": "apply_saved_edits_to_zarr",
+                            },
+                        ),
+                        status=HTTPStatus.CONFLICT,
+                    )
                     return True
                 requested_state = str(body.get("state") or "").strip()
                 if not requested_state:
@@ -1887,6 +1858,7 @@ def _make_handler(state: ServerState):
                         zarr_use=str(session.get("zarr_use") or "") or None,
                     )
                     review_status = result.get("review_status")
+                    runtime.summary_cache = None
                     if isinstance(review_status, Mapping):
                         _project_approved_keypoint_review_to_recording_step_status(
                             store=state.store,
@@ -1915,7 +1887,9 @@ def _make_handler(state: ServerState):
                                 mutation_event=mutation_event,
                                 operator_validation_mutation_gate=_runtime_operator_validation_mutation_gate(state.config),
                             ),
-                            "state": _keypoint_runtime_state(runtime, backend_module),
+                            "state": _keypoint_runtime_state(
+                                runtime, backend_module, store=state.store
+                            ),
                         }
                     )
                 )
@@ -4151,7 +4125,13 @@ def _make_handler(state: ServerState):
                         status=HTTPStatus.FORBIDDEN,
                     )
                     return
-                unapplied_count = state.store.count_unapplied_session_checkpoints(task_id=task_id)
+                unapplied_count = (
+                    count_unfinished_keypoint_checkpoint_edits(
+                        state.store, task_id=task_id
+                    )
+                    if str(session.get("workflow_kind") or "") == "keypoints"
+                    else state.store.count_unapplied_session_checkpoints(task_id=task_id)
+                )
                 if int(unapplied_count) > 0:
                     self._write_json(
                         _format_error(
@@ -4488,7 +4468,15 @@ def _make_handler(state: ServerState):
                         status=HTTPStatus.FORBIDDEN,
                     )
                     return
-                unapplied_count = state.store.count_unapplied_session_checkpoints(task_id=str(task["task_id"]))
+                unapplied_count = (
+                    count_unfinished_keypoint_checkpoint_edits(
+                        state.store, task_id=str(task["task_id"])
+                    )
+                    if str(session.get("workflow_kind") or "") == "keypoints"
+                    else state.store.count_unapplied_session_checkpoints(
+                        task_id=str(task["task_id"])
+                    )
+                )
                 if int(unapplied_count) > 0:
                     self._write_json(
                         _format_error(
@@ -4728,11 +4716,6 @@ def serve(config: ServerConfig) -> int:
     return 0
 
 
-
-
-
-
-
 ZARR_BACKUP_PATH_KEYS = _web_zarr_backup.ZARR_BACKUP_PATH_KEYS
 _zarr_backup_contract_policy = _web_zarr_backup._zarr_backup_contract_policy
 _iter_zarr_path_values = _web_zarr_backup._iter_zarr_path_values
@@ -4751,9 +4734,6 @@ def _configure_zarr_backup_plan_helpers() -> None:
             "_zarr_backup_policy": _zarr_backup_policy,
         }
     )
-
-
-
 
 
 def _zarr_backup_plan(
@@ -4776,14 +4756,6 @@ def _zarr_backup_plan(
     )
 
 
-
-
-
-
-
-
-
-
 def _execute_zarr_backup_plan(
     *,
     plan_path: Path,
@@ -4804,10 +4776,6 @@ def _execute_zarr_backup_plan(
         dry_run=dry_run,
         allow_missing=allow_missing,
     )
-
-
-
-
 
 
 def _assignment_control_plane_report_fields(store: LabelingStore) -> dict[str, object]:
@@ -4834,8 +4802,6 @@ def _assignment_control_plane_report_fields(store: LabelingStore) -> dict[str, o
         "assignment_manifest_browser_writes_label_data": False,
         "assignment_manifest_applies_recording_ownership_only": True,
     }
-
-
 
 
 def _labeler_route_authorization_contract_policy(policy: Mapping[str, object]) -> dict[str, object]:
@@ -5019,8 +4985,6 @@ def _browser_payload_redaction_contract_policy(policy: Mapping[str, object]) -> 
     }
 
 
-
-
 def _identity_probe_link_contract_policy(
     *,
     labeler_safety: Mapping[str, object],
@@ -5093,27 +5057,6 @@ def _browser_response_security_evidence_template(*args: object, **kwargs: object
     return _web_operator_evidence_templates._browser_response_security_evidence_template_impl(*args, **kwargs)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 LABELING_HOME_PATH = "/labeling"
 PERSONAL_WORK_PATH = "/my-work"
 IDENTITY_PROBE_PATH = "/identity"
@@ -5174,167 +5117,6 @@ BROWSER_RESPONSE_SECURITY_HEADERS: dict[str, str] = {
     "Content-Security-Policy": "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
 }
-
-BROWSER_SIGNED_LINK_POLICY: dict[str, object] = {
-    "canonical_entrypoint": DASHBOARD_PATH,
-    "task_specific_links": "short_lived_convenience_links",
-    "default_ttl_seconds": 24 * 60 * 60,
-    "authorization_grant": False,
-    "requires_authenticated_user": True,
-    "requires_active_assignment": True,
-    "requires_open_task": True,
-    "binds_expected_user_in_new_links": True,
-    "expected_user_mismatch_error": "signed_link_user_mismatch",
-    "opens_guarded_session": True,
-    "session_bound_after_open": True,
-    "runtime_operator_validation_start_gate_enforced": True,
-    "dashboard_preferred_for_multi_task_work": True,
-}
-
-BROWSER_WORKFLOW_CAPABILITIES: tuple[dict[str, object], ...] = (
-    {
-        "workflow_kind": "keypoints",
-        "label": "Keypoint correction",
-        "browser_editor": True,
-        "server_mutation": True,
-        "completion_supported": True,
-        "client_authority": dict(BROWSER_CLIENT_AUTHORITY),
-        "write_scope": "Correct failed or reviewed keypoints through the guarded session editor.",
-        "write_contract": {
-            **dict(BROWSER_WORKFLOW_SERVER_WRITE_CONTRACT),
-            "primary_mutation_target_kind": "task_scoped_training_zarr",
-            "training_zarr_write_mode": "direct",
-            "save_method": "POST",
-            "save_endpoint": "/api/sessions/{session_id}/keypoints/save",
-            "payload_fields": ["points", "advance", "target_token"],
-            "required_fields": ["points", "target_token"],
-            "response_fields": ["ok", "result", "state"],
-            "audit_event": "save_keypoints",
-            "audit_provenance": dict(BROWSER_MUTATION_AUDIT_PROVENANCE),
-            "retry_policy": dict(BROWSER_MUTATION_RETRY_POLICY),
-            "registry_refresh": True,
-            "guard": "session_for_user",
-        },
-        "notes": "The browser submits keypoint edits; the server applies them through Palette review/write tooling.",
-    },
-    {
-        "workflow_kind": "detect_training",
-        "label": "Detection training boxes",
-        "browser_editor": True,
-        "server_mutation": True,
-        "completion_supported": True,
-        "client_authority": dict(BROWSER_CLIENT_AUTHORITY),
-        "write_scope": "Edit training bounding boxes through the guarded session editor.",
-        "write_contract": {
-            **dict(BROWSER_WORKFLOW_SERVER_WRITE_CONTRACT),
-            "primary_mutation_target_kind": "task_scoped_training_zarr",
-            "training_zarr_write_mode": "direct",
-            "save_method": "POST",
-            "save_endpoint": "/api/sessions/{session_id}/detect/save",
-            "negative_frame_endpoint": "/api/sessions/{session_id}/detect/mark-negative",
-            "payload_fields": ["detections", "advance", "target_token"],
-            "required_fields": ["detections", "target_token"],
-            "detection_identity": "instance_key_decimal_string_or_null_for_new",
-            "save_semantics": "replace_server_selected_frame_detection_collection",
-            "negative_frame_semantics": "empty_frame_explicit_negative_bound_to_refined_run",
-            "response_fields": ["ok", "result", "state"],
-            "audit_event": "save_detect_bbox",
-            "audit_provenance": dict(BROWSER_MUTATION_AUDIT_PROVENANCE),
-            "retry_policy": dict(BROWSER_MUTATION_RETRY_POLICY),
-            "registry_refresh": True,
-            "guard": "session_for_user",
-        },
-        "notes": "The browser never receives direct zarr write authority.",
-    },
-    {
-        "workflow_kind": "detect_analysis",
-        "label": "Analysis detection boxes",
-        "browser_editor": True,
-        "server_mutation": True,
-        "completion_supported": True,
-        "client_authority": dict(BROWSER_CLIENT_AUTHORITY),
-        "write_scope": "Reviewable by default; editable only when task scope enables analysis-box edits.",
-        "write_contract": {
-            **dict(BROWSER_WORKFLOW_SERVER_WRITE_CONTRACT),
-            "primary_mutation_target_kind": "task_scoped_analysis_zarr",
-            "source_mutation_target_kind": "task_scoped_analysis_zarr",
-            "promotion_mutation_target_kind": "task_scoped_training_zarr",
-            "training_zarr_write_mode": "promotion_when_configured",
-            "save_method": "POST",
-            "save_endpoint": "/api/sessions/{session_id}/detect-analysis/save",
-            "payload_fields": ["bbox_norm", "advance", "target_token"],
-            "required_fields": ["bbox_norm", "target_token"],
-            "response_fields": ["ok", "result", "state", "promotion"],
-            "audit_event": "save_detect_analysis_bbox",
-            "audit_provenance": dict(BROWSER_MUTATION_AUDIT_PROVENANCE),
-            "retry_policy": {
-                **dict(BROWSER_MUTATION_RETRY_POLICY),
-                "secondary_side_effects": ["promotion_success", "promotion_failed"],
-                "retry_guidance": "Saving the same editable analysis box again should leave the analysis label data in the same state, but may enqueue or record another promotion attempt when promotion is enabled.",
-            },
-            "secondary_events": ["promotion_success", "promotion_failed"],
-            "scope_required": {"editable": True},
-            "registry_refresh": True,
-            "guard": "session_for_user",
-        },
-        "notes": "Use task scope to decide whether a detection-analysis task is review-only or mutable.",
-    },
-    {
-        "workflow_kind": "subject_mask_component",
-        "label": "Subject mask component masks",
-        "browser_editor": True,
-        "server_mutation": True,
-        "completion_supported": True,
-        "client_authority": dict(BROWSER_CLIENT_AUTHORITY),
-        "write_scope": "Edit assigned subject-mask components through the guarded session editor.",
-        "write_contract": {
-            **dict(BROWSER_WORKFLOW_SERVER_WRITE_CONTRACT),
-            "primary_mutation_target_kind": "task_scoped_training_zarr",
-            "training_zarr_write_mode": "session_checkpoint_then_apply",
-            "save_method": "POST",
-            "save_endpoint": "/api/sessions/{session_id}/subject-mask/save",
-            "save_semantics": "checkpoint_only_no_canonical_zarr_write",
-            "apply_method": "POST",
-            "apply_endpoint": "/api/sessions/{session_id}/subject-mask/apply",
-            "apply_semantics": "coalesce_saved_session_checkpoints_and_write_canonical_zarr_before_assignment_completion",
-            "payload_fields": ["mask", "advance", "target_token"],
-            "required_fields": ["mask", "target_token"],
-            "response_fields": ["ok", "result", "state"],
-            "audit_event": "checkpoint_subject_mask_roi",
-            "canonical_apply_audit_event": "apply_subject_mask_session_checkpoints",
-            "audit_provenance": dict(BROWSER_MUTATION_AUDIT_PROVENANCE),
-            "retry_policy": dict(BROWSER_MUTATION_RETRY_POLICY),
-            "registry_refresh": "apply_only",
-            "guard": "session_for_user",
-        },
-        "notes": "Subject-mask browser saves checkpoint to the labeling sidecar; explicit apply writes the unified refined subject-mask path while the assignment remains open.",
-    },
-)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def _expected_user_guard_contract_policy(
     labeler_safety: Mapping[str, object],
@@ -5460,16 +5242,6 @@ def _operator_authorization_contract_policy(policy: Mapping[str, object]) -> dic
         "operator_boundary_ready": bool(policy.get("operator_boundary_ready")),
         "admin_users_configured": bool(policy.get("admin_users_configured")),
     }
-
-
-
-
-
-
-
-
-
-
 
 
 def _mutation_audit_contract_policy(policy: Mapping[str, object]) -> dict[str, object]:
