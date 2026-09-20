@@ -232,7 +232,18 @@ The final commit/CI binding is recorded in the delivery PR. The final combined
 focused run passes 127/127: 59 keypoint backend/browser tests, 22 store
 lifecycle tests, and 46 complete labeling route/admin projection tests.
 Generated-census, file-size, metadata-mode, Python lint/compile, and diff checks
-pass. Required combined PR CI is still unrun at handoff preparation.
+pass. The first combined required PR CI, run `35478643305` for exact head
+`1284a4fd644ed6b523f2d774842a5de59c1ab9c7`, failed non-GPU shard 5:
+three handoff/export tests reported the browser workflow scope contract as
+not ready. The keypoint capability had introduced an unrecognized
+`training_zarr_write_mode`, which cascaded into operator-validation
+`needs_review`. Thirteen checks had passed and nine were still running when
+the correction began; that head remains blocked regardless of their eventual
+results. The correction reuses the established `session_checkpoint_then_apply`
+vocabulary for the mutable primary path and retains the explicit immutable
+direct-delta compatibility field. The original three failures plus an unknown
+mode refusal test pass 4/4, and the broader workflow/handoff/route/admin suite
+passes 51/51. Required combined PR CI for the corrected commit is unrun.
 
 No changes have been deployed to the labeling preview or shared data.
 

@@ -160,7 +160,7 @@ BROWSER_WORKFLOW_CAPABILITIES: tuple[dict[str, object], ...] = (
         "write_contract": {
             **dict(BROWSER_WORKFLOW_SERVER_WRITE_CONTRACT),
             "primary_mutation_target_kind": "task_scoped_training_zarr",
-            "training_zarr_write_mode": "session_checkpoint_then_explicit_apply_mutable__immutable_delta_direct",
+            "training_zarr_write_mode": "session_checkpoint_then_apply",
             "save_method": "POST",
             "save_endpoint": "/api/sessions/{session_id}/keypoints/save",
             "apply_endpoint": "/api/sessions/{session_id}/keypoints/apply",
