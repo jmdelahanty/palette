@@ -51,6 +51,12 @@ with one writer. It does not resolve sensor-coordinate authority or promote
 these annotation snapshots into analysis. Registry activation and training
 export remain separate steps. Correcting masks requires a new derivation
 version before further manual label work; existing edits are never overwritten.
+Pass `--refined-mask-run mask_tail_edit_PREVIOUS_VERSION` with the same original
+reviewed source run names to snapshot corrected masks into a fresh version.
+That path verifies the original reviewed supplier and exact crop-row bindings,
+without requiring another review of untouched channels. New manual keypoint
+edits from the previous derived version are not carried forward; perform mask
+corrections and regeneration before investing in additional keypoint edits.
 
 The browser shares the crop-only save/checkpoint path with recovered labels,
 including per-landmark manual origin tracking and all-visible row checks. The

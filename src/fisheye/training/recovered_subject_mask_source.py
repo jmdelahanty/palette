@@ -8,6 +8,10 @@ from pathlib import Path
 import numpy as np
 import zarr
 
+from fisheye.shared.recovered_training_review_contract import (
+    NATIVE_REVIEW_SCHEMA,
+    initial_contract_digest,
+)
 from fisheye.training.recover_merged_training_recording import (
     _sha256_array,
     validate_recovered_recording,
@@ -205,17 +209,38 @@ def use_refined_mask_snapshot(archive, run_name, arrays, labels, binding):
     group = root[f"refined_subject_masks_runs/{run_name}"]
     attrs_before = dict(group.attrs)
     crop = root[f"crop_runs/{attrs_before['source_crop_run']}"]
+    native = binding.get("source_kind") == "native_reviewed_training_masks_v1"
+    if native:
+        # Corrected pixels are a controlled derivative of the reviewed supplier;
+        # do not demand fresh reviews of unchanged eye/swim channels. Bind the
+        # exact original source, row identities, and editable snapshot contract.
+        source_binding = group.attrs.get("source_bindings", {})
+        source_matches = all(source_binding.get(k) == v for k, v in binding.items())
+        identity_valid = (
+            source_matches
+            and all(
+                g.attrs.get("schema_id") == NATIVE_REVIEW_SCHEMA
+                and g.attrs.get("stage_selector_eligible") is False
+                and initial_contract_digest(g) == g.attrs.get("initial_contract_sha256")
+                for g in (group, crop)
+            )
+            and np.array_equal(
+                group["source_training_crop_row_ids"][:],
+                arrays["source_training_crop_row_ids"],
+            )
+            and np.array_equal(group["frame_indices"][:], arrays["frame_indices"])
+        )
+    else:
+        identity_valid = group.attrs.get("source_bindings", {}).get(
+            "recovery_source_digest_index_sha256"
+        ) == binding["recovery_source_digest_index_sha256"] and np.array_equal(
+            group["source_merged_row"][:], arrays["source_merged_row"]
+        )
     if (
         tuple(group.attrs["mask_labels"]) != labels
         or group.attrs.get("source_bindings", {}).get("recording_id")
         != binding["recording_id"]
-        or group.attrs.get("source_bindings", {}).get(
-            "recovery_source_digest_index_sha256"
-        )
-        != binding["recovery_source_digest_index_sha256"]
-        or not np.array_equal(
-            group["source_merged_row"][:], arrays["source_merged_row"]
-        )
+        or not identity_valid
         or not np.array_equal(crop["roi_images"][:], arrays["roi_images"])
     ):
         raise ValueError("Refined masks do not bind these recovered crop rows")
@@ -230,6 +255,7 @@ def use_refined_mask_snapshot(archive, run_name, arrays, labels, binding):
     if (
         values.dtype != np.uint8
         or values.shape != arrays["masks_roi"].shape
+        or (native and np.any(values > 1))
         or attrs_before != dict(after.attrs)
         or digest != _sha256_array(np.asarray(after["masks_roi"][:]))
     ):

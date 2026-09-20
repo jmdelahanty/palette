@@ -90,6 +90,12 @@ def build_review_payload(
     root, arrays, labels, binding, *, version, pose_schema=SCHEMA_NAME, native=False
 ):
     recipe = recipe_for_schema(pose_schema)
+    if native:
+        recipe = {
+            **recipe,
+            "existing_keypoint_policy": "preserve_head_snout_fins_by_name_v1",
+            "tail_policy": "derive_all_11_stations_from_mask",
+        }
     _, schema = _schema_to_attr_payload(pose_schema)
     point_count = len(schema["keypoint_labels"])
     paths = run_paths(version, native=native)
@@ -212,11 +218,7 @@ def build_review_payload(
                 finite = np.isfinite(values).all(axis=1)
                 derived["keypoints_roi"][finite, target_index] = values[finite]
                 derived["keypoint_origin"][finite, target_index] = 4
-        recipe = {
-            **recipe,
-            "existing_keypoint_policy": "preserve_head_snout_fins_by_name_v1",
-            "tail_policy": "derive_all_11_stations_from_mask",
-        }
+
     attrs = {
         "pose_schema": schema,
         "skeleton_id": schema["skeleton_id"],

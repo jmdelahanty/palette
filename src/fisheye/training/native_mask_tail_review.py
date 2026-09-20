@@ -33,6 +33,7 @@ from fisheye.training.recovered_mask_review_payload import (
     build_review_payload,
     run_paths,
 )
+from fisheye.training.recovered_subject_mask_source import use_refined_mask_snapshot
 
 MAX_SOURCE_BYTES = 512 * 1024 * 1024
 HEAD_LABELS = ("swim_bladder", "eye_left", "eye_right")
@@ -192,20 +193,34 @@ def read_native_source(archive, *, mask_run, keypoint_run):
 
 
 def generate_native_mask_review(
-    *, archive, mask_run, keypoint_run, version, apply=False, scratch_root=Path("/tmp")
+    *,
+    archive,
+    mask_run,
+    keypoint_run,
+    version,
+    apply=False,
+    scratch_root=Path("/tmp"),
+    refined_mask_run=None,
 ):
     archive = Path(archive).resolve()
     paths = run_paths(version, native=True)
     if any((archive / path).exists() for path in paths.values()):
         raise FileExistsError("Native annotation version exists; use a fresh version")
-    arrays, labels, binding = read_native_source(
-        archive, mask_run=mask_run, keypoint_run=keypoint_run
-    )
 
-    def check_source(_root=None):
-        _, _, current = read_native_source(
+    def read_source():
+        arrays, labels, binding = read_native_source(
             archive, mask_run=mask_run, keypoint_run=keypoint_run
         )
+        if refined_mask_run is not None:
+            arrays, binding = use_refined_mask_snapshot(
+                archive, refined_mask_run, arrays, labels, binding
+            )
+        return arrays, labels, binding
+
+    arrays, labels, binding = read_source()
+
+    def check_source(_root=None):
+        _, _, current = read_source()
         if current != binding:
             raise ValueError(
                 "Native source identity or reviewed content changed during publication"
@@ -271,6 +286,10 @@ def main(argv=None):
     parser.add_argument("archive", type=Path)
     parser.add_argument("--mask-run", required=True)
     parser.add_argument("--keypoint-run", required=True)
+    parser.add_argument(
+        "--refined-mask-run",
+        help="Use corrected dense masks from an earlier native annotation version",
+    )
     parser.add_argument("--version", required=True)
     parser.add_argument("--scratch-root", type=Path, default=Path("/tmp"))
     parser.add_argument("--report", type=Path, required=True)

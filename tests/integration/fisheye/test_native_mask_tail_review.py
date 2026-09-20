@@ -177,3 +177,27 @@ def test_native_review_refuses_wrong_recording_and_tampered_contract(native_sour
     root[result["paths"]["pose_edit"]].attrs["keypoint_labels"] = ["wrong"] * 19
     with pytest.raises(ValueError, match="crop-only review contract"):
         resolve_review_session(str(native_source), **kwargs)
+
+
+def test_native_corrected_mask_can_seed_another_version(native_source):
+    first = produce(native_source, apply=True)
+    root = zarr.open_group(str(native_source), mode="a", use_consolidated=False)
+    edit = first["paths"]["mask_edit"]
+    root[edit]["masks_roi"][0, 0, 1, 1] = 1
+    second = generate_native_mask_review(
+        archive=native_source,
+        mask_run="masks",
+        keypoint_run="pose",
+        version="v2",
+        refined_mask_run=edit.split("/")[1],
+        apply=True,
+    )
+    root = zarr.open_group(str(native_source), mode="r", use_consolidated=True)
+    assert root[first["paths"]["mask"]]["masks_roi"][0, 0, 1, 1] == 0
+    assert root[second["paths"]["mask"]]["masks_roi"][0, 0, 1, 1] == 1
+    assert not root[second["paths"]["seed"]]["tail_valid"][0]
+    assert second["source_bindings"]["refined_mask_snapshot"]["run_path"] == edit
+    np.testing.assert_array_equal(
+        root[first["paths"]["seed"]]["keypoints_roi"][:, 18],
+        root[second["paths"]["seed"]]["keypoints_roi"][:, 18],
+    )
