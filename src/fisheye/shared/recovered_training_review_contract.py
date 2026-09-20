@@ -4,6 +4,9 @@ from fisheye.shared.run_provenance import sha256_payload
 
 REVIEW_SCHEMA = "palette.training.recovered_mask_tail_review.v1"
 COORDINATE_SYSTEM = "recovered_training_roi_xy"
+# Explicit native ROI snapshot contract; historical recovery identities stay fixed.
+NATIVE_REVIEW_SCHEMA = "palette.training.native_mask_tail_review.v1"
+NATIVE_COORDINATE_SYSTEM = "native_training_roi_xy"
 
 
 def initial_contract_digest(group):

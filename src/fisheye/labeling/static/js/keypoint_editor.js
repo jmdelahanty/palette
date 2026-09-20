@@ -238,7 +238,7 @@
       if (mutableReviewControls) mutableReviewControls.hidden = immutableDeltaReview || recoveredReview;
       if (immutableReviewNote) {
         immutableReviewNote.hidden = !immutableDeltaReview && !recoveredReview;
-        if (recoveredReview) immutableReviewNote.textContent = "Recovered training labels are saved per row. Registry approval and export are separate steps.";
+        if (recoveredReview) immutableReviewNote.textContent = "Training labels are checkpointed per row and written with Apply. Registry approval and export are separate steps.";
       }
       const editStorage = immutableDeltaReview
         ? `delta ${state.delta_run || ""}/${state.delta_generation || ""}`

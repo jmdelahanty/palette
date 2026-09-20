@@ -12,6 +12,8 @@ from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.recovered_training_review_contract import (
     COORDINATE_SYSTEM,
     REVIEW_SCHEMA,
+    NATIVE_REVIEW_SCHEMA,
+    NATIVE_COORDINATE_SYSTEM,
     initial_contract_digest,
 )
 from fisheye.shared.zarr_run_completion import (
@@ -34,7 +36,7 @@ from fisheye.tune.keypoint_failure_review import (
 from fisheye.utils.extend_keypoint_skeleton import _schema_to_attr_payload
 
 
-def run_paths(version):
+def run_paths(version, *, native=False):
     if (
         not version
         or version.startswith(".")
@@ -44,6 +46,14 @@ def run_paths(version):
         )
     ):
         raise ValueError("Version must be a safe non-hidden path component")
+    if native:
+        return {
+            "crop": f"crop_runs/mask_tail_full_roi_{version}",
+            "mask": f"subject_mask_runs/mask_tail_snapshot_{version}",
+            "mask_edit": f"refined_subject_masks_runs/mask_tail_edit_{version}",
+            "seed": f"keypoints_runs/head_tail11_fins_seed_{version}",
+            "pose_edit": f"refined_keypoints_runs/head_tail11_fins_edit_{version}",
+        }
     return {
         "crop": f"crop_runs/recovered_full_roi_{version}",
         "mask": f"subject_mask_runs/recovered_masks_{version}",
@@ -77,39 +87,57 @@ def _array(group, name, data):
 
 
 def build_review_payload(
-    root, arrays, labels, binding, *, version, pose_schema=SCHEMA_NAME
+    root, arrays, labels, binding, *, version, pose_schema=SCHEMA_NAME, native=False
 ):
     recipe = recipe_for_schema(pose_schema)
     _, schema = _schema_to_attr_payload(pose_schema)
     point_count = len(schema["keypoint_labels"])
-    paths = run_paths(version)
+    paths = run_paths(version, native=native)
     n = len(arrays["roi_images"])
     lineage = {
         "frame_indices": arrays["frame_indices"],
-        "source_merged_row": arrays["source_merged_row"],
-        "source_pose_local_row": arrays["source_pose_local_row"],
         "source_crop_row_ids": np.arange(n, dtype=np.int64),
     }
+    for name in (
+        "source_merged_row",
+        "source_pose_local_row",
+        "source_training_crop_row_ids",
+    ):
+        if name in arrays:
+            lineage[name] = arrays[name]
     # Preserve historical ROI/detection identifiers as lineage, without
     # relabeling the sampled row key as an acquisition frame index.
     for name in ("source_roi_idx", "source_refined_row_ids", "source_detect_row_index"):
         if name in arrays:
             lineage[name] = arrays[name]
     common = {
-        "schema_id": REVIEW_SCHEMA,
+        "schema_id": NATIVE_REVIEW_SCHEMA if native else REVIEW_SCHEMA,
         "schema_version": 1,
         "stage_selector_eligible": False,
-        "coordinate_system": COORDINATE_SYSTEM,
-        "frame_index_domain": "legacy_training_sample_row",
+        "coordinate_system": NATIVE_COORDINATE_SYSTEM if native else COORDINATE_SYSTEM,
+        "frame_index_domain": (
+            "source_crop_frame_index" if native else "legacy_training_sample_row"
+        ),
         "sensor_pixel_origin_available": False,
         "row_count": n,
         "source_bindings": binding,
         "source_crop_run": paths["crop"].split("/")[1],
     }
     provenance = build_writer_run_provenance(
-        command="fisheye.training.recover_merged_subject_masks",
+        command=(
+            "fisheye.training.native_mask_tail_review"
+            if native
+            else "fisheye.training.recover_merged_subject_masks"
+        ),
         params={"recipe": recipe, "version": version, "pose_schema": pose_schema},
-        input_run_ids={"merged_masks": binding["mask_run"]},
+        input_run_ids=(
+            {
+                "native_masks": binding["mask_run"],
+                "native_keypoints": binding["keypoint_run"],
+            }
+            if native
+            else {"merged_masks": binding["mask_run"]}
+        ),
     )
 
     def create(path, values, extra=None):
@@ -135,6 +163,10 @@ def build_review_payload(
             "pixel_operation": "identity_copy",
         },
     )
+    if "source_roi_coordinates_full" in arrays:
+        _array(
+            crop, "source_roi_coordinates_full", arrays["source_roi_coordinates_full"]
+        )
     mask = create(
         paths["mask"],
         {
@@ -148,7 +180,7 @@ def build_review_payload(
             "mask_labels": list(labels),
             "method": (
                 "refined_dense_mask_snapshot_v1"
-                if "refined_mask_snapshot" in binding
+                if native or "refined_mask_snapshot" in binding
                 else "recovered_merged_mask_pixels_v1"
             ),
             "output_semantics": "multilabel",
@@ -165,12 +197,32 @@ def build_review_payload(
         arrays["head_keypoints_roi"],
         schema_name=pose_schema,
     )
+    origins = ORIGIN_CODES
+    if native:
+        # Native source labels are mapped by name. Tail stations, including the
+        # tip, are one new mask-derived arc-length sequence. Historical points
+        # remain available in source_keypoints_roi and its bound label list.
+        origins = {**ORIGIN_CODES, "existing_keypoint": 4}
+        source_labels = binding["source_keypoint_labels"]
+        source_points = arrays["source_keypoints_roi"]
+        preserve = set(schema["keypoint_labels"][:3] + schema["keypoint_labels"][14:])
+        for target_index, label in enumerate(schema["keypoint_labels"]):
+            if label in preserve and label in source_labels:
+                values = source_points[:, source_labels.index(label)]
+                finite = np.isfinite(values).all(axis=1)
+                derived["keypoints_roi"][finite, target_index] = values[finite]
+                derived["keypoint_origin"][finite, target_index] = 4
+        recipe = {
+            **recipe,
+            "existing_keypoint_policy": "preserve_head_snout_fins_by_name_v1",
+            "tail_policy": "derive_all_11_stations_from_mask",
+        }
     attrs = {
         "pose_schema": schema,
         "skeleton_id": schema["skeleton_id"],
         "keypoint_labels": schema["keypoint_labels"],
         "kpt_shape": [point_count, 2],
-        "keypoint_origin_codes": ORIGIN_CODES,
+        "keypoint_origin_codes": origins,
         "derivation_recipe": recipe,
         "source_subject_mask_run": paths["mask"].split("/")[1],
         "source_mask_sha256": _sha256_array(arrays["masks_roi"]),
@@ -203,6 +255,20 @@ def build_review_payload(
         snout_reasons = decode_reason_bytes(derived["snout_failure_reason_bytes"])
         for i in np.flatnonzero(~derived["snout_valid"]):
             reasons[i] += f"|snout_derivation_failed:{snout_reasons[i]}"
+    if native:
+        reasons = np.array(
+            [
+                (
+                    "needs_manual_review"
+                    if ok
+                    else f"tail_derivation_failed:{reason}|needs_manual_review"
+                )
+                for ok, reason in zip(
+                    derived["tail_valid"], derived["tail_failure_reason"], strict=True
+                )
+            ],
+            dtype=object,
+        )
     values = {
         **lineage,
         **{k: v for k, v in derived.items() if k != "tail_failure_reason"},
@@ -224,6 +290,8 @@ def build_review_payload(
             )
         }
     )
+    if native:
+        values["source_keypoints_roi"] = arrays["source_keypoints_roi"]
     seed = create(
         paths["seed"],
         values,
@@ -269,8 +337,15 @@ def build_review_payload(
     failures = [
         {
             "roi_idx": i,
-            "source_merged_row": int(arrays["source_merged_row"][i]),
-            "source_pose_local_row": int(arrays["source_pose_local_row"][i]),
+            **{
+                name: int(arrays[name][i])
+                for name in (
+                    "source_merged_row",
+                    "source_pose_local_row",
+                    "source_training_crop_row_ids",
+                )
+                if name in arrays
+            },
             "source_frame_idx": int(arrays["frame_indices"][i]),
             "reason": (
                 str(reason)
@@ -280,7 +355,11 @@ def build_review_payload(
         }
         for i, reason in enumerate(derived["tail_failure_reason"])
         if not derived["tail_valid"][i]
-        or (snout_reasons is not None and not derived["snout_valid"][i])
+        or (
+            snout_reasons is not None
+            and not derived["snout_valid"][i]
+            and not (native and derived["keypoint_origin"][i, 18] == 4)
+        )
     ]
     return {
         "paths": paths,

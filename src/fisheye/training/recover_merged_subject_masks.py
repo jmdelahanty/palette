@@ -20,6 +20,7 @@ from fisheye.shared.atomic_run_publisher import (
 )
 from fisheye.shared.recovered_training_review_contract import (
     REVIEW_SCHEMA,
+    NATIVE_REVIEW_SCHEMA,
     initial_contract_digest,
 )
 from fisheye.shared.zarr_helpers import (
@@ -58,7 +59,7 @@ def validate_initial_payload(path):
     try:
         run = zarr.open_group(str(path), mode="r", use_consolidated=False)
         valid = (
-            run.attrs.get("schema_id") == REVIEW_SCHEMA
+            run.attrs.get("schema_id") in (REVIEW_SCHEMA, NATIVE_REVIEW_SCHEMA)
             and run.attrs.get("stage_selector_eligible") is False
             and is_run_complete(run, legacy_default=False)
             and bool(run.attrs.get("initial_array_sha256"))
@@ -140,6 +141,77 @@ def review_tasks(archive, recording_id, result, version):
     return tasks
 
 
+def publish_review_payload(
+    archive, local, paths, binding, source_check, *, resume=False
+):
+    """Publish validated unselected children; source owners supply identity checks."""
+    root = zarr.open_group(str(local), mode="r", use_consolidated=False)
+    publications = []
+    for path in paths.values():
+        family, name = path.split("/")
+        expected = dict(root[path].attrs)
+        target = archive / path
+        if target.exists():
+            existing = zarr.open_group(str(target), mode="r", use_consolidated=False)
+            if (
+                not resume
+                or not validate_initial_payload(target)["valid"]
+                or existing.attrs.get("source_bindings") != binding
+                or existing.attrs.get("initial_array_sha256")
+                != expected["initial_array_sha256"]
+                or existing.attrs.get("initial_contract_sha256")
+                != expected["initial_contract_sha256"]
+            ):
+                raise ValueError(
+                    f"Existing version is changed, edited, or conflicting: {path}"
+                )
+            continue
+        snapshot = {}
+
+        def prepare(current):
+            source_check(current)
+            parent = require_runs_parent(current, family)
+            snapshot.update({key: parent.attrs.get(key) for key in SELECTOR_NAMES})
+            return current, parent
+
+        def complete(current, parent, run):
+            mark_run_complete(
+                run,
+                parent_group=parent,
+                run_name=name,
+                run_provenance=run.attrs.get("run_provenance"),
+            )
+
+        def verify(current):
+            if any(
+                current[family].attrs.get(key) != value
+                for key, value in snapshot.items()
+            ):
+                raise RuntimeError("Publication changed an existing stage selector")
+
+        publications.append(
+            atomic_publish_run_group(
+                AtomicRunPublishSpec(
+                    source_zarr=archive,
+                    local_run_path=local / path,
+                    target_run_path=target,
+                    run_name=name,
+                    lock_suffix="recovered_subject_masks",
+                    publish_schema_id=expected["schema_id"],
+                    policy="atomic_unselected_recovery_child_v1",
+                    rollback_policy="retain_failed_selector_ineligible_child_v1",
+                ),
+                copy_backend="python",
+                validate_run=validate_initial_payload,
+                prepare_parents=prepare,
+                complete_run=complete,
+                verify_pointers=verify,
+                payload_metadata={"source_bindings": binding},
+            )
+        )
+    return publications
+
+
 def recover_subject_masks(
     *,
     archive: Path,
@@ -194,78 +266,18 @@ def recover_subject_masks(
         result = build_review_payload(
             root, arrays, labels, binding, version=version, pose_schema=pose_schema
         )
-        publications = []
-        for path in paths.values():
-            family, name = path.split("/")
-            expected = dict(root[path].attrs)
-            target = archive / path
-            if target.exists():
-                existing = zarr.open_group(
-                    str(target), mode="r", use_consolidated=False
-                )
-                if (
-                    not resume
-                    or not validate_initial_payload(target)["valid"]
-                    or existing.attrs.get("source_bindings") != binding
-                    or existing.attrs.get("initial_array_sha256")
-                    != expected["initial_array_sha256"]
-                    or existing.attrs.get("initial_contract_sha256")
-                    != expected["initial_contract_sha256"]
-                ):
-                    raise ValueError(
-                        f"Existing version is changed, edited, or conflicting: {path}"
-                    )
-                continue
-            snapshot = {}
 
-            def prepare(current):
-                if (
-                    current.attrs.get("array_sha256") is None
-                    or _digest_index_sha256(current.attrs["array_sha256"])
-                    != binding["recovery_source_digest_index_sha256"]
-                ):
-                    raise ValueError(
-                        "Recovered source identity changed during publication"
-                    )
-                parent = require_runs_parent(current, family)
-                snapshot.update({key: parent.attrs.get(key) for key in SELECTOR_NAMES})
-                return current, parent
+        def check_source(current):
+            if (
+                current.attrs.get("array_sha256") is None
+                or _digest_index_sha256(current.attrs["array_sha256"])
+                != binding["recovery_source_digest_index_sha256"]
+            ):
+                raise ValueError("Recovered source identity changed during publication")
 
-            def complete(current, parent, run):
-                mark_run_complete(
-                    run,
-                    parent_group=parent,
-                    run_name=name,
-                    run_provenance=run.attrs.get("run_provenance"),
-                )
-
-            def verify(current):
-                if any(
-                    current[family].attrs.get(key) != value
-                    for key, value in snapshot.items()
-                ):
-                    raise RuntimeError("Publication changed an existing stage selector")
-
-            publications.append(
-                atomic_publish_run_group(
-                    AtomicRunPublishSpec(
-                        source_zarr=archive,
-                        local_run_path=local / path,
-                        target_run_path=target,
-                        run_name=name,
-                        lock_suffix="recovered_subject_masks",
-                        publish_schema_id=REVIEW_SCHEMA,
-                        policy="atomic_unselected_recovery_child_v1",
-                        rollback_policy="retain_failed_selector_ineligible_child_v1",
-                    ),
-                    copy_backend="python",
-                    validate_run=validate_initial_payload,
-                    prepare_parents=prepare,
-                    complete_run=complete,
-                    verify_pointers=verify,
-                    payload_metadata={"source_bindings": binding},
-                )
-            )
+        publications = publish_review_payload(
+            archive, local, paths, binding, check_source, resume=resume
+        )
     # Original recovery content is validated again; its digest grammar and all
     # existing head-crop/source arrays remain unchanged.
     validate_recovered_recording(archive, require_source_only=True)

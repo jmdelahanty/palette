@@ -13,28 +13,34 @@ from fisheye.shared.keypoint_motion_authority import (
 from fisheye.shared.recovered_training_review_contract import (
     COORDINATE_SYSTEM,
     REVIEW_SCHEMA,
+    NATIVE_REVIEW_SCHEMA,
+    NATIVE_COORDINATE_SYSTEM,
     initial_contract_digest,
 )
 
 
 def is_recovered_roi_review(root, refined, crop):
-    if refined.attrs.get("schema_id") != REVIEW_SCHEMA:
+    schema = refined.attrs.get("schema_id")
+    if schema not in (REVIEW_SCHEMA, NATIVE_REVIEW_SCHEMA):
         return False
+    native = schema == NATIVE_REVIEW_SCHEMA
+    coordinate = NATIVE_COORDINATE_SYSTEM if native else COORDINATE_SYSTEM
+    domain = "source_crop_frame_index" if native else "legacy_training_sample_row"
     if (
         root.attrs.get("zarr_purpose") != "training"
-        or root.attrs.get("schema_id")
-        != "palette.training.merged_pose_detect_recovery_source.v1"
+        or (
+            not native
+            and root.attrs.get("schema_id")
+            != "palette.training.merged_pose_detect_recovery_source.v1"
+        )
         or any(
             g.attrs.get("stage_selector_eligible") is not False
-            for g in (root, crop, refined)
+            for g in ((crop, refined) if native else (root, crop, refined))
         )
-        or crop.attrs.get("schema_id") != REVIEW_SCHEMA
-        or any(
-            g.attrs.get("coordinate_system") != COORDINATE_SYSTEM
-            for g in (crop, refined)
-        )
+        or crop.attrs.get("schema_id") != schema
+        or any(g.attrs.get("coordinate_system") != coordinate for g in (crop, refined))
         or crop.attrs.get("sensor_pixel_origin_available") is not False
-        or crop.attrs.get("frame_index_domain") != "legacy_training_sample_row"
+        or any(g.attrs.get("frame_index_domain") != domain for g in (crop, refined))
         or refined.attrs.get("source_bindings") != crop.attrs.get("source_bindings")
         or keypoint_source_crop_run_from_attributes(refined.attrs)
         != str(crop.path).split("/")[-1]
@@ -47,6 +53,15 @@ def is_recovered_roi_review(root, refined, crop):
         or not np.array_equal(crop["frame_indices"][:], refined["frame_indices"][:])
     ):
         raise ValueError("Invalid recovered crop-only review contract")
+    if native:
+        binding = crop.attrs.get("source_bindings", {})
+        if (
+            binding.get("source_kind") != "native_reviewed_training_masks_v1"
+            or binding.get("recording_id") != root.attrs.get("recording_id")
+            or not binding.get("source_array_sha256")
+            or "source_training_crop_row_ids" not in crop
+        ):
+            raise ValueError("Invalid native crop-only review source binding")
     n, k, dims = refined["keypoints_roi"].shape
     if dims != 2 or n != crop["frame_indices"].shape[0]:
         raise ValueError("Recovered keypoint/crop row axes disagree")

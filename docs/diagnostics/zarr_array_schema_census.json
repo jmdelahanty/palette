@@ -11192,7 +11192,7 @@
       "window_start_frame"
     ],
     "note": "Leaf-name coverage is orientation evidence only; dynamic paths and semantic reuse require manual review.",
-    "writer_leaf_name_count": 640,
+    "writer_leaf_name_count": 641,
     "writer_without_array_spec_leaf_names": [
       "acceleration",
       "acceleration_mm",
@@ -11613,6 +11613,7 @@
       "source_proxy_crop_row_ids",
       "source_proxy_crop_run_index",
       "source_recording_frame_ids",
+      "source_roi_coordinates_full",
       "source_roi_idx",
       "source_roi_origin_xy",
       "source_roi_transform_json",
@@ -62909,6 +62910,40 @@
     {
       "access_pattern": "windowed",
       "access_pattern_basis": "row/timeline/coordinate naming",
+      "array_name": "source_roi_coordinates_full",
+      "array_name_expression": "'source_roi_coordinates_full'",
+      "canonical_contract_id": null,
+      "canonical_contract_version": null,
+      "consumer": "palette_training",
+      "consumer_basis": "training writer/reader surface",
+      "contract_mapping_basis": "no initial catalog candidate for this leaf name",
+      "contract_mapping_status": "unmapped",
+      "declaration_symbol": "fisheye.training.recovered_mask_review_payload:build_review_payload",
+      "declaring_stage": null,
+      "declaring_stage_basis": "stage is not statically bound at this writer call",
+      "description": "Schema evidence recovered from a physical writer call site.",
+      "dtype": null,
+      "dtype_expression": null,
+      "dynamic_name": false,
+      "file": "src/fisheye/training/recovered_mask_review_payload.py",
+      "line": 167,
+      "occurrence_id": "schema-writer-7096bb6c0f0a9f8f",
+      "path_pattern": "<create(paths['crop'], {**lineage, 'roi_images': arrays['roi_images'], 'source_bbox_norm_coords': arrays['source_bbox_norm_coords']}, {'crop_storage_mode': 'materialized', 'roi_size': list(arrays['roi_images'].shape[1:]), 'pixel_operation': 'identity_copy'})>/source_roi_coordinates_full",
+      "required": null,
+      "shape_expression": "shape(arrays['source_roi_coordinates_full'])",
+      "shape_template": null,
+      "source_kind": "writer_observed_schema",
+      "stage_spec_symbol": null,
+      "status": "current",
+      "status_basis": "module is a training reader/writer or training export",
+      "subgroup": null,
+      "write_lifecycle": "training_build_then_immutable",
+      "write_lifecycle_basis": "training artifact surface",
+      "writer_site_id": "writer-1b3002658c5bf6c7"
+    },
+    {
+      "access_pattern": "windowed",
+      "access_pattern_basis": "row/timeline/coordinate naming",
       "array_name": "source_frame_indices",
       "array_name_expression": "'source_frame_indices'",
       "canonical_contract_id": null,
@@ -75927,30 +75962,30 @@
     "direct_zarr_api_site_count": 671,
     "dynamic_or_unresolved_writer_site_count": 362,
     "manual_zarr_metadata_site_count": 1,
-    "parsed_writer_candidate_module_count": 405,
+    "parsed_writer_candidate_module_count": 406,
     "reader_required_array_declaration_count": 117,
-    "resolved_writer_leaf_name_count": 640,
-    "scanned_python_module_count": 1753,
+    "resolved_writer_leaf_name_count": 641,
+    "scanned_python_module_count": 1754,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
-      "unmapped": 1797
+      "unmapped": 1798
     },
     "schema_occurrences_by_source_kind": {
       "array_spec_stage_binding": 306,
       "array_spec_unbound_declaration": 144,
       "reader_required_array_declaration": 117,
-      "writer_observed_schema": 1306
+      "writer_observed_schema": 1307
     },
-    "writer_site_count": 1668,
+    "writer_site_count": 1669,
     "writer_site_with_chunks_expression_count": 739,
     "writer_site_with_codec_expression_count": 16,
     "writer_site_with_shards_expression_count": 17,
     "writer_site_with_stage_classification_count": 493,
-    "writer_site_without_dtype_evidence_count": 1022,
+    "writer_site_without_dtype_evidence_count": 1023,
     "writer_site_without_shape_evidence_count": 168,
     "writer_sites_by_status": {
-      "current": 1533,
+      "current": 1534,
       "unclear": 135
     },
     "writer_sites_by_surface": {
@@ -75961,8 +75996,8 @@
       "migration_or_maintenance": 47,
       "production": 1237,
       "publication": 73,
-      "training": 199
+      "training": 200
     },
-    "writer_wrapper_call_site_count": 996
+    "writer_wrapper_call_site_count": 997
   }
 }
