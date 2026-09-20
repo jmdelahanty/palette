@@ -231,15 +231,11 @@ def apply_keypoint_request(
             user=user,
         ):
             raise RuntimeError("Registry refresh failed after canonical keypoint apply.")
-        effects_completer = getattr(
-            store, "mark_session_checkpoint_apply_effects_complete", None
+        store.mark_session_checkpoint_apply_effects_complete(
+            task_id=runtime.task_id,
+            component_name="keypoints",
+            apply_id=str(result.get("apply_id") or ""),
         )
-        if callable(effects_completer):
-            effects_completer(
-                task_id=runtime.task_id,
-                component_name="keypoints",
-                apply_id=str(result.get("apply_id") or ""),
-            )
         with _keypoint_runtime_request_lock(runtime):
             response_state = _keypoint_runtime_state(
                 runtime, backend_module, store=store
@@ -294,12 +290,26 @@ def apply_keypoint_request(
                 HTTPStatus.CONFLICT,
             )
         requested_apply_id = str(body.get("apply_id") or "").strip()
-        retain_apply_id = bool(
-            requested_apply_id
-            and str(failure_state.get("resumable_apply_id") or "")
-            == requested_apply_id
+        requested_snapshot_digest = str(
+            body.get("checkpoint_snapshot_sha256") or ""
+        ).strip()
+        resumable_apply_id = str(
+            failure_state.get("resumable_apply_id") or ""
+        ).strip()
+        resumable_snapshot_digest = str(
+            failure_state.get("resumable_checkpoint_snapshot_sha256") or ""
+        ).strip()
+        same_resumable_id = bool(
+            requested_apply_id and requested_apply_id == resumable_apply_id
         )
-        is_conflict = isinstance(exc, KeypointCheckpointConflict)
+        retain_apply_id = bool(
+            same_resumable_id
+            and requested_snapshot_digest
+            and requested_snapshot_digest == resumable_snapshot_digest
+        )
+        is_conflict = isinstance(exc, KeypointCheckpointConflict) or bool(
+            same_resumable_id and resumable_snapshot_digest
+        )
         status = (
             HTTPStatus.CONFLICT
             if is_conflict or retain_apply_id

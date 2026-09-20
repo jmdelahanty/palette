@@ -4944,6 +4944,16 @@ def test_mutable_keypoint_http_apply_uncertainty_retains_id(tmp_path, monkeypatc
                     "target_token": token,
                 },
             )
+            wrong_pair_status, wrong_pair = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/keypoints/apply",
+                method="POST",
+                payload={
+                    "apply_id": "apply-recover",
+                    "checkpoint_snapshot_sha256": "0" * 64,
+                    "target_token": token,
+                },
+            )
             recovered_status, recovered = _json_request(
                 base_url,
                 f"/api/sessions/{lease.session_id}/keypoints/apply",
@@ -4962,6 +4972,14 @@ def test_mutable_keypoint_http_apply_uncertainty_retains_id(tmp_path, monkeypatc
         assert failed["apply_retry_disposition"] == "retry_same_snapshot"
         assert failed["state"]["resumable_apply_id"] == "apply-recover"
         assert failed["state"]["resumable_checkpoint_snapshot_sha256"] == digest
+        assert wrong_pair_status == 409
+        assert wrong_pair["safe_prewrite_rejection"] is True
+        assert wrong_pair["retain_apply_id"] is False
+        assert wrong_pair["apply_retry_disposition"] == "fresh_snapshot_required"
+        assert wrong_pair["state"]["resumable_apply_id"] == "apply-recover"
+        assert (
+            wrong_pair["state"]["resumable_checkpoint_snapshot_sha256"] == digest
+        )
         assert recovered_status == 200
         assert recovered["result"]["applied"] is True
         assert recovered["result"]["edit_revision_after"] == 1
@@ -5030,6 +5048,22 @@ def test_mutable_keypoint_http_post_apply_audit_failure_retries_same_receipt(
                     "target_token": token,
                 },
             )
+            reload_status, reloaded = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/keypoints/state"
+            )
+            pending_token = reloaded["state"]["target_token"]
+            review_status, review_blocked = _json_request(
+                base_url,
+                f"/api/sessions/{lease.session_id}/keypoints/review-status",
+                method="POST",
+                payload={"state": "approved", "target_token": pending_token},
+            )
+            complete_status, complete_blocked = _json_request(
+                base_url,
+                "/api/tasks/task-a/complete",
+                method="POST",
+                payload={"session_id": lease.session_id, "expected_user": "alice"},
+            )
             retry_status, retried = _json_request(
                 base_url,
                 f"/api/sessions/{lease.session_id}/keypoints/apply",
@@ -5050,9 +5084,20 @@ def test_mutable_keypoint_http_post_apply_audit_failure_retries_same_receipt(
             "source_refined_row_id": 100,
             "source_detect_row_index": 200,
         }
+        assert reload_status == 200
+        assert reloaded["state"]["pending_apply_effect_count"] == 1
+        assert reloaded["state"]["resumable_apply_id"] == "apply-audit-retry"
+        assert (
+            reloaded["state"]["resumable_checkpoint_snapshot_sha256"] == digest
+        )
+        assert review_status == 409
+        assert review_blocked["error"] == "unapplied_session_edits"
+        assert complete_status == 409
+        assert complete_blocked["error"] == "unapplied_session_edits"
         assert retry_status == 200
         assert retried["result"]["already_applied"] is True
         assert retried["result"]["row_results"] == failed["result"]["row_results"]
+        assert retried["state"]["pending_apply_effect_count"] == 0
         assert len(
             store.list_events(
                 task_id="task-a",

@@ -258,25 +258,22 @@ def apply_keypoint_checkpoints(
                 runtime.review_session = fresh_session
         return result
 
-    pending_effect_reader = getattr(
-        store, "list_pending_session_checkpoint_apply_effects", None
+    pending_effects = store.list_pending_session_checkpoint_apply_effects(
+        task_id=task_id,
+        component_name=KEYPOINT_CHECKPOINT_COMPONENT,
+        limit=1,
     )
-    if callable(pending_effect_reader):
-        pending_effects = pending_effect_reader(
-            task_id=task_id,
-            component_name=KEYPOINT_CHECKPOINT_COMPONENT,
-            limit=1,
+    if pending_effects:
+        raise KeypointCheckpointConflict(
+            "Finish the prior keypoint Apply record before applying another snapshot."
         )
-        if pending_effects:
-            raise KeypointCheckpointConflict(
-                "Finish the prior keypoint apply audit and registry effects before applying another snapshot."
-            )
 
     checkpoints = store.claim_session_checkpoints_for_apply(
         task_id=task_id,
         component_name=KEYPOINT_CHECKPOINT_COMPONENT,
         apply_id=apply_id_value,
         limit=_APPLY_SNAPSHOT_LIMIT,
+        checkpoint_snapshot_sha256=expected_digest,
     )
     if not checkpoints:
         # Compatibility with sidecars created before same-ID claim replay was
@@ -376,6 +373,7 @@ def apply_keypoint_checkpoints(
                     apply_id=apply_id_value,
                     edit_revision_before=int(receipt.get("edit_revision_before") or 0),
                     edit_revision_after=int(receipt.get("edit_revision_after") or 0),
+                    require_secondary_effects=True,
                 )
                 if int(updated) != len(checkpoints):
                     raise RuntimeError(
@@ -639,6 +637,7 @@ def apply_keypoint_checkpoints(
                 apply_id=apply_id_value,
                 edit_revision_before=edit_revision_before,
                 edit_revision_after=edit_revision_after,
+                require_secondary_effects=True,
             )
             if int(updated) != len(checkpoints):
                 raise RuntimeError(

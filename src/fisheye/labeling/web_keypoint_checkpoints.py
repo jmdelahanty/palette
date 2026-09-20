@@ -19,6 +19,8 @@ from fisheye.shared.frame_flags import row_identity_payload
 from fisheye.shared.subject_mask_stale import mark_downstream_subject_mask_runs_stale
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
+from .assignment_store import session_checkpoint_snapshot_row_sha256
+
 
 KEYPOINT_CHECKPOINT_COMPONENT = "keypoints"
 KEYPOINT_CHECKPOINT_SAVE_MODE = "checkpoint_v1"
@@ -818,45 +820,25 @@ def current_keypoint_payload(
     return canonical
 
 
-def _checkpoint_snapshot_row(checkpoint: Mapping[str, object]) -> dict[str, object]:
-    return {
-        "schema": "palette.labeling_session_checkpoint_snapshot_row.v1",
-        "checkpoint_id": str(checkpoint.get("checkpoint_id") or ""),
-        "task_id": str(checkpoint.get("task_id") or ""),
-        "recording_id": str(checkpoint.get("recording_id") or ""),
-        "user": str(checkpoint.get("user") or ""),
-        "workflow_kind": str(checkpoint.get("workflow_kind") or ""),
-        "target_run_path": str(checkpoint.get("target_run_path") or ""),
-        "target_edit_revision": int(checkpoint.get("target_edit_revision") or 0),
-        "source_rowset_path": str(checkpoint.get("source_rowset_path") or ""),
-        "roi_idx": int(checkpoint.get("roi_idx") or 0),
-        "component_name": str(checkpoint.get("component_name") or ""),
-        "payload": _json_value(checkpoint.get("payload")),
-        "metadata": _json_value(checkpoint.get("metadata")),
-    }
-
-
-def _checkpoint_snapshot_row_sha256(checkpoint: Mapping[str, object]) -> str:
-    declared = str(checkpoint.get("snapshot_row_sha256") or "")
-    if "payload" not in checkpoint or "metadata" not in checkpoint:
-        if not declared:
-            raise KeypointCheckpointConflict(
-                "Keypoint checkpoint snapshot descriptor has no row digest."
-            )
-        return declared
-    computed = canonical_json_sha256(_checkpoint_snapshot_row(checkpoint))
-    if declared and declared != computed:
-        raise KeypointCheckpointConflict(
-            "Keypoint checkpoint persisted row digest changed."
-        )
-    return computed
-
-
 def checkpoint_snapshot_digest(checkpoints: Sequence[Mapping[str, object]]) -> str:
+    def row_digest(checkpoint: Mapping[str, object]) -> str:
+        if "payload" in checkpoint and "metadata" in checkpoint:
+            return session_checkpoint_snapshot_row_sha256(checkpoint)
+        persisted = str(checkpoint.get("snapshot_row_sha256") or "")
+        if (
+            len(persisted) != 64
+            or persisted != persisted.lower()
+            or any(character not in "0123456789abcdef" for character in persisted)
+        ):
+            raise KeypointCheckpointConflict(
+                "Keypoint checkpoint snapshot descriptor has no valid row digest."
+            )
+        return persisted
+
     rows = [
         {
             "checkpoint_id": str(checkpoint.get("checkpoint_id") or ""),
-            "snapshot_row_sha256": _checkpoint_snapshot_row_sha256(checkpoint),
+            "snapshot_row_sha256": row_digest(checkpoint),
         }
         for checkpoint in sorted(
             checkpoints,
@@ -874,12 +856,9 @@ def checkpoint_snapshot_digest(checkpoints: Sequence[Mapping[str, object]]) -> s
 def _pending_keypoint_apply_effects(
     store: object, *, task_id: str
 ) -> list[Mapping[str, object]]:
-    reader = getattr(store, "list_pending_session_checkpoint_apply_effects", None)
-    if not callable(reader):
-        return []
     return [
         row
-        for row in reader(
+        for row in store.list_pending_session_checkpoint_apply_effects(
             task_id=task_id,
             component_name=KEYPOINT_CHECKPOINT_COMPONENT,
             limit=_APPLY_SNAPSHOT_LIMIT,
@@ -900,36 +879,24 @@ def count_unfinished_keypoint_checkpoint_edits(store: object, *, task_id: str) -
     pending_rows = sum(
         max(1, int(row.get("checkpoint_count") or 0)) for row in pending_effects
     )
-    exact_counter = getattr(
-        store, "count_pending_session_checkpoint_apply_effects", None
-    )
-    if callable(exact_counter):
-        pending_receipt_count = int(
-            exact_counter(
-                task_id=task_id, component_name=KEYPOINT_CHECKPOINT_COMPONENT
-            )
+    pending_receipt_count = int(
+        store.count_pending_session_checkpoint_apply_effects(
+            task_id=task_id, component_name=KEYPOINT_CHECKPOINT_COMPONENT
         )
-        pending_rows = max(pending_rows, pending_receipt_count)
+    )
+    pending_rows = max(pending_rows, pending_receipt_count)
     return unapplied + pending_rows
 
 
 def keypoint_checkpoint_state(store: object, runtime: object) -> dict[str, object]:
     task_id = str(getattr(runtime, "task_id"))
-    descriptor_reader = getattr(
-        store, "list_session_checkpoint_snapshot_descriptors", None
-    )
-    list_method = (
-        descriptor_reader
-        if callable(descriptor_reader)
-        else store.list_session_checkpoints
-    )
-    active = list_method(
+    active = store.list_session_checkpoint_snapshot_descriptors(
         task_id=task_id,
         state="active",
         component_name=KEYPOINT_CHECKPOINT_COMPONENT,
         limit=_APPLY_SNAPSHOT_LIMIT,
     )
-    applying = list_method(
+    applying = store.list_session_checkpoint_snapshot_descriptors(
         task_id=task_id,
         state="applying",
         component_name=KEYPOINT_CHECKPOINT_COMPONENT,
@@ -951,41 +918,25 @@ def keypoint_checkpoint_state(store: object, runtime: object) -> dict[str, objec
     pending_effect_rows = sum(
         max(1, int(row.get("checkpoint_count") or 0)) for row in pending_effects
     )
-    pending_effect_counter = getattr(
-        store, "count_pending_session_checkpoint_apply_effects", None
-    )
-    pending_effect_count = (
-        int(
-            pending_effect_counter(
-                task_id=task_id, component_name=KEYPOINT_CHECKPOINT_COMPONENT
-            )
+    pending_effect_count = int(
+        store.count_pending_session_checkpoint_apply_effects(
+            task_id=task_id, component_name=KEYPOINT_CHECKPOINT_COMPONENT
         )
-        if callable(pending_effect_counter)
-        else len(pending_effects)
     )
     pending_effect_rows = max(pending_effect_rows, pending_effect_count)
-    state_counter = getattr(store, "count_session_checkpoints", None)
-    active_count = (
-        int(
-            state_counter(
-                task_id=task_id,
-                state="active",
-                component_name=KEYPOINT_CHECKPOINT_COMPONENT,
-            )
+    active_count = int(
+        store.count_session_checkpoints(
+            task_id=task_id,
+            state="active",
+            component_name=KEYPOINT_CHECKPOINT_COMPONENT,
         )
-        if callable(state_counter)
-        else len(active)
     )
-    applying_count = (
-        int(
-            state_counter(
-                task_id=task_id,
-                state="applying",
-                component_name=KEYPOINT_CHECKPOINT_COMPONENT,
-            )
+    applying_count = int(
+        store.count_session_checkpoints(
+            task_id=task_id,
+            state="applying",
+            component_name=KEYPOINT_CHECKPOINT_COMPONENT,
         )
-        if callable(state_counter)
-        else len(applying)
     )
     # Recovery always owns its original applying snapshot.  Otherwise apply the
     # same deterministic bounded active window that the store claim API uses.

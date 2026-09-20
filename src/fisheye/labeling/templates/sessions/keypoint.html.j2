@@ -168,7 +168,7 @@
           <div class="buttons">
             <button id="apply-button" type="button" onclick="applyCheckpoints()">Apply saved checkpoints</button>
           </div>
-          <p class="meta">Apply writes the saved snapshot under the exclusive canonical writer. You can keep reviewing other rows while it runs.</p>
+          <p id="apply-help" class="meta">Apply writes the saved snapshot under the exclusive canonical writer. You can keep reviewing other rows while it runs.</p>
         </div>
         <p id="immutable-direct-save-note" class="status" hidden>
           Direct delta mode: Save writes this row directly to the task-bound immutable delta. There is no separate Apply step and the immutable base is not changed.

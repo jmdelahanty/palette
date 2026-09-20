@@ -313,10 +313,15 @@ def test_apply_retry_keeps_bound_id_and_snapshot_and_recovers_after_reload() -> 
   // active checkpoint changed the current snapshot digest.
   vm.runInContext(`payload.state = Object.assign(payload.state, {
     unapplied_session_edit_count:2,active_session_edit_count:1,
+    pending_apply_effect_count:1,selected_session_edit_count:1,
     checkpoint_snapshot_sha256:${JSON.stringify("b".repeat(64))},apply_available:true,
     resumable_apply_id:"apply-recovered",
     resumable_checkpoint_snapshot_sha256:${JSON.stringify("a".repeat(64))}
   }); renderSummary()`,context);
+  assert.strictEqual(getNode("checkpoint-status").textContent,
+    "Labels are applied; finish recording this Apply.");
+  assert.strictEqual(getNode("apply-button").textContent,"Finish Apply");
+  assert(getNode("apply-help").textContent.includes("already applied"));
   requests.length=0;
   await vm.runInContext("applyCheckpoints()",context);
   const recovered=JSON.parse(requests[0].body);
@@ -364,6 +369,45 @@ def test_safe_prewrite_rejection_starts_fresh_apply_id_and_snapshot() -> None:
   assert.strictEqual(bodies[0].checkpoint_snapshot_sha256,"a".repeat(64));
   assert.strictEqual(bodies[1].apply_id,"apply-fresh");
   assert.strictEqual(bodies[1].checkpoint_snapshot_sha256,"b".repeat(64));
+"""
+    )
+
+
+def test_wrong_digest_for_owned_apply_adopts_server_recovery_pair() -> None:
+    _run_browser_case(
+        r"""
+  initial.state = {...initial.state,unapplied_session_edit_count:1,
+    applying_session_edit_count:1,checkpoint_snapshot_sha256:"a".repeat(64),
+    apply_available:true,resumable_apply_id:"apply-owned",
+    resumable_checkpoint_snapshot_sha256:"a".repeat(64)};
+  vm.runInContext("payload.state = Object.assign(payload.state, initial.state);"
+    + " uncertainApplyAttempt={applyId:'apply-owned',snapshotDigest:'0'.repeat(64)};"
+    + " renderSummary()",context);
+  requests.length=0;
+  let attempts=0;
+  fetchImpl=async (url,options) => {
+    attempts += 1;
+    const body=JSON.parse(options.body);
+    if (attempts === 1) return {ok:false,status:409,body:{ok:false,
+      error:"keypoint_apply_conflict",details:"apply ID belongs to another snapshot",
+      apply_retry_disposition:"fresh_snapshot_required",
+      safe_prewrite_rejection:true,retain_apply_id:false,state:initial.state}};
+    return {ok:true,body:{ok:true,result:{apply_id:body.apply_id,
+      checkpoint_snapshot_sha256:body.checkpoint_snapshot_sha256,
+      applied_checkpoint_count:1,saved:true,applied:true,
+      canonical_zarr_mutated:true},state:{...initial.state,
+      unapplied_session_edit_count:0,applying_session_edit_count:0,
+      checkpoint_snapshot_sha256:null,apply_available:false,
+      resumable_apply_id:null,resumable_checkpoint_snapshot_sha256:null}}};
+  };
+  await vm.runInContext("applyCheckpoints()",context);
+  assert.strictEqual(getNode("apply-button").disabled,false);
+  await vm.runInContext("applyCheckpoints()",context);
+  const bodies=requests.map(request=>JSON.parse(request.body));
+  assert.strictEqual(bodies[0].apply_id,"apply-owned");
+  assert.strictEqual(bodies[0].checkpoint_snapshot_sha256,"0".repeat(64));
+  assert.strictEqual(bodies[1].apply_id,"apply-owned");
+  assert.strictEqual(bodies[1].checkpoint_snapshot_sha256,"a".repeat(64));
 """
     )
 

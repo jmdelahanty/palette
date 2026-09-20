@@ -26,6 +26,8 @@
       "unapplied_session_edit_count",
       "active_session_edit_count",
       "applying_session_edit_count",
+      "pending_apply_effect_count",
+      "selected_session_edit_count",
       "checkpoint_snapshot_sha256",
       "apply_available",
       "resumable_apply_id",
@@ -247,12 +249,18 @@
       const unappliedCount = stateCount(state, "unapplied_session_edit_count");
       const activeCount = stateCount(state, "active_session_edit_count");
       const applyingCount = stateCount(state, "applying_session_edit_count");
+      const pendingApplyEffectCount = stateCount(state, "pending_apply_effect_count");
+      const finishApply = pendingApplyEffectCount > 0
+        && Boolean(state.resumable_apply_id)
+        && Boolean(state.resumable_checkpoint_snapshot_sha256);
       const checkpointStatus = document.getElementById("checkpoint-status");
       if (checkpointStatus) {
         checkpointStatus.hidden = !knownSaveMode;
         checkpointStatus.textContent = directDeltaSave
           ? "Save mode: direct immutable delta; each Save is applied immediately to the task delta."
-          : `${unappliedCount} saved checkpoint${unappliedCount === 1 ? "" : "s"} pending Apply (${activeCount} ready, ${applyingCount} applying).`;
+          : finishApply
+            ? "Labels are applied; finish recording this Apply."
+            : `${unappliedCount} saved checkpoint${unappliedCount === 1 ? "" : "s"} pending Apply (${activeCount} ready, ${applyingCount} applying).`;
       }
       const applyControls = document.getElementById("apply-controls");
       if (applyControls) {
@@ -260,6 +268,14 @@
       }
       const directSaveNote = document.getElementById("immutable-direct-save-note");
       if (directSaveNote) directSaveNote.hidden = !directDeltaSave;
+      const applyButton = document.getElementById("apply-button");
+      if (applyButton) applyButton.textContent = finishApply
+        ? "Finish Apply"
+        : "Apply saved checkpoints";
+      const applyHelp = document.getElementById("apply-help");
+      if (applyHelp) applyHelp.textContent = finishApply
+        ? "The labels are already applied. Finish Apply before review approval or task completion."
+        : "Apply writes the saved snapshot under the exclusive canonical writer. You can keep reviewing other rows while it runs.";
       const saveButton = document.getElementById("save-button");
       const saveNextButton = document.getElementById("save-next-button");
       if (saveButton) saveButton.textContent = !knownSaveMode

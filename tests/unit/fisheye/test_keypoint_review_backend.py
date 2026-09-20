@@ -37,6 +37,7 @@ from fisheye.labeling.web_keypoint_checkpoints import (
     KEYPOINT_APPLY_RECEIPTS_ATTR,
     KeypointCheckpointConflict,
     apply_keypoint_checkpoints,
+    checkpoint_snapshot_digest,
     current_keypoint_payload,
     keypoint_checkpoint_state,
     stage_keypoint_checkpoint,
@@ -460,6 +461,16 @@ def test_keypoint_checkpoint_state_uses_bounded_descriptors_and_exact_totals(
         def count_session_checkpoints(self, *, state: str, **_kwargs: object) -> int:
             return 1_001 if state == "active" else 0
 
+        def list_pending_session_checkpoint_apply_effects(
+            self, **_kwargs: object
+        ) -> list[dict[str, object]]:
+            return []
+
+        def count_pending_session_checkpoint_apply_effects(
+            self, **_kwargs: object
+        ) -> int:
+            return 0
+
     try:
         state = keypoint_checkpoint_state(DescriptorStore(), runtime)
         assert state["active_session_edit_count"] == 1_001
@@ -536,6 +547,70 @@ def test_keypoint_checkpoint_state_prioritizes_pending_apply_effect_receipt(
         _store.close()
 
 
+def test_checkpoint_descriptor_digest_matches_claim_and_refuses_tampered_full_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path)
+    try:
+        stage_keypoint_checkpoint(
+            store,
+            runtime,
+            user="alice",
+            operation="replace_points",
+            points=_valid_points(),
+        )
+        descriptors = store.list_session_checkpoint_snapshot_descriptors(
+            task_id="task-a",
+            state="active",
+            component_name="keypoints",
+            limit=1_000,
+        )
+        expected_digest = checkpoint_snapshot_digest(descriptors)
+        claimed = store.claim_session_checkpoints_for_apply(
+            task_id="task-a",
+            component_name="keypoints",
+            apply_id="descriptor-equivalence",
+            limit=1_000,
+            checkpoint_snapshot_sha256=expected_digest,
+        )
+        assert checkpoint_snapshot_digest(claimed) == expected_digest
+        assert (
+            store.release_session_checkpoints_apply(
+                task_id="task-a", apply_id="descriptor-equivalence"
+            )
+            == 1
+        )
+
+        original_claim = store.claim_session_checkpoints_for_apply
+
+        def tampered_claim(**kwargs: object) -> list[dict[str, object]]:
+            rows = json.loads(json.dumps(original_claim(**kwargs)))
+            rows[0]["payload"]["points"][0][0] += 1.0
+            return rows
+
+        monkeypatch.setattr(store, "claim_session_checkpoints_for_apply", tampered_claim)
+        canonical_before = np.asarray(runtime.review_session.kp_roi_arr[0]).copy()
+        with pytest.raises(
+            KeypointCheckpointConflict,
+            match="snapshot changed before apply",
+        ):
+            apply_keypoint_checkpoints(
+                store,
+                runtime,
+                mod,
+                apply_id="tampered-full-row",
+                checkpoint_snapshot_sha256=expected_digest,
+            )
+        np.testing.assert_array_equal(
+            np.asarray(runtime.review_session.kp_roi_arr[0]), canonical_before
+        )
+        assert store.count_session_checkpoints(
+            task_id="task-a", state="active", component_name="keypoints"
+        ) == 1
+    finally:
+        store.close()
+
+
 def test_apply_response_does_not_replace_target_saved_while_apply_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -559,6 +634,11 @@ def test_apply_response_does_not_replace_target_saved_while_apply_runs(
 
     monkeypatch.setattr(
         checkpoint_routes, "apply_keypoint_checkpoints", delayed_apply
+    )
+    monkeypatch.setattr(
+        store,
+        "mark_session_checkpoint_apply_effects_complete",
+        lambda **_kwargs: True,
     )
     target_token = _browser_runtime_target_token(runtime)
     response: list[tuple[dict[str, object], object]] = []
@@ -792,6 +872,65 @@ def test_keypoint_apply_preserves_recovered_landmark_origin_and_is_idempotent(
         store.close()
 
 
+def test_keypoint_apply_history_survives_later_same_row_checkpoint(
+    tmp_path: Path,
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path)
+    try:
+        first_points = _valid_points()
+        stage_keypoint_checkpoint(
+            store,
+            runtime,
+            user="alice",
+            operation="replace_points",
+            points=first_points,
+        )
+        first_state = keypoint_checkpoint_state(store, runtime)
+        first_digest = str(first_state["checkpoint_snapshot_sha256"])
+        first_result = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id="first-same-row-apply",
+            checkpoint_snapshot_sha256=first_digest,
+        )
+        assert store.mark_session_checkpoint_apply_effects_complete(
+            task_id="task-a",
+            component_name="keypoints",
+            apply_id="first-same-row-apply",
+        )
+
+        later_points = _valid_points(2.0)
+        stage_keypoint_checkpoint(
+            store,
+            runtime,
+            user="alice",
+            operation="replace_points",
+            points=later_points,
+        )
+        later_state = keypoint_checkpoint_state(store, runtime)
+        assert later_state["active_session_edit_count"] == 1
+        assert later_state["checkpoint_snapshot_sha256"] != first_digest
+
+        replay = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id="first-same-row-apply",
+            checkpoint_snapshot_sha256=first_digest,
+        )
+        assert replay["already_applied"] is True
+        assert replay["row_results"] == first_result["row_results"]
+        np.testing.assert_allclose(
+            np.asarray(runtime.review_session.kp_roi_arr[0]), first_points
+        )
+        assert keypoint_checkpoint_state(store, runtime)[
+            "checkpoint_snapshot_sha256"
+        ] == later_state["checkpoint_snapshot_sha256"]
+    finally:
+        store.close()
+
+
 def test_keypoint_apply_new_row_survives_other_row_revision_advance(
     tmp_path: Path,
 ) -> None:
@@ -824,6 +963,11 @@ def test_keypoint_apply_new_row_survives_other_row_revision_advance(
             _ConcurrentBackend,
             apply_id="apply-row-zero",
             checkpoint_snapshot_sha256=str(state_a["checkpoint_snapshot_sha256"]),
+        )
+        assert store.mark_session_checkpoint_apply_effects_complete(
+            task_id="task-a",
+            component_name="keypoints",
+            apply_id="apply-row-zero",
         )
         state_b = keypoint_checkpoint_state(store, runtime)
         assert state_b["unapplied_session_edit_count"] == 1
