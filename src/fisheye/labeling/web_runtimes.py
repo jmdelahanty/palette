@@ -679,11 +679,14 @@ def _keypoint_runtime_state(
     return dict(_redact_labeler_runtime_payload(state))
 
 def _refresh_keypoint_queue(runtime: KeypointRuntimeSession, backend_module: Any) -> None:
-    runtime.review_session.failures = backend_module.filter_review_rois(
+    indices = backend_module.filter_review_rois(
         runtime.review_session,
         filter_mode=runtime.filter_mode,
         search=runtime.search,
     )
+    if runtime.task_roi_indices is not None:
+        indices = indices[np.isin(indices, runtime.task_roi_indices)]
+    runtime.review_session.failures = indices
     total = int(runtime.review_session.failures.size)
     runtime.position = 0 if total <= 0 else max(0, min(int(runtime.position), total - 1))
 
