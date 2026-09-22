@@ -69,6 +69,12 @@ from fisheye.analytics_exports.validated_behavior_bout_kinematics_contracts impo
     BOUT_KINEMATICS_EXPORT_TABLE_SPECS,
     BOUT_MOVEMENT_TABLE,
 )
+from fisheye.analytics_exports.validated_behavior_frame_clock_contracts import (
+    ACQUISITION_FRAME_CLOCK_SAMPLES_TABLE,
+    FRAME_CLOCK_EXPORT_PROFILE_ID,
+    FRAME_CLOCK_EXPORT_TABLE_SPECS,
+    RECORDING_CLOCK_METADATA_TABLE,
+)
 from fisheye.analytics_exports.validated_behavior_core_chaser_contracts import (
     CORE_CHASER_EXPORT_PROFILE_ID,
     CORE_CHASER_TABLE_SPECS,
@@ -560,6 +566,29 @@ def test_bundle_cli_exposes_the_versioned_bout_export_profile() -> None:
     assert args.export_profile == BOUT_KINEMATICS_EXPORT_PROFILE_ID
 
 
+def test_bundle_cli_exposes_the_session_aware_frame_clock_profile() -> None:
+    args = bundle_cli._parser().parse_args(  # noqa: SLF001
+        [
+            "bundle-set",
+            "--membership",
+            "/tmp/membership.json",
+            "--bundle-paths-json",
+            "/tmp/reports.json",
+            "--bundle-set-id",
+            "frame-clock-profile",
+            "--bundle-root",
+            "/tmp/reports",
+            "--palette-commit",
+            "a" * 40,
+            "--output-json",
+            "/tmp/bundle-set.json",
+            "--export-profile",
+            FRAME_CLOCK_EXPORT_PROFILE_ID,
+        ]
+    )
+    assert args.export_profile == FRAME_CLOCK_EXPORT_PROFILE_ID
+
+
 def test_bundle_cli_dispatches_one_core_plus_chaser_profile_from_exact_roles() -> None:
     membership = _membership_for_role(CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE)
     membership["members"][0]["admission_receipts"].append(  # type: ignore[index, union-attr]
@@ -1011,6 +1040,95 @@ def test_bout_kinematics_profile_real_writer_publisher_reader_round_trip(
     assert len(heading) == 1
     assert heading[0]["heading_level"] == "heading_raw"
     assert heading[0]["net_delta_heading_deg"] == pytest.approx(15.0)
+    assert set(dataset.table_names) == set(specs)
+
+
+def test_frame_clock_profile_real_writer_publisher_reader_round_trip(
+    tmp_path: Path,
+) -> None:
+    specs = FRAME_CLOCK_EXPORT_TABLE_SPECS
+    plan_path, plan = _core_profile_plan(
+        tmp_path,
+        table_specs=specs,
+        export_profile_id=FRAME_CLOCK_EXPORT_PROFILE_ID,
+        capability_contract=core_behavior_capability_contract(
+            FRAME_CLOCK_EXPORT_PROFILE_ID
+        ),
+    )
+
+    def extractor(table_name: str) -> Any:
+        def rows(
+            plan_value: dict[str, Any],
+            member: dict[str, Any],
+            bundle_member: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], None]:
+            row = _fixture_scientific_row(
+                table_name=table_name,
+                plan=plan_value,
+                member=member,
+                bundle_member=bundle_member,
+                table_specs=specs,
+            )
+            if table_name == BOUT_HEADING_TABLE:
+                row["heading_level"] = "heading_raw"
+            if table_name == RECORDING_CLOCK_METADATA_TABLE:
+                row["session_id"] = "session-a"
+                row["equal_frame_rate_alignment_valid"] = False
+            if table_name == ACQUISITION_FRAME_CLOCK_SAMPLES_TABLE:
+                row["session_id"] = "session-a"
+                row["source_acquisition_frame_index"] = 0
+                row["recording_frame_id"] = 100
+                row["camera_timestamp_ns"] = 1_000
+                row["camera_timestamp_valid"] = True
+            return [row], None
+
+        return rows
+
+    scientific = set(SCIENTIFIC_TABLES) | {
+        BOUT_MOVEMENT_TABLE,
+        BOUT_HEADING_TABLE,
+        BOUT_EYE_GAZE_TABLE,
+        RECORDING_CLOCK_METADATA_TABLE,
+        ACQUISITION_FRAME_CLOCK_SAMPLES_TABLE,
+    }
+    write_validated_behavior_recording_shard(
+        plan_path=plan_path,
+        member_ordinal=1,
+        table_specs=specs,
+        row_extractors={name: extractor(name) for name in scientific},
+        created_at_utc="2026-09-04T12:01:00Z",
+    )
+    published = publish_validated_behavior_cohort(
+        plan_path=plan_path,
+        table_specs=specs,
+        generation_id="frame-clock-boundary-generation-v1",
+        created_at_utc="2026-09-04T12:02:00Z",
+    )
+    dataset = ValidatedBehaviorExportDataset.open(
+        plan["publication_root"], plan["export_run_id"]
+    )
+    clock = (
+        dataset.table(ACQUISITION_FRAME_CLOCK_SAMPLES_TABLE)
+        .collect_bounded(max_rows=2)
+        .to_dicts()
+    )
+
+    assert published["status"] == "complete_selector_ineligible"
+    assert dataset.manifest["export_profile"]["profile_id"] == (
+        FRAME_CLOCK_EXPORT_PROFILE_ID
+    )
+    assert len(clock) == 1
+    assert clock[0]["session_id"] == "session-a"
+    assert clock[0]["source_acquisition_frame_index"] == 0
+    assert clock[0]["recording_frame_id"] == 100
+    assert clock[0]["camera_timestamp_ns"] == 1_000
+    assert clock[0]["camera_timestamp_valid"] is True
+    metadata = (
+        dataset.table(RECORDING_CLOCK_METADATA_TABLE)
+        .collect_bounded(max_rows=2)
+        .to_dicts()[0]
+    )
+    assert metadata["equal_frame_rate_alignment_valid"] is False
     assert set(dataset.table_names) == set(specs)
 
 
