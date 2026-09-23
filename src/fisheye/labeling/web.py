@@ -2590,201 +2590,227 @@ def _make_handler(state: ServerState):
                                 after=result,
                             )
                         else:
-                            edit_revision_before = _subject_mask_edit_revision(runtime)
-                            checkpoint_ids: list[str] = []
-                            applied_rows: list[int] = []
-                            edited_stacks: list[np.ndarray] = []
-                            before_area_total = 0
-                            after_area_total = 0
-                            compute_workers_used = 1
-                            stale_checkpoint_ids: list[str] = []
-                            stale_rows: list[int] = []
-                            scoped_row_set = set(int(value) for value in runtime.roi_indices.tolist())
-                            for checkpoint in checkpoints:
-                                checkpoint_target_path = str(checkpoint.get("target_run_path") or "")
-                                if checkpoint_target_path != target_path:
-                                    raise ValueError(
-                                        f"checkpoint target mismatch: expected {target_path}, got {checkpoint_target_path}"
-                                    )
-                                checkpoint_source_rowset = str(checkpoint.get("source_rowset_path") or "")
-                                if checkpoint_source_rowset and checkpoint_source_rowset != source_rowset_path:
-                                    raise ValueError(
-                                        f"checkpoint source rowset mismatch: expected {source_rowset_path}, got {checkpoint_source_rowset}"
-                                    )
-                                checkpoint_revision = int(checkpoint.get("target_edit_revision") or 0)
-                                roi_idx = int(checkpoint.get("roi_idx") or 0)
-                                if roi_idx not in scoped_row_set:
-                                    raise ValueError(f"checkpoint row {roi_idx} is outside the active task row scope.")
-                                if checkpoint_revision != edit_revision_before:
-                                    stale_checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
-                                    stale_rows.append(roi_idx)
-                                    continue
-                                metadata = checkpoint.get("metadata")
-                                if isinstance(metadata, Mapping):
-                                    expected_identity = metadata.get("row_identity")
-                                    if isinstance(expected_identity, Mapping):
-                                        current_identity = _subject_mask_row_identity(runtime, roi_idx)
-                                        for key, expected_value in expected_identity.items():
-                                            if key not in current_identity:
-                                                continue
-                                            if str(current_identity.get(key)) != str(expected_value):
-                                                raise ValueError(
-                                                    f"checkpoint row identity mismatch for row {roi_idx}, field {key}: "
-                                                    f"expected {expected_value}, got {current_identity.get(key)}"
-                                                )
-                                edited_mask = _subject_mask_checkpoint_mask(checkpoint)
-                                current_stack = np.asarray(runtime.refined.group["masks_roi"][roi_idx], dtype=np.uint8)
-                                before_mask = (np.asarray(current_stack[runtime.comp_idx], dtype=np.uint8) > 0).astype(np.uint8)
-                                if tuple(edited_mask.shape) != tuple(before_mask.shape):
-                                    raise ValueError(
-                                        f"checkpoint mask shape mismatch for row {roi_idx}: "
-                                        f"expected {tuple(before_mask.shape)}, got {tuple(edited_mask.shape)}"
-                                    )
-                                edited_stack = current_stack.copy()
-                                edited_stack[runtime.comp_idx] = edited_mask
-                                checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
-                                applied_rows.append(roi_idx)
-                                edited_stacks.append(edited_stack)
-                                before_area_total += int(before_mask.sum())
-                                after_area_total += int(edited_mask.sum())
-                            if not edited_stacks:
-                                released_stale_checkpoint_count = 0
-                                if stale_checkpoint_ids:
-                                    released_stale_checkpoint_count = state.store.release_session_checkpoints_apply(
-                                        task_id=runtime.task_id,
-                                        apply_id=apply_id,
-                                    )
-                                edit_revision_current = _subject_mask_edit_revision(runtime)
-                                result = {
-                                    "apply_id": apply_id,
-                                    "already_applied": False,
-                                    "applied_checkpoint_count": 0,
-                                    "requested_checkpoint_count": len(checkpoints),
-                                    "stale_checkpoint_count": len(stale_checkpoint_ids),
-                                    "stale_rows": stale_rows,
-                                    "released_stale_checkpoint_count": int(released_stale_checkpoint_count),
-                                    "skipped_checkpoint_count": len(stale_checkpoint_ids),
-                                    "component_name": runtime.component_name,
-                                    "rows": [],
-                                    "edit_revision_before": edit_revision_current,
-                                    "edit_revision_after": edit_revision_current,
-                                    "before_area_px_total": 0,
-                                    "after_area_px_total": 0,
-                                    "compute_workers": 0,
-                                    "canonical_zarr_mutated": False,
-                                }
-                                mutation_event = state.store.record_event(
-                                    task_id=runtime.task_id,
-                                    recording_id=runtime.recording_id,
-                                    user=user,
-                                    event_type="apply_subject_mask_session_checkpoints_stale_skipped",
-                                    target={
-                                        "apply_id": apply_id,
-                                        "component_name": runtime.component_name,
-                                        "refined_run": str(runtime.refined.run_name),
-                                        "target_run_path": target_path,
-                                    },
-                                    after=result,
+                            with review_mod._refined_subject_write_lock(
+                                runtime.zarr_path, refined_run=runtime.refined.run_name,
+                            ):
+                                fresh_root = review_mod.open_zarr_root(runtime.zarr_path, mode="a")
+                                fresh_refined = review_mod._open_existing_refined_subject_run(
+                                    fresh_root, runtime.refined.run_name,
                                 )
-                            else:
-                                if edited_stacks:
-                                    compute_worker_limit_raw = str(
-                                        os.environ.get("PALETTE_SUBJECT_MASK_APPLY_COMPUTE_WORKERS", "4")
-                                    ).strip()
-                                    try:
-                                        compute_worker_limit = int(compute_worker_limit_raw)
-                                    except ValueError:
-                                        compute_worker_limit = 4
-                                    compute_workers = max(
-                                        1,
-                                        min(
-                                            max(1, compute_worker_limit),
-                                            len(edited_stacks),
-                                            max(1, int(os.cpu_count() or 1)),
-                                        ),
-                                    )
-                                    compute_workers_used = int(compute_workers)
-                                    canonical_write_started = True
-                                    review_mod._apply_refined_subject_roi_rows(  # type: ignore[attr-defined]
-                                        source=runtime.source,
-                                        refined=runtime.refined,
-                                        roi_indices=applied_rows,
-                                        edited_masks_batch=np.stack(edited_stacks, axis=0),
-                                        component_names=(runtime.component_name,),
-                                        update_mode="browser_session_apply",
-                                        update_method="palette_web_labeling_session_apply_v1",
-                                        update_reason="web_labeling_subject_mask_session_apply",
-                                        compute_workers=compute_workers,
-                                    )
-                                edit_revision_after = int(edit_revision_before) + 1
-                                runtime.refined.group.attrs["edit_revision"] = int(edit_revision_after)
-                                runtime.refined.group.attrs["edit_revision_updated_at_utc"] = datetime.now(timezone.utc).isoformat()
-                                runtime.refined.group.attrs["edit_revision_last_apply_id"] = apply_id
-                                if "mask_rle" in runtime.refined.group:
-                                    runtime.refined.group.attrs["mask_rle_stale_since_edit_revision"] = int(edit_revision_after)
-                                updated_count = state.store.mark_session_checkpoints_applied(
-                                    checkpoint_ids=checkpoint_ids,
-                                    apply_id=apply_id,
-                                    edit_revision_before=edit_revision_before,
-                                    edit_revision_after=edit_revision_after,
-                                )
-                                released_stale_checkpoint_count = 0
-                                if stale_checkpoint_ids:
-                                    released_stale_checkpoint_count = state.store.release_session_checkpoints_apply(
-                                        task_id=runtime.task_id,
-                                        apply_id=apply_id,
-                                    )
-                                result = {
-                                    "apply_id": apply_id,
-                                    "already_applied": False,
-                                    "applied_checkpoint_count": int(updated_count),
-                                    "requested_checkpoint_count": len(checkpoints),
-                                    "stale_checkpoint_count": len(stale_checkpoint_ids),
-                                    "stale_rows": stale_rows,
-                                    "released_stale_checkpoint_count": int(released_stale_checkpoint_count),
-                                    "skipped_checkpoint_count": len(stale_checkpoint_ids),
-                                    "component_name": runtime.component_name,
-                                    "rows": applied_rows,
-                                    "edit_revision_before": edit_revision_before,
-                                    "edit_revision_after": edit_revision_after,
-                                    "before_area_px_total": before_area_total,
-                                    "after_area_px_total": after_area_total,
-                                    "compute_workers": int(compute_workers_used),
-                                    "canonical_zarr_mutated": True,
-                                }
-                                mutation_event = state.store.record_event(
-                                    task_id=runtime.task_id,
-                                    recording_id=runtime.recording_id,
-                                    user=user,
-                                    event_type="apply_subject_mask_session_checkpoints",
-                                    target={
+                                if fresh_refined.component_to_index.get(runtime.component_name) != runtime.comp_idx:
+                                    raise ValueError("Subject-mask component mapping changed before apply.")
+                                runtime.root = fresh_root
+                                runtime.refined = fresh_refined
+                                edit_revision_before = _subject_mask_edit_revision(runtime)
+                                checkpoint_ids: list[str] = []
+                                applied_rows: list[int] = []
+                                edited_stacks: list[np.ndarray] = []
+                                before_area_total = 0
+                                after_area_total = 0
+                                compute_workers_used = 1
+                                stale_checkpoint_ids: list[str] = []
+                                stale_rows: list[int] = []
+                                masks_array = runtime.refined.group["masks_roi"]
+                                row_chunk: int | None = None
+                                cached_chunk_index = -1
+                                cached_chunk: np.ndarray | None = None
+                                scoped_row_set = set(int(value) for value in runtime.roi_indices.tolist())
+                                for checkpoint in checkpoints:
+                                    checkpoint_target_path = str(checkpoint.get("target_run_path") or "")
+                                    if checkpoint_target_path != target_path:
+                                        raise ValueError(
+                                            f"checkpoint target mismatch: expected {target_path}, got {checkpoint_target_path}"
+                                        )
+                                    checkpoint_source_rowset = str(checkpoint.get("source_rowset_path") or "")
+                                    if checkpoint_source_rowset and checkpoint_source_rowset != source_rowset_path:
+                                        raise ValueError(
+                                            f"checkpoint source rowset mismatch: expected {source_rowset_path}, got {checkpoint_source_rowset}"
+                                        )
+                                    checkpoint_revision = int(checkpoint.get("target_edit_revision") or 0)
+                                    roi_idx = int(checkpoint.get("roi_idx") or 0)
+                                    if roi_idx not in scoped_row_set:
+                                        raise ValueError(f"checkpoint row {roi_idx} is outside the active task row scope.")
+                                    if checkpoint_revision != edit_revision_before:
+                                        stale_checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
+                                        stale_rows.append(roi_idx)
+                                        continue
+                                    metadata = checkpoint.get("metadata")
+                                    if isinstance(metadata, Mapping):
+                                        expected_identity = metadata.get("row_identity")
+                                        if isinstance(expected_identity, Mapping):
+                                            current_identity = _subject_mask_row_identity(runtime, roi_idx)
+                                            for key, expected_value in expected_identity.items():
+                                                if key not in current_identity:
+                                                    continue
+                                                if str(current_identity.get(key)) != str(expected_value):
+                                                    raise ValueError(
+                                                        f"checkpoint row identity mismatch for row {roi_idx}, field {key}: "
+                                                        f"expected {expected_value}, got {current_identity.get(key)}"
+                                                    )
+                                    edited_mask = _subject_mask_checkpoint_mask(checkpoint)
+                                    if row_chunk is None:
+                                        row_chunk = int(masks_array.chunks[0])
+                                    chunk_index = roi_idx // row_chunk
+                                    if chunk_index != cached_chunk_index:
+                                        chunk_start = chunk_index * row_chunk
+                                        cached_chunk = np.asarray(
+                                            masks_array[chunk_start:min(chunk_start + row_chunk, int(masks_array.shape[0]))],
+                                            dtype=np.uint8,
+                                        )
+                                        cached_chunk_index = chunk_index
+                                    assert cached_chunk is not None
+                                    current_stack = cached_chunk[roi_idx - chunk_index * row_chunk]
+                                    before_mask = (np.asarray(current_stack[runtime.comp_idx], dtype=np.uint8) > 0).astype(np.uint8)
+                                    if tuple(edited_mask.shape) != tuple(before_mask.shape):
+                                        raise ValueError(
+                                            f"checkpoint mask shape mismatch for row {roi_idx}: "
+                                            f"expected {tuple(before_mask.shape)}, got {tuple(edited_mask.shape)}"
+                                        )
+                                    edited_stack = current_stack.copy()
+                                    edited_stack[runtime.comp_idx] = edited_mask
+                                    checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
+                                    applied_rows.append(roi_idx)
+                                    edited_stacks.append(edited_stack)
+                                    before_area_total += int(before_mask.sum())
+                                    after_area_total += int(edited_mask.sum())
+                                if not edited_stacks:
+                                    released_stale_checkpoint_count = 0
+                                    if stale_checkpoint_ids:
+                                        released_stale_checkpoint_count = state.store.release_session_checkpoints_apply(
+                                            task_id=runtime.task_id,
+                                            apply_id=apply_id,
+                                        )
+                                    edit_revision_current = _subject_mask_edit_revision(runtime)
+                                    result = {
                                         "apply_id": apply_id,
+                                        "already_applied": False,
+                                        "applied_checkpoint_count": 0,
+                                        "requested_checkpoint_count": len(checkpoints),
+                                        "stale_checkpoint_count": len(stale_checkpoint_ids),
+                                        "stale_rows": stale_rows,
+                                        "released_stale_checkpoint_count": int(released_stale_checkpoint_count),
+                                        "skipped_checkpoint_count": len(stale_checkpoint_ids),
                                         "component_name": runtime.component_name,
-                                        "refined_run": str(runtime.refined.run_name),
-                                        "target_run_path": target_path,
-                                    },
-                                    before={
-                                        "edit_revision": edit_revision_before,
-                                        "area_px_total": before_area_total,
-                                    },
-                                    after={
-                                        "edit_revision": edit_revision_after,
-                                        "area_px_total": after_area_total,
+                                        "rows": [],
+                                        "edit_revision_before": edit_revision_current,
+                                        "edit_revision_after": edit_revision_current,
+                                        "before_area_px_total": 0,
+                                        "after_area_px_total": 0,
+                                        "compute_workers": 0,
+                                        "canonical_zarr_mutated": False,
+                                    }
+                                    mutation_event = state.store.record_event(
+                                        task_id=runtime.task_id,
+                                        recording_id=runtime.recording_id,
+                                        user=user,
+                                        event_type="apply_subject_mask_session_checkpoints_stale_skipped",
+                                        target={
+                                            "apply_id": apply_id,
+                                            "component_name": runtime.component_name,
+                                            "refined_run": str(runtime.refined.run_name),
+                                            "target_run_path": target_path,
+                                        },
+                                        after=result,
+                                    )
+                                else:
+                                    if edited_stacks:
+                                        compute_worker_limit_raw = str(
+                                            os.environ.get("PALETTE_SUBJECT_MASK_APPLY_COMPUTE_WORKERS", "4")
+                                        ).strip()
+                                        try:
+                                            compute_worker_limit = int(compute_worker_limit_raw)
+                                        except ValueError:
+                                            compute_worker_limit = 4
+                                        compute_workers = max(
+                                            1,
+                                            min(
+                                                max(1, compute_worker_limit),
+                                                len(edited_stacks),
+                                                max(1, int(os.cpu_count() or 1)),
+                                            ),
+                                        )
+                                        compute_workers_used = int(compute_workers)
+                                        canonical_write_started = True
+                                        review_mod._apply_refined_subject_roi_rows(  # type: ignore[attr-defined]
+                                            source=runtime.source,
+                                            refined=runtime.refined,
+                                            roi_indices=applied_rows,
+                                            edited_masks_batch=np.stack(edited_stacks, axis=0),
+                                            component_names=(runtime.component_name,),
+                                            update_mode="browser_session_apply",
+                                            update_method="palette_web_labeling_session_apply_v1",
+                                            update_reason="web_labeling_subject_mask_session_apply",
+                                            compute_workers=compute_workers,
+                                        )
+                                    edit_revision_after = int(edit_revision_before) + 1
+                                    runtime.refined.group.attrs["edit_revision"] = int(edit_revision_after)
+                                    runtime.refined.group.attrs["edit_revision_updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+                                    runtime.refined.group.attrs["edit_revision_last_apply_id"] = apply_id
+                                    if "mask_rle" in runtime.refined.group:
+                                        runtime.refined.group.attrs["mask_rle_stale_since_edit_revision"] = int(edit_revision_after)
+                                    updated_count = state.store.mark_session_checkpoints_applied(
+                                        checkpoint_ids=checkpoint_ids,
+                                        apply_id=apply_id,
+                                        edit_revision_before=edit_revision_before,
+                                        edit_revision_after=edit_revision_after,
+                                    )
+                                    released_stale_checkpoint_count = 0
+                                    if stale_checkpoint_ids:
+                                        released_stale_checkpoint_count = state.store.release_session_checkpoints_apply(
+                                            task_id=runtime.task_id,
+                                            apply_id=apply_id,
+                                        )
+                                    result = {
+                                        "apply_id": apply_id,
+                                        "already_applied": False,
                                         "applied_checkpoint_count": int(updated_count),
+                                        "requested_checkpoint_count": len(checkpoints),
+                                        "stale_checkpoint_count": len(stale_checkpoint_ids),
+                                        "stale_rows": stale_rows,
+                                        "released_stale_checkpoint_count": int(released_stale_checkpoint_count),
+                                        "skipped_checkpoint_count": len(stale_checkpoint_ids),
+                                        "component_name": runtime.component_name,
+                                        "rows": applied_rows,
+                                        "edit_revision_before": edit_revision_before,
+                                        "edit_revision_after": edit_revision_after,
+                                        "before_area_px_total": before_area_total,
+                                        "after_area_px_total": after_area_total,
                                         "compute_workers": int(compute_workers_used),
-                                    },
-                                )
-                                _refresh_registry_for_scope(
-                                    store=state.store,
-                                    task_id=runtime.task_id,
-                                    recording_id=runtime.recording_id,
-                                    user=user,
-                                    workflow_kind="subject_mask_component",
-                                    scope=_session_scope(session),
-                                    zarr_path=runtime.zarr_path,
-                                    dataset_id=str(session.get("dataset_id") or "") or None,
-                                    zarr_use=str(session.get("zarr_use") or "") or None,
-                                )
+                                        "canonical_zarr_mutated": True,
+                                    }
+                                    mutation_event = state.store.record_event(
+                                        task_id=runtime.task_id,
+                                        recording_id=runtime.recording_id,
+                                        user=user,
+                                        event_type="apply_subject_mask_session_checkpoints",
+                                        target={
+                                            "apply_id": apply_id,
+                                            "component_name": runtime.component_name,
+                                            "refined_run": str(runtime.refined.run_name),
+                                            "target_run_path": target_path,
+                                        },
+                                        before={
+                                            "edit_revision": edit_revision_before,
+                                            "area_px_total": before_area_total,
+                                        },
+                                        after={
+                                            "edit_revision": edit_revision_after,
+                                            "area_px_total": after_area_total,
+                                            "applied_checkpoint_count": int(updated_count),
+                                            "compute_workers": int(compute_workers_used),
+                                        },
+                                    )
+                                    _refresh_registry_for_scope(
+                                        store=state.store,
+                                        task_id=runtime.task_id,
+                                        recording_id=runtime.recording_id,
+                                        user=user,
+                                        workflow_kind="subject_mask_component",
+                                        scope=_session_scope(session),
+                                        zarr_path=runtime.zarr_path,
+                                        dataset_id=str(session.get("dataset_id") or "") or None,
+                                        zarr_use=str(session.get("zarr_use") or "") or None,
+                                    )
                 except Exception as exc:
                     if claimed_apply_id and not canonical_write_started:
                         try:

@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from types import ModuleType, SimpleNamespace
@@ -5932,5 +5934,207 @@ def test_subject_mask_nav_and_save_routes_record_audit_event_without_real_zarr(t
             event_type="checkpoint_subject_mask_roi",
         )
         assert events[0]["target"]["component_name"] == "body"
+    finally:
+        store.close()
+
+
+def test_subject_mask_apply_refreshes_locked_run_and_releases_prewrite_refusals(tmp_path, monkeypatch):
+    class FakeGroup(dict):
+        def __init__(self, *args, attrs=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.attrs = attrs or {}
+
+    masks = np.zeros((1, 1, 3, 3), dtype=np.uint8)
+    cached = SimpleNamespace(
+        group=FakeGroup({"masks_roi": masks.copy()}, attrs={"edit_revision": 0}),
+        run_name="refined-subject-a", component_names=("body",),
+        component_to_index={"body": 0}, parent=SimpleNamespace(),
+    )
+    fresh = SimpleNamespace(
+        group=FakeGroup({"masks_roi": masks.copy()}, attrs={"edit_revision": 1}),
+        run_name="refined-subject-a", component_names=("body",),
+        component_to_index={"body": 0}, parent=SimpleNamespace(),
+    )
+    controls = {"sealed": False, "timeout": False, "writes": 0}
+
+    @contextmanager
+    def run_lock(*args, **kwargs):
+        if controls["timeout"]:
+            raise TimeoutError("injected lock timeout")
+        yield {}
+
+    def fresh_run(*args, **kwargs):
+        if controls["sealed"]:
+            raise RuntimeError("sealed refined run")
+        return fresh
+
+    def unexpected_write(**kwargs):
+        controls["writes"] += 1
+        raise AssertionError("stale or sealed checkpoint must not write")
+
+    _fake_module(
+        monkeypatch, "fisheye.tune.refined_subject_mask_review",
+        _refined_subject_write_lock=run_lock,
+        open_zarr_root=lambda *args, **kwargs: SimpleNamespace(),
+        _open_existing_refined_subject_run=fresh_run,
+        _apply_refined_subject_roi_rows=unexpected_write,
+    )
+    store = LabelingStore(tmp_path / "labeling_work.sqlite")
+    try:
+        store.initialize()
+        store.assign_recording(recording_id="rec-a", assignee_user="alice")
+        store.upsert_task(
+            task_id="task-a", recording_id="rec-a",
+            workflow_kind="subject_mask_component", component_name="body",
+        )
+        lease = store.create_session(task_id="task-a", user="alice", ttl_seconds=600)
+
+        def configure(state):
+            state.subject_mask_sessions[lease.session_id] = labeling_web.SubjectMaskRuntimeSession(
+                session_id=lease.session_id, task_id="task-a", recording_id="rec-a",
+                user="alice", zarr_path=str(tmp_path / "fake.zarr"), root=SimpleNamespace(),
+                source=SimpleNamespace(frame_indices=np.asarray([88], dtype=np.int32), run_name="subject-a"),
+                refined=cached, roi_images=SimpleNamespace(), component_name="body", comp_idx=0,
+                roi_indices=np.asarray([0], dtype=np.int32),
+            )
+
+        with _running_server(store, user="alice", configure_state=configure) as base_url:
+            nav_status, nav = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/nav",
+                method="POST", payload={"position": 0},
+            )
+            assert nav_status == 200, nav
+            save_status, saved = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/save",
+                method="POST", payload={
+                    "mask": labeling_web._raw_array_payload(np.ones((3, 3), dtype=np.uint8)),
+                    "target_token": nav["state"]["target_token"],
+                },
+            )
+            assert save_status == 200, saved
+            stale_status, stale = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/apply",
+                method="POST", payload={"apply_id": "stale-revision", "target_token": saved["state"]["target_token"]},
+            )
+            assert stale_status == 200, stale.get("details")
+            assert stale["result"]["stale_checkpoint_count"] == 1
+            assert store.list_session_checkpoints(task_id="task-a", state="active")
+
+            fresh.group.attrs["edit_revision"] = 0
+            controls["sealed"] = True
+            sealed_status, sealed = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/apply",
+                method="POST", payload={"apply_id": "sealed-run", "target_token": stale["state"]["target_token"]},
+            )
+            assert sealed_status == 400, sealed
+            assert "sealed refined run" in sealed["details"]
+            assert store.list_session_checkpoints(task_id="task-a", state="active")
+
+            controls["sealed"] = False
+            controls["timeout"] = True
+            timeout_status, timed_out = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/apply",
+                method="POST", payload={"apply_id": "lock-timeout", "target_token": stale["state"]["target_token"]},
+            )
+            assert timeout_status == 400, timed_out
+            assert "injected lock timeout" in timed_out["details"]
+            assert store.list_session_checkpoints(task_id="task-a", state="active")
+        assert controls["writes"] == 0
+    finally:
+        store.close()
+
+
+def test_subject_mask_http_apply_uses_real_run_lock_and_fresh_revision(tmp_path):
+    from fisheye.tune import refined_subject_mask_review as review_mod
+    from tests.unit.fisheye.test_refined_subject_mask_review import _build_subject_review_root
+
+    zarr_path = tmp_path / "subject.zarr"
+    root = _build_subject_review_root(zarr_path=zarr_path)
+    source, _ = review_mod.prepare_refined_subject_run(
+        root, subject_run="subject_masks_001", refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    store = LabelingStore(tmp_path / "labeling_work.sqlite")
+    try:
+        store.initialize()
+        store.assign_recording(recording_id="rec-a", assignee_user="alice")
+        store.upsert_task(
+            task_id="task-a", recording_id="rec-a",
+            workflow_kind="subject_mask_component", component_name="subject_body",
+        )
+        store.upsert_task(
+            task_id="task-b", recording_id="rec-a",
+            workflow_kind="subject_mask_component", component_name="subject_body",
+        )
+        leases = [
+            store.create_session(task_id=task_id, user="alice", ttl_seconds=600)
+            for task_id in ("task-a", "task-b")
+        ]
+
+        def configure(state):
+            for lease, roi_idx in zip(leases, (0, 1)):
+                session_root = review_mod.open_zarr_root(zarr_path, mode="a")
+                session_refined = review_mod._open_existing_refined_subject_run(
+                    session_root, "refined_subject_masks_001",
+                )
+                state.subject_mask_sessions[lease.session_id] = labeling_web.SubjectMaskRuntimeSession(
+                    session_id=lease.session_id, task_id=lease.task_id, recording_id="rec-a",
+                    user="alice", zarr_path=str(zarr_path), root=session_root,
+                    source=source, refined=session_refined, roi_images=SimpleNamespace(),
+                    component_name="subject_body", comp_idx=0,
+                    roi_indices=np.asarray([roi_idx], dtype=np.int32),
+                )
+
+        with _running_server(store, user="alice", configure_state=configure) as base_url:
+            tokens = []
+            for lease in leases:
+                nav_status, nav = _json_request(
+                    base_url, f"/api/sessions/{lease.session_id}/subject-mask/nav",
+                    method="POST", payload={"position": 0},
+                )
+                assert nav_status == 200, nav
+                tokens.append(nav["state"]["target_token"])
+            for lease, token in zip(leases, tokens):
+                save_status, saved = _json_request(
+                    base_url, f"/api/sessions/{lease.session_id}/subject-mask/save",
+                    method="POST", payload={
+                        "mask": labeling_web._raw_array_payload(np.ones((8, 8), dtype=np.uint8)),
+                        "target_token": token,
+                    },
+                )
+                assert save_status == 200, saved
+
+            first_url = f"/api/sessions/{leases[0].session_id}/subject-mask/apply"
+            first_payload = {"apply_id": "first-apply", "target_token": tokens[0]}
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                with review_mod._refined_subject_write_lock(zarr_path, refined_run="refined_subject_masks_001"):
+                    future = pool.submit(_json_request, base_url, first_url, method="POST", payload=first_payload)
+                    time.sleep(0.1)
+                    assert not future.done()
+                first_status, first = future.result(timeout=20)
+            assert first_status == 200, first
+            assert first["result"]["applied_checkpoint_count"] == 1
+            retry_status, retry = _json_request(
+                base_url, first_url, method="POST", payload=first_payload,
+            )
+            assert retry_status == 200, retry
+            assert retry["result"]["already_applied"] is True
+
+            stale_status, stale = _json_request(
+                base_url, f"/api/sessions/{leases[1].session_id}/subject-mask/apply",
+                method="POST", payload={"apply_id": "stale-second", "target_token": tokens[1]},
+            )
+            assert stale_status == 200, stale
+            assert stale["result"]["stale_checkpoint_count"] == 1
+            assert stale["result"]["applied_checkpoint_count"] == 0
+
+        saved_root = review_mod.open_zarr_root(zarr_path, mode="r", use_consolidated=False)
+        saved_run = saved_root["refined_subject_masks_runs/refined_subject_masks_001"]
+        assert int(saved_run.attrs["edit_revision"]) == 1
+        np.testing.assert_array_equal(saved_run["masks_roi"][0, 0], np.ones((8, 8), dtype=np.uint8))
+        np.testing.assert_array_equal(saved_run["masks_roi"][1, 0], np.asarray(source.masks_roi[1, 0]))
+        np.testing.assert_array_equal(saved_run["components/subject_body/row_revision"][:], [1, 0])
+        assert len(store.list_session_checkpoints(task_id="task-a", state="applied")) == 1
+        assert len(store.list_session_checkpoints(task_id="task-b", state="active")) == 1
     finally:
         store.close()
