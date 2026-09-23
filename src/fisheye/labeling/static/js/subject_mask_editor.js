@@ -25,6 +25,7 @@
     let applyInFlight = false;
     let uncertainApplyId = null;
     let tailRefreshResult = null;
+    let foregroundGeneration = 0;
     const lassoMinPointStepPx = 2;
 
     function setStatus(text, isError=false) {
@@ -57,6 +58,7 @@
     }
 
     function setBusy(isBusy, text=null) {
+      if (isBusy) foregroundGeneration += 1;
       busyAction = Boolean(isBusy);
       document.querySelectorAll("button, select, input").forEach((node) => {
         node.disabled = busyAction;
@@ -291,18 +293,20 @@
       const reviewState = componentReview.state || "pending";
       const pendingEffects = Number(state.pending_apply_effect_count || 0);
       const reviewWarning = pendingEffects > 0
-        ? "<p><b>Action needed</b> Retry Apply to finish QC before setting review status or completing this task.</p>"
+        ? "<p><b>Action needed</b> Finish the pending Apply before setting review status or completing this task.</p>"
         : (completionGuard.ready ? "" :
           "<p><b>Action needed</b> Set component review before completing this task.</p>");
-      const tailTasks = Array.isArray(tailRefreshResult?.tail_refresh_tasks)
-        ? tailRefreshResult.tail_refresh_tasks : [];
-      const tailFailures = Array.isArray(tailRefreshResult?.tail_refresh_failures)
-        ? tailRefreshResult.tail_refresh_failures : [];
-      const tailSummary = tailRefreshResult?.tail_refresh_status === "complete"
-        ? "<p><b>Refreshed tail review</b> " + tailTasks.length + " new task(s); " +
-          Number(tailRefreshResult.tail_refresh_valid_rows || 0) + " valid row(s), " +
-          Number(tailRefreshResult.tail_refresh_training_eligible_rows || 0) + " training-eligible row(s), " +
-          Number(tailRefreshResult.tail_refresh_manual_point_count || 0) + " manual point(s) retained, " +
+      const savedOffer = state.tail_refresh || tailRefreshResult;
+      const tailOffer = Number(savedOffer?.tail_refresh_mask_revision) === Number(state.edit_revision || 0) ? savedOffer : null;
+      const tailTasks = Array.isArray(tailOffer?.tail_refresh_tasks)
+        ? tailOffer.tail_refresh_tasks : [];
+      const tailFailures = Array.isArray(tailOffer?.tail_refresh_failures)
+        ? tailOffer.tail_refresh_failures : [];
+      const tailSummary = tailOffer?.tail_refresh_status === "complete"
+        ? "<p><b>Refreshed tail review</b> Mask revision " + Number(tailOffer.tail_refresh_mask_revision) + "; " + tailTasks.length + " new task(s); " +
+          Number(tailOffer.tail_refresh_valid_rows || 0) + " valid row(s), " +
+          Number(tailOffer.tail_refresh_training_eligible_rows || 0) + " training-eligible row(s), " +
+          Number(tailOffer.tail_refresh_manual_point_count || 0) + " manual point(s) retained, " +
           tailFailures.length + " failure(s). " +
           (tailTasks.length ? "Find " + tailTasks.map((task) => escapeSupportText(task.task_id)).join(", ") +
             " in <a href=\"/my-work\">your task queue</a>." : "") + "</p>"
@@ -327,7 +331,11 @@
       clearMutationSupportReference();
       const response = await fetch("/api/sessions/" + encodeURIComponent(sessionId) + "/subject-mask" + path, options);
       const data = await readApiPayload(response);
-      if (!response.ok || !data.ok) throw apiFailure(response, data, "session_request_failed");
+      if (!response.ok || !data.ok) {
+        const failure = apiFailure(response, data, "session_request_failed");
+        failure.apiData = data;
+        throw failure;
+      }
       return data;
     }
 
@@ -426,9 +434,22 @@
       return "apply-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
     }
 
+    function mergeApplyState(state, generation) {
+      if (!payload || !state || busyAction || foregroundGeneration !== generation) return;
+      // Apply runs in the background. Never replace current pixels, ROI, token,
+      // navigation or a newer foreground request's checkpoint state.
+      for (const key of ["edit_revision", "unapplied_session_edit_count", "has_unapplied_session_edits",
+        "pending_apply_effect_count", "resumable_apply_id", "qc_status", "qc_edit_revision",
+        "component_review_completion_guard", "component_review_completion_ready", "tail_refresh"]) {
+        if (Object.prototype.hasOwnProperty.call(state, key)) payload.state[key] = state[key];
+      }
+      renderSummary();
+    }
+
     async function applySavedEdits() {
       if (busyAction || applyInFlight) return;
       applyInFlight = true;
+      const generation = foregroundGeneration;
       const applyId = String(payload?.state?.resumable_apply_id || uncertainApplyId || newApplyId());
       setStatus("Applying saved edits and refreshing QC. You can continue editing other rows while this runs.");
       try {
@@ -439,7 +460,8 @@
         });
         uncertainApplyId = null;
         tailRefreshResult = result.result;
-        await loadCurrent();
+        mergeApplyState(result.state, generation);
+        renderSummary();
         const applied = result.result.applied_checkpoint_count || 0;
         const stale = result.result.stale_checkpoint_count || 0;
         const staleRows = Array.isArray(result.result.stale_rows) ? result.result.stale_rows : [];
@@ -449,7 +471,7 @@
         const pendingEffects = Number(payload?.state?.pending_apply_effect_count || 0);
         const qcComplete = payload?.state?.qc_status === "complete" || result.result.qc_status === "complete";
         const nextStep = pendingEffects > 0
-          ? " QC is pending; use Apply again to finish it."
+          ? " Follow-up checks are pending; use Apply again to finish them."
           : remaining > 0
           ? " " + remaining + " saved edit(s) still need applying."
           : qcComplete
@@ -463,8 +485,8 @@
       } catch (error) {
         uncertainApplyId = applyId;
         if (error?.operatorSupport?.error === "subject_mask_apply_effects_pending") {
-          await loadCurrent();
-          setStatus("Mask pixels were applied, but QC is pending. Use Apply again to retry the same saved operation.", true);
+          mergeApplyState(error.apiData?.state, generation);
+          setStatus("Mask pixels were applied; follow-up checks are pending. " + error.message + " Use Apply again to retry the same saved operation.", true);
         } else {
           showOperatorSupport(error, "session_request_failed");
         }

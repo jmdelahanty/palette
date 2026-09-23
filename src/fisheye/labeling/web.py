@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -26,6 +27,11 @@ from .assignment_store import (
     LABELING_USER_STATUSES,
     LabelingStore,
     default_store_path,
+)
+from .web_subject_mask_apply_state import (
+    pending_mask_run_effects,
+    require_mask_apply_ownership,
+    tail_successor_offer,
 )
 from .admin_registry import (
     REGISTRY_PATH_ENV_VAR,
@@ -2392,6 +2398,7 @@ def _make_handler(state: ServerState):
                 return False
             from fisheye.tune import refined_subject_mask_review as review_mod
             from .web_subject_mask_apply_qc import refresh_subject_mask_apply_qc_locked
+            from .web_mask_tail_refresh import refresh_training_tail_after_mask_apply
 
             try:
                 runtime = _get_subject_mask_runtime(state, session)
@@ -2536,10 +2543,8 @@ def _make_handler(state: ServerState):
                 canonical_write_started = False
                 canonical_receipt_applied = False
                 try:
-                    pending_effects = state.store.list_pending_session_checkpoint_apply_effects(
-                        task_id=runtime.task_id,
-                        component_name=runtime.component_name,
-                    )
+                    pending_effects = pending_mask_run_effects(state.store, runtime)
+                    require_mask_apply_ownership(state.store, runtime, apply_id)
                     if pending_effects and all(str(row.get("apply_id") or "") != apply_id for row in pending_effects):
                         raise RuntimeError(
                             "A prior subject-mask Apply has pending derived effects; retry its apply_id before another Apply."
@@ -2570,11 +2575,13 @@ def _make_handler(state: ServerState):
                             (row for row in pending_effects if str(row.get("apply_id") or "") == apply_id),
                             None,
                         )
-                        if matching_pending is not None:
-                            canonical_receipt_applied = True
-                            with review_mod._refined_subject_write_lock(
-                                runtime.zarr_path, refined_run=runtime.refined.run_name,
-                            ):
+                        retry_lock = review_mod._refined_subject_write_lock(
+                            runtime.zarr_path, refined_run=runtime.refined.run_name,
+                        ) if matching_pending is not None else nullcontext()
+                        with retry_lock:
+                            if matching_pending is not None:
+                                canonical_receipt_applied = True
+                                require_mask_apply_ownership(state.store, runtime, apply_id)
                                 fresh_root = review_mod.open_zarr_root(runtime.zarr_path, mode="a")
                                 runtime.root = fresh_root
                                 runtime.refined = review_mod._open_existing_refined_subject_run(
@@ -2585,7 +2592,11 @@ def _make_handler(state: ServerState):
                                     refined_run=runtime.refined.run_name,
                                     expected_edit_revision=int(matching_pending["edit_revision_after"]),
                                 ))
-                                # Bound downstream derivations belong here, before registry and receipt completion.
+                                runtime.refined = review_mod._open_existing_refined_subject_run(fresh_root, runtime.refined.run_name)
+                                result.update(refresh_training_tail_after_mask_apply(
+                                    store=state.store, runtime=runtime, apply_id=apply_id,
+                                    expected_mask_revision=int(matching_pending["edit_revision_after"]),
+                                ))
                                 if not _refresh_registry_for_scope(
                                     store=state.store,
                                     task_id=runtime.task_id,
@@ -2598,24 +2609,28 @@ def _make_handler(state: ServerState):
                                     zarr_use=str(session.get("zarr_use") or "") or None,
                                 ):
                                     raise RuntimeError("Subject-mask registry refresh remains pending.")
-                        else:
-                            result["qc_status"] = "legacy_or_complete"
-                        mutation_event = state.store.record_event(
-                            task_id=runtime.task_id,
-                            recording_id=runtime.recording_id,
-                            user=user,
-                            event_type="apply_subject_mask_session_checkpoints_idempotent_retry",
-                            target={"apply_id": apply_id},
-                            after=result,
-                            )
-                        if matching_pending is not None:
-                            effects_complete = state.store.mark_session_checkpoint_apply_effects_complete(
+                            else:
+                                result["qc_status"] = "legacy_or_complete"
+                                result.update(tail_successor_offer(
+                                    state.store, runtime, apply_id=apply_id,
+                                    expected_mask_revision=int(result["edit_revision_after"]),
+                                ))
+                            mutation_event = state.store.record_event(
                                 task_id=runtime.task_id,
-                                component_name=runtime.component_name,
-                                apply_id=apply_id,
+                                recording_id=runtime.recording_id,
+                                user=user,
+                                event_type="apply_subject_mask_session_checkpoints_idempotent_retry",
+                                target={"apply_id": apply_id},
+                                after=result,
                             )
-                            if not effects_complete:
-                                raise RuntimeError("Subject-mask Apply effects receipt remains pending.")
+                            if matching_pending is not None:
+                                effects_complete = state.store.mark_session_checkpoint_apply_effects_complete(
+                                    task_id=runtime.task_id,
+                                    component_name=runtime.component_name,
+                                    apply_id=apply_id,
+                                )
+                                if not effects_complete:
+                                    raise RuntimeError("Subject-mask Apply effects receipt remains pending.")
                     else:
                         checkpoints = state.store.claim_session_checkpoints_for_apply(
                             task_id=runtime.task_id,
@@ -2645,6 +2660,7 @@ def _make_handler(state: ServerState):
                             with review_mod._refined_subject_write_lock(
                                 runtime.zarr_path, refined_run=runtime.refined.run_name,
                             ):
+                                require_mask_apply_ownership(state.store, runtime, apply_id)
                                 fresh_root = review_mod.open_zarr_root(runtime.zarr_path, mode="a")
                                 fresh_refined = review_mod._open_existing_refined_subject_run(
                                     fresh_root, runtime.refined.run_name,
@@ -2819,7 +2835,11 @@ def _make_handler(state: ServerState):
                                         refined_run=runtime.refined.run_name,
                                         expected_edit_revision=edit_revision_after,
                                     )
-                                    # Bound downstream derivations belong here, before audit, registry, and receipt completion.
+                                    runtime.refined = review_mod._open_existing_refined_subject_run(fresh_root, runtime.refined.run_name)
+                                    result_tail = refresh_training_tail_after_mask_apply(
+                                        store=state.store, runtime=runtime, apply_id=apply_id,
+                                        expected_mask_revision=edit_revision_after,
+                                    )
                                     result = {
                                         "apply_id": apply_id,
                                         "already_applied": False,
@@ -2838,6 +2858,7 @@ def _make_handler(state: ServerState):
                                         "compute_workers": int(compute_workers_used),
                                         "canonical_zarr_mutated": True,
                                         **result_qc,
+                                        **result_tail,
                                     }
                                     mutation_event = state.store.record_event(
                                         task_id=runtime.task_id,
@@ -2934,9 +2955,7 @@ def _make_handler(state: ServerState):
             if subject_mask_path == "/review-status":
                 if self._reject_browser_mutation_preflight(session, body, runtime):
                     return True
-                pending_effect_count = state.store.count_pending_session_checkpoint_apply_effects(
-                    task_id=runtime.task_id, component_name=runtime.component_name,
-                )
+                pending_effect_count = len(pending_mask_run_effects(state.store, runtime))
                 if pending_effect_count:
                     self._write_json(
                         _format_error(
@@ -2976,49 +2995,53 @@ def _make_handler(state: ServerState):
                     self._write_json(_format_error("payload_validation", details=f"Unsupported review state: {requested_state}"), status=HTTPStatus.BAD_REQUEST)
                     return True
                 try:
-                    before_component_reviews = runtime.refined.group.attrs.get("component_review_statuses")
-                    before_run_review = runtime.refined.group.attrs.get("refined_subject_mask_review_status")
-                    component_payload, run_payload = review_mod.apply_component_review_status(
-                        runtime.refined.parent,
-                        str(runtime.refined.run_name),
-                        runtime.refined.group,
-                        component_name=runtime.component_name,
-                        state=requested_state,
-                        method=str(body.get("method") or runtime.review_method or "manual"),
-                        intended_use=str(body.get("intended_use") or runtime.review_intended_use or "training"),
-                        reviewer=user,
-                        notes=str(body.get("notes") or runtime.review_notes or "").strip() or None,
-                        zarr_path=runtime.zarr_path,
-                    )
-                    mutation_event = state.store.record_event(
-                        task_id=runtime.task_id,
-                        recording_id=runtime.recording_id,
-                        user=user,
-                        event_type="set_review_status",
-                        target={
-                            "component_name": runtime.component_name,
-                            "refined_run": str(runtime.refined.run_name),
-                        },
-                        before={
-                            "component_review_statuses": dict(before_component_reviews) if isinstance(before_component_reviews, Mapping) else None,
-                            "run_review_status": dict(before_run_review) if isinstance(before_run_review, Mapping) else None,
-                        },
-                        after={
-                            "component_review_status": component_payload,
-                            "run_review_status": run_payload,
-                        },
-                    )
-                    _refresh_registry_for_scope(
-                        store=state.store,
-                        task_id=runtime.task_id,
-                        recording_id=runtime.recording_id,
-                        user=user,
-                        workflow_kind="subject_mask_component",
-                        scope=_session_scope(session),
-                        zarr_path=runtime.zarr_path,
-                        dataset_id=str(session.get("dataset_id") or "") or None,
-                        zarr_use=str(session.get("zarr_use") or "") or None,
-                    )
+                    with review_mod._refined_subject_write_lock(runtime.zarr_path, refined_run=runtime.refined.run_name):
+                        require_mask_apply_ownership(state.store, runtime, "")
+                        runtime.root = review_mod.open_zarr_root(runtime.zarr_path, mode="a")
+                        runtime.refined = review_mod._open_existing_refined_subject_run(runtime.root, runtime.refined.run_name)
+                        before_component_reviews = runtime.refined.group.attrs.get("component_review_statuses")
+                        before_run_review = runtime.refined.group.attrs.get("refined_subject_mask_review_status")
+                        component_payload, run_payload = review_mod.apply_component_review_status(
+                            runtime.refined.parent,
+                            str(runtime.refined.run_name),
+                            runtime.refined.group,
+                            component_name=runtime.component_name,
+                            state=requested_state,
+                            method=str(body.get("method") or runtime.review_method or "manual"),
+                            intended_use=str(body.get("intended_use") or runtime.review_intended_use or "training"),
+                            reviewer=user,
+                            notes=str(body.get("notes") or runtime.review_notes or "").strip() or None,
+                            zarr_path=runtime.zarr_path,
+                        )
+                        mutation_event = state.store.record_event(
+                            task_id=runtime.task_id,
+                            recording_id=runtime.recording_id,
+                            user=user,
+                            event_type="set_review_status",
+                            target={
+                                "component_name": runtime.component_name,
+                                "refined_run": str(runtime.refined.run_name),
+                            },
+                            before={
+                                "component_review_statuses": dict(before_component_reviews) if isinstance(before_component_reviews, Mapping) else None,
+                                "run_review_status": dict(before_run_review) if isinstance(before_run_review, Mapping) else None,
+                            },
+                            after={
+                                "component_review_status": component_payload,
+                                "run_review_status": run_payload,
+                            },
+                        )
+                        _refresh_registry_for_scope(
+                            store=state.store,
+                            task_id=runtime.task_id,
+                            recording_id=runtime.recording_id,
+                            user=user,
+                            workflow_kind="subject_mask_component",
+                            scope=_session_scope(session),
+                            zarr_path=runtime.zarr_path,
+                            dataset_id=str(session.get("dataset_id") or "") or None,
+                            zarr_use=str(session.get("zarr_use") or "") or None,
+                        )
                 except Exception as exc:
                     self._write_json(_format_error("review_status_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
                     return True

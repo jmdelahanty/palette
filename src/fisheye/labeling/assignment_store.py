@@ -2430,6 +2430,44 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
             component_name=component_name,
         )
 
+    def list_pending_subject_mask_run_effects(
+        self, *, zarr_path: str, refined_run: str, task_id: str
+    ) -> list[dict[str, object]]:
+        """Find pending receipts sharing a mutable mask run, across its tasks.
+
+        Read receipt summaries and task bindings, never dense checkpoint payloads.
+        The current task is included for older tasks without an explicit scope.
+        Callers that authorize a write must query under the existing run lock.
+        """
+        self.initialize()
+        archive = Path(zarr_path).expanduser().resolve()
+        rows = self.conn.execute(
+            """
+            SELECT r.apply_id, r.task_id, r.component_name, r.edit_revision_after,
+                   t.scope_json, t.run_name
+            FROM labeling_checkpoint_apply_receipts r
+            JOIN labeling_tasks t ON t.task_id = r.task_id
+            WHERE r.state = 'applied' AND r.secondary_effects_state = 'pending'
+              AND t.workflow_kind = 'subject_mask_component'
+            ORDER BY r.applied_at_utc, r.apply_id;
+            """
+        )
+        matches = []
+        for row in rows:
+            scope = _json_loads(row["scope_json"])
+            scope = scope if isinstance(scope, Mapping) else {}
+            source_path = str(scope.get("zarr_path") or "")
+            source_run = str(scope.get("refined_run") or row["run_name"] or "")
+            if str(row["task_id"]) == str(task_id) or (
+                source_path
+                and source_run == str(refined_run)
+                and Path(source_path).expanduser().resolve() == archive
+            ):
+                matches.append({key: row[key] for key in (
+                    "apply_id", "task_id", "component_name", "edit_revision_after"
+                )})
+        return matches
+
     def mark_session_checkpoint_apply_effects_complete(
         self,
         *,
@@ -2877,6 +2915,21 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         params.append(max(1, int(limit)))
         rows = self.conn.execute(" ".join(sql), params).fetchall()
         return [_row_to_dict(row) for row in rows]
+
+    def get_event_for_target(
+        self, *, task_id: str, event_type: str, target: Mapping[str, object]
+    ) -> dict[str, object] | None:
+        """Return the latest event for one exact canonical target object."""
+        self.initialize()
+        row = self.conn.execute(
+            """
+            SELECT * FROM labeling_task_events
+            WHERE task_id = ? AND event_type = ? AND target_json = ?
+            ORDER BY created_at_utc DESC, event_id DESC LIMIT 1;
+            """,
+            (str(task_id), str(event_type), _json_dumps(dict(target))),
+        ).fetchone()
+        return _row_to_dict(row) if row is not None else None
 
     def get_session_closure_event(self, session_id: str) -> dict[str, object] | None:
         """Return the latest audit event explaining why a browser session closed."""

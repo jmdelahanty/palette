@@ -18,6 +18,7 @@ import numpy as np
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 from .web_responses import _decode_uint8_payload, _raw_array_payload
+from .web_subject_mask_apply_state import pending_mask_run_effects, tail_successor_offer
 
 if TYPE_CHECKING:
     from .assignment_store import LabelingStore
@@ -1032,11 +1033,7 @@ def _subject_mask_component_completion_guard(
     store: LabelingStore | None = None,
 ) -> dict[str, object]:
     review_state = _subject_mask_component_review_state(runtime)
-    pending_effect_count = (
-        store.count_pending_session_checkpoint_apply_effects(
-            task_id=runtime.task_id, component_name=runtime.component_name,
-        ) if store is not None else 0
-    )
+    pending_effect_count = len(pending_mask_run_effects(store, runtime))
     ready = review_state in SUBJECT_MASK_COMPLETABLE_REVIEW_STATES and pending_effect_count == 0
     not_ready_reason = (
         "pending_apply_effects" if pending_effect_count
@@ -1084,11 +1081,7 @@ def _subject_mask_runtime_state(
             task_id=runtime.task_id, component_name=runtime.component_name,
         ) if store is not None else []
     )
-    pending_effect_count = (
-        store.count_pending_session_checkpoint_apply_effects(
-            task_id=runtime.task_id, component_name=runtime.component_name,
-        ) if store is not None else 0
-    )
+    pending_effect_count = len(pending_mask_run_effects(store, runtime))
     qc_policy = runtime.refined.group.attrs.get("browser_apply_qc_policy")
     edit_revision = _subject_mask_edit_revision(runtime)
     qc_current = (
@@ -1128,6 +1121,7 @@ def _subject_mask_runtime_state(
         "resumable_apply_id": str(pending_effects[0].get("apply_id") or "") if pending_effects else None,
         "qc_status": "complete" if qc_current else "pending" if pending_effects else "not_recorded",
         "qc_edit_revision": qc_policy.get("edit_revision") if isinstance(qc_policy, Mapping) else None,
+        "tail_refresh": tail_successor_offer(store, runtime),
         "component_review_completion_guard": completion_guard,
         "component_review_completion_ready": bool(completion_guard.get("ready")),
     }))
