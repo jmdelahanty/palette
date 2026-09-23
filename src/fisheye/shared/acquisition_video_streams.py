@@ -22,7 +22,11 @@ from fisheye.shared.acquisition_crop_stream_ledger import (
     publish_acquisition_crop_stream_ledger,
 )
 from fisheye.shared.import_video_metadata import probe_video_colorimetry_attrs
-from fisheye.shared.source_recording_identity import load_strict_json_object
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+    load_strict_json_object,
+)
 
 
 ACQUISITION_VIDEO_STREAMS_SCHEMA_ID = "palette.acquisition_video_streams.v1"
@@ -280,6 +284,7 @@ def build_acquisition_video_stream_inventory(
         rolling = manifest.get("rolling_clip_streams")
         if not isinstance(rolling, Mapping):
             return None
+        output_kinds = _rolling_output_kinds(manifest, rolling)
         index_value = rolling.get("recording_clip_index") or manifest.get(
             "recording_clip_index"
         )
@@ -346,6 +351,7 @@ def build_acquisition_video_stream_inventory(
                 },
             },
         }
+        stream_payloads = {key: stream_payloads[key] for key in output_kinds}
         return {
             "schema_id": ACQUISITION_VIDEO_STREAMS_SCHEMA_ID,
             "schema_version": 1,
@@ -358,7 +364,7 @@ def build_acquisition_video_stream_inventory(
             "inventory_status": availability,
             "stream_count": len(stream_payloads),
             "stream_keys": sorted(stream_payloads),
-            "crop_stream_available": availability == "ok",
+            "crop_stream_available": "crop" in stream_payloads and availability == "ok",
             "streams": stream_payloads,
         }
     streams = video_streams.get("streams")
@@ -410,6 +416,193 @@ def _put_attrs(group: Any, updates: Mapping[str, Any]) -> None:
     group.attrs.put(attrs)
 
 
+def _rolling_output_kinds(
+    manifest: Mapping[str, Any], rolling: Mapping[str, Any]
+) -> tuple[str, ...]:
+    """Preserve legacy inventory while requiring truthful current stream roles."""
+
+    kinds = rolling.get("output_kinds")
+    current = (
+        manifest.get(SOURCE_RECORDING_IDENTITY_PROFILE_ATTR)
+        == SOURCE_RECORDING_IDENTITY_PROFILE
+    )
+    if "output_kinds" not in rolling and not current:
+        return ("crop", "full")
+    if (
+        not isinstance(kinds, list)
+        or not kinds
+        or any(type(kind) is not str or kind not in {"crop", "full"} for kind in kinds)
+        or len(kinds) != len(set(kinds))
+        or "full" not in kinds
+    ):
+        raise ValueError(
+            "rolling_clip_streams.output_kinds must declare full and optionally crop exactly once"
+        )
+    return tuple(sorted(kinds))
+
+
+def resolve_acquisition_manifest_file(
+    recording_dir: Path, value: Any, *, label: str, allow_absolute: bool = False
+) -> Path:
+    """Resolve a confined file, permitting absolute index-row paths only by opt-in."""
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or (Path(value).is_absolute() and not allow_absolute)
+    ):
+        raise ValueError(f"{label} must be an exact recording-relative file")
+    path = (recording_dir / value).resolve()
+    if not path.is_relative_to(recording_dir.resolve()) or not path.is_file():
+        raise ValueError(f"{label} must name an existing file inside the recording")
+    return path
+
+
+def _validate_current_rolling_streams(
+    recording_dir: Path, manifest: Mapping[str, Any]
+) -> None:
+    """Validate current stream roles, retaining geometry/clock/ledger owners.
+
+    In particular an index may not relabel a crop member as the full source.
+    Canonical collection geometry and recording-wide rows are validated by the
+    collection/clock owners; crop payload semantics stay with the ledger owner.
+    """
+
+    rolling = manifest.get("rolling_clip_streams")
+    if not isinstance(rolling, Mapping):
+        raise ValueError("rolling_clip_streams must be an object")
+    if manifest.get("video_streams") is not None:
+        raise ValueError(
+            "current acquisition cannot declare both single-video and rolling streams"
+        )
+    if (
+        manifest.get("source_layout") != "rolling_clips"
+        or rolling.get("schema_id") != "palette.orange_rolling_clip_streams.v1"
+        or rolling.get("frame_clock") != "recording_frame_id"
+    ):
+        raise ValueError(
+            "current rolling streams require the existing rolling-clips schema and frame clock"
+        )
+    if (
+        "source_profile" in rolling
+        and rolling["source_profile"] != ACQUISITION_CROP_SOURCE_PROFILE_COLLECTION
+    ):
+        raise ValueError(
+            "current rolling streams declare an unsupported source_profile"
+        )
+    kinds = _rolling_output_kinds(manifest, rolling)
+    index_path = resolve_acquisition_manifest_file(
+        recording_dir, rolling.get("recording_clip_index"), label="recording_clip_index"
+    )
+    index = load_strict_json_object(index_path)
+    if (
+        index.get("schema_id") != "palette.orange_external_ipc_recording_clip_index.v1"
+        or index.get("mode") != "rolling_clips"
+    ):
+        raise ValueError(
+            "current recording clip index must declare the rolling-clips schema and mode"
+        )
+    rows = index.get("rows")
+    camera_id = manifest.get("camera_id")
+    if (
+        not isinstance(rows, list)
+        or not rows
+        or any(
+            not isinstance(row, Mapping) or row.get("camera_serial") != camera_id
+            for row in rows
+        )
+    ):
+        raise ValueError(
+            "current recording clip index must contain only the exact recording camera"
+        )
+    frame_count = 0
+    for row in rows:
+        count = row.get("frame_count")
+        if type(count) is not int or count <= 0:
+            raise ValueError("clip frame_count must be a positive exact integer")
+        frame_count += count
+        clip_path = resolve_acquisition_manifest_file(
+            recording_dir,
+            row.get("clip_manifest_path"),
+            label="clip_manifest_path",
+            allow_absolute=True,
+        )
+        clip = load_strict_json_object(clip_path)
+        if (
+            type(row.get("clip_index")) is not int
+            or type(clip.get("clip_index")) is not int
+            or clip["clip_index"] != row["clip_index"]
+        ):
+            raise ValueError(
+                "clip manifest index differs from its recording clip index"
+            )
+        outputs = clip.get("recording_outputs")
+        camera_outputs = (
+            outputs.get(camera_id) if isinstance(outputs, Mapping) else None
+        )
+        if not isinstance(camera_outputs, Mapping) or set(camera_outputs) != set(kinds):
+            raise ValueError(
+                "clip outputs differ from the declared rolling output_kinds"
+            )
+        for role, output in camera_outputs.items():
+            if not isinstance(output, Mapping) or output.get("output_kind") != role:
+                raise ValueError("clip output does not bind its declared stream role")
+            for field in (
+                "first_recording_frame_id",
+                "last_recording_frame_id",
+                "frame_count",
+            ):
+                if (
+                    type(output.get(field)) is not int
+                    or type(row.get(field)) is not int
+                    or output[field] != row[field]
+                ):
+                    raise ValueError(
+                        f"clip {role} {field} differs from its recording clip index"
+                    )
+            required = {"video", "metadata"} if role == "crop" else {"video"}
+            for field in sorted(required | (set(_PATH_FIELDS) & set(output))):
+                path = resolve_acquisition_manifest_file(
+                    recording_dir, output.get(field), label=f"clip {role}.{field}"
+                )
+                if field in {"summary", "status"}:
+                    payload = load_strict_json_object(path)
+                    if str(payload.get("status", "")).strip().lower() in {
+                        "fail",
+                        "failed",
+                        "error",
+                    }:
+                        raise ValueError(f"clip {role}.{field} records a failure")
+            if role == "full":
+                for output_field, row_field in (
+                    ("video", "video_path"),
+                    ("metadata", "metadata_path"),
+                    ("keyframes", "keyframe_path"),
+                ):
+                    if output_field in output and resolve_acquisition_manifest_file(
+                        recording_dir,
+                        output[output_field],
+                        label=f"full {output_field}",
+                    ) != resolve_acquisition_manifest_file(
+                        recording_dir,
+                        row.get(row_field),
+                        label=row_field,
+                        allow_absolute=True,
+                    ):
+                        raise ValueError(
+                            f"clip index {row_field} does not select the declared full stream"
+                        )
+    ranges = index.get("camera_ranges")
+    camera_range = ranges.get(camera_id) if isinstance(ranges, Mapping) else None
+    if not isinstance(camera_range, Mapping) or (
+        camera_range.get("clip_count") != len(rows)
+        or camera_range.get("total_frame_count") != frame_count
+    ):
+        raise ValueError(
+            "clip camera_ranges counts differ from the declared member rows"
+        )
+
+
 def validate_acquisition_video_stream_inventory(
     recording_dir: Path,
     manifest: Mapping[str, Any],
@@ -423,6 +616,12 @@ def validate_acquisition_video_stream_inventory(
     The read-only inventory builder remains available for diagnostic reports.
     """
 
+    if (
+        manifest.get(SOURCE_RECORDING_IDENTITY_PROFILE_ATTR)
+        == SOURCE_RECORDING_IDENTITY_PROFILE
+        and "rolling_clip_streams" in manifest
+    ):
+        _validate_current_rolling_streams(recording_dir, manifest)
     if manifest.get("video_streams") is not None:
         declared = manifest["video_streams"]
         if not isinstance(declared, Mapping):

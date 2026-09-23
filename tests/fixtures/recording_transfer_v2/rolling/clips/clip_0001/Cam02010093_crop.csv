@@ -1,0 +1,2 @@
+frame_id,timestamp,timestamp_sys,recording_frame_id,crop_video_frame_index,session_crop_video_frame_index
+3,1700000000000000003,1700000000000000013,3,0,2

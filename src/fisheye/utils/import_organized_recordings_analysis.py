@@ -21,6 +21,11 @@ from fisheye.registry.recording_identity_authority import load_verified_recordin
 from fisheye.registry.shadow_publish import shadow_synchronize_recording_import
 from fisheye.shared.batch_logging import JsonLogger, make_run_id, utc_now
 from fisheye.shared.recording_import_receipt import RecordingImportReceipt
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_IDENTITY_PROFILE,
+    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
+    load_strict_json_object,
+)
 from fisheye.utils.import_recording_analysis import (
     RecordingAnalysisPlan,
     RecordingImportOptions,
@@ -43,6 +48,7 @@ class OrganizedImportPlan:
     status: str
     reason: Optional[str] = None
     stimulus_present: Optional[bool] = None
+    recording_layout: str = "single_video"
 
 
 @dataclass(frozen=True)
@@ -128,9 +134,30 @@ def discover_recording_dirs(
     logs = tuple(organize_logs)
     if logs:
         return sorted(_read_organize_log_recording_dirs(logs))
+    # Explicit current rolling manifests do not need a cams/ or raw/*.h5 alias.
+    manifest_paths = list(
+        root.rglob("recording_manifest.json")
+        if recursive
+        else root.glob("*/recording_manifest.json")
+    )
+    if (root / "recording_manifest.json").is_file():
+        manifest_paths.append(root / "recording_manifest.json")
+    clipped: set[Path] = set()
+    for path in manifest_paths:
+        try:
+            manifest = load_strict_json_object(path)
+        except ValueError:
+            continue
+        if manifest.get(
+            SOURCE_RECORDING_IDENTITY_PROFILE_ATTR
+        ) == SOURCE_RECORDING_IDENTITY_PROFILE and (
+            manifest.get("source_layout") == "rolling_clips"
+            or "rolling_clip_streams" in manifest
+        ):
+            clipped.add(path.parent)
     if import_stimulus:
-        return sorted(_find_h5_recording_dirs(root, recursive=recursive))
-    return sorted(_find_video_recording_dirs(root, recursive=recursive))
+        return sorted(_find_h5_recording_dirs(root, recursive=recursive) | clipped)
+    return sorted(_find_video_recording_dirs(root, recursive=recursive) | clipped)
 
 
 def _existing_analysis_complete(
@@ -205,6 +232,7 @@ def build_plans(
                 status=status,
                 reason=reason,
                 stimulus_present=stimulus_present,
+                recording_layout=plan.recording_layout,
             )
         )
     return plans
@@ -255,6 +283,7 @@ def _log_plan(logger: Optional[JsonLogger], plan: OrganizedImportPlan) -> None:
         recording_dir=str(plan.recording_dir),
         h5_path=str(plan.h5_path) if plan.h5_path is not None else None,
         cam_video=str(plan.cam_video) if plan.cam_video is not None else None,
+        recording_layout=plan.recording_layout,
         zarr_path=str(plan.zarr_path),
         status=plan.status,
         reason=plan.reason,
@@ -521,19 +550,22 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
             continue
 
-        assert plan.cam_video is not None
+        if plan.recording_layout == "single_video":
+            assert plan.cam_video is not None
         import_plan = RecordingAnalysisPlan(
             recording_dir=plan.recording_dir,
             h5_path=plan.h5_path,
             cam_video=plan.cam_video,
             zarr_path=plan.zarr_path,
+            recording_layout=plan.recording_layout,
         )
         if logger is not None:
             logger.log(
                 "recording_start",
                 recording_dir=str(plan.recording_dir),
                 h5_path=str(plan.h5_path) if plan.h5_path is not None else None,
-                cam_video=str(plan.cam_video),
+                cam_video=str(plan.cam_video) if plan.cam_video is not None else None,
+                recording_layout=plan.recording_layout,
                 zarr_path=str(plan.zarr_path),
             )
         result = process_recording_import(import_plan, opts, logger=(logger.log if logger else None))

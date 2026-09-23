@@ -22,8 +22,13 @@ from uuid import uuid4
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.acquisition_publication_status import (
     ACQUISITION_AUTHORITY_PUBLISHED,
+    CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE,
     EXTERNAL_ACQUISITION_AUTHORITY_MODE,
     load_acquisition_authority_publication_status,
+)
+from fisheye.shared.clipped_video_collection import (
+    SOURCE_VIDEO_COLLECTION_LAYOUT,
+    SOURCE_VIDEO_COLLECTION_LOCATOR_KIND,
 )
 from fisheye.shared.pixel_frame_authority import (
     BoundAcquisitionCameraFrame,
@@ -630,6 +635,7 @@ def _verify_live_import_receipt(
     evidence: SourceRecordingIdentityClaim,
     receipt: object,
     require_current_producer_code: bool = False,
+    verify_current_surfaces: bool = False,
 ) -> tuple[
     str,
     BoundAcquisitionImportOwnership,
@@ -670,11 +676,7 @@ def _verify_live_import_receipt(
             use_consolidated=False,
         )
         publication = load_acquisition_authority_publication_status(root)
-        if (
-            publication.status != ACQUISITION_AUTHORITY_PUBLISHED
-            or publication.authority_mode
-            != EXTERNAL_ACQUISITION_AUTHORITY_MODE
-        ):
+        if publication.status != ACQUISITION_AUTHORITY_PUBLISHED:
             raise RecordingIdentityProjectionConflict(
                 "acquisition authority is not a published external-video authority"
             )
@@ -682,6 +684,25 @@ def _verify_live_import_receipt(
             root,
             expected_camera_id=source_identity.camera_id,
         )
+        layout = frame.record.source_video_metadata.get("layout")
+        expected_mode = {
+            "single_video": EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+            SOURCE_VIDEO_COLLECTION_LAYOUT: CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+        }.get(layout)
+        expected_locator = {
+            "single_video": "recording_relative",
+            SOURCE_VIDEO_COLLECTION_LAYOUT: SOURCE_VIDEO_COLLECTION_LOCATOR_KIND,
+        }.get(layout)
+        if (
+            expected_mode is None
+            or publication.authority_mode != expected_mode
+            or ownership.record.mode != expected_mode
+            or frame.record.source_video_metadata["locator"].get("kind")
+            != expected_locator
+        ):
+            raise RecordingIdentityProjectionConflict(
+                "acquisition layout, publication mode and source locator disagree"
+            )
     except RecordingIdentityProjectionConflict:
         raise
     except Exception as exc:
@@ -719,15 +740,32 @@ def _verify_live_import_receipt(
         )
     ownership.assert_verified()
     frame.assert_verified()
+    if verify_current_surfaces or layout == SOURCE_VIDEO_COLLECTION_LAYOUT:
+        try:
+            _verify_current_import_surfaces(
+                resolved=resolved_path,
+                evidence=evidence,
+                frame=frame,
+                authority_path=frame_path,
+            )
+        except RecordingIdentityAuthorityError:
+            raise
+        except Exception as exc:
+            raise RecordingIdentityAuthorityError(
+                f"current import source surfaces could not be verified: {exc}"
+            ) from exc
     if load_acquisition_authority_publication_status(root) != publication:
         raise RecordingIdentityProjectionConflict(
             "acquisition publication status changed while it was verified"
         )
-    if _verify_import_receipt(
-        resolved_path=resolved_path,
-        evidence=evidence,
-        receipt=receipt,
-    ) != receipt_sha256:
+    if (
+        _verify_import_receipt(
+            resolved_path=resolved_path,
+            evidence=evidence,
+            receipt=receipt,
+        )
+        != receipt_sha256
+    ):
         raise RecordingIdentityProjectionConflict(
             "import receipt changed while live acquisition was verified"
         )
@@ -742,72 +780,170 @@ def load_verified_recording_import_receipt(zarr_path: Path) -> RecordingImportRe
     check or the duplicated publication marker alone is not receipt evidence.
     """
 
-    from fisheye.shared.zarr.metadata_equivalence import validate_direct_consolidated_subtree
-    from fisheye.shared import acquisition_frame_clock as clock_contract
-    from fisheye.shared.acquisition_crop_stream_ledger import validate_current_acquisition_crop_stream_ledger
-    from fisheye.shared.source_recording_identity import load_source_recording_identity
-    from fisheye.shared.recording_preflight import preflight_gate_reason
-    from fisheye.shared.recording_manifest_context import validate_recording_manifest_context
-    from fisheye.shared.acquisition_video_streams import validate_acquisition_video_stream_inventory
-    import zarr
-
     resolved = Path(zarr_path).expanduser().resolve()
     evidence = collect_regular_source_recording_identity(resolved)
     paths = recording_import_receipt_paths(resolved)
     if len(paths) != 1:
-        raise RecordingIdentityAuthorityError("ingestion replay requires exactly one immutable import receipt")
+        raise RecordingIdentityAuthorityError(
+            "ingestion replay requires exactly one immutable import receipt"
+        )
     receipt = RecordingImportReceipt.from_path(paths[0])
-    _digest, _ownership, frame, authority_path = _verify_live_import_receipt(
-        resolved_path=resolved, evidence=evidence, receipt=receipt,
+    _verify_live_import_receipt(
+        resolved_path=resolved,
+        evidence=evidence,
+        receipt=receipt,
+        verify_current_surfaces=True,
     )
+    return receipt
+
+
+def _verify_current_import_surfaces(
+    *,
+    resolved: Path,
+    evidence: SourceRecordingIdentityClaim,
+    frame: BoundAcquisitionCameraFrame,
+    authority_path: str,
+) -> None:
+    """Verify replay surfaces; all clipped registry paths use this same boundary."""
+
+    from fisheye.shared.zarr.metadata_equivalence import (
+        validate_direct_consolidated_subtree,
+    )
+    from fisheye.shared import acquisition_frame_clock as clock_contract
+    from fisheye.shared.acquisition_crop_stream_ledger import (
+        validate_current_acquisition_crop_stream_ledger,
+    )
+    from fisheye.shared.source_recording_identity import load_source_recording_identity
+    from fisheye.shared.recording_preflight import preflight_gate_reason
+    from fisheye.shared.recording_manifest_context import (
+        validate_recording_manifest_context,
+    )
+    from fisheye.shared.acquisition_video_streams import (
+        validate_acquisition_video_stream_inventory,
+    )
+    from fisheye.shared.clipped_video_collection import (
+        verify_clipped_video_collection_live_files,
+    )
+    import zarr
+
     for subtree in ("raw_video", authority_path):
         validate_direct_consolidated_subtree(resolved, subtree_path=subtree)
 
     recording_dir = recording_directory_for_source_target(resolved)
-    manifest, _identity = load_source_recording_identity(recording_dir / "recording_manifest.json")
+    manifest, _identity = load_source_recording_identity(
+        recording_dir / "recording_manifest.json"
+    )
     validate_recording_manifest_context(manifest)
     reason = preflight_gate_reason(recording_dir)
     if reason is not None:
         raise RecordingIdentityAuthorityError(reason)
-    validate_acquisition_video_stream_inventory(recording_dir, manifest)
-    locator = frame.record.source_video_metadata["locator"]
-    if locator.get("kind") != "recording_relative":
-        raise RecordingIdentityAuthorityError("current intake requires a recording-relative source video")
-    if manifest.get("video_streams") is not None:
-        full = manifest["video_streams"]["streams"].get("full")
-        if not isinstance(full, Mapping) or not isinstance(full.get("video"), str):
-            raise RecordingIdentityAuthorityError("source video must bind the declared full-frame stream")
-        if (recording_dir / full["video"]).resolve() != (recording_dir / locator["relative_path"]).resolve():
-            raise RecordingIdentityAuthorityError("source video differs from the declared full-frame stream")
-    source = clock_contract.load_acquisition_frame_clock_source(
-        recording_dir,
-        camera_id=evidence.identity.camera_id,
-        video_path=recording_dir / locator["relative_path"],
-        expected_frame_count=frame.record.source_total_frames,
-    )
+    inventory = validate_acquisition_video_stream_inventory(recording_dir, manifest)
+    metadata = frame.record.source_video_metadata
+    locator = metadata["locator"]
+    clipped = metadata["layout"] == SOURCE_VIDEO_COLLECTION_LAYOUT
+    if clipped:
+        if manifest.get("video_streams") is not None:
+            raise RecordingIdentityAuthorityError(
+                "clipped intake cannot bind single-video stream declarations"
+            )
+        files = verify_clipped_video_collection_live_files(recording_dir, metadata)
+        rolling = manifest.get("rolling_clip_streams")
+        if "rolling_clip_streams" in manifest:
+            if not isinstance(rolling, Mapping):
+                raise RecordingIdentityAuthorityError(
+                    "rolling_clip_streams must be an object"
+                )
+            declared_indexes = rolling
+        elif manifest.get("source_layout") == "rolling_clips":
+            declared_indexes = manifest
+        else:
+            raise RecordingIdentityAuthorityError(
+                "clipped intake requires explicit rolling-clip source declarations"
+            )
+        for field, expected_path in zip(
+            (
+                "recording_clip_index",
+                "recording_frame_index",
+                "recording_frame_index_manifest",
+            ),
+            files.index_paths,
+            strict=True,
+        ):
+            declared = declared_indexes.get(field)
+            if (
+                type(declared) is not str
+                or not declared
+                or declared != declared.strip()
+                or Path(declared).is_absolute()
+                or (recording_dir / declared).resolve() != expected_path
+            ):
+                raise RecordingIdentityAuthorityError(
+                    f"declared {field} differs from the bound clipped collection"
+                )
+        source = clock_contract.load_clipped_acquisition_frame_clock_source(
+            recording_dir,
+            camera_id=evidence.identity.camera_id,
+            frame_index_path=locator["relative_path"],
+            expected_frame_count=frame.record.source_total_frames,
+        )
+        if source.source_path != files.index_paths[1]:
+            raise RecordingIdentityAuthorityError(
+                "clipped clock locator differs from the bound frame index"
+            )
+    else:
+        if manifest.get("video_streams") is not None:
+            full = manifest["video_streams"]["streams"].get("full")
+            if not isinstance(full, Mapping) or not isinstance(full.get("video"), str):
+                raise RecordingIdentityAuthorityError(
+                    "source video must bind the declared full-frame stream"
+                )
+            if (recording_dir / full["video"]).resolve() != (
+                recording_dir / locator["relative_path"]
+            ).resolve():
+                raise RecordingIdentityAuthorityError(
+                    "source video differs from the declared full-frame stream"
+                )
+        source = clock_contract.load_acquisition_frame_clock_source(
+            recording_dir,
+            camera_id=evidence.identity.camera_id,
+            video_path=recording_dir / locator["relative_path"],
+            expected_frame_count=frame.record.source_total_frames,
+        )
     root = zarr.open_group(str(resolved), mode="r", use_consolidated=False)
     for field in ("recording_type", "recording_subtype", "behavior_mode"):
         if root.attrs.get(field) != manifest[field].strip():
-            raise RecordingIdentityAuthorityError(f"published {field} differs from its manifest")
+            raise RecordingIdentityAuthorityError(
+                f"published {field} differs from its manifest"
+            )
     clock = clock_contract.resolve_acquisition_frame_clock(
-        root, required=source is not None or root.attrs.get("acquisition_frame_clock_available") is True,
+        root,
+        required=source is not None
+        or root.attrs.get("acquisition_frame_clock_available") is True,
     )
     if source is None and clock is not None:
-        raise RecordingIdentityAuthorityError("published clock has no live source evidence")
+        raise RecordingIdentityAuthorityError(
+            "published clock has no live source evidence"
+        )
     if source is not None:
         # Reuse the clock owner's existing persisted grammar, including source
         # stat evidence and array digests. Never reconstruct a competing digest.
         expected_clock = clock_contract.acquisition_frame_clock_source_sha256(source)
         if clock is None or clock.record_sha256 != expected_clock:
-            raise RecordingIdentityAuthorityError("published clock differs from its current source")
+            raise RecordingIdentityAuthorityError(
+                "published clock differs from its current source"
+            )
         validate_direct_consolidated_subtree(
-            resolved, subtree_path=clock_contract.ACQUISITION_FRAME_CLOCK_RUNS_PATH,
+            resolved,
+            subtree_path=clock_contract.ACQUISITION_FRAME_CLOCK_RUNS_PATH,
         )
     streams = (manifest.get("video_streams") or {}).get("streams", {})
+    if clipped and inventory is not None:
+        streams = inventory["streams"]
     if "crop" in streams or root.attrs.get("acquisition_crop_ledger_available") is True:
         validate_current_acquisition_crop_stream_ledger(root)
-        validate_direct_consolidated_subtree(resolved, subtree_path="analysis/acquisition_video_streams")
-    return receipt
+        validate_direct_consolidated_subtree(
+            resolved, subtree_path="analysis/acquisition_video_streams"
+        )
 
 
 def _preflight_receipt_binding(
@@ -1840,6 +1976,48 @@ class RegistryRecordingIdentityMixin:
         )
 
 
+@dataclass
+class _ReadOnlyRecordingIdentityReader(RegistryRecordingIdentityMixin):
+    path: Path
+    conn: sqlite3.Connection
+
+
+def load_verified_registry_recording_import(
+    *,
+    registry_path: Path,
+    zarr_path: Path,
+) -> VerifiedRecordingImport:
+    """Read existing receipt-bound admission without initializing a registry.
+
+    The same owner/mixin reader verifies live identity, acquisition and receipt
+    evidence. SQLite mode=ro prevents database creation or schema/projection
+    writes; no generic Registry constructor or replacement admission SQL runs.
+    """
+
+    path = Path(registry_path).expanduser().resolve()
+    if not path.is_file():
+        raise RecordingIdentityAuthorityError(
+            "read-only registry admission requires an existing database"
+        )
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        # These are connection-local settings, not schema/database mutations.
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA query_only=ON")
+        return _ReadOnlyRecordingIdentityReader(
+            path, conn
+        ).read_verified_recording_import_by_path(zarr_path)
+    except sqlite3.Error as exc:
+        raise RecordingIdentityAuthorityError(
+            "read-only registry import admission could not be verified"
+        ) from exc
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 __all__ = [
     "IDENTITY_REVISION_SCHEMA_ID",
     "RecordingIdentityAuthorityError",
@@ -1852,5 +2030,6 @@ __all__ = [
     "canonical_dataset_path_hash",
     "collect_regular_source_recording_identity",
     "load_verified_recording_import_receipt",
+    "load_verified_registry_recording_import",
     "recording_directory_for_source_target",
 ]
