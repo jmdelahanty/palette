@@ -47,6 +47,12 @@ from fisheye.shared.recording_geometry_bundle import (
     iter_recording_geometry_bundle_files,
     publish_recording_geometry_bundle,
 )
+from fisheye.shared.unified_h5 import UnifiedH5ContractError
+from fisheye.shared.unified_h5.correspondence import (
+    BINDING as ACQUISITION_BINDING_PATH,
+    AcquisitionBinding,
+    read_acquisition_binding,
+)
 from fisheye.shared.source_recording_identity import (
     SOURCE_RECORDING_IDENTITY_PROFILE,
     SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
@@ -1515,6 +1521,32 @@ def _choose_session_tag(meta: Dict[str, Any], h5_path: Path) -> str:
     )
 
 
+def _read_h5_acquisition_binding(h5_path: Path) -> AcquisitionBinding:
+    """Return the validated Orange acquisition binding or refuse the H5.
+
+    A camera recording ID is hash(acquisition session, camera). Only the
+    binding carries the acquisition session. The H5 ``session_uuid`` names one
+    Citrus Arena session and is never substituted, so an H5 without a valid
+    binding (every legacy v5/v6 H5) cannot be organized as a new recording.
+    """
+
+    try:
+        with h5py.File(h5_path, "r") as h5:
+            if ACQUISITION_BINDING_PATH not in h5:
+                raise SourceRecordingIdentityError(
+                    f"{h5_path} has no acquisition-session binding "
+                    f"({ACQUISITION_BINDING_PATH}); its session_uuid identifies "
+                    "a Citrus Arena session, not the acquisition session, and "
+                    "is not substituted. Legacy H5s are not organized as new "
+                    "recordings."
+                )
+            return read_acquisition_binding(h5)
+    except UnifiedH5ContractError as exc:
+        raise SourceRecordingIdentityError(
+            f"{h5_path} has an invalid acquisition-session binding: {exc}"
+        ) from exc
+
+
 def _build_plan(
     h5_path: Path,
     dest_root: Path,
@@ -1605,15 +1637,21 @@ def _build_plan(
     else:
         missing.append("camera_id (missing in H5 attrs)")
 
-    session_uuid = meta.get("session_uuid")
-    if not session_uuid:
-        missing.append("session_uuid (missing in H5 attrs)")
-    if camera_id and session_uuid:
-        _bind_mapped_source_identity(
-            meta,
-            session_uuid=session_uuid,
-            camera_id=camera_id,
+    binding = _read_h5_acquisition_binding(h5_path)
+    if camera_id and camera_id not in (
+        binding.camera_serial,
+        binding.acquisition_camera_id,
+    ):
+        raise SourceRecordingIdentityError(
+            "H5 camera_id conflicts with its acquisition binding: "
+            f"{camera_id!r} not in "
+            f"{(binding.camera_serial, binding.acquisition_camera_id)!r}"
         )
+    _bind_mapped_source_identity(
+        meta,
+        session_uuid=binding.acquisition_session_id,
+        camera_id=binding.camera_serial,
+    )
 
     return RecordingPlan(
         name=name,

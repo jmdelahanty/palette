@@ -12,6 +12,7 @@ from fisheye.shared.source_recording_identity import (
     SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
 )
 from fisheye.utils import organize_recordings
+from tests.unit.fisheye.unified_h5_fixtures import emit_bound_h5
 
 
 def _write_video_only_metadata_csv(path: Path, source_video_name: str) -> None:
@@ -130,11 +131,11 @@ def test_main_apply_runs_h5_diagnostics_hook(tmp_path: Path, monkeypatch) -> Non
     source_root = tmp_path / "staging"
     source_root.mkdir()
     h5_path = source_root / "recording_001.h5"
-    with h5py.File(h5_path, "w") as handle:
-        handle.attrs["camera_id"] = "2010093"
-        handle.attrs["session_uuid"] = "session_1"
-    cam_mp4 = source_root / "Cam2010093.mp4"
-    cam_meta = source_root / "Cam2010093_meta.csv"
+    emit_bound_h5(
+        h5_path, root_attrs={"camera_id": "CAM-42", "session_uuid": "session_1"}
+    )
+    cam_mp4 = source_root / "CamCAM-42.mp4"
+    cam_meta = source_root / "CamCAM-42_meta.csv"
     cam_mp4.write_bytes(b"video")
     cam_meta.write_text("frame_id,timestamp,timestamp_sys\n1,1,1\n", encoding="utf-8")
 
@@ -174,11 +175,11 @@ def test_main_apply_persists_h5_preflight_manifest(tmp_path: Path, monkeypatch) 
     source_root = tmp_path / "staging"
     source_root.mkdir()
     h5_path = source_root / "recording_002.h5"
-    with h5py.File(h5_path, "w") as handle:
-        handle.attrs["camera_id"] = "2010093"
-        handle.attrs["session_uuid"] = "session_2"
-    cam_mp4 = source_root / "Cam2010093.mp4"
-    cam_meta = source_root / "Cam2010093_meta.csv"
+    emit_bound_h5(
+        h5_path, root_attrs={"camera_id": "CAM-42", "session_uuid": "session_2"}
+    )
+    cam_mp4 = source_root / "CamCAM-42.mp4"
+    cam_meta = source_root / "CamCAM-42_meta.csv"
     cam_mp4.write_bytes(b"video")
     cam_meta.write_text("frame_id,timestamp,timestamp_sys\n1,1,1\n", encoding="utf-8")
 
