@@ -54,7 +54,7 @@ chaser_states per column (legacy 56 columns / 232 B; unified 63 fields / 280 B =
 
 NO-LEGACY-HOME: 30 unified nodes or families stay only in `native_h5` (list below).
 
-**Verdict (blunt):** unified H5 cannot fully replace legacy H5 today. There are three hard blockers. A fourth becomes a blocker for any non-trivial session.
+**Verdict (blunt, before the Citrus answers below):** unified H5 cannot fully replace legacy H5 today. There are three hard blockers. A fourth becomes a blocker for any non-trivial session.
 1. Subject metadata. `/metadata/subject` carries only `subject_id`. There is no `subject_count`, so `build_experiment_setup_record` raises, and every zebrobot field is gone.
 2. Display evidence. There is no `/display_snapshot/selected_output_block` equivalent, so `_preflight_selected_calibration` fails.
 3. Protocol execution status. Both fixtures are `status: "interrupted"`, and `_materialize_stimulus_steps` raises unless execution is `complete`.
@@ -63,6 +63,30 @@ NO-LEGACY-HOME: 30 unified nodes or families stay only in `native_h5` (list belo
 Also note: the core contract declares `status = development_core_definitions_not_production_admitted`, and the fixtures carry `development_schema_id = citrus.experimental_h5_core_writer_test`. This spec targets a schema Citrus has not yet frozen. **[V]**
 
 ---
+
+## Citrus answers (2026-09-23)
+
+Read-only audit by the Citrus agent of branch
+`agent/unified-h5-streamed-correspondence-20260923` (base `cb69cea`). The
+unified writer is implemented; its production-admission gate remains. These
+answers change the verdict above. **Blockers 1–3 were fixture sparseness, not
+dropped data.**
+
+| Q | Answer | Effect on this spec |
+|---|---|---|
+| Q1 subject | `/metadata/subject` keeps every supplied entry as a string attr: `fish_id`, `subject_type`, `subject_count`, dish/cross ids, `fish_count`, `source_dish_population_count`, genotype, line_strain, species, sex, parents, dates, `queried_at_utc`. The full Zebrobot snapshot is `/metadata/zebrobot/snapshot_json` (DPF `dish.dpf`, DOF `dish.dof`, parents `cross.parents`); absence and API failure stay distinguishable. `subject_id` is **not** a rename of `fish_id`; the fixture invented it. | A1/A2/C1 become DERIVED (attr move). Keep `subject_count` (selected subjects) distinct from `fish_count` / `source_dish_population_count` (source population). Never infer `fish_id` from `subject_id`. |
+| Q2 display | `/metadata/display/selected_output_block` exists, with output name, connection, geometry, transform, raw and verbose xrandr. Headless captures cannot supply it (`capture_status`). It is observed display configuration, not a homography authority. | D18 becomes EXACT (path move). The adapter refuses when `capture_status` says the display was unavailable. |
+| Q3 sentinels | Invalid source values: `target_source_frame_id` 0, `target_source_camera_id` 0, `target_source_box_index_in_payload` 255, `target_age_ms` -1.0, `target_distance_outside_px` -1.0, `behavior_phase_index` -1, `chase_trial_id` 0. The converter writes `valid=0, value=0`; valid zero is legitimate. `target_source_frame_id` is the IPC state-frame ID, not the Orange acquisition ID. | The D7 sub-table's sentinel questions are resolved: invalid rows map back to these values. **Camera zero is a Citrus bug:** SHAMAN camera 0 is a real camera, but the converter marks it invalid. Until Citrus fixes that, `target_source_camera_id` validity is unreliable; the adapter must refuse or flag rows with camera 0, never trust them. |
+| Q4 execution | `complete`, `interrupted` (interrupted step or recipe prefix) and `invalid` are all implemented and tested. Successful steps use `completion_status="completed"`. A gracefully interrupted session can be a fully finalized, valid H5; keep its status and analyze only recorded intervals, never inventing unexecuted post-periods. | D5 must choose (b) or refuse interrupted sessions; see D5. |
+| Q6 video | The `.mp4` is produced when video logging is on. `video_frame_index` is the encoder's zero-based index, assigned at queue admission; a later CUDA handoff failure can drop an admitted frame. | `video_frame_index_valid=1` does not prove the frame is in the decoded video. Do not promise decoded-frame alignment without reconciliation. |
+| Q7 cameras | The full camera JSON is copied (for example 32 keys for camera 2010093), plus `camera_runtime.sensor_pipeline`. | C2 is fine; tuning audits should read `recording_snapshot_json`, including `camera_runtime`. |
+| Q9 renderer | `/geometry/renderer` is expected from normal Arena startup but only required when the appearance component declares it. | Keep the D14 fallback for files without it. |
+| Q10 references | The legacy-looking references are captured-source provenance. `/definitions/source_namespaces/current_geometry_json` maps `/calibration_snapshot/…` → `/geometry/calibration/…` and `/runtime_geometry_contract/…` → `/geometry/runtime/…`; `/geometry/correspondence/authority_json` holds the resolved paths. | Follow the namespace descriptor and `authority_json`; never dereference the captured input strings. |
+
+Still open: size (Q5; asked separately with the full-session capacity
+question), the camera-zero fix in Citrus, a production-shaped fixture with
+full subject and display metadata (the pinned fixtures cannot exercise Q1/Q2),
+and the interrupted-session policy (D5).
 
 ## Main table
 
@@ -267,6 +291,11 @@ Totals: 41 EXACT, 8 EXACT-narrow, 7 DERIVED. The collapse is lossy for `target_s
   - (b) project steps only for steps whose `execution_completion_status` is complete. That is a legacy-contract change in `_materialize_stimulus_steps`, not an adapter rule.
 
   Never fall back to event `camera_frame_id` bounds (D10).
+
+  Citrus (2026-09-23): interrupted is a normal, integrity-valid outcome;
+  keep the status and analyze only recorded intervals. That favours (b), but
+  (b) changes the legacy step contract and every consumer's view of step
+  coverage, so it needs an explicit decision before implementation.
 - **D6. Selector coexistence.** For a recording that has both a legacy-H5 stimulus run and an adapter run, which is `latest`? Recommend: the adapter refuses if any selector-eligible stimulus run already exists, unless explicitly overridden. Otherwise the registry sees two protocol runs with different `source_h5` for one recording.
 - **D7. `protocol_semantic_chaser_selection` sealed raw-H5 binding.** It requires `run.attrs.source_h5 == source.raw_h5` (`analysis_workflows/protocol_semantic_chaser_selection.py:746-750`). Decide whether the sealed "raw H5" for unified recordings is the unified file or the derivative, and update the selection sealing accordingly.
 - **D8. No silent repair or inference.** The adapter must:
