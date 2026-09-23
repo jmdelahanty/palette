@@ -75962,10 +75962,10 @@
     "direct_zarr_api_site_count": 671,
     "dynamic_or_unresolved_writer_site_count": 362,
     "manual_zarr_metadata_site_count": 1,
-    "parsed_writer_candidate_module_count": 406,
+    "parsed_writer_candidate_module_count": 407,
     "reader_required_array_declaration_count": 117,
     "resolved_writer_leaf_name_count": 641,
-    "scanned_python_module_count": 1754,
+    "scanned_python_module_count": 1756,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
