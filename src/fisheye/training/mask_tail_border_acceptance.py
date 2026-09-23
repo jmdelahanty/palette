@@ -8,6 +8,9 @@ import re
 
 import numpy as np
 
+from fisheye.shared.keypoint_motion_authority import (
+    keypoint_source_crop_run_from_attributes,
+)
 from fisheye.training.recover_merged_training_recording import _sha256_array
 
 ATTR = "tail_crop_border_acceptances_v1"
@@ -136,7 +139,7 @@ def bound_acceptances(
         return {}
     body_idx = mask_labels.index("subject_body")
     n = int(group["masks_roi"].shape[0])
-    source_crop_run = str(group.attrs.get("source_crop_run") or "")
+    source_crop_run = keypoint_source_crop_run_from_attributes(group.attrs)
     valid = {}
     for key, record in records.items():
         row = int(key)
@@ -187,7 +190,7 @@ def apply_acceptance_actions(
             "schema": SCHEMA,
             "roi_idx": row,
             "row_identity": dict(item["row_identity"]),
-            "source_crop_run": str(group.attrs.get("source_crop_run") or ""),
+            "source_crop_run": keypoint_source_crop_run_from_attributes(group.attrs),
             "body_mask_sha256": after_digest,
             "accepted_at_mask_revision": int(revision),
             "accepted_by": str(item["user"]),

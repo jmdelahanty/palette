@@ -6,6 +6,9 @@ from collections.abc import Mapping
 
 import numpy as np
 
+from fisheye.shared.keypoint_motion_authority import (
+    keypoint_source_crop_run_from_attributes,
+)
 from fisheye.shared.recovered_training_review_contract import (
     REVIEW_SCHEMA,
     NATIVE_REVIEW_SCHEMA,
@@ -106,7 +109,7 @@ def apply_row_action(
         if (
             "source_crop_row_ids" not in identity
             or "frame_indices" not in identity
-            or not str(runtime.refined.group.attrs.get("source_crop_run") or "")
+            or not keypoint_source_crop_run_from_attributes(runtime.refined.group.attrs)
         ):
             raise ValueError(
                 "Tail crop-border acceptance requires crop and frame identity"

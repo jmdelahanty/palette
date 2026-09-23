@@ -1128,6 +1128,7 @@ def _subject_mask_runtime_state(
 
 def _subject_mask_tail_border_status(runtime, *, store, roi_idx: int, mask: np.ndarray) -> dict[str, object] | None:
     from fisheye.shared.detect_reason_codec import decode_reason_bytes
+    from fisheye.shared.keypoint_motion_authority import keypoint_source_crop_run_from_attributes
     from fisheye.shared.recovered_training_review_contract import REVIEW_SCHEMA, NATIVE_REVIEW_SCHEMA
     from fisheye.training.mask_tail_border_acceptance import (
         ACTION, active_acceptances, body_digest, expected_row_identity,
@@ -1148,7 +1149,7 @@ def _subject_mask_tail_border_status(runtime, *, store, roi_idx: int, mask: np.n
         try:
             bound = validate_acceptance_record(
                 str(roi_idx), record, body=mask,
-                source_crop_run=str(runtime.refined.group.attrs.get("source_crop_run") or ""),
+                source_crop_run=keypoint_source_crop_run_from_attributes(runtime.refined.group.attrs),
                 row_identity=expected_row_identity(runtime.refined.group, roi_idx),
             )
         except ValueError as exc:
@@ -1173,7 +1174,7 @@ def _subject_mask_tail_border_status(runtime, *, store, roi_idx: int, mask: np.n
                 seed = seeds[seed_name]
                 if (
                     seed.attrs.get("source_bindings") == runtime.refined.group.attrs.get("source_bindings")
-                    and seed.attrs.get("source_crop_run") == runtime.refined.group.attrs.get("source_crop_run")
+                    and keypoint_source_crop_run_from_attributes(seed.attrs) == keypoint_source_crop_run_from_attributes(runtime.refined.group.attrs)
                     and "reason_bytes" in seed
                 ):
                     seed_reason = str(decode_reason_bytes(seed["reason_bytes"][roi_idx:roi_idx + 1])[0])
