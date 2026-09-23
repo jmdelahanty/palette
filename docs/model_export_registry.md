@@ -56,6 +56,13 @@ environment.
 
 ## Deployment Artifacts
 
+For registered, promoted pose models sent to acquisition, use the final
+[`export_pose_deployment_bundle` packaging step](pose_model_deployment_contract.md).
+It supplies a versioned, hash-bound skeleton sidecar in exact training order,
+the unchanged preprocessing contract, and a relocatable v2 canonical manifest.
+It reads the registry without changing it; raw ONNX training exports remain
+historical export artifacts, not this complete acquisition handoff.
+
 TensorRT engines are compiled deployment artifacts, not portable model
 descriptions. A trained Palette checkpoint may produce one ONNX model, but that
 ONNX can legitimately have multiple TensorRT engines:

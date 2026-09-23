@@ -22,6 +22,7 @@ import uuid
 
 from fisheye.shared.atomic_run_publisher import tree_inventory
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.pose_deployment_manifest import CANONICAL_ONNX_MANIFEST_SCHEMA_ID
 from fisheye.shared.pose_model_input_contract import (
     POSE_MODEL_INPUT_CONTRACT_FILENAME,
     build_runtime_receipt_pose_model_input_contract,
@@ -32,7 +33,8 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 PUBLICATION_SCHEMA_ID = "palette.registered_pose_model_package_publication"
 PUBLICATION_SCHEMA_VERSION = 1
-CANONICAL_ONNX_MANIFEST_SCHEMA_ID = "palette.canonical_onnx_model_manifest"
+# Historical promotion remains v1; the explicit deployment packaging command
+# owns v2. Never restamp a published model package to add deployment metadata.
 CANONICAL_ONNX_MANIFEST_SCHEMA_VERSION = 1
 
 
