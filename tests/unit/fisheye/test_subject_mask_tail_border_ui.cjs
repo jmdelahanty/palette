@@ -26,6 +26,7 @@ const initial = {
 };
 let applyResolve;
 const calls = [];
+const checkpoints = [];
 const context = {
   console, Uint8Array, Uint8ClampedArray, Buffer, setTimeout,
   atob: (value) => Buffer.from(value, "base64").toString("binary"),
@@ -52,8 +53,14 @@ const context = {
   mutationStatusSuffix: () => "",
   showOperatorSupport: (error) => { throw error; },
   clearOperatorSupport() {},
-  fetch: async (url) => {
+  fetch: async (url, options) => {
     calls.push(url);
+    if (url.endsWith("/save")) {
+      const body = JSON.parse(options.body);
+      checkpoints.push(body);
+      initial.tail_crop_border.pending_action = body.tail_crop_border_action;
+      return {ok: true, body: {ok: true, result: {checkpoint_area_px: 2}}};
+    }
     if (url.endsWith("/roi/current")) return {ok: true, body: initial};
     if (url.endsWith("/roi/status")) return {ok: true, body: {
       ok: true, roi_idx: 0,
@@ -76,6 +83,8 @@ vm.runInContext(script, context, {filename: "subject_mask_editor.js"});
 
 (async () => {
   await new Promise(setImmediate);
+  assert.equal(node("tail-border-preset").value, "custom", "historical reasons must remain intact");
+  assert.equal(node("tail-border-reason").value, "tiny crop");
   node("tail-border-reason").value = "reason currently being typed";
   vm.runInContext("mask[0] = 1; markMaskOverlayDirty();", context);
   assert.match(node("tail-border-status").innerHTML, /unsaved painted pixels/i);
@@ -90,4 +99,36 @@ vm.runInContext(script, context, {filename: "subject_mask_editor.js"});
   assert.match(node("tail-border-status").innerHTML, /unsaved painted pixels/i);
   assert.equal(node("tail-border-reason").value, "reason currently being typed");
   assert(calls.some((url) => url.endsWith("/roi/status")), "Apply must refresh row outcome");
+
+  const preset = "Only the tiny tail tip is clipped; visible tail is usable.";
+  vm.runInContext("loadTailBorderReason('')", context);
+  assert.equal(node("tail-border-preset").value, "slight-tip");
+  assert.equal(node("tail-border-reason").value, "");
+  assert.equal(checkpoints.length, 0, "selecting a preset must not checkpoint automatically");
+  await vm.runInContext("saveTailBorder('accept')", context);
+  assert.equal(checkpoints.at(-1).tail_crop_border_action.reason, preset);
+  assert.equal(node("tail-border-reason").value, "", "preset-only checkpoint must reopen with empty optional notes");
+
+  node("tail-border-reason").value = "Tiny distal tip clipped on the bottom edge.";
+  await vm.runInContext("saveTailBorder('accept')", context);
+  assert.equal(checkpoints.at(-1).tail_crop_border_action.reason, preset + " Notes: Tiny distal tip clipped on the bottom edge.");
+  assert.equal(node("tail-border-preset").value, "slight-tip");
+  assert.equal(node("tail-border-reason").value, "Tiny distal tip clipped on the bottom edge.");
+
+  const count = checkpoints.length;
+  node("tail-border-reason").value = "x".repeat(240);
+  await vm.runInContext("saveTailBorder('accept')", context);
+  assert.equal(checkpoints.length, count, "combined reason limit must be checked before sending");
+  node("tail-border-preset").value = "custom";
+  vm.runInContext("updateTailBorderReasonInput()", context);
+  node("tail-border-reason").value = "";
+  await vm.runInContext("saveTailBorder('accept')", context);
+  assert.equal(checkpoints.length, count, "custom reasons still require text");
+  node("tail-border-reason").value = "A reviewer-specific explanation";
+  await vm.runInContext("saveTailBorder('accept')", context);
+  assert.equal(checkpoints.at(-1).tail_crop_border_action.reason, "A reviewer-specific explanation");
+  assert.equal(node("tail-border-preset").value, "custom");
+  await vm.runInContext("saveTailBorder('revoke')", context);
+  assert.equal(checkpoints.at(-1).tail_crop_border_action.action, "revoke");
+  assert.equal(checkpoints.at(-1).tail_crop_border_action.reason, "");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

@@ -398,11 +398,10 @@
         decodeMask(payload.mask);
         clearLasso(true);
         renderSummary();
-        const reasonInput = document.getElementById("tail-border-reason");
         const border = payload?.tail_crop_border;
-        if (reasonInput) reasonInput.value = border?.pending_action?.action === "accept"
+        loadTailBorderReason(border?.pending_action?.action === "accept"
           ? (border.pending_action.reason || "")
-          : (border?.accepted ? (border.acceptance.reason || "") : "");
+          : (border?.accepted ? (border.acceptance.reason || "") : ""));
         scheduleDraw();
         updateNavButtons();
         setStatus("Loaded.");
@@ -485,14 +484,41 @@
       }
     }
 
+    const tailBorderPresetReason = "Only the tiny tail tip is clipped; visible tail is usable.";
+    const tailBorderNotesSeparator = " Notes: ";
+
+    function updateTailBorderReasonInput() {
+      const custom = document.getElementById("tail-border-preset")?.value === "custom";
+      const input = document.getElementById("tail-border-reason");
+      const label = document.getElementById("tail-border-reason-label");
+      if (label) label.textContent = custom ? "Custom reason (required)" : "Optional notes";
+      if (input) {
+        input.placeholder = custom ? "Why is the visible tail endpoint usable?" : "Optional details for this ROI";
+        input.maxLength = custom ? 240 : 240 - tailBorderPresetReason.length - tailBorderNotesSeparator.length;
+      }
+    }
+
+    function loadTailBorderReason(reason) {
+      const preset = document.getElementById("tail-border-preset");
+      const input = document.getElementById("tail-border-reason");
+      if (!preset || !input) return;
+      const prefix = tailBorderPresetReason + tailBorderNotesSeparator;
+      const isPreset = !reason || reason === tailBorderPresetReason || reason.startsWith(prefix);
+      preset.value = isPreset ? "slight-tip" : "custom";
+      input.value = isPreset ? (reason.startsWith(prefix) ? reason.slice(prefix.length) : "") : reason;
+      updateTailBorderReasonInput();
+    }
+
     function saveTailBorder(action) {
       if (!payload?.tail_crop_border) return;
-      const reason = String(document.getElementById("tail-border-reason")?.value || "").trim();
+      const notes = String(document.getElementById("tail-border-reason")?.value || "").trim();
+      const custom = document.getElementById("tail-border-preset")?.value === "custom";
+      const reason = custom ? notes : tailBorderPresetReason + (notes ? tailBorderNotesSeparator + notes : "");
       if (action === "accept" && (reason.length < 3 || reason.length > 240)) {
-        setStatus("Enter a 3–240 character reason for accepting this clipped tail.", true);
+        setStatus(custom ? "Enter a 3–240 character custom reason." : "Shorten the optional notes to fit the 240-character reason limit.", true);
         return;
       }
-      save(false, {action, reason});
+      return save(false, {action, reason: action === "accept" ? reason : ""});
     }
 
     async function refreshTailStatus(generation, roiIdx) {
