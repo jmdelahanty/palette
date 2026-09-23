@@ -1,0 +1,14 @@
+{
+  "schema_id": "palette.registry_integrity_validation",
+  "schema_version": 1,
+  "status": "complete",
+  "validation": {
+    "foreign_key_issue_count": 0,
+    "integrity_check": "ok",
+    "path": "/tmp/palette-parent-intake-e2e-4gm_mszi/isolated_registry.sqlite",
+    "python_executable": "/home/delahantyj@hhmi.org/miniconda3/envs/palette-py311/bin/python",
+    "sqlite_python_module_version": "2.6.0",
+    "sqlite_runtime_version": "3.52.0",
+    "validation_backend": "python_stdlib_sqlite3"
+  }
+}

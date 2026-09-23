@@ -87,3 +87,20 @@ it, and record its manifest/file SHA identities in the PR handoff. Transfer to
 pancake0 and acquisition-agent instructions follow separately; preserve the old
 flat handoff and original engine receipts. Hardware parity/soak and downstream
 consumer capability tests are not performed by this Palette implementation.
+
+## Draft-branch reconciliation with advancing main
+
+Draft [PR 185](https://github.com/jmdelahanty/palette/pull/185) first recorded
+implementation commit `ecf2e6189700ad2faf2901de3c70f213d3c78589`. Main advanced
+to `d028214318e0e6a997c39a6e6a5eb9ba22b7d472`, causing generated module-count
+conflicts that prevented PR CI from starting. Before bringing that commit into
+this isolated draft branch, all 24 incoming PR 149 checks were verified green
+on `bad316982370ef2efe8abf1a87f285f5a06a2873`, along with successful
+[main-integration evidence](https://github.com/jmdelahanty/palette/actions/runs/35827634009).
+Only the two generated census files conflicted; regenerate them from the
+combined source rather than choosing one side. No pose implementation code
+conflicted and all incoming work/queue notes are preserved. The combined head
+passed the 116-test local regression rerun and import boundaries; it still
+requires all required CI. Earlier candidate
+bundle provenance must not be restamped to that new commit. This is branch
+maintenance, not merging PR 185 into main or deploying/activating it.
