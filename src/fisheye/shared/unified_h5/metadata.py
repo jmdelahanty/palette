@@ -5,7 +5,7 @@ import math
 import h5py
 import numpy as np
 
-from .common import MAX_JSON_BYTES, MAX_ROWS, require
+from .common import MAX_JSON_BYTES, MAX_ROWS, UnifiedH5ContractError, require
 from .hdf5_types import type_descriptor
 
 
@@ -52,3 +52,39 @@ def native_attributes(node):
         require(total <= MAX_JSON_BYTES, "node_attribute_byte_budget")
         values[name] = descriptor
     return values
+
+
+def string_attributes(descriptors):
+    """Decode copied scalar string attribute descriptors to text.
+
+    Citrus writes metadata such as ``/metadata/subject`` as scalar string
+    attributes. Anything else (arrays, numbers, undecodable bytes) is refused
+    rather than coerced.
+    """
+
+    decoded = {}
+    for name, descriptor in descriptors.items():
+        spec = descriptor.get("type", {})
+        require(
+            spec.get("class") == "string" and descriptor.get("shape") == [],
+            f"attribute_not_scalar_string:{name}",
+        )
+        if spec.get("variable_length"):
+            values = descriptor.get("values_hex")
+            require(
+                isinstance(values, list) and len(values) == 1,
+                f"attribute_value_missing:{name}",
+            )
+            raw = bytes.fromhex(values[0])
+        else:
+            raw = bytes.fromhex(descriptor["payload_hex"])
+            if spec.get("padding") == "space_padded":
+                raw = raw.rstrip(b" ")
+            else:
+                raw = raw.split(b"\0", 1)[0]
+        encoding = "utf-8" if spec.get("character_set") == "utf8" else "ascii"
+        try:
+            decoded[name] = raw.decode(encoding)
+        except UnicodeDecodeError as exc:
+            raise UnifiedH5ContractError(f"attribute_not_text:{name}") from exc
+    return decoded

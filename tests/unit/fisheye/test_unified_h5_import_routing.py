@@ -171,7 +171,7 @@ def test_routed_import_runs_the_real_importer(tmp_path: Path) -> None:
     assert candidate.read_table("/frames/stimulus", start=0, stop=1).shape == (1,)
 
 
-def test_unified_setup_step_is_logged_not_silently_skipped(
+def test_unified_setup_without_native_import_is_logged_not_silently_skipped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     recording = tmp_path / "rec"
@@ -203,5 +203,5 @@ def test_unified_setup_step_is_logged_not_silently_skipped(
 
     assert (
         "experiment_setup_not_projected",
-        "unified_h5_metadata_projection_not_implemented",
+        "unified_h5_metadata_requires_native_import",
     ) in [(event, fields.get("reason")) for event, fields in events]

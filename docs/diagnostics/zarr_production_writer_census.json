@@ -49436,7 +49436,7 @@
       "enclosing_symbol": "fisheye.shared.unified_h5.storage_schema:create_bytes",
       "file": "src/fisheye/shared/unified_h5/storage_schema.py",
       "filters_expression": null,
-      "line": 42,
+      "line": 55,
       "parent_path_pattern": "<group>",
       "path_pattern": "<group>/<name>",
       "receiver_expression": null,
@@ -49444,7 +49444,7 @@
       "shape_expression": null,
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-8197eeb7966405bc",
+      "site_id": "writer-6f8fc5a460cfcc8b",
       "status": "current",
       "status_basis": "packaged Palette module without a maintenance marker",
       "surface_class": "production",
@@ -70633,7 +70633,7 @@
     "writer_wrapper_call_site_count": 993
   },
   "wrapper_analysis": {
-    "function_definition_count": 6495,
+    "function_definition_count": 6496,
     "writer_function_count": 249,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",

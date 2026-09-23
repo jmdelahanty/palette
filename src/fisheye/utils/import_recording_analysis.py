@@ -68,7 +68,13 @@ from fisheye.shared.recording_import_receipt import (
 )
 from fisheye.shared.run_provenance import git_identity
 from fisheye.shared.unified_h5 import PROFILE as UNIFIED_H5_PROFILE
-from fisheye.shared.unified_h5 import declared_unified_profile
+from fisheye.shared.unified_h5 import UnifiedH5ContractError, declared_unified_profile
+from fisheye.shared.unified_h5.metadata import string_attributes
+from fisheye.shared.unified_h5.storage import (
+    MANIFEST_DIGEST_ATTR,
+    load_unified_stimulus_candidate,
+)
+from fisheye.shared.unified_h5.storage_schema import new_native_run_name
 from fisheye.shared.source_recording_identity import (
     SOURCE_ANALYSIS_CLASSIFICATION,
     SOURCE_RECORDING_IDENTITY_PROFILE,
@@ -80,6 +86,7 @@ from fisheye.shared.source_recording_identity import (
     load_strict_json_object,
 )
 from fisheye.shared.subject_metadata import (
+    normalize_subject_metadata,
     publish_subject_metadata,
     read_h5_subject_metadata,
 )
@@ -608,21 +615,70 @@ def import_experiment_setup(plan: RecordingAnalysisPlan) -> Optional[dict[str, A
     if not subject_metadata:
         return None
     root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    return _publish_subject_and_setup(
+        root, subject_metadata, source_h5_path=plan.h5_path
+    )
+
+
+def project_unified_subject_metadata(
+    plan: RecordingAnalysisPlan, run_name: str
+) -> Optional[dict[str, Any]]:
+    """Publish subject metadata and setup from an admitted native candidate.
+
+    Reads ``/metadata/subject`` from the verified native copy (not the raw H5)
+    and publishes it through the same subject/setup owners as legacy import,
+    to the same locations. Missing fields such as ``subject_count`` refuse;
+    nothing is inferred (``subject_id`` is not ``fish_id``).
+    """
+
+    read_root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=True)
+    candidate = load_unified_stimulus_candidate(read_root, run_name=run_name)
+    run_path = f"analysis/stimulus_runs/{run_name}"
+    try:
+        descriptors = candidate.typed_attributes("/metadata/subject")
+    except UnifiedH5ContractError:
+        # No /metadata/subject node was copied: absent, as in legacy.
+        descriptors = {}
+    subject_metadata = normalize_subject_metadata(string_attributes(descriptors))
+    if not subject_metadata:
+        return None
+    source = {
+        "kind": "unified_native_subject_metadata",
+        "group_path": "/metadata/subject",
+        "count_field": "subject_count",
+        "native_run_path": run_path,
+        "native_manifest_sha256": str(read_root[run_path].attrs[MANIFEST_DIGEST_ATTR]),
+        "source_profile": UNIFIED_H5_PROFILE,
+    }
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    return _publish_subject_and_setup(root, subject_metadata, source_artifact=source)
+
+
+def _publish_subject_and_setup(
+    root: Any,
+    subject_metadata: Mapping[str, Any],
+    *,
+    source_h5_path: Path | None = None,
+    source_artifact: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     subject_authority = publish_subject_metadata(
         root,
         subject_metadata,
-        source_h5_path=plan.h5_path,
+        source_h5_path=source_h5_path,
+        source_artifact=source_artifact,
     )
     record = build_experiment_setup_record(
         subject_metadata,
-        source_h5_path=plan.h5_path,
+        source_h5_path=source_h5_path,
+        source=source_artifact,
         subject_metadata_sha256=subject_authority.record_sha256,
         subject_metadata_ref=subject_authority.group_path,
     )
     resolved = publish_experiment_setup(
         root,
         record,
-        source_h5_path=plan.h5_path,
+        source_h5_path=source_h5_path,
+        source_artifact=source_artifact,
     )
     return {
         "run_name": resolved.run_name,
@@ -956,16 +1012,20 @@ def process_recording_import(
         **frame_clock,
     )
 
-    if plan.h5_path is not None and stimulus_h5_unified_profile(plan.h5_path):
-        # The legacy reader only knows /subject_metadata and would publish
-        # nothing for a unified H5. Say so instead of skipping silently.
-        _log(
-            logger,
-            "experiment_setup_not_projected",
-            recording_dir=str(plan.recording_dir),
-            zarr_path=str(plan.zarr_path),
-            reason="unified_h5_metadata_projection_not_implemented",
-        )
+    unified_h5 = plan.h5_path is not None and bool(
+        stimulus_h5_unified_profile(plan.h5_path)
+    )
+    if unified_h5:
+        # Subject metadata is projected after the native import admits the H5;
+        # without that import there is no verified copy to project from.
+        if not opts.import_stimulus:
+            _log(
+                logger,
+                "experiment_setup_not_projected",
+                recording_dir=str(plan.recording_dir),
+                zarr_path=str(plan.zarr_path),
+                reason="unified_h5_metadata_requires_native_import",
+            )
     elif plan.h5_path is not None:
         try:
             setup = import_experiment_setup(plan)
@@ -998,7 +1058,13 @@ def process_recording_import(
                 reason="stimulus_runs already present",
             )
         else:
-            stim_ok, stim_rc, stim_cmd = run_stimulus_import(plan, opts)
+            stim_opts = opts
+            if unified_h5:
+                stim_opts = replace(
+                    opts,
+                    stimulus_run_name=opts.stimulus_run_name or new_native_run_name(),
+                )
+            stim_ok, stim_rc, stim_cmd = run_stimulus_import(plan, stim_opts)
             _log(
                 logger,
                 "stimulus_result",
@@ -1017,6 +1083,24 @@ def process_recording_import(
                         if len(stim_cmd) == 1
                         else "stimulus import failed"
                     ),
+                )
+            if unified_h5:
+                try:
+                    setup = project_unified_subject_metadata(
+                        plan, str(stim_opts.stimulus_run_name)
+                    )
+                except Exception as exc:
+                    return RecordingImportResult(
+                        ok=False, failed_step="import_experiment_setup", error=str(exc)
+                    )
+                _log(
+                    logger,
+                    "experiment_setup_imported" if setup else "subject_metadata_absent",
+                    recording_dir=str(plan.recording_dir),
+                    zarr_path=str(plan.zarr_path),
+                    source="unified_native_candidate",
+                    native_run=str(stim_opts.stimulus_run_name),
+                    **(setup or {}),
                 )
 
     crop_ledger = (
