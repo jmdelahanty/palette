@@ -14,6 +14,8 @@ from fisheye.analysis.chaser_behavior import resolve_configured_chaser_behaviors
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.type_conversions import normalize_attr
 
+from .stimulus_metadata import is_unsupported_native_stimulus_run
+
 
 @dataclass(frozen=True)
 class ChaserMetadataIssue:
@@ -74,6 +76,20 @@ def extract_recording_chaser_metadata(
     for run_name in run_names:
         source_path = f"analysis/stimulus_runs/{run_name}"
         run_group = parent[run_name]
+        if is_unsupported_native_stimulus_run(run_group):
+            issues.append(
+                ChaserMetadataIssue(
+                    stimulus_run_id=run_name,
+                    source_path=source_path,
+                    reason="unsupported_native_stimulus_profile",
+                    detail=(
+                        "Native stimulus candidate "
+                        f"({run_group.attrs.get('source_profile')}) has no "
+                        "legacy protocol; chaser behavior is not extracted."
+                    ),
+                )
+            )
+            continue
         payload = _protocol_payload(run_group.attrs.get("protocol_json"))
         if payload is None:
             issues.append(
