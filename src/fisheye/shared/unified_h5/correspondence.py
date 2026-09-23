@@ -107,6 +107,30 @@ def _binding(h5):
     return binding, total
 
 
+@dataclass(frozen=True)
+class AcquisitionBinding:
+    """Validated Orange acquisition identity bound into one unified H5.
+
+    ``acquisition_session_id`` is the binding's ``recording_id``: the Orange
+    ``recording_session`` shared by every camera recording started together.
+    It is not the per-Arena Citrus ``/metadata/session@session_uuid``.
+    """
+
+    acquisition_session_id: str
+    camera_serial: str
+    acquisition_camera_id: str
+
+
+@contract_errors
+def read_acquisition_binding(h5) -> AcquisitionBinding:
+    binding, _total = _binding(h5)
+    return AcquisitionBinding(
+        acquisition_session_id=binding["recording_id"],
+        camera_serial=binding["camera_serial"],
+        acquisition_camera_id=binding["acquisition_camera_id"],
+    )
+
+
 def _receipt(h5, total, components):
     receipt = read_json(h5, "/correspondence/receipt_json", canonical=True)
     exact_keys(
