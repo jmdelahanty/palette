@@ -186,6 +186,12 @@ scripts/py -m fisheye.utils.run_keypoint_training_pipeline \
   --export-trt
 ```
 
+For acquisition delivery after registered model promotion, run the final
+[portable pose deployment packaging step](pose_model_deployment_contract.md).
+It binds the exported ONNX to the exact training-order skeleton and input
+contract without modifying model bytes, historical manifests, or selectors.
+The optional training exports above do not themselves emit that transfer bundle.
+
 Dry-run preflight (no files written):
 
 ```bash
