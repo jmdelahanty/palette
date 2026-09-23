@@ -12,10 +12,11 @@ import os
 import stat
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, List, Mapping, Optional
 
+import h5py
 import zarr
 
 from fisheye.registry.recording_identity_authority import (
@@ -66,6 +67,8 @@ from fisheye.shared.recording_import_receipt import (
     recording_import_receipt_paths,
 )
 from fisheye.shared.run_provenance import git_identity
+from fisheye.shared.unified_h5 import PROFILE as UNIFIED_H5_PROFILE
+from fisheye.shared.unified_h5 import declared_unified_profile
 from fisheye.shared.source_recording_identity import (
     SOURCE_ANALYSIS_CLASSIFICATION,
     SOURCE_RECORDING_IDENTITY_PROFILE,
@@ -95,6 +98,9 @@ class RecordingAnalysisPlan:
     cam_video: Path | None
     zarr_path: Path
     recording_layout: str = "single_video"
+    # External Citrus finalization receipt for a unified experimental H5. It is
+    # required to import a unified H5 and never inferred from the H5 location.
+    finalization_receipt_path: Path | None = None
 
 
 @dataclass
@@ -764,11 +770,37 @@ def _stimulus_import_lease_fds() -> tuple[int, ...]:
     return (descriptor,)
 
 
+def stimulus_h5_unified_profile(h5_path: Path | None) -> str | None:
+    """Unified artifact profile declared by the stimulus H5, or None for legacy.
+
+    An absent or unreadable file is left to the importer, which re-detects a
+    unified H5 itself and refuses it without an explicit profile.
+    """
+
+    if h5_path is None or not Path(h5_path).is_file():
+        return None
+    try:
+        with h5py.File(h5_path, "r") as h5:
+            return declared_unified_profile(h5)
+    except OSError:
+        return None
+
+
 def run_stimulus_import(
     plan: RecordingAnalysisPlan, opts: RecordingImportOptions
 ) -> tuple[bool, int, List[str]]:
     if plan.h5_path is None:
         return False, 2, ["missing_h5_for_stimulus_import"]
+    unified_profile = stimulus_h5_unified_profile(plan.h5_path)
+    if unified_profile is not None:
+        if unified_profile != UNIFIED_H5_PROFILE:
+            return False, 2, [f"unsupported_unified_h5_profile:{unified_profile}"]
+        if plan.finalization_receipt_path is None:
+            return False, 2, ["unified_h5_requires_finalization_receipt"]
+        if opts.stimulus_overwrite:
+            return False, 2, ["unified_h5_import_is_immutable_no_overwrite"]
+        if opts.stimulus_metadata_and_calibration_only:
+            return False, 2, ["unified_h5_has_no_metadata_only_import"]
     lease_fds = _stimulus_import_lease_fds()
     cmd = [
         sys.executable,
@@ -777,6 +809,15 @@ def run_stimulus_import(
         str(plan.h5_path),
         str(plan.zarr_path),
     ]
+    if unified_profile is not None:
+        cmd.extend(
+            [
+                "--source-profile",
+                unified_profile,
+                "--finalization-receipt",
+                str(plan.finalization_receipt_path),
+            ]
+        )
     if opts.stimulus_run_name:
         cmd.extend(["--run-name", opts.stimulus_run_name])
     if opts.stimulus_overwrite:
@@ -915,7 +956,17 @@ def process_recording_import(
         **frame_clock,
     )
 
-    if plan.h5_path is not None:
+    if plan.h5_path is not None and stimulus_h5_unified_profile(plan.h5_path):
+        # The legacy reader only knows /subject_metadata and would publish
+        # nothing for a unified H5. Say so instead of skipping silently.
+        _log(
+            logger,
+            "experiment_setup_not_projected",
+            recording_dir=str(plan.recording_dir),
+            zarr_path=str(plan.zarr_path),
+            reason="unified_h5_metadata_projection_not_implemented",
+        )
+    elif plan.h5_path is not None:
         try:
             setup = import_experiment_setup(plan)
         except Exception as exc:
@@ -961,7 +1012,11 @@ def process_recording_import(
                     ok=False,
                     failed_step="import_stimulus_to_zarr",
                     returncode=int(stim_rc),
-                    error="stimulus import failed",
+                    error=(
+                        f"stimulus import refused: {stim_cmd[0]}"
+                        if len(stim_cmd) == 1
+                        else "stimulus import failed"
+                    ),
                 )
 
     crop_ledger = (
@@ -1134,6 +1189,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--recording-dir", type=Path, required=True, help="Recording directory to process.")
     parser.add_argument("--video", type=Path, help="Optional explicit camera video path.")
     parser.add_argument("--h5", type=Path, help="Optional explicit stimulus H5 path.")
+    parser.add_argument(
+        "--finalization-receipt",
+        type=Path,
+        help="External Citrus finalization receipt; required when the H5 is a unified experimental H5.",
+    )
     parser.add_argument("--output", type=Path, help="Optional explicit analysis zarr output path.")
 
     parser.add_argument("--apply", action="store_true", help="Execute import steps.")
@@ -1200,6 +1260,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     except ValueError as exc:
         print(f"Plan resolution failed: {exc}")
         return 1
+    if args.finalization_receipt is not None:
+        plan = replace(
+            plan,
+            finalization_receipt_path=args.finalization_receipt.expanduser().resolve(),
+        )
 
     print("Single recording import plan")
     print(f"  recording_dir: {plan.recording_dir}")
