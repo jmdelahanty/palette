@@ -1126,6 +1126,85 @@ def _subject_mask_runtime_state(
         "component_review_completion_ready": bool(completion_guard.get("ready")),
     }))
 
+def _subject_mask_tail_border_status(runtime, *, store, roi_idx: int, mask: np.ndarray) -> dict[str, object] | None:
+    from fisheye.shared.detect_reason_codec import decode_reason_bytes
+    from fisheye.shared.recovered_training_review_contract import REVIEW_SCHEMA, NATIVE_REVIEW_SCHEMA
+    from fisheye.training.mask_tail_border_acceptance import (
+        ACTION, active_acceptances, body_digest, expected_row_identity,
+        validate_acceptance_record,
+    )
+
+    if runtime.component_name != "subject_body" or runtime.refined.group.attrs.get("schema_id") not in (REVIEW_SCHEMA, NATIVE_REVIEW_SCHEMA):
+        return None
+    malformed_acceptance = None
+    try:
+        record = active_acceptances(runtime.refined.group).get(str(roi_idx))
+    except ValueError as exc:
+        record = None
+        malformed_acceptance = str(exc)
+    current_digest = body_digest(mask)
+    bound = False
+    if record:
+        try:
+            bound = validate_acceptance_record(
+                str(roi_idx), record, body=mask,
+                source_crop_run=str(runtime.refined.group.attrs.get("source_crop_run") or ""),
+                row_identity=expected_row_identity(runtime.refined.group, roi_idx),
+            )
+        except ValueError as exc:
+            malformed_acceptance = str(exc)
+    checkpoint = store.get_session_checkpoint(
+        task_id=runtime.task_id, roi_idx=roi_idx, component_name=runtime.component_name,
+        state="active",
+    ) if store is not None else None
+    if checkpoint is None and store is not None:
+        checkpoint = store.get_session_checkpoint(
+            task_id=runtime.task_id, roi_idx=roi_idx, component_name=runtime.component_name,
+            state="applying",
+        )
+    pending = checkpoint.get("payload", {}).get(ACTION) if checkpoint else None
+    seed_reason = None
+    name = str(runtime.refined.run_name)
+    for prefix in ("mask_tail_edit_", "recovered_masks_edit_"):
+        if name.startswith(prefix):
+            seed_name = "head_tail11_fins_seed_" + name.removeprefix(prefix)
+            seeds = runtime.root.get("keypoints_runs")
+            if seeds is not None and seed_name in seeds:
+                seed = seeds[seed_name]
+                if (
+                    seed.attrs.get("source_bindings") == runtime.refined.group.attrs.get("source_bindings")
+                    and seed.attrs.get("source_crop_run") == runtime.refined.group.attrs.get("source_crop_run")
+                    and "reason_bytes" in seed
+                ):
+                    seed_reason = str(decode_reason_bytes(seed["reason_bytes"][roi_idx:roi_idx + 1])[0])
+            break
+    offer = tail_successor_offer(store, runtime)
+    if offer and int(offer.get("tail_refresh_mask_revision") or -1) == _subject_mask_edit_revision(runtime):
+        failure = next((item for item in offer.get("tail_refresh_failures", []) if int(item.get("roi_idx", -1)) == roi_idx), None)
+        visible = roi_idx in offer.get("tail_refresh_visible_endpoint_rows", [])
+        outcome = {
+            "mask_revision": int(offer["tail_refresh_mask_revision"]),
+            "status": "failed" if failure else "derived",
+            "reason": str(failure["reason"]) if failure else ("tail_tip_is_visible_crop_endpoint" if visible else "tail_derived"),
+            "visible_endpoint": bool(visible),
+        }
+    else:
+        outcome = None
+    return {
+        "roi_idx": int(roi_idx),
+        "mask_revision": _subject_mask_edit_revision(runtime),
+        "original_queued_reason": seed_reason,
+        "accepted": bound,
+        "acceptance": dict(record) if bound else None,
+        "stale_acceptance": bool(record and not bound),
+        "malformed_acceptance": malformed_acceptance,
+        "pending_action": pending,
+        "checkpoint_state": str(checkpoint.get("state") or "") if checkpoint else None,
+        "latest_outcome": outcome,
+        "body_mask_sha256": current_digest,
+    }
+
+
 def _subject_mask_current_payload(
     runtime: SubjectMaskRuntimeSession,
     *,
@@ -1174,6 +1253,7 @@ def _subject_mask_current_payload(
             frame_idx = int(np.asarray(frame_indices[roi_idx]).item())
         except Exception:
             frame_idx = None
+    tail_border = _subject_mask_tail_border_status(runtime, store=store, roi_idx=roi_idx, mask=mask)
     return {
         "ok": True,
         "roi_idx": roi_idx,
@@ -1196,5 +1276,6 @@ def _subject_mask_current_payload(
         "mask": _raw_array_payload(mask),
         "mask_area_px": int(mask.sum()),
         "session_checkpoint": session_checkpoint,
+        "tail_crop_border": tail_border,
         "state": _subject_mask_runtime_state(runtime, store=store),
     }

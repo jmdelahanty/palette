@@ -46,6 +46,15 @@ RECIPE = {
     "snout_projection_tolerance_px": 1.0,
 }
 ORIGIN_CODES = {"missing": 0, "recovered_head": 1, "mask_derived": 2, "manual": 3}
+VISIBLE_ENDPOINT_RECIPE_ID = "recovered_head_oriented_subject_shape_visible_endpoint_tail11_v3"
+
+
+def recipe_with_visible_endpoint(schema_name):
+    return {
+        **recipe_for_schema(schema_name),
+        "id": VISIBLE_ENDPOINT_RECIPE_ID,
+        "crop_border_policy": "accepted_roi_visible_centerline_endpoint_no_extrapolation_v1",
+    }
 
 
 def recipe_for_schema(schema_name):
@@ -62,6 +71,7 @@ def derive_tail_seed(
     head_points: np.ndarray,
     *,
     schema_name: str = SCHEMA_NAME,
+    accepted_crop_border_rows: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Keep every row, preserve head coordinates, leave fins/failures as NaNs."""
     recipe = recipe_for_schema(schema_name)
@@ -113,6 +123,11 @@ def derive_tail_seed(
         tail_sample_count=11,
     )
     n, _, h, w = masks.shape
+    accepted = None
+    if accepted_crop_border_rows is not None:
+        accepted = np.asarray(accepted_crop_border_rows)
+        if accepted.shape != (n,) or accepted.dtype != np.bool_:
+            raise ValueError("Expected one boolean crop-border acceptance per ROI")
     point_count = 19 if include_snout else 18
     points = np.full((n, point_count, 2), np.nan, dtype=head.dtype)
     points[:, :3] = head
@@ -125,7 +140,10 @@ def derive_tail_seed(
     for row in range(n):
         if not spline.tail_sample_valid[row]:
             continue
-        if np.any(body[row, (0, -1), :]) or np.any(body[row, :, (0, -1)]):
+        touches_border = bool(
+            np.any(body[row, (0, -1), :]) or np.any(body[row, :, (0, -1)])
+        )
+        if touches_border and not (accepted is not None and accepted[row]):
             reasons[row] = "body_touches_crop_border"
             continue
         _, total = _resample_polyline(
@@ -168,6 +186,11 @@ def derive_tail_seed(
         "swim_caudal_anchor_xy": anchor.point_xy,
         "training_eligible": np.zeros(n, dtype=bool),
     }
+    if accepted is not None:
+        # This records the physical limitation even when all visible stations
+        # pass the unchanged inside-body check. It never claims anatomical tip.
+        result["tail_tip_truncated"] = accepted & valid
+        result["tail_visible_endpoint_accepted"] = accepted.copy()
     if include_snout:
         snout_valid = snout.valid & np.isfinite(snout.point_xy).all(axis=1)
         inside = (

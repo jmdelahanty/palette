@@ -163,6 +163,8 @@ def refresh_training_tail_after_mask_apply(
         "tail_refresh_manual_point_count": result["manual_point_count"],
         "tail_refresh_mask_revision": int(expected_mask_revision),
     }
+    if "visible_endpoint_rows" in result:
+        offer["tail_refresh_visible_endpoint_rows"] = result["visible_endpoint_rows"]
     store.record_event(
         task_id=runtime.task_id,
         recording_id=runtime.recording_id,

@@ -38,7 +38,9 @@ from fisheye.training.mask_tail_keypoints import (
     LEGACY_SCHEMA_NAME,
     SCHEMA_NAME,
     recipe_for_schema,
+    recipe_with_visible_endpoint,
 )
+from fisheye.training.mask_tail_border_acceptance import bound_acceptances
 from fisheye.training.recover_merged_subject_masks import (
     publish_review_payload,
     review_tasks,
@@ -103,14 +105,23 @@ def _capture(root, *, mask_name, pose_name, revision):
             existing_keypoint_policy="preserve_head_snout_fins_by_name_v1",
             tail_policy="derive_all_11_stations_from_mask",
         )
+    existing_recipe = pose.attrs.get("derivation_recipe")
+    variant_recipe = recipe_with_visible_endpoint(schema_name)
+    if pose.attrs["schema_id"] == NATIVE_REVIEW_SCHEMA:
+        variant_recipe.update(
+            existing_keypoint_policy="preserve_head_snout_fins_by_name_v1",
+            tail_policy="derive_all_11_stations_from_mask",
+        )
     if (
-        pose.attrs.get("derivation_recipe") != recipe
+        existing_recipe not in (recipe, variant_recipe)
         or pose.attrs.get("mask_edit_policy")
         != "new_derivation_version_required_after_mask_corrections"
     ):
         raise ValueError("Tail refresh cannot change an existing derivation recipe")
+    labels = tuple(mask.attrs["mask_labels"])
+    accepted = bound_acceptances(mask, mask_labels=labels)
     identities = {}
-    for name in _IDENTITY_ARRAYS:
+    for name in (*_IDENTITY_ARRAYS, *(("instance_key",) if accepted else ())):
         present = [name in g for g in (mask, pose, crop)]
         if not any(present):
             continue
@@ -125,7 +136,6 @@ def _capture(root, *, mask_name, pose_name, revision):
     manual = np.asarray(pose["keypoint_manual_edit"][:], dtype=bool)
     origins = np.asarray(pose["keypoint_origin"][:])
     original_reasons = read_reason_labels(pose)
-    labels = tuple(mask.attrs["mask_labels"])
     if (
         masks.dtype != np.uint8
         or masks.ndim != 4
@@ -165,6 +175,8 @@ def _capture(root, *, mask_name, pose_name, revision):
         },
         "recovered_review_qc": dict(pose.attrs["recovered_review_qc"]),
     }
+    if accepted:
+        proof["tail_crop_border_acceptances"] = accepted
     arrays = {
         **identities,
         "masks_roi": masks,
@@ -514,6 +526,10 @@ def regenerate_training_tail_version(
             ),
             "publications": publications,
         }
+        if "tail_tip_truncated" in seed:
+            result["visible_endpoint_rows"] = [
+                int(row) for row in np.flatnonzero(seed["tail_tip_truncated"][:])
+            ]
         result["tasks"] = review_tasks(
             archive, binding["recording_id"], result, version
         )

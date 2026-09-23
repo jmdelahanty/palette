@@ -13,6 +13,7 @@ import zarr
 
 from fisheye.labeling import web
 from fisheye.training.recovered_mask_review_payload import array_hashes
+from fisheye.training.mask_tail_border_acceptance import ATTR as TAIL_ACCEPTANCE_ATTR
 from fisheye.tune.refined_subject_mask_review import _refined_subject_write_lock
 from tests.unit.fisheye.test_labeling_web_routes import _running_server
 from tests.unit.fisheye.test_mask_tail_apply_refresh import (
@@ -64,6 +65,111 @@ def save_mask(base, session_id, mask, *, position=1):
     return saved["state"]["target_token"]
 
 
+def test_http_accept_and_revoke_visible_endpoint_without_painting(reviewed_archive, context):
+    path, root, initial = reviewed_archive
+    store, runtime, pose_session, mask_session = context
+    mask_run = root[initial["paths"]["mask_edit"]]
+    body = np.asarray(mask_run["masks_roi"][0, 0]).copy()
+    body[108:128, 64] = 1
+    mask_run["masks_roi"][0, 0] = body
+    before = np.asarray(mask_run["masks_roi"][:]).copy()
+    route = f"/api/sessions/{mask_session.session_id}/subject-mask"
+    with _running_server(store, user="reviewer") as base:
+        status, current = request(base, route + "/roi/current")
+        assert status == 200, current
+        assert "body_touches_crop_border" in current["tail_crop_border"]["original_queued_reason"] or current["tail_crop_border"]["original_queued_reason"]
+        status, saved = request(base, route + "/save", {
+            "mask": web._raw_array_payload(body),
+            "tail_crop_border_action": {"action": "accept", "reason": "Only the tiny visible tail tip is clipped", "accepted_by": "forged-user", "accepted_at_utc": "2000-01-01T00:00:00Z"},
+            "target_token": current["state"]["target_token"],
+        })
+        assert status == 200, saved
+        status, checkpoint_status = request(base, route + "/roi/status")
+        assert status == 200, checkpoint_status
+        assert checkpoint_status["tail_crop_border"]["pending_action"]["action"] == "accept"
+        status, applied = request(base, route + "/apply", {
+            "apply_id": "accept-tail", "target_token": saved["state"]["target_token"],
+        })
+        assert status == 200, applied
+        assert applied["result"]["tail_refresh_visible_endpoint_rows"] == [0]
+        status, current_status = request(base, route + "/roi/status")
+        assert status == 200, current_status
+        assert current_status["tail_crop_border"]["accepted"] is True
+        assert current_status["tail_crop_border"]["latest_outcome"]["visible_endpoint"] is True
+        np.testing.assert_array_equal(mask_run["masks_roi"][:], before)
+        fresh_mask = zarr.open_group(str(path), mode="r", use_consolidated=False)[initial["paths"]["mask_edit"]]
+        record = fresh_mask.attrs[TAIL_ACCEPTANCE_ATTR]["0"]
+        assert record["accepted_by"] == "reviewer"
+        assert record["accepted_at_utc"] != "2000-01-01T00:00:00Z"
+        assert record["reason"] == "Only the tiny visible tail tip is clipped"
+
+        status, state = request(base, route + "/state")
+        status, old_client_saved = request(base, route + "/save", {
+            "mask": web._raw_array_payload(body),
+            "target_token": state["state"]["target_token"],
+        })
+        assert status == 200, old_client_saved
+        status, old_client_apply = request(base, route + "/apply", {
+            "apply_id": "unchanged-old-client", "target_token": old_client_saved["state"]["target_token"],
+        })
+        assert status == 200, old_client_apply
+        assert old_client_apply["result"]["tail_refresh_visible_endpoint_rows"] == [0]
+        fresh_mask = zarr.open_group(str(path), mode="r", use_consolidated=False)[initial["paths"]["mask_edit"]]
+        assert fresh_mask.attrs[TAIL_ACCEPTANCE_ATTR]["0"]["accepted_at_mask_revision"] == record["accepted_at_mask_revision"]
+
+        status, state = request(base, route + "/state")
+        status, saved = request(base, route + "/save", {
+            "mask": web._raw_array_payload(body),
+            "tail_crop_border_action": {"action": "revoke"},
+            "target_token": state["state"]["target_token"],
+        })
+        assert status == 200, saved
+        status, revoked = request(base, route + "/apply", {
+            "apply_id": "revoke-tail", "target_token": saved["state"]["target_token"],
+        })
+        assert status == 200, revoked
+        assert 0 not in revoked["result"].get("tail_refresh_visible_endpoint_rows", [])
+        assert any(f["roi_idx"] == 0 and f["reason"] == "body_touches_crop_border" for f in revoked["result"]["tail_refresh_failures"])
+        fresh_mask = zarr.open_group(str(path), mode="r", use_consolidated=False)[initial["paths"]["mask_edit"]]
+        assert "0" not in fresh_mask.attrs[TAIL_ACCEPTANCE_ATTR]
+        np.testing.assert_array_equal(mask_run["masks_roi"][:], before)
+
+
+def test_http_changed_body_after_accept_checkpoint_clears_pending_action(reviewed_archive, context):
+    path, root, initial = reviewed_archive
+    store, runtime, pose_session, mask_session = context
+    body = np.asarray(root[initial["paths"]["mask_edit"]]["masks_roi"][0, 0]).copy()
+    body[108:128, 64] = 1
+    changed = body.copy()
+    changed[65, 64] = 0
+    route = f"/api/sessions/{mask_session.session_id}/subject-mask"
+    with _running_server(store, user="reviewer") as base:
+        status, current = request(base, route + "/roi/current")
+        assert status == 200, current
+        status, accepted_checkpoint = request(base, route + "/save", {
+            "mask": web._raw_array_payload(body),
+            "tail_crop_border_action": {"action": "accept", "reason": "Slight tip clipping is acceptable"},
+            "target_token": current["state"]["target_token"],
+        })
+        assert status == 200, accepted_checkpoint
+        status, later_checkpoint = request(base, route + "/save", {
+            "mask": web._raw_array_payload(changed),
+            "target_token": accepted_checkpoint["state"]["target_token"],
+        })
+        assert status == 200, later_checkpoint
+        status, row_status = request(base, route + "/roi/status")
+        assert status == 200, row_status
+        assert row_status["tail_crop_border"]["pending_action"] is None
+        status, applied = request(base, route + "/apply", {
+            "apply_id": "changed-after-accept", "target_token": later_checkpoint["state"]["target_token"],
+        })
+        assert status == 200, applied
+        assert 0 not in applied["result"].get("tail_refresh_visible_endpoint_rows", [])
+        assert any(f["roi_idx"] == 0 for f in applied["result"]["tail_refresh_failures"])
+        fresh = zarr.open_group(str(path), mode="r", use_consolidated=False)[initial["paths"]["mask_edit"]]
+        assert TAIL_ACCEPTANCE_ATTR not in fresh.attrs
+
+
 @pytest.mark.parametrize("repair", [True, False], ids=["repaired", "still_fragmented"])
 def test_http_apply_offers_durable_successor_and_keeps_original_session(
     reviewed_archive, context, repair
@@ -88,6 +194,7 @@ def test_http_apply_offers_durable_successor_and_keeps_original_session(
         assert result["qc_status"] == "complete"
         assert applied["state"]["qc_status"] == "complete"
         assert result["tail_refresh_status"] == "complete"
+        assert TAIL_ACCEPTANCE_ATTR not in zarr.open_group(str(path), mode="r", use_consolidated=False)[initial["paths"]["mask_edit"]].attrs
         assert result["tail_refresh_valid_rows"] == (2 if repair else 1)
         assert result["tail_refresh_training_eligible_rows"] == (2 if repair else 1)
         failures = result["tail_refresh_failures"]
@@ -178,9 +285,17 @@ def test_tail_publication_failure_blocks_sibling_task_until_locked_retry(
     sibling_route = f"/api/sessions/{sibling.session_id}/subject-mask"
     mask = root[initial["paths"]["mask_edit"]]
     with _running_server(store, user="reviewer") as base:
-        body_token = save_mask(
-            base, mask_session.session_id, np.asarray(mask["masks_roi"][0, 0])
-        )
+        clipped = np.asarray(mask["masks_roi"][0, 0]).copy()
+        clipped[108:128, 64] = 1
+        status, current = request(base, route + "/roi/current")
+        assert status == 200, current
+        status, saved = request(base, route + "/save", {
+            "mask": web._raw_array_payload(clipped),
+            "tail_crop_border_action": {"action": "accept", "reason": "Tiny visible tail endpoint is usable"},
+            "target_token": current["state"]["target_token"],
+        })
+        assert status == 200, saved
+        body_token = saved["state"]["target_token"]
         status, failed_response = request(
             base,
             route + "/apply",
@@ -255,6 +370,7 @@ def test_tail_publication_failure_blocks_sibling_task_until_locked_retry(
         assert status == 200, retried
         assert retried["result"]["already_applied"] is True
         assert retried["result"]["tail_refresh_status"] == "complete"
+        assert retried["result"]["tail_refresh_visible_endpoint_rows"] == [0]
         assert checked_lock
         after = zarr.open_group(str(path), mode="r", use_consolidated=False)[
             initial["paths"]["mask_edit"]

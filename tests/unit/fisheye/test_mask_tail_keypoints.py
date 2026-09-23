@@ -6,7 +6,7 @@ from scipy import integrate, interpolate
 
 from fisheye.shared.pose_schema import schema_from_package
 from fisheye.analysis.subject_shape_spline import sample_spline_segment_by_arclength
-from fisheye.training.mask_tail_keypoints import derive_tail_seed
+from fisheye.training.mask_tail_keypoints import derive_tail_seed, recipe_for_schema, recipe_with_visible_endpoint
 from fisheye.shared.detect_reason_codec import decode_reason_bytes
 
 
@@ -126,3 +126,31 @@ def test_valid_snout_is_retained_when_tail_cannot_be_anchored():
     assert not result["tail_valid"][0]
     assert np.isnan(result["keypoints_roi"][0, 3:14]).all()
     assert np.isfinite(result["keypoints_roi"][0, 18]).all()
+
+
+def test_explicit_crop_edge_acceptance_keeps_visible_endpoint_and_other_checks():
+    masks, head = _fish()
+    clipped = masks[:, :, :108, :].copy()
+    strict = derive_tail_seed(clipped, ("subject_body", "eyes_union", "swim_bladder"), head)
+    assert strict["tail_failure_reason"].tolist() == ["body_touches_crop_border"]
+    assert "tail_tip_truncated" not in strict
+    accepted = derive_tail_seed(
+        clipped, ("subject_body", "eyes_union", "swim_bladder"), head,
+        accepted_crop_border_rows=np.array([True]),
+    )
+    assert accepted["tail_valid"].tolist() == [True]
+    assert accepted["tail_tip_truncated"].tolist() == [True]
+    assert accepted["tail_visible_endpoint_accepted"].tolist() == [True]
+    np.testing.assert_array_equal(accepted["keypoints_roi"][:, :3], head)
+    assert accepted["keypoint_origin"][0, 13] == 2
+    assert accepted["keypoints_roi"][0, 13, 1] < 108
+    assert recipe_for_schema("head_tail11_fins_v2")["id"].endswith("v2")
+    assert recipe_with_visible_endpoint("head_tail11_fins_v2")["id"].endswith("v3")
+    fragmented = clipped.copy()
+    fragmented[0, 0, 1, 1] = 1
+    refused = derive_tail_seed(
+        fragmented, ("subject_body", "eyes_union", "swim_bladder"), head,
+        accepted_crop_border_rows=np.array([True]),
+    )
+    assert not refused["tail_valid"][0]
+    assert refused["tail_failure_reason"][0] == "fragmented_subject_body_mask"

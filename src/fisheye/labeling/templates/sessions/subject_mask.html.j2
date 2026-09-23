@@ -146,6 +146,17 @@
       </div>
       <aside class="panel">
         <div id="summary" class="meta"></div>
+        <section id="tail-border-controls" hidden aria-label="Visible tail endpoint acceptance">
+          <h3>Tail reaches crop edge</h3>
+          <p class="meta">Accept only when the slightly clipped tail is usable. The last derived point represents the visible endpoint at the crop edge; it does not reconstruct the missing anatomical tip. Checkpoint this decision, then use Apply saved edits to regenerate the tail. This does not approve the mask or training labels.</p>
+          <label for="tail-border-reason">Reason for accepting this ROI</label>
+          <input id="tail-border-reason" type="text" maxlength="240" placeholder="Why is the visible tail endpoint usable?">
+          <div class="buttons">
+            <button type="button" class="secondary" onclick="saveTailBorder('accept')">Checkpoint acceptance</button>
+            <button type="button" class="secondary" onclick="saveTailBorder('revoke')">Checkpoint revocation</button>
+          </div>
+          <div id="tail-border-status" class="meta"></div>
+        </section>
         <label for="mask-view">View</label>
         <select id="mask-view" onchange="setMaskView(this.value)" aria-describedby="mask-view-help">
           <option value="overlay">Image + mask</option>

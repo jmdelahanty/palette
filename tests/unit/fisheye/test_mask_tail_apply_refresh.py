@@ -11,6 +11,12 @@ from fisheye.training.recovered_mask_review_payload import (
 )
 from fisheye.tune import keypoint_review_backend as editor
 from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
+from fisheye.training.mask_tail_border_acceptance import (
+    ATTR as TAIL_ACCEPTANCE_ATTR,
+    apply_acceptance_actions,
+    body_digest,
+    expected_row_identity,
+)
 
 
 @pytest.fixture(params=[False, True], ids=["recovered", "native"])
@@ -174,6 +180,91 @@ def test_same_source_retry_reuses_version_and_preserves_successor_edits(
     second = refresh(reviewed_archive)
     assert first["paths"] == second["paths"]
     np.testing.assert_array_equal(session.kp_roi_arr[0], points)
+
+
+def test_visible_endpoint_acceptance_survives_successor_and_revocation_restores_strict(reviewed_archive):
+    path, root, old_result = reviewed_archive
+    mask = root[old_result["paths"]["mask_edit"]]
+    body = np.asarray(mask["masks_roi"][0, 0]).copy()
+    before_digest = body_digest(body)
+    body[108:128, 64] = 1
+    mask["masks_roi"][0, 0] = body
+    apply_acceptance_actions(
+        mask, mask_labels=tuple(mask.attrs["mask_labels"]), revision=1,
+        actions=[{
+            "roi_idx": 0,
+            "action": {"action": "accept", "reason": "A very small visible tip is clipped"},
+            "before_body_sha256": before_digest,
+            "row_identity": expected_row_identity(mask, 0),
+            "user": "reviewer@example.org",
+            "timestamp": "2026-09-23T12:00:00+00:00",
+        }],
+    )
+    first = refresh(reviewed_archive)
+    published = zarr.open_group(str(path), mode="a", use_consolidated=False)
+    seed = published[first["paths"]["seed"]]
+    assert seed["tail_valid"][:].tolist() == [True, False]
+    assert seed["tail_tip_truncated"][:].tolist() == [True, False]
+    assert seed["keypoint_origin"][0, 13] == 2
+    assert "tail_tip_is_visible_crop_endpoint" in read_reason_labels(seed)[0]
+    next_mask = published[first["paths"]["mask_edit"]]
+    assert next_mask.attrs[TAIL_ACCEPTANCE_ATTR]["0"]["source_crop_run"] == first["paths"]["crop"].split("/")[1]
+    next_mask.attrs["edit_revision"] = 2
+    second = regenerate_training_tail_version(
+        archive=path,
+        refined_mask_run=first["paths"]["mask_edit"].split("/")[1],
+        refined_keypoint_run=first["paths"]["pose_edit"].split("/")[1],
+        apply_id="apply-two", expected_mask_revision=2,
+    )
+    second_seed = published[second["paths"]["seed"]]
+    assert second_seed["tail_tip_truncated"][0]
+    second_mask = published[second["paths"]["mask_edit"]]
+    second_mask.attrs[TAIL_ACCEPTANCE_ATTR] = {}
+    second_mask.attrs["edit_revision"] = 3
+    third = regenerate_training_tail_version(
+        archive=path,
+        refined_mask_run=second["paths"]["mask_edit"].split("/")[1],
+        refined_keypoint_run=second["paths"]["pose_edit"].split("/")[1],
+        apply_id="apply-three", expected_mask_revision=3,
+    )
+    third_seed = published[third["paths"]["seed"]]
+    assert "tail_tip_truncated" not in third_seed
+    assert not third_seed["tail_valid"][0]
+    assert "body_touches_crop_border" in read_reason_labels(third_seed)[0]
+
+
+def test_body_change_invalidates_only_the_edited_roi_acceptance(reviewed_archive):
+    _, root, initial = reviewed_archive
+    mask = root[initial["paths"]["mask_edit"]]
+    labels = tuple(mask.attrs["mask_labels"])
+    original = np.asarray(mask["masks_roi"][0, 0]).copy()
+    clipped = original.copy()
+    clipped[108:128, 64] = 1
+    mask["masks_roi"][0, 0] = clipped
+    actor = {"action": "accept", "reason": "Only the visible tail tip is clipped"}
+    apply_acceptance_actions(mask, mask_labels=labels, revision=2, actions=[{
+        "roi_idx": 0, "action": actor, "before_body_sha256": body_digest(original),
+        "row_identity": expected_row_identity(mask, 0), "user": "reviewer",
+        "timestamp": "2026-09-23T12:00:00+00:00",
+    }])
+    accepted = mask.attrs[TAIL_ACCEPTANCE_ATTR]["0"]
+    other_before = np.asarray(mask["masks_roi"][1, 0]).copy()
+    other_after = other_before.copy(); other_after[2, 2] = 1
+    mask["masks_roi"][1, 0] = other_after
+    apply_acceptance_actions(mask, mask_labels=labels, revision=3, actions=[{
+        "roi_idx": 1, "action": None, "before_body_sha256": body_digest(other_before),
+        "row_identity": expected_row_identity(mask, 1), "user": "reviewer",
+        "timestamp": "2026-09-23T12:01:00+00:00",
+    }])
+    assert mask.attrs[TAIL_ACCEPTANCE_ATTR]["0"] == accepted
+    changed = clipped.copy(); changed[65, 64] = 0
+    mask["masks_roi"][0, 0] = changed
+    apply_acceptance_actions(mask, mask_labels=labels, revision=4, actions=[{
+        "roi_idx": 0, "action": None, "before_body_sha256": body_digest(clipped),
+        "row_identity": expected_row_identity(mask, 0), "user": "reviewer",
+        "timestamp": "2026-09-23T12:02:00+00:00",
+    }])
+    assert mask.attrs[TAIL_ACCEPTANCE_ATTR] == {}
 
 
 def test_retry_does_not_rebind_apply_to_changed_original_labels(reviewed_archive):

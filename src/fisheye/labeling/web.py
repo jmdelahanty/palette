@@ -299,6 +299,7 @@ from .web_session_renderers import (
     _video_detect_session_html,
 )
 from .web_wsgi_adapter import handle_with_flask_if_claimed
+from . import web_mask_tail_border as tail_border
 from .template_assets import read_labeling_asset, render_labeling_template
 from .web_responses import (
     _decode_uint8_payload,
@@ -2391,14 +2392,15 @@ def _make_handler(state: ServerState):
                     return True
                 self._write_json(payload)
                 return True
+            if subject_mask_path == "/roi/status":
+                self._write_json(tail_border.row_status_payload(runtime, state.store))
+                return True
             return False
 
         def _handle_subject_mask_post(self, session: Mapping[str, object], suffix: str, body: Mapping[str, object], user: str) -> bool:
             if not suffix.startswith("/subject-mask/"):
                 return False
             from fisheye.tune import refined_subject_mask_review as review_mod
-            from .web_subject_mask_apply_qc import refresh_subject_mask_apply_qc_locked
-            from .web_mask_tail_refresh import refresh_training_tail_after_mask_apply
 
             try:
                 runtime = _get_subject_mask_runtime(state, session)
@@ -2447,6 +2449,7 @@ def _make_handler(state: ServerState):
                         edited_mask = edited_mask[:, :, 0]
                     if tuple(edited_mask.shape) != tuple(canonical_mask.shape):
                         raise ValueError(f"mask shape mismatch: expected {tuple(canonical_mask.shape)}, got {tuple(edited_mask.shape)}")
+                    tail_border_action = tail_border.save_action(state.store, runtime, roi_idx=roi_idx, edited_mask=edited_mask, requested=body.get("tail_crop_border_action"))
                     frame_idx: int | None = None
                     if runtime.source.frame_indices is not None:
                         try:
@@ -2470,6 +2473,7 @@ def _make_handler(state: ServerState):
                             "schema": "palette.web_labeling_subject_mask_checkpoint_payload.v1",
                             "payload_kind": "dense_roi_replacement_mask",
                             "mask": _raw_array_payload(edited_mask),
+                            **tail_border.checkpoint_fields(tail_border_action, edited_mask),
                         },
                         metadata={
                             "schema": "palette.web_labeling_subject_mask_checkpoint_metadata.v1",
@@ -2580,6 +2584,8 @@ def _make_handler(state: ServerState):
                         ) if matching_pending is not None else nullcontext()
                         with retry_lock:
                             if matching_pending is not None:
+                                from .web_subject_mask_apply_qc import refresh_subject_mask_apply_qc_locked
+                                from .web_mask_tail_refresh import refresh_training_tail_after_mask_apply
                                 canonical_receipt_applied = True
                                 require_mask_apply_ownership(state.store, runtime, apply_id)
                                 fresh_root = review_mod.open_zarr_root(runtime.zarr_path, mode="a")
@@ -2678,7 +2684,9 @@ def _make_handler(state: ServerState):
                                 compute_workers_used = 1
                                 stale_checkpoint_ids: list[str] = []
                                 stale_rows: list[int] = []
+                                tail_border_actions: list[dict[str, object]] = []
                                 masks_array = runtime.refined.group["masks_roi"]
+                                tail_border.preflight_run(runtime)
                                 row_chunk: int | None = None
                                 cached_chunk_index = -1
                                 cached_chunk: np.ndarray | None = None
@@ -2729,13 +2737,9 @@ def _make_handler(state: ServerState):
                                     assert cached_chunk is not None
                                     current_stack = cached_chunk[roi_idx - chunk_index * row_chunk]
                                     before_mask = (np.asarray(current_stack[runtime.comp_idx], dtype=np.uint8) > 0).astype(np.uint8)
-                                    if tuple(edited_mask.shape) != tuple(before_mask.shape):
-                                        raise ValueError(
-                                            f"checkpoint mask shape mismatch for row {roi_idx}: "
-                                            f"expected {tuple(before_mask.shape)}, got {tuple(edited_mask.shape)}"
-                                        )
-                                    edited_stack = current_stack.copy()
-                                    edited_stack[runtime.comp_idx] = edited_mask
+                                    edited_stack, tail_action = tail_border.prepare_apply_row(runtime, checkpoint, roi_idx=roi_idx, current_stack=current_stack, before_mask=before_mask, edited_mask=edited_mask)
+                                    if tail_action is not None:
+                                        tail_border_actions.append(tail_action)
                                     checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
                                     applied_rows.append(roi_idx)
                                     edited_stacks.append(edited_stack)
@@ -2810,6 +2814,7 @@ def _make_handler(state: ServerState):
                                             update_reason="web_labeling_subject_mask_session_apply",
                                             compute_workers=compute_workers,
                                         )
+                                    tail_border.commit_actions(runtime, tail_border_actions, revision=int(edit_revision_before) + 1)
                                     edit_revision_after = int(edit_revision_before) + 1
                                     runtime.refined.group.attrs["edit_revision"] = int(edit_revision_after)
                                     runtime.refined.group.attrs["edit_revision_updated_at_utc"] = datetime.now(timezone.utc).isoformat()
@@ -2830,6 +2835,8 @@ def _make_handler(state: ServerState):
                                             task_id=runtime.task_id,
                                             apply_id=apply_id,
                                         )
+                                    from .web_subject_mask_apply_qc import refresh_subject_mask_apply_qc_locked
+                                    from .web_mask_tail_refresh import refresh_training_tail_after_mask_apply
                                     result_qc = refresh_subject_mask_apply_qc_locked(
                                         root=fresh_root,
                                         refined_run=runtime.refined.run_name,

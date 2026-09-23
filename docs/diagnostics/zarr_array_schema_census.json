@@ -62926,8 +62926,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/training/recovered_mask_review_payload.py",
-      "line": 173,
-      "occurrence_id": "schema-writer-937d58b2d2b58965",
+      "line": 208,
+      "occurrence_id": "schema-writer-06cee836b3f06aa4",
       "path_pattern": "<create(paths['crop'], {**lineage, 'roi_images': arrays['roi_images'], 'source_bbox_norm_coords': arrays['source_bbox_norm_coords']}, {'crop_storage_mode': 'materialized', 'roi_size': list(arrays['roi_images'].shape[1:]), 'pixel_operation': 'identity_copy'})>/source_roi_coordinates_full",
       "required": null,
       "shape_expression": "shape(arrays['source_roi_coordinates_full'])",
@@ -62939,7 +62939,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-d62527bf4d1fee05"
+      "writer_site_id": "writer-fac9c8531e52b863"
     },
     {
       "access_pattern": "windowed",
@@ -75962,10 +75962,10 @@
     "direct_zarr_api_site_count": 671,
     "dynamic_or_unresolved_writer_site_count": 362,
     "manual_zarr_metadata_site_count": 1,
-    "parsed_writer_candidate_module_count": 407,
+    "parsed_writer_candidate_module_count": 408,
     "reader_required_array_declaration_count": 117,
     "resolved_writer_leaf_name_count": 641,
-    "scanned_python_module_count": 1759,
+    "scanned_python_module_count": 1761,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,

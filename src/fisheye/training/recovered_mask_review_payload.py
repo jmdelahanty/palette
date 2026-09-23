@@ -26,6 +26,12 @@ from fisheye.training.mask_tail_keypoints import (
     SCHEMA_NAME,
     derive_tail_seed,
     recipe_for_schema,
+    recipe_with_visible_endpoint,
+)
+from fisheye.training.mask_tail_border_acceptance import (
+    ATTR as TAIL_ACCEPTANCE_ATTR,
+    expected_row_identity,
+    validate_acceptance_record,
 )
 from fisheye.training.recover_merged_training_recording import _sha256_array
 from fisheye.tune.refined_subject_mask_review import prepare_refined_subject_run
@@ -89,7 +95,34 @@ def _array(group, name, data):
 def build_review_payload(
     root, arrays, labels, binding, *, version, pose_schema=SCHEMA_NAME, native=False
 ):
-    recipe = recipe_for_schema(pose_schema)
+    source_proof = binding.get("mask_apply_refresh") or {}
+    acceptance_records = source_proof.get(
+        "tail_crop_border_acceptances", {}
+    )
+    if not isinstance(acceptance_records, dict):
+        raise ValueError("Invalid tail crop-border acceptance binding")
+    accepted_rows = None
+    if acceptance_records:
+        accepted_rows = np.zeros(len(arrays["roi_images"]), dtype=bool)
+        body_idx = labels.index("subject_body")
+        for key, record in acceptance_records.items():
+            if not isinstance(key, str):
+                raise ValueError("Accepted tail ROI key must be a canonical string")
+            row = int(key)
+            if row < 0 or row >= len(accepted_rows) or not isinstance(record, dict):
+                raise ValueError("Invalid accepted tail ROI")
+            actual_identity = expected_row_identity(arrays, row)
+            if not validate_acceptance_record(
+                key, record, body=arrays["masks_roi"][row, body_idx],
+                source_crop_run=str(source_proof.get("source_crop_run") or "").split("/")[-1],
+                row_identity=actual_identity,
+            ):
+                raise ValueError("Accepted tail ROI source binding is stale")
+            accepted_rows[row] = True
+    recipe = (
+        recipe_with_visible_endpoint(pose_schema)
+        if accepted_rows is not None else recipe_for_schema(pose_schema)
+    )
     if native:
         recipe = {
             **recipe,
@@ -116,6 +149,8 @@ def build_review_payload(
     for name in ("source_roi_idx", "source_refined_row_ids", "source_detect_row_index"):
         if name in arrays:
             lineage[name] = arrays[name]
+    if acceptance_records and "instance_key" in arrays:
+        lineage["instance_key"] = arrays["instance_key"]
     common = {
         "schema_id": NATIVE_REVIEW_SCHEMA if native else REVIEW_SCHEMA,
         "schema_version": 1,
@@ -202,6 +237,7 @@ def build_review_payload(
         labels,
         arrays["head_keypoints_roi"],
         schema_name=pose_schema,
+        **({"accepted_crop_border_rows": accepted_rows} if accepted_rows is not None else {}),
     )
     origins = ORIGIN_CODES
     if native:
@@ -271,6 +307,9 @@ def build_review_payload(
             ],
             dtype=object,
         )
+    if accepted_rows is not None:
+        for row in np.flatnonzero(derived["tail_tip_truncated"]):
+            reasons[row] += "|tail_tip_is_visible_crop_endpoint"
     values = {
         **lineage,
         **{k: v for k, v in derived.items() if k != "tail_failure_reason"},
@@ -322,6 +361,15 @@ def build_review_payload(
     mask_edit.attrs.update(
         {**common, "recovery_payload_mutability": "editable_annotations"}
     )
+    if acceptance_records:
+        mask_edit.attrs[TAIL_ACCEPTANCE_ATTR] = {
+            key: {
+                **record,
+                "accepted_source_crop_run": record.get("accepted_source_crop_run", record["source_crop_run"]),
+                "source_crop_run": paths["crop"].split("/")[1],
+            }
+            for key, record in acceptance_records.items()
+        }
     for name, values in lineage.items():
         if name not in mask_edit:
             _array(mask_edit, name, values)

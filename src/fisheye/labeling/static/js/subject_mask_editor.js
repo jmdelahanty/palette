@@ -4,6 +4,7 @@
     let payload = null;
     let imageData = null;
     let mask = null;
+    let loadedMask = null;
     let maskWidth = 0;
     let maskHeight = 0;
     let maskOverlayCanvas = document.createElement("canvas");
@@ -107,6 +108,7 @@
       maskWidth = maskPayload.shape[1];
       mask = new Uint8Array(maskWidth * maskHeight);
       for (let i = 0; i < mask.length; i++) mask[i] = bytes[i] > 0 ? 1 : 0;
+      loadedMask = mask.slice();
       markMaskOverlayDirty();
     }
 
@@ -127,6 +129,7 @@
     function markMaskOverlayDirty(rect=null) {
       const wasFullyDirty = maskOverlayDirty && maskOverlayDirtyRect === null;
       maskOverlayDirty = true;
+      if (payload?.tail_crop_border) renderTailBorderStatus();
       if (!rect) {
         maskOverlayDirtyRect = null;
         return;
@@ -325,6 +328,53 @@
         reviewWarning + tailSummary;
       const seekInput = document.getElementById("roi-seek-input");
       if (seekInput) seekInput.value = payload.roi_idx;
+      renderTailBorderStatus();
+    }
+
+    function renderTailBorderStatus() {
+      const panel = document.getElementById("tail-border-controls");
+      if (!panel) return;
+      const info = payload?.tail_crop_border;
+      panel.hidden = !info;
+      if (!info) return;
+      const describeReason = (raw) => {
+        const value = String(raw || "");
+        if (value.includes("body_touches_crop_border")) return "Body mask reaches the crop edge (body_touches_crop_border)";
+        if (value.includes("fragmented_subject_body_mask")) return "Body mask has disconnected regions (fragmented_subject_body_mask)";
+        if (value.includes("snout_extension_too_long")) return "Snout extension exceeds the allowed limit (snout_extension_too_long)";
+        if (value.includes("snout_outside_crop")) return "Snout lies outside the crop (snout_outside_crop)";
+        if (value.includes("tail_station_outside_body")) return "A tail point lies outside the body mask (tail_station_outside_body)";
+        if (value.includes("tail_tip_is_visible_crop_endpoint")) return "Tail points derived; the last point is the visible crop-edge endpoint";
+        if (value === "tail_derived") return "Tail points derived from the current mask";
+        if (value.includes("snout_projection")) return "Snout extension exceeds the allowed geometry limit (" + value + ")";
+        return value || "not recorded";
+      };
+      const original = describeReason(info.original_queued_reason);
+      const outcome = info.latest_outcome;
+      const outcomeText = outcome
+        ? outcome.status + " at mask revision " + outcome.mask_revision + ": " + describeReason(outcome.reason)
+        : "No refreshed tail derivation for the current mask revision";
+      const pending = info.pending_action?.action
+        ? "Pending checkpoint: " + info.pending_action.action + "; use Apply saved edits to publish a new tail version."
+        : info.checkpoint_state
+          ? "Saved mask pixels await Apply; the latest derived result has not checked this checkpoint."
+          : "No acceptance action pending.";
+      const localPixelsChanged = mask && loadedMask && mask.some((value, index) => value !== loadedMask[index]);
+      const accepted = localPixelsChanged
+        ? "Unsaved painted pixels are not covered by the applied result. If the clipped endpoint is still acceptable, checkpoint acceptance for the edited mask."
+        : info.accepted
+        ? "Accepted for this exact body mask by " + info.acceptance.accepted_by +
+          " at revision " + info.acceptance.accepted_at_mask_revision + "."
+        : info.malformed_acceptance
+          ? "Saved acceptance evidence is invalid: " + info.malformed_acceptance
+          : (info.stale_acceptance ? "Prior acceptance no longer matches this body mask or row." : "Strict crop-border rule applies.");
+      document.getElementById("tail-border-status").innerHTML =
+        "<p><b>Original queued reason</b> " + escapeSupportText(original) + "</p>" +
+        "<p><b>Current acceptance</b> " + escapeSupportText(accepted) + "</p>" +
+        "<p><b>Latest applied outcome</b> " + escapeSupportText(outcomeText) + "</p>" +
+        "<p><b>Checkpoint</b> " + escapeSupportText(pending) + "</p>" +
+        (info.status_unavailable ? "<p><b>Status unavailable</b> Reload this ROI to verify the applied result.</p>" : "") +
+        (localPixelsChanged ? "<p><b>Local paint</b> Unsaved pixels differ from the latest applied result. Save and Apply to update the derivation.</p>" : "");
     }
 
     async function api(path, options={}) {
@@ -348,6 +398,11 @@
         decodeMask(payload.mask);
         clearLasso(true);
         renderSummary();
+        const reasonInput = document.getElementById("tail-border-reason");
+        const border = payload?.tail_crop_border;
+        if (reasonInput) reasonInput.value = border?.pending_action?.action === "accept"
+          ? (border.pending_action.reason || "")
+          : (border?.accepted ? (border.acceptance.reason || "") : "");
         scheduleDraw();
         updateNavButtons();
         setStatus("Loaded.");
@@ -411,14 +466,15 @@
       }
     }
 
-    async function save(advance) {
+    async function save(advance, tailBorderAction=null) {
       if (busyAction) return;
       setBusy(true, advance ? "Checkpointing mask and advancing..." : "Checkpointing mask...");
       try {
         const result = await api("/save", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({mask: encodeMaskPayload(), advance, target_token: payload?.state?.target_token})
+          body: JSON.stringify({mask: encodeMaskPayload(), advance, target_token: payload?.state?.target_token,
+            ...(tailBorderAction ? {tail_crop_border_action: tailBorderAction} : {})})
         });
         await loadCurrent();
         setStatus("Checkpoint saved; area " + result.result.checkpoint_area_px + " px." + mutationStatusSuffix(result));
@@ -427,6 +483,23 @@
       } finally {
         setBusy(false);
       }
+    }
+
+    function saveTailBorder(action) {
+      if (!payload?.tail_crop_border) return;
+      const reason = String(document.getElementById("tail-border-reason")?.value || "").trim();
+      if (action === "accept" && (reason.length < 3 || reason.length > 240)) {
+        setStatus("Enter a 3–240 character reason for accepting this clipped tail.", true);
+        return;
+      }
+      save(false, {action, reason});
+    }
+
+    async function refreshTailStatus(generation, roiIdx) {
+      const result = await api("/roi/status");
+      if (!payload || busyAction || foregroundGeneration !== generation || Number(payload.roi_idx) !== Number(roiIdx) || Number(result.roi_idx) !== Number(roiIdx)) return;
+      payload.tail_crop_border = result.tail_crop_border;
+      renderTailBorderStatus();
     }
 
     function newApplyId() {
@@ -461,6 +534,12 @@
         uncertainApplyId = null;
         tailRefreshResult = result.result;
         mergeApplyState(result.state, generation);
+        try { await refreshTailStatus(generation, payload?.roi_idx); } catch (_error) {
+          if (payload?.tail_crop_border && foregroundGeneration === generation) {
+            payload.tail_crop_border.status_unavailable = true;
+            renderTailBorderStatus();
+          }
+        }
         renderSummary();
         const applied = result.result.applied_checkpoint_count || 0;
         const stale = result.result.stale_checkpoint_count || 0;
@@ -486,6 +565,12 @@
         uncertainApplyId = applyId;
         if (error?.operatorSupport?.error === "subject_mask_apply_effects_pending") {
           mergeApplyState(error.apiData?.state, generation);
+          try { await refreshTailStatus(generation, payload?.roi_idx); } catch (_statusError) {
+            if (payload?.tail_crop_border && foregroundGeneration === generation) {
+              payload.tail_crop_border.status_unavailable = true;
+              renderTailBorderStatus();
+            }
+          }
           setStatus("Mask pixels were applied; follow-up checks are pending. " + error.message + " Use Apply again to retry the same saved operation.", true);
         } else {
           showOperatorSupport(error, "session_request_failed");

@@ -96,4 +96,7 @@ def tail_successor_offer(store, runtime, *, apply_id=None, expected_mask_revisio
     if event is None:
         return {}
     offer = event["after"]["tail_refresh"]
-    return {key: offer[key] for key in TAIL_OFFER_KEYS}
+    result = {key: offer[key] for key in TAIL_OFFER_KEYS}
+    if "tail_refresh_visible_endpoint_rows" in offer:
+        result["tail_refresh_visible_endpoint_rows"] = offer["tail_refresh_visible_endpoint_rows"]
+    return result
