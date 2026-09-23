@@ -236,7 +236,7 @@ Totals: 41 EXACT, 8 EXACT-narrow, 7 DERIVED. The collapse is lossy for `target_s
 - **Q8 (answered 2026-09-23).** `session_uuid` (`citsess_…`) is intentionally the per-Arena Citrus session, one per H5; legacy `<timestamp>_arena_N` was also per arena, so the meaning is unchanged and only the format differs. It is **not** the acquisition session: that is `/correspondence/acquisition/binding_json.recording_id` (see the recording identity design).
 - **Q9.** `/geometry/renderer` exists in the appearance fixture but not the base fixture. Is it required in production?
 - **Q10.** `/geometry/correspondence/input@calibration_authority_ref` and `@runtime_geometry_contract_ref` point to legacy paths (`/calibration_snapshot/...`, `/runtime_geometry_contract/...`) that do not exist in a unified file. Is that a bug or an intentional legacy-name reference?
-- **Scientific decision (not Citrus).** Legacy `camera_frame_offset` / `camera_to_metadata_index` index by trigger ID. Unified now provides an authoritative acquisition map (NO-LEGACY-HOME #4). Keeping the trigger-ID semantics preserves bit-compatibility and preserves the known approximation. Switching silently would change every downstream alignment.
+- **Scientific decision (not Citrus): decided 2026-09-23, see D12.** Legacy `camera_frame_offset` / `camera_to_metadata_index` index by trigger ID; unified provides an authoritative acquisition map (NO-LEGACY-HOME #4).
 
 ---
 
@@ -279,3 +279,15 @@ Totals: 41 EXACT, 8 EXACT-narrow, 7 DERIVED. The collapse is lossy for `target_s
 - **D9. Frame session clock.** Either add `timestamp_ns_session` as a fifth `frame_metadata` column (additive; columnar readers select by name, so it should be harmless **[I]**) or leave it native-only. Adding it is the cheapest win for downstream timing work.
 - **D10. `session_uuid` / `camera_id` sourcing.** Take `session_uuid` from `/metadata/session` as-is: it is the Arena session, as the legacy per-arena value was (do not synthesize the legacy format). Take `camera_id` from the binding. Never use `session_uuid` as the acquisition session or as a recording-ID input.
 - **D11. Version the adapter against the unified schema.** The unified core is `development_core_definitions_not_production_admitted`. Pin the adapter to `(schema_id, schema_version, storage_schema/storage_version)`, and refuse unknown versions rather than best-effort mapping.
+- **D12. Frame alignment method (decided 2026-09-23).** Adapter v1 keeps the
+  legacy trigger-ID alignment bit-for-bit (`camera_frame_offset`,
+  `camera_to_metadata_index`, step bounds), so new results stay comparable with
+  every existing recording. Legacy H5s carry no exact acquisition map and
+  cannot be re-aligned, so switching methods would mix two alignments within a
+  cohort. The exact map stays in `native_h5`. Once real unified sessions exist,
+  measure the per-session difference between the two methods, especially
+  around chase onsets; check the 2026-08-20 chaser stimulus/camera temporal
+  projection audit in `docs/` first. Switch only if that difference matters,
+  and then as a versioned alignment method stamped on each run, with cohort
+  analyses refusing to mix versions silently. The code cost of a switch is
+  small (about 5 consumers read these fields); the cost is comparability.
