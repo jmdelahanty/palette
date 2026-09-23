@@ -7,6 +7,19 @@ from fisheye.shared.zarr.storage_planner import plan_storage
 from fisheye.shared.zarr.storage_profiles import get_storage_profile
 
 STORAGE_SCHEMA = "palette.unified_h5_native_storage"
+
+
+def new_native_run_name() -> str:
+    """Fresh immutable run name for a native unified candidate."""
+
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    return (
+        "unified_native_"
+        + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_")
+        + uuid4().hex[:12]
+    )
 STORAGE_VERSION = 1
 PAYLOAD_CONTRACT = ArrayContract(
     schema_id="palette.unified_h5_native_payload",

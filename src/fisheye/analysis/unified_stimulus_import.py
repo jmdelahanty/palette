@@ -1,7 +1,6 @@
 """Public importer's native-profile branch; never activates selectors."""
 
 from collections.abc import MutableMapping
-from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -22,7 +21,11 @@ from fisheye.shared.unified_h5.storage import (
     verify_unpublished_native_candidate,
     write_native_candidate,
 )
-from fisheye.shared.unified_h5.storage_schema import STORAGE_SCHEMA, STORAGE_VERSION
+from fisheye.shared.unified_h5.storage_schema import (
+    STORAGE_SCHEMA,
+    STORAGE_VERSION,
+    new_native_run_name,
+)
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_started,
@@ -112,11 +115,7 @@ def import_unified_from_open_h5(
         "source_h5_generation_changed",
     )
     if run_name is None:
-        run_name = (
-            "unified_native_"
-            + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_")
-            + uuid4().hex[:12]
-        )
+        run_name = new_native_run_name()
     require(
         isinstance(run_name, str)
         and run_name not in ("", ".", "..")
