@@ -161,6 +161,69 @@ def test_load_tracking_ids_resolves_matching_lineage_not_latest() -> None:
     assert first_group["track_arena_ids"][:].tolist() == [2, 4]
 
 
+def test_dag_motion_command_preserves_tracking_selection_through_materializer(
+    tmp_path,
+) -> None:
+    from fisheye.analysis_workflows.execution import STAGE_COMMAND_BUILDERS
+    from fisheye.analysis_workflows.materializers import track_kinematics
+    from tests.unit.fisheye.test_analysis_workflow_execution import _command_context
+
+    root = _memory_root()
+    # Both are valid for the same source lineage, but assign different tracks.
+    # Without the DAG's explicit pin, the real loader chooses the newer selector.
+    for name, arena_ids in (
+        ("tracking_selected", [2, 4, 2]),
+        ("tracking_latest", [7, 7, 7]),
+    ):
+        write_single_subject_per_arena_tracking_run(
+            root=root,
+            arena_ids=np.asarray(arena_ids, dtype=np.int32),
+            frame_indices=np.arange(3, dtype=np.int32),
+            source_detect_run="detect_a",
+            source_arena_assignment_run=f"arena_{name}",
+            source_rowset_path="crop_runs/crop_a",
+            exact_run_name=name,
+        )
+    assert root["tracking_runs"].attrs["latest"] == "tracking_latest"
+
+    context = _command_context(
+        tmp_path,
+        stage_id="track_kinematics",
+        dependencies={"tracks": "tracking_selected", "refined_keypoints": "kp_1"},
+    )
+    context.zarr_path.mkdir()
+    argv = STAGE_COMMAND_BUILDERS["track_kinematics"](context)
+    args, remaining = track_kinematics._build_parser().parse_known_args(argv[3:])
+    assert remaining[0] == "--"
+    plan = track_kinematics.build_track_kinematics_materialization_plan(
+        args.zarr_path,
+        scratch_root=tmp_path / "scratch",
+        keypoint_run=args.keypoint_run,
+        run_name=args.run_name,
+        tracking_run=args.tracking_run,
+        execution_profile_id=args.execution_profile,
+        writer_arguments=remaining[1:],
+    )
+    forwarded = plan.writer_arguments
+    tracking_run = (
+        forwarded[forwarded.index("--tracking-run") + 1]
+        if "--tracking-run" in forwarded
+        else None
+    )
+    track_ids, metadata = load_tracking_ids(
+        root,
+        3,
+        expected_detect_run="detect_a",
+        expected_source_rowset_path="crop_runs/crop_a",
+        run_name=tracking_run,
+        return_metadata=True,
+    )
+
+    assert metadata["track_run"] == "tracking_selected"
+    assert track_ids.tolist() == [0, 1, 0]
+    assert not plan.scratch_root.exists()
+
+
 def test_load_tracking_ids_requires_matching_refined_lineage() -> None:
     root = _memory_root()
 

@@ -9,10 +9,11 @@ import yaml
 
 from scripts import ci_required as gate
 
-
 ROOT = Path(__file__).resolve().parents[3]
 SHA = "a" * 40
 MERGE_SHA = "b" * 40
+BASE_SHA = "c" * 40
+TREE_SHA = "d" * 40
 
 
 @pytest.fixture
@@ -61,19 +62,41 @@ def test_exact_success_inventory_passes(context, run, jobs, needs):
     assert len(gate.required_names()) == 23
 
 
-def test_push_context_requires_the_same_tested_commit():
-    gate.Context("jmdelahanty/palette", 42, 1, SHA, SHA, "push")
-    with pytest.raises(gate.GateError, match="Push head and tested commit"):
-        gate.Context("jmdelahanty/palette", 42, 1, SHA, MERGE_SHA, "push")
+def test_workflow_dispatch_context_requires_the_same_tested_commit():
+    gate.Context("jmdelahanty/palette", 42, 1, SHA, SHA, "workflow_dispatch")
+    with pytest.raises(gate.GateError, match="Workflow-dispatch head and tested"):
+        gate.Context(
+            "jmdelahanty/palette",
+            42,
+            1,
+            SHA,
+            MERGE_SHA,
+            "workflow_dispatch",
+        )
 
 
-@pytest.mark.parametrize("conclusion", [
-    "failure", "skipped", "cancelled", "timed_out", "neutral", "stale",
-    "action_required", "startup_failure", None, "",
-])
+@pytest.mark.parametrize(
+    "conclusion",
+    [
+        "failure",
+        "skipped",
+        "cancelled",
+        "timed_out",
+        "neutral",
+        "stale",
+        "action_required",
+        "startup_failure",
+        None,
+        "",
+    ],
+)
 @pytest.mark.parametrize("index", [0, 7, 22])
 def test_non_success_is_blocking_even_when_needs_says_success(
-    context, jobs, needs, conclusion, index,
+    context,
+    jobs,
+    needs,
+    conclusion,
+    index,
 ):
     gate.validate_needs(needs)
     jobs[index]["conclusion"] = conclusion
@@ -96,17 +119,27 @@ def test_every_required_job_must_exist(context, jobs, index):
 
 
 def test_collapsed_skipped_matrix_does_not_count_as_sixteen_shards(context, jobs):
-    jobs = jobs[:7] + [{**jobs[7], "name": "non-gpu tests (shard)", "conclusion": "skipped"}]
+    jobs = jobs[:7] + [
+        {**jobs[7], "name": "non-gpu tests (shard)", "conclusion": "skipped"}
+    ]
     with pytest.raises(gate.GateError):
         gate.validate_jobs(jobs, context)
 
 
-@pytest.mark.parametrize("change", [
-    {"run_id": 43}, {"run_attempt": 0}, {"run_attempt": 2},
-    {"run_attempt": True}, {"run_id": "42"},
-    {"head_sha": "c" * 40}, {"head_sha": MERGE_SHA},
-    {"workflow_name": "unrelated"}, {"id": None},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"run_id": 43},
+        {"run_attempt": 0},
+        {"run_attempt": 2},
+        {"run_attempt": True},
+        {"run_id": "42"},
+        {"head_sha": "c" * 40},
+        {"head_sha": MERGE_SHA},
+        {"workflow_name": "unrelated"},
+        {"id": None},
+    ],
+)
 def test_foreign_or_malformed_job_evidence_fails(context, jobs, change):
     jobs[0].update(change)
     with pytest.raises(gate.GateError):
@@ -123,18 +156,27 @@ def test_duplicate_names_and_ids_fail(context, jobs):
 
 def test_unexpected_jobs_fail(context, jobs):
     with pytest.raises(gate.GateError, match="Unexpected"):
-        gate.validate_jobs(jobs + [{**jobs[0], "name": "new check", "id": 999}], context)
+        gate.validate_jobs(
+            jobs + [{**jobs[0], "name": "new check", "id": 999}], context
+        )
 
 
 def test_running_gate_is_not_its_own_prerequisite(context, jobs):
-    current = {**jobs[0], "name": "ci-required", "id": 999,
-               "status": "in_progress", "conclusion": None}
+    current = {
+        **jobs[0],
+        "name": "ci-required",
+        "id": 999,
+        "status": "in_progress",
+        "conclusion": None,
+    }
     gate.validate_jobs(jobs + [current], context)
     with pytest.raises(gate.GateError, match="Duplicate"):
         gate.validate_jobs(jobs + [current, {**current, "id": 1000}], context)
 
 
-def test_previous_terminal_gate_success_cannot_substitute_for_current_evidence(context, jobs):
+def test_previous_terminal_gate_success_cannot_substitute_for_current_evidence(
+    context, jobs
+):
     previous = {**jobs[0], "name": "ci-required", "id": 999}
     with pytest.raises(gate.GateError, match="Unexpected terminal gate state"):
         gate.validate_jobs(jobs + [previous], context)
@@ -160,12 +202,19 @@ def test_needs_inventory_is_exact(needs, change):
         gate.validate_needs(needs)
 
 
-@pytest.mark.parametrize("change", [
-    {"id": 43}, {"run_attempt": 2}, {"head_sha": "c" * 40},
-    {"run_attempt": True}, {"id": "42"},
-    {"event": "pull_request_target"}, {"path": ".github/workflows/other.yml"},
-    {"repository": {"full_name": "other/palette"}},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"id": 43},
+        {"run_attempt": 2},
+        {"head_sha": "c" * 40},
+        {"run_attempt": True},
+        {"id": "42"},
+        {"event": "pull_request_target"},
+        {"path": ".github/workflows/other.yml"},
+        {"repository": {"full_name": "other/palette"}},
+    ],
+)
 def test_run_identity_is_bound_to_invocation(context, run, change):
     run.update(change)
     with pytest.raises(gate.GateError, match="Run identity mismatch"):
@@ -187,40 +236,88 @@ def test_full_rerun_passes_but_partial_or_mixed_attempts_fail(context, run, jobs
 
 
 def test_paginated_api_evidence_is_complete(context, jobs):
-    pages = [{"total_count": 23, "jobs": jobs[:10]},
-             {"total_count": 23, "jobs": jobs[10:]}]
+    pages = [
+        {"total_count": 23, "jobs": jobs[:10]},
+        {"total_count": 23, "jobs": jobs[10:]},
+    ]
     assert gate.jobs_from_pages(pages) == jobs
     gate.validate_jobs(gate.jobs_from_pages(pages), context)
 
 
-@pytest.mark.parametrize("pages", [
-    [], {}, [{"total_count": 2, "jobs": []}],
-    [{"total_count": 0, "jobs": {}}], [{"jobs": []}],
-    [{"total_count": 0, "jobs": []}, {"total_count": 1, "jobs": []}],
-])
+@pytest.mark.parametrize(
+    "pages",
+    [
+        [],
+        {},
+        [{"total_count": 2, "jobs": []}],
+        [{"total_count": 0, "jobs": {}}],
+        [{"jobs": []}],
+        [{"total_count": 0, "jobs": []}, {"total_count": 1, "jobs": []}],
+    ],
+)
 def test_incomplete_or_malformed_pages_fail(pages):
     with pytest.raises(gate.GateError):
         gate.jobs_from_pages(pages)
 
 
 @pytest.fixture
-def environ(needs):
+def event_path(tmp_path):
+    path = tmp_path / "event.json"
+    path.write_text(
+        json.dumps(
+            {
+                "number": 7,
+                "repository": {"full_name": "jmdelahanty/palette"},
+                "pull_request": {
+                    "number": 7,
+                    "merge_commit_sha": MERGE_SHA,
+                    "base": {"ref": "main", "sha": BASE_SHA},
+                    "head": {"ref": "feature", "sha": SHA},
+                },
+            }
+        )
+    )
+    return path
+
+
+@pytest.fixture
+def environ(needs, event_path):
     return {
         "GITHUB_REPOSITORY": "jmdelahanty/palette",
-        "GITHUB_RUN_ID": "42", "GITHUB_RUN_ATTEMPT": "1",
-        "GITHUB_SHA": MERGE_SHA, "GITHUB_EVENT_NAME": "pull_request",
-        "CI_REQUIRED_HEAD_SHA": SHA, "CI_REQUIRED_NEEDS": json.dumps(needs),
+        "GITHUB_RUN_ID": "42",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_SHA": MERGE_SHA,
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_EVENT_PATH": str(event_path),
+        "GITHUB_REF": "refs/pull/7/merge",
+        "CI_REQUIRED_HEAD_SHA": SHA,
+        "CI_REQUIRED_NEEDS": json.dumps(needs),
     }
 
 
-def test_cli_reads_exact_attempt_and_checks_checkout(monkeypatch, environ, run, jobs):
+def test_cli_reads_exact_attempt_and_checks_checkout(
+    monkeypatch,
+    environ,
+    run,
+    jobs,
+    capsys,
+):
     requests = []
 
     def fake_command(args, **kwargs):
         requests.append(args)
-        if args[0] == "git":
+        if args[:3] == ["git", "rev-parse", "HEAD"]:
             return subprocess.CompletedProcess(args, 0, MERGE_SHA + "\n", "")
-        payload = [{"total_count": len(jobs), "jobs": jobs}] if "--slurp" in args else run
+        if args[:3] == ["git", "cat-file", "-p"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                f"tree {TREE_SHA}\nparent {BASE_SHA}\nparent {SHA}\n\nmessage\n",
+                "",
+            )
+        payload = (
+            [{"total_count": len(jobs), "jobs": jobs}] if "--slurp" in args else run
+        )
         return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
 
     monkeypatch.setattr(gate.subprocess, "run", fake_command)
@@ -231,6 +328,30 @@ def test_cli_reads_exact_attempt_and_checks_checkout(monkeypatch, environ, run, 
         "repos/jmdelahanty/palette/actions/runs/42",
     ]
     assert ["git", "rev-parse", "HEAD"] in requests
+    assert ["git", "cat-file", "-p", "HEAD"] in requests
+    output = capsys.readouterr().out.splitlines()
+    records = [line for line in output if line.startswith("ci-required-attestation: ")]
+    assert len(records) == 1
+    evidence = json.loads(records[0].split(": ", maxsplit=1)[1])
+    assert evidence == {
+        "schema": gate.ATTESTATION_SCHEMA,
+        "repository": "jmdelahanty/palette",
+        "workflow_path": ".github/workflows/ci.yml",
+        "event": "pull_request",
+        "run_id": 42,
+        "run_attempt": 1,
+        "candidate_head_sha": SHA,
+        "tested_sha": MERGE_SHA,
+        "tested_tree_sha": TREE_SHA,
+        "tested_parent_shas": [BASE_SHA, SHA],
+        "pull_request": {
+            "number": 7,
+            "base_ref": "main",
+            "base_sha": BASE_SHA,
+            "head_ref": "feature",
+            "head_sha": SHA,
+        },
+    }
 
 
 def test_run_attempt_rollover_fails(monkeypatch, environ, run, jobs):
@@ -254,12 +375,120 @@ def test_wrong_checkout_fails_before_api(monkeypatch, environ):
     assert gate.main(environ) == 1
 
 
-@pytest.mark.parametrize("key,value", [
-    ("GITHUB_RUN_ID", ""), ("GITHUB_RUN_ATTEMPT", "0"),
-    ("GITHUB_REPOSITORY", "../other/path"), ("GITHUB_SHA", "short"),
-    ("CI_REQUIRED_HEAD_SHA", ""), ("GITHUB_EVENT_NAME", "pull_request_target"),
-    ("CI_REQUIRED_NEEDS", "invalid json"),
-])
+def test_pull_request_attestation_rejects_wrong_merge_parent():
+    context = gate.Context(
+        "jmdelahanty/palette",
+        42,
+        1,
+        SHA,
+        MERGE_SHA,
+        "pull_request",
+    )
+    payload = {
+        "number": 7,
+        "repository": {"full_name": context.repository},
+        "pull_request": {
+            "number": 7,
+            "merge_commit_sha": MERGE_SHA,
+            "base": {"ref": "main", "sha": BASE_SHA},
+            "head": {"ref": "feature", "sha": SHA},
+        },
+    }
+    with pytest.raises(gate.GateError, match="parents"):
+        gate.build_attestation(
+            context,
+            payload,
+            gate.CommitIdentity(TREE_SHA, ("e" * 40, SHA)),
+            "refs/pull/7/merge",
+        )
+
+
+def test_workflow_dispatch_attestation_is_exact_main_fallback():
+    context = gate.Context(
+        "jmdelahanty/palette",
+        42,
+        1,
+        SHA,
+        SHA,
+        "workflow_dispatch",
+    )
+    payload = {"repository": {"full_name": context.repository}}
+    evidence = gate.build_attestation(
+        context,
+        payload,
+        gate.CommitIdentity(TREE_SHA, (BASE_SHA,)),
+        "refs/heads/main",
+    )
+    assert evidence["pull_request"] is None
+    assert evidence["tested_sha"] == SHA
+    with pytest.raises(gate.GateError, match="must run on main"):
+        gate.build_attestation(
+            context,
+            payload,
+            gate.CommitIdentity(TREE_SHA, (BASE_SHA,)),
+            "refs/heads/feature",
+        )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        ("repository", {"full_name": "other/palette"}),
+        ("number", 0),
+        ("base_sha", "short"),
+        ("head_sha", "e" * 40),
+    ],
+)
+def test_pull_request_attestation_rejects_malformed_or_conflicting_event(change):
+    context = gate.Context(
+        "jmdelahanty/palette",
+        42,
+        1,
+        SHA,
+        MERGE_SHA,
+        "pull_request",
+    )
+    payload = {
+        "number": 7,
+        "repository": {"full_name": context.repository},
+        "pull_request": {
+            "number": 7,
+            "merge_commit_sha": MERGE_SHA,
+            "base": {"ref": "main", "sha": BASE_SHA},
+            "head": {"ref": "feature", "sha": SHA},
+        },
+    }
+    key, value = change
+    if key == "repository":
+        payload[key] = value
+    elif key == "number":
+        payload[key] = value
+        payload["pull_request"][key] = value
+    elif key == "base_sha":
+        payload["pull_request"]["base"]["sha"] = value
+    elif key == "head_sha":
+        payload["pull_request"]["head"]["sha"] = value
+    with pytest.raises(gate.GateError):
+        gate.build_attestation(
+            context,
+            payload,
+            gate.CommitIdentity(TREE_SHA, (BASE_SHA, SHA)),
+            "refs/pull/7/merge",
+        )
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("GITHUB_RUN_ID", ""),
+        ("GITHUB_RUN_ATTEMPT", "0"),
+        ("GITHUB_REPOSITORY", "../other/path"),
+        ("GITHUB_SHA", "short"),
+        ("CI_REQUIRED_HEAD_SHA", ""),
+        ("GITHUB_EVENT_NAME", "push"),
+        ("CI_REQUIRED_NEEDS", "invalid json"),
+    ],
+)
 def test_invalid_invocation_fails_closed(environ, key, value):
     environ[key] = value
     assert gate.main(environ) == 1
@@ -276,13 +505,18 @@ def test_malformed_api_json_fails_closed(monkeypatch):
         gate.api_json("repos/jmdelahanty/palette/actions/runs/42")
 
 
-@pytest.mark.parametrize("failure", [
-    subprocess.CalledProcessError(1, "gh", stderr="secret must not be printed"),
-    subprocess.TimeoutExpired("gh", 60), FileNotFoundError("gh"),
-])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.CalledProcessError(1, "gh", stderr="secret must not be printed"),
+        subprocess.TimeoutExpired("gh", 60),
+        FileNotFoundError("gh"),
+    ],
+)
 def test_api_errors_fail_closed_without_leaking_output(monkeypatch, failure, capsys):
     def fail(*args, **kwargs):
         raise failure
+
     monkeypatch.setattr(gate.subprocess, "run", fail)
     with pytest.raises(gate.GateError) as error:
         gate.api_json("repos/jmdelahanty/palette/actions/runs/42")
@@ -297,7 +531,8 @@ def test_workflow_inventory_and_wiring_cannot_drift():
     assert {key: jobs[key]["name"] for key in gate.SINGLE_JOBS} == gate.SINGLE_JOBS
     assert jobs["tests"]["name"] == "non-gpu tests (shard ${{ matrix.shard }})"
     assert jobs["tests"]["strategy"] == {
-        "fail-fast": False, "matrix": {"shard": list(range(gate.SHARD_COUNT))},
+        "fail-fast": False,
+        "matrix": {"shard": list(range(gate.SHARD_COUNT))},
     }
     terminal = jobs["ci-required"]
     assert terminal["name"] == "ci-required"
@@ -326,4 +561,4 @@ def test_workflow_inventory_and_wiring_cannot_drift():
     }
     # PyYAML's YAML 1.1 loader reads the Actions `on` key as True.
     triggers = workflow.get("on", workflow.get(True))
-    assert triggers == {"push": {"branches": ["main"]}, "pull_request": None}
+    assert triggers == {"pull_request": None, "workflow_dispatch": None}

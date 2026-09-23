@@ -251,6 +251,27 @@ TRAINING_IMMUTABLE_V1 = StorageProfile(
     codec_profile_id="zstd_fast_v1",
 )
 
+# Merged training images are sampled one row at a time in shuffled batches.
+# Keep each image as one independently decodable inner chunk, while indexed
+# outer shards retain a bounded physical object count for immutable exports.
+# Other arrays retain the established 1 MiB planning budget.
+TRAINING_RANDOM_ROW_IMMUTABLE_V1 = StorageProfile(
+    profile_id="training_random_row_immutable_v1",
+    target_chunk_bytes=1 * MIB,
+    min_chunk_bytes=512 * KIB,
+    max_chunk_bytes=2 * MIB,
+    eager_max_bytes=8 * MIB,
+    target_shard_bytes=32 * MIB,
+    per_row_target_shard_bytes=32 * MIB,
+    max_shard_bytes=128 * MIB,
+    max_payload_objects=4_096,
+    codec_profile_id="zstd_fast_v1",
+    # A one-byte target is an intentional sentinel at the byte planner layer:
+    # every real image access unit exceeds it, so the chosen inner chunk is
+    # exactly one sample regardless of crop dimensions or channel count.
+    target_chunk_bytes_by_access=((AccessPattern.PER_ROW, 1),),
+)
+
 
 STORAGE_PROFILES = {
     profile.profile_id: profile
@@ -262,6 +283,7 @@ STORAGE_PROFILES = {
         SUBJECT_MASK_PRESENTATION_CANDIDATE_V1,
         DETECTION_REGULAR_ROLLBACK_V1,
         TRAINING_IMMUTABLE_V1,
+        TRAINING_RANDOM_ROW_IMMUTABLE_V1,
     )
 }
 

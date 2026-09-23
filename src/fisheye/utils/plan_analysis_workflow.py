@@ -113,6 +113,7 @@ def build_availability(
                 stage_id,
                 requested_run=requested_run,
                 dependency_runs=dependency_runs,
+                run_scope=workflow.stage_run_scope(stage_id),
                 execution_profile_id=execution_profile.profile_id,
             )
     return statuses
@@ -179,8 +180,7 @@ def _print_human(payload: Mapping[str, object]) -> None:
             print(f"kinematics_resolution: {kinematics.get('resolution')}")
             if "sample_rate_hz" in kinematics:
                 print(
-                    "kinematics_sample_rate_hz: "
-                    f"{kinematics.get('sample_rate_hz')}"
+                    "kinematics_sample_rate_hz: " f"{kinematics.get('sample_rate_hz')}"
                 )
         if isinstance(summaries, Mapping):
             print(f"activity_spatial_bin_size_s: {summaries.get('bin_size_s')}")

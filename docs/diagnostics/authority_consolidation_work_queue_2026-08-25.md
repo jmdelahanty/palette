@@ -97,7 +97,7 @@ tests alone are insufficient when required CI is part of the gate.
 |---|---|---|---|---|
 | GOV-001 | Plan governance | in_progress | Consolidate status here; stamp overlapping audits/queues as evidence or scoped companion work. Ingestion audit #142 is integrated with all 24 post-merge checks successful. Final documentation/rules #145 is refreshed onto that validated main and requires its own 24-check candidate and post-merge evidence. Broader governance/admission implementation is not completed by landing audits. | This document, the companion roster, and the [documentation integration handoff](review_docs_rules_landing_handoff_2026-09-05.md#authorized-main-integration--september-6); [PR 145](https://github.com/jmdelahanty/palette/pull/145) records its exact head and current CI. |
 | ADM-001 | Shared admission | open | Define executable producer/profile declarations and one profile-neutral resolution result. Static capability and dynamic artifact checks must be methods of the same declaration, not duplicated planner grammar. | Clipped-eye audit Phases 1–2; source-of-truth plan Steps 1 and 6. |
-| INGEST-001 | Source ingestion enforcement | in_progress | Scoped corrections are implemented, validated, and integrated: removed failure overrides and automatic legacy source-analysis intake; enforced immutable replay, exact invocation acknowledgments, declared streams, and required manifest context. Manual sampled training preserves its product contract while rejecting guessed IDs and recorded failures. PR 147 head `27864f5a` passed all 24 checks and merged as `e802818d`; all 24 post-merge checks passed. Broader intake catalog/AST closure, parent-level clipped intake, and transfer-v2 adoption remain separately scoped and incomplete. | [2026-09-06 enforcement handoff](ingestion_enforcement_handoff_2026-09-06.md); [PR 147](https://github.com/jmdelahanty/palette/pull/147); [post-merge CI 34051186036](https://github.com/jmdelahanty/palette/actions/runs/34051186036). No deployment or activation. |
+| INGEST-001 | Source ingestion enforcement | in_progress | Scoped corrections are implemented, validated, and integrated: removed failure overrides and automatic legacy source-analysis intake; enforced immutable replay, exact invocation acknowledgments, declared streams, and required manifest context. Manual sampled training preserves its product contract while rejecting guessed IDs and recorded failures. PR 147 head `27864f5a` passed all 24 checks and merged as `e802818d`; all 24 post-merge checks passed. Broader intake catalog/AST closure, parent-level clipped intake, and transfer-v2 adoption remain separately scoped and incomplete. September 12: root's isolated `agent/palette/unified-h5-import-20260912` implements explicit native unified-H5 candidate import and the unpatched verified reader, with preservation/refusal/ownership tests and local legacy regressions. PR 169's incoming `dc00de7c` passed all 24 checks. The user authorized merging PRs 168 and 169; PR 168 merged as `7498ea02` with successful main-integration evidence, and PR 169 now incorporates that verified main while requiring fresh combined-head CI. Exact combination and post-merge results are tracked on PR 169; this is not production normalization or activation. Parent-transfer PR 149 remains separate. September 23: PR 149 (which already contains PR 155's head `45a2a165`) is being reconciled onto main `46d8dce8` in worktree `/tmp/palette-parent-intake-reconcile-20260923`; conflicts were limited to this queue and generated Zarr inventories. Fresh combined CI and the packaged end-to-end canaries must pass before integration. | [2026-09-06 enforcement handoff](ingestion_enforcement_handoff_2026-09-06.md); [PR 147](https://github.com/jmdelahanty/palette/pull/147); [post-merge CI 34051186036](https://github.com/jmdelahanty/palette/actions/runs/34051186036); [unified-H5 integration handoff](unified_h5_import_handoff_2026-09-12.md); [PR 169](https://github.com/jmdelahanty/palette/pull/169). No deployment or activation. |
 | GEOM-AUTO-001 | Geometry scientific policy | in_progress | User-authorized parallel implementation of a named top-rim-preferred blind probe recipe, additional agreement/image-support/stability/boundary-impact metrics, exact approved-reference catalog, and inactive shadow policy. Preserve historical labels/digests and unchanged acquisition gates; do not manufacture human review or enable uncalibrated thresholds. All new required CI is unrun; no policy activation or production writes. | [Parallel ownership and validation handoff](geometry_auto_acceptance_parallel_handoff_2026-09-06.md); existing registered-dish implementation checklist OQ4a/OQ5. |
 | ADM-002 | Shared admission | open | Add `admitted`, `pending_receipt`, and typed `blocked` node states. Reuse, scratch creation, submission, and publication require concrete admission; downstream nodes wait for real upstream receipts. | Clipped-eye audit Phase 2. |
 | ADM-003 | Inventory/proof | open | Generate entry point -> producer -> output profile -> resolver -> boundary test edges from executable declarations. At runtime, unknown blocks only the requested closure; CI rejects newly undeclared maintained production entry points. Reuse the graph schema for the future proof walker. | Pipeline survey, clipped-eye audit, source-of-truth plan Step 1. |
@@ -130,6 +130,39 @@ tests alone are insufficient when required CI is part of the gate.
 `blocked` above means a named dependency is unresolved, not that work should be
 silently skipped. When a dependency closes, update this queue before treating
 the dependent item as active.
+
+### Scoped DAG dependency-pinning correction — 2026-09-09
+
+Status: `in_progress`; owner: root implementation agent, branch
+`agent/palette/generic-dag-gap-review-20260909`, worktree
+`/tmp/palette-generic-dag-gap-review-20260909`, base
+`fc6fea5fd937759f5ed21c79d13279b25c309e13` plus the scoped changes recorded at
+the pre-CI implementation checkpoint. Commit, push, draft PR, and CI monitoring
+are now user-authorized; integration and deployment are not.
+Production motion commands now preserve the resolved tracking pin, and strict
+motion verification compares sealed tracking/keypoint sources with dependencies
+explicitly selected by the plan. Sealed-supplier branch closure is preserved.
+Focused local validation passed; required CI was unrun at this checkpoint.
+This is not integrated, deployed, activated, complete, or merge-ready and does
+not close the broader `ADM-*`, `RES-TRACK-001`, `REP-001`, or `TEST-001` work.
+See the [scoped implementation handoff](dag_motion_dependency_pinning_handoff_2026-09-09.md)
+for contracts, exact test evidence, all unrun CI checks, and remaining work.
+
+### Scoped DAG catalog tracking alignment — 2026-09-10
+
+Status: `in_progress`; owner: root implementation agent, branch
+`agent/palette/dag-catalog-alignment-20260910`, worktree
+`/tmp/palette-dag-catalog-alignment-20260910`, clean base
+`6fd555d05a50dec82c85e5edc567159a0c491f4d`. The uncommitted bounded correction
+declares `tracks` as a direct input to `track_kinematics` and makes a new tracks
+run invalidate motion and all of its catalog descendants. It preserves the
+packaged profile's composite arena-assignment/tracking adapter and every
+scientific, identity, manifest, selector, and runtime execution contract.
+Focused local validation passed 134 distinct tests; all required new-change CI
+is unrun. This is not committed, integrated, deployed, activated, complete, or
+merge-ready, and it does not close `RES-TRACK-001`. See the
+[scoped handoff](dag_catalog_tracking_alignment_handoff_2026-09-10.md) for the
+provider-boundary decision, exact validation, and remaining work.
 
 ## Targeted four-camera recovery plan — 2026-08-27
 
@@ -586,6 +619,20 @@ Primary surfaces: `shared/observation_coordinate_publication.py`,
 
 - [ ] Make tracking request one profile-neutral position surface and eliminate
   crop-profile grammar from tracking consumers.
+  - 2026-09-10 bounded selector-ineligible caller-migration candidate
+    implemented and locally validated on
+    `agent/palette/provider-aware-core-workflow-20260910`, stacked on PR 161:
+    provider behavior-chain task v3 consumes one exact manifest-pinned
+    observation-position run, while v1/v2 preserve their keypoint-triad
+    compatibility adapter. Provider-motion computation v2 binds and reopens
+    live recording timing; every downstream reuse branch validates its exact
+    upstream lineage. Receipted task v4 adds a canonical task digest, seven
+    stage evidence digests, and a self-verifiable execution receipt while v3
+    result bytes remain compatible. A real persisted detection-position chain
+    publishes, fully reuses, and refuses direct position tampering. The
+    uncommitted slice has local 421-test evidence but required CI is unrun. It
+    does not migrate or activate the default core workflow; see
+    `provider_behavior_chain_position_input_handoff_2026-09-10.md`.
 - [ ] Support materialized, collection-successor compatibility, and sealed
   geometry-only lineage through full-strength resolver branches with exactly
   one selected branch.

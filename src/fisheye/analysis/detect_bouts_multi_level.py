@@ -78,6 +78,7 @@ from fisheye.shared.zarr.columnar import (
 from fisheye.analysis.track_kinematics_io import (
     TRACK_KINEMATICS_PUBLICATION_PROFILE_IDS,
     TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_ACTIVATED_V1,
+    TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1,
     load_track_kinematics_track,
 )
 from fisheye.analysis.swim_bout_frame_axis import (
@@ -2865,6 +2866,9 @@ def _load_provider_track_motion_speeds(
         "n_frames": int(frames.shape[0]),
         "track_kinematics_run": provider.run_name,
         "track_kinematics_scope": "provider",
+        "track_kinematics_publication_profile_id": (
+            TRACK_KINEMATICS_PUBLICATION_PROFILE_SELECTOR_INELIGIBLE_CANARY_V1
+        ),
         "source_track_path": run_path,
         "track_kinematics_created_at_utc": None,
         "track_kinematics_stage": "provider_track_motion",

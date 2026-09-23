@@ -35,7 +35,6 @@ from fisheye.analysis.chaser_epoch_behavior_summary import (
     _structured_field,
     _window_time_mask,
 )
-from fisheye.analysis.swim_bout_frame_axis import canonical_frame_axis_sha256
 from fisheye.analysis.swim_bout_io import (
     SwimBoutTables,
     load_default_swim_bout_tables,
@@ -66,6 +65,10 @@ from fisheye.analysis_workflows.provider_analysis_offers import (
 from fisheye.analysis_workflows.provider_track_motion_source_handle import (
     ProviderTrackMotionSourceHandle,
     load_provider_track_motion_source_handle,
+)
+from fisheye.analysis_workflows.provider_swim_bout_binding import (
+    ProviderSwimBoutBindingError,
+    validate_provider_swim_bout_binding,
 )
 from fisheye.analytics_exports.validated_behavior_core_behavior_contracts import (
     CANONICAL_SWIM_BOUTS_CAPABILITY,
@@ -532,76 +535,15 @@ def _swim_bout_binding(
     rows: slice,
     track_id: int,
 ) -> tuple[dict[str, Any], str, str]:
-    attrs = dict(tables.run_attrs)
-    if attrs.get("source_track_kinematics_scope") != "provider":
-        raise ProviderEpochBehaviorSummaryError(
-            "Swim-bout candidate is not bound to provider motion."
+    try:
+        return validate_provider_swim_bout_binding(
+            tables,
+            provider=provider,
+            rows=rows,
+            track_id=track_id,
         )
-    if attrs.get("source_track_kinematics_run") != provider.run_name:
-        raise ProviderEpochBehaviorSummaryError(
-            "Swim-bout and provider-motion run identities disagree."
-        )
-    if int(attrs.get("track_id", -1)) != int(track_id):
-        raise ProviderEpochBehaviorSummaryError(
-            "Swim-bout and provider-motion track identities disagree."
-        )
-    if (
-        attrs.get("source_track_motion_manifest_sha256")
-        != provider.provider_manifest_sha256
-    ):
-        raise ProviderEpochBehaviorSummaryError(
-            "Swim-bout provider-motion manifest binding is stale."
-        )
-    authority = attrs.get("source_track_motion_authority")
-    if not isinstance(authority, Mapping):
-        raise ProviderEpochBehaviorSummaryError(
-            "Swim-bout provider read authority is absent."
-        )
-    expected_authority = {
-        "motion_manifest_sha256": provider.provider_manifest_sha256,
-        "provider_verification_digest": provider.verification_digest,
-        "track_id": int(track_id),
-        "track_row_start": int(rows.start or 0),
-        "track_row_stop": int(rows.stop or 0),
-    }
-    for key, expected in expected_authority.items():
-        if authority.get(key) != expected:
-            raise ProviderEpochBehaviorSummaryError(
-                f"Swim-bout provider read authority differs at {key!r}."
-            )
-    frame_contract = attrs.get("frame_axis_contract")
-    if not isinstance(frame_contract, Mapping):
-        raise ProviderEpochBehaviorSummaryError(
-            "Swim-bout frame-axis contract is absent."
-        )
-    frames = np.asarray(provider.source_acquisition_frame_index[rows], dtype=np.int64)
-    frame_sha256 = canonical_frame_axis_sha256(frames)
-    if frame_contract.get("content_sha256") != frame_sha256:
-        raise ProviderEpochBehaviorSummaryError(
-            "Swim-bout frame axis differs from the selected provider track."
-        )
-    lineage_hash = attrs.get("lineage_hash")
-    if type(lineage_hash) is not str or len(lineage_hash) != 64:
-        raise ProviderEpochBehaviorSummaryError(
-            "Swim-bout candidate lacks its exact lineage digest."
-        )
-    binding = {
-        "schema_id": "palette.selector_ineligible_swim_bout_binding.v1",
-        "run_name": tables.run_name,
-        "run_path": tables.run_path,
-        "lineage_hash": lineage_hash,
-        "frame_axis_sha256": frame_sha256,
-        "source_track_motion_manifest_sha256": provider.provider_manifest_sha256,
-        "source_track_motion_verification_digest": provider.verification_digest,
-        "track_id": int(track_id),
-        "track_row_start": int(rows.start or 0),
-        "track_row_stop": int(rows.stop or 0),
-        "default_candidate_id": int(tables.candidate.candidate_id),
-        "default_signal_id": int(tables.signal.signal_id),
-        "default_signal_level": str(tables.signal.speed_level),
-    }
-    binding["sha256"] = canonical_json_sha256(binding)
-    return binding, lineage_hash, frame_sha256
+    except ProviderSwimBoutBindingError as exc:
+        raise ProviderEpochBehaviorSummaryError(str(exc)) from exc
 
 
 def _make_per_epoch_fish(

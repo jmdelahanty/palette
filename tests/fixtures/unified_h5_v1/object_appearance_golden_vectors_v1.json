@@ -1,0 +1,211 @@
+{
+  "schema_id": "citrus.object_appearance_reference_golden_vectors",
+  "schema_version": 1,
+  "absolute_tolerance": 1e-6,
+  "vectors": [
+    {
+      "name": "absolute_rgba_compatibility",
+      "request": {
+        "schema_id": "citrus.object_appearance_replay_request",
+        "schema_version": 1,
+        "appearance_profile": null,
+        "drive": {"value": 0.75, "valid": true},
+        "local_underlay_rgba": [0.9, 0.8, 0.7, 1.0],
+        "authored_target_rgba": [0.125, 0.5, 0.75, 0.25]
+      },
+      "expected": {
+        "realized_rgba": [0.125, 0.5, 0.75, 0.25],
+        "realized_rgba8": [32, 128, 191, 64],
+        "drive_used": false,
+        "reference_valid": true,
+        "clipped": false
+      }
+    },
+    {
+      "name": "constant_weber_grayscale",
+      "request": {
+        "schema_id": "citrus.object_appearance_replay_request",
+        "schema_version": 1,
+        "appearance_profile": {
+          "schema_id": "citrus.object_appearance_profile",
+          "schema_version": 1,
+          "scope_id": "constant.gray",
+          "contrast_model": "signed_weber_luminance_v1",
+          "calculation_domain": "renderer_nominal_code_luminance_v1",
+          "reference": "local_rendered_background_v1",
+          "alpha_policy": "preserve_authored_alpha_v1",
+          "invalid_reference_policy": "preserve_underlay_v1",
+          "baseline_contrast": -0.25,
+          "peak_contrast": -0.25,
+          "baseline_chromatic_strength": 0.0,
+          "peak_chromatic_strength": 0.0,
+          "modulation": {
+            "mode": "constant",
+            "curve": "smoothstep_v1",
+            "invalid_drive_policy": "return_to_baseline_v1"
+          }
+        },
+        "drive": {"value": 1.0, "valid": false},
+        "local_underlay_rgba": [0.8, 0.8, 0.8, 1.0],
+        "authored_target_rgba": [1.0, 0.0, 0.0, 0.75]
+      },
+      "expected": {
+        "effective_drive": 0.0,
+        "requested_contrast": -0.25,
+        "requested_code_luminance": 0.6,
+        "realized_rgba": [0.6, 0.6, 0.6, 0.75],
+        "realized_rgba8": [153, 153, 153, 191],
+        "drive_used": false,
+        "reference_valid": true,
+        "clipped": false
+      }
+    },
+    {
+      "name": "smoothstep_drive",
+      "request": {
+        "schema_id": "citrus.object_appearance_replay_request",
+        "schema_version": 1,
+        "appearance_profile": {
+          "schema_id": "citrus.object_appearance_profile",
+          "schema_version": 1,
+          "scope_id": "smoothstep.gray",
+          "contrast_model": "signed_weber_luminance_v1",
+          "calculation_domain": "renderer_nominal_code_luminance_v1",
+          "reference": "local_rendered_background_v1",
+          "alpha_policy": "preserve_authored_alpha_v1",
+          "invalid_reference_policy": "preserve_underlay_v1",
+          "baseline_contrast": -0.05,
+          "peak_contrast": -0.45,
+          "baseline_chromatic_strength": 0.0,
+          "peak_chromatic_strength": 0.0,
+          "modulation": {
+            "mode": "normalized_drive",
+            "curve": "smoothstep_v1",
+            "invalid_drive_policy": "return_to_baseline_v1"
+          }
+        },
+        "drive": {"value": 0.25, "valid": true},
+        "local_underlay_rgba": [0.5, 0.5, 0.5, 1.0],
+        "authored_target_rgba": [1.0, 0.0, 0.0, 1.0]
+      },
+      "expected": {
+        "effective_drive": 0.15625,
+        "requested_contrast": -0.1125,
+        "requested_code_luminance": 0.44375,
+        "realized_rgba": [0.44375, 0.44375, 0.44375, 1.0],
+        "realized_rgba8": [113, 113, 113, 255],
+        "drive_used": true,
+        "drive_valid": true,
+        "clipped": false
+      }
+    },
+    {
+      "name": "chromatic_red_endpoint",
+      "request": {
+        "schema_id": "citrus.object_appearance_replay_request",
+        "schema_version": 1,
+        "appearance_profile": {
+          "schema_id": "citrus.object_appearance_profile",
+          "schema_version": 1,
+          "scope_id": "chromatic.red",
+          "contrast_model": "signed_weber_luminance_v1",
+          "calculation_domain": "renderer_nominal_code_luminance_v1",
+          "reference": "local_rendered_background_v1",
+          "alpha_policy": "preserve_authored_alpha_v1",
+          "invalid_reference_policy": "preserve_underlay_v1",
+          "baseline_contrast": 0.0,
+          "peak_contrast": 0.0,
+          "baseline_chromatic_strength": 1.0,
+          "peak_chromatic_strength": 1.0,
+          "modulation": {
+            "mode": "constant",
+            "curve": "linear_v1",
+            "invalid_drive_policy": "return_to_baseline_v1"
+          }
+        },
+        "drive": {"value": 0.0, "valid": false},
+        "local_underlay_rgba": [0.2, 0.2, 0.2, 1.0],
+        "authored_target_rgba": [1.0, 0.0, 0.0, 0.4]
+      },
+      "expected": {
+        "requested_code_luminance": 0.2,
+        "realized_rgba": [0.94073377, 0.0, 0.0, 0.4],
+        "realized_code_luminance": 0.2,
+        "realized_rgba8": [240, 0, 0, 102],
+        "authored_chromaticity_valid": true,
+        "clipped": false
+      }
+    },
+    {
+      "name": "black_reference_fails_visually_closed",
+      "request": {
+        "schema_id": "citrus.object_appearance_replay_request",
+        "schema_version": 1,
+        "appearance_profile": {
+          "schema_id": "citrus.object_appearance_profile",
+          "schema_version": 1,
+          "scope_id": "invalid.reference",
+          "contrast_model": "signed_weber_luminance_v1",
+          "calculation_domain": "renderer_nominal_code_luminance_v1",
+          "reference": "local_rendered_background_v1",
+          "alpha_policy": "preserve_authored_alpha_v1",
+          "invalid_reference_policy": "preserve_underlay_v1",
+          "baseline_contrast": -0.5,
+          "peak_contrast": -0.5,
+          "baseline_chromatic_strength": 1.0,
+          "peak_chromatic_strength": 1.0,
+          "modulation": {
+            "mode": "constant",
+            "curve": "linear_v1",
+            "invalid_drive_policy": "return_to_baseline_v1"
+          }
+        },
+        "drive": {"value": 0.0, "valid": false},
+        "local_underlay_rgba": [0.0, 0.0, 0.0, 1.0],
+        "authored_target_rgba": [1.0, 0.0, 0.0, 0.25]
+      },
+      "expected": {
+        "reference_valid": false,
+        "realized_rgba": [0.0, 0.0, 0.0, 0.25],
+        "realized_rgba8": [0, 0, 0, 64],
+        "clipped": false
+      }
+    },
+    {
+      "name": "gamut_clip_is_explicit",
+      "request": {
+        "schema_id": "citrus.object_appearance_replay_request",
+        "schema_version": 1,
+        "appearance_profile": {
+          "schema_id": "citrus.object_appearance_profile",
+          "schema_version": 1,
+          "scope_id": "clipped.red",
+          "contrast_model": "signed_weber_luminance_v1",
+          "calculation_domain": "renderer_nominal_code_luminance_v1",
+          "reference": "local_rendered_background_v1",
+          "alpha_policy": "preserve_authored_alpha_v1",
+          "invalid_reference_policy": "preserve_underlay_v1",
+          "baseline_contrast": 0.0,
+          "peak_contrast": 0.0,
+          "baseline_chromatic_strength": 1.0,
+          "peak_chromatic_strength": 1.0,
+          "modulation": {
+            "mode": "constant",
+            "curve": "linear_v1",
+            "invalid_drive_policy": "return_to_baseline_v1"
+          }
+        },
+        "drive": {"value": 0.0, "valid": false},
+        "local_underlay_rgba": [0.75, 0.75, 0.75, 1.0],
+        "authored_target_rgba": [1.0, 0.0, 0.0, 1.0]
+      },
+      "expected": {
+        "requested_code_luminance": 0.75,
+        "realized_rgba": [1.0, 0.0, 0.0, 1.0],
+        "realized_code_luminance": 0.2126,
+        "realized_rgba8": [255, 0, 0, 255],
+        "clipped": true
+      }
+    }
+  ]
+}

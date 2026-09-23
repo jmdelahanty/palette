@@ -1,0 +1,4042 @@
+{
+  "completion": {
+    "capture": [
+      "running",
+      "complete",
+      "failed"
+    ],
+    "closed_failed_evidence_may_transfer": true,
+    "closure_external_receipt_only": [
+      "open",
+      "closed",
+      "failed"
+    ],
+    "dependency_manifest_path": "/evidence/integrity/dependency_manifest_json",
+    "finalization": [
+      "pending",
+      "complete",
+      "failed"
+    ],
+    "global_finalization_receipt_path": "/evidence/integrity/finalization_receipt_json",
+    "internal_path": "/metadata/completion_json",
+    "ordering": "capture_join_then_scoped_finalizers_then_internal_dependency_manifest_then_h5_close_then_external_whole_file_receipt",
+    "scientific_acceptance": "separate downstream decision"
+  },
+  "component_outcomes": {
+    "closed_entry_fields": [
+      "component_id",
+      "requirement",
+      "status",
+      "expected_rows",
+      "written_rows",
+      "dropped_rows",
+      "write_errors",
+      "reason"
+    ],
+    "core_required_component": "frames",
+    "count_dtype": "uint64_json_integer",
+    "path": "/metadata/component_outcomes_json",
+    "requirement": [
+      "not_requested",
+      "not_applicable",
+      "optional",
+      "required"
+    ],
+    "requirements_source": "declared protocol/profile, not whichever datasets were emitted",
+    "status": [
+      "not_requested",
+      "not_applicable",
+      "pending",
+      "complete",
+      "unavailable",
+      "invalid",
+      "failed"
+    ]
+  },
+  "integrity": {
+    "canonical_json_encoding": "canonical_json_utf8_sort_keys_compact_v1",
+    "canonical_table_encoding": "core_schema_json_and_packed_le_v1",
+    "dependency_set": "all internal datasets except dependency_manifest_json and finalization_receipt_json self",
+    "generic_dataset_encoding": "hdf5_closed_logical_values_v1",
+    "scientific_acceptance": "not implied by internal or whole-file integrity",
+    "self_digest_excluded": true,
+    "whole_file_sha256": "external finalized observation receipt after physical H5 close"
+  },
+  "integrity_scope": "all internal dataset logical content and schema descriptors; exclude manifest and receipt self digests; final whole-file hash external",
+  "missing_values": {
+    "invalid_value": 0,
+    "validity_dtype": "|u1",
+    "validity_values": [
+      0,
+      1
+    ],
+    "zero_is_not_globally_missing": true
+  },
+  "namespace_owners": {
+    "/components": "one typed state table per component",
+    "/correspondence": "frame/state references and acquisition binding",
+    "/definitions": "enum definitions",
+    "/events": "events",
+    "/evidence": "source-scoped evidence; not duplicate active schemas",
+    "/frames": "shared stimulus frames; independent of encoded video",
+    "/geometry": "used geometry and coordinate authority",
+    "/metadata": "session, subject, recording, rig, display and component declarations",
+    "/observations": "tracking and routing inputs",
+    "/protocol": "authored and executed settings",
+    "/timing": "explicit clock/event domains",
+    "/trials": "executed trials"
+  },
+  "not_yet_defined": [
+    "remaining metadata/observation/timing/protocol table schemas",
+    "production profile admission and binding materialization",
+    "user-facing transfer admission"
+  ],
+  "root_attributes": {
+    "schema_id": "utf8",
+    "schema_version": "<u8"
+  },
+  "schema_id": "citrus.experimental_h5",
+  "schema_version": 1,
+  "status": "development_core_definitions_not_production_admitted",
+  "table_attributes": {
+    "component_id": "utf8",
+    "schema_id": "utf8",
+    "schema_version": "<u8"
+  },
+  "tables": [
+    {
+      "component": "frames",
+      "fields": [
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "session stimulus frame key; zero valid",
+          "name": "stimulus_frame_num",
+          "offset": 0,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "recorded trigger ID; not authoritative Orange acquisition correspondence",
+          "name": "triggering_camera_frame_id",
+          "offset": 8,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<i8",
+          "meaning": "Citrus wall clock software state-output time; can jump",
+          "name": "timestamp_ns_epoch",
+          "offset": 16,
+          "units": "ns",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<i8",
+          "meaning": "Citrus session monotonic software state-output time; not photon timing",
+          "name": "timestamp_ns_session",
+          "offset": 24,
+          "units": "ns",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "recorded_value",
+          "name": "video_frame_index",
+          "offset": 32,
+          "units": "1",
+          "validity_field": "video_frame_index_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit validity; invalid payload zero",
+          "name": "video_frame_index_valid",
+          "offset": 40,
+          "units": "1",
+          "validity_field": ""
+        }
+      ],
+      "id": "citrus.experimental_h5.stimulus_frame",
+      "itemsize": 41,
+      "key_fields": "stimulus_frame_num",
+      "path": "/frames/stimulus",
+      "rank": 1,
+      "required_reference_attributes": [],
+      "row_order": "append_order",
+      "schema_version": 1
+    },
+    {
+      "component": "chaser",
+      "fields": [
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "session stimulus frame key; zero valid",
+          "name": "stimulus_frame_num",
+          "offset": 0,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<i8",
+          "meaning": "Citrus session monotonic software state-output time; not photon timing",
+          "name": "timestamp_ns_session",
+          "offset": 8,
+          "units": "ns",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "stimulus instance key; zero valid",
+          "name": "chaser_index",
+          "offset": 16,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "recorded_value",
+          "name": "is_chasing",
+          "offset": 24,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "arena-relative canvas; top-left origin; x right; y down",
+          "name": "chaser_pos_x",
+          "offset": 25,
+          "units": "px",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "arena-relative canvas; top-left origin; x right; y down",
+          "name": "chaser_pos_y",
+          "offset": 29,
+          "units": "px",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "arena-relative canvas; top-left origin; x right; y down",
+          "name": "target_pos_x",
+          "offset": 33,
+          "units": "px",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "arena-relative canvas; top-left origin; x right; y down",
+          "name": "target_pos_y",
+          "offset": 37,
+          "units": "px",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "target IPC source frame; not recording/acquisition index",
+          "name": "target_source_frame_id",
+          "offset": 41,
+          "units": "1",
+          "validity_field": "target_source_frame_id_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit validity; invalid payload zero",
+          "name": "target_source_frame_id_valid",
+          "offset": 49,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "old Chaser camera zero was unknown; NOT the SHAMAN numeric camera-zero rule",
+          "name": "target_source_camera_id",
+          "offset": 50,
+          "units": "1",
+          "validity_field": "target_source_camera_id_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit validity; invalid payload zero",
+          "name": "target_source_camera_id_valid",
+          "offset": 58,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "recorded_value",
+          "name": "target_source_box_index_in_payload",
+          "offset": 59,
+          "units": "1",
+          "validity_field": "target_source_box_index_in_payload_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit validity; invalid payload zero",
+          "name": "target_source_box_index_in_payload_valid",
+          "offset": 67,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "target_age_ms",
+          "offset": 68,
+          "units": "ms",
+          "validity_field": "target_age_ms_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit validity; invalid payload zero",
+          "name": "target_age_ms_valid",
+          "offset": 72,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/chaser_target_freshness_states",
+          "name": "target_freshness_state",
+          "offset": 73,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/chaser_target_area_states",
+          "name": "target_area_state",
+          "offset": 81,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "arena-relative canvas; top-left origin; x right; y down",
+          "name": "target_clamped_pos_x",
+          "offset": 89,
+          "units": "px",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "arena-relative canvas; top-left origin; x right; y down",
+          "name": "target_clamped_pos_y",
+          "offset": 93,
+          "units": "px",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "target_distance_outside_px",
+          "offset": 97,
+          "units": "px",
+          "validity_field": "target_distance_outside_px_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit validity; invalid payload zero",
+          "name": "target_distance_outside_px_valid",
+          "offset": 101,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "chaser_radius_px",
+          "offset": 102,
+          "units": "px",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "chaser_radius_mm",
+          "offset": 106,
+          "units": "mm",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "target_radius_px",
+          "offset": 110,
+          "units": "px",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "target_radius_mm",
+          "offset": 114,
+          "units": "mm",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "distance_to_target_px",
+          "offset": 118,
+          "units": "px",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "distance_to_target_mm",
+          "offset": 122,
+          "units": "mm",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "chase_speed_px_per_s",
+          "offset": 126,
+          "units": "px/s",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "chase_speed_mm_per_s",
+          "offset": 130,
+          "units": "mm/s",
+          "validity_field": ""
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "recorded_value",
+          "name": "behavior_program_active",
+          "offset": 134,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "recorded_value",
+          "name": "behavior_episode_active",
+          "offset": 135,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "recorded_value",
+          "name": "behavior_episode_id",
+          "offset": 136,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "recorded_value",
+          "name": "behavior_phase_index",
+          "offset": 144,
+          "units": "1",
+          "validity_field": "behavior_phase_index_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit validity; invalid payload zero",
+          "name": "behavior_phase_index_valid",
+          "offset": 152,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/chaser_motion_types",
+          "name": "behavior_motion_type_id",
+          "offset": 153,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "behavior_velocity_x_mm_per_s",
+          "offset": 161,
+          "units": "mm/s",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "behavior_velocity_y_mm_per_s",
+          "offset": 165,
+          "units": "mm/s",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "behavior_command_speed_mm_per_s",
+          "offset": 169,
+          "units": "mm/s",
+          "validity_field": ""
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "recorded_value",
+          "name": "behavior_retreat_plan_active",
+          "offset": 173,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "behavior_retreat_requested_distance_mm",
+          "offset": 174,
+          "units": "mm",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "behavior_retreat_actual_distance_mm",
+          "offset": 178,
+          "units": "mm",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "projected-surface mm derived from active pixels_per_mm",
+          "name": "behavior_retreat_endpoint_x_mm",
+          "offset": 182,
+          "units": "mm",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "projected-surface mm derived from active pixels_per_mm",
+          "name": "behavior_retreat_endpoint_y_mm",
+          "offset": 186,
+          "units": "mm",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "projected-surface mm derived from active pixels_per_mm",
+          "name": "behavior_retreat_target_x_mm",
+          "offset": 190,
+          "units": "mm",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "projected-surface mm derived from active pixels_per_mm",
+          "name": "behavior_retreat_target_y_mm",
+          "offset": 194,
+          "units": "mm",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "behavior_retreat_angular_deviation_deg",
+          "offset": 198,
+          "units": "deg",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "visual_angle_deg",
+          "offset": 202,
+          "units": "deg",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "angular_velocity_deg_s",
+          "offset": 206,
+          "units": "deg/s",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "tau_ms",
+          "offset": 210,
+          "units": "ms",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/chaser_loom_modes",
+          "name": "loom_mode",
+          "offset": 214,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/chaser_loom_phases",
+          "name": "loom_phase",
+          "offset": 222,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/chaser_behavior_classes",
+          "name": "chaser_behavior_class_id",
+          "offset": 230,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "l_over_v_ms",
+          "offset": 238,
+          "units": "ms",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "initial_distance_mm",
+          "offset": 242,
+          "units": "mm",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "max_angle_deg",
+          "offset": 246,
+          "units": "deg",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "z_eff_mm",
+          "offset": 250,
+          "units": "mm",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "pixels_per_mm",
+          "offset": 254,
+          "units": "px/mm",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/chaser_trial_states",
+          "name": "trial_state",
+          "offset": 258,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "recorded_value",
+          "name": "chase_sequence_active",
+          "offset": 266,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "recorded_value",
+          "name": "chase_trial_id",
+          "offset": 267,
+          "units": "1",
+          "validity_field": "chase_trial_id_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit validity; invalid payload zero",
+          "name": "chase_trial_id_valid",
+          "offset": 275,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "time_in_state_s",
+          "offset": 276,
+          "units": "s",
+          "validity_field": ""
+        }
+      ],
+      "id": "citrus.experimental_h5.chaser_state",
+      "itemsize": 280,
+      "key_fields": "chaser_index,stimulus_frame_num",
+      "path": "/components/chaser/states",
+      "rank": 1,
+      "required_reference_attributes": [
+        "frame_table_ref",
+        "geometry_ref"
+      ],
+      "row_order": "append_order",
+      "schema_version": 1
+    },
+    {
+      "component": "visual_appearance",
+      "fields": [
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "session stimulus frame key; zero valid",
+          "name": "stimulus_frame_num",
+          "offset": 0,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<i8",
+          "meaning": "Citrus session monotonic software state-output time; not photon timing",
+          "name": "timestamp_ns_session",
+          "offset": 8,
+          "units": "ns",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 65,
+          "dtype": "utf8_nullterm",
+          "meaning": "authored object-appearance scope identity; unique within a protocol step",
+          "name": "scope_id",
+          "offset": 16,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 72,
+          "dtype": "utf8_nullterm",
+          "meaning": "sha256-prefixed digest of the canonical authored object-appearance profile",
+          "name": "profile_digest",
+          "offset": 81,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "object-appearance profile schema version bound by profile_digest",
+          "name": "profile_schema_version",
+          "offset": 153,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 65,
+          "dtype": "utf8_nullterm",
+          "meaning": "versioned renderer adapter that evaluated the appearance contract",
+          "name": "renderer_adapter_id",
+          "offset": 161,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 33,
+          "dtype": "utf8_nullterm",
+          "meaning": "versioned rule selecting the local rendered-background witness",
+          "name": "reference_sample_policy_id",
+          "offset": 226,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/appearance_contrast_models",
+          "name": "contrast_model_id",
+          "offset": 259,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/appearance_calculation_domains",
+          "name": "calculation_domain_id",
+          "offset": 267,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/appearance_reference_policies",
+          "name": "reference_policy_id",
+          "offset": 275,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/appearance_alpha_policies",
+          "name": "alpha_policy_id",
+          "offset": 283,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/appearance_modulation_modes",
+          "name": "modulation_mode_id",
+          "offset": 291,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/appearance_modulation_curves",
+          "name": "modulation_curve_id",
+          "offset": 299,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/appearance_invalid_drive_policies",
+          "name": "invalid_drive_policy_id",
+          "offset": 307,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "enum:/definitions/enums/appearance_invalid_reference_policies",
+          "name": "invalid_reference_policy_id",
+          "offset": 315,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "normalized renderer drive before modulation curve",
+          "name": "drive_value",
+          "offset": 323,
+          "units": "1",
+          "validity_field": "drive_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit validity; invalid payload zero",
+          "name": "drive_valid",
+          "offset": 327,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "renderer returned to baseline because required drive evidence was invalid",
+          "name": "invalid_drive_fallback_used",
+          "offset": 328,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "normalized drive after validation, fallback, clamping, and modulation curve",
+          "name": "effective_drive",
+          "offset": 329,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "signed Weber contrast requested in renderer nominal code-luminance space",
+          "name": "requested_contrast",
+          "offset": 333,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "requested interpolation toward authored target chromaticity",
+          "name": "requested_chromatic_strength",
+          "offset": 337,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<i8",
+          "meaning": "integer sample pixel in arena-relative render raster; top-left origin",
+          "name": "reference_sample_x_px",
+          "offset": 341,
+          "units": "px",
+          "validity_field": "reference_sample_position_valid"
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<i8",
+          "meaning": "integer sample pixel in arena-relative render raster; top-left origin",
+          "name": "reference_sample_y_px",
+          "offset": 349,
+          "units": "px",
+          "validity_field": "reference_sample_position_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit validity; invalid coordinate payloads zero",
+          "name": "reference_sample_position_valid",
+          "offset": 357,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "this appearance scope owned the selected output pixel under Chaser first-matching-index overlap semantics",
+          "name": "sample_scope_visible",
+          "offset": 358,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 4,
+          "dtype": "<f4",
+          "meaning": "sampled local underlay RGBA in renderer nominal code values",
+          "name": "reference_rgba",
+          "offset": 359,
+          "units": "1",
+          "validity_field": "reference_valid"
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "weighted RGB code value used as the contrast denominator; not physical luminance",
+          "name": "reference_code_luminance",
+          "offset": 375,
+          "units": "1",
+          "validity_field": "reference_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit validity; invalid reference payloads zero",
+          "name": "reference_valid",
+          "offset": 379,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "unclipped requested code luminance derived from the valid local reference",
+          "name": "requested_code_luminance",
+          "offset": 380,
+          "units": "1",
+          "validity_field": "reference_valid"
+        },
+        {
+          "boolean": false,
+          "count": 4,
+          "dtype": "<f4",
+          "meaning": "actual realized object RGBA after renderer byte quantization, expressed as code values divided by 255",
+          "name": "realized_rgba",
+          "offset": 384,
+          "units": "1",
+          "validity_field": "realized_valid"
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "weighted RGB code value of realized_rgba; not physical luminance",
+          "name": "realized_code_luminance",
+          "offset": 400,
+          "units": "1",
+          "validity_field": "realized_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit validity; invalid realized payloads zero",
+          "name": "realized_valid",
+          "offset": 404,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "authored target RGB had a usable code-luminance chromaticity",
+          "name": "authored_chromaticity_valid",
+          "offset": 405,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "one or more requested RGB channels exceeded the renderer code interval",
+          "name": "clipped",
+          "offset": 406,
+          "units": "1",
+          "validity_field": ""
+        }
+      ],
+      "id": "citrus.experimental_h5.object_appearance_state",
+      "itemsize": 407,
+      "key_fields": "stimulus_frame_num,scope_id",
+      "path": "/components/visual_appearance/states",
+      "rank": 1,
+      "required_reference_attributes": [
+        "frame_table_ref",
+        "geometry_ref",
+        "profile_definition_ref",
+        "protocol_semantic_ref",
+        "stimulus_state_table_ref",
+        "renderer_snapshot_ref",
+        "presentation_timing_ref",
+        "appearance_enum_group_ref",
+        "build_identity_ref",
+        "replay_dependency_manifest_ref"
+      ],
+      "row_order": "append_order",
+      "schema_version": 1
+    },
+    {
+      "component": "independent_motion_grid",
+      "fields": [
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "session stimulus frame key; zero valid",
+          "name": "stimulus_frame_num",
+          "offset": 0,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<i8",
+          "meaning": "Citrus session monotonic software state-output time; not photon timing",
+          "name": "timestamp_ns_session",
+          "offset": 8,
+          "units": "ns",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "recorded_value",
+          "name": "grid_rows",
+          "offset": 16,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "recorded_value",
+          "name": "grid_cols",
+          "offset": 24,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "recorded_value",
+          "name": "slot_index",
+          "offset": 32,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "recorded_value",
+          "name": "is_moving",
+          "offset": 40,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "velocity_x",
+          "offset": 41,
+          "units": "px/s",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "velocity_y",
+          "offset": 45,
+          "units": "px/s",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "current_offset_x",
+          "offset": 49,
+          "units": "px",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "current_offset_y",
+          "offset": 53,
+          "units": "px",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "speed_px_per_sec",
+          "offset": 57,
+          "units": "px/s",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "grid direction in local texture axes",
+          "name": "direction_degrees",
+          "offset": 61,
+          "units": "deg",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "recorded_value",
+          "name": "image_index",
+          "offset": 65,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "brightness",
+          "offset": 73,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "recorded_value",
+          "name": "borders_visible",
+          "offset": 77,
+          "units": "1",
+          "validity_field": ""
+        }
+      ],
+      "id": "citrus.experimental_h5.independent_motion_grid_state",
+      "itemsize": 78,
+      "key_fields": "stimulus_frame_num,slot_index",
+      "path": "/components/independent_motion_grid/states",
+      "rank": 1,
+      "required_reference_attributes": [
+        "frame_table_ref",
+        "geometry_ref"
+      ],
+      "row_order": "append_order",
+      "schema_version": 1
+    },
+    {
+      "component": "moving_grating",
+      "fields": [
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "session stimulus frame key; zero valid",
+          "name": "stimulus_frame_num",
+          "offset": 0,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<i8",
+          "meaning": "Citrus session monotonic software state-output time; not photon timing",
+          "name": "timestamp_ns_session",
+          "offset": 8,
+          "units": "ns",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "recorded trigger ID; not authoritative Orange acquisition correspondence",
+          "name": "triggering_camera_frame_id",
+          "offset": 16,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "authored angle in direction_reference_frame",
+          "name": "motion_direction_degrees_authored",
+          "offset": 24,
+          "units": "deg",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "canvas angle; zero right; positive clockwise",
+          "name": "motion_direction_degrees_canvas",
+          "offset": 28,
+          "units": "deg",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "canvas angle; zero right; positive clockwise",
+          "name": "render_axis_degrees_canvas",
+          "offset": 32,
+          "units": "deg",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "retained old render-axis alias; not a direction-reference conversion",
+          "name": "orientation_degrees",
+          "offset": 36,
+          "units": "deg",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "speed_px_per_sec",
+          "offset": 40,
+          "units": "px/s",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "speed_mm_per_sec",
+          "offset": 44,
+          "units": "mm/s",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "spatial_frequency_cpp",
+          "offset": 48,
+          "units": "cycles/px",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "spatial_frequency_cpm",
+          "offset": 52,
+          "units": "cycles/mm",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "phase_radians",
+          "offset": 56,
+          "units": "rad",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "duty_cycle",
+          "offset": 60,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<f4",
+          "meaning": "recorded_value",
+          "name": "brightness",
+          "offset": 64,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 4,
+          "dtype": "<f4",
+          "meaning": "recorded RGBA channels, not inferred luminance",
+          "name": "line_color_rgba",
+          "offset": 68,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 4,
+          "dtype": "<f4",
+          "meaning": "recorded RGBA channels, not inferred luminance",
+          "name": "background_color_rgba",
+          "offset": 84,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "recorded_value",
+          "name": "is_reactive",
+          "offset": 100,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 32,
+          "dtype": "utf8_nullterm",
+          "meaning": "recorded_value",
+          "name": "direction_reference_frame",
+          "offset": 101,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 64,
+          "dtype": "utf8_nullterm",
+          "meaning": "recorded_value",
+          "name": "reactive_logic_module",
+          "offset": 133,
+          "units": "1",
+          "validity_field": ""
+        }
+      ],
+      "id": "citrus.experimental_h5.moving_grating_state",
+      "itemsize": 197,
+      "key_fields": "stimulus_frame_num",
+      "path": "/components/moving_grating/states",
+      "rank": 1,
+      "required_reference_attributes": [
+        "frame_table_ref",
+        "geometry_ref"
+      ],
+      "row_order": "append_order",
+      "schema_version": 1
+    },
+    {
+      "component": "correspondence",
+      "fields": [
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "references frames/stimulus key; zero valid",
+          "name": "stimulus_frame_num",
+          "offset": 0,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "Orange one-based recording frame ID; independent from acquisition index",
+          "name": "source_recording_frame_id",
+          "offset": 8,
+          "units": "1",
+          "validity_field": "source_recording_frame_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit validity",
+          "name": "source_recording_frame_valid",
+          "offset": 16,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "verified acquisition mapping index; zero valid",
+          "name": "source_acquisition_frame_index",
+          "offset": 17,
+          "units": "1",
+          "validity_field": "source_acquisition_frame_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit validity",
+          "name": "source_acquisition_frame_valid",
+          "offset": 25,
+          "units": "1",
+          "validity_field": ""
+        }
+      ],
+      "id": "citrus.experimental_h5.frame_source",
+      "itemsize": 26,
+      "key_fields": "stimulus_frame_num",
+      "path": "/correspondence/frames/sources",
+      "rank": 1,
+      "required_reference_attributes": [
+        "frame_table_ref",
+        "acquisition_binding_ref"
+      ],
+      "row_order": "append_order",
+      "schema_version": 1
+    },
+    {
+      "component": "correspondence",
+      "fields": [
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "ordinal in explicitly referenced canonical state table; zero valid",
+          "name": "state_row_index",
+          "offset": 0,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "current verified acquisition index; not held target",
+          "name": "source_acquisition_frame_index",
+          "offset": 8,
+          "units": "1",
+          "validity_field": "source_acquisition_frame_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit current-source validity",
+          "name": "source_acquisition_frame_valid",
+          "offset": 16,
+          "units": "1",
+          "validity_field": ""
+        },
+        {
+          "boolean": false,
+          "count": 1,
+          "dtype": "<u8",
+          "meaning": "held target acquisition index; may precede current",
+          "name": "target_source_acquisition_frame_index",
+          "offset": 17,
+          "units": "1",
+          "validity_field": "target_source_acquisition_frame_valid"
+        },
+        {
+          "boolean": true,
+          "count": 1,
+          "dtype": "|u1",
+          "meaning": "explicit held-target validity",
+          "name": "target_source_acquisition_frame_valid",
+          "offset": 25,
+          "units": "1",
+          "validity_field": ""
+        }
+      ],
+      "id": "citrus.experimental_h5.state_source",
+      "itemsize": 26,
+      "key_fields": "state_row_index",
+      "path": "/correspondence/{component}/sources",
+      "rank": 1,
+      "required_reference_attributes": [
+        "acquisition_binding_ref",
+        "state_table_ref"
+      ],
+      "row_order": "append_order",
+      "schema_version": 1
+    },
+    {
+      "id": "citrus.experimental_h5.event_record",
+      "schema_version": 1,
+      "path": "/events/records",
+      "component": "events",
+      "rank": 1,
+      "row_order": "append_order",
+      "key_fields": "event_row_index",
+      "itemsize": 1480,
+      "fields": [
+        {
+          "name": "event_row_index",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 0,
+          "units": "1",
+          "meaning": "zero-based append ordinal; preserves repeated events; not a frame or acquisition ID",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "timestamp_ns_epoch",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 8,
+          "units": "ns",
+          "meaning": "Citrus wall clock at event logging; can jump; not photon timing",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "timestamp_ns_session",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 16,
+          "units": "ns",
+          "meaning": "Citrus session monotonic event logging time; not photon timing",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "event_type_id",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 24,
+          "units": "1",
+          "meaning": "enum:/definitions/enums/events",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "current_step_index",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 32,
+          "units": "1",
+          "meaning": "recorded signed execution context; -1 outside a step is retained, not inferred null",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "event_name",
+          "dtype": "utf8_nullterm",
+          "count": 128,
+          "offset": 40,
+          "units": "1",
+          "meaning": "recorded bounded UTF-8 event name",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "stimulus_frame_num",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 168,
+          "units": "1",
+          "meaning": "recorded inclusive boundary context; zero may be default; not a proven frame reference",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "camera_frame_id",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 176,
+          "units": "1",
+          "meaning": "recorded camera context only; zero may be default; not acquisition correspondence",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "reserved",
+          "dtype": "|u1",
+          "count": 8,
+          "offset": 184,
+          "units": "1",
+          "meaning": "retained source bytes; not boolean flags or native struct padding",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "name_or_context",
+          "dtype": "utf8_nullterm",
+          "count": 256,
+          "offset": 192,
+          "units": "1",
+          "meaning": "recorded bounded UTF-8 context",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "stimulus_mode_id",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 448,
+          "units": "1",
+          "meaning": "enum:/definitions/enums/stimulus_modes",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "details_json",
+          "dtype": "utf8_nullterm",
+          "count": 1024,
+          "offset": 456,
+          "units": "1",
+          "meaning": "recorded bounded text; malformed/non-JSON/truncated source text remains evidence",
+          "validity_field": "",
+          "boolean": false
+        }
+      ],
+      "required_reference_attributes": [
+        "clock_domain_ref",
+        "enum_group_ref",
+        "protocol_snapshot_ref",
+        "frame_context_ref"
+      ]
+    },
+    {
+      "id": "citrus.experimental_h5.runtime_trial",
+      "schema_version": 1,
+      "path": "/trials/trial_index",
+      "component": "runtime_trials",
+      "rank": 1,
+      "row_order": "append_order",
+      "key_fields": "trial_row_index",
+      "itemsize": 4208,
+      "fields": [
+        {
+          "name": "trial_row_index",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 0,
+          "units": "1",
+          "meaning": "zero-based append ordinal; repeated trial IDs are not deduplicated",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "trial_id",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 8,
+          "units": "1",
+          "meaning": "recorded runtime trial ID; identity is not assumed unique across source rows",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "trial_kind_id",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 16,
+          "units": "1",
+          "meaning": "enum:/definitions/enums/runtime_trial_kinds",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "step_index",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 24,
+          "units": "1",
+          "meaning": "recorded signed execution context; -1 outside/unknown step is retained",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "stimulus_mode_id",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 32,
+          "units": "1",
+          "meaning": "enum:/definitions/enums/stimulus_modes",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "start_timestamp_ns_session",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 40,
+          "units": "ns",
+          "meaning": "recorded Citrus monotonic trial start; zero may be default; not photon timing",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "end_timestamp_ns_session",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 48,
+          "units": "ns",
+          "meaning": "recorded Citrus monotonic trial end; not photon timing",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "start_stimulus_frame_num",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 56,
+          "units": "1",
+          "meaning": "recorded boundary context; orphan start may be default; not a proven frame reference",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "end_stimulus_frame_num",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 64,
+          "units": "1",
+          "meaning": "recorded boundary context; session-end closure may leave default zero",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "start_camera_frame_id",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 72,
+          "units": "1",
+          "meaning": "recorded source context; zero may be default; not acquisition correspondence",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "end_camera_frame_id",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 80,
+          "units": "1",
+          "meaning": "recorded source context; zero may be default; not acquisition correspondence",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "end_reason_id",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 88,
+          "units": "1",
+          "meaning": "enum:/definitions/enums/runtime_trial_end_reasons",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "details_json",
+          "dtype": "utf8_nullterm",
+          "count": 4096,
+          "offset": 96,
+          "units": "1",
+          "meaning": "recorded bounded start/end evidence including wrapped non-JSON input; no inferred observation flags",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "reserved",
+          "dtype": "|u1",
+          "count": 16,
+          "offset": 4192,
+          "units": "1",
+          "meaning": "retained source bytes; not boolean flags or native struct padding",
+          "validity_field": "",
+          "boolean": false
+        }
+      ],
+      "required_reference_attributes": [
+        "clock_domain_ref",
+        "enum_group_ref",
+        "protocol_snapshot_ref",
+        "frame_context_ref"
+      ]
+    },
+    {
+      "id": "citrus.experimental_h5.enum_definition",
+      "schema_version": 1,
+      "path": "/definitions/enums/{component}",
+      "component": "definitions",
+      "rank": 1,
+      "row_order": "append_order",
+      "key_fields": "id",
+      "itemsize": 72,
+      "fields": [
+        {
+          "name": "id",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 0,
+          "units": "1",
+          "meaning": "recorded enum ID; shared signed width; definition dataset selects vocabulary",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "name",
+          "dtype": "utf8_nullterm",
+          "count": 64,
+          "offset": 8,
+          "units": "1",
+          "meaning": "recorded bounded UTF-8 enum label",
+          "validity_field": "",
+          "boolean": false
+        }
+      ],
+      "required_reference_attributes": []
+    },
+    {
+      "id": "citrus.experimental_h5.bounding_boxes",
+      "schema_version": 1,
+      "path": "/observations/bounding_boxes",
+      "component": "bounding_boxes",
+      "rank": 1,
+      "row_order": "append_order",
+      "key_fields": "",
+      "itemsize": 76,
+      "fields": [
+        {
+          "name": "payload_timestamp_ns_epoch",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 0,
+          "units": "ns",
+          "meaning": "Orange publish wall-clock time; not camera capture",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "payload_timestamp_ns_monotonic",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 8,
+          "units": "ns",
+          "meaning": "Orange process steady-clock publish time; not Citrus session time",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "received_timestamp_ns_epoch",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 16,
+          "units": "ns",
+          "meaning": "Citrus wall-clock IPC receive time; not camera capture",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "payload_frame_id",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 24,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "payload_camera_id",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 32,
+          "units": "1",
+          "meaning": "recorded SHAMAN numeric camera ID; zero valid; not serial or fish identity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "box_index_in_payload",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 40,
+          "units": "1",
+          "meaning": "payload-local index; not cross-frame track or fish identity; zero valid",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "x_min",
+          "dtype": "<f4",
+          "count": 1,
+          "offset": 48,
+          "units": "px",
+          "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "y_min",
+          "dtype": "<f4",
+          "count": 1,
+          "offset": 52,
+          "units": "px",
+          "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "width",
+          "dtype": "<f4",
+          "count": 1,
+          "offset": 56,
+          "units": "px",
+          "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "height",
+          "dtype": "<f4",
+          "count": 1,
+          "offset": 60,
+          "units": "px",
+          "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "class_id",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 64,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "confidence",
+          "dtype": "<f4",
+          "count": 1,
+          "offset": 72,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        }
+      ],
+      "required_reference_attributes": [
+        "clock_domain_ref",
+        "coordinate_context_ref"
+      ]
+    },
+    {
+      "id": "citrus.experimental_h5.region_routing",
+      "schema_version": 1,
+      "path": "/observations/region_routing",
+      "component": "region_routing",
+      "rank": 1,
+      "row_order": "append_order",
+      "key_fields": "",
+      "itemsize": 1719,
+      "fields": [
+        {
+          "name": "source_identity",
+          "dtype": "compound",
+          "count": 1,
+          "offset": 0,
+          "units": "1",
+          "meaning": "distinct recorded source_identity evidence; never silently replace current with held",
+          "validity_field": "",
+          "boolean": false,
+          "value_type_id": "citrus.experimental_h5.observation_source",
+          "fields": [
+            {
+              "name": "sequence_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 0,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "state_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 8,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "source_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 16,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "camera_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 24,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "recording_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 32,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "camera_timestamp_ns",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 40,
+              "units": "ns",
+              "meaning": "camera clock capture timestamp; requires its recorded clock contract",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "timestamp_sys_ns",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 48,
+              "units": "ns",
+              "meaning": "Orange host acquisition timestamp claim; no inferred clock conversion",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "orange_publish_timestamp_us_epoch",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 56,
+              "units": "us",
+              "meaning": "Orange publish wall-clock time; not camera capture",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "orange_publish_timestamp_us_monotonic",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 64,
+              "units": "us",
+              "meaning": "Orange process steady-clock publish time; not Citrus session time",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "camera_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 72,
+              "units": "1",
+              "meaning": "recorded SHAMAN numeric camera ID; zero valid; not serial or fish identity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "source_width_px",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 80,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "source_height_px",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 88,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "detection_status",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 96,
+              "units": "1",
+              "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "pose_status",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 104,
+              "units": "1",
+              "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "detection_model_id_hash",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 112,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "pose_model_id_hash",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 120,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "pose_skeleton_id_hash",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 128,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "source_detection_count",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 136,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "retained_detection_count",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 144,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "transmitted_object_count",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 152,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "objects_truncated",
+              "dtype": "|u1",
+              "count": 1,
+              "offset": 160,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": true
+            },
+            {
+              "name": "object_order",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 161,
+              "units": "1",
+              "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "detection_reason",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 169,
+              "units": "1",
+              "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "producer_generation",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 177,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "producer_instance_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 185,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "recording_identity_token",
+              "dtype": "utf8_nullterm",
+              "count": 257,
+              "offset": 193,
+              "units": "1",
+              "meaning": "recorded Orange recording-level token; distinct from frame ID, clip ID and fish identity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "camera_serial",
+              "dtype": "utf8_nullterm",
+              "count": 129,
+              "offset": 450,
+              "units": "1",
+              "meaning": "recorded exact camera serial spelling; not numeric-normalized",
+              "validity_field": "",
+              "boolean": false
+            }
+          ],
+          "itemsize": 579
+        },
+        {
+          "name": "held_source_identity",
+          "dtype": "compound",
+          "count": 1,
+          "offset": 579,
+          "units": "1",
+          "meaning": "distinct recorded held_source_identity evidence; never silently replace current with held",
+          "validity_field": "",
+          "boolean": false,
+          "value_type_id": "citrus.experimental_h5.observation_source",
+          "fields": [
+            {
+              "name": "sequence_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 0,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "state_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 8,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "source_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 16,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "camera_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 24,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "recording_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 32,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "camera_timestamp_ns",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 40,
+              "units": "ns",
+              "meaning": "camera clock capture timestamp; requires its recorded clock contract",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "timestamp_sys_ns",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 48,
+              "units": "ns",
+              "meaning": "Orange host acquisition timestamp claim; no inferred clock conversion",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "orange_publish_timestamp_us_epoch",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 56,
+              "units": "us",
+              "meaning": "Orange publish wall-clock time; not camera capture",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "orange_publish_timestamp_us_monotonic",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 64,
+              "units": "us",
+              "meaning": "Orange process steady-clock publish time; not Citrus session time",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "camera_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 72,
+              "units": "1",
+              "meaning": "recorded SHAMAN numeric camera ID; zero valid; not serial or fish identity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "source_width_px",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 80,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "source_height_px",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 88,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "detection_status",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 96,
+              "units": "1",
+              "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "pose_status",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 104,
+              "units": "1",
+              "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "detection_model_id_hash",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 112,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "pose_model_id_hash",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 120,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "pose_skeleton_id_hash",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 128,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "source_detection_count",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 136,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "retained_detection_count",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 144,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "transmitted_object_count",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 152,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "objects_truncated",
+              "dtype": "|u1",
+              "count": 1,
+              "offset": 160,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": true
+            },
+            {
+              "name": "object_order",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 161,
+              "units": "1",
+              "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "detection_reason",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 169,
+              "units": "1",
+              "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "producer_generation",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 177,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "producer_instance_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 185,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "recording_identity_token",
+              "dtype": "utf8_nullterm",
+              "count": 257,
+              "offset": 193,
+              "units": "1",
+              "meaning": "recorded Orange recording-level token; distinct from frame ID, clip ID and fish identity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "camera_serial",
+              "dtype": "utf8_nullterm",
+              "count": 129,
+              "offset": 450,
+              "units": "1",
+              "meaning": "recorded exact camera serial spelling; not numeric-normalized",
+              "validity_field": "",
+              "boolean": false
+            }
+          ],
+          "itemsize": 579
+        },
+        {
+          "name": "arena_group_id",
+          "dtype": "utf8_nullterm",
+          "count": 129,
+          "offset": 1158,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "region_id",
+          "dtype": "utf8_nullterm",
+          "count": 129,
+          "offset": 1287,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "received_timestamp_ns_epoch",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 1416,
+          "units": "ns",
+          "meaning": "Citrus wall-clock IPC receive time; not camera capture",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "payload_timestamp_ns_epoch",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 1424,
+          "units": "ns",
+          "meaning": "Orange publish wall-clock time; not camera capture",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "payload_timestamp_ns_monotonic",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 1432,
+          "units": "ns",
+          "meaning": "Orange process steady-clock publish time; not Citrus session time",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "observation_frame_id",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 1440,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "observation_data_is_fresh",
+          "dtype": "|u1",
+          "count": 1,
+          "offset": 1448,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": true
+        },
+        {
+          "name": "recorded_timestamp_ns_session",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 1449,
+          "units": "ns",
+          "meaning": "Citrus session monotonic routing log time; not photon timing",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "source_detection_count",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 1457,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "retained_detection_count",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 1465,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "transmitted_object_count",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 1473,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "objects_truncated",
+          "dtype": "|u1",
+          "count": 1,
+          "offset": 1481,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": true
+        },
+        {
+          "name": "object_order",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 1482,
+          "units": "1",
+          "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "detection_reason",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 1490,
+          "units": "1",
+          "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "detection_model_id_hash",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 1498,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "producer_generation",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 1506,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "producer_instance_id",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 1514,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "region_candidate_count",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 1522,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "selected_source_vector_index",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 1530,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "selected_source_vector_index_valid",
+          "boolean": false
+        },
+        {
+          "name": "selected_source_vector_index_valid",
+          "dtype": "|u1",
+          "count": 1,
+          "offset": 1538,
+          "units": "1",
+          "meaning": "explicit validity; source -1 becomes invalid zero",
+          "validity_field": "",
+          "boolean": true
+        },
+        {
+          "name": "held_source_vector_index",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 1539,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "held_source_vector_index_valid",
+          "boolean": false
+        },
+        {
+          "name": "held_source_vector_index_valid",
+          "dtype": "|u1",
+          "count": 1,
+          "offset": 1547,
+          "units": "1",
+          "meaning": "explicit validity; source -1 becomes invalid zero",
+          "validity_field": "",
+          "boolean": true
+        },
+        {
+          "name": "routing_disposition",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 1548,
+          "units": "1",
+          "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "held_routing_disposition",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 1556,
+          "units": "1",
+          "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "selected_candidate_valid",
+          "dtype": "|u1",
+          "count": 1,
+          "offset": 1564,
+          "units": "1",
+          "meaning": "recorded source selection/hold flag; accompanying raw nested evidence is retained even when false",
+          "validity_field": "",
+          "boolean": true
+        },
+        {
+          "name": "held_candidate_valid",
+          "dtype": "|u1",
+          "count": 1,
+          "offset": 1565,
+          "units": "1",
+          "meaning": "recorded source selection/hold flag; accompanying raw nested evidence is retained even when false",
+          "validity_field": "",
+          "boolean": true
+        },
+        {
+          "name": "held_source_identity_valid",
+          "dtype": "|u1",
+          "count": 1,
+          "offset": 1566,
+          "units": "1",
+          "meaning": "recorded source selection/hold flag; accompanying raw nested evidence is retained even when false",
+          "validity_field": "",
+          "boolean": true
+        },
+        {
+          "name": "selected_candidate",
+          "dtype": "compound",
+          "count": 1,
+          "offset": 1567,
+          "units": "1",
+          "meaning": "distinct recorded selected_candidate evidence; never silently replace current with held",
+          "validity_field": "",
+          "boolean": false,
+          "value_type_id": "citrus.experimental_h5.bounding_boxes",
+          "fields": [
+            {
+              "name": "payload_timestamp_ns_epoch",
+              "dtype": "<i8",
+              "count": 1,
+              "offset": 0,
+              "units": "ns",
+              "meaning": "Orange publish wall-clock time; not camera capture",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "payload_timestamp_ns_monotonic",
+              "dtype": "<i8",
+              "count": 1,
+              "offset": 8,
+              "units": "ns",
+              "meaning": "Orange process steady-clock publish time; not Citrus session time",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "received_timestamp_ns_epoch",
+              "dtype": "<i8",
+              "count": 1,
+              "offset": 16,
+              "units": "ns",
+              "meaning": "Citrus wall-clock IPC receive time; not camera capture",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "payload_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 24,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "payload_camera_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 32,
+              "units": "1",
+              "meaning": "recorded SHAMAN numeric camera ID; zero valid; not serial or fish identity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "box_index_in_payload",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 40,
+              "units": "1",
+              "meaning": "payload-local index; not cross-frame track or fish identity; zero valid",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "x_min",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 48,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "y_min",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 52,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "width",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 56,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "height",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 60,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "class_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 64,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "confidence",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 72,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            }
+          ],
+          "itemsize": 76
+        },
+        {
+          "name": "held_candidate",
+          "dtype": "compound",
+          "count": 1,
+          "offset": 1643,
+          "units": "1",
+          "meaning": "distinct recorded held_candidate evidence; never silently replace current with held",
+          "validity_field": "",
+          "boolean": false,
+          "value_type_id": "citrus.experimental_h5.bounding_boxes",
+          "fields": [
+            {
+              "name": "payload_timestamp_ns_epoch",
+              "dtype": "<i8",
+              "count": 1,
+              "offset": 0,
+              "units": "ns",
+              "meaning": "Orange publish wall-clock time; not camera capture",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "payload_timestamp_ns_monotonic",
+              "dtype": "<i8",
+              "count": 1,
+              "offset": 8,
+              "units": "ns",
+              "meaning": "Orange process steady-clock publish time; not Citrus session time",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "received_timestamp_ns_epoch",
+              "dtype": "<i8",
+              "count": 1,
+              "offset": 16,
+              "units": "ns",
+              "meaning": "Citrus wall-clock IPC receive time; not camera capture",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "payload_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 24,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "payload_camera_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 32,
+              "units": "1",
+              "meaning": "recorded SHAMAN numeric camera ID; zero valid; not serial or fish identity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "box_index_in_payload",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 40,
+              "units": "1",
+              "meaning": "payload-local index; not cross-frame track or fish identity; zero valid",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "x_min",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 48,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "y_min",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 52,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "width",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 56,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "height",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 60,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "class_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 64,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "confidence",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 72,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            }
+          ],
+          "itemsize": 76
+        }
+      ],
+      "required_reference_attributes": [
+        "clock_domain_ref",
+        "coordinate_context_ref"
+      ]
+    },
+    {
+      "id": "citrus.experimental_h5.region_candidates",
+      "schema_version": 1,
+      "path": "/observations/region_candidates",
+      "component": "region_candidates",
+      "rank": 1,
+      "row_order": "append_order",
+      "key_fields": "",
+      "itemsize": 9292,
+      "fields": [
+        {
+          "name": "source_identity",
+          "dtype": "compound",
+          "count": 1,
+          "offset": 0,
+          "units": "1",
+          "meaning": "distinct recorded source_identity evidence; never silently replace current with held",
+          "validity_field": "",
+          "boolean": false,
+          "value_type_id": "citrus.experimental_h5.observation_source",
+          "fields": [
+            {
+              "name": "sequence_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 0,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "state_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 8,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "source_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 16,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "camera_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 24,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "recording_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 32,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "camera_timestamp_ns",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 40,
+              "units": "ns",
+              "meaning": "camera clock capture timestamp; requires its recorded clock contract",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "timestamp_sys_ns",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 48,
+              "units": "ns",
+              "meaning": "Orange host acquisition timestamp claim; no inferred clock conversion",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "orange_publish_timestamp_us_epoch",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 56,
+              "units": "us",
+              "meaning": "Orange publish wall-clock time; not camera capture",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "orange_publish_timestamp_us_monotonic",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 64,
+              "units": "us",
+              "meaning": "Orange process steady-clock publish time; not Citrus session time",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "camera_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 72,
+              "units": "1",
+              "meaning": "recorded SHAMAN numeric camera ID; zero valid; not serial or fish identity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "source_width_px",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 80,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "source_height_px",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 88,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "detection_status",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 96,
+              "units": "1",
+              "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "pose_status",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 104,
+              "units": "1",
+              "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "detection_model_id_hash",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 112,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "pose_model_id_hash",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 120,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "pose_skeleton_id_hash",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 128,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "source_detection_count",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 136,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "retained_detection_count",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 144,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "transmitted_object_count",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 152,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "objects_truncated",
+              "dtype": "|u1",
+              "count": 1,
+              "offset": 160,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": true
+            },
+            {
+              "name": "object_order",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 161,
+              "units": "1",
+              "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "detection_reason",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 169,
+              "units": "1",
+              "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "producer_generation",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 177,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "producer_instance_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 185,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "recording_identity_token",
+              "dtype": "utf8_nullterm",
+              "count": 257,
+              "offset": 193,
+              "units": "1",
+              "meaning": "recorded Orange recording-level token; distinct from frame ID, clip ID and fish identity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "camera_serial",
+              "dtype": "utf8_nullterm",
+              "count": 129,
+              "offset": 450,
+              "units": "1",
+              "meaning": "recorded exact camera serial spelling; not numeric-normalized",
+              "validity_field": "",
+              "boolean": false
+            }
+          ],
+          "itemsize": 579
+        },
+        {
+          "name": "arena_group_id",
+          "dtype": "utf8_nullterm",
+          "count": 129,
+          "offset": 579,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "region_id",
+          "dtype": "utf8_nullterm",
+          "count": 129,
+          "offset": 708,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "candidate_region_ids",
+          "dtype": "utf8_nullterm",
+          "count": 8257,
+          "offset": 837,
+          "units": "1",
+          "meaning": "exact bounded source candidate-region set text; not reordered or reparsed",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "source_vector_index",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 9094,
+          "units": "1",
+          "meaning": "payload-local index; not cross-frame track or fish identity; zero valid",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "candidate_ordinal",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 9102,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "candidate_disposition",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 9110,
+          "units": "1",
+          "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "received_timestamp_ns_epoch",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 9118,
+          "units": "ns",
+          "meaning": "Citrus wall-clock IPC receive time; not camera capture",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "payload_timestamp_ns_epoch",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 9126,
+          "units": "ns",
+          "meaning": "Orange publish wall-clock time; not camera capture",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "payload_timestamp_ns_monotonic",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 9134,
+          "units": "ns",
+          "meaning": "Orange process steady-clock publish time; not Citrus session time",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "observation_frame_id",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 9142,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "observation_data_is_fresh",
+          "dtype": "|u1",
+          "count": 1,
+          "offset": 9150,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": true
+        },
+        {
+          "name": "source_detection_count",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 9151,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "retained_detection_count",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 9159,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "transmitted_object_count",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 9167,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "objects_truncated",
+          "dtype": "|u1",
+          "count": 1,
+          "offset": 9175,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": true
+        },
+        {
+          "name": "object_order",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 9176,
+          "units": "1",
+          "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "detection_reason",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 9184,
+          "units": "1",
+          "meaning": "recorded producer/router numeric code under captured source contract; unknown codes preserved",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "detection_model_id_hash",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 9192,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "producer_generation",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 9200,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "producer_instance_id",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 9208,
+          "units": "1",
+          "meaning": "recorded source value; not inferred validity",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "candidate",
+          "dtype": "compound",
+          "count": 1,
+          "offset": 9216,
+          "units": "1",
+          "meaning": "distinct recorded candidate evidence; never silently replace current with held",
+          "validity_field": "",
+          "boolean": false,
+          "value_type_id": "citrus.experimental_h5.bounding_boxes",
+          "fields": [
+            {
+              "name": "payload_timestamp_ns_epoch",
+              "dtype": "<i8",
+              "count": 1,
+              "offset": 0,
+              "units": "ns",
+              "meaning": "Orange publish wall-clock time; not camera capture",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "payload_timestamp_ns_monotonic",
+              "dtype": "<i8",
+              "count": 1,
+              "offset": 8,
+              "units": "ns",
+              "meaning": "Orange process steady-clock publish time; not Citrus session time",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "received_timestamp_ns_epoch",
+              "dtype": "<i8",
+              "count": 1,
+              "offset": 16,
+              "units": "ns",
+              "meaning": "Citrus wall-clock IPC receive time; not camera capture",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "payload_frame_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 24,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "payload_camera_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 32,
+              "units": "1",
+              "meaning": "recorded SHAMAN numeric camera ID; zero valid; not serial or fish identity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "box_index_in_payload",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 40,
+              "units": "1",
+              "meaning": "payload-local index; not cross-frame track or fish identity; zero valid",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "x_min",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 48,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "y_min",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 52,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "width",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 56,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "height",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 60,
+              "units": "px",
+              "meaning": "camera-native full raster; xywh boxes, top-left origin, x right, y down",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "class_id",
+              "dtype": "<u8",
+              "count": 1,
+              "offset": 64,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            },
+            {
+              "name": "confidence",
+              "dtype": "<f4",
+              "count": 1,
+              "offset": 72,
+              "units": "1",
+              "meaning": "recorded source value; not inferred validity",
+              "validity_field": "",
+              "boolean": false
+            }
+          ],
+          "itemsize": 76
+        }
+      ],
+      "required_reference_attributes": [
+        "clock_domain_ref",
+        "coordinate_context_ref"
+      ]
+    },
+    {
+      "id": "citrus.experimental_h5.display_submission",
+      "schema_version": 1,
+      "path": "/timing/display_submissions/frame_submissions",
+      "component": "display_submissions",
+      "rank": 1,
+      "row_order": "append_order",
+      "key_fields": "",
+      "itemsize": 81,
+      "fields": [
+        {
+          "name": "display_frame_index",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 0,
+          "units": "1",
+          "meaning": "process-global display-loop ID; not the per-arena stimulus frame; append order retained",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "source_stimulus_frame_num",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 8,
+          "units": "1",
+          "meaning": "recorded composited state context under source_state_valid; raw payload retained even when false",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "source_camera_frame_id",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 16,
+          "units": "1",
+          "meaning": "recorded source camera context; not verified acquisition correspondence",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "compose_call_start_ns_session",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 24,
+          "units": "ns",
+          "meaning": "Citrus session monotonic CPU compose-call start; not photon timing",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "compose_call_end_ns_session",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 32,
+          "units": "ns",
+          "meaning": "Citrus session monotonic CPU compose-call end; not photon timing",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "swap_call_start_ns_session",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 40,
+          "units": "ns",
+          "meaning": "Citrus session monotonic CPU swap-call start; not photon timing",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "swap_call_end_ns_session",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 48,
+          "units": "ns",
+          "meaning": "Citrus session monotonic CPU swap-call end; not photon timing",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "swap_call_end_ns_epoch",
+          "dtype": "<i8",
+          "count": 1,
+          "offset": 56,
+          "units": "ns",
+          "meaning": "Citrus wall-clock CPU swap-call end; can jump; not photon timing",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "marker_code",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 64,
+          "units": "1",
+          "meaning": "requested final-framebuffer marker code; not measured DAQ/photodiode evidence",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "marker_patch_count_rendered",
+          "dtype": "<u8",
+          "count": 1,
+          "offset": 72,
+          "units": "1",
+          "meaning": "recorded marker patch count; zero means no marker photons requested regardless of code",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "source_state_valid",
+          "dtype": "|u1",
+          "count": 1,
+          "offset": 80,
+          "units": "1",
+          "meaning": "recorded source-state assertion; does not authorize dropping context bytes or proving a frame join",
+          "validity_field": "",
+          "boolean": true
+        }
+      ],
+      "required_reference_attributes": [
+        "clock_domain_ref",
+        "frame_context_ref"
+      ]
+    }
+  ]
+}

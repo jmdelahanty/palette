@@ -1224,6 +1224,61 @@ def _write_min_manifest(path: Path, *, set_id: str = "pose_set_v001") -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def test_merged_manifest_declares_pose_task_when_source_manifest_omits_it(
+    tmp_path: Path,
+) -> None:
+    merge_result = SimpleNamespace(
+        source_specs=[],
+        source_type="recovered_pose_crop",
+        source_type_counts={"recovered_pose_crop": 1},
+        input_format="gray",
+        skeleton_id="pose_schema:traditional_v1",
+        kpt_shape=(3, 3),
+        skeleton=[[0, 1], [0, 2], [1, 2]],
+        skeleton_signature="skeleton_id=pose_schema:traditional_v1, kpt_shape=[3,3]",
+        row_gate_policy="recovered_materialized_all_visible",
+        row_gate_counts={"recovered_materialized_all_visible": 2},
+        keypoint_supervision_counts={"full": 2, "box_only": 0},
+        total_samples=2,
+        total_successful=2,
+        total_failed=0,
+        keypoint_shape=(3, 2),
+        keypoint_labels=["swim_bladder", "eye_left", "eye_right"],
+        train_indices=np.asarray([0], dtype=np.int64),
+        val_indices=np.asarray([1], dtype=np.int64),
+        test_indices=np.asarray([], dtype=np.int64),
+        keypoint_dtype_policy="float32_checked",
+        keypoint_cast_max_abs_error={},
+        split_strategy="biological_acquisition_grouped_v1",
+        split_unit="leakage_group",
+        roi_transform_mode="strict",
+        target_roi_hw=(192, 192),
+    )
+
+    payload = mod._build_merged_manifest_payload(
+        manifest_payload={
+            "set_id": "pose_head_v001",
+            "set_name": "pose_head",
+            "source_type": "recovered_pose_crop",
+            "input_format": "gray",
+            "datasets": [{"dataset_id": "source_a"}],
+        },
+        merged_zarr=tmp_path / "pose_head_v001_merged.zarr",
+        merged_dataset_id="pose_head_v001_merged",
+        merged_dataset_name="pose_head_merged",
+        run_name="merged_export_test",
+        out_manifest=tmp_path / "pose_head_v001.manifest.json",
+        out_config=tmp_path / "pose_head_v001.yaml",
+        merge_result=merge_result,
+        train_ratio=0.8,
+        val_ratio=0.2,
+        test_ratio=0.0,
+        seed=42,
+    )
+
+    assert payload["task"] == "pose"
+
+
 def test_main_auto_aggregates_keypoint_data_card_by_default(
     tmp_path: Path, monkeypatch
 ) -> None:

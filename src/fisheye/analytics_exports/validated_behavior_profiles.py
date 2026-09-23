@@ -18,7 +18,12 @@ from .validated_behavior_contracts import (
     ValidatedBehaviorTableSpec,
 )
 from .validated_behavior_core_behavior_adapters import (
+    build_core_behavior_bout_row_extractors,
     build_core_behavior_row_extractors,
+)
+from .validated_behavior_bout_kinematics_contracts import (
+    BOUT_KINEMATICS_EXPORT_PROFILE_ID,
+    BOUT_KINEMATICS_EXPORT_TABLE_SPECS,
 )
 from .validated_behavior_core_behavior_contracts import (
     CORE_BEHAVIOR_EXPORT_PROFILE_ID,
@@ -120,6 +125,11 @@ INSTALLED_VALIDATED_BEHAVIOR_PROFILES: Mapping[str, ValidatedBehaviorExportProfi
                 profile_id=CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1,
                 table_specs=CORE_BEHAVIOR_TABLE_SPECS_V1,
                 row_extractor_factory=build_core_behavior_row_extractors,
+            ),
+            BOUT_KINEMATICS_EXPORT_PROFILE_ID: ValidatedBehaviorExportProfile(
+                profile_id=BOUT_KINEMATICS_EXPORT_PROFILE_ID,
+                table_specs=BOUT_KINEMATICS_EXPORT_TABLE_SPECS,
+                row_extractor_factory=build_core_behavior_bout_row_extractors,
             ),
             CORE_CHASER_EXPORT_PROFILE_ID: ValidatedBehaviorExportProfile(
                 profile_id=CORE_CHASER_EXPORT_PROFILE_ID,

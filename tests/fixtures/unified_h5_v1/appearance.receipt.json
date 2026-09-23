@@ -1,0 +1,37 @@
+{
+  "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+  "contract": {
+    "acceptance_contract_sha256": "sha256:4f2c8093aec9678f712065bc0cf6307813f40e123f6692424f93606eec228f6e",
+    "acceptance_id": "obsbindacc_4f2c8093aec9678f712065bc0cf6307813f40e123f6692424f93606eec228f6e",
+    "citrus_experiment_id": "citexp_4d30473f98f9106e86d0ea5592409868ccc15bca53f1e2b92c7c5e6826eddbce",
+    "citrus_session_uuid": "citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80",
+    "finalized_at_utc": "2026-09-07T12:00:00Z",
+    "h5_artifact": {
+      "relative_path": "citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair_appearance_active.h5",
+      "sha256": "sha256:854c0f08a226876942e92bdba3b6f9d842ef659923e792dea2d7228bafbd6c35",
+      "size_bytes": 939032
+    },
+    "observation_context_id": "obsctx_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80",
+    "protocol_semantic": {
+      "semantic_sha256": "sha256:8a297da4d4c55d2912678c596523e38da60a8e34cfbd89fcdf626ab73b2364e7",
+      "status": "available"
+    },
+    "request_contract_sha256": "sha256:94ab294b2f2f1b358385428f585107fc2b09b50fef3bf765d4584453f30678aa",
+    "request_id": "obsbindreq_94ab294b2f2f1b358385428f585107fc2b09b50fef3bf765d4584453f30678aa",
+    "runtime_geometry_contract_sha256": "sha256:708ed9950500d17063882528c14e2d617fb826bea978c9396d7abeea6af9c4fb",
+    "schema_id": "citrus.recording_observation_finalized_receipt",
+    "schema_version": 1,
+    "session_status": "COMPLETE",
+    "target": {
+      "arena_id": "arena_1",
+      "camera_id": "CAM-42",
+      "canvas_name": "synthetic-canvas",
+      "rig_id": "synthetic-preservation-rig",
+      "source_camera_stream_id": "CAM-42"
+    }
+  },
+  "contract_sha256": "sha256:03f81bb06952cb9a0ad2f5b885b14941f730822a80de8e28aca940f8605e36c5",
+  "receipt_id": "obsbindfin_03f81bb06952cb9a0ad2f5b885b14941f730822a80de8e28aca940f8605e36c5",
+  "schema_id": "citrus.recording_observation_finalized_receipt",
+  "schema_version": 1
+}

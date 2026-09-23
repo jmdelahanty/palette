@@ -1,0 +1,52 @@
+name: Main integration
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: main-integration-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  main-integration:
+    name: main-integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PALETTE_PYTHON: python
+      PALETTE_ACTIONS_APP_ID: "15368"
+      PALETTE_MAIN_RULESET_ID: "22372296"
+    steps:
+      - name: Check out exact integrated commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create repository-scoped ruleset reader
+        id: ruleset-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ vars.PALETTE_RULESET_APP_ID }}
+          private-key: ${{ secrets.PALETTE_RULESET_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: palette
+          permission-administration: write
+
+      - name: Verify exact green same-tree integration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PALETTE_RULESET_TOKEN: ${{ steps.ruleset-token.outputs.token }}
+        run: scripts/py scripts/check_main_integration_tree.py

@@ -1,0 +1,1649 @@
+{
+  "crop_recipe": {
+    "id": "recovered_pose_roi_center_192_visibility_v1",
+    "no_resize_padding_rotation": true,
+    "origin_xy_in_recovered_pose_roi": [
+      160,
+      160
+    ],
+    "sensor_crop_equivalence_claim": false,
+    "size_px": 192
+  },
+  "datasets": [
+    {
+      "dataset_id": "2026-01-28T19-22-28Z_arena_1:zc66de17bea1b",
+      "eligible_fully_visible_rows": 231,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2edd360f-9dc4-405e-b516-fed515fa4eb1",
+        "recording_started_utc": "2026-01-28T19-22-28Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2edd360f-9dc4-405e-b516-fed515fa4eb1"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "790016651873dd6e20eb5446754052d15ad48cf07bc6b8d7b0de972c0a823f5b",
+        "contract_sha256": "e1fd856ab7df582177c5435102cd8806df2e75df90d789b34a826faf7c9e09c9",
+        "keypoint_visibility_sha256": "aa99b7acc839045148a8c361877722bde114cf0fc0027d355ce10ed2551af0c3",
+        "keypoints_roi_sha256": "93d9c5a36671f52f0a3e6ee9676f2b32f165c5f626207c0a6feb17341d51319c",
+        "pixel_sha256": "511eb10ac2f705a1abeedcd720cc52d5468c6458698116d4f69aedf984e8a1c0",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "07fdf07a85448b89e5f840ec4f183c97de972ac6694c59c47d520ae55c3bb71a"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T19-22-28Z_arena_1_DefaultScreen",
+      "recording_id": "2026-01-28T19-22-28Z_arena_1",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 231,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T19-22-28Z_arena_2:ze41894008350",
+      "eligible_fully_visible_rows": 221,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:ac6dab59-eaae-4dd6-9a19-d768406ff4f9",
+        "recording_started_utc": "2026-01-28T19-22-28Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "ac6dab59-eaae-4dd6-9a19-d768406ff4f9"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "ee09bc70acadf3171801e5061529edc683fced0a76d548b82003efbbcf428d20",
+        "contract_sha256": "5cc474d1d7a80236eaef5bd2b97aea5102938083af10fa39b3afd12dc2c4fa75",
+        "keypoint_visibility_sha256": "0c81a07b949a8940a664ee12308cd1238aa18e5155acd93ecf170416025ffe33",
+        "keypoints_roi_sha256": "1b703484a42b97a7effb691e4f36d76a356dcec97c03293f0caa2935d2e15bf1",
+        "pixel_sha256": "d1b4bef041d88fc8683e37566217651c76d8094abc177f6d1a88c14a2408e91d",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "1f644220072ceb61fae81b3ac175fde065c43fe4a95b13b60b948eb3a9075977"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T19-22-28Z_arena_2_DefaultScreen",
+      "recording_id": "2026-01-28T19-22-28Z_arena_2",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 221,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T19-22-28Z_arena_2_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_2_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T19-22-28Z_arena_3:ze9b35d662a87",
+      "eligible_fully_visible_rows": 231,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:ca04fd59-53b1-4f9b-ab25-6f0ed317cfd0",
+        "recording_started_utc": "2026-01-28T19-22-28Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "ca04fd59-53b1-4f9b-ab25-6f0ed317cfd0"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "0191340e6b7e8d2aa27456449a449a917a5b5185df2ad93d0034bf2960538a17",
+        "contract_sha256": "b61c24ef870c1ca832cdefac6119f9ff7478f2eeb6bc0c07af507cdf734b0b0b",
+        "keypoint_visibility_sha256": "aa99b7acc839045148a8c361877722bde114cf0fc0027d355ce10ed2551af0c3",
+        "keypoints_roi_sha256": "ab1f9e77c5c678f0faa35eb13d1b389a68f7a48dc38ba241020f239e24345d66",
+        "pixel_sha256": "cd2375114664cfc15e88048740f46106069f8af2ab2642a077a3c4fe2f1087fc",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "7d1be35a375ce96c41bb960421d035670cfdbfecdd0dd98f42dfb9c0cbc4d5da"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T19-22-28Z_arena_3_DefaultScreen",
+      "recording_id": "2026-01-28T19-22-28Z_arena_3",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 231,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T19-22-28Z_arena_3_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_3_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T19-22-28Z_arena_4:zd9af96ac53af",
+      "eligible_fully_visible_rows": 231,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:9d6df247-96e6-4d50-8e55-9cfb15ea5c51",
+        "recording_started_utc": "2026-01-28T19-22-28Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "9d6df247-96e6-4d50-8e55-9cfb15ea5c51"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "e007b47c834fb4965c911354ec4de210e366880c706be04aaab27850caee1210",
+        "contract_sha256": "a6fed5eb4634d1ebdce077738872e7d315af5957b913a4b8db86e04e970f0e2f",
+        "keypoint_visibility_sha256": "aa99b7acc839045148a8c361877722bde114cf0fc0027d355ce10ed2551af0c3",
+        "keypoints_roi_sha256": "fd623a4a9daf0002bb57ec8c88c3a9ba046e8b143587b0108e5c04adf1a10968",
+        "pixel_sha256": "9d0e53d153f2af83387d1d71a814eef809abf9b7a22a38690a3255e012ddcafa",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "e366f861d00e3bc4f56637e5ddcb4ffc5b03b1415621ea8eb6a3be0a06812ce9"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T19-22-28Z_arena_4_DefaultScreen",
+      "recording_id": "2026-01-28T19-22-28Z_arena_4",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 231,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T19-22-28Z_arena_4_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_4_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T19-36-18Z_arena_1:zfe208d1b989b",
+      "eligible_fully_visible_rows": 185,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:2edd360f-9dc4-405e-b516-fed515fa4eb1",
+        "recording_started_utc": "2026-01-28T19-36-18Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "2edd360f-9dc4-405e-b516-fed515fa4eb1"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "7a3afff679bea5d42d424a26926108219493e40defabc9f3322f83ca99a81944",
+        "contract_sha256": "5cdde9496c45b5999d694a956b9e0813172fc4f094525a70b607511a2c358dce",
+        "keypoint_visibility_sha256": "7ae2a25773c6121edcab9d53a09f97d82bf08adf76732155ad4c630229be537a",
+        "keypoints_roi_sha256": "e335726bec36eeb53a5c8bee32608297411e2a51f31b56e2b1b66097eb7503be",
+        "pixel_sha256": "dc2a38ff8550ea54f715ec154600e39a3871f175c7654ad44a08f26eb5e91f3f",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "9d93bfaad6a0c5b5a72628e87e61c0d2f6d479e0e1157814ee6613ed5404db0e"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T19-36-18Z_arena_1_Feeding",
+      "recording_id": "2026-01-28T19-36-18Z_arena_1",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 185,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T19-36-18Z_arena_1_Feeding/zarr/2026-01-28T19-36-18Z_arena_1_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T19-36-18Z_arena_2:z386db9c2a8f6",
+      "eligible_fully_visible_rows": 183,
+      "excluded_partial_visibility_rows": 2,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:ac6dab59-eaae-4dd6-9a19-d768406ff4f9",
+        "recording_started_utc": "2026-01-28T19-36-18Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "ac6dab59-eaae-4dd6-9a19-d768406ff4f9"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "7026687043317290a8382280b559187a37ac5c576fe7991f7f8c6528c16dcdbd",
+        "contract_sha256": "8e8944da60d38b7852b3e1189dc80a0f50f726676d256eb03b006b7e2562e70c",
+        "keypoint_visibility_sha256": "c75d672e50a72bacb3e850d523f52e785d78579615e462312b7a05388c74ff24",
+        "keypoints_roi_sha256": "0b8d2571db9096d25d23085a1d2a81d7e749511272d20ce00fc077cba913b826",
+        "pixel_sha256": "f9568546fd08e0dfa6e07be2af2988869761bc34d61e0a4a3a59da1cf11f8545",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "0c7d4aa12620bda1feaf1d732074b7ada36a33f15227bb0581ecd135e019084a"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T19-36-18Z_arena_2_Feeding",
+      "recording_id": "2026-01-28T19-36-18Z_arena_2",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 185,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T19-36-18Z_arena_2_Feeding/zarr/2026-01-28T19-36-18Z_arena_2_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T19-36-18Z_arena_3:z87d5cee5f737",
+      "eligible_fully_visible_rows": 185,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:ac6dab59-eaae-4dd6-9a19-d768406ff4f9",
+        "recording_started_utc": "2026-01-28T19-36-18Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "ac6dab59-eaae-4dd6-9a19-d768406ff4f9"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "46ae45071619392aae3f3df0877d60561b09121e355fe482a65158fa0e9ff324",
+        "contract_sha256": "c2f7ee23bc788f4df4c1c4ff781e228795567c8992b64d248bf46941ad9da551",
+        "keypoint_visibility_sha256": "7ae2a25773c6121edcab9d53a09f97d82bf08adf76732155ad4c630229be537a",
+        "keypoints_roi_sha256": "3bf7faf484fcabb21ade6b413faf89be6f638557b7e7119e5d4cc6943311aa43",
+        "pixel_sha256": "abac6d47c2ba751594a188f07355bffc59113d93e2a53f9036b2c026f9b00fc7",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "b64d05415c94f8346d86d757b5fae6a9619fd5074969792a4304e2cf11c12fd4"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T19-36-18Z_arena_3_Feeding",
+      "recording_id": "2026-01-28T19-36-18Z_arena_3",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 185,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T19-36-18Z_arena_3_Feeding/zarr/2026-01-28T19-36-18Z_arena_3_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T19-36-18Z_arena_4:zb8e6ba77d834",
+      "eligible_fully_visible_rows": 185,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:ac6dab59-eaae-4dd6-9a19-d768406ff4f9",
+        "recording_started_utc": "2026-01-28T19-36-18Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "ac6dab59-eaae-4dd6-9a19-d768406ff4f9"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "d1fc4e0074e7bf6eeb4a10760200519ba7fd3106e77a09f24d289eeefda21656",
+        "contract_sha256": "ff352e4649ee0132e1426ec204dad9f3f7ecc2e3b0bcefae4b4dd80a13e11b00",
+        "keypoint_visibility_sha256": "7ae2a25773c6121edcab9d53a09f97d82bf08adf76732155ad4c630229be537a",
+        "keypoints_roi_sha256": "2f1c047f00aa9ba6e7d4f3ce0db04c7a11d4f0593b237ba15f53e8cc1418cb0a",
+        "pixel_sha256": "18253c1eece1f6adf5eeb6a4f669c2cb5962759fef43173023c33a2d9a95facf",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "7b869833475cf48ef0832268a9fc9e09ce6292c6edb0b9222adb014ae59b7493"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T19-36-18Z_arena_4_Feeding",
+      "recording_id": "2026-01-28T19-36-18Z_arena_4",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 185,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T19-36-18Z_arena_4_Feeding/zarr/2026-01-28T19-36-18Z_arena_4_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T20-41-59Z_arena_1:zd3aa1c19985b",
+      "eligible_fully_visible_rows": 229,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:a02a0130-8f9d-4501-8509-3bf4bea2142c",
+        "recording_started_utc": "2026-01-28T20-41-59Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "a02a0130-8f9d-4501-8509-3bf4bea2142c"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "b8141832a42595c49840a665b5c0bd4b55852d22dacd2b16c2a680d093f6ded3",
+        "contract_sha256": "a44d43b7cb801329cf80ea413dc31887b378001127d97247d7a6ef20ec5678cb",
+        "keypoint_visibility_sha256": "d010ad566e8a2a70c9b30cf7b5c4301089c45d6fe936cf9d39fcb43a3d252b36",
+        "keypoints_roi_sha256": "967df1003c268b85011abb346dde20c5481359c1d33aa853fee1ea4bff2b6e2d",
+        "pixel_sha256": "2a105029ac5e5b973622dd81e501b0c48e34cdf3dceeda446eb67b675e3f9378",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "09b924bdc0525beea472e99f288ef487f55f44d24a73be12d59e5e5ab61a2f84"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T20-41-59Z_arena_1_DefaultScreen",
+      "recording_id": "2026-01-28T20-41-59Z_arena_1",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 229,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T20-41-59Z_arena_1_DefaultScreen/zarr/2026-01-28T20-41-59Z_arena_1_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T20-41-59Z_arena_2:z28d84b75fc9b",
+      "eligible_fully_visible_rows": 229,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:518c17e6-a85d-4393-9ea1-93d0cb3c2821",
+        "recording_started_utc": "2026-01-28T20-41-59Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "518c17e6-a85d-4393-9ea1-93d0cb3c2821"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "d65b5d63e6db030a96b6aeca111358b9cd73065218f40047ecadba73fad8744f",
+        "contract_sha256": "0c43a0779c8f1e3ddf7491ee9d018e5f3554ed185d270d5e9e2e9833510cab99",
+        "keypoint_visibility_sha256": "d010ad566e8a2a70c9b30cf7b5c4301089c45d6fe936cf9d39fcb43a3d252b36",
+        "keypoints_roi_sha256": "c2bc4795e2f08c34784605d65e102c7bc3dc35ee36527f78e52b50485144340e",
+        "pixel_sha256": "1ec56dc9f02aeb21b1b8683978f6eb625bd5e5bbdf39262341ba4bcaf2d4bac2",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "e475f77a43a090b304b9a6b894f2f96cbec5689dac5229785631322192c8669d"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T20-41-59Z_arena_2_DefaultScreen",
+      "recording_id": "2026-01-28T20-41-59Z_arena_2",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 229,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T20-41-59Z_arena_2_DefaultScreen/zarr/2026-01-28T20-41-59Z_arena_2_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T20-41-59Z_arena_3:z0c3ae418e51a",
+      "eligible_fully_visible_rows": 229,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:b99aabb7-cba4-4600-afbf-f6f50f0ed24c",
+        "recording_started_utc": "2026-01-28T20-41-59Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "b99aabb7-cba4-4600-afbf-f6f50f0ed24c"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "312614b80210d88f32e27a9c9c07bb624074e8922316b592e33b9caacc865199",
+        "contract_sha256": "bb69302effbc79866d58c03dcdd3fb9a78e0814a628d6eee5e4a8c9f4363219c",
+        "keypoint_visibility_sha256": "d010ad566e8a2a70c9b30cf7b5c4301089c45d6fe936cf9d39fcb43a3d252b36",
+        "keypoints_roi_sha256": "c19579fb99e4d91f091458392c3c80d6408af4aa6a1d03f2157799ed77e380ac",
+        "pixel_sha256": "afa530f7113053bd8c1343c5b83832e21731cabe0d88f7382777ce3380e635ce",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "c5a713746542aed17e3ec4b846ad40213e64558855867ad359f3a28ec5a9152c"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T20-41-59Z_arena_3_DefaultScreen",
+      "recording_id": "2026-01-28T20-41-59Z_arena_3",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 229,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T20-41-59Z_arena_3_DefaultScreen/zarr/2026-01-28T20-41-59Z_arena_3_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T20-41-59Z_arena_4:z1bc30a125d74",
+      "eligible_fully_visible_rows": 229,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:bc4fa7f8-7983-408e-abdf-0345d951004d",
+        "recording_started_utc": "2026-01-28T20-41-59Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "bc4fa7f8-7983-408e-abdf-0345d951004d"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "23624d1620b8370ea65b6dda8129f4265ed12f4091b55ace28b00d2bf6b72520",
+        "contract_sha256": "e6ecc4a8b3289b4205de2578fee30b4f59798b7f5ef77381494985e49ce1b36e",
+        "keypoint_visibility_sha256": "d010ad566e8a2a70c9b30cf7b5c4301089c45d6fe936cf9d39fcb43a3d252b36",
+        "keypoints_roi_sha256": "a7b7df1850bac67b661f00d35b3e8936a73b898f05c988ab67b528e8e009a4ae",
+        "pixel_sha256": "ac2bb95b2a2c7f4e24618d88be9379697fbb81bf38ca56f666b6d9ca63e635f6",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "60932374a1fde71fbc7e978608d86093dbd28aa20ffa99923651bb634b211970"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T20-41-59Z_arena_4_DefaultScreen",
+      "recording_id": "2026-01-28T20-41-59Z_arena_4",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 229,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T20-41-59Z_arena_4_DefaultScreen/zarr/2026-01-28T20-41-59Z_arena_4_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T20-51-00Z_arena_1:z529662d10605",
+      "eligible_fully_visible_rows": 191,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:a02a0130-8f9d-4501-8509-3bf4bea2142c",
+        "recording_started_utc": "2026-01-28T20-51-00Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "a02a0130-8f9d-4501-8509-3bf4bea2142c"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "0ed72fabf2ff72570a893dbbe3d0f5aaa6213f3322ff7a43a15ec30eaa2ec64c",
+        "contract_sha256": "01b269eaa069c20b80042929dcdb3e3a56091db763e4bf1f92185c06b314365d",
+        "keypoint_visibility_sha256": "909f5d54bb1dc2e85202e59679847e3c7409911476c0eadbfc127a44d43432f2",
+        "keypoints_roi_sha256": "fae505b9c87abed86e34b59db55035c701da1541f83c99fe844eb026b3368aec",
+        "pixel_sha256": "7826fc276baa90c00c66d646f624cd5cb606c1f94829740b627a0bf5d355a578",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "de57ff81364007e45de2fc9905eb77cf2375835eadfbf5c32cfde5adc53323dc"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T20-51-00Z_arena_1_Feeding",
+      "recording_id": "2026-01-28T20-51-00Z_arena_1",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 191,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T20-51-00Z_arena_1_Feeding/zarr/2026-01-28T20-51-00Z_arena_1_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T20-51-00Z_arena_2:z5b0accf196a0",
+      "eligible_fully_visible_rows": 191,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:518c17e6-a85d-4393-9ea1-93d0cb3c2821",
+        "recording_started_utc": "2026-01-28T20-51-00Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "518c17e6-a85d-4393-9ea1-93d0cb3c2821"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "f79df842fdea63a21dfe00cf2bd97a342c156d9afe6f4573900be39e09940826",
+        "contract_sha256": "c875095755a0da4b1cd4dcab58e69ea041cf631cc1ee399f21b6cec6697eeaef",
+        "keypoint_visibility_sha256": "909f5d54bb1dc2e85202e59679847e3c7409911476c0eadbfc127a44d43432f2",
+        "keypoints_roi_sha256": "62808799b4a5dfff538b9e9be065b5d2287be99f88158a2e770e7b3ffeb245d4",
+        "pixel_sha256": "7954734f56e4a711a35712617cb13c5a6aa97a5c13e93b1c9390f15f01ef88d6",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "a298e5b91ed5beae36feb5ce1b7dfb321a49f35bfdb1f821776f51770a62f594"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T20-51-00Z_arena_2_Feeding",
+      "recording_id": "2026-01-28T20-51-00Z_arena_2",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 191,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T20-51-00Z_arena_2_Feeding/zarr/2026-01-28T20-51-00Z_arena_2_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T20-51-00Z_arena_3:zd682a53e63f3",
+      "eligible_fully_visible_rows": 191,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:b99aabb7-cba4-4600-afbf-f6f50f0ed24c",
+        "recording_started_utc": "2026-01-28T20-51-00Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "b99aabb7-cba4-4600-afbf-f6f50f0ed24c"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "fefd7b4062d69020091e7f5e61eced339047a74b7ffa70967ee45f52694b3996",
+        "contract_sha256": "4da16ee718f5e13b029de9d3c35773c45c586ce8aa4d6416ae0182c9958f8aa5",
+        "keypoint_visibility_sha256": "909f5d54bb1dc2e85202e59679847e3c7409911476c0eadbfc127a44d43432f2",
+        "keypoints_roi_sha256": "ca036daae279d122351aaa0a33ff3f9a4eddd193ccd534ddf8daaceec2ce10db",
+        "pixel_sha256": "9e109d731d075ad2cecd381ec1417737e46d71fbd3f4f5263024162a12edd6f9",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "c7496d51ab20c47a8fd125ac8405e23e7834088f8d7c16cb688f22a1f8e373e9"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T20-51-00Z_arena_3_Feeding",
+      "recording_id": "2026-01-28T20-51-00Z_arena_3",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 191,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T20-51-00Z_arena_3_Feeding/zarr/2026-01-28T20-51-00Z_arena_3_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T20-51-00Z_arena_4:z8f14a8de0d1b",
+      "eligible_fully_visible_rows": 191,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:bc4fa7f8-7983-408e-abdf-0345d951004d",
+        "recording_started_utc": "2026-01-28T20-51-00Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "bc4fa7f8-7983-408e-abdf-0345d951004d"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "d043a8df07888ca72a4734db870caa90bdca324f3febff409020dd3be505b197",
+        "contract_sha256": "523268fc3db36c2a4bc812a69f36b8d4adf6d2d003d4bcc0cc9b5d3f7cdd35ae",
+        "keypoint_visibility_sha256": "909f5d54bb1dc2e85202e59679847e3c7409911476c0eadbfc127a44d43432f2",
+        "keypoints_roi_sha256": "8dd5d33e4f82743816d3a93c3dd3cc873c6675075792542912b9ef8a789df91d",
+        "pixel_sha256": "a2efc46b40020f14c0dc7e765ead59e94e8d1ef6c0d0c9816dd8fac88b62fa75",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "660a670cf55f00c7c37b7b203ac61289129256d19ea3142f68e79cb04fda4add"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T20-51-00Z_arena_4_Feeding",
+      "recording_id": "2026-01-28T20-51-00Z_arena_4",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 191,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T20-51-00Z_arena_4_Feeding/zarr/2026-01-28T20-51-00Z_arena_4_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T21-18-51Z_arena_1:za048ee62747b",
+      "eligible_fully_visible_rows": 229,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:a449a232-d660-4f47-bce4-b9869522c9bf",
+        "recording_started_utc": "2026-01-28T21-18-51Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "a449a232-d660-4f47-bce4-b9869522c9bf"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "3039f745898253f0d0b349e0a61c2ebd4d72e1e2b93af0a8d77b48fd05ee6ce8",
+        "contract_sha256": "da24e52a43ed98a2f9df9a6c924533f0ba538c8503c3e86d48cb55bc2d1720cb",
+        "keypoint_visibility_sha256": "d010ad566e8a2a70c9b30cf7b5c4301089c45d6fe936cf9d39fcb43a3d252b36",
+        "keypoints_roi_sha256": "08c8cf517dd49481c14a5f996bca5b4eaba7504e38a2c2b6fbc5cae2c47c3709",
+        "pixel_sha256": "46f455622364faafcad7b1639872f6638e1103f07b7ef47ff07f073e0997002c",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "ecdc5e5869a35ebb2fed8da4cf542ab591b0e2646f6c6ff1038a9f834f2c8f64"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T21-18-51Z_arena_1_DefaultScreen",
+      "recording_id": "2026-01-28T21-18-51Z_arena_1",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 229,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T21-18-51Z_arena_1_DefaultScreen/zarr/2026-01-28T21-18-51Z_arena_1_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T21-18-51Z_arena_2:z3df209582329",
+      "eligible_fully_visible_rows": 228,
+      "excluded_partial_visibility_rows": 1,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:7f655e35-07fb-49e6-8450-921497c40a3c",
+        "recording_started_utc": "2026-01-28T21-18-51Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "7f655e35-07fb-49e6-8450-921497c40a3c"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "0fc0d16f6403fa77409ca7b38dbbc1be401504284a3ce7275dff206f3362d8e0",
+        "contract_sha256": "e36d779dd59b11b986e21afbf016db0e1ec69ad3eab2bf04dbdbc3e105e979a0",
+        "keypoint_visibility_sha256": "ecde5218c21adbf524f11c8d97bb3a605ca80400b4709400f1e1732d107b8ba0",
+        "keypoints_roi_sha256": "fe83acff504ed897f70bf4ace20a1041bfb7856a2e5b1462e8bca0b6e2523e2e",
+        "pixel_sha256": "71d7be64d2a2be528f417d3a8f0b34543188494c7acc9c4ee0c2f82ef47bd8ab",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "d748d81864f3eec9e6bada4c8eeb5c78f57a25fe494b7876721f4399ead8df9e"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T21-18-51Z_arena_2_DefaultScreen",
+      "recording_id": "2026-01-28T21-18-51Z_arena_2",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 229,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T21-18-51Z_arena_2_DefaultScreen/zarr/2026-01-28T21-18-51Z_arena_2_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T21-18-51Z_arena_4:zb7c04a40d97b",
+      "eligible_fully_visible_rows": 229,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:c2f2d65c-3ff1-4a1f-ae76-a39ba86454b8",
+        "recording_started_utc": "2026-01-28T21-18-51Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "c2f2d65c-3ff1-4a1f-ae76-a39ba86454b8"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "9746deea65a5083f581af58560083aeed16f2ed7f6b6f5231c5e79ac62e08a90",
+        "contract_sha256": "68fdabe83c1d503b5a77cf4cc2704a952175a1e775d68f053bff368840b17f44",
+        "keypoint_visibility_sha256": "d010ad566e8a2a70c9b30cf7b5c4301089c45d6fe936cf9d39fcb43a3d252b36",
+        "keypoints_roi_sha256": "0a452ab88b09962f3eba4db873a080fe955411ad1983dcc8059f2661bb7e2ffd",
+        "pixel_sha256": "877fffaeffe90e91c1d9e7f81e2fc86f2b4deee36f1e2558d1906aa967e42092",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "5bcbda212a50502e5f5372f0577c7e04c0112647d5ef185b51b308ed914b99eb"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T21-18-51Z_arena_4_DefaultScreen",
+      "recording_id": "2026-01-28T21-18-51Z_arena_4",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 229,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T21-18-51Z_arena_4_DefaultScreen/zarr/2026-01-28T21-18-51Z_arena_4_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T21-27-20Z_arena_1:z63f2ce27f5a6",
+      "eligible_fully_visible_rows": 184,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:a449a232-d660-4f47-bce4-b9869522c9bf",
+        "recording_started_utc": "2026-01-28T21-27-20Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "a449a232-d660-4f47-bce4-b9869522c9bf"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "24637f4b79f7f770dfbe2debaf73baa9a45972d5d048364e33978eac31af6ecc",
+        "contract_sha256": "988923b90b948d4d0e2e656c33cc9839d826e140c34809884275c0ac59583b54",
+        "keypoint_visibility_sha256": "17926c003f87ab49cd58f5972e62b39cb54fbd84753043d061efefa6fbedb023",
+        "keypoints_roi_sha256": "57c5f8b2beb88a50f98bdc3ae9032dddbb63a2ff2f8650dcf97d8628d9fb0e17",
+        "pixel_sha256": "6ceaf06c6bde342c45537fdfd79b607c34707f8ea6cef4f725bf0f1827e50d7d",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "2e5a248d80ba74466ca0dd28e10b651171540bec82ce826f3e1158be3df0730d"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T21-27-20Z_arena_1_Feeding",
+      "recording_id": "2026-01-28T21-27-20Z_arena_1",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 184,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T21-27-20Z_arena_1_Feeding/zarr/2026-01-28T21-27-20Z_arena_1_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T21-27-20Z_arena_2:z8bfc50682db2",
+      "eligible_fully_visible_rows": 161,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:7f655e35-07fb-49e6-8450-921497c40a3c",
+        "recording_started_utc": "2026-01-28T21-27-20Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "7f655e35-07fb-49e6-8450-921497c40a3c"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "242b7ddd272c76c4f83258f65834270bc00b273c25a7b86a0a783421a99e2493",
+        "contract_sha256": "d218d6ea8dd5d8954da67f8639301816175c1c7c569a17fd81e1e4f3f499a0a9",
+        "keypoint_visibility_sha256": "d70725b9e495c59a190ffdc929f2705baa6d349e0eca76afd7ebdd959e5359de",
+        "keypoints_roi_sha256": "6a2bfd5e35e34f70b5378fdc59972cddc17d092e091a2398dce9278859c72637",
+        "pixel_sha256": "d841d89869355334aa966e01fad9c074d06726910ab6eea66b27bf5bbd12a56c",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "5b4371f83e4d3f38ebd266daf1cd2a44e1da78455f6dd236f9718fd67bcf2493"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T21-27-20Z_arena_2_Feeding",
+      "recording_id": "2026-01-28T21-27-20Z_arena_2",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 161,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T21-27-20Z_arena_2_Feeding/zarr/2026-01-28T21-27-20Z_arena_2_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T21-27-20Z_arena_4:ze9175336c2d0",
+      "eligible_fully_visible_rows": 184,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:c2f2d65c-3ff1-4a1f-ae76-a39ba86454b8",
+        "recording_started_utc": "2026-01-28T21-27-20Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "c2f2d65c-3ff1-4a1f-ae76-a39ba86454b8"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "5a70bec39f00cd71d66b4c8b6b858393f199a2aadbb8745784ca6eaa254a16c5",
+        "contract_sha256": "e0b3962e457adf451afba0ff480342d639b7810d6642bf6b9f2bcd32918ff391",
+        "keypoint_visibility_sha256": "17926c003f87ab49cd58f5972e62b39cb54fbd84753043d061efefa6fbedb023",
+        "keypoints_roi_sha256": "54d7e5516e361a21b2f886f9c2b5b0910c22edabe77e635116a035cb6e47c1f1",
+        "pixel_sha256": "8c2b4b6db654e58f3371c3ffa5f9d03f3d4c90749b87199b6d95237e2dafe2cd",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "8d50a23558286b542dd6a611bc2a34b58ba4fa4a654a5147b7aa17011da394e2"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T21-27-20Z_arena_4_Feeding",
+      "recording_id": "2026-01-28T21-27-20Z_arena_4",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 184,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T21-27-20Z_arena_4_Feeding/zarr/2026-01-28T21-27-20Z_arena_4_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T21-47-47Z_arena_1:z36ae7c3bf7e1",
+      "eligible_fully_visible_rows": 231,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:ef36c5de-a2b4-43b4-9efb-1d344332c90e",
+        "recording_started_utc": "2026-01-28T21-47-47Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "ef36c5de-a2b4-43b4-9efb-1d344332c90e"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "609216a561e11ea3a92db85ac2f9721473ee8661f69c55510ab8fe3b3556539c",
+        "contract_sha256": "76539ce6bf7aee55fb9b82aa540ae634315ae86941ec7812549b3095491c86e0",
+        "keypoint_visibility_sha256": "aa99b7acc839045148a8c361877722bde114cf0fc0027d355ce10ed2551af0c3",
+        "keypoints_roi_sha256": "2b21fb56b114f59a81bc1f403278217b94de4829616ed8e28a3d94e6132ffa89",
+        "pixel_sha256": "d25a39bb8311824a826b93040d449d82d9c48fb8456ca9b631393bef5331e135",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "cc355eae655961bf9ab425058d9af2cd45d7315247e68e65d9693735a664c34d"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T21-47-47Z_arena_1_DefaultScreen",
+      "recording_id": "2026-01-28T21-47-47Z_arena_1",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 231,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T21-47-47Z_arena_1_DefaultScreen/zarr/2026-01-28T21-47-47Z_arena_1_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T21-47-47Z_arena_2:z4e5ca982387e",
+      "eligible_fully_visible_rows": 231,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:19f08707-5a16-4a56-85d5-504457149645",
+        "recording_started_utc": "2026-01-28T21-47-47Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "19f08707-5a16-4a56-85d5-504457149645"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "6f370d897df104ae02a9a47dfb10ff94c32b27b7ff563f52a8ff468df27c0947",
+        "contract_sha256": "a3354533c9352fe02f9d3372d17ccef73245333b0a414578740b1704198d9dbc",
+        "keypoint_visibility_sha256": "aa99b7acc839045148a8c361877722bde114cf0fc0027d355ce10ed2551af0c3",
+        "keypoints_roi_sha256": "e7dc1f9c6f751c7c11956ea6199a82a55fa16c353aff0aab8a75051d1dd552be",
+        "pixel_sha256": "7ed959b74c470f80294dc15a9cd04aed4d63c855f8f3ddb97904bee16434eb2e",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "5b69cfc488cdaa1d2fb46b1c3d975020ef5f2d920b812ec4fa8ef17b581fed67"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T21-47-47Z_arena_2_DefaultScreen",
+      "recording_id": "2026-01-28T21-47-47Z_arena_2",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 231,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T21-47-47Z_arena_2_DefaultScreen/zarr/2026-01-28T21-47-47Z_arena_2_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T21-47-47Z_arena_3:zd155d78626cd",
+      "eligible_fully_visible_rows": 231,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:89ef92ed-2e7b-41fb-93a0-d49cc3b8e1d8",
+        "recording_started_utc": "2026-01-28T21-47-47Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "89ef92ed-2e7b-41fb-93a0-d49cc3b8e1d8"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "c370b89ab3e41fc7723d72e719ae1ae877074b30324b86f154a745ffb8506b6b",
+        "contract_sha256": "11468cb5b3eb9fa26b60f27bc1f18a046b42d75c1f7652b9b9d96a87da5c631e",
+        "keypoint_visibility_sha256": "aa99b7acc839045148a8c361877722bde114cf0fc0027d355ce10ed2551af0c3",
+        "keypoints_roi_sha256": "35e219c6743f2b7ab96014c44854173c8624a668dc0ebad34e2dbdd0b7e25a5d",
+        "pixel_sha256": "3a0fb190ddcf05bbc9165e6e63170af0fcbcfdcc16be6466c9ca63f8904f0525",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "39ec4704414682ed1a770a20d0b850fe092bb76644b703c0524c99010a6ef877"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T21-47-47Z_arena_3_DefaultScreen",
+      "recording_id": "2026-01-28T21-47-47Z_arena_3",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 231,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T21-47-47Z_arena_3_DefaultScreen/zarr/2026-01-28T21-47-47Z_arena_3_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T21-47-47Z_arena_4:z24994b002e39",
+      "eligible_fully_visible_rows": 231,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:d752d68b-7b1c-4040-a356-9416477b6656",
+        "recording_started_utc": "2026-01-28T21-47-47Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "d752d68b-7b1c-4040-a356-9416477b6656"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "471fbf47a8a282cff6f29d7a266de46b2f438d80ac1bd82b0d127b545004d053",
+        "contract_sha256": "61b19142035b5c6f48461b70bd190a56ead098b234e48206812751e6cde88b66",
+        "keypoint_visibility_sha256": "aa99b7acc839045148a8c361877722bde114cf0fc0027d355ce10ed2551af0c3",
+        "keypoints_roi_sha256": "83f4df78a4a6d764b24b93bae294db741575990afbb2493476886ab381fd1e07",
+        "pixel_sha256": "43764acffa84828f7c416e94285a76bbab963b8c3bb512afa369dda6f9dc9128",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "4559024b84c72c66eb13bebaef33ab6d3ced918a173ec422d5d05b1c76e34792"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T21-47-47Z_arena_4_DefaultScreen",
+      "recording_id": "2026-01-28T21-47-47Z_arena_4",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 231,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T21-47-47Z_arena_4_DefaultScreen/zarr/2026-01-28T21-47-47Z_arena_4_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T21-56-23Z_arena_1:ze5b9b3bd4150",
+      "eligible_fully_visible_rows": 187,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:ef36c5de-a2b4-43b4-9efb-1d344332c90e",
+        "recording_started_utc": "2026-01-28T21-56-23Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "ef36c5de-a2b4-43b4-9efb-1d344332c90e"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "d61d1c525bee3635cf76a3856a455354ebb36a19eae4b9414cf3ba618ce3aa4e",
+        "contract_sha256": "71a1edf8cdc5e8dc5322f05890d84627d4e63fd497d0bda676467d4b72eed9f1",
+        "keypoint_visibility_sha256": "90fbb02383dcd215eb579e12f9dcf9f021ba0a683d8c3d0677073584d4bb705a",
+        "keypoints_roi_sha256": "0fc225df18bd67b271a0975e0341598738a262af6e60b13a9988ef9c46e2ded9",
+        "pixel_sha256": "ba921305a0ef21cda6dccf8596ffa39bf4bfa47e41d07b6adb83d38bf567e034",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "b5081391be14e77e036ea5c226cf49def1d95a55347b592e5ecff4f6a5f906b2"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T21-56-23Z_arena_1_Feeding",
+      "recording_id": "2026-01-28T21-56-23Z_arena_1",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 187,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T21-56-23Z_arena_1_Feeding/zarr/2026-01-28T21-56-23Z_arena_1_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T21-56-23Z_arena_2:zaafad399a098",
+      "eligible_fully_visible_rows": 187,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:19f08707-5a16-4a56-85d5-504457149645",
+        "recording_started_utc": "2026-01-28T21-56-23Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "19f08707-5a16-4a56-85d5-504457149645"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "e1ee169faa60dff1435d03078ba54df4b693ddd3f8eddac5ac74e52aaff1a1de",
+        "contract_sha256": "665e01427832504e5a5c2561f11d79c3669fe04b577b83bf75bd74fa91aa7b57",
+        "keypoint_visibility_sha256": "90fbb02383dcd215eb579e12f9dcf9f021ba0a683d8c3d0677073584d4bb705a",
+        "keypoints_roi_sha256": "9ec93465d2bb2bbfd4388b8591c410430e94ef1307cbc90a0f15b31e4b98a31f",
+        "pixel_sha256": "6f3b56132774d77eb9d7cbedd11c2d546d2338dfebf23a5f7db8535fd8ac2b2a",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "40b84d147d47c0004a02f9c6e2f44042d783fb81ed34a9bfd06f4a91f19b1d24"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T21-56-23Z_arena_2_Feeding",
+      "recording_id": "2026-01-28T21-56-23Z_arena_2",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 187,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T21-56-23Z_arena_2_Feeding/zarr/2026-01-28T21-56-23Z_arena_2_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T21-56-23Z_arena_3:z8b4897188ebd",
+      "eligible_fully_visible_rows": 187,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:89ef92ed-2e7b-41fb-93a0-d49cc3b8e1d8",
+        "recording_started_utc": "2026-01-28T21-56-23Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "89ef92ed-2e7b-41fb-93a0-d49cc3b8e1d8"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "d06549a3a8401143b38fb275866d1b54e121251f8c88f9451e24277c48ee4087",
+        "contract_sha256": "0df32a14dc0a5d09bb76ee53b6a95d4e1dd8388823790eef68b2a057b351ee7c",
+        "keypoint_visibility_sha256": "90fbb02383dcd215eb579e12f9dcf9f021ba0a683d8c3d0677073584d4bb705a",
+        "keypoints_roi_sha256": "8d2ad774e5b40f8e0ac8fae79f8042c4b59c8fbf44f1ea215aeb581932c387f5",
+        "pixel_sha256": "6bdc0c683b09091751fa256f6b75aac2995b2ebca233bed4b20717887ba59ee9",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "8a3bff171a9ba32e182f22c2b8eee750eb01f39ec6933b59730e0a8599dcab0d"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T21-56-23Z_arena_3_Feeding",
+      "recording_id": "2026-01-28T21-56-23Z_arena_3",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 187,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T21-56-23Z_arena_3_Feeding/zarr/2026-01-28T21-56-23Z_arena_3_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T21-56-23Z_arena_4:z750697cddc03",
+      "eligible_fully_visible_rows": 187,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:d752d68b-7b1c-4040-a356-9416477b6656",
+        "recording_started_utc": "2026-01-28T21-56-23Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "d752d68b-7b1c-4040-a356-9416477b6656"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "d3b5f03d3bbc50c32e4e287e3198a64a46d3dd97ad0bd334e3977abb92b7f8e4",
+        "contract_sha256": "050c5b4dc9f0c2f724d430ada0f4e2e52d8dcc1e7d65466ddfdaaeeb1a70aec0",
+        "keypoint_visibility_sha256": "90fbb02383dcd215eb579e12f9dcf9f021ba0a683d8c3d0677073584d4bb705a",
+        "keypoints_roi_sha256": "41b2087aa1b7a00c82da1a058688bb4ac3c0b350f01451b4d451bcf3b029bb5d",
+        "pixel_sha256": "37f9e430a87ca1766c36b029114e0bcb357a4600fcce2083a08b1a3a1a457115",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "8f04e14783975eaeccb9f1a56fd4835ce46e5b3c7b35a2eda0e2f9a6410077b3"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T21-56-23Z_arena_4_Feeding",
+      "recording_id": "2026-01-28T21-56-23Z_arena_4",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 187,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T21-56-23Z_arena_4_Feeding/zarr/2026-01-28T21-56-23Z_arena_4_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-15-03Z_arena_1:zd69339d8d0e5",
+      "eligible_fully_visible_rows": 227,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:4d11b79f-5fc6-4f38-beb2-8f1d46c9f64f",
+        "recording_started_utc": "2026-01-28T22-15-03Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "4d11b79f-5fc6-4f38-beb2-8f1d46c9f64f"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "d8921e60a6aec56544d825c359ed2c3477e6ca52b583accbb598f77a0c50bbf7",
+        "contract_sha256": "e0961d5a9bf6c0df7380d6e1679b72750c78ce413144de3cb4a0a9af01c7c268",
+        "keypoint_visibility_sha256": "1d4a57d8cfd7459f14578c33683558a9c4351082cc601ad12e0b87bee662effb",
+        "keypoints_roi_sha256": "f8c9171cd4ffbd3f56c30b7d35d9e358fccf01360db523247a905f7cc9b9ec7e",
+        "pixel_sha256": "830747c3d938e5f796c5b574f91f5920a06a7e8b6f38b669215ab2cfa82c093a",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "ea794febce6f620bf33f4b0a6f0f9ca48717a0749a74e6adf33f2a2d2f5cd75c"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-15-03Z_arena_1_DefaultScreen",
+      "recording_id": "2026-01-28T22-15-03Z_arena_1",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 227,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-15-03Z_arena_1_DefaultScreen/zarr/2026-01-28T22-15-03Z_arena_1_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-15-03Z_arena_2:z87f2843620f0",
+      "eligible_fully_visible_rows": 227,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:7ca9bafa-10b3-4529-a854-92d5cd050bfe",
+        "recording_started_utc": "2026-01-28T22-15-03Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "7ca9bafa-10b3-4529-a854-92d5cd050bfe"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "c205e368ffb47483a29f217b8c02fc3d5ad3ca83ff4bfb979728e64e347ee84b",
+        "contract_sha256": "094ec15e56ca38dc28dfedde9afd344f937813f5d301cbf7bb30e845adfe9d8e",
+        "keypoint_visibility_sha256": "1d4a57d8cfd7459f14578c33683558a9c4351082cc601ad12e0b87bee662effb",
+        "keypoints_roi_sha256": "ee359613b2259675166e570cf59cf37336d2ba7d76095823a20024dce77b4bfa",
+        "pixel_sha256": "b3d18a9b119eaf13fa3149f70c3f7a4be94e3c95b99161233d82dfc48c2f755a",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "34aaf2f2276c110714bf95db2acdeaa1bfc71d16aeef2601fee171c563344a4c"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-15-03Z_arena_2_DefaultScreen",
+      "recording_id": "2026-01-28T22-15-03Z_arena_2",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 227,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-15-03Z_arena_2_DefaultScreen/zarr/2026-01-28T22-15-03Z_arena_2_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-15-04Z_arena_3:z3cfcf3829278",
+      "eligible_fully_visible_rows": 227,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:717ef867-8eff-4e15-a9db-44f0f946b937",
+        "recording_started_utc": "2026-01-28T22-15-04Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "717ef867-8eff-4e15-a9db-44f0f946b937"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "8384f4c43ef2d1bdc3c52726a1148a5530ec8677b1d9c83f56bb96394c18bdb8",
+        "contract_sha256": "61164ea0f91f33dadb248dc9acd1d611c651590dbd237cf814f179d8bcf25576",
+        "keypoint_visibility_sha256": "1d4a57d8cfd7459f14578c33683558a9c4351082cc601ad12e0b87bee662effb",
+        "keypoints_roi_sha256": "a10983011d1f6e15e0d7e27d80ea09783c7f5b45700c1b2395ea2caa5359406d",
+        "pixel_sha256": "cb821f214b46df226541987e725a8832740f814197f4de7f03bd3d234d203d53",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "72e929df34c88cb63e267d16665a03a9565a7e6c32785b81b35219e19a09b991"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-15-04Z_arena_3_DefaultScreen",
+      "recording_id": "2026-01-28T22-15-04Z_arena_3",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 227,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-15-04Z_arena_3_DefaultScreen/zarr/2026-01-28T22-15-04Z_arena_3_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-15-04Z_arena_4:zcd3cb2f2498d",
+      "eligible_fully_visible_rows": 227,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:d5955dc3-ad43-4c10-ab1c-b72b7fef45a0",
+        "recording_started_utc": "2026-01-28T22-15-04Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "d5955dc3-ad43-4c10-ab1c-b72b7fef45a0"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "be81658d3b0b9d901295328055458484b4d38fd45fd61b7fc3d4b21d5310798e",
+        "contract_sha256": "27ede06070bfd831123c357db2f7e93746b7b99483521af96dad7c3be283693a",
+        "keypoint_visibility_sha256": "1d4a57d8cfd7459f14578c33683558a9c4351082cc601ad12e0b87bee662effb",
+        "keypoints_roi_sha256": "6a68ba0028f9c68b1d01b91235f0759175e9b8212f84a6d5e8fa04637f896073",
+        "pixel_sha256": "28464a6afc843b2ea513dc089ee49572a7b84f2fd1f9a41f6bf8970f2456f4a7",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "5d7470f3543b8b0855e13291a344e1a5cb35c1aef5670a62e61730ec0f0e1c6e"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-15-04Z_arena_4_DefaultScreen",
+      "recording_id": "2026-01-28T22-15-04Z_arena_4",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 227,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-15-04Z_arena_4_DefaultScreen/zarr/2026-01-28T22-15-04Z_arena_4_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-22-57Z_arena_1:zab664f68e1f7",
+      "eligible_fully_visible_rows": 188,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:4d11b79f-5fc6-4f38-beb2-8f1d46c9f64f",
+        "recording_started_utc": "2026-01-28T22-22-57Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "4d11b79f-5fc6-4f38-beb2-8f1d46c9f64f"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "6fb617c56ac139bd2d7c5a1dc33d10de72fa2475e2d0dc0ca9428374b5ea0c2c",
+        "contract_sha256": "140c782a26bc202e097245b79dad780e8bbcab2c4a02fff105630da33031d07a",
+        "keypoint_visibility_sha256": "82e8f0a59e8c3f124e9edeca6565b4443e33305263cf5543d352fd72176a36aa",
+        "keypoints_roi_sha256": "76acbe0b2bfe05d41d4b4a9857b7fb0cd407ded7bba579553ec6ee70a1d4e906",
+        "pixel_sha256": "e2beb8b19a8652f53159e8c709752ae27c113131970fb28d0d0d8a11465fe55d",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "86843e00d7cf8693a02e11d4b34d6ed5259491fbd6f26a76177e6bdae2ce038b"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-22-57Z_arena_1_Feeding",
+      "recording_id": "2026-01-28T22-22-57Z_arena_1",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 188,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-22-57Z_arena_1_Feeding/zarr/2026-01-28T22-22-57Z_arena_1_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-22-57Z_arena_2:zccd15e12cefd",
+      "eligible_fully_visible_rows": 188,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:7ca9bafa-10b3-4529-a854-92d5cd050bfe",
+        "recording_started_utc": "2026-01-28T22-22-57Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "7ca9bafa-10b3-4529-a854-92d5cd050bfe"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "fd4c493bc7081f4a01a49a22e8cc71e9c462e280784e8e5b9e10ca9969f0c1ce",
+        "contract_sha256": "3178cab722ec098b2a27eb2998d6629d99064afeb0413b8d3bbdc0f8376c9aad",
+        "keypoint_visibility_sha256": "82e8f0a59e8c3f124e9edeca6565b4443e33305263cf5543d352fd72176a36aa",
+        "keypoints_roi_sha256": "0c55c83e67247986ab911615334731501e683b8dda191794acbfb2cc32e25f82",
+        "pixel_sha256": "11cee0108fcaf5480a733d7b1d614b081c0d59454a816fe75fea8c99f97d2754",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "d62e767c6ef2af21c71cbca30d02e21e2ee2b86f583aff2ba7e15b0e8f2218bc"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-22-57Z_arena_2_Feeding",
+      "recording_id": "2026-01-28T22-22-57Z_arena_2",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 188,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-22-57Z_arena_2_Feeding/zarr/2026-01-28T22-22-57Z_arena_2_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-22-57Z_arena_4:z857fd8fe737c",
+      "eligible_fully_visible_rows": 187,
+      "excluded_partial_visibility_rows": 1,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:d5955dc3-ad43-4c10-ab1c-b72b7fef45a0",
+        "recording_started_utc": "2026-01-28T22-22-57Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "d5955dc3-ad43-4c10-ab1c-b72b7fef45a0"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "f8b8399bc5d3f0b0bb3edff040b7abc55339e1cdc16fdf523f0b1c34ce9b2760",
+        "contract_sha256": "fa24e3ed67cd017d58e96db6c78ea2a7a8c2c7c0979338aa0d16fa3dce89087b",
+        "keypoint_visibility_sha256": "aa3630f38356e5eff234d15ada0b7d3501c6aacbeb5d428bb95df27bcf3c4752",
+        "keypoints_roi_sha256": "b387f8d1bd10c7fffd44fd2dfcdc72cc7612ed94ba2e60b9933e8f31dec906bc",
+        "pixel_sha256": "3100f26bc1a7156c545fea4ad75e74fb02fda882aebe2f036e6a721f7ccd08bb",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "6fe7a157594ffbbe90fadf81d5d91e41f970003defdb6c8476753c2abc5cc724"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-22-57Z_arena_4_Feeding",
+      "recording_id": "2026-01-28T22-22-57Z_arena_4",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 188,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-22-57Z_arena_4_Feeding/zarr/2026-01-28T22-22-57Z_arena_4_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-42-59Z_arena_1:zd24b5941af12",
+      "eligible_fully_visible_rows": 231,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:7141799c-f4a1-49b9-8905-9686fa3fb4fc",
+        "recording_started_utc": "2026-01-28T22-42-59Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "7141799c-f4a1-49b9-8905-9686fa3fb4fc"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "1b3619f328cc33ee2d7e70a69de95c128161686497c53f30b7c105743d8cf4c4",
+        "contract_sha256": "b32a5202a9b273c97766d851e829d9059cb7755c46c8dc7645cf790ddc8b0793",
+        "keypoint_visibility_sha256": "aa99b7acc839045148a8c361877722bde114cf0fc0027d355ce10ed2551af0c3",
+        "keypoints_roi_sha256": "2bf1fe227a66593e8b118c9bfbd2730d37d29c19b1f5f0a0411504996d69fbc6",
+        "pixel_sha256": "eaf268cc37d5f3ed1680952d4f9012fe664ac19dc750f026ab60651c8bf76d82",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "341eb8f3ac009f552a14c10036a546568c6ef92dc3c24f3b6bc85251ace20d2c"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-42-59Z_arena_1_DefaultScreen",
+      "recording_id": "2026-01-28T22-42-59Z_arena_1",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 231,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-42-59Z_arena_1_DefaultScreen/zarr/2026-01-28T22-42-59Z_arena_1_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-42-59Z_arena_2:zc2c29e634201",
+      "eligible_fully_visible_rows": 231,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:cee2f12e-9e68-4358-87be-eb70e32bce26",
+        "recording_started_utc": "2026-01-28T22-42-59Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "cee2f12e-9e68-4358-87be-eb70e32bce26"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "0e18153a0f436ea8c11cd0180e8722328daf2f0c390c7d876f0382ac04859486",
+        "contract_sha256": "ba83b97f2c37eec65a4711b35d9782f2804573ff3844a77968df9de23d32419f",
+        "keypoint_visibility_sha256": "aa99b7acc839045148a8c361877722bde114cf0fc0027d355ce10ed2551af0c3",
+        "keypoints_roi_sha256": "a8f9606efedb047049867b656741106df707b605303fb6018690d76e09f55006",
+        "pixel_sha256": "5dd40a5d2297578d0eed3bb397db819196a61fc80363597d496a320510e1cdd2",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "b6bbb89f5713e31d6cd47d4a5204ac7b54fc9d7de772edb5134e100f5f6ca029"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-42-59Z_arena_2_DefaultScreen",
+      "recording_id": "2026-01-28T22-42-59Z_arena_2",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 231,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-42-59Z_arena_2_DefaultScreen/zarr/2026-01-28T22-42-59Z_arena_2_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-42-59Z_arena_3:z05a0f8cd9f5d",
+      "eligible_fully_visible_rows": 231,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:da96f1ac-75f6-4e2c-ba47-7ca2e653b8c2",
+        "recording_started_utc": "2026-01-28T22-42-59Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "da96f1ac-75f6-4e2c-ba47-7ca2e653b8c2"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "af70b691f29aa6a07d3d5b755ec3125f5aaeee3fcf591f9a59ac8518527abf37",
+        "contract_sha256": "fe3710964c2c5334400e54c04d59e4320fcd05b535cf316f46a3214ec9094f88",
+        "keypoint_visibility_sha256": "aa99b7acc839045148a8c361877722bde114cf0fc0027d355ce10ed2551af0c3",
+        "keypoints_roi_sha256": "3e350a411b25849fcf7a662be94f649b1e441ecec54713f2cc8451e43dee2f5d",
+        "pixel_sha256": "36c2e2f1bbd49c8a33344dbb47cc1001e9e4b7dabfae8730dfc8c9d0824214c4",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "af21d06bc07aecaf5851723313b98834d5fc0ce33a4e3a0afdbe554ffe333e50"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-42-59Z_arena_3_DefaultScreen",
+      "recording_id": "2026-01-28T22-42-59Z_arena_3",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 231,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-42-59Z_arena_3_DefaultScreen/zarr/2026-01-28T22-42-59Z_arena_3_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-42-59Z_arena_4:z7063ef4d9e72",
+      "eligible_fully_visible_rows": 231,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:342c1a69-8a94-4524-847a-6e94f36b8ff2",
+        "recording_started_utc": "2026-01-28T22-42-59Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "342c1a69-8a94-4524-847a-6e94f36b8ff2"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "e150b1301372d88e7e9acb4a52bfe61faa2d4043c251cfd7afa5199f3cd8b9b3",
+        "contract_sha256": "a6a211ea9f9d5cd111dc9e833d6ed09e36fb1b701768a0742ad2aa056b1ab8f8",
+        "keypoint_visibility_sha256": "aa99b7acc839045148a8c361877722bde114cf0fc0027d355ce10ed2551af0c3",
+        "keypoints_roi_sha256": "f437f9cf4be55a0f5692a1c389e1220080c54907eea625cfbd903474a133fa3a",
+        "pixel_sha256": "ec5bf88c7443e993261a329e0fed7a47bcd00fc63dac67d087b7b1e5b1ebe779",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "60f885418a7a0d4c4f8708cc79f0036f44e24cc603feccab4813e95d3e709690"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-42-59Z_arena_4_DefaultScreen",
+      "recording_id": "2026-01-28T22-42-59Z_arena_4",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 231,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-42-59Z_arena_4_DefaultScreen/zarr/2026-01-28T22-42-59Z_arena_4_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-50-39Z_arena_1:z95dbde59aaff",
+      "eligible_fully_visible_rows": 210,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:7141799c-f4a1-49b9-8905-9686fa3fb4fc",
+        "recording_started_utc": "2026-01-28T22-50-39Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "7141799c-f4a1-49b9-8905-9686fa3fb4fc"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "afe8e5e37ce4eef0bd6dab8c626cecbe98e510bd449fa6a661b0398ebb37ecdc",
+        "contract_sha256": "7e3f5f5fc7a18c7495b4d39dc263553c083ae6b5ec4a03b44faadab4a1703b68",
+        "keypoint_visibility_sha256": "f83f248637948234c95725868b0351024912ae827d8585c9b5c7773873f6ef9b",
+        "keypoints_roi_sha256": "08b2a6fd3cd82dff0b8c0ff1c41e6827a033587089061b00ed828a2691c3c32c",
+        "pixel_sha256": "27722b738b5503025cee890cf388e9e31464d25e256bc7b66395abf712ef93b0",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "ab23c5f714de85a856ba965e1dc07d1fc7f64f62f9c104489aa72c93fb8ddabf"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-50-39Z_arena_1_Feeding",
+      "recording_id": "2026-01-28T22-50-39Z_arena_1",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 210,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-50-39Z_arena_1_Feeding/zarr/2026-01-28T22-50-39Z_arena_1_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-50-39Z_arena_2:z8d154621d65b",
+      "eligible_fully_visible_rows": 210,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:cee2f12e-9e68-4358-87be-eb70e32bce26",
+        "recording_started_utc": "2026-01-28T22-50-39Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "cee2f12e-9e68-4358-87be-eb70e32bce26"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "d5d378499d30e95dc6825d3afbe9bb3e1158a87c1c24044d782fda5b45aee2cd",
+        "contract_sha256": "59f4cdba534834e883f0585f8f31d6438303b6e82e9cf93c02474f46818bc213",
+        "keypoint_visibility_sha256": "f83f248637948234c95725868b0351024912ae827d8585c9b5c7773873f6ef9b",
+        "keypoints_roi_sha256": "fa1c5d1552881d4cb2e76a43f6a19860b0def0f7e067634a66bd82ef9bb40040",
+        "pixel_sha256": "f9775e892885acad8d49e886d29cc78937640a2e6c684fe3dea4203876892f37",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "03149381ee32d949504d7678153c2b438d770bba21f6610bceba90b31e1c8205"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-50-39Z_arena_2_Feeding",
+      "recording_id": "2026-01-28T22-50-39Z_arena_2",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 210,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-50-39Z_arena_2_Feeding/zarr/2026-01-28T22-50-39Z_arena_2_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-50-39Z_arena_3:z8763c63de197",
+      "eligible_fully_visible_rows": 210,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:da96f1ac-75f6-4e2c-ba47-7ca2e653b8c2",
+        "recording_started_utc": "2026-01-28T22-50-39Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "da96f1ac-75f6-4e2c-ba47-7ca2e653b8c2"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "6a3e392c17dd91bbd7de2a2a9797ce8898c028d91b331990cbe2eb4f4409a489",
+        "contract_sha256": "7ce1c47c9516789b1fa24d766d16b6c98df0d55ebe222c8ff5b013b16b1ea952",
+        "keypoint_visibility_sha256": "f83f248637948234c95725868b0351024912ae827d8585c9b5c7773873f6ef9b",
+        "keypoints_roi_sha256": "1b960aa51371532014b4faa902cf6cfdb34f0960d724660d855454bf7b5d0c16",
+        "pixel_sha256": "39173247a88589361c064659017a559b59b03ae81243e8b43be7c7e3d12000a3",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "fdf395189bff6f247c0b58e926c0c28adf42c16c8d949ed4c3241549a17b421d"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-50-39Z_arena_3_Feeding",
+      "recording_id": "2026-01-28T22-50-39Z_arena_3",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 210,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-50-39Z_arena_3_Feeding/zarr/2026-01-28T22-50-39Z_arena_3_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T22-50-39Z_arena_4:z1f7fe556da59",
+      "eligible_fully_visible_rows": 210,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:342c1a69-8a94-4524-847a-6e94f36b8ff2",
+        "recording_started_utc": "2026-01-28T22-50-39Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "342c1a69-8a94-4524-847a-6e94f36b8ff2"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "6d848e077d91b0b3f8cce9aea938310706f840b88e28e6afe3a16024a72e04a9",
+        "contract_sha256": "528f822092b1ef38304a1d63514efcb85023b9df6748ae03f53236f1467e02a6",
+        "keypoint_visibility_sha256": "f83f248637948234c95725868b0351024912ae827d8585c9b5c7773873f6ef9b",
+        "keypoints_roi_sha256": "b538e7c8af4debb497bb167c3db4f6f2e6b4131875eed421020c68705180dfe0",
+        "pixel_sha256": "f946ff814ebda306e849cc7e587fa2bdb302e11cbbb08282a043c36ca66fb1e2",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "da4baeb5142c0925752d7736be5038a09a7f5438ea248b000fa0aab03a901712"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T22-50-39Z_arena_4_Feeding",
+      "recording_id": "2026-01-28T22-50-39Z_arena_4",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 210,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T22-50-39Z_arena_4_Feeding/zarr/2026-01-28T22-50-39Z_arena_4_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T23-07-24Z_arena_2:zb438a3d9194a",
+      "eligible_fully_visible_rows": 230,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:1b218bf7-4da2-4be5-8590-d247a6dd148c",
+        "recording_started_utc": "2026-01-28T23-07-24Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "1b218bf7-4da2-4be5-8590-d247a6dd148c"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "acec2b308098c00258e0742256f1f32fe8203ea86d115904693540ee2a4cf8a4",
+        "contract_sha256": "a52ccf604bf2c1c1fe2e081ce767c1ee623e3d3597451c0411eb6ddb3f628b5b",
+        "keypoint_visibility_sha256": "2103fc2ef899d561bb8f267f9eb25e8f9220a21ed4f7c9d1f056da6926b36a6b",
+        "keypoints_roi_sha256": "0db89f42dc3b691d8fbfd08d4f46d7dd0d3d2f6672b4eeb41f5fac0a39c0a75f",
+        "pixel_sha256": "bab5fefdbe8c620393421ad6fd1566fc4430fbc4ddd74ab07c891ac602da611d",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "c1af739303c2dab2fb1ed3300948f89f08ed4daaef8b8d1efb5fddd05159761e"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T23-07-24Z_arena_2_DefaultScreen",
+      "recording_id": "2026-01-28T23-07-24Z_arena_2",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 230,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T23-07-24Z_arena_2_DefaultScreen/zarr/2026-01-28T23-07-24Z_arena_2_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T23-07-24Z_arena_3:z619ff1d52502",
+      "eligible_fully_visible_rows": 230,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:ba1004cf-e9f7-41fc-849f-812fa29cd16a",
+        "recording_started_utc": "2026-01-28T23-07-24Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "ba1004cf-e9f7-41fc-849f-812fa29cd16a"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "0f19b9b9e5a1eb458100f0f6713023431d6d6a399f69cdf2b61ac676ca7d25c7",
+        "contract_sha256": "4d31d8a21ab193a95ce497d24a4e2dd5139dccbad1848fbe3a58fc42827a6772",
+        "keypoint_visibility_sha256": "2103fc2ef899d561bb8f267f9eb25e8f9220a21ed4f7c9d1f056da6926b36a6b",
+        "keypoints_roi_sha256": "2da3f3b018439d342a848b9d5062fe2c98a50542b1e2467c229775843c1cafdf",
+        "pixel_sha256": "276890b2dc61414a453d64025fbd2e84720f01c28e88ba64d3e449c2cf18ef52",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "8a80a8c8f0004c89fb11eb0e0f9ba77879eb11f00dc536b974ee25877fa0a61e"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T23-07-24Z_arena_3_DefaultScreen",
+      "recording_id": "2026-01-28T23-07-24Z_arena_3",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 230,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T23-07-24Z_arena_3_DefaultScreen/zarr/2026-01-28T23-07-24Z_arena_3_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T23-07-24Z_arena_4:z77daad5336a4",
+      "eligible_fully_visible_rows": 230,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:a560dfda-3d29-4265-b37d-1de985209563",
+        "recording_started_utc": "2026-01-28T23-07-24Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "a560dfda-3d29-4265-b37d-1de985209563"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "a57bc109a4d5571a98134458fc032c2387ae6d28e468d4a4f80f2f196cf659a7",
+        "contract_sha256": "24ad41334b7f922c4a529889d7dcc7d7cb6e484eefb5c69b9d007cfd613cc591",
+        "keypoint_visibility_sha256": "2103fc2ef899d561bb8f267f9eb25e8f9220a21ed4f7c9d1f056da6926b36a6b",
+        "keypoints_roi_sha256": "3e6bfd5ffa944b3a42a876188e769867999d6504d00956ae36adc7b7ed17def7",
+        "pixel_sha256": "f48f61385a710605e18d9947c4c3e031f8ec4a721c7dcf5e61ef36b576c235ca",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "6f835781c89d66fd834515c9af35b8d36bf118745632a2dfa3acfc3e63d0b124"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T23-07-24Z_arena_4_DefaultScreen",
+      "recording_id": "2026-01-28T23-07-24Z_arena_4",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 230,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T23-07-24Z_arena_4_DefaultScreen/zarr/2026-01-28T23-07-24Z_arena_4_DefaultScreen_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T23-15-10Z_arena_2:zd4dc9e3d7f85",
+      "eligible_fully_visible_rows": 191,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:1b218bf7-4da2-4be5-8590-d247a6dd148c",
+        "recording_started_utc": "2026-01-28T23-15-10Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "1b218bf7-4da2-4be5-8590-d247a6dd148c"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "6568bbd44e65cad1a39dbf74ebca3c767de1b1e5905db988340e95f0ab7e4b02",
+        "contract_sha256": "85c2f6f925aa3bc777516e7a45be79275949fb87fba0a0d7adb7bdf7084740d8",
+        "keypoint_visibility_sha256": "909f5d54bb1dc2e85202e59679847e3c7409911476c0eadbfc127a44d43432f2",
+        "keypoints_roi_sha256": "3222a2212e77fe3d62f2c45715164dfc4bfbb455e7c06d18e801278ee8ca49ff",
+        "pixel_sha256": "32a548a63d0fd39d2f26402bd047d13aad6845fb3a98b4af629ec1b098c2e72e",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "358b742485c1dfd6475face4b55f55d93756970bcde8c0d86599c44d7c9e8c01"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T23-15-10Z_arena_2_Feeding",
+      "recording_id": "2026-01-28T23-15-10Z_arena_2",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 191,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T23-15-10Z_arena_2_Feeding/zarr/2026-01-28T23-15-10Z_arena_2_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T23-15-10Z_arena_3:z713b658550fa",
+      "eligible_fully_visible_rows": 191,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:ba1004cf-e9f7-41fc-849f-812fa29cd16a",
+        "recording_started_utc": "2026-01-28T23-15-10Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "ba1004cf-e9f7-41fc-849f-812fa29cd16a"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "c6c26c3908832f72c74d86d59f26499a53a1ce5b6a6431c680480e0d14a771da",
+        "contract_sha256": "63c59301a70ddcb4e66b376bf657690cce8b857c4c5a51a1596f5744374b93cf",
+        "keypoint_visibility_sha256": "909f5d54bb1dc2e85202e59679847e3c7409911476c0eadbfc127a44d43432f2",
+        "keypoints_roi_sha256": "38452fa53f096aa72c4f885ef7673df076f06f399187d225815a875b3cf12fec",
+        "pixel_sha256": "bf366638f0ae15cc00259cf82cc538912f6045b944ff9e82856de1f6c4e834fa",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "9569e3acdb0ffb2fc805e1480be5acbbaede28dbff79239f82b85940ba76acaf"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T23-15-10Z_arena_3_Feeding",
+      "recording_id": "2026-01-28T23-15-10Z_arena_3",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 191,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T23-15-10Z_arena_3_Feeding/zarr/2026-01-28T23-15-10Z_arena_3_Feeding_recovered_training.zarr"
+    },
+    {
+      "dataset_id": "2026-01-28T23-15-10Z_arena_4:z730ba5b8b697",
+      "eligible_fully_visible_rows": 191,
+      "excluded_partial_visibility_rows": 0,
+      "input_format": "gray",
+      "leakage_group": {
+        "id": "subject:a560dfda-3d29-4265-b37d-1de985209563",
+        "recording_started_utc": "2026-01-28T23-15-10Z",
+        "source": "registered_subject",
+        "subject_ids": [
+          "a560dfda-3d29-4265-b37d-1de985209563"
+        ]
+      },
+      "materialized_content": {
+        "array_digest_index_sha256": "e4f983565dd769a7597d5fed9b37fbcd644913b4c88a12d4e54af6548c6a2c35",
+        "contract_sha256": "f4766b61594f49f0855e988df637234676ecfa7d5f17703518f5c81dc581e4bb",
+        "keypoint_visibility_sha256": "909f5d54bb1dc2e85202e59679847e3c7409911476c0eadbfc127a44d43432f2",
+        "keypoints_roi_sha256": "3353cbfaa5b4cc53d18ebb490be0c10aa9eed27da70f58ed67a81bde60c40110",
+        "pixel_sha256": "df344b15a8f50e93d2777c42cc26abfe561e42e92ee3a8aaa6fec26107f8398a",
+        "schema_id": "palette.training.recovered_pose_head_crop_visibility.v1",
+        "schema_version": 1,
+        "source_row_lineage_sha256": "93985f2dbc8e5b7a4e0909476da308e63599f0f6a162de6647f89f042697f40a"
+      },
+      "materialized_crop_run": "pose_head_center_192_recovered_v001",
+      "name": "2026-01-28T23-15-10Z_arena_4_Feeding",
+      "recording_id": "2026-01-28T23-15-10Z_arena_4",
+      "source_kind": "recovered_pose_crop",
+      "source_rows": 191,
+      "source_type_resolved": "recovered_pose_crop",
+      "zarr_path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-01-28T23-15-10Z_arena_4_Feeding/zarr/2026-01-28T23-15-10Z_arena_4_Feeding_recovered_training.zarr"
+    }
+  ],
+  "expected_sample_count": 10717,
+  "expected_source_count": 51,
+  "input_format": "gray",
+  "manifest_schema_id": "palette.recovered_pose_crop_training_source_manifest",
+  "manifest_schema_version": 1,
+  "pose_schema": {
+    "keypoint_labels": [
+      "swim_bladder",
+      "eye_left",
+      "eye_right"
+    ],
+    "kpt_shape": [
+      3,
+      3
+    ],
+    "skeleton": [
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        2
+      ],
+      [
+        1,
+        2
+      ]
+    ],
+    "skeleton_id": "pose_schema:traditional_v1"
+  },
+  "registry_grouping": {
+    "group_count": 26,
+    "registry_path": "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite",
+    "resolver": "fisheye.shared.training_leakage_groups.resolve_training_leakage_group",
+    "snapshot_sha256": "7514d60b6141c546a0fceb3fbc4994e1161dfab9c57e5d5fadd77359e7491bdd",
+    "source_count": 51
+  },
+  "row_gate": {
+    "eligible_rows": 10717,
+    "excluded_partial_visibility_rows": 4,
+    "policy": "all_keypoints_visibility_2",
+    "source_rows": 10721
+  },
+  "set_id": "pose_head_192_recovered_reviewed_v001",
+  "set_name": "head_192_recovered_reviewed",
+  "set_version": 1,
+  "source_collection": {
+    "path": "/groups/johnson/johnsonlab/jeremy/recordings/_index/pose_head_center_192_recovered_v001.collection.json",
+    "run_id": "pose_head_center_192_recovered_v001",
+    "schema_id": "palette.training.recovered_pose_head_crop_collection.v1",
+    "sha256": "a12739a19ecd5a7ea65620c68300a64fd77841cd3ca0116a3b67939ead1daf7e"
+  },
+  "source_type": "recovered_pose_crop"
+}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from fisheye.analysis_workflows import (
     TemporalPolicy,
     WorkflowNode,
     default_core_behavior_profile_path,
+    provider_motion_core_behavior_profile_path,
     discover_stage_availability,
     load_analysis_workflow,
     plan_analysis_workflow,
@@ -74,6 +76,198 @@ def test_core_behavior_profile_preserves_framewise_scientific_traces() -> None:
         "track_kinematics_visualization",
         "eye_angles",
     )
+
+
+def test_core_behavior_v1_profile_bytes_and_serialization_remain_unchanged() -> None:
+    path = default_core_behavior_profile_path()
+    workflow = load_analysis_workflow(path)
+
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == (
+        "a2103e45e8f9217bb39382912400256fdc1dfac8743c3e48c25f954229ed22a1"
+    )
+    assert workflow.schema_version == 1
+    assert dict(workflow.run_scopes) == {}
+    assert "run_scopes" not in workflow.to_dict()
+
+
+def test_provider_motion_core_profile_is_a_bounded_schema_v2_canary() -> None:
+    workflow = load_analysis_workflow(provider_motion_core_behavior_profile_path())
+
+    assert workflow.schema_version == 2
+    assert workflow.workflow_id == "core_behavior_provider_motion_v1"
+    assert dict(workflow.run_scopes) == {"track_kinematics": "provider"}
+    assert workflow.stage_run_scope("track_kinematics") == "provider"
+    assert workflow.targets == ("swim_bouts",)
+    assert tuple(workflow.node_by_id) == ("track_kinematics", "swim_bouts")
+    assert workflow.node_by_id["track_kinematics"].kind == "prerequisite"
+    assert workflow.node_by_id["track_kinematics"].runnable is False
+    assert workflow.node_by_id["track_kinematics"].depends_on == ()
+    assert workflow.node_by_id["swim_bouts"].depends_on == ("track_kinematics",)
+    assert workflow.run_selection == {}
+    assert workflow.to_dict()["run_scopes"] == {"track_kinematics": "provider"}
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "run_scopes", "message"),
+    (
+        (1, {"track_kinematics": "provider"}, "schema_version 2"),
+        (2, {"track_kinematics": "offline"}, "unsupported run scope"),
+        (2, {"swim_bouts": "provider"}, "does not support run scopes"),
+    ),
+)
+def test_workflow_run_scope_grammar_fails_closed(
+    schema_version: int,
+    run_scopes: dict[str, str],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        AnalysisWorkflow(
+            schema_id=ANALYSIS_WORKFLOW_SCHEMA_ID,
+            schema_version=schema_version,
+            workflow_id="scoped_workflow",
+            description="scope grammar fixture",
+            nodes=(
+                WorkflowNode(
+                    node_id="track_kinematics",
+                    kind="prerequisite",
+                    stage_id="track_kinematics",
+                    runnable=False,
+                ),
+                WorkflowNode(
+                    node_id="swim_bouts",
+                    kind="analysis",
+                    stage_id="swim_bouts",
+                    depends_on=("track_kinematics",),
+                ),
+            ),
+            targets=("swim_bouts",),
+            run_scopes=run_scopes,
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "runnable"),
+    (("analysis", False), ("prerequisite", True)),
+)
+def test_provider_scope_cannot_dispatch_a_workflow_producer(
+    kind: str,
+    runnable: bool,
+) -> None:
+    with pytest.raises(ValueError, match="non-runnable sealed prerequisite"):
+        AnalysisWorkflow(
+            schema_id=ANALYSIS_WORKFLOW_SCHEMA_ID,
+            schema_version=2,
+            workflow_id="invalid_provider_producer",
+            description="provider scopes are read-only suppliers",
+            nodes=(
+                WorkflowNode(
+                    node_id="track_kinematics",
+                    kind=kind,
+                    stage_id="track_kinematics",
+                    runnable=runnable,
+                ),
+            ),
+            targets=("track_kinematics",),
+            run_scopes={"track_kinematics": "provider"},
+        )
+
+
+def test_provider_motion_availability_requires_exact_canary_name(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "analysis" / "track_kinematics_runs" / "provider"
+    _write_zarr_metadata(parent)
+    _write_zarr_metadata(
+        parent / "motion_canary",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        },
+    )
+
+    canary = discover_stage_availability(
+        tmp_path,
+        "track_kinematics",
+        requested_run="motion_canary",
+        run_scope="provider",
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+    encoded = discover_stage_availability(
+        tmp_path,
+        "track_kinematics",
+        requested_run="provider/motion_canary",
+        run_scope="provider",
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+    implicit = discover_stage_availability(
+        tmp_path,
+        "track_kinematics",
+        requested_run="latest",
+        run_scope="provider",
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+    padded = discover_stage_availability(
+        tmp_path,
+        "track_kinematics",
+        requested_run=" motion_canary ",
+        run_scope="provider",
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+    production = discover_stage_availability(
+        tmp_path,
+        "track_kinematics",
+        requested_run="motion_canary",
+        run_scope="provider",
+    )
+
+    assert canary.available is True
+    assert canary.run_name == "provider/motion_canary"
+    assert canary.artifact_path == (
+        "analysis/track_kinematics_runs/provider/motion_canary"
+    )
+    assert encoded == canary
+    assert implicit.available is False
+    assert "exact named provider-motion run" in implicit.reason
+    assert padded.available is False
+    assert "exact named provider-motion run" in padded.reason
+    assert production.available is False
+    assert "selector-ineligible canary" in production.reason
+
+
+def test_provider_motion_workflow_availability_does_not_require_sealed_ancestors(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "analysis" / "track_kinematics_runs" / "provider"
+    _write_zarr_metadata(parent)
+    _write_zarr_metadata(
+        parent / "motion_canary",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        },
+    )
+    workflow = load_analysis_workflow(
+        provider_motion_core_behavior_profile_path()
+    ).with_run_selection({"track_kinematics": "motion_canary"})
+
+    statuses = build_availability(
+        workflow,
+        tmp_path,
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+    )
+    plan = plan_analysis_workflow(
+        workflow,
+        statuses,
+        execution_profile_id=SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
+        materialize_stage_ids=("swim_bouts",),
+    )
+
+    assert set(statuses) == {"track_kinematics", "swim_bouts"}
+    assert statuses["track_kinematics"].available is True
+    assert statuses["track_kinematics"].run_name == "provider/motion_canary"
+    assert plan.ready is True
+    assert plan.node_by_id["track_kinematics"].action == "reuse"
+    assert plan.node_by_id["swim_bouts"].action == "run"
 
 
 def test_selector_ineligible_availability_requires_exact_candidate_name(
@@ -198,13 +392,9 @@ def test_temporal_policy_rejects_unknown_configuration_fields() -> None:
 def test_temporal_policy_round_trips_framewise_and_historical_sampled_forms() -> None:
     framewise = TemporalPolicy()
     assert TemporalPolicy.from_mapping(framewise.to_dict()) == framewise
-    assert framewise.kinematics_export_rate_hz(source_sample_rate_hz=29.97) == (
-        29.97
-    )
+    assert framewise.kinematics_export_rate_hz(source_sample_rate_hz=29.97) == (29.97)
 
-    sampled = TemporalPolicy.from_mapping(
-        {"kinematics": {"sample_rate_hz": 10}}
-    )
+    sampled = TemporalPolicy.from_mapping({"kinematics": {"sample_rate_hz": 10}})
     assert sampled.kinematics_resolution == "sampled"
     assert sampled.kinematics_export_rate_hz(source_sample_rate_hz=30) == 10.0
 

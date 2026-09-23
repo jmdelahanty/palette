@@ -17,6 +17,7 @@ import zarr
 from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.analysis.swim_bout_frame_axis import (
     SwimBoutFrameAxisError,
+    canonical_frame_axis_sha256,
     resolve_swim_bout_frame_axis,
 )
 from fisheye.shared.json_safety import decode_null_terminated_text
@@ -139,6 +140,23 @@ class SwimBoutEvents:
     signal_attrs: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class SwimBoutOverlayTables:
+    """Event, boundary, interval, and signal surfaces needed by time overlays."""
+
+    run_name: str
+    run_path: str
+    level_path: str
+    candidate: SwimBoutCandidate
+    signal: SwimBoutSignalVariant
+    bouts: np.ndarray
+    peak_events: np.ndarray
+    inter_bout_intervals: np.ndarray
+    series: Mapping[str, np.ndarray]
+    run_attrs: Mapping[str, Any]
+    signal_attrs: Mapping[str, Any]
+
+
 def normalize_speed_level(value: object, default: str | None = None) -> str:
     """Return a canonical ``speed_*`` level name."""
 
@@ -243,12 +261,15 @@ def load_default_swim_bout_tables(
     )
 
 
-def load_exact_selector_ineligible_default_swim_bout_tables(
+def load_exact_selector_ineligible_swim_bout_tables(
     root: zarr.Group,
     *,
     run_name: str,
+    candidate_id: int | None = None,
+    signal_id: int | None = None,
+    speed_level: str | None = None,
 ) -> SwimBoutTables:
-    """Load one explicitly named, complete selector-ineligible v8 candidate.
+    """Load one signal from an exact complete selector-ineligible v8 run.
 
     Ordinary readers intentionally reject selector-ineligible runs, including
     when a caller happens to know the child name.  Phase-4 canaries need a
@@ -259,8 +280,46 @@ def load_exact_selector_ineligible_default_swim_bout_tables(
     a selector alias, path, historical layout, or implicit compatibility mode.
     """
 
+    requested, run_group, selected_candidate, selected_signal = (
+        _resolve_exact_selector_ineligible_selection(
+            root,
+            run_name=run_name,
+            candidate_id=candidate_id,
+            signal_id=signal_id,
+            speed_level=speed_level,
+        )
+    )
+    selected = _load_compact_v2_tables(
+        root,
+        run_group,
+        run_name=requested,
+        is_latest=False,
+        candidate_id=selected_candidate.candidate_id,
+        signal_id=selected_signal.signal_id,
+        speed_level=None,
+    )
+    return selected
+
+
+def _resolve_exact_selector_ineligible_selection(
+    root: zarr.Group | None,
+    *,
+    run_name: str,
+    candidate_id: int | None,
+    signal_id: int | None,
+    speed_level: str | None,
+    swim_bout_parent: zarr.Group | None = None,
+) -> tuple[str, zarr.Group, SwimBoutCandidate, SwimBoutSignalVariant]:
     if type(run_name) is not str:
         raise TypeError("run_name must be one exact string.")
+    for field_name, value in (
+        ("candidate_id", candidate_id),
+        ("signal_id", signal_id),
+    ):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, np.integer))
+        ):
+            raise TypeError(f"{field_name} must be one exact integer when supplied.")
     requested = run_name.strip()
     if (
         not requested
@@ -273,7 +332,18 @@ def load_exact_selector_ineligible_default_swim_bout_tables(
         raise SwimBoutIOError(
             "Selector-ineligible swim-bout reads require one exact bare run name."
         )
-    parent = _require_child(root, "analysis/swim_bout_runs")
+    if swim_bout_parent is None:
+        if root is None:
+            raise SwimBoutIOError(
+                "A recording root or exact swim-bout parent is required."
+            )
+        parent = _require_child(root, "analysis/swim_bout_runs")
+    else:
+        if root is not None:
+            raise SwimBoutIOError(
+                "Supply either the recording root or exact swim-bout parent, not both."
+            )
+        parent = swim_bout_parent
     if requested not in parent:
         raise SwimBoutIOError(f"Swim-bout run {requested!r} not found.")
     run_group = parent[requested]
@@ -288,24 +358,168 @@ def load_exact_selector_ineligible_default_swim_bout_tables(
         raise SwimBoutIOError(
             "Selector-ineligible swim-bout canaries require the maintained compact v8 layout."
         )
-    candidate = _default_candidate_from_run_group(
+    default_candidate = _default_candidate_from_run_group(
         run_group,
         run_name=requested,
         is_latest=False,
     )
-    if not candidate.signals:
+    if not default_candidate.signals:
         raise SwimBoutIOError(
             f"Swim-bout run {requested!r} has no readable speed levels."
         )
-    default_signal = _default_signal(candidate)
-    return _load_compact_v2_tables(
-        root,
+    selected_candidate = _resolve_compact_candidate(
         run_group,
         run_name=requested,
         is_latest=False,
+        candidate_id=(
+            default_candidate.candidate_id
+            if candidate_id is None
+            else int(candidate_id)
+        ),
+    )
+    selected_signal = _resolve_signal(
+        selected_candidate,
+        signal_id=None if signal_id is None else int(signal_id),
+        speed_level=speed_level,
+    )
+    if signal_id is not None and speed_level is not None:
+        expected_level = normalize_speed_level(speed_level)
+        if selected_signal.speed_level != expected_level:
+            raise SwimBoutIOError(
+                "Exact selector-ineligible swim-bout signal_id and speed_level "
+                "identify different signals."
+            )
+    return requested, run_group, selected_candidate, selected_signal
+
+
+def load_exact_selector_ineligible_default_swim_bout_tables(
+    root: zarr.Group,
+    *,
+    run_name: str,
+) -> SwimBoutTables:
+    """Load the default signal from one exact selector-ineligible v8 run."""
+
+    return load_exact_selector_ineligible_swim_bout_tables(
+        root,
+        run_name=run_name,
+    )
+
+
+def load_exact_selector_ineligible_swim_bout_events(
+    root: zarr.Group | None,
+    *,
+    run_name: str,
+    candidate_id: int | None = None,
+    signal_id: int | None = None,
+    speed_level: str | None = None,
+    swim_bout_parent: zarr.Group | None = None,
+) -> SwimBoutEvents:
+    """Load only exact selector-ineligible bout rows for discovery/timelines.
+
+    ``swim_bout_parent`` is the direct-subtree path for an explicitly named
+    selector-ineligible canary.  It never resolves parent selectors and cannot
+    be combined with a recording root.
+    """
+
+    requested, run_group, candidate, signal = (
+        _resolve_exact_selector_ineligible_selection(
+            root,
+            run_name=run_name,
+            candidate_id=candidate_id,
+            signal_id=signal_id,
+            speed_level=speed_level,
+            swim_bout_parent=swim_bout_parent,
+        )
+    )
+    tables = _require_child(run_group, "tables")
+    bouts = _filter_records(
+        _load_structured_or_empty(tables, "bouts", required=True),
         candidate_id=candidate.candidate_id,
-        signal_id=default_signal.signal_id,
-        speed_level=None,
+        signal_id=signal.signal_id,
+    )
+    indexes = _require_child(run_group, "indexes")
+    signal_rows = _load_structured_or_empty(indexes, "signal_variants")
+    signal_row = _row_by_int_field(signal_rows, "signal_id", signal.signal_id)
+    return SwimBoutEvents(
+        run_name=requested,
+        run_path=f"analysis/swim_bout_runs/{requested}",
+        level_path=(
+            f"analysis/swim_bout_runs/{requested}/tables/bouts"
+            f"?candidate_id={candidate.candidate_id}&signal_id={signal.signal_id}"
+        ),
+        candidate=candidate,
+        signal=signal,
+        bouts=bouts,
+        run_attrs=_attrs_dict(run_group),
+        signal_attrs=(
+            _record_to_dict(signal_row) if signal_row is not None else signal.attrs
+        ),
+    )
+
+
+def load_exact_selector_ineligible_swim_bout_overlay_tables(
+    root: zarr.Group | None,
+    *,
+    run_name: str,
+    candidate_id: int | None = None,
+    signal_id: int | None = None,
+    speed_level: str | None = None,
+    swim_bout_parent: zarr.Group | None = None,
+    authoritative_frame_indices: np.ndarray | None = None,
+) -> SwimBoutOverlayTables:
+    """Load the bounded persisted surfaces used by interactive bout overlays.
+
+    This deliberately omits point tables, histograms, summary tables, and
+    trials.  It is the selector-ineligible counterpart to the event projection
+    already used by the reusable core-behavior Marimo component.  A direct
+    parent read must supply the already-admitted authoritative frame axis when
+    the compact signal stores it by reference outside the subtree.
+    """
+
+    requested, run_group, candidate, signal = (
+        _resolve_exact_selector_ineligible_selection(
+            root,
+            run_name=run_name,
+            candidate_id=candidate_id,
+            signal_id=signal_id,
+            speed_level=speed_level,
+            swim_bout_parent=swim_bout_parent,
+        )
+    )
+    tables = _require_child(run_group, "tables")
+
+    def _selected(name: str, *, required: bool = False) -> np.ndarray:
+        return _filter_records(
+            _load_structured_or_empty(tables, name, required=required),
+            candidate_id=candidate.candidate_id,
+            signal_id=signal.signal_id,
+        )
+
+    indexes = _require_child(run_group, "indexes")
+    signal_rows = _load_structured_or_empty(indexes, "signal_variants")
+    signal_row = _row_by_int_field(signal_rows, "signal_id", signal.signal_id)
+    return SwimBoutOverlayTables(
+        run_name=requested,
+        run_path=f"analysis/swim_bout_runs/{requested}",
+        level_path=(
+            f"analysis/swim_bout_runs/{requested}/tables/bouts"
+            f"?candidate_id={candidate.candidate_id}&signal_id={signal.signal_id}"
+        ),
+        candidate=candidate,
+        signal=signal,
+        bouts=_selected("bouts", required=True),
+        peak_events=_selected("peak_events"),
+        inter_bout_intervals=_selected("inter_bout_intervals"),
+        series=_load_compact_signal_series(
+            root,
+            run_group,
+            signal=signal,
+            authoritative_frame_indices=authoritative_frame_indices,
+        ),
+        run_attrs=_attrs_dict(run_group),
+        signal_attrs=(
+            _record_to_dict(signal_row) if signal_row is not None else signal.attrs
+        ),
     )
 
 
@@ -921,10 +1135,11 @@ def _histogram_rows_to_legacy(records: np.ndarray) -> np.ndarray:
 
 
 def _load_compact_signal_series(
-    root: zarr.Group,
+    root: zarr.Group | None,
     run_group: zarr.Group,
     *,
     signal: SwimBoutSignalVariant,
+    authoritative_frame_indices: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     series: dict[str, np.ndarray] = {}
     signals_group = _get_child(run_group, "signals")
@@ -959,16 +1174,43 @@ def _load_compact_signal_series(
     expected_length = None
     if "detection_signal_mm_s" in series:
         expected_length = int(series["detection_signal_mm_s"].size)
-    try:
-        frame_indices = resolve_swim_bout_frame_axis(
-            root,
-            run_group,
-            expected_length=expected_length,
-        )
-    except SwimBoutFrameAxisError as exc:
-        raise SwimBoutIOError(
-            f"Cannot resolve frame axis for swim-bout run {signal.run_name!r}: {exc}"
-        ) from exc
+    if authoritative_frame_indices is not None:
+        frame_indices = np.asarray(authoritative_frame_indices, dtype=np.int64)
+        if frame_indices.ndim != 1 or (
+            expected_length is not None and frame_indices.shape != (expected_length,)
+        ):
+            raise SwimBoutIOError(
+                "The bound authoritative frame axis disagrees with the selected "
+                "detector signal."
+            )
+        frame_contract = _attrs_dict(run_group).get("frame_axis_contract")
+        if (
+            not isinstance(frame_contract, Mapping)
+            or frame_contract.get("content_sha256")
+            != canonical_frame_axis_sha256(frame_indices)
+        ):
+            raise SwimBoutIOError(
+                "The bound authoritative frame axis differs from the swim-bout "
+                "frame axis contract."
+            )
+        frame_indices = np.array(frame_indices, copy=True)
+        frame_indices.setflags(write=False)
+    else:
+        if root is None:
+            raise SwimBoutIOError(
+                "A direct swim-bout subtree read requires its bound authoritative "
+                "frame axis."
+            )
+        try:
+            frame_indices = resolve_swim_bout_frame_axis(
+                root,
+                run_group,
+                expected_length=expected_length,
+            )
+        except SwimBoutFrameAxisError as exc:
+            raise SwimBoutIOError(
+                f"Cannot resolve frame axis for swim-bout run {signal.run_name!r}: {exc}"
+            ) from exc
     if frame_indices is not None:
         series["frame_indices"] = frame_indices
     return series

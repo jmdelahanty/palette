@@ -9,6 +9,7 @@ Run after installing optional UI dependencies:
 Optional selectors:
 
     --run-path analysis/track_kinematics_runs/offline/<run>
+    --run-path analysis/track_kinematics_runs/provider/<exact-run>
     --swim-bout-run <run-name>
     --speed-level filtered
     --eye-angle-representation eye_frame
@@ -248,6 +249,9 @@ def _(
     track_options = discover_track_kinematics_run_options(
         zarr_path,
         artifact_name=artifact,
+        requested_run_path=(
+            str(initial_run_path) if initial_run_path is not None else None
+        ),
     )
     write_perf_event(
         "discover_track_options",
@@ -258,11 +262,19 @@ def _(
     )
     if not track_options:
         raise ValueError(
-            "No track-kinematics interactive artifacts were found. "
-            "Run plot_track_kinematics with --write-zarr-artifacts first."
+            "No verified track-kinematics interactive artifacts or current "
+            "provider-motion canaries were found."
         )
     _eye_discovery_t0 = time.perf_counter()
-    eye_angle_options = discover_eye_angle_run_options(zarr_path)
+    _provider_direct_mode = bool(track_options) and all(
+        _option.source_kind == "verified_provider_motion"
+        for _option in track_options
+    )
+    eye_angle_options = (
+        []
+        if _provider_direct_mode and initial_eye_angle_run is None
+        else discover_eye_angle_run_options(zarr_path)
+    )
     write_perf_event(
         "discover_eye_angle_options",
         time.perf_counter() - _eye_discovery_t0,
@@ -531,6 +543,7 @@ def _(
         zarr_path,
         track_run_path=selected_track.run_path,
         track_id=selected_track.track_id,
+        provider_handle=selected_track.provider_handle,
     )
     write_perf_event(
         "discover_swim_bout_options",
@@ -670,15 +683,20 @@ def _(
     discover_bout_classification_run_options,
     selected_speed_level,
     selected_swim_bout,
+    selected_track,
     time,
     write_perf_event,
     zarr_path,
 ):
     _classification_discovery_t0 = time.perf_counter()
-    bout_classification_options = discover_bout_classification_run_options(
-        zarr_path,
-        swim_bout_run=selected_swim_bout.run_name if selected_swim_bout is not None else None,
-        speed_level=selected_speed_level,
+    bout_classification_options = (
+        []
+        if selected_track.source_kind == "verified_provider_motion"
+        else discover_bout_classification_run_options(
+            zarr_path,
+            swim_bout_run=selected_swim_bout.run_name if selected_swim_bout is not None else None,
+            speed_level=selected_speed_level,
+        )
     )
     write_perf_event(
         "discover_bout_classification_options",
@@ -784,8 +802,12 @@ def _(
         zarr_path,
         run_path=selected_track.run_path,
         artifact_name=artifact,
+        track_id=selected_track.track_id,
         swim_bout_run=selected_swim_bout.run_name if selected_swim_bout is not None else "none",
+        swim_bout_candidate_id=(selected_swim_bout.candidate_id if selected_swim_bout is not None else None),
+        swim_bout_signal_id=(selected_swim_bout.signal_id if selected_swim_bout is not None else None),
         speed_level=selected_speed_level,
+        provider_handle=selected_track.provider_handle,
     )
     write_perf_event(
         "load_interactive_data",
@@ -835,6 +857,10 @@ def _(
 
         **Track Selection:** `{selected_track.label}`
 
+        **Source Mode:** `{selected_track.source_kind}`
+
+        **Position Provider:** `{selected_track.provider_estimator_id or "legacy track publication"}`
+
         **Artifact:** `{data.artifact_name}`
 
         **Renderer:** `{data.attrs.get("renderer", "unknown")}`
@@ -868,6 +894,16 @@ def _(
             "surface": "track_kinematics",
             "field": "scope",
             "value": selected_track.run_scope,
+        },
+        {
+            "surface": "track_kinematics",
+            "field": "source_kind",
+            "value": selected_track.source_kind,
+        },
+        {
+            "surface": "track_kinematics",
+            "field": "position_estimator_id",
+            "value": selected_track.provider_estimator_id or "legacy publication",
         },
         {
             "surface": "track_kinematics",
@@ -1025,6 +1061,9 @@ def _(
             "run": selected_track.run_name,
             "run_path": selected_track.run_path,
             "scope": selected_track.run_scope,
+            "source_kind": selected_track.source_kind,
+            "position_estimator_id": selected_track.provider_estimator_id,
+            "provider_manifest_sha256": selected_track.provider_manifest_sha256,
             "track_id": int(selected_track.track_id),
             "latest": bool(selected_track.is_latest),
             "artifact": {
@@ -1145,7 +1184,7 @@ def _(
 
 
 @app.cell
-def _(json, mo, pd, time, write_perf_event, zarr, zarr_path):
+def _(json, mo, pd, selected_track, time, write_perf_event, zarr, zarr_path):
     _stimulus_step_discovery_t0 = time.perf_counter()
 
     def _group_keys(_group):
@@ -1203,7 +1242,13 @@ def _(json, mo, pd, time, write_perf_event, zarr, zarr_path):
 
     _step_rows = []
     try:
-        _root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+        _root = (
+            None
+            if selected_track.source_kind == "verified_provider_motion"
+            else zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+        )
+        if _root is None:
+            raise KeyError("stimulus discovery is outside the provider canary slice")
         _parent = _root["analysis/stimulus_runs"]
         _parent_path = zarr_path / "analysis" / "stimulus_runs"
         _latest = str(_parent.attrs.get("latest", ""))
@@ -1280,7 +1325,7 @@ def _(json, mo, pd, time, write_perf_event, zarr, zarr_path):
 
 
 @app.cell
-def _(concentric_radial_omr_steps, load_omr_step_summaries, mo, time, write_perf_event, zarr, zarr_path):
+def _(concentric_radial_omr_steps, load_omr_step_summaries, mo, selected_track, time, write_perf_event, zarr, zarr_path):
     _stimulus_response_discovery_t0 = time.perf_counter()
     _stimulus_response_options = []
 
@@ -1315,7 +1360,15 @@ def _(concentric_radial_omr_steps, load_omr_step_summaries, mo, time, write_perf
             raise
 
     try:
-        _root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+        _root = (
+            None
+            if selected_track.source_kind == "verified_provider_motion"
+            else zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+        )
+        if _root is None:
+            raise KeyError(
+                "stimulus-response discovery is outside the provider canary slice"
+            )
         _parent = _root["analysis/stimulus_response_runs"]
         _parent_path = zarr_path / "analysis" / "stimulus_response_runs"
         _latest = str(_parent.attrs.get("latest", ""))

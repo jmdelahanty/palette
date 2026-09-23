@@ -1435,6 +1435,8 @@ class ZarrYOLODataset(Dataset):
         self.pose_fliplr_permutation: Optional[np.ndarray] = None
         self.pose_flipud_permutation: Optional[np.ndarray] = None
         self.detect_frame_arrays = {}
+        self.pose_frame_arrays = {}
+        self.pose_crop_runs = {}
         self.detect_frame_chunk_len = {}
         self.detect_frame_chunk_cache = OrderedDict()
         if self.config.task == 'detect':
@@ -1538,7 +1540,10 @@ class ZarrYOLODataset(Dataset):
                 if latest_crop is None:
                     raise KeyError(f"No complete crop run available for {Path(zarr_path).name}.")
                 crop_group = root[f'crop_runs/{latest_crop}']
-                roi_shape = crop_group['roi_images'].shape[1:3]
+                frame_array = crop_group['roi_images']
+                self.pose_frame_arrays[zarr_path] = frame_array
+                self.pose_crop_runs[zarr_path] = latest_crop
+                roi_shape = frame_array.shape[1:3]
                 roi_h, roi_w = roi_shape
                 self.roi_size_cache[zarr_path] = (roi_h, roi_w)
                 target_shape = self.config.model_input_shape_hw or (roi_h, roi_w)
@@ -1676,7 +1681,7 @@ class ZarrYOLODataset(Dataset):
         if self.config.task != "pose":
             return {}
         return {
-            "schema_id": "palette.pose_training_preprocessing_runtime.v1",
+            "schema_id": "palette.pose_training_preprocessing_runtime.v2",
             "model_input_shape_hw": (
                 list(self.config.model_input_shape_hw)
                 if self.config.model_input_shape_hw is not None
@@ -1689,6 +1694,16 @@ class ZarrYOLODataset(Dataset):
             "sources": {
                 str(path): transform.to_attrs()
                 for path, transform in sorted(self.pose_input_transforms.items())
+            },
+            "source_bindings": {
+                str(path): {
+                    "crop_run": self.pose_crop_runs[path],
+                    "roi_images_path": (
+                        f"crop_runs/{self.pose_crop_runs[path]}/roi_images"
+                    ),
+                    "selection_lifetime": "fixed_at_dataset_construction",
+                }
+                for path in sorted(self.pose_input_transforms)
             },
             "augmentation_enabled": bool(self.config.augmentation_enabled),
             "augmentation": {
@@ -2206,9 +2221,9 @@ class ZarrYOLODataset(Dataset):
         if self.config.task == 'detect':
             image_source_path = metadata.frame_array_path
         else:
-            latest_crop = _latest_complete(root['crop_runs'])
+            latest_crop = self.pose_crop_runs.get(zarr_path)
             if latest_crop is None:
-                raise KeyError(f"No complete crop run available for {Path(zarr_path).name}.")
+                raise KeyError(f"No cached crop run available for {Path(zarr_path).name}.")
             image_source_path = f"crop_runs/{latest_crop}/roi_images"
         
         frame_idx = None
@@ -2229,12 +2244,16 @@ class ZarrYOLODataset(Dataset):
             image = self._get_detect_frame(zarr_path, image_source_path, frame_idx)
         else:
             roi_idx = det_idx
-            if roi_idx < 0 or roi_idx >= root[image_source_path].shape[0]:
+            frame_array = self.pose_frame_arrays.get(zarr_path)
+            if frame_array is None:
+                frame_array = root[image_source_path]
+                self.pose_frame_arrays[zarr_path] = frame_array
+            if roi_idx < 0 or roi_idx >= frame_array.shape[0]:
                 raise IndexError(
                     f"{Path(zarr_path).name}: selected label row {det_idx} is outside "
-                    f"'{image_source_path}' with {root[image_source_path].shape[0]} ROI images."
+                    f"'{image_source_path}' with {frame_array.shape[0]} ROI images."
                 )
-            image = root[image_source_path][roi_idx]
+            image = frame_array[roi_idx]
         if profile_enabled:
             read_seconds = max(0.0, time.perf_counter() - read_start)
 

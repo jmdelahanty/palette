@@ -1,0 +1,77 @@
+{
+  "schema_id": "citrus.visual_appearance_replay_dependency_manifest",
+  "schema_version": 1,
+  "component_id": "visual_appearance",
+  "runtime_state_authority": "recorded_frame_state_v1_not_random_seed_resimulation",
+  "physical_claim": "renderer_code_values_only_not_emitted_projector_luminance",
+  "adapters": [
+    {
+      "renderer_adapter_id": "chaser_compact_object_cuda_v1",
+      "appearance_formula_id": "compact_object_signed_weber_code_luminance_v1",
+      "quantization_id": "rgba8_round_half_up_v1",
+      "reference_evaluation": "per_pixel_local_underlay_before_foreground_v1",
+      "audit_witness_policy_id": "object_center_v1",
+      "composition_order_id": "chaser_first_matching_index_v1",
+      "dependencies": [
+        {
+          "role": "appearance_runtime_state",
+          "object_ref": "/components/visual_appearance/states",
+          "required_attributes": []
+        },
+        {
+          "role": "authored_protocol_definition",
+          "object_ref": "/protocol/authored/protocol_definition_json",
+          "required_attributes": []
+        },
+        {
+          "role": "appearance_profile_index",
+          "object_ref": "/protocol/authored/protocol_trial_index_json",
+          "required_attributes": []
+        },
+        {
+          "role": "protocol_semantic_identity",
+          "object_ref": "/protocol/authored/protocol_semantic_json",
+          "required_attributes": []
+        },
+        {
+          "role": "chaser_runtime_state",
+          "object_ref": "/components/chaser/states",
+          "required_attributes": []
+        },
+        {
+          "role": "stimulus_frame_timeline",
+          "object_ref": "/frames/stimulus",
+          "required_attributes": []
+        },
+        {
+          "role": "renderer_snapshot",
+          "object_ref": "/geometry/renderer",
+          "required_attributes": []
+        },
+        {
+          "role": "runtime_geometry",
+          "object_ref": "/geometry/runtime/contract_json",
+          "required_attributes": []
+        },
+        {
+          "role": "presentation_timing",
+          "object_ref": "/timing/display_submissions/frame_submissions",
+          "required_attributes": []
+        },
+        {
+          "role": "appearance_enum_definitions",
+          "object_ref": "/definitions/enums",
+          "required_attributes": []
+        },
+        {
+          "role": "build_identity",
+          "object_ref": "/metadata/session",
+          "required_attributes": [
+            "software_version",
+            "git_commit_hash"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 AGENT_INSTRUCTIONS_PATH = REPOSITORY_ROOT / "AGENTS.md"
 POLICY_HEADING = "## Required CI and Integration Rule"
-POLICY_MARKER = "<!-- required-ci-integration-contract:v1 -->"
+POLICY_MARKER = "<!-- required-ci-integration-contract:v2 -->"
 
 
 def _required_ci_policy() -> str:
@@ -36,3 +35,15 @@ def test_required_ci_policy_distinguishes_incomplete_handoff() -> None:
     assert "every failing or unrun check" in policy
     assert "not authorization to merge, integrate, promote" in policy
     assert "reported as not merge-ready" in policy
+
+
+def test_required_ci_policy_defines_fail_closed_same_tree_integration() -> None:
+    policy = _required_ci_policy()
+
+    assert "successful full CI run on the exact integrated commit" in policy
+    assert "successful `main-integration` same-tree gate" in policy
+    assert "first parent is an ancestor" in policy
+    assert "landed tree is identical" in policy
+    assert "attested tested PR tree" in policy
+    assert "active strict required-check ruleset has no bypass actors" in policy
+    assert "requires a successful manual full CI run" in policy

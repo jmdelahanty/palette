@@ -1,0 +1,133 @@
+{
+  "schema_id": "palette.unified_h5_test_fixture_inventory",
+  "schema_version": 1,
+  "encoding": "gzip_base64",
+  "fixtures": {
+    "appearance": {
+      "sha256": "854c0f08a226876942e92bdba3b6f9d842ef659923e792dea2d7228bafbd6c35",
+      "size_bytes": 939032,
+      "producer_commit": "74083cee35196b4b1fc58e8bea180455a0b924ad",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-object-appearance-review-74083ce-v2/unified_format/synthetic-paired-recording/citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair_appearance_active.h5",
+      "scope": "globally_finalized"
+    },
+    "legacy_appearance": {
+      "sha256": "5eb42136bf8ec2b31781622223e124bc2f9121e3bafb812d9cd844be97c53850",
+      "size_bytes": 681564,
+      "producer_commit": "74083cee35196b4b1fc58e8bea180455a0b924ad",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-object-appearance-review-74083ce-v2/current_format/synthetic-paired-recording/citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair_appearance_active.h5",
+      "scope": "legacy_preservation"
+    },
+    "base": {
+      "sha256": "176b16575c2c1f503194a78ce8f52fc2fcc0e4c7d8c515f32103c2d91634dc16",
+      "size_bytes": 823240,
+      "producer_commit": "0a9e2d490ab0772dbaa7fdda3f837693806caad0",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-unified-h5-0a9e2d4-v1/lifecycle-acceptance/experimental/synthetic-paired-recording/citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair.h5",
+      "scope": "globally_finalized"
+    },
+    "full_bound_pair_correspondence_failed": {
+      "sha256": "8f87f1815dbc23377fdb5bae54e1488effed137ac0d1bdd8a638751bb2033878",
+      "size_bytes": 770688,
+      "producer_commit": "0a9e2d490ab0772dbaa7fdda3f837693806caad0",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-unified-h5-0a9e2d4-v1/lifecycle-acceptance/full_bound_pair_correspondence_failed/synthetic-paired-recording/citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair_correspondence_failed.h5",
+      "scope": "closed_diagnostic_failure"
+    },
+    "full_bound_pair_deferred_mapping_failed": {
+      "sha256": "dfed4829c221f80af9d132826c26e7ae8cccd6e9630db4b482fcea3b09b55199",
+      "size_bytes": 770696,
+      "producer_commit": "0a9e2d490ab0772dbaa7fdda3f837693806caad0",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-unified-h5-0a9e2d4-v1/lifecycle-acceptance/full_bound_pair_deferred_mapping_failed/synthetic-paired-recording/citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair_deferred_mapping_failed.h5",
+      "scope": "closed_diagnostic_failure"
+    },
+    "full_bound_pair_deferred_app_shutdown": {
+      "sha256": "907b8bb087e55ebfdec9ea480bf5ad5eb5c916302634b99978d7ef255b61c427",
+      "size_bytes": 768576,
+      "producer_commit": "0a9e2d490ab0772dbaa7fdda3f837693806caad0",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-unified-h5-0a9e2d4-v1/lifecycle-acceptance/full_bound_pair_deferred_app_shutdown/synthetic-paired-recording/citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair_deferred_app_shutdown.h5",
+      "scope": "closed_diagnostic_failure"
+    },
+    "full_bound_pair_interrupted_finalization": {
+      "sha256": "cebc137e79b93502de8bdc20750e4a137dcd388203da08d40dc06ff1e9fc721f",
+      "size_bytes": 724488,
+      "producer_commit": "0a9e2d490ab0772dbaa7fdda3f837693806caad0",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-unified-h5-0a9e2d4-v1/lifecycle-acceptance/full_bound_pair_interrupted_finalization/synthetic-paired-recording/citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair_interrupted_finalization.h5",
+      "scope": "closed_diagnostic_failure"
+    },
+    "appearance_global_success": {
+      "sha256": "419dae68f022ed2ad22a9f5befc2ed9a5e2ffc2caa1b812c5a328493987e6334",
+      "size_bytes": 243776,
+      "producer_commit": "74083cee35196b4b1fc58e8bea180455a0b924ad",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-object-appearance-review-74083ce-v2/component_scope_witnesses/appearance_global_success.h5",
+      "scope": "component_only_not_globally_finalized"
+    },
+    "appearance_reused_profile_new_chaser": {
+      "sha256": "4611b016992df6e49918e199970b470f4e65bb38dd0a7a269ed08dfa5bceb4cd",
+      "size_bytes": 243776,
+      "producer_commit": "74083cee35196b4b1fc58e8bea180455a0b924ad",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-object-appearance-review-74083ce-v2/component_scope_witnesses/appearance_reused_profile_new_chaser.h5",
+      "scope": "component_only_not_globally_finalized"
+    },
+    "appearance_duplicate_runtime_key": {
+      "sha256": "ae55e1268c814469c365da18b4cf6ec7572a0b26a72851f15cca0422d516269d",
+      "size_bytes": 243776,
+      "producer_commit": "74083cee35196b4b1fc58e8bea180455a0b924ad",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-object-appearance-review-74083ce-v2/component_scope_witnesses/appearance_duplicate_runtime_key.h5",
+      "scope": "component_only_not_globally_finalized"
+    },
+    "appearance_duplicate_step_owner": {
+      "sha256": "f5b4614e520ce096a38d45020db97c4758b14860814db874bd345b082a5f0a64",
+      "size_bytes": 243776,
+      "producer_commit": "74083cee35196b4b1fc58e8bea180455a0b924ad",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-object-appearance-review-74083ce-v2/component_scope_witnesses/appearance_duplicate_step_owner.h5",
+      "scope": "component_only_not_globally_finalized"
+    },
+    "appearance_wrong_chaser_state": {
+      "sha256": "828f67ea54142bbdb2ad0f31c50146ec3c0299fdaa6fb94fbf414eb40c0c3005",
+      "size_bytes": 243776,
+      "producer_commit": "74083cee35196b4b1fc58e8bea180455a0b924ad",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-object-appearance-review-74083ce-v2/component_scope_witnesses/appearance_wrong_chaser_state.h5",
+      "scope": "component_only_not_globally_finalized"
+    },
+    "appearance_wrong_profile": {
+      "sha256": "bb6ee26a6ac40d6624a6c6f09dad072b7b7053c69e54f164f436040382f32c3e",
+      "size_bytes": 243776,
+      "producer_commit": "74083cee35196b4b1fc58e8bea180455a0b924ad",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-object-appearance-review-74083ce-v2/component_scope_witnesses/appearance_wrong_profile.h5",
+      "scope": "component_only_not_globally_finalized"
+    },
+    "appearance_wrong_reference": {
+      "sha256": "81310d349083ed793e05a9d0718819b180bee5bb4438a077139b91f4fd5f46aa",
+      "size_bytes": 247872,
+      "producer_commit": "74083cee35196b4b1fc58e8bea180455a0b924ad",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-object-appearance-review-74083ce-v2/component_scope_witnesses/appearance_wrong_reference.h5",
+      "scope": "component_only_not_globally_finalized"
+    },
+    "appearance_wrong_step": {
+      "sha256": "fa313e2826d3c36f1f6674c651b0fc4e9466daea0b81a193dcc66ea73c2417f4",
+      "size_bytes": 243776,
+      "producer_commit": "74083cee35196b4b1fc58e8bea180455a0b924ad",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-object-appearance-review-74083ce-v2/component_scope_witnesses/appearance_wrong_step.h5",
+      "scope": "component_only_not_globally_finalized"
+    },
+    "frames_only": {
+      "sha256": "6a3bba27c85b1f6e7878268b3ad7998586bfc4926ee3cb9aaa092171319dbd6d",
+      "size_bytes": 145808,
+      "producer_commit": "0a9e2d490ab0772dbaa7fdda3f837693806caad0",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-unified-h5-component-scope-supplement-0a9e2d4-v1/cases/frames_only/session.h5",
+      "scope": "component_only_not_globally_finalized"
+    },
+    "independent_motion_grid": {
+      "sha256": "77c9c2f294645626de6639aead01a7c5b2e42c85c5e56f611989c6eb3d27a238",
+      "size_bytes": 178544,
+      "producer_commit": "0a9e2d490ab0772dbaa7fdda3f837693806caad0",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-unified-h5-component-scope-supplement-0a9e2d4-v1/cases/independent_motion_grid/session.h5",
+      "scope": "component_only_not_globally_finalized"
+    },
+    "moving_grating": {
+      "sha256": "57ad0e7f13555baeab4a06782060b52dd5b16510281c961dd7acfbcf7e370427",
+      "size_bytes": 203200,
+      "producer_commit": "0a9e2d490ab0772dbaa7fdda3f837693806caad0",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-unified-h5-component-scope-supplement-0a9e2d4-v1/cases/moving_grating/session.h5",
+      "scope": "component_only_not_globally_finalized"
+    }
+  }
+}

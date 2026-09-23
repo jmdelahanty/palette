@@ -18,9 +18,12 @@ import yaml
 
 from fisheye.registry.stage_catalog import canonical_stage_id, get_stage_spec
 
-
 ANALYSIS_WORKFLOW_SCHEMA_ID = "palette.analysis_workflow"
-ANALYSIS_WORKFLOW_SCHEMA_VERSION = 1
+ANALYSIS_WORKFLOW_LEGACY_SCHEMA_VERSION = 1
+ANALYSIS_WORKFLOW_SCHEMA_VERSION = 2
+ANALYSIS_WORKFLOW_SUPPORTED_SCHEMA_VERSIONS = frozenset(
+    {ANALYSIS_WORKFLOW_LEGACY_SCHEMA_VERSION, ANALYSIS_WORKFLOW_SCHEMA_VERSION}
+)
 FRAMEWISE_RESOLUTION = "framewise"
 SAMPLED_RESOLUTION = "sampled"
 FRAMEWISE_ZARR_AUTHORITY = "framewise_zarr"
@@ -28,6 +31,9 @@ NODE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 NODE_KINDS = frozenset({"prerequisite", "analysis", "visualization", "export"})
 TEMPORAL_PRODUCTS = frozenset(
     {"kinematics", "activity_spatial", "eye_traces", "tail_traces"}
+)
+STAGE_RUN_SCOPE_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
+    {"track_kinematics": frozenset({"provider"})}
 )
 
 
@@ -73,20 +79,14 @@ class TemporalPolicy:
             FRAMEWISE_RESOLUTION,
             SAMPLED_RESOLUTION,
         }:
-            raise ValueError(
-                "kinematics.resolution must be 'framewise' or 'sampled'"
-            )
+            raise ValueError("kinematics.resolution must be 'framewise' or 'sampled'")
         object.__setattr__(self, "kinematics_resolution", kinematics_resolution)
         if kinematics_resolution == FRAMEWISE_RESOLUTION:
             if self.kinematics_sample_rate_hz is not None:
-                raise ValueError(
-                    "framewise kinematics must not declare sample_rate_hz"
-                )
+                raise ValueError("framewise kinematics must not declare sample_rate_hz")
         else:
             if self.kinematics_sample_rate_hz is None:
-                raise ValueError(
-                    "sampled kinematics requires sample_rate_hz"
-                )
+                raise ValueError("sampled kinematics requires sample_rate_hz")
             object.__setattr__(
                 self,
                 "kinematics_sample_rate_hz",
@@ -173,9 +173,7 @@ class TemporalPolicy:
             )
         activity_resolution = summaries.get("resolution", "fixed_time_bins")
         if activity_resolution != "fixed_time_bins":
-            raise ValueError(
-                "activity_spatial.resolution must be 'fixed_time_bins'"
-            )
+            raise ValueError("activity_spatial.resolution must be 'fixed_time_bins'")
         return cls(
             kinematics_resolution=kinematics_resolution,
             kinematics_sample_rate_hz=kinematics.get("sample_rate_hz"),
@@ -316,9 +314,7 @@ class WorkflowNode:
                 f"node {node_id!r} output_run_from must name one of its dependencies"
             )
         if kind == "visualization" and output_run_from is None:
-            raise ValueError(
-                f"visualization node {node_id!r} requires output_run_from"
-            )
+            raise ValueError(f"visualization node {node_id!r} requires output_run_from")
         if kind != "visualization" and output_run_from is not None:
             raise ValueError(
                 f"only visualization nodes may declare output_run_from ({node_id!r})"
@@ -326,22 +322,36 @@ class WorkflowNode:
         object.__setattr__(self, "output_run_from", output_run_from)
         if self.stage_id is not None:
             object.__setattr__(self, "stage_id", canonical_stage_id(str(self.stage_id)))
-        if kind in {"prerequisite", "analysis", "visualization"} and self.stage_id is None:
+        if (
+            kind in {"prerequisite", "analysis", "visualization"}
+            and self.stage_id is None
+        ):
             raise ValueError(f"node {node_id!r} requires a canonical stage_id")
         if not isinstance(self.runnable, bool):
             raise ValueError(f"node {node_id!r} runnable must be a boolean")
         if self.temporal_product is not None:
-            object.__setattr__(self, "temporal_product", str(self.temporal_product).strip())
-        if self.temporal_product is not None and self.temporal_product not in TEMPORAL_PRODUCTS:
+            object.__setattr__(
+                self, "temporal_product", str(self.temporal_product).strip()
+            )
+        if (
+            self.temporal_product is not None
+            and self.temporal_product not in TEMPORAL_PRODUCTS
+        ):
             raise ValueError(
                 f"node {node_id!r} has unknown temporal_product {self.temporal_product!r}"
             )
         if self.temporal_product is not None and kind != "export":
-            raise ValueError(f"only export nodes may declare temporal_product ({node_id!r})")
+            raise ValueError(
+                f"only export nodes may declare temporal_product ({node_id!r})"
+            )
         object.__setattr__(
             self,
             "execution_policy",
-            str(self.execution_policy).strip() if self.execution_policy is not None else None,
+            (
+                str(self.execution_policy).strip()
+                if self.execution_policy is not None
+                else None
+            ),
         )
         object.__setattr__(self, "description", str(self.description).strip())
 
@@ -351,7 +361,9 @@ class WorkflowNode:
             node_id=str(raw.get("id") or ""),
             kind=str(raw.get("kind") or "analysis"),
             depends_on=_string_tuple(raw.get("depends_on"), label="node.depends_on"),
-            stage_id=(str(raw["stage_id"]) if raw.get("stage_id") is not None else None),
+            stage_id=(
+                str(raw["stage_id"]) if raw.get("stage_id") is not None else None
+            ),
             output_run_from=(
                 str(raw["output_run_from"])
                 if raw.get("output_run_from") is not None
@@ -395,6 +407,7 @@ class AnalysisWorkflow:
     targets: tuple[str, ...]
     temporal_policy: TemporalPolicy = field(default_factory=TemporalPolicy)
     run_selection: Mapping[str, str] = field(default_factory=dict)
+    run_scopes: Mapping[str, str] = field(default_factory=dict)
     schema_id: str = ANALYSIS_WORKFLOW_SCHEMA_ID
     schema_version: int = ANALYSIS_WORKFLOW_SCHEMA_VERSION
 
@@ -405,7 +418,7 @@ class AnalysisWorkflow:
                 f"expected {ANALYSIS_WORKFLOW_SCHEMA_ID!r}"
             )
         schema_version = int(self.schema_version)
-        if schema_version != ANALYSIS_WORKFLOW_SCHEMA_VERSION:
+        if schema_version not in ANALYSIS_WORKFLOW_SUPPORTED_SCHEMA_VERSIONS:
             raise ValueError(
                 f"unsupported analysis workflow schema_version {self.schema_version!r}"
             )
@@ -432,7 +445,9 @@ class AnalysisWorkflow:
                 raise ValueError(f"node {node.node_id!r} cannot depend on itself")
         unknown_targets = sorted(set(self.targets) - set(node_by_id))
         if unknown_targets:
-            raise ValueError(f"unknown workflow target(s): {', '.join(unknown_targets)}")
+            raise ValueError(
+                f"unknown workflow target(s): {', '.join(unknown_targets)}"
+            )
         if not self.targets:
             raise ValueError("analysis workflow must declare at least one target")
 
@@ -463,7 +478,9 @@ class AnalysisWorkflow:
                 )
 
         normalized_selection: dict[str, str] = {}
-        known_stages = {node.stage_id for node in self.nodes if node.stage_id is not None}
+        known_stages = {
+            node.stage_id for node in self.nodes if node.stage_id is not None
+        }
         for raw_stage, raw_run in dict(self.run_selection).items():
             stage_id = canonical_stage_id(str(raw_stage))
             if stage_id not in known_stages:
@@ -474,7 +491,41 @@ class AnalysisWorkflow:
             if not run_name:
                 raise ValueError(f"run_selection for {stage_id!r} cannot be empty")
             normalized_selection[stage_id] = run_name
-        object.__setattr__(self, "run_selection", MappingProxyType(normalized_selection))
+        object.__setattr__(
+            self, "run_selection", MappingProxyType(normalized_selection)
+        )
+
+        raw_scopes = dict(self.run_scopes)
+        if schema_version == ANALYSIS_WORKFLOW_LEGACY_SCHEMA_VERSION and raw_scopes:
+            raise ValueError("run_scopes requires analysis workflow schema_version 2")
+        normalized_scopes: dict[str, str] = {}
+        for raw_stage, raw_scope in raw_scopes.items():
+            stage_id = canonical_stage_id(str(raw_stage))
+            if stage_id not in known_stages:
+                raise ValueError(
+                    f"run_scopes references stage {stage_id!r} outside the workflow"
+                )
+            allowed = STAGE_RUN_SCOPE_VALUES.get(stage_id)
+            if allowed is None:
+                raise ValueError(f"stage {stage_id!r} does not support run scopes")
+            scope = str(raw_scope).strip().lower()
+            if scope not in allowed:
+                raise ValueError(
+                    f"unsupported run scope {scope!r} for stage {stage_id!r}; "
+                    f"expected one of {sorted(allowed)!r}"
+                )
+            scoped_node = stage_node_by_id[stage_id]
+            if scope == "provider" and (
+                scoped_node.kind != "prerequisite"
+                or scoped_node.runnable
+                or scoped_node.depends_on
+            ):
+                raise ValueError(
+                    "provider-scoped track_kinematics must be a non-runnable "
+                    "sealed prerequisite with no workflow dependencies"
+                )
+            normalized_scopes[stage_id] = scope
+        object.__setattr__(self, "run_scopes", MappingProxyType(normalized_scopes))
 
         # Import lazily to keep the contracts module independent of planner types.
         from .dag import topological_order
@@ -504,6 +555,11 @@ class AnalysisWorkflow:
         merged.update(updates)
         return replace(self, run_selection=merged)
 
+    def stage_run_scope(self, stage_id: str) -> str | None:
+        """Return an explicit versioned namespace scope for one stage."""
+
+        return self.run_scopes.get(canonical_stage_id(stage_id))
+
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "AnalysisWorkflow":
         node_rows = raw.get("nodes")
@@ -519,6 +575,9 @@ class AnalysisWorkflow:
         run_selection = raw.get("run_selection") or {}
         if not isinstance(run_selection, Mapping):
             raise ValueError("run_selection must be a mapping")
+        run_scopes = raw.get("run_scopes") or {}
+        if not isinstance(run_scopes, Mapping):
+            raise ValueError("run_scopes must be a mapping")
         return cls(
             schema_id=str(raw.get("schema_id") or ""),
             schema_version=int(raw.get("schema_version") or 0),
@@ -527,11 +586,14 @@ class AnalysisWorkflow:
             nodes=nodes,
             targets=_string_tuple(raw.get("targets"), label="targets"),
             temporal_policy=TemporalPolicy.from_mapping(raw.get("temporal_policy")),
-            run_selection={str(key): str(value) for key, value in run_selection.items()},
+            run_selection={
+                str(key): str(value) for key, value in run_selection.items()
+            },
+            run_scopes={str(key): str(value) for key, value in run_scopes.items()},
         )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_id": self.schema_id,
             "schema_version": self.schema_version,
             "workflow_id": self.workflow_id,
@@ -541,13 +603,18 @@ class AnalysisWorkflow:
             "run_selection": dict(self.run_selection),
             "nodes": [node.to_dict() for node in self.nodes],
         }
+        if self.schema_version >= ANALYSIS_WORKFLOW_SCHEMA_VERSION:
+            payload["run_scopes"] = dict(self.run_scopes)
+        return payload
 
 
 def load_analysis_workflow(path: str | Path) -> AnalysisWorkflow:
     profile_path = Path(path).expanduser()
     payload = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
-        raise ValueError(f"analysis workflow profile must contain a mapping: {profile_path}")
+        raise ValueError(
+            f"analysis workflow profile must contain a mapping: {profile_path}"
+        )
     return AnalysisWorkflow.from_mapping(payload)
 
 
@@ -555,13 +622,24 @@ def default_core_behavior_profile_path() -> Path:
     return Path(__file__).resolve().parent / "profiles" / "core_behavior_v1.yaml"
 
 
+def provider_motion_core_behavior_profile_path() -> Path:
+    return (
+        Path(__file__).resolve().parent
+        / "profiles"
+        / "core_behavior_provider_motion_v1.yaml"
+    )
+
+
 __all__ = [
     "ANALYSIS_WORKFLOW_SCHEMA_ID",
+    "ANALYSIS_WORKFLOW_LEGACY_SCHEMA_VERSION",
     "ANALYSIS_WORKFLOW_SCHEMA_VERSION",
+    "ANALYSIS_WORKFLOW_SUPPORTED_SCHEMA_VERSIONS",
     "AnalysisWorkflow",
     "FRAMEWISE_RESOLUTION",
     "TemporalPolicy",
     "WorkflowNode",
     "default_core_behavior_profile_path",
     "load_analysis_workflow",
+    "provider_motion_core_behavior_profile_path",
 ]
