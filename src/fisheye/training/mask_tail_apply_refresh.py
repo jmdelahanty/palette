@@ -39,7 +39,10 @@ from fisheye.training.mask_tail_keypoints import (
     SCHEMA_NAME,
     recipe_for_schema,
     recipe_with_visible_endpoint,
+    registered_recipe,
+    derive_tail_seed,
 )
+from fisheye.analysis.subject_shape_runs import HEAD_ANCHORED_CENTERLINE_METHOD
 from fisheye.training.mask_tail_border_acceptance import bound_acceptances
 from fisheye.training.recover_merged_subject_masks import (
     publish_review_payload,
@@ -77,7 +80,7 @@ def _safe_name(value):
     return value
 
 
-def _capture(root, *, mask_name, pose_name, revision):
+def _capture(root, *, mask_name, pose_name, revision, upgrade_target_rows=None):
     mask = resolve_mutable_refined_subject_mask_run(root, mask_name)
     pose = root[f"refined_keypoints_runs/{pose_name}"]
     crop_name = keypoint_source_crop_run_from_attributes(pose.attrs)
@@ -112,8 +115,20 @@ def _capture(root, *, mask_name, pose_name, revision):
             existing_keypoint_policy="preserve_head_snout_fins_by_name_v1",
             tail_policy="derive_all_11_stations_from_mask",
         )
+    upgraded_recipe = registered_recipe(
+        schema_name, method=HEAD_ANCHORED_CENTERLINE_METHOD,
+        visible_endpoint=bool("crop_border_policy" in (existing_recipe or {})),
+    ) if schema_name == SCHEMA_NAME else None
+    if upgraded_recipe is not None and pose.attrs["schema_id"] == NATIVE_REVIEW_SCHEMA:
+        upgraded_recipe.update(
+            existing_keypoint_policy="preserve_head_snout_fins_by_name_v1",
+            tail_policy="derive_all_11_stations_from_mask",
+        )
+    source_is_legacy = existing_recipe in (recipe, variant_recipe)
+    source_is_upgraded = upgraded_recipe is not None and existing_recipe == upgraded_recipe
     if (
-        existing_recipe not in (recipe, variant_recipe)
+        not (source_is_legacy or source_is_upgraded)
+        or (upgrade_target_rows is not None and not source_is_legacy)
         or pose.attrs.get("mask_edit_policy")
         != "new_derivation_version_required_after_mask_corrections"
     ):
@@ -136,6 +151,90 @@ def _capture(root, *, mask_name, pose_name, revision):
     manual = np.asarray(pose["keypoint_manual_edit"][:], dtype=bool)
     origins = np.asarray(pose["keypoint_origin"][:])
     original_reasons = read_reason_labels(pose)
+    preserved_pose = None
+    preserved_seed_reasons = None
+    row_method_codes = None
+    if source_is_upgraded:
+        if "tail_derivation_method_code" not in pose:
+            raise ValueError("Upgraded source lacks per-row method identity")
+        raw_method_codes = np.asarray(pose["tail_derivation_method_code"][:])
+        if (
+            raw_method_codes.shape != (n,)
+            or raw_method_codes.dtype != np.dtype("uint8")
+            or not np.isin(raw_method_codes, [0, 1]).all()
+        ):
+            raise ValueError("Invalid upgraded per-row method identity")
+        row_method_codes = raw_method_codes
+        expected_codes = {"legacy": 0, HEAD_ANCHORED_CENTERLINE_METHOD: 1}
+        seed_name = _safe_name(pose.attrs.get("source_seed_run") or "")
+        seed = root[f"keypoints_runs/{seed_name}"]
+        code_hash = _sha256_array(row_method_codes)
+        if (
+            pose.attrs.get("tail_derivation_method_codes") != expected_codes
+            or seed.attrs.get("tail_derivation_method_codes") != expected_codes
+            or "tail_derivation_method_code" not in seed
+            or not np.array_equal(seed["tail_derivation_method_code"][:], row_method_codes)
+            or (pose.attrs.get("initial_array_sha256") or {}).get("tail_derivation_method_code") != code_hash
+            or (seed.attrs.get("initial_array_sha256") or {}).get("tail_derivation_method_code") != code_hash
+            or initial_contract_digest(seed) != seed.attrs.get("initial_contract_sha256")
+            or array_hashes(seed) != seed.attrs.get("initial_array_sha256")
+            or not is_run_complete(seed, legacy_default=False)
+        ):
+            raise ValueError("Upgraded per-row method identity or seed is stale")
+    selected_rows = None
+    preserved_seed = None
+    if upgrade_target_rows is not None:
+        requested_rows = list(upgrade_target_rows)
+        if any(
+            isinstance(row, (bool, np.bool_)) or not isinstance(row, (int, np.integer))
+            for row in requested_rows
+        ):
+            raise ValueError("Upgrade target rows must be integer row indices")
+        selected_rows = sorted({int(row) for row in requested_rows})
+        if not selected_rows or any(row < 0 or row >= n for row in selected_rows):
+            raise ValueError("Upgrade requires valid explicit target rows")
+        if any(
+            "tail_derivation_failed:snout_extension_too_long" not in str(original_reasons[row]).split("|")
+            for row in selected_rows
+        ):
+            raise ValueError("Upgrade target is not a recorded long-snout failure")
+        seed_name = _safe_name(pose.attrs.get("source_seed_run") or "")
+        seed = root[f"keypoints_runs/{seed_name}"]
+        if (
+            seed.attrs.get("source_bindings") != pose.attrs.get("source_bindings")
+            or initial_contract_digest(seed) != seed.attrs.get("initial_contract_sha256")
+            or array_hashes(seed) != seed.attrs.get("initial_array_sha256")
+            or not is_run_complete(seed, legacy_default=False)
+        ):
+            raise ValueError("Upgrade source seed identity is invalid")
+        seed_mask_name = _safe_name(seed.attrs.get("source_subject_mask_run") or "")
+        seed_mask = root[f"subject_mask_runs/{seed_mask_name}"]
+        unchanged = np.ones(n, dtype=bool)
+        unchanged[selected_rows] = False
+        old_masks = np.asarray(seed_mask["masks_roi"][:])
+        changed_non_target = np.flatnonzero(
+            unchanged & np.any(masks != old_masks, axis=(1, 2, 3))
+        ).tolist()
+        preserved_seed = {
+            name: np.asarray(array[:]) for name, array in seed.arrays()
+            if array.shape and array.shape[0] == n
+        }
+        preserved_pose = {
+            name: np.asarray(array[:]) for name, array in pose.arrays()
+            if array.shape and array.shape[0] == n
+        }
+        preserved_seed_reasons = read_reason_labels(seed)
+        accepted_rows = np.zeros(n, dtype=bool)
+        for key in accepted:
+            accepted_rows[int(key)] = True
+        legacy_now = derive_tail_seed(
+            masks, labels, points[:, :3], schema_name=schema_name,
+            accepted_crop_border_rows=accepted_rows if accepted else None,
+        )
+        row_method_codes = np.zeros(n, dtype=np.uint8)
+        for row in selected_rows:
+            if str(legacy_now["tail_failure_reason"][row]) == "snout_extension_too_long":
+                row_method_codes[row] = 1
     if (
         masks.dtype != np.uint8
         or masks.ndim != 4
@@ -175,6 +274,31 @@ def _capture(root, *, mask_name, pose_name, revision):
         },
         "recovered_review_qc": dict(pose.attrs["recovered_review_qc"]),
     }
+    if selected_rows is not None:
+        proof["geometry_upgrade"] = {
+            "method": HEAD_ANCHORED_CENTERLINE_METHOD,
+            "target_rows": selected_rows,
+            "source_recipe": existing_recipe,
+            "source_seed_run": str(seed.path),
+            "source_seed_contract_sha256": initial_contract_digest(seed),
+            "source_seed_array_sha256": dict(seed.attrs["initial_array_sha256"]),
+            "source_pose_array_sha256": array_hashes(pose),
+            "non_target_policy": "copy_source_seed_exact_v1",
+            "non_target_mask_changed_rows": {
+                str(row): {
+                    "source_mask_sha256": _sha256_array(old_masks[row]),
+                    "current_mask_sha256": _sha256_array(masks[row]),
+                }
+                for row in changed_non_target
+            },
+            "legacy_rechecked_rows": selected_rows,
+            "head_anchored_rows": [row for row in selected_rows if row_method_codes[row] == 1],
+            "legacy_recheck_reasons": [
+                str(legacy_now["tail_failure_reason"][row]) for row in selected_rows
+            ],
+        }
+    if row_method_codes is not None:
+        proof["source_row_method_codes_sha256"] = _sha256_array(row_method_codes)
     if accepted:
         proof["tail_crop_border_acceptances"] = accepted
     arrays = {
@@ -204,13 +328,35 @@ def _capture(root, *, mask_name, pose_name, revision):
         origins,
         schema_name,
         original_reasons,
+        HEAD_ANCHORED_CENTERLINE_METHOD if (selected_rows is not None or source_is_upgraded) else "legacy",
+        preserved_seed,
+        preserved_pose,
+        preserved_seed_reasons,
+        selected_rows,
+        row_method_codes,
     )
 
 
-def _carry_labels(local, result, *, points, manual, origins, proof, original_reasons):
+def _carry_labels(
+    local, result, *, points, manual, origins, proof, original_reasons,
+    preserved_seed=None, preserved_pose=None, preserved_seed_reasons=None,
+    selected_rows=None,
+):
     paths = result["paths"]
     root = zarr.open_group(str(local), mode="a", use_consolidated=False)
     seed, target = (root[paths[name]] for name in ("seed", "pose_edit"))
+    if preserved_seed is not None:
+        keep = np.ones(len(points), dtype=bool)
+        keep[selected_rows] = False
+        for group in (seed, target):
+            for name, source in preserved_seed.items():
+                if name != "reason_bytes" and name in group and group[name].shape == source.shape:
+                    values = np.asarray(group[name][:])
+                    values[keep] = source[keep]
+                    group[name][:] = values
+            method_codes = np.asarray(group["tail_derivation_method_code"][:])
+            method_codes[keep] = 0
+            group["tail_derivation_method_code"][:] = method_codes
     seed_points = np.asarray(seed["keypoints_roi"][:])
     seed_origins = np.asarray(seed["keypoint_origin"][:])
     # The current head is the orientation supplier. Native existing landmarks
@@ -285,6 +431,27 @@ def _carry_labels(local, result, *, points, manual, origins, proof, original_rea
     eligible &= np.asarray(target["tail_valid"][:], dtype=bool) & finite_inside
     target["training_eligible"][:] = eligible
     target["usable_keypoints"][:] = eligible
+    if preserved_seed is not None:
+        # The upgrade is row-scoped. Preserve both the immutable numerical
+        # seed and the independently edited annotation surface on other rows.
+        for group, source in ((seed, preserved_seed), (target, preserved_pose)):
+            for name, old_values in source.items():
+                if name == "reason_bytes" or name not in group or group[name].shape != old_values.shape:
+                    continue
+                values = np.asarray(group[name][:])
+                values[keep] = old_values[keep]
+                group[name][:] = values
+            reason_values = read_reason_labels(group)
+            old_reasons = preserved_seed_reasons if group is seed else original_reasons
+            reason_values[keep] = old_reasons[keep]
+            write_reason_columns(
+                group, reason_values,
+                chunk_size=group["reason_bytes"].chunks[0], overwrite=True,
+            )
+        # New method identity is the only intentional added row field.
+        assert np.array_equal(seed["tail_derivation_method_code"][:][keep], np.zeros(int(keep.sum()), dtype=np.uint8))
+        assert np.array_equal(target["tail_derivation_method_code"][:][keep], np.zeros(int(keep.sum()), dtype=np.uint8))
+        eligible = np.asarray(target["training_eligible"][:], dtype=bool)
     # The immutable seed and editable initial snapshot each bind their own data.
     for path in paths.values():
         group = root[path]
@@ -351,6 +518,7 @@ def regenerate_training_tail_version(
     apply_id,
     expected_mask_revision,
     scratch_root=Path("/tmp"),
+    upgrade_target_rows=None,
 ):
     """Create/reuse one unselected successor from applied masks and saved labels.
 
@@ -360,6 +528,8 @@ def regenerate_training_tail_version(
     checkpoint store before invoking this publisher.
     """
     archive = Path(archive).resolve()
+    if upgrade_target_rows is not None:
+        upgrade_target_rows = tuple(upgrade_target_rows)
     mask_name, pose_name = _safe_name(refined_mask_run), _safe_name(
         refined_keypoint_run
     )
@@ -372,6 +542,7 @@ def regenerate_training_tail_version(
             mask_name=mask_name,
             pose_name=pose_name,
             revision=expected_mask_revision,
+            upgrade_target_rows=upgrade_target_rows,
         )
         (
             arrays,
@@ -383,6 +554,12 @@ def regenerate_training_tail_version(
             origins,
             schema_name,
             original_reasons,
+            derivation_method,
+            preserved_seed,
+            preserved_pose,
+            preserved_seed_reasons,
+            selected_rows,
+            row_method_codes,
         ) = captured
         proof = {**proof, "apply_id": str(apply_id)}
         # One durable Apply cannot silently change its source after a partial
@@ -428,6 +605,7 @@ def regenerate_training_tail_version(
                     mask_name=mask_name,
                     pose_name=pose_name,
                     revision=expected_mask_revision,
+                    upgrade_target_rows=upgrade_target_rows,
                 )[3]
                 if {**current_proof, "apply_id": str(apply_id)} != proof:
                     raise ValueError(
@@ -450,6 +628,8 @@ def regenerate_training_tail_version(
                     version=version,
                     native=native,
                     pose_schema=schema_name,
+                    derivation_method=derivation_method,
+                    row_method_codes=row_method_codes,
                 )
                 _carry_labels(
                     local,
@@ -459,6 +639,10 @@ def regenerate_training_tail_version(
                     origins=origins,
                     proof=proof,
                     original_reasons=original_reasons,
+                    preserved_seed=preserved_seed,
+                    preserved_pose=preserved_pose,
+                    preserved_seed_reasons=preserved_seed_reasons,
+                    selected_rows=selected_rows,
                 )
                 provenance = build_writer_run_provenance(
                     command="fisheye.training.mask_tail_apply_refresh",
@@ -530,12 +714,42 @@ def regenerate_training_tail_version(
             result["visible_endpoint_rows"] = [
                 int(row) for row in np.flatnonzero(seed["tail_tip_truncated"][:])
             ]
+        task_result = result
+        if selected_rows is not None:
+            result["upgrade_target_rows"] = selected_rows
+            task_result = {
+                **result,
+                "failures": [
+                    failure for failure in failures
+                    if failure["roi_idx"] in selected_rows
+                ],
+            }
         result["tasks"] = review_tasks(
-            archive, binding["recording_id"], result, version
+            archive, binding["recording_id"], task_result, version
         )
+        if selected_rows is not None:
+            for task in result["tasks"]:
+                if task["workflow_kind"] == "keypoints":
+                    task["scope"]["target_roi_indices"] = selected_rows
         if native:
             for task in result["tasks"]:
                 task["dataset_id"] = (
                     f"{binding['recording_id']}:native_mask_tail:{version}"
                 )
         return result
+
+
+def upgrade_training_tail_geometry_version(
+    *, archive, refined_mask_run, refined_keypoint_run, upgrade_id,
+    expected_mask_revision, target_rows, scratch_root=Path("/tmp"),
+):
+    """Publish an explicit, selector-ineligible v4 successor for failed rows."""
+    return regenerate_training_tail_version(
+        archive=archive,
+        refined_mask_run=refined_mask_run,
+        refined_keypoint_run=refined_keypoint_run,
+        apply_id=upgrade_id,
+        expected_mask_revision=expected_mask_revision,
+        scratch_root=scratch_root,
+        upgrade_target_rows=target_rows,
+    )

@@ -4,7 +4,10 @@ import numpy as np
 import pytest
 import zarr
 
-from fisheye.training.mask_tail_apply_refresh import regenerate_training_tail_version
+from fisheye.training.mask_tail_apply_refresh import (
+    regenerate_training_tail_version,
+    upgrade_training_tail_geometry_version,
+)
 from fisheye.training.recovered_mask_review_payload import (
     array_hashes,
     build_review_payload,
@@ -162,6 +165,174 @@ def test_new_version_keeps_manual_points_failures_and_source_history(reviewed_ar
         include_all=True,
     )
     assert reopened.recovered_roi_only
+
+
+def test_explicit_geometry_upgrade_keeps_other_seed_rows_and_manual_clears(reviewed_archive):
+    path, root, old_result = reviewed_archive
+    old = root[old_result["paths"]["pose_edit"]]
+    seed = root[old_result["paths"]["seed"]]
+    old_seed = {name: np.asarray(array[:]).copy() for name, array in seed.arrays()}
+    old_points = np.asarray(old["keypoints_roi"][:]).copy()
+    old_points[1, 5] = np.nan
+    old["keypoints_roi"][:] = old_points
+    old_manual = np.asarray(old["keypoint_manual_edit"][:]).copy()
+    old_manual[1, 5] = True
+    old["keypoint_manual_edit"][:] = old_manual
+    old_origins = np.asarray(old["keypoint_origin"][:]).copy()
+    old_origins[1, 5] = 3
+    old["keypoint_origin"][:] = old_origins
+    reasons = read_reason_labels(old)
+    reasons[1] = str(reasons[1]) + "|tail_derivation_failed:snout_extension_too_long"
+    write_reason_columns(old, reasons, chunk_size=2, overwrite=True)
+    old_pose = {name: np.asarray(array[:]).copy() for name, array in old.arrays()}
+    old_pose_reasons = read_reason_labels(old).copy()
+    result = upgrade_training_tail_geometry_version(
+        archive=path,
+        refined_mask_run=old_result["paths"]["mask_edit"].split("/")[1],
+        refined_keypoint_run=old_result["paths"]["pose_edit"].split("/")[1],
+        upgrade_id="explicit-upgrade-one",
+        expected_mask_revision=1,
+        target_rows=[1],
+    )
+    published = zarr.open_group(str(path), mode="r", use_consolidated=False)
+    new_seed = published[result["paths"]["seed"]]
+    new_pose = published[result["paths"]["pose_edit"]]
+    for name, values in old_seed.items():
+        if name in new_seed and new_seed[name].shape == values.shape:
+            np.testing.assert_array_equal(new_seed[name][0], values[0])
+    for name, values in old_pose.items():
+        if name != "reason_bytes" and name in new_pose and new_pose[name].shape == values.shape:
+            np.testing.assert_array_equal(new_pose[name][0], values[0])
+    assert read_reason_labels(new_pose)[0] == old_pose_reasons[0]
+    # A stale long-snout annotation is rechecked against current masks. Here
+    # the current fragmented mask fails for another reason, so it stays legacy.
+    assert new_seed["tail_derivation_method_code"][:].tolist() == [0, 0]
+    assert np.isnan(new_pose["keypoints_roi"][1, 5]).all()
+    assert bool(new_pose["keypoint_manual_edit"][1, 5])
+    assert result["upgrade_target_rows"] == [1]
+    assert result["tasks"][0]["scope"]["target_roi_indices"] == [1]
+    assert all(
+        task["scope"].get("target_roi_indices") == [1]
+        for task in result["tasks"]
+    )
+    assert result["source_bindings"]["mask_apply_refresh"]["geometry_upgrade"]["target_rows"] == [1]
+
+
+def test_geometry_upgrade_refuses_nonfailure_and_records_changed_non_target_mask(reviewed_archive):
+    path, root, old_result = reviewed_archive
+    args = dict(
+        archive=path,
+        refined_mask_run=old_result["paths"]["mask_edit"].split("/")[1],
+        refined_keypoint_run=old_result["paths"]["pose_edit"].split("/")[1],
+        upgrade_id="explicit-upgrade-invalid",
+        expected_mask_revision=1,
+    )
+    with pytest.raises(ValueError, match="recorded long-snout failure"):
+        upgrade_training_tail_geometry_version(**args, target_rows=[1])
+    old = root[old_result["paths"]["pose_edit"]]
+    reasons = read_reason_labels(old)
+    reasons[1] = str(reasons[1]) + "|tail_derivation_failed:snout_extension_too_long"
+    write_reason_columns(old, reasons, chunk_size=2, overwrite=True)
+    mask = root[old_result["paths"]["mask_edit"]]
+    mask["masks_roi"][0, 0, 1, 1] = 1
+    result = upgrade_training_tail_geometry_version(**args, target_rows=[1])
+    changed = result["source_bindings"]["mask_apply_refresh"]["geometry_upgrade"]["non_target_mask_changed_rows"]
+    assert list(changed) == ["0"]
+    assert changed["0"]["source_mask_sha256"] != changed["0"]["current_mask_sha256"]
+
+
+def test_geometry_upgrade_refuses_tampered_immutable_seed(reviewed_archive):
+    path, root, old_result = reviewed_archive
+    old = root[old_result["paths"]["pose_edit"]]
+    reasons = read_reason_labels(old)
+    reasons[1] = str(reasons[1]) + "|tail_derivation_failed:snout_extension_too_long"
+    write_reason_columns(old, reasons, chunk_size=2, overwrite=True)
+    seed = root[old_result["paths"]["seed"]]
+    seed["tail_arc_length_px"][0] = 12345.0
+    with pytest.raises(ValueError, match="source seed identity is invalid"):
+        upgrade_training_tail_geometry_version(
+            archive=path,
+            refined_mask_run=old_result["paths"]["mask_edit"].split("/")[1],
+            refined_keypoint_run=old_result["paths"]["pose_edit"].split("/")[1],
+            upgrade_id="tampered-seed",
+            expected_mask_revision=1,
+            target_rows=[1],
+        )
+
+
+@pytest.mark.parametrize("invalid_row", [1.9, True, "1"])
+def test_geometry_upgrade_refuses_noninteger_target_rows(reviewed_archive, invalid_row):
+    path, _, old_result = reviewed_archive
+    with pytest.raises(ValueError, match="integer row indices"):
+        upgrade_training_tail_geometry_version(
+            archive=path,
+            refined_mask_run=old_result["paths"]["mask_edit"].split("/")[1],
+            refined_keypoint_run=old_result["paths"]["pose_edit"].split("/")[1],
+            upgrade_id="bad-target-row",
+            expected_mask_revision=1,
+            target_rows=[invalid_row],
+        )
+
+
+def test_later_apply_preserves_mixed_row_methods_from_real_curled_mask(tmp_path):
+    from pathlib import Path
+
+    frozen_path = Path(__file__).resolve().parents[2] / "fixtures" / "redscare_head_anchored_tail_rows_v1.npz"
+    with np.load(frozen_path) as frozen:
+        sample = [0, 8]  # ROI 16 needs v4; ROI 18 is a successful legacy row.
+        masks = frozen["masks"][sample]
+        heads = frozen["head"][sample]
+        labels = tuple(frozen["labels"])
+    path = tmp_path / "mixed.zarr"
+    root = zarr.open_group(str(path), mode="w", use_consolidated=False)
+    root.attrs.update(
+        zarr_purpose="training", recording_id="mixed", stage_selector_eligible=False,
+        schema_id="palette.training.merged_pose_detect_recovery_source.v1",
+    )
+    result = build_review_payload(
+        root,
+        {
+            "roi_images": np.zeros((2, 384, 384), np.uint8),
+            "masks_roi": masks,
+            "head_keypoints_roi": heads,
+            "frame_indices": np.array([11184, 11186]),
+            "source_bbox_norm_coords": np.zeros((2, 4)),
+            "detection_source": np.zeros(2, np.int8),
+            "target_valid_channels": np.ones((2, len(labels)), bool),
+        },
+        labels,
+        {"mask_run": "original", "recording_id": "mixed", "mask_run_attrs": {"label_schema_id": "subject_v1_lr"}},
+        version="original",
+    )
+    source_mask = result["paths"]["mask_edit"].split("/")[1]
+    source_pose = result["paths"]["pose_edit"].split("/")[1]
+    first = upgrade_training_tail_geometry_version(
+        archive=path, refined_mask_run=source_mask, refined_keypoint_run=source_pose,
+        upgrade_id="mixed-upgrade", expected_mask_revision=0, target_rows=[0],
+    )
+    published = zarr.open_group(str(path), mode="r", use_consolidated=False)
+    first_seed = published[first["paths"]["seed"]]
+    assert first_seed["tail_derivation_method_code"][:].tolist() == [1, 0]
+    assert first_seed["tail_valid"][:].tolist() == [True, True]
+    editable = zarr.open_group(str(path), mode="a", use_consolidated=False)[first["paths"]["pose_edit"]]
+    editable["tail_derivation_method_code"][0] = 0
+    with pytest.raises(ValueError, match="method identity or seed is stale"):
+        regenerate_training_tail_version(
+            archive=path,
+            refined_mask_run=first["paths"]["mask_edit"].split("/")[1],
+            refined_keypoint_run=first["paths"]["pose_edit"].split("/")[1],
+            apply_id="tampered-followup", expected_mask_revision=0,
+        )
+    editable["tail_derivation_method_code"][0] = 1
+    second = regenerate_training_tail_version(
+        archive=path,
+        refined_mask_run=first["paths"]["mask_edit"].split("/")[1],
+        refined_keypoint_run=first["paths"]["pose_edit"].split("/")[1],
+        apply_id="mixed-followup-apply", expected_mask_revision=0,
+    )
+    later = zarr.open_group(str(path), mode="r", use_consolidated=False)[second["paths"]["seed"]]
+    assert later["tail_derivation_method_code"][:].tolist() == [1, 0]
+    np.testing.assert_array_equal(later["keypoints_roi"][1], first_seed["keypoints_roi"][1])
 
 
 def test_same_source_retry_reuses_version_and_preserves_successor_edits(

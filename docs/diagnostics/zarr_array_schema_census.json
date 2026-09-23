@@ -62926,8 +62926,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/training/recovered_mask_review_payload.py",
-      "line": 208,
-      "occurrence_id": "schema-writer-06cee836b3f06aa4",
+      "line": 211,
+      "occurrence_id": "schema-writer-8aaf718dca411cfc",
       "path_pattern": "<create(paths['crop'], {**lineage, 'roi_images': arrays['roi_images'], 'source_bbox_norm_coords': arrays['source_bbox_norm_coords']}, {'crop_storage_mode': 'materialized', 'roi_size': list(arrays['roi_images'].shape[1:]), 'pixel_operation': 'identity_copy'})>/source_roi_coordinates_full",
       "required": null,
       "shape_expression": "shape(arrays['source_roi_coordinates_full'])",
@@ -62939,7 +62939,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-fac9c8531e52b863"
+      "writer_site_id": "writer-8b55da4ffc16f710"
     },
     {
       "access_pattern": "windowed",

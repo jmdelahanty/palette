@@ -7,6 +7,15 @@ import numpy as np
 from fisheye.analysis.subject_shape_runs import (
     BodyFrameBatch,
     CENTERLINE_SAMPLE_COUNT,
+    HEAD_ANCHORED_CENTERLINE_METHOD,
+    HEAD_ANCHORED_HEAD_SCORE_MARGIN_PX,
+    HEAD_ANCHORED_SNOUT_SCORE_WEIGHT,
+    HEAD_ANCHORED_TAIL_GEODESIC_MARGIN_PX,
+    HEAD_ANCHORED_JOIN_MAX_ARCLENGTH_PX,
+    HEAD_ANCHORED_JOIN_ARCLENGTH_SCORE_WEIGHT,
+    CENTERLINE_SNOUT_EXTENSION_MAX_DISTANCE_PX,
+    CENTERLINE_SNOUT_EXTENSION_MAX_LENGTH_RATIO,
+    CENTERLINE_SNOUT_EXTENSION_MAX_EXTRA_PX,
     SNOUT_TIP_METHOD,
     _compute_caudal_anchor_batch,
     _compute_centerline_batch,
@@ -47,6 +56,20 @@ RECIPE = {
 }
 ORIGIN_CODES = {"missing": 0, "recovered_head": 1, "mask_derived": 2, "manual": 3}
 VISIBLE_ENDPOINT_RECIPE_ID = "recovered_head_oriented_subject_shape_visible_endpoint_tail11_v3"
+HEAD_ANCHORED_RECIPE_ID = "recovered_head_anchored_subject_shape_tail11_v4"
+HEAD_ANCHORED_RECIPE = {
+    **RECIPE,
+    "id": HEAD_ANCHORED_RECIPE_ID,
+    "centerline": HEAD_ANCHORED_CENTERLINE_METHOD,
+    "head_score_margin_px": HEAD_ANCHORED_HEAD_SCORE_MARGIN_PX,
+    "head_score_snout_distance_weight": HEAD_ANCHORED_SNOUT_SCORE_WEIGHT,
+    "tail_geodesic_margin_px": HEAD_ANCHORED_TAIL_GEODESIC_MARGIN_PX,
+    "head_join_max_arclength_px": HEAD_ANCHORED_JOIN_MAX_ARCLENGTH_PX,
+    "head_join_arclength_score_weight": HEAD_ANCHORED_JOIN_ARCLENGTH_SCORE_WEIGHT,
+    "snout_bridge_max_distance_px": CENTERLINE_SNOUT_EXTENSION_MAX_DISTANCE_PX,
+    "snout_bridge_max_length_ratio": CENTERLINE_SNOUT_EXTENSION_MAX_LENGTH_RATIO,
+    "snout_bridge_max_extra_px": CENTERLINE_SNOUT_EXTENSION_MAX_EXTRA_PX,
+}
 
 
 def recipe_with_visible_endpoint(schema_name):
@@ -55,6 +78,17 @@ def recipe_with_visible_endpoint(schema_name):
         "id": VISIBLE_ENDPOINT_RECIPE_ID,
         "crop_border_policy": "accepted_roi_visible_centerline_endpoint_no_extrapolation_v1",
     }
+
+
+def registered_recipe(schema_name: str, *, method: str = "legacy", visible_endpoint: bool = False):
+    if method == "legacy":
+        return recipe_with_visible_endpoint(schema_name) if visible_endpoint else recipe_for_schema(schema_name)
+    if method != HEAD_ANCHORED_CENTERLINE_METHOD or schema_name != SCHEMA_NAME:
+        raise ValueError("Unsupported training centerline method or pose schema")
+    recipe = dict(HEAD_ANCHORED_RECIPE)
+    if visible_endpoint:
+        recipe["crop_border_policy"] = "accepted_roi_visible_centerline_endpoint_no_extrapolation_v1"
+    return recipe
 
 
 def recipe_for_schema(schema_name):
@@ -72,9 +106,10 @@ def derive_tail_seed(
     *,
     schema_name: str = SCHEMA_NAME,
     accepted_crop_border_rows: np.ndarray | None = None,
+    method: str = "legacy",
 ) -> dict[str, np.ndarray]:
     """Keep every row, preserve head coordinates, leave fins/failures as NaNs."""
-    recipe = recipe_for_schema(schema_name)
+    recipe = registered_recipe(schema_name, method=method)
     include_snout = schema_name == SCHEMA_NAME
     masks, head = np.asarray(masks), np.asarray(head_points)
     if (
@@ -106,7 +141,8 @@ def derive_tail_seed(
     )
     anchor = _compute_caudal_anchor_batch(swim, frame)
     center = _compute_centerline_batch(
-        body, frame, anchor, snout_tip=snout, crop_to_foreground=True
+        body, frame, anchor, snout_tip=snout, crop_to_foreground=True,
+        method=method,
     )
     spline = fit_subject_body_spline_batch(
         center.centerline_xy,

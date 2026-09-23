@@ -27,6 +27,7 @@ from fisheye.training.mask_tail_keypoints import (
     derive_tail_seed,
     recipe_for_schema,
     recipe_with_visible_endpoint,
+    registered_recipe,
 )
 from fisheye.training.mask_tail_border_acceptance import (
     ATTR as TAIL_ACCEPTANCE_ATTR,
@@ -93,7 +94,9 @@ def _array(group, name, data):
 
 
 def build_review_payload(
-    root, arrays, labels, binding, *, version, pose_schema=SCHEMA_NAME, native=False
+    root, arrays, labels, binding, *, version, pose_schema=SCHEMA_NAME, native=False,
+    derivation_method="legacy",
+    row_method_codes=None,
 ):
     source_proof = binding.get("mask_apply_refresh") or {}
     acceptance_records = source_proof.get(
@@ -119,9 +122,9 @@ def build_review_payload(
             ):
                 raise ValueError("Accepted tail ROI source binding is stale")
             accepted_rows[row] = True
-    recipe = (
-        recipe_with_visible_endpoint(pose_schema)
-        if accepted_rows is not None else recipe_for_schema(pose_schema)
+    recipe = registered_recipe(
+        pose_schema, method=derivation_method,
+        visible_endpoint=accepted_rows is not None,
     )
     if native:
         recipe = {
@@ -232,13 +235,47 @@ def build_review_payload(
         if name in arrays:
             _array(mask, name, arrays[name])
 
-    derived = derive_tail_seed(
-        arrays["masks_roi"],
-        labels,
-        arrays["head_keypoints_roi"],
-        schema_name=pose_schema,
-        **({"accepted_crop_border_rows": accepted_rows} if accepted_rows is not None else {}),
-    )
+    if derivation_method == "legacy":
+        if row_method_codes is not None:
+            raise ValueError("Legacy recipe cannot accept per-row method codes")
+        derived = derive_tail_seed(
+            arrays["masks_roi"], labels, arrays["head_keypoints_roi"],
+            schema_name=pose_schema,
+            **({"accepted_crop_border_rows": accepted_rows} if accepted_rows is not None else {}),
+        )
+    else:
+        codes = (
+            np.ones(len(arrays["roi_images"]), dtype=np.uint8)
+            if row_method_codes is None else np.asarray(row_method_codes)
+        )
+        if (
+            codes.shape != (len(arrays["roi_images"]),)
+            or codes.dtype != np.dtype("uint8")
+            or not np.isin(codes, [0, 1]).all()
+        ):
+            raise ValueError("Invalid per-row tail derivation methods")
+        if np.any(codes == 0):
+            derived = derive_tail_seed(
+                arrays["masks_roi"], labels, arrays["head_keypoints_roi"],
+                schema_name=pose_schema,
+                **({"accepted_crop_border_rows": accepted_rows} if accepted_rows is not None else {}),
+            )
+        else:
+            derived = None
+        if np.any(codes == 1):
+            selected = codes == 1
+            head_anchored = derive_tail_seed(
+                arrays["masks_roi"][selected], labels,
+                arrays["head_keypoints_roi"][selected],
+                schema_name=pose_schema, method=derivation_method,
+                **({"accepted_crop_border_rows": accepted_rows[selected]} if accepted_rows is not None else {}),
+            )
+            if derived is None:
+                derived = head_anchored
+            else:
+                for name, values in head_anchored.items():
+                    derived[name][selected] = values
+        derived["tail_derivation_method_code"] = codes.copy()
     origins = ORIGIN_CODES
     if native:
         # Native source labels are mapped by name. Tail stations, including the
@@ -262,6 +299,8 @@ def build_review_payload(
         "kpt_shape": [point_count, 2],
         "keypoint_origin_codes": origins,
         "derivation_recipe": recipe,
+        **({"tail_derivation_method_codes": {"legacy": 0, derivation_method: 1}}
+           if derivation_method != "legacy" else {}),
         "source_subject_mask_run": paths["mask"].split("/")[1],
         "source_mask_sha256": _sha256_array(arrays["masks_roi"]),
         "source_seed_run": paths["seed"].split("/")[1],
