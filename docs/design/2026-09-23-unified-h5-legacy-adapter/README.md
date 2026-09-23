@@ -331,3 +331,44 @@ Totals: 41 EXACT, 8 EXACT-narrow, 7 DERIVED. The collapse is lossy for `target_s
   and then as a versioned alignment method stamped on each run, with cohort
   analyses refusing to mix versions silently. The code cost of a switch is
   small (about 5 consumers read these fields); the cost is comparability.
+- **D13. Capacity: one dataset per table, streamed (decided 2026-09-23).**
+  Citrus has removed the whole-table 64 MiB / 2,000,000-row limits (commits
+  78f835f and df2747b on `agent/unified-h5-streamed-correspondence-20260923`,
+  not yet pushed). Each table stays one HDF5-chunked dataset, and hashing
+  streams through it. Retained limits: 64 MiB per single element, 8 MiB per
+  JSON payload. Palette agrees with Citrus option A. That means a declared
+  finite ceiling per dataset (Citrus proposes 1 TiB of logical bytes and 2^40
+  rows) and mandatory streaming hashing, copying and genuine row-range reads.
+  Raising Palette's constants alone would be unsafe while its reader loads
+  whole datasets. Planning scale from Citrus: a 24-hour, one-arena,
+  pose-enabled H5 is about 26 GiB logical (largest tables: pose updates
+  8.6 GiB, visual appearance 7.9 GiB, chaser 5.4 GiB); today's 30-minute
+  goodbatbadbat is about 250 MB. The shared admission-contract revision,
+  including capacity preflight before recording, is outstanding. It will land
+  with the optional pose component (v1) and streamed correspondence (v2);
+  core table layouts stay v1.
+- **D14. Storage: reference the H5, do not copy it (decided 2026-09-23).**
+  The raw unified H5 in the recording's `raw/` directory is the single primary
+  source. It must be kept regardless, because the Citrus finalization receipt
+  binds its exact bytes, and a Zarr copy cannot reconstruct the container.
+  Copying it into Zarr (PR 169's `native_h5` layout) would only duplicate the
+  largest object. The analysis Zarr instead holds a sealed reference:
+  - the H5 path relative to the recording directory (never absolute);
+  - the source digest and finalization receipt;
+  - the admission summary;
+  - per-chunk digests for verified row-range reads.
+
+  Exactly one Palette reader opens the H5. It checks the sealed reference on
+  every open and serves verified row ranges; analyses, visualization and
+  exports go through it and never open the H5 path. Consumers therefore still
+  see one object per recording. Precedent: clipped recordings already
+  reference external video clips (`raw_video_storage="external_clips"`). The
+  Zarr also keeps the small projected metadata (subject and setup, PR 190)
+  and the adapter's derived legacy-layout tables. Those are regenerable
+  outputs, not a second source of truth. Risks are the H5 moving or being
+  deleted; mitigations are the relative path, the digest check that fails
+  loudly on a moved or changed file, and registering the H5 as a recording
+  artifact so integrity sweeps cover it. This replaces PR 169's byte-copy
+  storage, which has no consumers yet, and D1's derivative H5 should be
+  revisited on the same grounds. The Palette storage format change is a new
+  native storage version.
