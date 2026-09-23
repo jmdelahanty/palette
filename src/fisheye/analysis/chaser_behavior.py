@@ -68,7 +68,12 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
-def _first_chaser_parameters(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+def first_chaser_step_parameters(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Parameters of the first protocol step that configures chasers.
+
+    Protocols may open with non-chaser steps (e.g. SOLID_BLACK), so the chaser
+    step is found by content, never assumed to be ``steps[0]``.
+    """
     steps = payload.get("steps")
     if not isinstance(steps, list):
         raise ValueError("protocol_json lacks steps[].")
@@ -86,7 +91,7 @@ def resolve_configured_chaser_behaviors(
 ) -> tuple[ConfiguredChaserBehavior, ...]:
     """Resolve a variable-length chaser list using the acquisition enum vocabulary."""
 
-    parameters = _first_chaser_parameters(payload)
+    parameters = first_chaser_step_parameters(payload)
     chasers = parameters.get("chasers")
     if not isinstance(chasers, list):
         raise ValueError("protocol_json chasers field is not a list.")

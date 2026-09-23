@@ -14,6 +14,7 @@ from fisheye.shared.source_recording_identity import (
     SourceRecordingIdentityError,
     recording_id_from_session_camera,
 )
+from tests.unit.fisheye.unified_h5_fixtures import emit_bound_h5
 
 
 def _write_h5(path: Path, *, session_uuid: str, camera_id: str) -> None:
@@ -23,21 +24,23 @@ def _write_h5(path: Path, *, session_uuid: str, camera_id: str) -> None:
         h5.attrs["ipc_source_name"] = f"/shm_cam_{camera_id}"
 
 
-def test_legacy_h5_plan_preserves_batch_root_sidecars(tmp_path: Path) -> None:
+def test_bound_h5_plan_preserves_batch_root_sidecars(tmp_path: Path) -> None:
     batch_root = tmp_path / "2026_04_20_16_37_39"
     citrus_root = batch_root / "citrus"
-    h5_path = citrus_root / "recording_arena_1.h5"
-    _write_h5(h5_path, session_uuid="session_arena_1", camera_id="2010093")
+    h5_path = emit_bound_h5(
+        citrus_root / "recording_arena_1.h5",
+        root_attrs={"session_uuid": "session_arena_1", "camera_id": "CAM-42"},
+    )
     h5_path.with_suffix(".mp4").write_bytes(b"stimulus")
     h5_path.with_name(f"{h5_path.stem}_update_timing.csv").write_text(
         "frame,time\n", encoding="utf-8"
     )
 
-    (batch_root / "Cam2010093.mp4").write_bytes(b"camera")
-    (batch_root / "Cam2010093_meta.csv").write_text(
+    (batch_root / "CamCAM-42.mp4").write_bytes(b"camera")
+    (batch_root / "CamCAM-42_meta.csv").write_text(
         "frame_id,timestamp,timestamp_sys\n", encoding="utf-8"
     )
-    (batch_root / "Cam2010093_keyframe.json").write_text("{}", encoding="utf-8")
+    (batch_root / "CamCAM-42_keyframe.json").write_text("{}", encoding="utf-8")
     snapshot = batch_root / "recording_snapshot.json"
     snapshot.write_text("{}", encoding="utf-8")
     ptp_summary = batch_root / "ptp_sync_summary.json"
@@ -51,9 +54,9 @@ def test_legacy_h5_plan_preserves_batch_root_sidecars(tmp_path: Path) -> None:
     )
 
     assert [planned.dest_name for planned in plan.cam_files] == [
-        "Cam2010093_session_arena_1.mp4",
-        "Cam2010093_session_arena_1_meta.csv",
-        "Cam2010093_session_arena_1_keyframe.json",
+        "CamCAM-42_session_arena_1.mp4",
+        "CamCAM-42_session_arena_1_meta.csv",
+        "CamCAM-42_session_arena_1_keyframe.json",
     ]
     shared = {
         planned.dest_name: planned
@@ -69,14 +72,34 @@ def test_legacy_h5_plan_preserves_batch_root_sidecars(tmp_path: Path) -> None:
     )
     assert plan.meta["num_dishes"] == 1
     assert plan.meta["fish_per_dish"] == 4
+    # Minted from the Orange acquisition session in the binding, never from
+    # the per-Arena Citrus session_uuid.
     assert plan.meta["recording_id"] == recording_id_from_session_camera(
-        session_uuid="session_arena_1",
-        camera_id="2010093",
+        session_uuid="synthetic-paired-recording",
+        camera_id="CAM-42",
     )
     assert plan.meta["recording_id"] != h5_path.stem
     assert plan.meta[SOURCE_RECORDING_ID_MAPPING_PROFILE_ATTR] == (
         SOURCE_RECORDING_ID_MAPPING_PROFILE
     )
+
+
+def test_legacy_h5_without_acquisition_binding_is_refused(tmp_path: Path) -> None:
+    h5_path = tmp_path / "recording_arena_1.h5"
+    _write_h5(h5_path, session_uuid="session_arena_1", camera_id="2010093")
+
+    try:
+        organize_recordings._build_plan(
+            h5_path,
+            dest_root=tmp_path / "recordings",
+            cam_root=None,
+            rename_cams=True,
+        )
+    except SourceRecordingIdentityError as exc:
+        assert "acquisition-session binding" in str(exc)
+        assert "not substituted" in str(exc)
+    else:
+        raise AssertionError("expected an unbound legacy H5 to be refused")
 
 
 def test_h5_plan_rejects_explicit_and_ipc_camera_disagreement(
@@ -107,11 +130,11 @@ def test_video_only_plan_finds_sidecars_in_organized_raw_directory(tmp_path: Pat
     raw_root = recording_root / "raw"
     cams_root.mkdir(parents=True)
     raw_root.mkdir(parents=True)
-    video = cams_root / "Cam2010093_legacy.mp4"
+    video = cams_root / "CamCAM-42_legacy.mp4"
     video.write_bytes(b"video")
-    metadata = cams_root / "Cam2010093_meta.csv"
+    metadata = cams_root / "CamCAM-42_meta.csv"
     metadata.write_text("frame_id,timestamp,timestamp_sys\n", encoding="utf-8")
-    (cams_root / "Cam2010093_keyframe.json").write_text("{}", encoding="utf-8")
+    (cams_root / "CamCAM-42_keyframe.json").write_text("{}", encoding="utf-8")
     (raw_root / "ptp_sync_summary.json").write_text("{}", encoding="utf-8")
     (raw_root / "recording_snapshot_runtime.json").write_text("{}", encoding="utf-8")
 
