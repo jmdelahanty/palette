@@ -23,6 +23,8 @@
     let brushSize = 8;
     let busyAction = false;
     let applyInFlight = false;
+    let uncertainApplyId = null;
+    let tailRefreshResult = null;
     const lassoMinPointStepPx = 2;
 
     function setStatus(text, isError=false) {
@@ -287,8 +289,24 @@
       const componentReview = state.component_review_status || {};
       const completionGuard = state.component_review_completion_guard || {};
       const reviewState = componentReview.state || "pending";
-      const reviewWarning = completionGuard.ready ? "" :
-        "<p><b>Action needed</b> Set component review before completing this task.</p>";
+      const pendingEffects = Number(state.pending_apply_effect_count || 0);
+      const reviewWarning = pendingEffects > 0
+        ? "<p><b>Action needed</b> Retry Apply to finish QC before setting review status or completing this task.</p>"
+        : (completionGuard.ready ? "" :
+          "<p><b>Action needed</b> Set component review before completing this task.</p>");
+      const tailTasks = Array.isArray(tailRefreshResult?.tail_refresh_tasks)
+        ? tailRefreshResult.tail_refresh_tasks : [];
+      const tailFailures = Array.isArray(tailRefreshResult?.tail_refresh_failures)
+        ? tailRefreshResult.tail_refresh_failures : [];
+      const tailSummary = tailRefreshResult?.tail_refresh_status === "complete"
+        ? "<p><b>Refreshed tail review</b> " + tailTasks.length + " new task(s); " +
+          Number(tailRefreshResult.tail_refresh_valid_rows || 0) + " valid row(s), " +
+          Number(tailRefreshResult.tail_refresh_training_eligible_rows || 0) + " training-eligible row(s), " +
+          Number(tailRefreshResult.tail_refresh_manual_point_count || 0) + " manual point(s) retained, " +
+          tailFailures.length + " failure(s). " +
+          (tailTasks.length ? "Find " + tailTasks.map((task) => escapeSupportText(task.task_id)).join(", ") +
+            " in <a href=\"/my-work\">your task queue</a>." : "") + "</p>"
+        : "";
       document.getElementById("summary").innerHTML =
         "<p><b>ROI</b> " + payload.roi_idx + " / <b>" + (payload.frame_index_domain === "legacy_training_sample_row" ? "source training row" : "frame") + "</b> " + (payload.frame_idx ?? "") + "</p>" +
         "<p><b>Position</b> " + (state.position + 1) + " of " + state.total + "</p>" +
@@ -298,7 +316,9 @@
         "<p><b>Review</b> " + reviewState + "</p>" +
         "<p><b>Session edits</b> " + (state.unapplied_session_edit_count || 0) +
         (payload.session_checkpoint ? " (current ROI is checkpoint overlay)" : "") + "</p>" +
-        reviewWarning;
+        "<p><b>QC</b> " + (state.qc_status || "pending") +
+        (pendingEffects ? " (" + pendingEffects + " Apply effect(s) pending)" : "") + "</p>" +
+        reviewWarning + tailSummary;
       const seekInput = document.getElementById("roi-seek-input");
       if (seekInput) seekInput.value = payload.roi_idx;
     }
@@ -409,13 +429,16 @@
     async function applySavedEdits() {
       if (busyAction || applyInFlight) return;
       applyInFlight = true;
-      setStatus("Applying saved edits to Zarr in the background. You can continue editing other rows while this runs.");
+      const applyId = String(payload?.state?.resumable_apply_id || uncertainApplyId || newApplyId());
+      setStatus("Applying saved edits and refreshing QC. You can continue editing other rows while this runs.");
       try {
         const result = await api("/apply", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({apply_id: newApplyId(), target_token: payload?.state?.target_token})
+          body: JSON.stringify({apply_id: applyId, target_token: payload?.state?.target_token})
         });
+        uncertainApplyId = null;
+        tailRefreshResult = result.result;
         await loadCurrent();
         const applied = result.result.applied_checkpoint_count || 0;
         const stale = result.result.stale_checkpoint_count || 0;
@@ -423,16 +446,28 @@
         const before = result.result.edit_revision_before;
         const after = result.result.edit_revision_after;
         const remaining = Number(payload?.state?.unapplied_session_edit_count || 0);
-        const nextStep = remaining > 0
+        const pendingEffects = Number(payload?.state?.pending_apply_effect_count || 0);
+        const qcComplete = payload?.state?.qc_status === "complete" || result.result.qc_status === "complete";
+        const nextStep = pendingEffects > 0
+          ? " QC is pending; use Apply again to finish it."
+          : remaining > 0
           ? " " + remaining + " saved edit(s) still need applying."
-          : " Saved edits are applied to Zarr. You can now set review status or complete the task.";
+          : qcComplete
+          ? " Saved edits and QC are complete. You can now set review status or complete the task."
+          : " No saved edits were applied.";
         const stalePreview = staleRows.slice(0, 12).join(", ");
         const staleSuffix = stale > 0
           ? " Skipped " + stale + " stale saved edit(s)" + (stalePreview ? " at ROI " + stalePreview : "") + "; revisit and save those ROI(s) again."
           : "";
         setStatus("Applied " + applied + " saved edit(s) to Zarr; revision " + before + " -> " + after + "." + staleSuffix + nextStep + mutationStatusSuffix(result));
       } catch (error) {
-        showOperatorSupport(error, "session_request_failed");
+        uncertainApplyId = applyId;
+        if (error?.operatorSupport?.error === "subject_mask_apply_effects_pending") {
+          await loadCurrent();
+          setStatus("Mask pixels were applied, but QC is pending. Use Apply again to retry the same saved operation.", true);
+        } else {
+          showOperatorSupport(error, "session_request_failed");
+        }
       } finally {
         applyInFlight = false;
       }

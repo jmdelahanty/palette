@@ -6138,3 +6138,129 @@ def test_subject_mask_http_apply_uses_real_run_lock_and_fresh_revision(tmp_path)
         assert len(store.list_session_checkpoints(task_id="task-b", state="active")) == 1
     finally:
         store.close()
+
+
+def test_subject_mask_http_qc_failure_retries_effects_without_rewriting_pixels(tmp_path, monkeypatch):
+    from fisheye.refinement import finalize_subject_masks as finalizer
+    from fisheye.shared.detect_reason_codec import read_reason_labels, update_reason_rows
+    from fisheye.tune import refined_subject_mask_review as review_mod
+    from tests.unit.fisheye.test_refined_subject_mask_review import _build_subject_review_root
+
+    zarr_path = tmp_path / "subject_qc.zarr"
+    root = _build_subject_review_root(zarr_path=zarr_path)
+    source, refined = review_mod.prepare_refined_subject_run(
+        root, subject_run="subject_masks_001", refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    update_reason_rows(
+        refined.group["components/subject_body"], np.asarray([0]),
+        np.asarray(["operator_note"], dtype=object),
+    )
+    original_refresh = finalizer.refresh_refined_subject_mask_metrics_run
+    fail_once = {"pending": True}
+
+    def fail_after_qc_write(*args, **kwargs):
+        result = original_refresh(*args, **kwargs)
+        if fail_once["pending"]:
+            fail_once["pending"] = False
+            raise OSError("injected post-QC failure")
+        return result
+
+    monkeypatch.setattr(finalizer, "refresh_refined_subject_mask_metrics_run", fail_after_qc_write)
+    store = LabelingStore(tmp_path / "labeling_work.sqlite")
+    try:
+        store.initialize()
+        store.assign_recording(recording_id="rec-a", assignee_user="alice")
+        store.upsert_task(
+            task_id="task-a", recording_id="rec-a",
+            workflow_kind="subject_mask_component", component_name="subject_body",
+        )
+        lease = store.create_session(task_id="task-a", user="alice", ttl_seconds=600)
+
+        def configure(state):
+            fresh_root = review_mod.open_zarr_root(zarr_path, mode="a")
+            fresh_refined = review_mod._open_existing_refined_subject_run(
+                fresh_root, "refined_subject_masks_001",
+            )
+            state.subject_mask_sessions[lease.session_id] = labeling_web.SubjectMaskRuntimeSession(
+                session_id=lease.session_id, task_id="task-a", recording_id="rec-a",
+                user="alice", zarr_path=str(zarr_path), root=fresh_root,
+                source=source, refined=fresh_refined, roi_images=SimpleNamespace(),
+                component_name="subject_body", comp_idx=0,
+                roi_indices=np.asarray([0], dtype=np.int32),
+            )
+
+        with _running_server(store, user="alice", configure_state=configure) as base_url:
+            nav_status, nav = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/nav",
+                method="POST", payload={"position": 0},
+            )
+            assert nav_status == 200, nav
+            token = nav["state"]["target_token"]
+            save_status, saved = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/save",
+                method="POST", payload={
+                    "mask": labeling_web._raw_array_payload(np.ones((8, 8), dtype=np.uint8)),
+                    "target_token": token,
+                },
+            )
+            assert save_status == 200, saved
+            apply_url = f"/api/sessions/{lease.session_id}/subject-mask/apply"
+            apply_payload = {"apply_id": "qc-retry", "target_token": token}
+            failed_status, failed = _json_request(
+                base_url, apply_url, method="POST", payload=apply_payload,
+            )
+            assert failed_status == 400, failed
+            assert failed["state"]["pending_apply_effect_count"] == 1
+            assert failed["state"]["resumable_apply_id"] == "qc-retry"
+            assert store.list_session_checkpoints(task_id="task-a", state="applied")
+            assert store.count_pending_session_checkpoint_apply_effects(task_id="task-a") == 1
+            status, blocked = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/review-status",
+                method="POST", payload={"state": "approved", "target_token": token},
+            )
+            assert status == 409, blocked
+            assert blocked["error"] == "pending_apply_effects"
+            complete_status, complete_blocked = _json_request(
+                base_url, "/api/tasks/task-a/complete", method="POST",
+                payload={"session_id": lease.session_id, "expected_user": "alice"},
+            )
+            assert complete_status == 409, complete_blocked
+            assert complete_blocked["error"] == "pending_apply_effects"
+
+        before_retry = review_mod.open_zarr_root(zarr_path, mode="r", use_consolidated=False)
+        before_run = before_retry["refined_subject_masks_runs/refined_subject_masks_001"]
+        pixels = np.asarray(before_run["masks_roi"][:], dtype=np.uint8).copy()
+        revision = np.asarray(before_run["components/subject_body/row_revision"][:], dtype=np.int64).copy()
+        assert revision[0] == 1
+        assert bool(before_run.attrs["metrics_stale"]) is True
+
+        with _running_server(store, user="alice", configure_state=configure) as base_url:
+            nav_status, nav = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/nav",
+                method="POST", payload={"position": 0},
+            )
+            assert nav_status == 200, nav
+            retry_status, retried = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/apply",
+                method="POST", payload={
+                    "apply_id": "qc-retry", "target_token": nav["state"]["target_token"],
+                },
+            )
+            assert retry_status == 200, retried
+            assert retried["result"]["already_applied"] is True
+            assert retried["result"]["qc_status"] == "complete"
+            assert retried["state"]["pending_apply_effect_count"] == 0
+
+        after_root = review_mod.open_zarr_root(zarr_path, mode="r", use_consolidated=False)
+        after = after_root["refined_subject_masks_runs/refined_subject_masks_001"]
+        np.testing.assert_array_equal(after["masks_roi"][:], pixels)
+        np.testing.assert_array_equal(after["components/subject_body/row_revision"][:], revision)
+        assert bool(after.attrs["metrics_stale"]) is False
+        assert bool(after.attrs["contours_stale"]) is False
+        assert bool(after.attrs["derived_mask_caches_stale"]) is True
+        np.testing.assert_array_equal(after["metrics/mask_present"][:, 0], [True, True])
+        assert "operator_note" in str(read_reason_labels(after["components/subject_body"])[0])
+        assert store.count_pending_session_checkpoint_apply_effects(task_id="task-a") == 0
+    finally:
+        store.close()

@@ -1026,16 +1026,33 @@ def _subject_mask_component_review_state(runtime: SubjectMaskRuntimeSession) -> 
                 return state
     return "pending"
 
-def _subject_mask_component_completion_guard(runtime: SubjectMaskRuntimeSession) -> dict[str, object]:
+def _subject_mask_component_completion_guard(
+    runtime: SubjectMaskRuntimeSession,
+    *,
+    store: LabelingStore | None = None,
+) -> dict[str, object]:
     review_state = _subject_mask_component_review_state(runtime)
-    ready = review_state in SUBJECT_MASK_COMPLETABLE_REVIEW_STATES
+    pending_effect_count = (
+        store.count_pending_session_checkpoint_apply_effects(
+            task_id=runtime.task_id, component_name=runtime.component_name,
+        ) if store is not None else 0
+    )
+    ready = review_state in SUBJECT_MASK_COMPLETABLE_REVIEW_STATES and pending_effect_count == 0
+    not_ready_reason = (
+        "pending_apply_effects" if pending_effect_count
+        else "component_review_pending" if not ready else ""
+    )
     return {
         "ready": ready,
         "component_name": runtime.component_name,
         "component_review_state": review_state,
         "completable_review_states": sorted(SUBJECT_MASK_COMPLETABLE_REVIEW_STATES),
-        "not_ready_reason": "" if ready else "component_review_pending",
-        "required_action": "" if ready else "set_component_review_status_before_completing_task",
+        "pending_apply_effect_count": int(pending_effect_count),
+        "not_ready_reason": not_ready_reason,
+        "required_action": (
+            "retry_pending_apply_effects" if pending_effect_count
+            else "set_component_review_status_before_completing_task" if not ready else ""
+        ),
     }
 
 def _subject_mask_runtime_state(
@@ -1062,6 +1079,29 @@ def _subject_mask_runtime_state(
         component_review = dict(raw_review) if isinstance(raw_review, Mapping) else None
     run_review = runtime.refined.group.attrs.get("refined_subject_mask_review_status")
     unapplied_checkpoint_count = _subject_mask_unapplied_checkpoint_count(store, runtime)
+    pending_effects = (
+        store.list_pending_session_checkpoint_apply_effects(
+            task_id=runtime.task_id, component_name=runtime.component_name,
+        ) if store is not None else []
+    )
+    pending_effect_count = (
+        store.count_pending_session_checkpoint_apply_effects(
+            task_id=runtime.task_id, component_name=runtime.component_name,
+        ) if store is not None else 0
+    )
+    qc_policy = runtime.refined.group.attrs.get("browser_apply_qc_policy")
+    edit_revision = _subject_mask_edit_revision(runtime)
+    qc_current = (
+        isinstance(qc_policy, Mapping)
+        and qc_policy.get("id") == "palette.browser_subject_mask_apply_full_qc_v1"
+        and type(qc_policy.get("version")) is int
+        and qc_policy.get("version") == 1
+        and type(qc_policy.get("edit_revision")) is int
+        and qc_policy.get("edit_revision") == edit_revision
+        and runtime.refined.group.attrs.get("metrics_stale") is False
+        and runtime.refined.group.attrs.get("contours_stale") is False
+    )
+    completion_guard = _subject_mask_component_completion_guard(runtime, store=store)
     return dict(_redact_labeler_runtime_payload({
         "session_id": runtime.session_id,
         "task_id": runtime.task_id,
@@ -1079,13 +1119,17 @@ def _subject_mask_runtime_state(
         "component_review_status": component_review,
         "run_review_status": dict(run_review) if isinstance(run_review, Mapping) else None,
         "auto_advance_on_save": bool(runtime.auto_advance_on_save),
-        "edit_revision": _subject_mask_edit_revision(runtime),
+        "edit_revision": edit_revision,
         "target_run_path": _subject_mask_target_run_path(runtime),
         "source_rowset_path": _subject_mask_source_rowset_path(runtime),
         "unapplied_session_edit_count": unapplied_checkpoint_count,
         "has_unapplied_session_edits": bool(unapplied_checkpoint_count > 0),
-        "component_review_completion_guard": _subject_mask_component_completion_guard(runtime),
-        "component_review_completion_ready": bool(_subject_mask_component_completion_guard(runtime).get("ready")),
+        "pending_apply_effect_count": int(pending_effect_count),
+        "resumable_apply_id": str(pending_effects[0].get("apply_id") or "") if pending_effects else None,
+        "qc_status": "complete" if qc_current else "pending" if pending_effects else "not_recorded",
+        "qc_edit_revision": qc_policy.get("edit_revision") if isinstance(qc_policy, Mapping) else None,
+        "component_review_completion_guard": completion_guard,
+        "component_review_completion_ready": bool(completion_guard.get("ready")),
     }))
 
 def _subject_mask_current_payload(

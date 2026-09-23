@@ -2391,6 +2391,7 @@ def _make_handler(state: ServerState):
             if not suffix.startswith("/subject-mask/"):
                 return False
             from fisheye.tune import refined_subject_mask_review as review_mod
+            from .web_subject_mask_apply_qc import refresh_subject_mask_apply_qc_locked
 
             try:
                 runtime = _get_subject_mask_runtime(state, session)
@@ -2533,7 +2534,16 @@ def _make_handler(state: ServerState):
                 apply_id = str(body.get("apply_id") or "").strip() or str(uuid.uuid4())
                 claimed_apply_id: str | None = None
                 canonical_write_started = False
+                canonical_receipt_applied = False
                 try:
+                    pending_effects = state.store.list_pending_session_checkpoint_apply_effects(
+                        task_id=runtime.task_id,
+                        component_name=runtime.component_name,
+                    )
+                    if pending_effects and all(str(row.get("apply_id") or "") != apply_id for row in pending_effects):
+                        raise RuntimeError(
+                            "A prior subject-mask Apply has pending derived effects; retry its apply_id before another Apply."
+                        )
                     already_applied = state.store.get_applied_session_checkpoints_by_apply_id(
                         task_id=runtime.task_id,
                         apply_id=apply_id,
@@ -2556,6 +2566,40 @@ def _make_handler(state: ServerState):
                             "edit_revision_before": before_values[0] if before_values else _subject_mask_edit_revision(runtime),
                             "edit_revision_after": after_values[0] if after_values else _subject_mask_edit_revision(runtime),
                         }
+                        matching_pending = next(
+                            (row for row in pending_effects if str(row.get("apply_id") or "") == apply_id),
+                            None,
+                        )
+                        if matching_pending is not None:
+                            canonical_receipt_applied = True
+                            with review_mod._refined_subject_write_lock(
+                                runtime.zarr_path, refined_run=runtime.refined.run_name,
+                            ):
+                                fresh_root = review_mod.open_zarr_root(runtime.zarr_path, mode="a")
+                                runtime.root = fresh_root
+                                runtime.refined = review_mod._open_existing_refined_subject_run(
+                                    fresh_root, runtime.refined.run_name,
+                                )
+                                result.update(refresh_subject_mask_apply_qc_locked(
+                                    root=fresh_root,
+                                    refined_run=runtime.refined.run_name,
+                                    expected_edit_revision=int(matching_pending["edit_revision_after"]),
+                                ))
+                                # Bound downstream derivations belong here, before registry and receipt completion.
+                                if not _refresh_registry_for_scope(
+                                    store=state.store,
+                                    task_id=runtime.task_id,
+                                    recording_id=runtime.recording_id,
+                                    user=user,
+                                    workflow_kind="subject_mask_component",
+                                    scope=_session_scope(session),
+                                    zarr_path=runtime.zarr_path,
+                                    dataset_id=str(session.get("dataset_id") or "") or None,
+                                    zarr_use=str(session.get("zarr_use") or "") or None,
+                                ):
+                                    raise RuntimeError("Subject-mask registry refresh remains pending.")
+                        else:
+                            result["qc_status"] = "legacy_or_complete"
                         mutation_event = state.store.record_event(
                             task_id=runtime.task_id,
                             recording_id=runtime.recording_id,
@@ -2564,6 +2608,14 @@ def _make_handler(state: ServerState):
                             target={"apply_id": apply_id},
                             after=result,
                             )
+                        if matching_pending is not None:
+                            effects_complete = state.store.mark_session_checkpoint_apply_effects_complete(
+                                task_id=runtime.task_id,
+                                component_name=runtime.component_name,
+                                apply_id=apply_id,
+                            )
+                            if not effects_complete:
+                                raise RuntimeError("Subject-mask Apply effects receipt remains pending.")
                     else:
                         checkpoints = state.store.claim_session_checkpoints_for_apply(
                             task_id=runtime.task_id,
@@ -2753,13 +2805,21 @@ def _make_handler(state: ServerState):
                                         apply_id=apply_id,
                                         edit_revision_before=edit_revision_before,
                                         edit_revision_after=edit_revision_after,
+                                        require_secondary_effects=True,
                                     )
+                                    canonical_receipt_applied = True
                                     released_stale_checkpoint_count = 0
                                     if stale_checkpoint_ids:
                                         released_stale_checkpoint_count = state.store.release_session_checkpoints_apply(
                                             task_id=runtime.task_id,
                                             apply_id=apply_id,
                                         )
+                                    result_qc = refresh_subject_mask_apply_qc_locked(
+                                        root=fresh_root,
+                                        refined_run=runtime.refined.run_name,
+                                        expected_edit_revision=edit_revision_after,
+                                    )
+                                    # Bound downstream derivations belong here, before audit, registry, and receipt completion.
                                     result = {
                                         "apply_id": apply_id,
                                         "already_applied": False,
@@ -2777,6 +2837,7 @@ def _make_handler(state: ServerState):
                                         "after_area_px_total": after_area_total,
                                         "compute_workers": int(compute_workers_used),
                                         "canonical_zarr_mutated": True,
+                                        **result_qc,
                                     }
                                     mutation_event = state.store.record_event(
                                         task_id=runtime.task_id,
@@ -2800,7 +2861,7 @@ def _make_handler(state: ServerState):
                                             "compute_workers": int(compute_workers_used),
                                         },
                                     )
-                                    _refresh_registry_for_scope(
+                                    if not _refresh_registry_for_scope(
                                         store=state.store,
                                         task_id=runtime.task_id,
                                         recording_id=runtime.recording_id,
@@ -2810,8 +2871,23 @@ def _make_handler(state: ServerState):
                                         zarr_path=runtime.zarr_path,
                                         dataset_id=str(session.get("dataset_id") or "") or None,
                                         zarr_use=str(session.get("zarr_use") or "") or None,
+                                    ):
+                                        raise RuntimeError("Subject-mask registry refresh remains pending.")
+                                    effects_complete = state.store.mark_session_checkpoint_apply_effects_complete(
+                                        task_id=runtime.task_id,
+                                        component_name=runtime.component_name,
+                                        apply_id=apply_id,
                                     )
+                                    if not effects_complete:
+                                        raise RuntimeError("Subject-mask Apply effects receipt remains pending.")
                 except Exception as exc:
+                    if canonical_receipt_applied and claimed_apply_id:
+                        try:
+                            state.store.release_session_checkpoints_apply(
+                                task_id=runtime.task_id, apply_id=claimed_apply_id,
+                            )
+                        except Exception:
+                            pass
                     if claimed_apply_id and not canonical_write_started:
                         try:
                             state.store.release_session_checkpoints_apply(
@@ -2820,6 +2896,22 @@ def _make_handler(state: ServerState):
                             )
                         except Exception:
                             pass
+                    if canonical_receipt_applied:
+                        self._write_json(
+                            _format_error(
+                                "subject_mask_apply_effects_pending",
+                                details=_labeler_safe_error_details(exc),
+                                status=HTTPStatus.BAD_REQUEST,
+                                extra={
+                                    "canonical_apply_succeeded": True,
+                                    "retain_apply_id": True,
+                                    "apply_id": apply_id,
+                                    "state": _subject_mask_runtime_state(runtime, store=state.store),
+                                },
+                            ),
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return True
                     self._write_json(_format_error("apply_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
                     return True
                 self._write_json(
@@ -2841,6 +2933,20 @@ def _make_handler(state: ServerState):
 
             if subject_mask_path == "/review-status":
                 if self._reject_browser_mutation_preflight(session, body, runtime):
+                    return True
+                pending_effect_count = state.store.count_pending_session_checkpoint_apply_effects(
+                    task_id=runtime.task_id, component_name=runtime.component_name,
+                )
+                if pending_effect_count:
+                    self._write_json(
+                        _format_error(
+                            "pending_apply_effects",
+                            details="Retry the saved subject-mask Apply to finish QC before changing review status.",
+                            status=HTTPStatus.CONFLICT,
+                            extra={"pending_apply_effect_count": int(pending_effect_count)},
+                        ),
+                        status=HTTPStatus.CONFLICT,
+                    )
                     return True
                 unapplied_count = state.store.count_unapplied_session_checkpoints(
                     task_id=runtime.task_id,
@@ -4232,7 +4338,7 @@ def _make_handler(state: ServerState):
                 if str(session.get("workflow_kind") or "") == "subject_mask_component":
                     try:
                         runtime = _get_subject_mask_runtime(state, session)
-                        review_completion_guard = _subject_mask_component_completion_guard(runtime)
+                        review_completion_guard = _subject_mask_component_completion_guard(runtime, store=state.store)
                     except Exception as exc:
                         self._write_json(
                             _format_error(
@@ -4254,8 +4360,12 @@ def _make_handler(state: ServerState):
                     if not bool(review_completion_guard.get("ready")):
                         self._write_json(
                             _format_error(
-                                "component_review_pending",
-                                details="Set component review status before completing this subject-mask task.",
+                                str(review_completion_guard.get("not_ready_reason") or "component_review_pending"),
+                                details=(
+                                    "Retry pending subject-mask Apply effects before completing this task."
+                                    if review_completion_guard.get("not_ready_reason") == "pending_apply_effects"
+                                    else "Set component review status before completing this subject-mask task."
+                                ),
                                 status=HTTPStatus.CONFLICT,
                                 extra={
                                     **_task_completion_failure_metadata(
@@ -4264,7 +4374,7 @@ def _make_handler(state: ServerState):
                                         task=task,
                                         session=session,
                                         requested_task_id=task_id,
-                                        error="component_review_pending",
+                                        error=str(review_completion_guard.get("not_ready_reason") or "component_review_pending"),
                                     ),
                                     "component_review_completion_guard": review_completion_guard,
                                 },
@@ -4577,7 +4687,7 @@ def _make_handler(state: ServerState):
                 if str(session.get("workflow_kind") or "") == "subject_mask_component":
                     try:
                         runtime = _get_subject_mask_runtime(state, session)
-                        review_completion_guard = _subject_mask_component_completion_guard(runtime)
+                        review_completion_guard = _subject_mask_component_completion_guard(runtime, store=state.store)
                     except Exception as exc:
                         self._write_json(
                             _format_error(
@@ -4599,8 +4709,12 @@ def _make_handler(state: ServerState):
                     if not bool(review_completion_guard.get("ready")):
                         self._write_json(
                             _format_error(
-                                "component_review_pending",
-                                details="Set component review status before completing this subject-mask task.",
+                                str(review_completion_guard.get("not_ready_reason") or "component_review_pending"),
+                                details=(
+                                    "Retry pending subject-mask Apply effects before completing this task."
+                                    if review_completion_guard.get("not_ready_reason") == "pending_apply_effects"
+                                    else "Set component review status before completing this subject-mask task."
+                                ),
                                 status=HTTPStatus.CONFLICT,
                                 extra={
                                     **_task_completion_failure_metadata(
@@ -4609,7 +4723,7 @@ def _make_handler(state: ServerState):
                                         task=task,
                                         session=session,
                                         requested_task_id=str(task["task_id"]),
-                                        error="component_review_pending",
+                                        error=str(review_completion_guard.get("not_ready_reason") or "component_review_pending"),
                                     ),
                                     "component_review_completion_guard": review_completion_guard,
                                 },
