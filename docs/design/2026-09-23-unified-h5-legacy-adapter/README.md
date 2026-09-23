@@ -296,6 +296,17 @@ Totals: 41 EXACT, 8 EXACT-narrow, 7 DERIVED. The collapse is lossy for `target_s
   keep the status and analyze only recorded intervals. That favours (b), but
   (b) changes the legacy step contract and every consumer's view of step
   coverage, so it needs an explicit decision before implementation.
+
+  **Decided 2026-09-23: (b).** Interrupted sessions are imported. The run
+  keeps the aggregate execution status (`complete` / `interrupted`; `invalid`
+  is still refused) and materializes only executed steps, each with its own
+  `completion_status`. No unexecuted interval is invented, and step bounds are
+  never backfilled from events. Exclusion moves from import to analysis: each
+  consumer declares the steps (or epochs) it requires and excludes a session
+  that lacks them, with a recorded reason, instead of failing or silently
+  using partial coverage. Before `_materialize_stimulus_steps` accepts
+  interrupted runs, audit the step consumers for full-recipe assumptions (for
+  example pre/train/post epoch comparisons that expect a post-epoch).
 - **D6. Selector coexistence.** For a recording that has both a legacy-H5 stimulus run and an adapter run, which is `latest`? Recommend: the adapter refuses if any selector-eligible stimulus run already exists, unless explicitly overridden. Otherwise the registry sees two protocol runs with different `source_h5` for one recording.
 - **D7. `protocol_semantic_chaser_selection` sealed raw-H5 binding.** It requires `run.attrs.source_h5 == source.raw_h5` (`analysis_workflows/protocol_semantic_chaser_selection.py:746-750`). Decide whether the sealed "raw H5" for unified recordings is the unified file or the derivative, and update the selection sealing accordingly.
 - **D8. No silent repair or inference.** The adapter must:
