@@ -1,0 +1,311 @@
+"""Unpatched isolated intake canary; refuses dirty code and non-synthetic roots."""
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict
+import hashlib
+import json
+from pathlib import Path
+import sqlite3
+import subprocess
+import tempfile
+import traceback
+
+import numpy as np
+import h5py
+import zarr
+
+from fisheye.registry.db import Registry
+from fisheye.registry.recording_identity_authority import (
+    load_verified_recording_import_receipt,
+    load_verified_registry_recording_import,
+)
+from fisheye.shared.acquisition_crop_stream_ledger import validate_current_acquisition_crop_stream_ledger
+from fisheye.shared.acquisition_frame_clock import resolve_acquisition_frame_clock
+from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.recording_geometry import verify_recording_geometry_bundle, load_registered_dish_masks_from_recording_folder
+from fisheye.shared.recording_transfer_snapshot import file_ref
+from fisheye.shared.zarr.crop_pixel_authority import bind_crop_pixel_authority
+
+
+def verify_stimulus(root, *, path: Path, recording_id: str, camera_id: str,
+                    commit: str, expected: dict) -> dict:
+    from fisheye.registry.extractors.stimulus_metadata import extract_stimulus_metadata
+    from fisheye.shared.directed_transform import TransformReferenceExtent
+    from fisheye.shared.selected_calibration import load_selected_calibration_snapshot, selected_calibration_paths
+    from fisheye.shared.stimulus_physical_coordinate import load_stimulus_physical_coordinate_authority
+    from fisheye.shared.zarr.columnar import read_columnar_dataset
+    from fisheye.analysis.stimulus_response import _load_event_columns
+
+    runs = root['analysis/stimulus_runs']
+    name = runs.attrs['latest']
+    assert name == runs.attrs['latest_complete']
+    assert list(runs.group_keys()) == [name]
+    run = runs[name]
+    assert run.attrs['palette_run_completion_status'] == 'complete'
+    assert run.attrs['stage_selector_eligible'] is True
+    assert run.attrs['source_coordinate_policy'] != 'metadata_and_calibration_only'
+    assert run.attrs['source_coordinate_surface_status'] == 'not_present'
+    assert 'tracking_data' not in run and 'stimulus_coordinates' not in run
+    provenance = run.attrs['run_provenance']
+    assert provenance['git_sha'] == commit and provenance['git_dirty'] is False
+    assert provenance['command'] == 'fisheye.analysis.import_stimulus_to_zarr'
+    assert provenance['params']['omitted_coordinate_source_paths'] == []
+    h5_path = Path(root.attrs['source_h5_path'])
+    assert Path(run.attrs['source_h5']) == h5_path
+    assert h5_path.name == expected['source_h5']
+    with h5py.File(h5_path, 'r') as h5:
+        for source_name, output_name in [('video_metadata/frame_metadata', 'video_metadata/frame_metadata')]:
+            original = h5[source_name][:]
+            target = read_columnar_dataset(run[output_name])
+            for field in original.dtype.names:
+                actual = np.asarray(target[field])
+                desired = original[field]
+                if desired.dtype.kind == 'S':
+                    actual = actual.astype(str)
+                    desired = desired.astype(str)
+                np.testing.assert_array_equal(actual, desired)
+        # Events use the existing event-specific column contract, which does
+        # not declare the generic structured-column field_dtypes metadata.
+        event_names, step_indices, modes, camera_frames = _load_event_columns(root, run['events'])
+        source_events = h5['events'][:]
+        np.testing.assert_array_equal(event_names, source_events['event_name'].astype(str))
+        for actual, field in ((step_indices, 'current_step_index'), (modes, 'stimulus_mode_id'),
+                               (camera_frames, 'camera_frame_id')):
+            np.testing.assert_array_equal(actual, source_events[field])
+        for name_in, name_out in [('protocol_semantic_json', 'protocol_semantic_json_utf8'),
+                                  ('protocol_trial_index_json', 'protocol_trial_index_json_utf8')]:
+            assert run['protocol_semantic_snapshot/' + name_out][:].tobytes() == h5['protocol_snapshot/' + name_in][()]
+        np.testing.assert_array_equal(run['calibration/' + camera_id + '/homography_matrix'][:],
+                                      h5['calibration_snapshot/' + camera_id + '/homography_matrix'][:])
+    np.testing.assert_array_equal(run['video_metadata/frame_metadata/stimulus_frame_num'][:], [1000, 1001, 1002])
+    np.testing.assert_array_equal(run['video_metadata/frame_metadata/triggering_camera_frame_id'][:], [1, 2, 3])
+    assert run.attrs['protocol_semantic_status'] == 'verified'
+    assert run.attrs['protocol_semantic_hash'] == expected['protocol_semantic_hash']
+    assert sorted(run['steps'].group_keys()) == ['step_0', 'step_1']
+    assert run['steps/step_0'].attrs['stimulus_family'] == 'moving_grating'
+    assert run['steps/step_1'].attrs['stimulus_family'] == 'concentric_grating'
+    renderer = run['stimulus_renderer_snapshot']
+    assert renderer.attrs['schema_id'] == 'citrus.stimulus_renderer_snapshot'
+    assert renderer['arena_1'].attrs['texture_width_px'] == 32
+    paths = selected_calibration_paths(stimulus_run=name, camera_id=camera_id)
+    calibration = load_selected_calibration_snapshot(root, stimulus_run=name,
+        expected_camera_id=camera_id, expected_from_space_id='source_camera_image_px',
+        expected_to_space_id='stimulus_canvas_px',
+        expected_source_reference_extent=TransformReferenceExtent(width=32, height=32, units='px',
+            authority=paths.camera_calibration_path + '@native_width_px,native_height_px'),
+        expected_target_reference_extent=TransformReferenceExtent(width=1920, height=1080, units='px',
+            authority=paths.display_snapshot_path + '@selected_output_geometry'))
+    assert calibration.camera_id == camera_id
+    physical = load_stimulus_physical_coordinate_authority(root, stimulus_run=name)
+    assert physical is not None
+    extraction = extract_stimulus_metadata(root, zarr_path=path, recording_id=recording_id)
+    assert len(extraction.recording_runs) == 1 and len(extraction.recording_steps) == 2
+    return {'stimulus_run': name, 'exact_h5_event_and_frame_columns_preserved': True,
+            'protocol_semantic_hash': expected['protocol_semantic_hash'],
+            'protocol_step_count': 2, 'renderer_snapshot_preserved': True,
+            'selected_camera_id': calibration.camera_id,
+            'physical_coordinate_status': run.attrs['physical_coordinate_publication_status'],
+            'producer_git_sha': provenance['git_sha'], 'producer_git_dirty': provenance['git_dirty'],
+            'metadata_only_bypass_used': False, 'scientific_calibration_acceptance': False}
+
+
+def digest(path: Path) -> str:
+    result = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+            result.update(block)
+    return result.hexdigest()
+
+
+def inventory(root: Path) -> dict[str, str]:
+    return {p.relative_to(root).as_posix(): digest(p) for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--palette-repo", required=True, type=Path)
+    parser.add_argument("--commit", required=True)
+    parser.add_argument("--fixture", required=True, type=Path)
+    parser.add_argument("--negative-corruption", action="store_true")
+    parser.add_argument("--full-stimulus", action="store_true")
+    parser.add_argument("--negative-stimulus", action="store_true")
+    args = parser.parse_args()
+    assert not (args.negative_stimulus and args.negative_corruption)
+    assert not args.negative_stimulus or args.full_stimulus
+    repo = args.palette_repo.resolve(strict=True)
+    fixture = args.fixture.resolve(strict=True)
+    assert fixture.parent == Path("/tmp") and fixture.name.startswith("palette-citrus-encoded-transfer-")
+    source, delivery = fixture / "source", fixture / "delivery"
+    producer_report = json.loads((fixture / "producer_smoke_report.json").read_bytes())
+    assert producer_report["includes_synthetic_h5_ptp_geometry"] is True
+    assert producer_report["status"] == "actual_pinned_citrus_transfer_and_loadback_passed"
+    if args.full_stimulus:
+        assert producer_report['stimulus_variant'] == ('missing-frame-metadata' if args.negative_stimulus else 'renderer-only')
+    assert len(args.commit) == 40
+    assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip() == args.commit
+    assert subprocess.check_output(["git", "status", "--porcelain"], cwd=repo, text=True) == ""
+    import fisheye
+    assert Path(fisheye.__file__).resolve().is_relative_to(repo / "src")
+    work = Path(tempfile.mkdtemp(prefix="palette-parent-intake-e2e-20260907-"))
+    report = {"status": "incomplete", "work_dir": str(work), "palette_repo": str(repo),
+              "harness": str(Path(__file__).resolve()), "harness_sha256": digest(Path(__file__)),
+              "palette_commit": args.commit, "producer_report": str(fixture / "producer_smoke_report.json"),
+              "producer_snapshot_id": producer_report["snapshot_id"], "commands": [],
+              "negative_corruption": args.negative_corruption,
+              "negative_stimulus": args.negative_stimulus, "full_stimulus": args.full_stimulus,
+              "scope": ("synthetic renderer-only stimulus import with semantic-v1 protocol" if args.full_stimulus else
+                        "synthetic recording-only intake with H5/geometry custody") + "; no scientific/hardware acceptance"}
+    print(json.dumps({"work_dir": str(work)}), flush=True)
+
+    def command(argv, *, expected=0):
+        result = subprocess.run([str(a) for a in argv], cwd=repo, capture_output=True, text=True, timeout=120)
+        report["commands"].append({"argv": [str(a) for a in argv], "returncode": result.returncode,
+                                   "stdout": result.stdout, "stderr": result.stderr})
+        write_json_atomic(work / "e2e_report.json", report)
+        assert result.returncode == expected, f"command returned {result.returncode}: {result.stderr}\n{result.stdout}"
+        return result
+
+    try:
+        original_source = inventory(source)
+        registry_path = work / "isolated_registry.sqlite"
+        registry = Registry(registry_path)
+        registry.close()
+        before_registry = digest(registry_path)
+        if args.negative_corruption:
+            # Mutate only this explicitly disposable fixture before attempting
+            # import. Never alter the frozen producer copy or repair its marker.
+            corrupt = delivery / "context/synthetic_session_opaque_payload.bin"
+            assert corrupt.is_file()
+            with corrupt.open("ab") as stream:
+                stream.write(b"\nDECLARED NEGATIVE-CONTROL CORRUPTION\n")
+        before_delivery = inventory(delivery)
+        argv = [repo / "scripts/py", "-m", "fisheye.utils.run_citrus_session_import", delivery,
+                "--transfer-v2", "--apply", "--recording-type", "behavior",
+                "--recording-subtype", "free", "--behavior-mode", "free", "--dest-root", work / "recordings",
+                "--run-dir", work / "first-run", "--register", "--registry", registry_path]
+        if not args.full_stimulus:
+            argv.append('--recording-only')
+        command(argv, expected=1 if args.negative_corruption or args.negative_stimulus else 0)
+        if args.negative_corruption or args.negative_stimulus:
+            assert inventory(delivery) == before_delivery
+            assert inventory(source) == original_source
+            assert digest(registry_path) == before_registry
+            if args.negative_stimulus:
+                status = json.loads((work / 'first-run/citrus_session_import.status.json').read_bytes())
+                assert status['status'] != 'complete' and not status.get('staging_finalized')
+                assert not status.get('import_receipts')
+                failed_runs = []
+                for path in (work / 'recordings').rglob('*_analysis.zarr'):
+                    root = zarr.open_group(str(path), mode='r', use_consolidated=False)
+                    runs = root.get('analysis/stimulus_runs')
+                    assert runs is not None
+                    assert not runs.attrs.get('latest') and not runs.attrs.get('latest_complete')
+                    for run_name in runs.group_keys():
+                        run = runs[run_name]
+                        assert run.attrs['palette_run_completion_status'] == 'failed'
+                        assert run.attrs['stage_selector_eligible'] is False
+                        failed_runs.append({'zarr': str(path), 'run_name': run_name,
+                                            'completion_status': 'failed', 'selector_eligible': False})
+                assert len(failed_runs) == 2
+                importer_logs = {name: (work / 'first-run' / name).read_text()
+                                 for name in ('import_parents.stdout.txt', 'import_parents.stderr.txt')}
+                assert 'Stimulus H5 missing /video_metadata/frame_metadata dataset' in json.dumps(importer_logs)
+                report['importer_logs'] = importer_logs
+                report['failed_stimulus_candidates'] = failed_runs
+            else:
+                assert not (work / "recordings").exists()
+            report.update(status="negative_control_refused_without_loss_or_admission", source_preserved=True,
+                          staging_preserved=True, isolated_registry_unchanged=True)
+        else:
+            status = json.loads((work / "first-run/citrus_session_import.status.json").read_bytes())
+            assert status["status"] == "complete" and status["staging_finalized"] is True
+            assert status["import_complete"] is True and not list(delivery.iterdir())
+            assert inventory(source) == original_source
+            plan = status["plan"]
+            assert len(plan["parents"]) == 2 and len(plan["files"]) == len(before_delivery)
+            assert {item["source"]["path"] for item in plan["files"]} == set(before_delivery)
+            parent_evidence = []
+            for parent in plan["parents"]:
+                directory = Path(parent["destination_dir"])
+                recording_id = parent["identity"]["recording_id"]
+                camera_id = parent["identity"]["camera_id"]
+                for item in plan["files"]:
+                    for target in item["destinations"]:
+                        if target["recording_id"] == recording_id:
+                            actual = file_ref(directory, target["relative_path"])
+                            assert actual["sha256"] == before_delivery[item["source"]["path"]]
+                            assert actual["size_bytes"] == item["source"]["size_bytes"]
+                path = directory / "zarr" / f"{directory.name}_analysis.zarr"
+                receipt = load_verified_recording_import_receipt(path)
+                verified = load_verified_registry_recording_import(registry_path=registry_path, zarr_path=path)
+                assert verified.receipt == receipt
+                assert receipt.producer_git_sha == args.commit and receipt.producer_git_dirty is False
+                root = zarr.open_group(str(path), mode="r", use_consolidated=True)
+                assert root.attrs["source_layout"] == "rolling_clips"
+                assert root.attrs.get("source_video_path") is None
+                clock = resolve_acquisition_frame_clock(root, required=True)
+                assert clock.row_count == 3
+                clock_arrays = root[clock.group_path]
+                np.testing.assert_array_equal(clock_arrays["recording_frame_id"][:], [1, 2, 3])
+                np.testing.assert_array_equal(clock_arrays["parent_frame_index"][:], [0, 1, 2])
+                np.testing.assert_array_equal(clock_arrays["camera_timestamp_ns"][:],
+                    [1700000000000000000, 1700000000500000000, 1700000001000000000])
+                pixel = bind_crop_pixel_authority(path, expected_recording_identity=recording_id,
+                    expected_camera_identity=camera_id, expected_n_frames=3,
+                    expected_source_width=32, expected_source_height=32)
+                assert pixel.source_video_path is None and len(pixel.source_video_paths) == 2
+                ledger = validate_current_acquisition_crop_stream_ledger(root)
+                assert ledger.row_count == 3 and ledger.blank_row_count == 1 and ledger.detected_row_count == 2
+                ledger_run = root["analysis/acquisition_video_streams/streams/crop/" + ledger.group_path]
+                np.testing.assert_array_equal(ledger_run["source_crop_video_frame_indices"][:], [0, 1, 0])
+                np.testing.assert_array_equal(ledger_run["source_session_crop_video_frame_indices"][:], [0, 1, 2])
+                np.testing.assert_array_equal(ledger_run["blank_frame"][:], [False, True, False])
+                geometry_root = directory / "raw/recording_geometry_bundle"
+                geometry = verify_recording_geometry_bundle(geometry_root, require_snapshot_pointer=True, verify_all_assets=True)
+                masks = load_registered_dish_masks_from_recording_folder(geometry_root, policy="required")
+                assert any(key.camera_serial == camera_id for key in masks.masks)
+                parent_evidence.append({"recording_id": recording_id, "camera_id": camera_id,
+                    "receipt_sha256": receipt.receipt_sha256, "clock": asdict(clock), "crop_ledger": asdict(ledger),
+                    "geometry_contract_sha256": geometry.contract_sha256, "all_original_bytes_preserved": True,
+                    "unpatched_pixel_source_paths": [str(p) for p in pixel.source_video_paths]})
+                if args.full_stimulus:
+                    expected = next(item for item in producer_report['stimulus_evidence'] if item['camera_id'] == camera_id)
+                    parent_evidence[-1]['stimulus'] = verify_stimulus(root, path=path,
+                        recording_id=recording_id, camera_id=camera_id, commit=args.commit, expected=expected)
+            if args.full_stimulus:
+                with sqlite3.connect(f'file:{registry_path}?mode=ro', uri=True) as connection:
+                    counts = {table: connection.execute('SELECT COUNT(*) FROM ' + table).fetchone()[0]
+                              for table in ('recording_stimulus_runs', 'recording_stimulus_steps')}
+                assert counts == {'recording_stimulus_runs': 2, 'recording_stimulus_steps': 4}
+                report['registry_stimulus_counts'] = counts
+            command([repo / "scripts/py", "-m", "fisheye.utils.registry_integrity", "--registry", registry_path,
+                     "--result-json", work / "registry_integrity.json"])
+            before_parents = {p["destination_dir"]: inventory(Path(p["destination_dir"])) for p in plan["parents"]}
+            admitted_registry = digest(registry_path)
+            replay = list(argv)
+            replay[replay.index("--run-dir") + 1] = work / "replay-run"
+            replay.extend(["--resume-transfer-plan", work / "first-run/organization_plan.json"])
+            command(replay)
+            replay_status = json.loads((work / "replay-run/citrus_session_import.status.json").read_bytes())
+            assert replay_status["status"] == "complete" and replay_status["import_receipts"] == status["import_receipts"]
+            assert not replay_status.get("commands")  # Retirement replay does not re-import sealed parents.
+            assert digest(registry_path) == admitted_registry
+            assert {p["destination_dir"]: inventory(Path(p["destination_dir"])) for p in plan["parents"]} == before_parents
+            assert not list(delivery.iterdir()) and inventory(source) == original_source
+            report.update(status="unpatched_recording_only_intake_registry_retirement_and_replay_passed",
+                          parent_evidence=parent_evidence, retired_file_count=len(plan["files"]),
+                          staging_empty=True, acquisition_source_preserved=True, replay_byte_stable=True,
+                          original_payload_coverage_complete=True)
+            if args.full_stimulus:
+                report['status'] = 'unpatched_full_stimulus_intake_registry_retirement_and_replay_passed'
+        write_json_atomic(work / "e2e_report.json", report)
+        print(json.dumps({"status": report["status"], "report": str(work / "e2e_report.json")}), flush=True)
+    except BaseException:
+        report["error"] = traceback.format_exc()
+        write_json_atomic(work / "e2e_report.json", report)
+        raise
+
+
+if __name__ == "__main__":
+    main()
