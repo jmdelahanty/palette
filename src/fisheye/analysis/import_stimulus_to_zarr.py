@@ -3049,10 +3049,9 @@ def import_stimulus_to_zarr(
                 h5, source_h5=resolved_h5, zarr_path=zarr_path, run_name=run_name,
                 overwrite=overwrite, finalization_receipt=finalization_receipt,
             )
-        native_session = h5.get("/metadata/session")
-        if (
-            native_session is not None and "recording_artifact_profile" in native_session.attrs
-        ) or h5.attrs.get("development_schema_id") == "citrus.experimental_h5_core_writer_test":
+        from fisheye.shared.unified_h5 import declared_unified_profile
+
+        if declared_unified_profile(h5) is not None:
             raise ValueError("Native stimulus H5 requires explicit source_profile selection; legacy fallback is forbidden.")
         protocol_semantic_snapshot = read_protocol_semantic_snapshot(h5)
         protocol_execution_index = (
