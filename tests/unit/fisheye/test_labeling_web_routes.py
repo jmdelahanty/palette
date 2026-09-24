@@ -4700,9 +4700,7 @@ def _mutable_keypoint_route_session(tmp_path):
     )
 
 
-def _install_mutable_keypoint_route_backend(monkeypatch, *, failure=None):
-    failure_state = failure if failure is not None else {"real_apply_failures": 0}
-
+def _install_mutable_keypoint_route_backend(monkeypatch):
     def load_roi_payload(session, position=0):
         roi_idx = int(session.failures[int(position)])
         point = np.asarray(session.kp_roi_arr[roi_idx], dtype=np.float64)[0]
@@ -4729,14 +4727,6 @@ def _install_mutable_keypoint_route_backend(monkeypatch, *, failure=None):
         roi_idx = int(session.failures[int(position)])
         session.kp_roi_arr[roi_idx] = np.asarray(points, dtype=np.float64)
         session.reason_arr[roi_idx] = "manual_correction"
-        if (
-            type(session.root).__name__ != "_DryRunRoot"
-            and int(failure_state.get("real_apply_failures", 0)) > 0
-        ):
-            failure_state["real_apply_failures"] = int(
-                failure_state["real_apply_failures"]
-            ) - 1
-            raise RuntimeError("injected real apply failure")
         return {
             "roi_idx": roi_idx,
             "frame_idx": int(session.frame_indices[roi_idx]),
@@ -4768,7 +4758,6 @@ def _install_mutable_keypoint_route_backend(monkeypatch, *, failure=None):
             "review_status": {"state": kwargs["state"]}
         },
     )
-    return failure_state
 
 
 def test_mutable_keypoint_http_checkpoint_apply_and_pending_gates(
@@ -4901,9 +4890,19 @@ def test_mutable_keypoint_http_checkpoint_apply_and_pending_gates(
 
 
 def test_mutable_keypoint_http_apply_uncertainty_retains_id(tmp_path, monkeypatch):
-    failure = _install_mutable_keypoint_route_backend(
-        monkeypatch, failure={"real_apply_failures": 1}
-    )
+    from fisheye.labeling import web_keypoint_checkpoint_apply as apply_mod
+
+    _install_mutable_keypoint_route_backend(monkeypatch)
+    failure = {"real_apply_failures": 1}
+    real_write = apply_mod._write_intended_rows
+
+    def _interrupted_write(session, intended, current):
+        real_write(session, intended, current)
+        if failure["real_apply_failures"] > 0:
+            failure["real_apply_failures"] -= 1
+            raise RuntimeError("injected real apply failure")
+
+    monkeypatch.setattr(apply_mod, "_write_intended_rows", _interrupted_write)
     store = LabelingStore(tmp_path / "labeling_work.sqlite")
     try:
         store.initialize()
@@ -6261,6 +6260,113 @@ def test_subject_mask_http_qc_failure_retries_effects_without_rewriting_pixels(t
         assert bool(after.attrs["derived_mask_caches_stale"]) is True
         np.testing.assert_array_equal(after["metrics/mask_present"][:, 0], [True, True])
         assert "operator_note" in str(read_reason_labels(after["components/subject_body"])[0])
+        assert store.count_pending_session_checkpoint_apply_effects(task_id="task-a") == 0
+    finally:
+        store.close()
+
+
+def test_subject_mask_http_retry_finalizes_write_committed_before_store_finalize(tmp_path, monkeypatch):
+    """A crash after the canonical revision write but before SQLite finalization
+    must not release the checkpoints as stale on retry: the retry recognizes its
+    own committed write, finalizes it without rewriting pixels, and runs QC."""
+    from fisheye.tune import refined_subject_mask_review as review_mod
+    from tests.unit.fisheye.test_refined_subject_mask_review import _build_subject_review_root
+
+    zarr_path = tmp_path / "subject_crash.zarr"
+    root = _build_subject_review_root(zarr_path=zarr_path)
+    source, _refined = review_mod.prepare_refined_subject_run(
+        root, subject_run="subject_masks_001", refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    store = LabelingStore(tmp_path / "labeling_work.sqlite")
+    try:
+        store.initialize()
+        store.assign_recording(recording_id="rec-a", assignee_user="alice")
+        store.upsert_task(
+            task_id="task-a", recording_id="rec-a",
+            workflow_kind="subject_mask_component", component_name="subject_body",
+        )
+        lease = store.create_session(task_id="task-a", user="alice", ttl_seconds=600)
+        original_finalize = store.mark_session_checkpoints_applied
+        crash_once = {"pending": True}
+
+        def crash_before_finalize(*args, **kwargs):
+            if crash_once["pending"]:
+                crash_once["pending"] = False
+                raise OSError("injected crash before SQLite finalization")
+            return original_finalize(*args, **kwargs)
+
+        monkeypatch.setattr(store, "mark_session_checkpoints_applied", crash_before_finalize)
+
+        def configure(state):
+            fresh_root = review_mod.open_zarr_root(zarr_path, mode="a")
+            fresh_refined = review_mod._open_existing_refined_subject_run(
+                fresh_root, "refined_subject_masks_001",
+            )
+            state.subject_mask_sessions[lease.session_id] = labeling_web.SubjectMaskRuntimeSession(
+                session_id=lease.session_id, task_id="task-a", recording_id="rec-a",
+                user="alice", zarr_path=str(zarr_path), root=fresh_root,
+                source=source, refined=fresh_refined, roi_images=SimpleNamespace(),
+                component_name="subject_body", comp_idx=0,
+                roi_indices=np.asarray([0], dtype=np.int32),
+            )
+
+        edited = np.zeros((8, 8), dtype=np.uint8)
+        edited[2:6, 1:7] = 1
+        with _running_server(store, user="alice", configure_state=configure) as base_url:
+            _, nav = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/nav",
+                method="POST", payload={"position": 0},
+            )
+            token = nav["state"]["target_token"]
+            save_status, saved = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/save",
+                method="POST", payload={
+                    "mask": labeling_web._raw_array_payload(edited), "target_token": token,
+                },
+            )
+            assert save_status == 200, saved
+            failed_status, failed = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/apply",
+                method="POST", payload={"apply_id": "crash-retry", "target_token": token},
+            )
+            assert failed_status >= 400, failed
+
+        crashed = review_mod.open_zarr_root(zarr_path, mode="r", use_consolidated=False)
+        crashed_run = crashed["refined_subject_masks_runs/refined_subject_masks_001"]
+        assert int(crashed_run.attrs["edit_revision"]) == 1
+        assert crashed_run.attrs["edit_revision_last_apply_id"] == "crash-retry"
+        pixels = np.asarray(crashed_run["masks_roi"][:], dtype=np.uint8).copy()
+        np.testing.assert_array_equal(pixels[0, 0] > 0, edited > 0)
+        assert store.list_session_checkpoints(task_id="task-a", state="applying")
+
+        with _running_server(store, user="alice", configure_state=configure) as base_url:
+            _, nav = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/nav",
+                method="POST", payload={"position": 0},
+            )
+            retry_status, retried = _json_request(
+                base_url, f"/api/sessions/{lease.session_id}/subject-mask/apply",
+                method="POST", payload={
+                    "apply_id": "crash-retry", "target_token": nav["state"]["target_token"],
+                },
+            )
+            assert retry_status == 200, retried
+            assert retried["result"]["applied_checkpoint_count"] == 1
+            assert retried["result"]["stale_checkpoint_count"] == 0
+            assert retried["result"]["edit_revision_before"] == 0
+            assert retried["result"]["edit_revision_after"] == 1
+            assert retried["result"]["qc_status"] == "complete"
+            assert retried["state"]["pending_apply_effect_count"] == 0
+
+        after = review_mod.open_zarr_root(zarr_path, mode="r", use_consolidated=False)[
+            "refined_subject_masks_runs/refined_subject_masks_001"
+        ]
+        np.testing.assert_array_equal(after["masks_roi"][:], pixels)
+        assert int(after.attrs["edit_revision"]) == 1
+        assert bool(after.attrs["metrics_stale"]) is False
+        assert store.list_session_checkpoints(task_id="task-a", state="applied")
+        assert not store.list_session_checkpoints(task_id="task-a", state="applying")
         assert store.count_pending_session_checkpoint_apply_effects(task_id="task-a") == 0
     finally:
         store.close()

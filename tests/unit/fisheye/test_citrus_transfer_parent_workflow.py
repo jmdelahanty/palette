@@ -8,11 +8,30 @@ import pytest
 
 from fisheye.utils import run_citrus_session_import as runner
 
+
+@pytest.fixture(autouse=True)
+def _placeholder_media_sync_assessment(monkeypatch):
+    """Fixture videos are text placeholders; the real check runs in the canary."""
+    from fisheye.diagnostics.video import container
+
+    monkeypatch.setattr(
+        container,
+        "check_hevc_keyframe_flags",
+        lambda path, **_: {
+            "schema_id": "palette.video.sync_sample_assessment.v1",
+            "codec": "h264",
+            "container_inspection_status": "ok",
+            "sync_sample_proof": "container_declared",
+            "message": "placeholder media",
+        },
+    )
+
+
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures/recording_transfer_v2"
 
 
-def _arguments(tmp_path):
-    source = Path(shutil.copytree(FIXTURES / "rolling", tmp_path / "staging"))
+def _arguments(tmp_path, name="rolling"):
+    source = Path(shutil.copytree(FIXTURES / name, tmp_path / "staging"))
     arguments = [
         str(source),
         "--recording-only",
@@ -51,6 +70,26 @@ def test_transfer_v2_dry_run_writes_nothing_and_never_calls_legacy_organizer(
     assert {
         p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()
     } == before
+
+
+def test_transfer_v2_single_video_dry_run_is_planned_not_refused(
+    tmp_path, monkeypatch, capsys
+):
+    from tests.unit.fisheye.test_transfer_recording_organization import _resign
+
+    source, arguments = _arguments(tmp_path, "whole")
+    (source / "fixture.h5").unlink()  # placeholder bytes, not an H5 container
+    _resign(source)
+    monkeypatch.setattr(
+        runner,
+        "_run_command",
+        lambda *a, **k: pytest.fail("dry-run executed a command"),
+    )
+    assert runner.main([*arguments, "--dry-run"]) == 0
+    plan = json.loads(capsys.readouterr().out)["plan"]
+    assert plan["recording_layout"] == "single_video"
+    assert [parent["clip_count"] for parent in plan["parents"]] == [1]
+    assert not (tmp_path / "recordings").exists()
 
 
 @pytest.mark.parametrize(

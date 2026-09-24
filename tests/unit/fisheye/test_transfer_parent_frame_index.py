@@ -17,10 +17,15 @@ from fisheye.utils.build_recording_frame_index import TABLE_SCHEMA
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures/recording_transfer_v2"
 
 
-def _organized(tmp_path):
+def _organized(tmp_path, name="rolling"):
     from fisheye.utils import organize_transfer_recordings as organizer
 
-    root = _copy(tmp_path)
+    root = _copy(tmp_path, name)
+    if name == "whole":
+        from tests.unit.fisheye.test_transfer_recording_organization import _resign
+
+        (root / "fixture.h5").unlink()  # placeholder bytes, not an H5 container
+        _resign(root)
     plan = organizer.build_transfer_organization_plan(
         root,
         destination_root=tmp_path / "recordings",
@@ -72,6 +77,28 @@ def test_organized_index_maps_live_parent_files_without_changing_original_bytes(
     assert clip_index["mode"] == "rolling_clips"
     assert clip_index["camera_ranges"]["02010093"]["total_frame_count"] == 3
     assert len(clip_index["rows"]) == 2
+
+
+def test_organized_single_video_index_is_one_clip_with_producer_label(tmp_path):
+    root, plan, parent = _organized(tmp_path, "whole")
+    before = _bytes(root)
+    output = parent / "derived/recording_frame_index"
+    indexer.build_transfer_parent_frame_index(
+        root, camera_id="02010093", output_dir=output, organization_plan=plan
+    )
+    assert _bytes(root) == before
+    table = pq.read_table(output / "recording_frame_index.parquet")
+    assert table["recording_frame_id"].to_pylist() == [1, 2]
+    assert table["clip_local_frame_index"].to_pylist() == [0, 1]
+    assert set(table["clip_directory"].to_pylist()) == {"."}
+    assert set(table["recording_backend_mode"].to_pylist()) == {"single_video"}
+    assert {Path(p) for p in table["video_path"].to_pylist()} == {
+        parent / "cams/acquisition/Cam02010093_full.mp4"
+    }
+    clip_index = json.loads((output / "recording_clip_index.json").read_bytes())
+    assert clip_index["mode"] == "rolling_clips"
+    assert clip_index["recording_backend_mode"] == "single_video"
+    assert len(clip_index["rows"]) == 1
 
 
 @pytest.mark.parametrize(
