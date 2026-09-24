@@ -70,11 +70,7 @@ from fisheye.shared.run_provenance import git_identity
 from fisheye.shared.unified_h5 import PROFILE as UNIFIED_H5_PROFILE
 from fisheye.shared.unified_h5 import UnifiedH5ContractError, declared_unified_profile
 from fisheye.shared.unified_h5.metadata import string_attributes
-from fisheye.shared.unified_h5.storage import (
-    MANIFEST_DIGEST_ATTR,
-    load_unified_stimulus_candidate,
-)
-from fisheye.shared.unified_h5.storage_schema import new_native_run_name
+from fisheye.shared.unified_h5.reference import new_native_run_name, open_unified_source
 from fisheye.shared.source_recording_identity import (
     SOURCE_ANALYSIS_CLASSIFICATION,
     SOURCE_RECORDING_IDENTITY_PROFILE,
@@ -623,21 +619,21 @@ def import_experiment_setup(plan: RecordingAnalysisPlan) -> Optional[dict[str, A
 def project_unified_subject_metadata(
     plan: RecordingAnalysisPlan, run_name: str
 ) -> Optional[dict[str, Any]]:
-    """Publish subject metadata and setup from an admitted native candidate.
+    """Publish subject metadata and setup from an admitted unified source.
 
-    Reads ``/metadata/subject`` from the verified native copy (not the raw H5)
-    and publishes it through the same subject/setup owners as legacy import,
+    Reads ``/metadata/subject`` through the sealed reference's verified
+    attribute snapshot (not by reopening the raw H5 unchecked) and publishes it through the same subject/setup owners as legacy import,
     to the same locations. Missing fields such as ``subject_count`` refuse;
     nothing is inferred (``subject_id`` is not ``fish_id``).
     """
 
     read_root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=True)
-    candidate = load_unified_stimulus_candidate(read_root, run_name=run_name)
+    source_reader = open_unified_source(read_root, run_name=run_name)
     run_path = f"analysis/stimulus_runs/{run_name}"
     try:
-        descriptors = candidate.typed_attributes("/metadata/subject")
+        descriptors = source_reader.typed_attributes("/metadata/subject")
     except UnifiedH5ContractError:
-        # No /metadata/subject node was copied: absent, as in legacy.
+        # No /metadata/subject node was admitted: absent, as in legacy.
         descriptors = {}
     subject_metadata = normalize_subject_metadata(string_attributes(descriptors))
     if not subject_metadata:
@@ -647,7 +643,7 @@ def project_unified_subject_metadata(
         "group_path": "/metadata/subject",
         "count_field": "subject_count",
         "native_run_path": run_path,
-        "native_manifest_sha256": str(read_root[run_path].attrs[MANIFEST_DIGEST_ATTR]),
+        "unified_reference_sha256": str(source_reader.reference_sha256),
         "source_profile": UNIFIED_H5_PROFILE,
     }
     root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)

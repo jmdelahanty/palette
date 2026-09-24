@@ -14,7 +14,6 @@ from .common import (
     MAX_DEPTH,
     MAX_JSON_BYTES,
     MAX_ROWS,
-    exact_keys,
     require,
 )
 
@@ -108,108 +107,6 @@ def type_descriptor(type_id, *, nested=False, _depth=0) -> dict:
     raise ValueError(f"unsupported_hdf5_type:{kind}")
 
 
-def dtype_from_descriptor(spec: dict, *, _depth=0) -> np.dtype:
-    require(type(spec) is dict and _depth <= MAX_DEPTH, "native_type_descriptor_depth")
-    kind = spec["class"]
-    if kind == "integer":
-        exact_keys(
-            spec, ("class", "size_bytes", "byte_order", "signed"), "integer_type"
-        )
-        require(
-            type(spec["size_bytes"]) is int
-            and spec["size_bytes"] in (1, 2, 4, 8)
-            and type(spec["signed"]) is bool
-            and spec["byte_order"]
-            == ("none" if spec["size_bytes"] == 1 else "little_endian"),
-            "native_integer_type",
-        )
-        return np.dtype(("<i" if spec["signed"] else "<u") + str(spec["size_bytes"]))
-    if kind == "ieee_float":
-        exact_keys(spec, ("class", "size_bytes", "byte_order"), "float_type")
-        require(
-            type(spec["size_bytes"]) is int
-            and spec["size_bytes"] in (4, 8)
-            and spec["byte_order"] == "little_endian",
-            "native_float_type",
-        )
-        return np.dtype("<f" + str(spec["size_bytes"]))
-    if kind == "string":
-        exact_keys(
-            spec,
-            {"class", "variable_length", "character_set"}
-            | (set() if spec["variable_length"] else {"size_bytes", "padding"}),
-            "string_type",
-        )
-        require(
-            type(spec["variable_length"]) is bool
-            and spec["character_set"] in ("ascii", "utf8"),
-            "native_string_type",
-        )
-        if not spec["variable_length"]:
-            require(
-                type(spec["size_bytes"]) is int
-                and 0 < spec["size_bytes"] <= MAX_DATASET_BYTES
-                and spec["padding"]
-                in ("null_terminated", "null_padded", "space_padded"),
-                "native_fixed_string_type",
-            )
-        else:
-            require(_depth == 0, "native_nested_variable_string")
-        return h5py.string_dtype(
-            "utf-8" if spec["character_set"] == "utf8" else "ascii",
-            length=None if spec["variable_length"] else spec["size_bytes"],
-        )
-    if kind == "array":
-        exact_keys(spec, ("class", "dimensions", "base", "size_bytes"), "array_type")
-        dimensions = spec["dimensions"]
-        require(
-            type(dimensions) is list
-            and 0 < len(dimensions) <= 8
-            and all(type(value) is int and value > 0 for value in dimensions),
-            "native_array_dimensions",
-        )
-        base = dtype_from_descriptor(spec["base"], _depth=_depth + 1)
-        require(
-            math.prod(dimensions) * base.itemsize
-            == spec["size_bytes"]
-            <= MAX_DATASET_BYTES,
-            "native_array_type_budget",
-        )
-        return np.dtype((base, tuple(dimensions)))
-    if kind == "packed_compound":
-        exact_keys(spec, ("class", "size_bytes", "members"), "compound_type")
-        require(
-            type(spec["members"]) is list and 0 < len(spec["members"]) <= 4096,
-            "native_compound_member_budget",
-        )
-        end, names, formats = 0, set(), []
-        for member in spec["members"]:
-            exact_keys(member, ("name", "offset", "type"), "compound_member")
-            name = member["name"]
-            require(
-                isinstance(name, str)
-                and name not in ("", ".", "..")
-                and "/" not in name
-                and name not in names
-                and member["offset"] == end,
-                "native_compound_layout",
-            )
-            names.add(name)
-            formats.append(dtype_from_descriptor(member["type"], _depth=_depth + 1))
-            end += formats[-1].itemsize
-            require(end <= MAX_DATASET_BYTES, "native_compound_byte_budget")
-        require(end == spec["size_bytes"], "native_compound_itemsize")
-        return np.dtype(
-            {
-                "names": [m["name"] for m in spec["members"]],
-                "formats": formats,
-                "offsets": [m["offset"] for m in spec["members"]],
-                "itemsize": spec["size_bytes"],
-            }
-        )
-    raise ValueError(f"unsupported_logical_type:{kind}")
-
-
 def check_dataset_budget(dataset: h5py.Dataset) -> dict:
     require(
         dataset.shape is not None and dataset.ndim <= 8,
@@ -252,6 +149,12 @@ def read_bounded_string(
         width = min(width * 2, limit + 1)
 
 
+def block_rows(dataset: h5py.Dataset, *, block_bytes: int = BLOCK_BYTES) -> int:
+    """Rows per first-axis block: the one grid admission and readers share."""
+    row_bytes = dataset.dtype.itemsize * math.prod(dataset.shape[1:])
+    return max(1, min(4096, block_bytes // max(1, row_bytes)))
+
+
 def iter_blocks(
     dataset: h5py.Dataset, *, block_bytes: int = BLOCK_BYTES
 ) -> Iterator[tuple[int, np.ndarray]]:
@@ -280,8 +183,7 @@ def iter_blocks(
     if not dataset.shape:
         yield 0, np.asarray(dataset[()])
         return
-    row_bytes = dataset.dtype.itemsize * math.prod(dataset.shape[1:])
-    rows = max(1, min(4096, block_bytes // max(1, row_bytes)))
+    rows = block_rows(dataset, block_bytes=block_bytes)
     for start in range(0, dataset.shape[0], rows):
         yield start, dataset[start : min(start + rows, dataset.shape[0])]
 

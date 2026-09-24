@@ -17,7 +17,7 @@ import pytest
 import zarr
 
 from fisheye.shared.unified_h5 import PROFILE
-from fisheye.shared.unified_h5.storage import load_unified_stimulus_candidate
+from fisheye.shared.unified_h5.reference import open_unified_source
 from fisheye.utils import import_recording_analysis as mod
 from tests.unit.fisheye.test_import_recording_analysis import (
     _acquisition_authority_updates,
@@ -167,7 +167,7 @@ def test_routed_import_runs_the_real_importer(tmp_path: Path) -> None:
 
     assert (ok, code) == (True, 0)
     root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=True)
-    candidate = load_unified_stimulus_candidate(root, run_name="candidate")
+    candidate = open_unified_source(root, run_name="candidate")
     assert candidate.read_table("/frames/stimulus", start=0, stop=1).shape == (1,)
 
 

@@ -1,4 +1,8 @@
-"""Public importer's native-profile branch; never activates selectors."""
+"""Public importer's unified-profile branch: admit, then seal a reference.
+
+The H5 is not copied. Admission streams it once; the run stores a sealed
+reference (see ``shared.unified_h5.reference``). Selectors are never activated.
+"""
 
 from collections.abc import MutableMapping
 from pathlib import Path
@@ -12,19 +16,20 @@ from fisheye.shared.run_provenance import (
     validate_run_provenance,
 )
 from fisheye.shared.unified_h5 import PROFILE, validate_unified_h5_artifact
-from fisheye.shared.unified_h5.common import MAX_JSON_BYTES, parse_json, require
-from fisheye.shared.unified_h5.integrity import source_file_digest, source_identity
-from fisheye.shared.unified_h5.storage import (
-    MANIFEST_DIGEST_ATTR,
-    inspect_native_inventory,
-    load_unified_stimulus_candidate,
-    verify_unpublished_native_candidate,
-    write_native_candidate,
+from fisheye.shared.unified_h5.common import (
+    MAX_JSON_BYTES,
+    admission_scan,
+    parse_json,
+    require,
 )
-from fisheye.shared.unified_h5.storage_schema import (
-    STORAGE_SCHEMA,
-    STORAGE_VERSION,
+from fisheye.shared.unified_h5.integrity import source_identity
+from fisheye.shared.unified_h5.reference import (
+    REFERENCE_DIGEST_ATTR,
+    REFERENCE_SCHEMA,
+    REFERENCE_VERSION,
     new_native_run_name,
+    open_unified_source,
+    seal_reference,
 )
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
@@ -75,7 +80,7 @@ class _OwnedAttrs(MutableMapping):
                 name=name,
                 value=value,
             ),
-            "native_candidate_ownership_lost",
+            "unified_run_ownership_lost",
         )
 
     def __delitem__(self, name):
@@ -86,7 +91,7 @@ class _OwnedAttrs(MutableMapping):
                 publication_owner_uuid=self._token,
                 name=name,
             ),
-            "native_candidate_ownership_lost",
+            "unified_run_ownership_lost",
         )
 
 
@@ -106,32 +111,27 @@ def import_unified_from_open_h5(
         receipt = parse_json(
             stream.read(MAX_JSON_BYTES + 1), label="external_finalization_receipt"
         )
-    admission = validate_unified_h5_artifact(
-        h5, source_h5=source_h5, finalization_receipt=receipt
-    )
-    inventory = inspect_native_inventory(h5, admission.node_kinds)
-    require(
-        source_identity(h5, Path(source_h5)) == admission.source_identity,
-        "source_h5_generation_changed",
-    )
+    with admission_scan() as scan:
+        admission = validate_unified_h5_artifact(
+            h5, source_h5=source_h5, finalization_receipt=receipt
+        )
     if run_name is None:
         run_name = new_native_run_name()
     require(
         isinstance(run_name, str)
         and run_name not in ("", ".", "..")
         and not any(value in run_name for value in ("/", "\\", "\0", "\n", "\r")),
-        "native_run_name_invalid",
+        "unified_run_name_invalid",
     )
     provenance_result = validate_run_provenance(
         build_writer_run_provenance(
             command="fisheye.analysis.import_stimulus_to_zarr",
             params={
                 "source_profile": PROFILE,
-                "storage_schema": STORAGE_SCHEMA,
-                "storage_version": STORAGE_VERSION,
+                "reference_schema": REFERENCE_SCHEMA,
+                "reference_version": REFERENCE_VERSION,
                 "repair_chaser_gaps": False,
                 "selector_eligible": False,
-                "write_ownership": "single_importer_all_physical_chunks",
                 "source_sha256": admission.source_sha256,
             },
             input_artifacts=[
@@ -143,19 +143,18 @@ def import_unified_from_open_h5(
             ],
         )
     )
-    require(provenance_result.valid, "native_writer_provenance_invalid")
+    require(provenance_result.valid, "unified_writer_provenance_invalid")
     provenance = provenance_result.normalized
 
     zarr_path = Path(zarr_path).expanduser().resolve()
-    # No destination directory or group is created until every source check and
-    # metadata-budget check above has succeeded.
+    # No destination directory or group is created until admission succeeded.
     root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
-    require(root.metadata.zarr_format == 3, "native_candidate_requires_zarr_v3")
+    require(root.metadata.zarr_format == 3, "unified_run_requires_zarr_v3")
     parent = require_runs_parent(root.require_group("analysis"), "stimulus_runs")
     before = _selectors(parent)
     require(
         run_name not in parent and run_name not in before.values(),
-        "native_run_exists_or_reserved_use_new_name",
+        "unified_run_exists_or_reserved_use_new_name",
     )
     token, path = str(uuid4()), f"analysis/stimulus_runs/{run_name}"
 
@@ -166,7 +165,7 @@ def import_unified_from_open_h5(
         require(
             candidate is not None
             and candidate.attrs.get("stage_selector_eligible") is False,
-            "native_candidate_ownership_lost",
+            "unified_run_ownership_lost",
         )
         return candidate
 
@@ -178,43 +177,22 @@ def import_unified_from_open_h5(
         mark_run_started(lifecycle, run_name=run_name, stage="stimulus")
         attrs.update(
             source_profile=PROFILE,
-            native_storage_schema=STORAGE_SCHEMA,
-            native_storage_version=STORAGE_VERSION,
-        )
-        manifest_digest = write_native_candidate(
-            h5,
-            run,
-            admission=admission,
-            inventory=inventory,
-            run_name=run_name,
-            owner=token,
-            provenance=provenance,
-            assert_owner=fresh,
-        )
-        repeated = validate_unified_h5_artifact(
-            h5, source_h5=source_h5, finalization_receipt=receipt
-        )
-        require(
-            repeated.source_identity == admission.source_identity
-            and repeated.manifest_claims() == admission.manifest_claims()
-            and inspect_native_inventory(h5, repeated.node_kinds) == inventory,
-            "native_source_changed_during_copy",
-        )
-        attrs[MANIFEST_DIGEST_ATTR] = manifest_digest
-        require(
-            _selectors(root["analysis/stimulus_runs"]) == before,
-            "native_import_parent_selection_changed",
-        )
-        # With explicit ineligibility and a non-reserved run name this executes
-        # normal provenance finalization without publishing any selector.
-        mark_run_complete(
-            lifecycle, parent_group=parent, run_name=run_name, run_provenance=provenance
+            unified_reference_schema=REFERENCE_SCHEMA,
+            unified_reference_version=REFERENCE_VERSION,
         )
         fresh()
-        verify_unpublished_native_candidate(root, run_name=run_name)
+        attrs[REFERENCE_DIGEST_ATTR] = seal_reference(
+            run, h5, admission=admission, scan=scan,
+            source_h5=source_h5, zarr_path=zarr_path,
+        )
+        # Nothing was copied, so no second admission pass: an unchanged
+        # size/mtime/inode on the open handle is what the reference relies on.
         require(
-            _selectors(root["analysis/stimulus_runs"]) == before,
-            "native_import_parent_selection_changed",
+            source_identity(h5, Path(source_h5)) == admission.source_identity,
+            "unified_source_changed_during_admission",
+        )
+        mark_run_complete(
+            lifecycle, parent_group=parent, run_name=run_name, run_provenance=provenance
         )
         fresh()
         owner.consolidate_metadata_capture_expected_warnings(zarr_path)
@@ -222,18 +200,9 @@ def import_unified_from_open_h5(
         published = zarr.open_group(str(zarr_path), mode="r", use_consolidated=True)
         require(
             _selectors(published["analysis/stimulus_runs"]) == before
-            and _selectors(root["analysis/stimulus_runs"]) == before,
-            "native_consolidated_selection_changed",
-        )
-        loaded = load_unified_stimulus_candidate(published, run_name=run_name)
-        require(
-            loaded.admission == admission.manifest_claims(),
-            "native_published_admission_changed",
-        )
-        require(
-            source_file_digest(h5, admission.source_identity)
-            == admission.source_sha256,
-            "native_source_changed_before_return",
+            and open_unified_source(published, run_name=run_name).admission
+            == admission.manifest_claims(),
+            "unified_published_selection_or_admission_changed",
         )
         fresh()
     return run_name
