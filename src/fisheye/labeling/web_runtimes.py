@@ -1126,7 +1126,10 @@ def _subject_mask_runtime_state(
         "pending_apply_effect_count": int(pending_effect_count),
         "resumable_apply_id": str(pending_effects[0].get("apply_id") or "") if pending_effects else None,
         "apply_effects_background": bool(getattr(runtime, "apply_effects_background", False)),
-        "apply_effects_status": apply_effects_status(store, runtime) if pending_effect_count else None,
+        "apply_effects_status": (
+            apply_effects_status(store, runtime)
+            if pending_effect_count and getattr(runtime, "apply_effects_background", False) else None
+        ),
         "qc_status": "complete" if qc_current else "pending" if pending_effects else "not_recorded",
         "qc_edit_revision": qc_policy.get("edit_revision") if isinstance(qc_policy, Mapping) else None,
         "tail_refresh": tail_successor_offer(store, runtime),
