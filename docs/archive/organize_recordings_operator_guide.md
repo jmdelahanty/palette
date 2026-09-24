@@ -1,5 +1,7 @@
 # Organize Recordings
 
+> **Retired 2026-09-24:** the legacy per-H5 organizer CLI described here was removed. New recordings enter only through transfer-v2 parent intake (`fisheye.utils.run_citrus_session_import`, launched by `scripts/submit_citrus_session_import_bsub.sh`). Kept for historical reference.
+
 This guide walks you through taking a freshly acquired dataset and organizing
 it into the directory structure that the rest of the Palette pipeline expects.
 
