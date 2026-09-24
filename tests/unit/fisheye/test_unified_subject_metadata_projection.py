@@ -21,7 +21,7 @@ from fisheye.shared.experiment_setup import resolve_experiment_setup
 from fisheye.shared.subject_metadata import resolve_subject_metadata
 from fisheye.shared.unified_h5 import UnifiedH5ContractError
 from fisheye.shared.unified_h5.metadata import string_attributes
-from fisheye.shared.unified_h5.storage import MANIFEST_DIGEST_ATTR
+from fisheye.shared.unified_h5.reference import REFERENCE_DIGEST_ATTR
 from fisheye.utils import import_recording_analysis as mod
 from tests.unit.fisheye.test_import_recording_analysis import (
     _acquisition_authority_updates,
@@ -127,9 +127,9 @@ def test_setup_records_its_verified_native_source(tmp_path: Path) -> None:
     assert source["kind"] == "unified_native_subject_metadata"
     assert source["group_path"] == "/metadata/subject"
     assert source["native_run_path"] == "analysis/stimulus_runs/candidate"
-    assert source["native_manifest_sha256"] == root[
+    assert source["unified_reference_sha256"] == root[
         "analysis/stimulus_runs/candidate"
-    ].attrs[MANIFEST_DIGEST_ATTR]
+    ].attrs[REFERENCE_DIGEST_ATTR]
 
 
 def test_missing_subject_count_refuses_rather_than_inventing(tmp_path: Path) -> None:
