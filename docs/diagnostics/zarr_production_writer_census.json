@@ -70808,7 +70808,7 @@
     "parsed_writer_candidate_module_count": 409,
     "reader_required_array_declaration_count": 117,
     "resolved_writer_leaf_name_count": 641,
-    "scanned_python_module_count": 1766,
+    "scanned_python_module_count": 1767,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
