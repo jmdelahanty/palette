@@ -33,11 +33,11 @@ from fisheye.labeling.assignment_store import LabelingStore
 from fisheye.labeling import web_keypoint_checkpoints as checkpoint_mod
 from fisheye.labeling import web_keypoint_checkpoint_apply as apply_mod
 from fisheye.labeling import web_keypoint_checkpoint_routes as checkpoint_routes
+from fisheye.labeling.web_keypoint_checkpoint_apply import apply_keypoint_checkpoints
 from fisheye.labeling.web_keypoint_checkpoints import (
     KEYPOINT_APPLY_INFLIGHT_ATTR,
     KEYPOINT_APPLY_RECEIPTS_ATTR,
     KeypointCheckpointConflict,
-    apply_keypoint_checkpoints,
     checkpoint_snapshot_digest,
     current_keypoint_payload,
     keypoint_checkpoint_state,
@@ -2333,3 +2333,18 @@ def test_web_config_ignores_whitespace_positional_zarr_in_registry_mode(
 
     assert config.zarr_path is None
     assert config.registry_path == str(tmp_path / "palette_registry.sqlite")
+
+
+@pytest.mark.parametrize(
+    "module",
+    (
+        "fisheye.labeling.web_keypoint_checkpoint_apply",
+        "fisheye.labeling.web_keypoint_checkpoints",
+        "fisheye.labeling.web_keypoint_checkpoint_routes",
+    ),
+)
+def test_keypoint_checkpoint_modules_import_in_a_fresh_interpreter(module: str) -> None:
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", f"import {module}"], check=True)

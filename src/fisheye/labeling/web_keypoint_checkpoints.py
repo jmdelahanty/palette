@@ -1412,9 +1412,6 @@ def _write_intended_rows(
             _write_field(arrays[field_name], field_name, rows, intended)
 
 
-from .web_keypoint_checkpoint_apply import apply_keypoint_checkpoints  # noqa: E402
-
-
 __all__ = [
     "KEYPOINT_APPLY_INFLIGHT_ATTR",
     "KEYPOINT_APPLY_RECEIPTS_ATTR",
@@ -1422,7 +1419,6 @@ __all__ = [
     "KEYPOINT_CHECKPOINT_SAVE_MODE",
     "KEYPOINT_IMMUTABLE_DIRECT_SAVE_MODE",
     "KeypointCheckpointConflict",
-    "apply_keypoint_checkpoints",
     "checkpoint_snapshot_digest",
     "count_unfinished_keypoint_checkpoint_edits",
     "current_keypoint_payload",
