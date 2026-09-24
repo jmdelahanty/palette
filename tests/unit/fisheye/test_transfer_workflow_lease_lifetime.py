@@ -80,7 +80,6 @@ def test_writer_retains_workflow_lease_after_supervisor_sigkill(tmp_path):
     )
     arguments = [
         str(source),
-        "--transfer-v2",
         "--recording-only",
         "--apply",
         "--recording-type",

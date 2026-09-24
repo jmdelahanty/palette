@@ -278,7 +278,6 @@ def main() -> None:
             "-m",
             "fisheye.utils.run_citrus_session_import",
             delivery,
-            "--transfer-v2",
             "--apply",
             "--recording-type",
             "behavior",

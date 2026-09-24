@@ -19,22 +19,21 @@ WRITER_LOCK_PATH="${PALETTE_REGISTRY_WRITER_LOCK_PATH:-/tmp/palette-registry-wri
 SHADOW_TEMP_ROOT="${PALETTE_REGISTRY_SHADOW_TEMP_ROOT:-/tmp/palette-registry-shadows}"
 SHADOW_BACKUP_DIR="${PALETTE_REGISTRY_SHADOW_BACKUP_DIR:-}"
 RECORDING_ONLY=0
-RUN_VIDEO_DIAGNOSTICS=1
-RUN_H5_DIAGNOSTICS=1
+RECORDING_TYPE=""
+RECORDING_SUBTYPE=""
+BEHAVIOR_MODE=""
+RESUME_TRANSFER_PLAN=""
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
   cat <<'USAGE'
 Usage: submit_citrus_session_import_bsub.sh --session-dir PATH [options]
 
-Submit one LSF job for a completed Citrus transfer session.
+Submit one LSF job that ingests a completed Citrus transfer through
+transfer-v2 parent intake (the only ingest path; see
+fisheye.utils.run_citrus_session_import).
 
-The job payload is intentionally conservative: it organizes one completed
-session into the recordings store, creates/imports analysis Zarrs, and
-optionally scans those Zarrs into a registry during import. It does not run
-detect/refine.
-
-Required:
+Options:
   --session-dir PATH             Completed Citrus session directory
 
 Options:
@@ -55,12 +54,11 @@ Options:
   --registry PATH                Registry SQLite path used with --register
                                 (default: $PALETTE_REGISTRY or /groups/.../palette_registry.sqlite)
   --writer-host HOST             Designated registry writer host; required with --register
-  --recording-only               Import Orange external_ipc video-only recordings
-                                without H5; selects the no-H5 organizer mode
-  --run-video-diagnostics        Persist video preflight diagnostics in manifests (default)
-  --no-run-video-diagnostics     Skip video preflight diagnostics
-  --run-h5-diagnostics           Persist H5 preflight diagnostics in manifests (default)
-  --no-run-h5-diagnostics        Skip H5 preflight diagnostics
+  --recording-only               Import camera-video-only recordings without stimulus
+  --recording-type TYPE          Recording context (required unless resuming)
+  --recording-subtype SUBTYPE    Recording subtype (required unless resuming)
+  --behavior-mode MODE           free, embedded or none (required unless resuming)
+  --resume-transfer-plan PATH    Exact saved organization plan for a retry
   --dry-run                      Print files and submit command; do not submit
   -h, --help                     Show this message
 USAGE
@@ -83,10 +81,10 @@ while [[ $# -gt 0 ]]; do
     --registry) REGISTRY="$2"; shift 2;;
     --writer-host) WRITER_HOST="$2"; shift 2;;
     --recording-only) RECORDING_ONLY=1; shift;;
-    --run-video-diagnostics) RUN_VIDEO_DIAGNOSTICS=1; shift;;
-    --no-run-video-diagnostics) RUN_VIDEO_DIAGNOSTICS=0; shift;;
-    --run-h5-diagnostics) RUN_H5_DIAGNOSTICS=1; shift;;
-    --no-run-h5-diagnostics) RUN_H5_DIAGNOSTICS=0; shift;;
+    --recording-type) RECORDING_TYPE="$2"; shift 2;;
+    --recording-subtype) RECORDING_SUBTYPE="$2"; shift 2;;
+    --behavior-mode) BEHAVIOR_MODE="$2"; shift 2;;
+    --resume-transfer-plan) RESUME_TRANSFER_PLAN="$2"; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage; exit 0;;
     --*) echo "Unknown arg: $1" >&2; usage; exit 2;;
@@ -127,6 +125,11 @@ fi
 
 if [[ "$DRY_RUN" != "1" && ! -d "$SESSION_DIR" ]]; then
   echo "Session directory not found: $SESSION_DIR" >&2
+  exit 2
+fi
+
+if [[ -z "$RESUME_TRANSFER_PLAN" && ( -z "$RECORDING_TYPE" || -z "$RECORDING_SUBTYPE" || -z "$BEHAVIOR_MODE" ) ]]; then
+  echo "Transfer-v2 intake requires --recording-type, --recording-subtype and --behavior-mode (or --resume-transfer-plan)" >&2
   exit 2
 fi
 
@@ -171,6 +174,10 @@ quoted_writer_host="$(printf '%q' "$WRITER_HOST")"
 quoted_writer_lock_path="$(printf '%q' "$WRITER_LOCK_PATH")"
 quoted_shadow_temp_root="$(printf '%q' "$SHADOW_TEMP_ROOT")"
 quoted_shadow_backup_dir="$(printf '%q' "$SHADOW_BACKUP_DIR")"
+quoted_recording_type="$(printf '%q' "$RECORDING_TYPE")"
+quoted_recording_subtype="$(printf '%q' "$RECORDING_SUBTYPE")"
+quoted_behavior_mode="$(printf '%q' "$BEHAVIOR_MODE")"
+quoted_resume_plan="$(printf '%q' "$RESUME_TRANSFER_PLAN")"
 
 cat >"$JOB_SCRIPT" <<JOBSCRIPT
 #!/usr/bin/env bash
@@ -189,8 +196,10 @@ export PALETTE_REGISTRY_SHADOW_BACKUP_DIR=${quoted_shadow_backup_dir}
 JOB_DRY_RUN=${JOB_DRY_RUN}
 REGISTER=${REGISTER}
 RECORDING_ONLY=${RECORDING_ONLY}
-RUN_VIDEO_DIAGNOSTICS=${RUN_VIDEO_DIAGNOSTICS}
-RUN_H5_DIAGNOSTICS=${RUN_H5_DIAGNOSTICS}
+RECORDING_TYPE=${quoted_recording_type}
+RECORDING_SUBTYPE=${quoted_recording_subtype}
+BEHAVIOR_MODE=${quoted_behavior_mode}
+RESUME_TRANSFER_PLAN=${quoted_resume_plan}
 JOB_ID="\${LSB_JOBID:-manual}"
 STATUS_FILE="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.status.txt"
 STATUS_JSON="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.status.json"
@@ -219,11 +228,10 @@ fi
 if [[ "\${RECORDING_ONLY}" == "1" ]]; then
   cmd+=(--recording-only)
 fi
-if [[ "\${RUN_VIDEO_DIAGNOSTICS}" == "1" ]]; then
-  cmd+=(--run-video-diagnostics)
-fi
-if [[ "\${RUN_H5_DIAGNOSTICS}" == "1" && "\${RECORDING_ONLY}" != "1" ]]; then
-  cmd+=(--run-h5-diagnostics)
+if [[ -n "\${RESUME_TRANSFER_PLAN}" ]]; then
+  cmd+=(--resume-transfer-plan "\${RESUME_TRANSFER_PLAN}")
+else
+  cmd+=(--recording-type "\${RECORDING_TYPE}" --recording-subtype "\${RECORDING_SUBTYPE}" --behavior-mode "\${BEHAVIOR_MODE}")
 fi
 
 printf 'payload_command='

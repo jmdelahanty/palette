@@ -15,7 +15,6 @@ def _arguments(tmp_path):
     source = Path(shutil.copytree(FIXTURES / "rolling", tmp_path / "staging"))
     arguments = [
         str(source),
-        "--transfer-v2",
         "--recording-only",
         "--recording-type",
         "behavior",

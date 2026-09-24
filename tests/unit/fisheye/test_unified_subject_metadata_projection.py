@@ -202,12 +202,39 @@ def test_process_import_projects_after_the_native_import(
         lambda _plan, stim_opts: order.append(("import", stim_opts.stimulus_run_name)) or (True, 0, ["cmd", "x"]),
     )
     monkeypatch.setattr(
+        mod, "require_unified_source_matches_recording",
+        lambda _plan, run_name: order.append(("identity", run_name)),
+    )
+    monkeypatch.setattr(
         mod, "project_unified_subject_metadata",
         lambda _plan, run_name: order.append(("project", run_name)) or None,
     )
 
     mod.process_recording_import(plan, opts, logger=None)
 
-    assert [step for step, _ in order] == ["import", "project"]
-    assert order[0][1] == order[1][1]
+    assert [step for step, _ in order] == ["import", "identity", "project"]
+    assert len({run_name for _, run_name in order}) == 1
     assert order[0][1].startswith("unified_native_")
+
+
+@pytest.mark.parametrize(
+    ("session", "camera", "ok"),
+    [
+        ("synthetic-paired-recording", "CAM-42", True),
+        ("another-acquisition", "CAM-42", False),
+        ("synthetic-paired-recording", "CAM-43", False),
+    ],
+)
+def test_unified_source_must_match_the_recording_identity(
+    tmp_path: Path, session: str, camera: str, ok: bool
+) -> None:
+    plan = _native_candidate(tmp_path, PRODUCTION_SUBJECT)
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    root.attrs.update(session_uuid=session, camera_id=camera)
+    zarr.consolidate_metadata(str(plan.zarr_path))
+
+    if ok:
+        mod.require_unified_source_matches_recording(plan, "candidate")
+    else:
+        with pytest.raises(ValueError, match="unified_h5_recording_mismatch"):
+            mod.require_unified_source_matches_recording(plan, "candidate")

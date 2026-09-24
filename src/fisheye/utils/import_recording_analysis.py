@@ -616,6 +616,30 @@ def import_experiment_setup(plan: RecordingAnalysisPlan) -> Optional[dict[str, A
     )
 
 
+def require_unified_source_matches_recording(
+    plan: RecordingAnalysisPlan, run_name: str
+) -> None:
+    """Refuse a unified H5 whose acquisition binding names another recording.
+
+    The recording's identity (Orange acquisition session, camera serial) comes
+    from transfer intake; the H5's comes from its validated acquisition
+    binding. Both must agree, or the stimulus data belongs to someone else.
+    """
+
+    root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+    admission = open_unified_source(
+        zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=True),
+        run_name=run_name,
+    ).admission
+    recording = (root.attrs.get("session_uuid"), root.attrs.get("camera_id"))
+    bound = (admission.get("recording_id"), admission.get("camera_serial"))
+    if recording != bound:
+        raise ValueError(
+            "unified_h5_recording_mismatch: recording (session, camera)="
+            f"{recording!r} but the H5 is bound to {bound!r}"
+        )
+
+
 def project_unified_subject_metadata(
     plan: RecordingAnalysisPlan, run_name: str
 ) -> Optional[dict[str, Any]]:
@@ -1081,6 +1105,14 @@ def process_recording_import(
                     ),
                 )
             if unified_h5:
+                try:
+                    require_unified_source_matches_recording(
+                        plan, str(stim_opts.stimulus_run_name)
+                    )
+                except Exception as exc:
+                    return RecordingImportResult(
+                        ok=False, failed_step="unified_h5_recording_identity", error=str(exc)
+                    )
                 try:
                     setup = project_unified_subject_metadata(
                         plan, str(stim_opts.stimulus_run_name)
