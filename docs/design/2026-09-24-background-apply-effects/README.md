@@ -93,7 +93,8 @@ A single daemon thread, started with the server, drains owed effects:
   queue as they do today.
 - **On failure:** a persistent banner: "Background update failed: <reason>.
   Retrying automatically." Retries back off (for example 30 s, 2 min, 10 min,
-  then hourly). An admin can see all failed effects in one place.
+  then hourly). Failures are emailed to the admin (the user) through the
+  existing notification email path; there is no separate admin page.
 - **The browser polls** the existing state endpoint every few seconds while
   `pending_apply_effect_count > 0`. No new push channel is needed.
 
@@ -177,10 +178,27 @@ Several quick Applies to the same run queue several effect jobs.
    (proposed), or keep blocking completion?
 2. Coalesce QC to the latest revision (proposed), and keep one tail successor
    per Apply for now (proposed)?
-3. Retry schedule and who is notified of failures (admin page only, or also
-   email, which already exists for exports)?
+3. ~~Who is notified of failures~~ Decided: email to the user only.
+
+## Follow-up: row-scoped QC
+
+The QC science is per-row: metrics, eye ellipses, eye-pair separation, and
+contours each depend only on that row's mask. The whole-run recompute comes
+from bookkeeping, not science:
+- staleness is one run-level flag;
+- contours are stored as one packed array with per-row offsets;
+- the check recomputes everything a second time.
+
+A row-scoped refresh would recompute only rows whose `row_revision` changed
+since the last QC, splice their contours into the packed arrays, and check only
+those rows. It needs a v2 QC policy stamp and a parity test against a full
+recompute, and it keeps a full recompute at approval or export. Estimated QC
+time for a 1–10 row Apply: about 12–22 s down to 1–2 s on `/groups`. Separate
+change, after the worker.
 
 ## Decision log
+
+- 2026-09-24: effect failures are emailed to the user only.
 
 - 2026-09-24: draft opened after live receipts showed about 2 minutes of effects
   per mask Apply. The user asked for saving to be fast or transparent so
