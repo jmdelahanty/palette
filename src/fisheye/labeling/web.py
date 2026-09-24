@@ -7915,15 +7915,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _print_json(payload)
         return 0
 
+    if args.command == "backup-store":  # read-only: never migrate the live store
+        from .store_backup import write_validated_copy
+
+        _print_json({**write_validated_copy(store_path, args.output, overwrite=bool(args.overwrite)), "ok": True})
+        return 0
+
     with LabelingStore(store_path) as store:
         store.initialize()
         if args.command == "init":
             _print_json({"ok": True, "store": str(store_path)})
-            return 0
-        if args.command == "backup-store":
-            result = store.backup_to(args.output, overwrite=bool(args.overwrite))
-            result["ok"] = True
-            _print_json(result)
             return 0
         if args.command == "users-list":
             users = store.list_labeling_users(status=args.status, role=args.role)
