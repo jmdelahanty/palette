@@ -557,8 +557,20 @@ def test_settle_trim_leaves_dynamic_epochs_alone(tmp_path: Path) -> None:
 def test_settle_trim_defaults_to_protocol_transition_duration(tmp_path: Path) -> None:
     zarr_path = _make_settle_archive(tmp_path, name="settle_protocol.zarr")
     root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    # goodbatbadbat shape: a SOLID_BLACK step precedes the CHASER step that
+    # carries the transition duration.
     root["analysis/stimulus_runs/stimulus_1"].attrs["protocol_json"] = json.dumps(
-        {"steps": [{"parameters": {"position_transition_duration_s": 2.0}}]}
+        {
+            "steps": [
+                {"parameters": {"stimulus_mode": "SOLID_BLACK"}},
+                {
+                    "parameters": {
+                        "position_transition_duration_s": 2.0,
+                        "chasers": [{"radius_mm": 5.0}],
+                    }
+                },
+            ]
+        }
     )
 
     result = build_chaser_radial_occupancy_result(zarr_path, chaser_distance_run="chaser_distance_1")

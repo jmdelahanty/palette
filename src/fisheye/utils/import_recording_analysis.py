@@ -8,12 +8,15 @@ This module intentionally excludes detect/refine orchestration. Use
 from __future__ import annotations
 
 import argparse
+import os
+import stat
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, List, Mapping, Optional
 
+import h5py
 import zarr
 
 from fisheye.registry.recording_identity_authority import (
@@ -21,8 +24,14 @@ from fisheye.registry.recording_identity_authority import (
 )
 from fisheye.shared.acquisition_frame_clock import (
     import_acquisition_frame_clock,
+    load_clipped_acquisition_frame_clock_source,
+    publish_acquisition_frame_clock,
 )
-from fisheye.shared.acquisition_video_streams import write_acquisition_video_stream_inventory
+from fisheye.shared.acquisition_video_streams import (
+    resolve_acquisition_manifest_file,
+    validate_acquisition_video_stream_inventory,
+    write_acquisition_video_stream_inventory,
+)
 from fisheye.shared.acquisition_crop_stream_ledger import (
     validate_current_acquisition_crop_stream_ledger,
 )
@@ -41,7 +50,12 @@ from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_wa
 from fisheye.shared.import_video_metadata import (
     probe_video_metadata,
     publish_external_video_acquisition_authority,
+    publish_clipped_video_collection_acquisition_authority,
     write_video_metadata,
+)
+from fisheye.shared.clipped_video_collection import (
+    SOURCE_VIDEO_COLLECTION_LAYOUT,
+    build_clipped_video_collection_metadata,
 )
 from fisheye.shared.recording_preflight import preflight_gate_reason
 from fisheye.shared.recording_manifest_context import validate_recording_manifest_context
@@ -53,6 +67,14 @@ from fisheye.shared.recording_import_receipt import (
     recording_import_receipt_paths,
 )
 from fisheye.shared.run_provenance import git_identity
+from fisheye.shared.unified_h5 import PROFILE as UNIFIED_H5_PROFILE
+from fisheye.shared.unified_h5 import UnifiedH5ContractError, declared_unified_profile
+from fisheye.shared.unified_h5.metadata import string_attributes
+from fisheye.shared.unified_h5.storage import (
+    MANIFEST_DIGEST_ATTR,
+    load_unified_stimulus_candidate,
+)
+from fisheye.shared.unified_h5.storage_schema import new_native_run_name
 from fisheye.shared.source_recording_identity import (
     SOURCE_ANALYSIS_CLASSIFICATION,
     SOURCE_RECORDING_IDENTITY_PROFILE,
@@ -64,6 +86,7 @@ from fisheye.shared.source_recording_identity import (
     load_strict_json_object,
 )
 from fisheye.shared.subject_metadata import (
+    normalize_subject_metadata,
     publish_subject_metadata,
     read_h5_subject_metadata,
 )
@@ -79,8 +102,12 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 class RecordingAnalysisPlan:
     recording_dir: Path
     h5_path: Optional[Path]
-    cam_video: Path
+    cam_video: Path | None
     zarr_path: Path
+    recording_layout: str = "single_video"
+    # External Citrus finalization receipt for a unified experimental H5. It is
+    # required to import a unified H5 and never inferred from the H5 location.
+    finalization_receipt_path: Path | None = None
 
 
 @dataclass
@@ -161,6 +188,43 @@ def _manifest_full_video(recording_dir: Path) -> Optional[Path]:
     return candidate
 
 
+def _manifest_recording_layout(manifest: Mapping[str, Any]) -> str:
+    if (
+        "rolling_clip_streams" in manifest
+        or manifest.get("source_layout") == "rolling_clips"
+    ):
+        if manifest.get("video_streams") is not None:
+            raise ValueError(
+                "current intake cannot declare both single-video and rolling streams"
+            )
+        if manifest.get("source_layout") != "rolling_clips" or not isinstance(
+            manifest.get("rolling_clip_streams"), Mapping
+        ):
+            raise ValueError(
+                "clipped intake requires explicit rolling_clip_streams and source_layout=rolling_clips"
+            )
+        return SOURCE_VIDEO_COLLECTION_LAYOUT
+    return "single_video"
+
+
+def _clipped_source_indexes(
+    recording_dir: Path, manifest: Mapping[str, Any]
+) -> dict[str, Path]:
+    if _manifest_recording_layout(manifest) != SOURCE_VIDEO_COLLECTION_LAYOUT:
+        raise ValueError("clipped source indexes require a declared clipped recording")
+    rolling = manifest["rolling_clip_streams"]
+    return {
+        field: resolve_acquisition_manifest_file(
+            recording_dir, rolling.get(field), label=field
+        )
+        for field in (
+            "recording_clip_index",
+            "recording_frame_index",
+            "recording_frame_index_manifest",
+        )
+    }
+
+
 def _producer_video_metadata(plan: RecordingAnalysisPlan) -> dict[str, Any]:
     """Return the organizer's producer-declared full-video fields, when present."""
 
@@ -232,13 +296,46 @@ def validate_recording_import_plan(
     reason = preflight_gate_reason(plan.recording_dir)
     if reason is not None:
         raise ValueError(reason)
-    _producer_video_metadata(plan)
+    layout = _manifest_recording_layout(manifest)
+    if plan.recording_layout != layout:
+        raise ValueError("recording plan layout differs from its manifest")
+    if layout == SOURCE_VIDEO_COLLECTION_LAYOUT:
+        if plan.cam_video is not None:
+            raise ValueError(
+                "clipped recording plans cannot use a single-video or first-clip stand-in"
+            )
+        _clipped_source_indexes(plan.recording_dir, manifest)
+        validate_acquisition_video_stream_inventory(plan.recording_dir, manifest)
+        declared_h5 = (
+            resolve_acquisition_manifest_file(
+                plan.recording_dir,
+                manifest["h5_relative_path"],
+                label="h5_relative_path",
+            )
+            if "h5_relative_path" in manifest
+            else None
+        )
+        if (
+            plan.h5_path.resolve() if plan.h5_path is not None else None
+        ) != declared_h5:
+            raise ValueError(
+                "clipped H5 source differs from its explicit manifest binding"
+            )
+    else:
+        if plan.cam_video is None:
+            raise ValueError("single-video recording plan requires its source video")
+        _producer_video_metadata(plan)
     try:
         plan.zarr_path.resolve().relative_to(plan.recording_dir.resolve())
     except ValueError as exc:
-        raise SourceRecordingIdentityError("analysis Zarr must be inside its recording directory") from exc
+        raise SourceRecordingIdentityError(
+            "analysis Zarr must be inside its recording directory"
+        ) from exc
     if plan.zarr_path.exists():
-        if load_source_recording_identity_profile(plan.zarr_path) != SOURCE_RECORDING_IDENTITY_PROFILE:
+        if (
+            load_source_recording_identity_profile(plan.zarr_path)
+            != SOURCE_RECORDING_IDENTITY_PROFILE
+        ):
             raise SourceRecordingIdentityError("legacy intake is forbidden")
     return manifest, identity
 
@@ -310,9 +407,16 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
         attrs.setdefault("organizer_recording_id", organizer_recording_id)
     if manifest:
         attrs.setdefault("recording_manifest_path", str(plan.recording_dir / "recording_manifest.json"))
-    attrs.setdefault("source_video", plan.cam_video.name)
-    attrs.setdefault("source_video_path", str(plan.cam_video))
-    attrs.setdefault("source_path", str(plan.cam_video))
+    if plan.recording_layout == SOURCE_VIDEO_COLLECTION_LAYOUT:
+        indexes = _clipped_source_indexes(plan.recording_dir, manifest)
+        attrs.setdefault("source_layout", "rolling_clips")
+        attrs.setdefault("source_frame_index_path", str(indexes["recording_frame_index"]))
+        attrs.setdefault("source_recording_frame_index_path", str(indexes["recording_frame_index"]))
+    else:
+        assert plan.cam_video is not None
+        attrs.setdefault("source_video", plan.cam_video.name)
+        attrs.setdefault("source_video_path", str(plan.cam_video))
+        attrs.setdefault("source_path", str(plan.cam_video))
     if plan.h5_path is None:
         attrs["experiment_context_status"] = "absent"
         attrs["experiment_context_source"] = "none"
@@ -335,6 +439,8 @@ def apply_video_metadata(
     *,
     overwrite: bool,
 ) -> dict[str, object]:
+    if plan.recording_layout == SOURCE_VIDEO_COLLECTION_LAYOUT:
+        return _apply_clipped_video_metadata(plan, overwrite=overwrite)
     root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
     raw = root.get("raw_video")
     marked = ACQUISITION_AUTHORITY_STATUS_ATTR in root.attrs or (
@@ -364,6 +470,64 @@ def apply_video_metadata(
     }
 
 
+def _apply_clipped_video_metadata(
+    plan: RecordingAnalysisPlan, *, overwrite: bool
+) -> dict[str, object]:
+    """Use the canonical collection owner; never the single-video metadata writer."""
+
+    manifest, identity = validate_recording_import_plan(plan)
+    indexes = _clipped_source_indexes(plan.recording_dir, manifest)
+    metadata = build_clipped_video_collection_metadata(
+        plan.recording_dir,
+        clip_index_path=indexes["recording_clip_index"],
+        frame_index_path=indexes["recording_frame_index"],
+        frame_manifest_path=indexes["recording_frame_index_manifest"],
+    )
+    if metadata["camera_id"] != identity.camera_id:
+        raise ValueError("clipped source camera differs from the recording manifest")
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    existing_metadata = root.attrs.get("source_video_metadata")
+    if existing_metadata is not None and existing_metadata != metadata:
+        raise ValueError(
+            "existing clipped acquisition metadata differs from the current source; rebinding is forbidden"
+        )
+    if any(
+        root.attrs.get(field) is not None
+        for field in ("source_video", "source_video_path", "source_path")
+    ):
+        raise ValueError(
+            "clipped source archive cannot retain single-video locator aliases"
+        )
+    raw = root.require_group("raw_video")
+    if any(name in raw for name in ("images_full", "images_ds", "images_ds_rgb")):
+        raise ValueError(
+            "clipped metadata import cannot authorize preexisting materialized pixels"
+        )
+    root_updates = {
+        "source_video_metadata": metadata,
+        "has_raw_video": False,
+        "raw_video_storage": "external_clips",
+    }
+    raw_updates = {
+        "storage_mode": "external_clips",
+        "has_images_full": False,
+        "has_images_ds": False,
+        "frame_index_source": indexes["recording_frame_index"]
+        .relative_to(plan.recording_dir.resolve())
+        .as_posix(),
+    }
+    root.attrs.update(root_updates)
+    raw.attrs.update(raw_updates)
+    authority = publish_clipped_video_collection_acquisition_authority(root)
+    h5_updates = _write_source_h5_fingerprint(root, plan.h5_path, overwrite=overwrite)
+    return {
+        "root_attrs_updated": len(root_updates) + h5_updates["root_attrs_updated"],
+        "raw_video_attrs_updated": len(raw_updates)
+        + h5_updates["raw_video_attrs_updated"],
+        **authority,
+    }
+
+
 def apply_acquisition_frame_clock(plan: RecordingAnalysisPlan) -> dict[str, object]:
     """Publish the full recording clock when Orange timing metadata exists."""
 
@@ -376,13 +540,19 @@ def apply_acquisition_frame_clock(plan: RecordingAnalysisPlan) -> dict[str, obje
     _ownership, frame = load_persisted_acquisition_camera_authority(
         root, expected_camera_id=camera_id,
     )
-    resolved = import_acquisition_frame_clock(
-        root,
-        recording_dir=plan.recording_dir,
-        camera_id=camera_id,
-        video_path=plan.cam_video,
-        expected_frame_count=frame.record.source_total_frames,
-    )
+    if plan.recording_layout == SOURCE_VIDEO_COLLECTION_LAYOUT:
+        source = load_clipped_acquisition_frame_clock_source(
+            plan.recording_dir, camera_id=camera_id,
+            frame_index_path=frame.record.source_video_metadata["locator"]["relative_path"],
+            expected_frame_count=frame.record.source_total_frames,
+        )
+        resolved = publish_acquisition_frame_clock(root, source)
+    else:
+        resolved = import_acquisition_frame_clock(
+            root, recording_dir=plan.recording_dir, camera_id=camera_id,
+            video_path=plan.cam_video,
+            expected_frame_count=frame.record.source_total_frames,
+        )
     if resolved is None:
         return {
             "available": False,
@@ -444,22 +614,71 @@ def import_experiment_setup(plan: RecordingAnalysisPlan) -> Optional[dict[str, A
     subject_metadata = read_h5_subject_metadata(plan.h5_path)
     if not subject_metadata:
         return None
-    root = zarr.open_group(str(plan.zarr_path), mode="r+")
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    return _publish_subject_and_setup(
+        root, subject_metadata, source_h5_path=plan.h5_path
+    )
+
+
+def project_unified_subject_metadata(
+    plan: RecordingAnalysisPlan, run_name: str
+) -> Optional[dict[str, Any]]:
+    """Publish subject metadata and setup from an admitted native candidate.
+
+    Reads ``/metadata/subject`` from the verified native copy (not the raw H5)
+    and publishes it through the same subject/setup owners as legacy import,
+    to the same locations. Missing fields such as ``subject_count`` refuse;
+    nothing is inferred (``subject_id`` is not ``fish_id``).
+    """
+
+    read_root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=True)
+    candidate = load_unified_stimulus_candidate(read_root, run_name=run_name)
+    run_path = f"analysis/stimulus_runs/{run_name}"
+    try:
+        descriptors = candidate.typed_attributes("/metadata/subject")
+    except UnifiedH5ContractError:
+        # No /metadata/subject node was copied: absent, as in legacy.
+        descriptors = {}
+    subject_metadata = normalize_subject_metadata(string_attributes(descriptors))
+    if not subject_metadata:
+        return None
+    source = {
+        "kind": "unified_native_subject_metadata",
+        "group_path": "/metadata/subject",
+        "count_field": "subject_count",
+        "native_run_path": run_path,
+        "native_manifest_sha256": str(read_root[run_path].attrs[MANIFEST_DIGEST_ATTR]),
+        "source_profile": UNIFIED_H5_PROFILE,
+    }
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    return _publish_subject_and_setup(root, subject_metadata, source_artifact=source)
+
+
+def _publish_subject_and_setup(
+    root: Any,
+    subject_metadata: Mapping[str, Any],
+    *,
+    source_h5_path: Path | None = None,
+    source_artifact: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     subject_authority = publish_subject_metadata(
         root,
         subject_metadata,
-        source_h5_path=plan.h5_path,
+        source_h5_path=source_h5_path,
+        source_artifact=source_artifact,
     )
     record = build_experiment_setup_record(
         subject_metadata,
-        source_h5_path=plan.h5_path,
+        source_h5_path=source_h5_path,
+        source=source_artifact,
         subject_metadata_sha256=subject_authority.record_sha256,
         subject_metadata_ref=subject_authority.group_path,
     )
     resolved = publish_experiment_setup(
         root,
         record,
-        source_h5_path=plan.h5_path,
+        source_h5_path=source_h5_path,
+        source_artifact=source_artifact,
     )
     return {
         "run_name": resolved.run_name,
@@ -587,9 +806,58 @@ def _consolidate_current_source_publication(
         )
 
 
-def run_stimulus_import(plan: RecordingAnalysisPlan, opts: RecordingImportOptions) -> tuple[bool, int, List[str]]:
+def _stimulus_import_lease_fds() -> tuple[int, ...]:
+    """Keep an explicitly inherited workflow lease alive in the stimulus writer."""
+    variable = "PALETTE_RECORDING_IMPORT_LEASE_FD"
+    value = os.environ.get(variable)
+    if value is None:
+        return ()
+    if not value or not value.isascii() or not value.isdecimal():
+        raise ValueError(f"{variable} must be a decimal nonnegative file descriptor")
+    try:
+        descriptor = int(value)
+        metadata = os.fstat(descriptor)
+    except (OSError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"{variable} must name an open regular-file descriptor"
+        ) from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"{variable} must name an open regular-file descriptor")
+    return (descriptor,)
+
+
+def stimulus_h5_unified_profile(h5_path: Path | None) -> str | None:
+    """Unified artifact profile declared by the stimulus H5, or None for legacy.
+
+    An absent or unreadable file is left to the importer, which re-detects a
+    unified H5 itself and refuses it without an explicit profile.
+    """
+
+    if h5_path is None or not Path(h5_path).is_file():
+        return None
+    try:
+        with h5py.File(h5_path, "r") as h5:
+            return declared_unified_profile(h5)
+    except OSError:
+        return None
+
+
+def run_stimulus_import(
+    plan: RecordingAnalysisPlan, opts: RecordingImportOptions
+) -> tuple[bool, int, List[str]]:
     if plan.h5_path is None:
         return False, 2, ["missing_h5_for_stimulus_import"]
+    unified_profile = stimulus_h5_unified_profile(plan.h5_path)
+    if unified_profile is not None:
+        if unified_profile != UNIFIED_H5_PROFILE:
+            return False, 2, [f"unsupported_unified_h5_profile:{unified_profile}"]
+        if plan.finalization_receipt_path is None:
+            return False, 2, ["unified_h5_requires_finalization_receipt"]
+        if opts.stimulus_overwrite:
+            return False, 2, ["unified_h5_import_is_immutable_no_overwrite"]
+        if opts.stimulus_metadata_and_calibration_only:
+            return False, 2, ["unified_h5_has_no_metadata_only_import"]
+    lease_fds = _stimulus_import_lease_fds()
     cmd = [
         sys.executable,
         "-m",
@@ -597,6 +865,15 @@ def run_stimulus_import(plan: RecordingAnalysisPlan, opts: RecordingImportOption
         str(plan.h5_path),
         str(plan.zarr_path),
     ]
+    if unified_profile is not None:
+        cmd.extend(
+            [
+                "--source-profile",
+                unified_profile,
+                "--finalization-receipt",
+                str(plan.finalization_receipt_path),
+            ]
+        )
     if opts.stimulus_run_name:
         cmd.extend(["--run-name", opts.stimulus_run_name])
     if opts.stimulus_overwrite:
@@ -606,7 +883,10 @@ def run_stimulus_import(plan: RecordingAnalysisPlan, opts: RecordingImportOption
     if opts.stimulus_metadata_and_calibration_only:
         cmd.append("--metadata-and-calibration-only")
     print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, check=False)
+    subprocess_options: dict[str, Any] = {"check": False}
+    if lease_fds:
+        subprocess_options["pass_fds"] = lease_fds
+    result = subprocess.run(cmd, **subprocess_options)
     return result.returncode == 0, result.returncode, cmd
 
 
@@ -732,7 +1012,21 @@ def process_recording_import(
         **frame_clock,
     )
 
-    if plan.h5_path is not None:
+    unified_h5 = plan.h5_path is not None and bool(
+        stimulus_h5_unified_profile(plan.h5_path)
+    )
+    if unified_h5:
+        # Subject metadata is projected after the native import admits the H5;
+        # without that import there is no verified copy to project from.
+        if not opts.import_stimulus:
+            _log(
+                logger,
+                "experiment_setup_not_projected",
+                recording_dir=str(plan.recording_dir),
+                zarr_path=str(plan.zarr_path),
+                reason="unified_h5_metadata_requires_native_import",
+            )
+    elif plan.h5_path is not None:
         try:
             setup = import_experiment_setup(plan)
         except Exception as exc:
@@ -764,7 +1058,13 @@ def process_recording_import(
                 reason="stimulus_runs already present",
             )
         else:
-            stim_ok, stim_rc, stim_cmd = run_stimulus_import(plan, opts)
+            stim_opts = opts
+            if unified_h5:
+                stim_opts = replace(
+                    opts,
+                    stimulus_run_name=opts.stimulus_run_name or new_native_run_name(),
+                )
+            stim_ok, stim_rc, stim_cmd = run_stimulus_import(plan, stim_opts)
             _log(
                 logger,
                 "stimulus_result",
@@ -778,7 +1078,29 @@ def process_recording_import(
                     ok=False,
                     failed_step="import_stimulus_to_zarr",
                     returncode=int(stim_rc),
-                    error="stimulus import failed",
+                    error=(
+                        f"stimulus import refused: {stim_cmd[0]}"
+                        if len(stim_cmd) == 1
+                        else "stimulus import failed"
+                    ),
+                )
+            if unified_h5:
+                try:
+                    setup = project_unified_subject_metadata(
+                        plan, str(stim_opts.stimulus_run_name)
+                    )
+                except Exception as exc:
+                    return RecordingImportResult(
+                        ok=False, failed_step="import_experiment_setup", error=str(exc)
+                    )
+                _log(
+                    logger,
+                    "experiment_setup_imported" if setup else "subject_metadata_absent",
+                    recording_dir=str(plan.recording_dir),
+                    zarr_path=str(plan.zarr_path),
+                    source="unified_native_candidate",
+                    native_run=str(stim_opts.stimulus_run_name),
+                    **(setup or {}),
                 )
 
     crop_ledger = (
@@ -855,7 +1177,15 @@ def resolve_single_recording_plan(
     if not rec_dir.exists() or not rec_dir.is_dir():
         raise ValueError(f"recording_dir not found: {rec_dir}")
 
-    if video is None:
+    # Preserve single-video path diagnostics when no manifest exists; the final
+    # current-profile validation still requires it before any intake write.
+    manifest = _load_recording_manifest(rec_dir) if (rec_dir / "recording_manifest.json").exists() else {}
+    layout = _manifest_recording_layout(manifest)
+    if layout == SOURCE_VIDEO_COLLECTION_LAYOUT:
+        if video is not None:
+            raise ValueError("clipped recordings bind a frame index, not an explicit video")
+        cam_video = None
+    elif video is None:
         cams_dir = rec_dir / "cams"
         mp4s = sorted(cams_dir.glob("*.mp4"))
         if not mp4s:
@@ -878,7 +1208,16 @@ def resolve_single_recording_plan(
         if not cam_video.exists() or not cam_video.is_file():
             raise ValueError(f"video not found: {cam_video}")
 
-    if h5 is None:
+    if layout == SOURCE_VIDEO_COLLECTION_LAYOUT:
+        h5_path = (
+            resolve_acquisition_manifest_file(rec_dir, manifest["h5_relative_path"], label="h5_relative_path")
+            if "h5_relative_path" in manifest else None
+        )
+        if h5 is not None and h5.expanduser().resolve() != h5_path:
+            raise ValueError("clipped H5 override differs from the explicit manifest binding")
+        if require_h5 and h5_path is None:
+            raise ValueError("clipped recording has no manifest-declared H5 source")
+    elif h5 is None:
         raw_dir = rec_dir / "raw"
         h5s = sorted(raw_dir.glob("*.h5"))
         if not h5s:
@@ -906,6 +1245,7 @@ def resolve_single_recording_plan(
         h5_path=h5_path,
         cam_video=cam_video,
         zarr_path=zarr_path,
+        recording_layout=layout,
     )
     validate_recording_import_plan(plan)
     return plan
@@ -933,6 +1273,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--recording-dir", type=Path, required=True, help="Recording directory to process.")
     parser.add_argument("--video", type=Path, help="Optional explicit camera video path.")
     parser.add_argument("--h5", type=Path, help="Optional explicit stimulus H5 path.")
+    parser.add_argument(
+        "--finalization-receipt",
+        type=Path,
+        help="External Citrus finalization receipt; required when the H5 is a unified experimental H5.",
+    )
     parser.add_argument("--output", type=Path, help="Optional explicit analysis zarr output path.")
 
     parser.add_argument("--apply", action="store_true", help="Execute import steps.")
@@ -999,6 +1344,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     except ValueError as exc:
         print(f"Plan resolution failed: {exc}")
         return 1
+    if args.finalization_receipt is not None:
+        plan = replace(
+            plan,
+            finalization_receipt_path=args.finalization_receipt.expanduser().resolve(),
+        )
 
     print("Single recording import plan")
     print(f"  recording_dir: {plan.recording_dir}")

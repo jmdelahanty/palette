@@ -1,0 +1,166 @@
+"""Synthetic renderer-only stimulus H5, built before the transfer is sealed.
+
+Uses the repository's supported semantic-v1 fixture grammar, not a mocked
+importer. This is not Citrus acquisition telemetry or scientific calibration.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import h5py
+import numpy as np
+
+from tests.canaries.parent_intake.safety import validate_new_h5_path
+
+
+def write_stimulus_h5(
+    path: Path,
+    *,
+    camera: str,
+    session_id: str,
+    start_ns: int,
+    frame_ns: int,
+    missing_frames: bool = False,
+) -> dict:
+    from tests.unit.fisheye.test_import_stimulus_to_zarr_paths import (
+        _write_stimulus_h5_with_protocol_steps,
+    )
+    from fisheye.shared.protocol_semantic_contract import (
+        read_protocol_semantic_snapshot,
+    )
+    from fisheye.shared.stimulus_coordinate_contract import (
+        preflight_stimulus_coordinate_contract,
+    )
+
+    validate_new_h5_path(path)
+    semantic_hash = _write_stimulus_h5_with_protocol_steps(path, modern_semantic=True)
+    # The source fixture is still private/unsealed; historical test outputs
+    # and all transfer snapshots are left untouched.
+    matrix = np.eye(3, dtype=np.float64)
+    yaml_bytes = (
+        b"%YAML:1.0\n---\nhomography_matrix:\n  rows: 3\n  cols: 3\n"
+        b"  dt: d\n  data: [1, 0, 0, 0, 1, 0, 0, 0, 1]\n"
+    )
+    artifact = path.parent / f"synthetic_homography_{camera}.yml"
+    artifact.write_bytes(yaml_bytes)
+    fnv = 0xCBF29CE484222325
+    for value in yaml_bytes:
+        fnv = ((fnv ^ value) * 0x100000001B3) & ((1 << 64) - 1)
+    frames = np.asarray(
+        [(1000 + index, index + 1, start_ns + index * frame_ns) for index in range(3)],
+        dtype=[
+            ("stimulus_frame_num", "<u8"),
+            ("triggering_camera_frame_id", "<u8"),
+            ("timestamp_ns", "<i8"),
+        ],
+    )
+    with h5py.File(path, "r+") as h5:
+        h5.attrs.update(
+            camera_id=camera,
+            session_uuid=session_id,
+            canvas_name="synthetic",
+            synthetic_fixture=True,
+        )
+        del h5["video_metadata/frame_metadata"]
+        if not missing_frames:
+            h5["video_metadata"].create_dataset("frame_metadata", data=frames)
+        events = h5["events"][:]
+        events["camera_frame_id"] = [1, 2, 3, 3]
+        h5["events"][:] = events
+        calib = h5["calibration_snapshot"]
+        config = json.loads(calib["arena_config_json"][()])
+        config.update(
+            active_camera_id=camera,
+            experimental_area_center_x_px=16.0,
+            experimental_area_center_y_px=16.0,
+            experimental_area_radius_px=12.0,
+            sub_arena_x_px=0,
+            sub_arena_y_px=0,
+            sub_arena_width_px=32,
+            sub_arena_height_px=32,
+        )
+        config["camera_calibrations"][0].update(
+            camera_id=camera,
+            native_width_px=32,
+            native_height_px=32,
+            pixels_per_mm_camera=2.0,
+            pixels_per_mm_projector=2.0,
+            real_world_ref_mm=1.0,
+        )
+        del calib["arena_config_json"]
+        calib.create_dataset("arena_config_json", data=json.dumps(config).encode())
+        calib.move("2010093", camera)
+        cam = calib[camera]
+        cam.attrs.update(
+            pixels_per_mm_camera=2.0, pixels_per_mm_projector=2.0, real_world_ref_mm=1.0
+        )
+        # The helper's dummy image buffer is not scientific evidence and is
+        # unnecessary for this renderer-only fixture.
+        del cam["scale_models"]
+        cam["homography_matrix"][:] = matrix
+        yaml_attrs = dict(cam["homography_matrix_yml"].attrs)
+        del cam["homography_matrix_yml"]
+        cam.create_dataset("homography_matrix_yml", data=yaml_bytes).attrs.update(
+            yaml_attrs
+        )
+        for name in ("homography_matrix", "homography_matrix_yml"):
+            cam[name].attrs.update(
+                camera_id=camera,
+                canvas_name="synthetic",
+                homography_artifact_path=str(artifact),
+                homography_artifact_size_bytes=len(yaml_bytes),
+                homography_artifact_mtime_unix_ns=artifact.stat().st_mtime_ns,
+                homography_artifact_checksum_fnv1a64=f"{fnv:016x}",
+            )
+        calib["arena_geometry"].attrs.update(
+            arena_region_width_px=32,
+            arena_region_height_px=32,
+            arena_origin_in_canvas_x_px=0,
+            arena_origin_in_canvas_y_px=0,
+        )
+        del h5["stimulus_coordinates"]
+        renderer = h5.create_group("stimulus_renderer_snapshot")
+        renderer.attrs.update(
+            schema_id="citrus.stimulus_renderer_snapshot",
+            schema_version=1,
+            capture_phase="experiment_start_after_arena_initialization",
+        )
+        arena = renderer.create_group("arena_1")
+        arena.attrs.update(
+            active_stimulus_mode="MOVING_GRATING",
+            texture_width_px=32,
+            texture_height_px=32,
+            texture_origin="top_left",
+        )
+        arena.create_group("custom_coordinates").attrs.update(
+            texture_center_x=16.0, texture_center_y=16.0
+        )
+    with h5py.File(path, "r") as h5:
+        semantic = read_protocol_semantic_snapshot(h5)
+        assert semantic.semantic_hash == semantic_hash
+        preflight = preflight_stimulus_coordinate_contract(
+            h5, source_h5=path, metadata_and_calibration_only=False
+        )
+        assert preflight.selected_calibration.active_camera_id == camera
+        assert (
+            not preflight.has_chaser_states
+            and not preflight.omitted_coordinate_source_paths
+        )
+    return {
+        "camera_id": camera,
+        "source_h5": path.name,
+        "protocol_semantic_hash": semantic_hash,
+        "protocol_snapshot_schema_version": semantic.snapshot_schema_version,
+        "fixture_variant": "missing_frame_metadata"
+        if missing_frames
+        else "valid_renderer_only",
+        "expected_stimulus_frames": [1000, 1001, 1002],
+        "expected_camera_frame_ids": [1, 2, 3],
+        "expected_event_camera_frame_ids": [1, 2, 3, 3],
+        "expected_step_count": 2,
+        "metadata_only_bypass_requested": False,
+        "scientific_calibration": False,
+        "sealed_stimulus_to_acquisition_mapping": False,
+    }
