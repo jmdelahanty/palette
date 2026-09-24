@@ -37,6 +37,11 @@ CAMERAS = ["02010093", "02010094"]
 RATE = 2
 START_NS = 1700000000000000000
 FRAME_NS = 1000000000 // RATE
+# Pinned Citrus fixture shapes: producer layout label and full-clip frame counts.
+LAYOUTS = {
+    "rolling": {"recording_layout": "rolling_clips", "clip_frame_counts": [2, 1]},
+    "single": {"recording_layout": "single_video", "clip_frame_counts": [2]},
+}
 
 
 def inventory(root: Path) -> list[dict]:
@@ -52,7 +57,7 @@ def inventory(root: Path) -> list[dict]:
 
 
 def add_synthetic_context(
-    source: Path, write_json, *, stimulus: str = "none"
+    source: Path, write_json, *, stimulus: str = "none", frame_count: int = 3
 ) -> list[dict]:
     """Test H5/geometry custody; all contents are declared synthetic before seal."""
     import h5py
@@ -72,6 +77,7 @@ def add_synthetic_context(
                     start_ns=START_NS,
                     frame_ns=FRAME_NS,
                     missing_frames=stimulus == "missing-frame-metadata",
+                    camera_frame_count=frame_count,
                 )
             )
         else:
@@ -236,7 +242,16 @@ def main() -> None:
         choices=("none", "renderer-only", "missing-frame-metadata"),
         default="none",
     )
+    parser.add_argument(
+        "--layout",
+        choices=tuple(LAYOUTS),
+        default="rolling",
+        help="Pinned Citrus transfer-v2 parent layout (rolling_clips or single_video)",
+    )
     args = parser.parse_args()
+    layout = LAYOUTS[args.layout]
+    clip_frame_counts = layout["clip_frame_counts"]
+    total_frames = sum(clip_frame_counts)
     if args.stimulus != "none" and not args.with_context:
         parser.error("--stimulus requires --with-context")
     producer = args.producer_repo.resolve(strict=True)
@@ -262,8 +277,15 @@ def main() -> None:
     sys.path.insert(0, str(palette))
     from recording_transfer_fixture import fixture, write_json, MARKER
 
-    manifest = fixture(source, rolling=True, cameras=2, clips=2, crop=True)
+    if args.layout == "rolling":
+        manifest = fixture(source, rolling=True, cameras=2, clips=2, crop=True)
+    else:
+        # Orange's native single-video manifest shape (clip-only fields absent).
+        manifest = fixture(
+            source, rolling=False, cameras=2, crop=True, native_single_clip=True
+        )
     assert manifest["cameras"] == CAMERAS
+    assert len(manifest["clips"]) == len(clip_frame_counts)
     manifest["session_id"] = SESSION_ID
     # All payload references are relative; this is a declared synthetic root,
     # not a live acquisition location and not the temporary output directory.
@@ -298,13 +320,14 @@ def main() -> None:
     ffprobe_version = run(["/usr/bin/ffprobe", "-version"]).stdout.splitlines()[0]
     media = []
     for clip in manifest["clips"]:
-        clip["session_id"] = SESSION_ID
+        if args.layout == "rolling" or "session_id" in clip:
+            clip["session_id"] = SESSION_ID
         for camera, outputs in clip["recording_outputs"].items():
             for kind, output in outputs.items():
                 count = output["frame_count"]
                 first = output["first_recording_frame_id"]
                 last = output["last_recording_frame_id"]
-                assert count == (2 if clip["clip_index"] == 0 else 1)
+                assert count == clip_frame_counts[clip["clip_index"]]
                 video = source / output["video"]
                 filters = (
                     f"trim=start_frame={first - 1}:end_frame={last},setpts=PTS-STARTPTS"
@@ -470,7 +493,7 @@ def main() -> None:
     stimulus_evidence = []
     if args.with_context:
         stimulus_evidence = add_synthetic_context(
-            source, write_json, stimulus=args.stimulus
+            source, write_json, stimulus=args.stimulus, frame_count=total_frames
         )
     (source / "fixture_notice.txt").write_text(
         "SYNTHETIC TEST FIXTURE — NEVER SUBMIT TO PRODUCTION STAGING.\n"
@@ -501,7 +524,7 @@ def main() -> None:
             "contracts_commit": CONTRACTS_COMMIT,
             "synthetic_session_id": SESSION_ID,
             "camera_serials": CAMERAS,
-            "clip_frame_counts": [2, 1],
+            "clip_frame_counts": clip_frame_counts,
             "full_geometry": {"width": 32, "height": 32},
             "crop_geometry": {"width": 16, "height": 16, "x": 8, "y": 8},
             "timestamp_start_ns": START_NS,
@@ -543,12 +566,18 @@ def main() -> None:
     snapshot = json.loads((destination / "_citrus_transfer/snapshot.json").read_bytes())
     assert snapshot["inventory"] == before
     assert marker["parent_recording_count"] == 2
-    assert snapshot["recording_layout"] == "rolling_clips"
+    assert snapshot["recording_layout"] == layout["recording_layout"]
     assert snapshot["recording_payload_kind"] == (
         "citrus_h5" if args.with_context else "video_only"
     )
     assert [p["parent_key"]["camera_serial"] for p in snapshot["parents"]] == CAMERAS
-    assert all(len(p["clips"]) == 2 for p in snapshot["parents"])
+    for parent in snapshot["parents"]:
+        assert [
+            output["frame_map"]["frame_count"]
+            for clip in parent["clips"]
+            for output in clip["outputs"]
+            if output["output_kind"] == "full"
+        ] == clip_frame_counts
     for item in before:
         assert sha256(destination / item["path"]) == item["sha256"]
     write_json(evidence / "source_inventory_before.json", {"inventory": before})
@@ -579,7 +608,9 @@ def main() -> None:
         "snapshot_id": marker["snapshot_id"],
         "parent_count": 2,
         "camera_serials": CAMERAS,
-        "clip_frame_counts_per_parent": [2, 1],
+        "fixture_layout": args.layout,
+        "recording_layout": layout["recording_layout"],
+        "clip_frame_counts_per_parent": clip_frame_counts,
         "producer_commit": CITRUS_COMMIT,
         "contracts_commit": CONTRACTS_COMMIT,
         "producer_repo": str(producer),

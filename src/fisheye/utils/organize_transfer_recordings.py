@@ -36,6 +36,7 @@ from fisheye.shared.recording_preflight import default_preflight_payload
 from fisheye.shared.recording_transfer_snapshot import (
     MARKER_NAME,
     SNAPSHOT_PATH,
+    TRANSFER_PARENT_LAYOUTS,
     file_ref,
     plan_parent_recordings,
     require,
@@ -844,9 +845,11 @@ def prepare_transfer_parent_recordings(
         build_transfer_parent_frame_index,
     )
 
+    # Both transfer-v2 producer layouts share parents[].clips[]; a single_video
+    # parent is a one-clip collection with its original paths preserved.
     require(
-        plan.get("recording_layout") == "rolling_clips",
-        "parent collection preparation requires rolling_clips",
+        plan.get("recording_layout") in TRANSFER_PARENT_LAYOUTS,
+        "parent collection preparation requires rolling_clips or single_video",
     )
     materialize_transfer_organization(plan)
     with _organization_state(plan) as (state, save):
