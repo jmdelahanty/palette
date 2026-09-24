@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import numpy as np
 
 TAIL_SUCCESSOR_EVENT = "mask_apply_tail_successor"
 TAIL_OFFER_KEYS = (
@@ -15,6 +19,140 @@ TAIL_OFFER_KEYS = (
     "tail_refresh_manual_point_count",
     "tail_refresh_mask_revision",
 )
+
+
+def committed_by_this_apply(runtime, *, apply_id, checkpoint_revision, edit_revision, committed_mask, checkpoint_mask):
+    """True when a retried apply finds its own committed canonical write.
+
+    A crash between the revision write and SQLite finalization leaves the
+    run one revision past the checkpoint and stamped with this apply id.
+    The row must still hold exactly the checkpoint's mask.
+    """
+
+    if not (
+        runtime.refined.group.attrs.get("edit_revision_last_apply_id") == apply_id
+        and int(checkpoint_revision) + 1 == int(edit_revision)
+    ):
+        return False
+    if not np.array_equal(np.asarray(committed_mask) > 0, np.asarray(checkpoint_mask) > 0):
+        raise ValueError(f"Apply {apply_id} revision is committed but a row differs from its checkpoint.")
+    return True
+
+
+def classify_apply_checkpoints(runtime, checkpoints, *, apply_id, edit_revision, target_path, source_rowset_path):
+    """Validate claimed checkpoints and split them into write, stale, and committed rows.
+
+    Rows at the current revision get their edited stack prepared (one masks_roi
+    chunk read per chunk).  Rows one revision behind that this apply already
+    committed are verified pixel-exact; other revision mismatches are stale.
+    """
+
+    from . import web_mask_tail_border as tail_border
+    from .web_runtimes import _subject_mask_checkpoint_mask, _subject_mask_row_identity
+
+    checkpoint_ids: list[str] = []
+    applied_rows: list[int] = []
+    edited_stacks: list[np.ndarray] = []
+    before_area_total = 0
+    after_area_total = 0
+    stale_checkpoint_ids: list[str] = []
+    stale_rows: list[int] = []
+    committed_checkpoint_ids: list[str] = []
+    committed_rows: list[int] = []
+    tail_border_actions: list[dict[str, object]] = []
+    masks_array = runtime.refined.group["masks_roi"]
+    tail_border.preflight_run(runtime)
+    row_chunk: int | None = None
+    cached_chunk_index = -1
+    cached_chunk: np.ndarray | None = None
+    scoped_row_set = set(int(value) for value in runtime.roi_indices.tolist())
+    for checkpoint in checkpoints:
+        checkpoint_target_path = str(checkpoint.get("target_run_path") or "")
+        if checkpoint_target_path != target_path:
+            raise ValueError(
+                f"checkpoint target mismatch: expected {target_path}, got {checkpoint_target_path}"
+            )
+        checkpoint_source_rowset = str(checkpoint.get("source_rowset_path") or "")
+        if checkpoint_source_rowset and checkpoint_source_rowset != source_rowset_path:
+            raise ValueError(
+                f"checkpoint source rowset mismatch: expected {source_rowset_path}, got {checkpoint_source_rowset}"
+            )
+        checkpoint_revision = int(checkpoint.get("target_edit_revision") or 0)
+        roi_idx = int(checkpoint.get("roi_idx") or 0)
+        if roi_idx not in scoped_row_set:
+            raise ValueError(f"checkpoint row {roi_idx} is outside the active task row scope.")
+        if checkpoint_revision != edit_revision:
+            if committed_by_this_apply(
+                runtime, apply_id=apply_id, checkpoint_revision=checkpoint_revision,
+                edit_revision=edit_revision, committed_mask=masks_array[roi_idx, runtime.comp_idx],
+                checkpoint_mask=_subject_mask_checkpoint_mask(checkpoint),
+            ):
+                committed_checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
+                committed_rows.append(roi_idx)
+                continue
+            stale_checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
+            stale_rows.append(roi_idx)
+            continue
+        metadata = checkpoint.get("metadata")
+        if isinstance(metadata, Mapping):
+            expected_identity = metadata.get("row_identity")
+            if isinstance(expected_identity, Mapping):
+                current_identity = _subject_mask_row_identity(runtime, roi_idx)
+                for key, expected_value in expected_identity.items():
+                    if key not in current_identity:
+                        continue
+                    if str(current_identity.get(key)) != str(expected_value):
+                        raise ValueError(
+                            f"checkpoint row identity mismatch for row {roi_idx}, field {key}: "
+                            f"expected {expected_value}, got {current_identity.get(key)}"
+                        )
+        edited_mask = _subject_mask_checkpoint_mask(checkpoint)
+        if row_chunk is None:
+            row_chunk = int(masks_array.chunks[0])
+        chunk_index = roi_idx // row_chunk
+        if chunk_index != cached_chunk_index:
+            chunk_start = chunk_index * row_chunk
+            cached_chunk = np.asarray(
+                masks_array[chunk_start:min(chunk_start + row_chunk, int(masks_array.shape[0]))],
+                dtype=np.uint8,
+            )
+            cached_chunk_index = chunk_index
+        assert cached_chunk is not None
+        current_stack = cached_chunk[roi_idx - chunk_index * row_chunk]
+        before_mask = (np.asarray(current_stack[runtime.comp_idx], dtype=np.uint8) > 0).astype(np.uint8)
+        edited_stack, tail_action = tail_border.prepare_apply_row(runtime, checkpoint, roi_idx=roi_idx, current_stack=current_stack, before_mask=before_mask, edited_mask=edited_mask)
+        if tail_action is not None:
+            tail_border_actions.append(tail_action)
+        checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
+        applied_rows.append(roi_idx)
+        edited_stacks.append(edited_stack)
+        before_area_total += int(before_mask.sum())
+        after_area_total += int(edited_mask.sum())
+    return SimpleNamespace(
+        checkpoint_ids=checkpoint_ids,
+        applied_rows=applied_rows,
+        edited_stacks=edited_stacks,
+        before_area_total=before_area_total,
+        after_area_total=after_area_total,
+        stale_checkpoint_ids=stale_checkpoint_ids,
+        stale_rows=stale_rows,
+        committed_checkpoint_ids=committed_checkpoint_ids,
+        committed_rows=committed_rows,
+        tail_border_actions=tail_border_actions,
+    )
+
+
+def commit_mask_edit_revision(runtime, *, apply_id, revision):
+    """Stamp the revision and its apply id in one metadata write."""
+
+    attrs = {
+        "edit_revision": int(revision),
+        "edit_revision_updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "edit_revision_last_apply_id": apply_id,
+    }
+    if "mask_rle" in runtime.refined.group:
+        attrs["mask_rle_stale_since_edit_revision"] = int(revision)
+    runtime.refined.group.attrs.update(attrs)
 
 
 def pending_mask_run_effects(store, runtime):

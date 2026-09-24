@@ -29,6 +29,8 @@ from .assignment_store import (
     default_store_path,
 )
 from .web_subject_mask_apply_state import (
+    classify_apply_checkpoints,
+    commit_mask_edit_revision,
     pending_mask_run_effects,
     require_mask_apply_ownership,
     tail_successor_offer,
@@ -337,7 +339,6 @@ from .web_runtimes import (
     _redact_labeler_runtime_payload,
     _refresh_keypoint_queue,
     _session_scope,
-    _subject_mask_checkpoint_mask,
     _subject_mask_component_completion_guard,
     _subject_mask_current_payload,
     _subject_mask_edit_revision,
@@ -2676,76 +2677,18 @@ def _make_handler(state: ServerState):
                                 runtime.root = fresh_root
                                 runtime.refined = fresh_refined
                                 edit_revision_before = _subject_mask_edit_revision(runtime)
-                                checkpoint_ids: list[str] = []
-                                applied_rows: list[int] = []
-                                edited_stacks: list[np.ndarray] = []
-                                before_area_total = 0
-                                after_area_total = 0
                                 compute_workers_used = 1
-                                stale_checkpoint_ids: list[str] = []
-                                stale_rows: list[int] = []
-                                tail_border_actions: list[dict[str, object]] = []
-                                masks_array = runtime.refined.group["masks_roi"]
-                                tail_border.preflight_run(runtime)
-                                row_chunk: int | None = None
-                                cached_chunk_index = -1
-                                cached_chunk: np.ndarray | None = None
-                                scoped_row_set = set(int(value) for value in runtime.roi_indices.tolist())
-                                for checkpoint in checkpoints:
-                                    checkpoint_target_path = str(checkpoint.get("target_run_path") or "")
-                                    if checkpoint_target_path != target_path:
-                                        raise ValueError(
-                                            f"checkpoint target mismatch: expected {target_path}, got {checkpoint_target_path}"
-                                        )
-                                    checkpoint_source_rowset = str(checkpoint.get("source_rowset_path") or "")
-                                    if checkpoint_source_rowset and checkpoint_source_rowset != source_rowset_path:
-                                        raise ValueError(
-                                            f"checkpoint source rowset mismatch: expected {source_rowset_path}, got {checkpoint_source_rowset}"
-                                        )
-                                    checkpoint_revision = int(checkpoint.get("target_edit_revision") or 0)
-                                    roi_idx = int(checkpoint.get("roi_idx") or 0)
-                                    if roi_idx not in scoped_row_set:
-                                        raise ValueError(f"checkpoint row {roi_idx} is outside the active task row scope.")
-                                    if checkpoint_revision != edit_revision_before:
-                                        stale_checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
-                                        stale_rows.append(roi_idx)
-                                        continue
-                                    metadata = checkpoint.get("metadata")
-                                    if isinstance(metadata, Mapping):
-                                        expected_identity = metadata.get("row_identity")
-                                        if isinstance(expected_identity, Mapping):
-                                            current_identity = _subject_mask_row_identity(runtime, roi_idx)
-                                            for key, expected_value in expected_identity.items():
-                                                if key not in current_identity:
-                                                    continue
-                                                if str(current_identity.get(key)) != str(expected_value):
-                                                    raise ValueError(
-                                                        f"checkpoint row identity mismatch for row {roi_idx}, field {key}: "
-                                                        f"expected {expected_value}, got {current_identity.get(key)}"
-                                                    )
-                                    edited_mask = _subject_mask_checkpoint_mask(checkpoint)
-                                    if row_chunk is None:
-                                        row_chunk = int(masks_array.chunks[0])
-                                    chunk_index = roi_idx // row_chunk
-                                    if chunk_index != cached_chunk_index:
-                                        chunk_start = chunk_index * row_chunk
-                                        cached_chunk = np.asarray(
-                                            masks_array[chunk_start:min(chunk_start + row_chunk, int(masks_array.shape[0]))],
-                                            dtype=np.uint8,
-                                        )
-                                        cached_chunk_index = chunk_index
-                                    assert cached_chunk is not None
-                                    current_stack = cached_chunk[roi_idx - chunk_index * row_chunk]
-                                    before_mask = (np.asarray(current_stack[runtime.comp_idx], dtype=np.uint8) > 0).astype(np.uint8)
-                                    edited_stack, tail_action = tail_border.prepare_apply_row(runtime, checkpoint, roi_idx=roi_idx, current_stack=current_stack, before_mask=before_mask, edited_mask=edited_mask)
-                                    if tail_action is not None:
-                                        tail_border_actions.append(tail_action)
-                                    checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
-                                    applied_rows.append(roi_idx)
-                                    edited_stacks.append(edited_stack)
-                                    before_area_total += int(before_mask.sum())
-                                    after_area_total += int(edited_mask.sum())
-                                if not edited_stacks:
+                                plan = classify_apply_checkpoints(
+                                    runtime, checkpoints, apply_id=apply_id, edit_revision=edit_revision_before,
+                                    target_path=target_path, source_rowset_path=source_rowset_path,
+                                )
+                                checkpoint_ids, applied_rows, edited_stacks = plan.checkpoint_ids, plan.applied_rows, plan.edited_stacks
+                                stale_checkpoint_ids, stale_rows, tail_border_actions = plan.stale_checkpoint_ids, plan.stale_rows, plan.tail_border_actions
+                                committed_checkpoint_ids, committed_rows = plan.committed_checkpoint_ids, plan.committed_rows
+                                before_area_total, after_area_total = plan.before_area_total, plan.after_area_total
+                                if committed_checkpoint_ids and edited_stacks:
+                                    raise ValueError(f"Apply {apply_id} mixes committed and unwritten checkpoints.")
+                                if not edited_stacks and not committed_checkpoint_ids:
                                     released_stale_checkpoint_count = 0
                                     if stale_checkpoint_ids:
                                         released_stale_checkpoint_count = state.store.release_session_checkpoints_apply(
@@ -2814,13 +2757,16 @@ def _make_handler(state: ServerState):
                                             update_reason="web_labeling_subject_mask_session_apply",
                                             compute_workers=compute_workers,
                                         )
-                                    tail_border.commit_actions(runtime, tail_border_actions, revision=int(edit_revision_before) + 1)
-                                    edit_revision_after = int(edit_revision_before) + 1
-                                    runtime.refined.group.attrs["edit_revision"] = int(edit_revision_after)
-                                    runtime.refined.group.attrs["edit_revision_updated_at_utc"] = datetime.now(timezone.utc).isoformat()
-                                    runtime.refined.group.attrs["edit_revision_last_apply_id"] = apply_id
-                                    if "mask_rle" in runtime.refined.group:
-                                        runtime.refined.group.attrs["mask_rle_stale_since_edit_revision"] = int(edit_revision_after)
+                                    if committed_checkpoint_ids:
+                                        # Finalize this apply's already-committed write; pixels,
+                                        # border actions, and the revision are not rewritten.
+                                        edit_revision_after = int(edit_revision_before)
+                                        edit_revision_before = edit_revision_after - 1
+                                        checkpoint_ids, applied_rows = committed_checkpoint_ids, committed_rows
+                                    else:
+                                        tail_border.commit_actions(runtime, tail_border_actions, revision=int(edit_revision_before) + 1)
+                                        edit_revision_after = int(edit_revision_before) + 1
+                                        commit_mask_edit_revision(runtime, apply_id=apply_id, revision=edit_revision_after)
                                     updated_count = state.store.mark_session_checkpoints_applied(
                                         checkpoint_ids=checkpoint_ids,
                                         apply_id=apply_id,
