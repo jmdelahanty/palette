@@ -31,6 +31,7 @@ from fisheye.shared.tabular_deltas import (
 )
 from fisheye.labeling.assignment_store import LabelingStore
 from fisheye.labeling import web_keypoint_checkpoints as checkpoint_mod
+from fisheye.labeling import web_keypoint_checkpoint_apply as apply_mod
 from fisheye.labeling import web_keypoint_checkpoint_routes as checkpoint_routes
 from fisheye.labeling.web_keypoint_checkpoints import (
     KEYPOINT_APPLY_INFLIGHT_ATTR,
@@ -932,7 +933,7 @@ def test_keypoint_apply_history_survives_later_same_row_checkpoint(
 
 
 def test_keypoint_apply_new_row_survives_other_row_revision_advance(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, runtime = _checkpoint_runtime(tmp_path)
     try:
@@ -940,27 +941,26 @@ def test_keypoint_apply_new_row_survives_other_row_revision_advance(
             store, runtime, user="alice", operation="replace_points", points=_valid_points()
         )
         state_a = keypoint_checkpoint_state(store, runtime)
+        real_write = apply_mod._write_intended_rows
 
-        class _ConcurrentBackend:
-            @staticmethod
-            def save_roi_correction(session, *, position, points):
-                result = mod.save_roi_correction(
-                    session, position=position, points=points
-                )
-                runtime.position = 1
-                stage_keypoint_checkpoint(
-                    store,
-                    runtime,
-                    user="alice",
-                    operation="replace_points",
-                    points=_valid_points(1.0),
-                )
-                return result
+        def _write_then_stage_other_row(session, intended, current):
+            real_write(session, intended, current)
+            runtime.position = 1
+            stage_keypoint_checkpoint(
+                store,
+                runtime,
+                user="alice",
+                operation="replace_points",
+                points=_valid_points(1.0),
+            )
 
+        monkeypatch.setattr(
+            apply_mod, "_write_intended_rows", _write_then_stage_other_row
+        )
         apply_keypoint_checkpoints(
             store,
             runtime,
-            _ConcurrentBackend,
+            mod,
             apply_id="apply-row-zero",
             checkpoint_snapshot_sha256=str(state_a["checkpoint_snapshot_sha256"]),
         )
@@ -973,6 +973,7 @@ def test_keypoint_apply_new_row_survives_other_row_revision_advance(
         assert state_b["unapplied_session_edit_count"] == 1
         assert runtime.review_session.refined.attrs["edit_revision"] == 1
 
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", real_write)
         result_b = apply_keypoint_checkpoints(
             store,
             runtime,
@@ -1046,9 +1047,9 @@ def test_keypoint_apply_receipt_recovers_after_store_finalize_failure(
         store.close()
 
 
-@pytest.mark.parametrize("failure_boundary", ("mid_row", "after_row"))
-def test_keypoint_apply_recovers_owned_current_row_at_physical_write_boundary(
-    tmp_path: Path, failure_boundary: str
+@pytest.mark.parametrize("failure_boundary", ("mid_write", "after_write"))
+def test_keypoint_apply_recovers_owned_snapshot_at_physical_write_boundary(
+    tmp_path: Path, failure_boundary: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, runtime = _checkpoint_runtime(tmp_path)
     try:
@@ -1057,32 +1058,40 @@ def test_keypoint_apply_recovers_owned_current_row_at_physical_write_boundary(
             store, runtime, user="alice", operation="replace_points", points=points
         )
         state = keypoint_checkpoint_state(store, runtime)
+        real_write = apply_mod._write_intended_rows
 
-        class _InterruptedBackend:
-            @staticmethod
-            def save_roi_correction(session, *, position, points):
-                roi_idx = int(session.failures[position])
-                if failure_boundary == "mid_row":
-                    session.kp_roi_arr[roi_idx] = np.asarray(points, dtype=np.float64)
-                else:
-                    mod.save_roi_correction(session, position=position, points=points)
-                raise RuntimeError(f"injected {failure_boundary} failure")
+        def _interrupted_write(session, intended, current):
+            if failure_boundary == "mid_write":
+                session.kp_roi_arr[0] = np.asarray(points, dtype=np.float64)
+            else:
+                real_write(session, intended, current)
+            raise RuntimeError(f"injected {failure_boundary} failure")
 
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", _interrupted_write)
         with pytest.raises(RuntimeError, match=failure_boundary):
             apply_keypoint_checkpoints(
                 store,
                 runtime,
-                _InterruptedBackend,
+                mod,
                 apply_id=f"apply-{failure_boundary}",
                 checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
             )
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", real_write)
 
         retry_state = keypoint_checkpoint_state(store, runtime)
         assert retry_state["resumable_apply_id"] == f"apply-{failure_boundary}"
-        with pytest.raises(KeypointCheckpointConflict, match="being applied"):
-            current_keypoint_payload(
+        if failure_boundary == "mid_write":
+            # A row holding a mix of base and intended fields is not shown.
+            with pytest.raises(KeypointCheckpointConflict, match="being applied"):
+                current_keypoint_payload(
+                    store, runtime, mod, state_payload=retry_state
+                )
+        else:
+            # A row already exactly at its intended state displays normally.
+            payload = current_keypoint_payload(
                 store, runtime, mod, state_payload=retry_state
             )
+            assert payload["ok"] is True
 
         recovered = apply_keypoint_checkpoints(
             store,
@@ -1100,7 +1109,7 @@ def test_keypoint_apply_recovers_owned_current_row_at_physical_write_boundary(
 
 
 def test_keypoint_apply_restart_recovers_rows_missing_from_new_failure_queue(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, runtime = _checkpoint_runtime(tmp_path)
     try:
@@ -1117,29 +1126,23 @@ def test_keypoint_apply_restart_recovers_rows_missing_from_new_failure_queue(
             points=_valid_points(1.0),
         )
         state = keypoint_checkpoint_state(store, runtime)
-        calls = 0
+        real_write = apply_mod._write_intended_rows
 
-        class _SecondRowInterruptedBackend:
-            @staticmethod
-            def save_roi_correction(session, *, position, points):
-                nonlocal calls
-                calls += 1
-                if calls == 1:
-                    return mod.save_roi_correction(
-                        session, position=position, points=points
-                    )
-                roi_idx = int(session.failures[position])
-                session.kp_roi_arr[roi_idx] = np.asarray(points, dtype=np.float64)
-                raise RuntimeError("injected second row failure")
+        def _second_row_interrupted(session, intended, current):
+            real_write(session, {0: intended[0]}, {0: current[0]})
+            session.kp_roi_arr[1] = np.asarray(_valid_points(1.0), dtype=np.float64)
+            raise RuntimeError("injected second row failure")
 
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", _second_row_interrupted)
         with pytest.raises(RuntimeError, match="second row"):
             apply_keypoint_checkpoints(
                 store,
                 runtime,
-                _SecondRowInterruptedBackend,
+                mod,
                 apply_id="apply-restart",
                 checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
             )
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", real_write)
 
         runtime.review_session.failures = np.asarray([1], dtype=np.int64)
         restarted = KeypointRuntimeSession(
@@ -1167,7 +1170,7 @@ def test_keypoint_apply_restart_recovers_rows_missing_from_new_failure_queue(
 
 
 def test_recovered_keypoint_midwrite_recovery_restores_landmark_provenance(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, runtime = _checkpoint_runtime(tmp_path, recovered=True)
     try:
@@ -1184,21 +1187,22 @@ def test_recovered_keypoint_midwrite_recovery_restores_landmark_provenance(
         )
         state = keypoint_checkpoint_state(store, runtime)
 
-        class _CoordinatesOnlyInterruptedBackend:
-            @staticmethod
-            def save_roi_correction(session, *, position, points):
-                roi_idx = int(session.failures[position])
-                session.kp_roi_arr[roi_idx] = np.asarray(points, dtype=np.float64)
-                raise RuntimeError("injected after coordinate write")
+        real_write = apply_mod._write_intended_rows
 
+        def _coordinates_only(session, intended, current):
+            session.kp_roi_arr[0] = updated
+            raise RuntimeError("injected after coordinate write")
+
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", _coordinates_only)
         with pytest.raises(RuntimeError, match="coordinate write"):
             apply_keypoint_checkpoints(
                 store,
                 runtime,
-                _CoordinatesOnlyInterruptedBackend,
+                mod,
                 apply_id="apply-recovered-midwrite",
                 checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
             )
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", real_write)
         np.testing.assert_array_equal(
             runtime.review_session.refined["keypoint_origin"][0], [0, 0, 0]
         )
@@ -1226,7 +1230,7 @@ def test_recovered_keypoint_midwrite_recovery_restores_landmark_provenance(
 
 
 def test_recovered_keypoint_postwrite_failure_keeps_training_ineligible(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, runtime = _checkpoint_runtime(tmp_path, recovered=True)
     try:
@@ -1239,23 +1243,25 @@ def test_recovered_keypoint_postwrite_failure_keeps_training_ineligible(
         )
         state = keypoint_checkpoint_state(store, runtime)
 
-        class _PostwriteInterruptedBackend:
-            @staticmethod
-            def save_roi_correction(session, *, position, points):
-                mod.save_roi_correction(session, position=position, points=points)
-                assert bool(session.refined["training_eligible"][0]) is True
-                raise RuntimeError("injected recovered postwrite failure")
+        real_write = apply_mod._write_intended_rows
 
+        def _postwrite_interrupted(session, intended, current):
+            real_write(session, intended, current)
+            assert bool(session.refined["training_eligible"][0]) is True
+            raise RuntimeError("injected recovered postwrite failure")
+
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", _postwrite_interrupted)
         with pytest.raises(RuntimeError, match="recovered postwrite"):
             apply_keypoint_checkpoints(
                 store,
                 runtime,
-                _PostwriteInterruptedBackend,
+                mod,
                 apply_id="apply-recovered-postwrite",
                 checkpoint_snapshot_sha256=str(
                     state["checkpoint_snapshot_sha256"]
                 ),
             )
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", real_write)
         assert bool(runtime.review_session.refined["training_eligible"][0]) is False
         assert (
             keypoint_checkpoint_state(store, runtime)["resumable_apply_id"]
@@ -1277,6 +1283,63 @@ def test_recovered_keypoint_postwrite_failure_keeps_training_ineligible(
         store.close()
 
 
+class _HardCrash(BaseException):
+    """Bypasses ``except Exception`` cleanup, like a killed process."""
+
+
+def test_recovered_keypoint_hard_crash_mid_batch_leaves_rows_ineligible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path, recovered=True)
+    try:
+        # Start eligible so the test proves the batch clears eligibility first.
+        runtime.review_session.refined["training_eligible"][0:2] = True
+        for position, offset in ((0, 0.0), (1, 1.0)):
+            runtime.position = position
+            stage_keypoint_checkpoint(
+                store,
+                runtime,
+                user="alice",
+                operation="replace_points",
+                points=_valid_points(offset),
+            )
+        state = keypoint_checkpoint_state(store, runtime)
+        real_write_field = checkpoint_mod._write_field
+
+        def _crash_on_coordinates(array, field_name, rows, documents):
+            if field_name == "keypoints_roi":
+                raise _HardCrash()
+            real_write_field(array, field_name, rows, documents)
+
+        monkeypatch.setattr(checkpoint_mod, "_write_field", _crash_on_coordinates)
+        with pytest.raises(_HardCrash):
+            apply_keypoint_checkpoints(
+                store,
+                runtime,
+                mod,
+                apply_id="apply-hard-crash",
+                checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+            )
+        monkeypatch.setattr(checkpoint_mod, "_write_field", real_write_field)
+        eligible = np.asarray(runtime.review_session.refined["training_eligible"][:2])
+        assert not eligible.any()
+
+        recovered = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id="apply-hard-crash",
+            checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+        )
+        assert recovered["rows"] == [0, 1]
+        for row in (0, 1):
+            assert bool(runtime.review_session.refined["training_eligible"][row]) == bool(
+                runtime.review_session.usable_arr[row]
+            )
+    finally:
+        store.close()
+
+
 def test_keypoint_apply_recovery_completes_downstream_stale_side_effect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1293,21 +1356,23 @@ def test_keypoint_apply_recovery_completes_downstream_stale_side_effect(
             lambda _root, **kwargs: stale_calls.append(dict(kwargs)) or 1,
         )
 
-        class _CrashBeforeStaleBackend:
-            @staticmethod
-            def save_roi_correction(session, *, position, points):
-                mod.save_roi_correction(session, position=position, points=points)
-                raise RuntimeError("injected before stale completion")
+        real_write = apply_mod._write_intended_rows
 
+        def _crash_before_stale(session, intended, current):
+            real_write(session, intended, current)
+            raise RuntimeError("injected before stale completion")
+
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", _crash_before_stale)
         with pytest.raises(RuntimeError, match="before stale"):
             apply_keypoint_checkpoints(
                 store,
                 runtime,
-                _CrashBeforeStaleBackend,
+                mod,
                 apply_id="apply-stale-recovery",
                 checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
             )
         assert stale_calls == []
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", real_write)
 
         recovered = apply_keypoint_checkpoints(
             store,

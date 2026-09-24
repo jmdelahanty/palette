@@ -128,45 +128,96 @@ def _point_payload(points: object) -> list[list[float | None]]:
     ]
 
 
-def _row_array_value(array: object | None, roi_idx: int) -> object:
-    if array is None:
-        return None
-    return _json_value(np.asarray(array[int(roi_idx)]).copy())  # type: ignore[index]
+_RECOVERED_ROW_ARRAYS = ("keypoint_origin", "keypoint_manual_edit", "training_eligible")
+_DERIVED_ROW_ARRAYS = ("values", "values_norm", "valid")
 
 
-def _reason_value(session: object, roi_idx: int) -> str:
-    reason = getattr(session, "reason_arr", None)
-    if reason is None:
-        return ""
-    value = reason[int(roi_idx)]
-    return "" if value is None else str(value)
+def _sorted_rows(roi_indices: Sequence[int]) -> np.ndarray:
+    rows = np.asarray([int(value) for value in roi_indices], dtype=np.int64)
+    if np.unique(rows).size != rows.size:
+        raise KeypointCheckpointConflict("A keypoint row appears twice in one snapshot.")
+    return np.sort(rows)
+
+
+def _read_rows(array: object, rows: np.ndarray) -> Sequence[object]:
+    """Read selected rows, touching each physical chunk at most once."""
+
+    if rows.size == 1:
+        # One-row reads keep plain integer indexing so private row views such
+        # as the dry-run intent wrapper see the established access pattern.
+        return [array[int(rows[0])]]  # type: ignore[index]
+    oindex = getattr(array, "oindex", None)
+    return oindex[rows] if oindex is not None else array[rows]  # type: ignore[index]
+
+
+def _write_rows(array: object, rows: Sequence[int], values: Sequence[object]) -> None:
+    """Write selected rows, touching each physical chunk at most once."""
+
+    if len(rows) == 1:
+        array[int(rows[0])] = values[0]  # type: ignore[index]
+        return
+    index = np.asarray(rows, dtype=np.int64)
+    oindex = getattr(array, "oindex", None)
+    if oindex is not None:
+        oindex[index] = values
+    else:
+        array[index] = values  # type: ignore[index]
+
+
+def _row_state_documents(
+    session: object, roi_indices: Sequence[int]
+) -> dict[int, dict[str, object]]:
+    """Capture every coupled row surface for many rows with one read per array."""
+
+    rows = _sorted_rows(roi_indices)
+    blocks = {
+        name: None if array is None else _read_rows(array, rows)
+        for name, array in _coupled_row_arrays(session).items()
+    }
+    documents: dict[int, dict[str, object]] = {}
+    for position, roi_idx in enumerate(rows.tolist()):
+        values: dict[str, object] = {}
+        for name, block in blocks.items():
+            if name == "reason":
+                value = None if block is None else block[position]
+                values[name] = "" if value is None else str(value)
+            else:
+                values[name] = (
+                    None
+                    if block is None
+                    else _json_value(np.asarray(block[position]).copy())
+                )
+        documents[int(roi_idx)] = {
+            "schema": "palette.keypoint_review_coupled_row_state.v1",
+            "roi_idx": int(roi_idx),
+            "fields": values,
+        }
+    return documents
+
+
+def _coupled_row_arrays(session: object) -> dict[str, object | None]:
+    """Map each coupled row-state field to its array (``None`` if absent)."""
+
+    arrays: dict[str, object | None] = {
+        name: getattr(session, attribute, None)
+        for name, attribute in _ROW_ARRAY_FIELDS.items()
+    }
+    arrays["reason"] = getattr(session, "reason_arr", None)
+    if bool(getattr(session, "recovered_roi_only", False)):
+        getter = getattr(getattr(session, "refined"), "get", None)
+        for name in _RECOVERED_ROW_ARRAYS:
+            arrays[name] = getter(name) if callable(getter) else None
+    derived = getattr(session, "derived_metric_storage", None)
+    if derived is not None:
+        for name in _DERIVED_ROW_ARRAYS:
+            arrays[f"derived_{name}"] = getattr(derived, name, None)
+    return arrays
 
 
 def _row_state_document(session: object, roi_idx: int) -> dict[str, object]:
     """Capture every row surface coupled by established keypoint save actions."""
 
-    values = {
-        name: _row_array_value(getattr(session, attribute, None), roi_idx)
-        for name, attribute in _ROW_ARRAY_FIELDS.items()
-    }
-    values["reason"] = _reason_value(session, roi_idx)
-    refined = getattr(session, "refined")
-    if bool(getattr(session, "recovered_roi_only", False)):
-        getter = getattr(refined, "get", None)
-        for name in ("keypoint_origin", "keypoint_manual_edit", "training_eligible"):
-            array = getter(name) if callable(getter) else None
-            values[name] = _row_array_value(array, roi_idx)
-    derived = getattr(session, "derived_metric_storage", None)
-    if derived is not None:
-        for name in ("values", "values_norm", "valid"):
-            values[f"derived_{name}"] = _row_array_value(
-                getattr(derived, name, None), roi_idx
-            )
-    return {
-        "schema": "palette.keypoint_review_coupled_row_state.v1",
-        "roi_idx": int(roi_idx),
-        "fields": values,
-    }
+    return _row_state_documents(session, [int(roi_idx)])[int(roi_idx)]
 
 
 def _edit_revision(session: object) -> int:
@@ -326,24 +377,54 @@ def _scientific_contract_binding(session: object) -> dict[str, object]:
     }
 
 
-def _binding(session: object, roi_idx: int) -> dict[str, object]:
-    row_state = _row_state_document(session, roi_idx)
+def _bindings(
+    session: object,
+    roi_indices: Sequence[int],
+    *,
+    row_states: Mapping[int, Mapping[str, object]] | None = None,
+) -> dict[int, dict[str, object]]:
+    """Bind many rows; run-level context is computed once for the whole set."""
+
+    rows = _sorted_rows(roi_indices)
+    states = (
+        _row_state_documents(session, rows.tolist()) if row_states is None else row_states
+    )
     roi_coordinates = getattr(session, "roi_coordinates_full", None)
-    return {
-        "target_run_path": f"refined_keypoints_runs/{getattr(session, 'refined_run')}",
-        "source_rowset_path": f"crop_runs/{getattr(session, 'crop_run')}",
-        "row_identity": _row_identity(session, roi_idx),
-        "skeleton": _skeleton_binding(session),
-        "scientific_contract": _scientific_contract_binding(session),
-        "expected_edit_revision": _edit_revision(session),
-        "expected_row_state": row_state,
-        "expected_row_state_sha256": canonical_json_sha256(row_state),
-        "write_inputs": {
-            "roi_coordinates_full": _row_array_value(roi_coordinates, roi_idx),
-        },
-        "delta_run": getattr(session, "delta_run", None),
-        "delta_generation": getattr(session, "delta_generation", None),
-    }
+    coordinates = (
+        None if roi_coordinates is None else _read_rows(roi_coordinates, rows)
+    )
+    target_run_path = f"refined_keypoints_runs/{getattr(session, 'refined_run')}"
+    source_rowset_path = f"crop_runs/{getattr(session, 'crop_run')}"
+    skeleton = _skeleton_binding(session)
+    scientific_contract = _scientific_contract_binding(session)
+    edit_revision = _edit_revision(session)
+    bindings: dict[int, dict[str, object]] = {}
+    for position, roi_idx in enumerate(rows.tolist()):
+        row_state = states[int(roi_idx)]
+        bindings[int(roi_idx)] = {
+            "target_run_path": target_run_path,
+            "source_rowset_path": source_rowset_path,
+            "row_identity": _row_identity(session, roi_idx),
+            "skeleton": skeleton,
+            "scientific_contract": scientific_contract,
+            "expected_edit_revision": edit_revision,
+            "expected_row_state": row_state,
+            "expected_row_state_sha256": canonical_json_sha256(row_state),
+            "write_inputs": {
+                "roi_coordinates_full": (
+                    None
+                    if coordinates is None
+                    else _json_value(np.asarray(coordinates[position]).copy())
+                ),
+            },
+            "delta_run": getattr(session, "delta_run", None),
+            "delta_generation": getattr(session, "delta_generation", None),
+        }
+    return bindings
+
+
+def _binding(session: object, roi_idx: int) -> dict[str, object]:
+    return _bindings(session, [int(roi_idx)])[int(roi_idx)]
 
 
 def _current_roi_idx(runtime: object) -> int:
@@ -523,8 +604,13 @@ def validate_keypoint_checkpoint(
     *,
     allowed_row_state_sha256: Sequence[str] = (),
     allowed_intermediate_row_state: Mapping[str, object] | None = None,
+    current_binding: Mapping[str, object] | None = None,
 ) -> Mapping[str, object]:
-    """Revalidate ownership, lineage, schema, row identity, and exact base row."""
+    """Revalidate ownership, lineage, schema, row identity, and exact base row.
+
+    ``current_binding`` lets a batch caller supply the row's binding from
+    :func:`_bindings`, which reads each array once for the whole snapshot.
+    """
 
     session = getattr(runtime, "review_session")
     expected_owner = {
@@ -608,7 +694,9 @@ def validate_keypoint_checkpoint(
         raise KeypointCheckpointConflict(
             "Keypoint checkpoint static task scope changed."
         )
-    current = _binding(session, roi_idx)
+    current = (
+        _binding(session, roi_idx) if current_binding is None else current_binding
+    )
     for key in (
         "target_run_path",
         "source_rowset_path",
@@ -770,6 +858,7 @@ def current_keypoint_payload(
         allowed: list[str] = []
         intermediate: Mapping[str, object] | None = None
         current_write_uncertain = False
+        current_binding = _binding(session, roi_idx)
         if str(checkpoint.get("state") or "") == "applying":
             attrs = getattr(getattr(session, "refined"), "attrs")
             inflight = attrs.get(KEYPOINT_APPLY_INFLIGHT_ATTR)
@@ -787,28 +876,31 @@ def current_keypoint_payload(
                     raise KeypointCheckpointConflict(
                         "Applying keypoint checkpoint belongs to another target recovery receipt."
                     )
-                checkpoint_id = str(checkpoint.get("checkpoint_id") or "")
-                completed = inflight.get("completed_row_state_sha256")
-                if isinstance(completed, Mapping):
-                    digest = completed.get(checkpoint_id)
-                    if digest:
-                        allowed.append(str(digest))
-                if str(inflight.get("current_checkpoint_id") or "") == checkpoint_id:
-                    candidate = inflight.get("current_expected_row_state")
-                    candidate_sha256 = str(
-                        inflight.get("current_expected_row_state_sha256") or ""
+                # Apply writes a whole snapshot per array, so any snapshot row
+                # may hold a mix of base and intended fields.  Exact base or
+                # exact intended rows remain displayable; mixed rows are not.
+                intermediate = _checkpoint_metadata(checkpoint).get(
+                    "intended_row_state"
+                )
+                if not isinstance(intermediate, Mapping):
+                    raise KeypointCheckpointConflict(
+                        "Applying keypoint checkpoint recovery intent changed."
                     )
-                    if not isinstance(candidate, Mapping) or candidate_sha256 != canonical_json_sha256(candidate):
-                        raise KeypointCheckpointConflict(
-                            "Applying keypoint checkpoint recovery intent changed."
-                        )
-                    intermediate = candidate
-                    current_write_uncertain = True
+                intended_sha256 = canonical_json_sha256(intermediate)
+                allowed.append(intended_sha256)
+                stored = _checkpoint_metadata(checkpoint)["binding"]
+                current_write_uncertain = str(
+                    current_binding["expected_row_state_sha256"]
+                ) not in {
+                    intended_sha256,
+                    str(stored.get("expected_row_state_sha256") or ""),  # type: ignore[union-attr]
+                }
         validate_keypoint_checkpoint(
             checkpoint,
             runtime,
             allowed_row_state_sha256=allowed,
             allowed_intermediate_row_state=intermediate,
+            current_binding=current_binding,
         )
         if current_write_uncertain:
             raise KeypointCheckpointConflict(
@@ -1195,70 +1287,129 @@ def _apply_operation(
     return getattr(backend_module, function_name)(apply_session, position=0)
 
 
-def _ensure_downstream_stale_after_row_apply(
+_STALE_REASONS = {
+    "replace_points": "keypoint_manual_correction",
+    "mark_no_keypoints": "keypoint_mark_no_keypoints",
+    "mark_detection_issue": "keypoint_mark_detection_issue",
+    "clear_failure_label": "keypoint_clear_failure_label",
+}
+
+
+def _mark_changed_rows_stale(
     session: object,
-    *,
-    roi_idx: int,
-    payload: Mapping[str, object],
-    base_row_state: Mapping[str, object],
-    intended_row_state: Mapping[str, object],
-) -> int:
-    """Close the crash window between row writes and stale publication."""
+    changed_operations: Mapping[int, str],
+) -> dict[int, int]:
+    """Publish downstream mask staleness once per operation kind, not per row.
 
-    if canonical_json_sha256(base_row_state) == canonical_json_sha256(
-        intended_row_state
-    ):
-        return 0
-    stale_reason = {
-        "replace_points": "keypoint_manual_correction",
-        "mark_no_keypoints": "keypoint_mark_no_keypoints",
-        "mark_detection_issue": "keypoint_mark_detection_issue",
-        "clear_failure_label": "keypoint_clear_failure_label",
-    }[str(payload.get("operation") or "")]
-    return int(
-        mark_downstream_subject_mask_runs_stale(
-            getattr(session, "root"),
-            source_keypoint_group="refined_keypoints_runs",
-            source_keypoints_run=str(getattr(session, "refined_run")),
-            roi_indices=[int(roi_idx)],
-            frame_indices=[int(getattr(session, "frame_indices")[int(roi_idx)])],
-            reason=stale_reason,
+    ``changed_operations`` maps each row whose intended state differs from its
+    staged base to the checkpoint operation.  The marker merges row lists, so
+    repeating it during recovery is idempotent.
+    """
+
+    rows_by_reason: dict[str, list[int]] = {}
+    for roi_idx, operation in changed_operations.items():
+        rows_by_reason.setdefault(_STALE_REASONS[str(operation)], []).append(int(roi_idx))
+    frame_indices = getattr(session, "frame_indices")
+    touched: dict[int, int] = {}
+    for reason, rows in sorted(rows_by_reason.items()):
+        count = int(
+            mark_downstream_subject_mask_runs_stale(
+                getattr(session, "root"),
+                source_keypoint_group="refined_keypoints_runs",
+                source_keypoints_run=str(getattr(session, "refined_run")),
+                roi_indices=sorted(rows),
+                frame_indices=[int(frame_indices[row]) for row in sorted(rows)],
+                reason=reason,
+            )
         )
-    )
+        touched.update({row: count for row in rows})
+    return touched
 
 
-def _converge_row_to_intended_state(
-    session: object, *, roi_idx: int, intended: Mapping[str, object]
+def _write_field(
+    array: object,
+    field_name: str,
+    rows: Sequence[int],
+    documents: Mapping[int, Mapping[str, object]],
 ) -> None:
-    """Write the precomputed established-backend result for every coupled field."""
+    decoded = [
+        _decoded_json_value(documents[row]["fields"][field_name])  # type: ignore[index]
+        for row in rows
+    ]
+    dtype = object if field_name == "reason" else getattr(array, "dtype", None)
+    _write_rows(array, rows, np.asarray(decoded, dtype=dtype))
 
-    fields = intended.get("fields")
-    if not isinstance(fields, Mapping):
-        raise KeypointCheckpointConflict("Keypoint apply intended row fields are missing.")
-    for field_name, attribute_name in _ROW_ARRAY_FIELDS.items():
-        array = getattr(session, attribute_name, None)
-        value = fields.get(field_name)
-        if array is not None and value is not None:
-            array[int(roi_idx)] = _decoded_json_value(value)  # type: ignore[index]
-    reason = getattr(session, "reason_arr", None)
-    if reason is not None and fields.get("reason") is not None:
-        reason[int(roi_idx) : int(roi_idx) + 1] = np.asarray(
-            [_decoded_json_value(fields["reason"])], dtype=object
-        )
-    if bool(getattr(session, "recovered_roi_only", False)):
-        refined = getattr(session, "refined")
-        getter = getattr(refined, "get", None)
-        for name in ("keypoint_origin", "keypoint_manual_edit", "training_eligible"):
-            array = getter(name) if callable(getter) else None
-            value = fields.get(name)
-            if array is not None and value is not None:
-                array[int(roi_idx)] = _decoded_json_value(value)
-    derived = getattr(session, "derived_metric_storage", None)
-    if derived is not None:
-        for name in ("values", "values_norm", "valid"):
-            value = fields.get(f"derived_{name}")
-            if value is not None:
-                getattr(derived, name)[int(roi_idx)] = _decoded_json_value(value)
+
+def _fail_closed_recovered_rows(session: object, roi_indices: Sequence[int]) -> None:
+    """Keep recovered training rows ineligible after an uncertain write."""
+
+    if not bool(getattr(session, "recovered_roi_only", False)) or not roi_indices:
+        return
+    getter = getattr(getattr(session, "refined"), "get", None)
+    eligible = getter("training_eligible") if callable(getter) else None
+    if eligible is not None:
+        rows = sorted(int(row) for row in roi_indices)
+        _write_rows(eligible, rows, np.zeros(len(rows), dtype=bool))
+
+
+def _write_intended_rows(
+    session: object,
+    intended: Mapping[int, Mapping[str, object]],
+    current: Mapping[int, Mapping[str, object]],
+) -> None:
+    """Write precomputed intended row states, once per array.
+
+    Only fields that differ from the current row state are written.  Recovered
+    training rows stay fail-closed: eligibility and usability are cleared
+    before any other field and eligibility is restored last, so an interrupted
+    write never leaves a partially written row training-eligible.
+    """
+
+    for document in intended.values():
+        if not isinstance(document.get("fields"), Mapping):
+            raise KeypointCheckpointConflict("Keypoint apply intended row fields are missing.")
+    arrays = {
+        name: array
+        for name, array in _coupled_row_arrays(session).items()
+        if array is not None
+    }
+
+    def rows_to_write(field_name: str) -> list[int]:
+        rows = []
+        for row in sorted(intended):
+            value = intended[row]["fields"].get(field_name)  # type: ignore[union-attr]
+            if value is None:
+                continue
+            existing = current[row]["fields"].get(field_name)  # type: ignore[union-attr]
+            if canonical_json_sha256(existing) != canonical_json_sha256(value):
+                rows.append(row)
+        return rows
+
+    pending = {name: rows_to_write(name) for name in arrays}
+    recovered = bool(getattr(session, "recovered_roi_only", False))
+    final_fields = [name for name in arrays if name != "training_eligible"]
+    if recovered:
+        dirty = sorted({row for rows in pending.values() for row in rows})
+        _fail_closed_recovered_rows(session, dirty)
+        usable = arrays.get("usable_keypoints")
+        if usable is not None and dirty:
+            _write_rows(usable, dirty, np.zeros(len(dirty), dtype=bool))
+            pending["usable_keypoints"] = [
+                row
+                for row in dirty
+                if intended[row]["fields"].get("usable_keypoints") is not None  # type: ignore[union-attr]
+            ]
+        if "training_eligible" in arrays:
+            pending["training_eligible"] = [
+                row
+                for row in dirty
+                if intended[row]["fields"].get("training_eligible") is not None  # type: ignore[union-attr]
+            ]
+            final_fields.append("training_eligible")
+    for field_name in final_fields:
+        rows = pending.get(field_name) or []
+        if rows:
+            _write_field(arrays[field_name], field_name, rows, intended)
 
 
 from .web_keypoint_checkpoint_apply import apply_keypoint_checkpoints  # noqa: E402

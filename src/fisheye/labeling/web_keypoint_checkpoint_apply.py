@@ -21,35 +21,28 @@ from .web_keypoint_checkpoints import (
     KeypointCheckpointConflict,
     _APPLY_SNAPSHOT_LIMIT,
     _RECEIPT_HISTORY_LIMIT,
-    _apply_operation,
+    _bindings,
     _checkpoint_metadata,
     _checkpoint_payload,
-    _converge_row_to_intended_state,
     _decoded_json_value,
     _edit_revision,
-    _ensure_downstream_stale_after_row_apply,
+    _fail_closed_recovered_rows,
     _json_value,
-    _row_state_document,
+    _mark_changed_rows_stale,
+    _row_state_documents,
+    _write_intended_rows,
     checkpoint_snapshot_digest,
     keypoint_browser_save_mode,
     validate_keypoint_checkpoint,
 )
+
+KEYPOINT_APPLY_INFLIGHT_SCHEMA = "palette.keypoint_checkpoint_apply_inflight.v2"
 
 
 def _receipts(session: object) -> dict[str, object]:
     attrs = getattr(getattr(session, "refined"), "attrs")
     value = attrs.get(KEYPOINT_APPLY_RECEIPTS_ATTR)
     return dict(value) if isinstance(value, Mapping) else {}
-
-
-def _fail_closed_recovered_training_row(session: object, *, roi_idx: int) -> None:
-    if not bool(getattr(session, "recovered_roi_only", False)):
-        return
-    refined = getattr(session, "refined")
-    getter = getattr(refined, "get", None)
-    eligible = getter("training_eligible") if callable(getter) else None
-    if eligible is not None:
-        eligible[int(roi_idx)] = False
 
 
 def _fresh_session_for_apply(
@@ -305,6 +298,7 @@ def apply_keypoint_checkpoints(
         )
 
     write_started = False
+    rows = [int(row.get("roi_idx") or 0) for row in checkpoints]
     try:
         with archive_metadata_publication_lock(str(getattr(session, "zarr_path"))):
             session, apply_runtime = _fresh_session_for_apply(runtime, backend_module)
@@ -320,6 +314,20 @@ def apply_keypoint_checkpoints(
                 )
             receipts = _receipts(session)
             receipt = receipts.get(apply_id_value)
+            inflight = attrs.get(KEYPOINT_APPLY_INFLIGHT_ATTR)
+            owned_inflight = isinstance(inflight, Mapping)
+            if owned_inflight and (
+                str(inflight.get("apply_id") or "") != apply_id_value
+                or str(inflight.get("checkpoint_snapshot_sha256") or "")
+                != actual_digest
+            ):
+                raise KeypointCheckpointConflict(
+                    "The durable keypoint receipt conflicts with another inflight apply."
+                    if isinstance(receipt, Mapping)
+                    else "A different uncertain keypoint apply owns the canonical target."
+                )
+            intended = _intended_row_states(checkpoints)
+
             if isinstance(receipt, Mapping):
                 if str(receipt.get("checkpoint_snapshot_sha256") or "") != actual_digest:
                     raise KeypointCheckpointConflict(
@@ -329,57 +337,25 @@ def apply_keypoint_checkpoints(
                 # finalization failure must keep this same apply_id claimed so
                 # restart recovery cannot release it to a different writer.
                 write_started = True
-                receipt_inflight = attrs.get(KEYPOINT_APPLY_INFLIGHT_ATTR)
-                if isinstance(receipt_inflight, Mapping) and (
-                    str(receipt_inflight.get("apply_id") or "") != apply_id_value
-                    or str(
-                        receipt_inflight.get("checkpoint_snapshot_sha256") or ""
+                if bool(getattr(session, "recovered_roi_only", False)):
+                    current = _validated_current_rows(
+                        checkpoints, apply_runtime, session, intended, uncertain=True
+                    )[1]
+                    _write_intended_rows(session, intended, current)
+                    _verify_rows(
+                        session,
+                        intended,
+                        message="Recovered keypoint receipt {} did not restore its intended row.",
+                        checkpoints=checkpoints,
                     )
-                    != actual_digest
-                ):
-                    raise KeypointCheckpointConflict(
-                        "The durable keypoint receipt conflicts with another inflight apply."
-                    )
-                for checkpoint in checkpoints:
-                    if not bool(getattr(session, "recovered_roi_only", False)):
-                        break
-                    checkpoint_id = str(checkpoint.get("checkpoint_id") or "")
-                    metadata = _checkpoint_metadata(checkpoint)
-                    intended = metadata.get("intended_row_state")
-                    if not isinstance(intended, Mapping):
-                        raise KeypointCheckpointConflict(
-                            "The recovered keypoint receipt lost its intended row state."
-                        )
-                    validate_keypoint_checkpoint(
-                        checkpoint,
-                        apply_runtime,
-                        allowed_row_state_sha256=[canonical_json_sha256(intended)],
-                        allowed_intermediate_row_state=intended,
-                    )
-                    roi_idx = int(checkpoint.get("roi_idx") or 0)
-                    _converge_row_to_intended_state(
-                        session, roi_idx=roi_idx, intended=intended
-                    )
-                    if canonical_json_sha256(
-                        _row_state_document(session, roi_idx)
-                    ) != canonical_json_sha256(intended):
-                        raise RuntimeError(
-                            f"Recovered keypoint receipt {checkpoint_id} did not restore its intended row."
-                        )
-                updated = store.mark_session_checkpoints_applied(
-                    checkpoint_ids=[
-                        str(row.get("checkpoint_id") or "") for row in checkpoints
-                    ],
+                _finalize_store(
+                    store,
+                    checkpoints,
                     apply_id=apply_id_value,
                     edit_revision_before=int(receipt.get("edit_revision_before") or 0),
                     edit_revision_after=int(receipt.get("edit_revision_after") or 0),
-                    require_secondary_effects=True,
                 )
-                if int(updated) != len(checkpoints):
-                    raise RuntimeError(
-                        "The keypoint apply receipt could not finalize every claimed checkpoint."
-                    )
-                if isinstance(receipt_inflight, Mapping):
+                if owned_inflight:
                     attrs.pop(KEYPOINT_APPLY_INFLIGHT_ATTR, None)
                 if session is not getattr(runtime, "review_session"):
                     runtime.review_session = session
@@ -391,209 +367,70 @@ def apply_keypoint_checkpoints(
                     "applied": True,
                 }
 
-            inflight = attrs.get(KEYPOINT_APPLY_INFLIGHT_ATTR)
-            recovering = isinstance(inflight, Mapping)
-            write_started = bool(recovering)
-            if recovering and (
-                str(inflight.get("apply_id") or "") != apply_id_value
-                or str(inflight.get("checkpoint_snapshot_sha256") or "")
-                != actual_digest
-            ):
-                raise KeypointCheckpointConflict(
-                    "A different uncertain keypoint apply owns the canonical target."
-                )
-            completed_digests: dict[str, str] = {}
-            completed_row_results: dict[str, dict[str, object]] = {}
-            if recovering:
-                completed = inflight.get("completed_row_state_sha256")
-                if isinstance(completed, Mapping):
-                    completed_digests = {
-                        str(key): str(value)
-                        for key, value in completed.items()
-                        if str(key) and str(value)
-                    }
-                recorded_results = inflight.get("completed_row_results")
-                if isinstance(recorded_results, Mapping):
-                    completed_row_results = {
-                        str(key): dict(value)
-                        for key, value in recorded_results.items()
-                        if str(key) and isinstance(value, Mapping)
-                    }
-
-            current_checkpoint_id = (
-                str(inflight.get("current_checkpoint_id") or "")
-                if recovering
-                else ""
+            # Without an owned inflight marker every row must still be at its
+            # exact staged base.  With one, a prior attempt of this same
+            # apply_id may have left any snapshot row partially written.
+            write_started = owned_inflight
+            payloads, current = _validated_current_rows(
+                checkpoints, apply_runtime, session, intended, uncertain=owned_inflight
             )
-            current_intended: Mapping[str, object] | None = None
-            if current_checkpoint_id:
-                candidate = inflight.get("current_expected_row_state")
-                candidate_digest = str(
-                    inflight.get("current_expected_row_state_sha256") or ""
-                )
-                if (
-                    not isinstance(candidate, Mapping)
-                    or candidate_digest != canonical_json_sha256(candidate)
-                ):
-                    raise KeypointCheckpointConflict(
-                        "The uncertain keypoint apply row intent changed."
-                    )
-                current_intended = candidate
-
-            payloads: list[Mapping[str, object]] = []
-            for checkpoint in checkpoints:
-                roi_idx = int(checkpoint.get("roi_idx") or 0)
-                checkpoint_id = str(checkpoint.get("checkpoint_id") or "")
-                metadata = _checkpoint_metadata(checkpoint)
-                recovered_completed_intended = (
-                    metadata.get("intended_row_state")
-                    if checkpoint_id in completed_digests
-                    and bool(getattr(session, "recovered_roi_only", False))
-                    else None
-                )
-                payloads.append(
-                    validate_keypoint_checkpoint(
-                        checkpoint,
-                        apply_runtime,
-                        allowed_row_state_sha256=(
-                            [completed_digests[checkpoint_id]]
-                            if checkpoint_id in completed_digests
-                            else []
-                        ),
-                        allowed_intermediate_row_state=(
-                            current_intended
-                            if checkpoint_id == current_checkpoint_id
-                            else (
-                                recovered_completed_intended
-                                if isinstance(
-                                    recovered_completed_intended, Mapping
-                                )
-                                else None
-                            )
-                        ),
-                    )
-                )
-                if checkpoint_id in completed_digests and (
-                    canonical_json_sha256(_row_state_document(session, roi_idx))
-                    != completed_digests[checkpoint_id]
-                ):
-                    completed_digests.pop(checkpoint_id, None)
-                    completed_row_results.pop(checkpoint_id, None)
-            intended_states: dict[str, dict[str, object]] = {}
-            for checkpoint, payload in zip(checkpoints, payloads):
-                checkpoint_id = str(checkpoint.get("checkpoint_id") or "")
-                if checkpoint_id in completed_digests:
-                    continue
-                metadata = _checkpoint_metadata(checkpoint)
-                intended = metadata.get("intended_row_state")
-                assert isinstance(intended, Mapping)
-                if checkpoint_id == current_checkpoint_id and _json_value(
-                    current_intended
-                ) != _json_value(intended):
-                    raise KeypointCheckpointConflict(
-                        "The uncertain keypoint row intent no longer matches its checkpoint."
-                    )
-                intended_states[checkpoint_id] = dict(intended)
             # The global revision is context, not row freshness.  A checkpoint
             # for an unchanged row remains valid after a different row commits.
             edit_revision_before = (
                 int(inflight.get("edit_revision_before") or 0)
-                if recovering
+                if owned_inflight
                 else _edit_revision(session)
             )
-            inflight_payload = (
-                dict(inflight)
-                if recovering
-                else {
-                    "schema": "palette.keypoint_checkpoint_apply_inflight.v1",
+            if not owned_inflight:
+                attrs[KEYPOINT_APPLY_INFLIGHT_ATTR] = {
+                    "schema": KEYPOINT_APPLY_INFLIGHT_SCHEMA,
                     "apply_id": apply_id_value,
                     "checkpoint_snapshot_sha256": actual_digest,
                     "checkpoint_ids": [
-                        str(row.get("checkpoint_id") or "")
-                        for row in checkpoints
+                        str(row.get("checkpoint_id") or "") for row in checkpoints
                     ],
                     "edit_revision_before": edit_revision_before,
                     "started_at_utc": datetime.now(timezone.utc).isoformat(),
-                    "completed_row_state_sha256": {},
-                    "completed_row_results": {},
                 }
-            )
-            attrs[KEYPOINT_APPLY_INFLIGHT_ATTR] = inflight_payload
             write_started = True
-            results: list[Mapping[str, object]] = []
-            for checkpoint, payload in zip(checkpoints, payloads):
-                checkpoint_id = str(checkpoint.get("checkpoint_id") or "")
-                if checkpoint_id in completed_digests:
-                    continue
+            _write_intended_rows(session, intended, current)
+            changed_operations: dict[int, str] = {}
+            for checkpoint in checkpoints:
                 roi_idx = int(checkpoint.get("roi_idx") or 0)
-                intended = intended_states[checkpoint_id]
-                inflight_payload["current_checkpoint_id"] = checkpoint_id
-                inflight_payload["current_roi_idx"] = roi_idx
-                inflight_payload["current_expected_row_state"] = intended
-                inflight_payload["current_expected_row_state_sha256"] = (
-                    canonical_json_sha256(intended)
+                binding = _checkpoint_metadata(checkpoint).get("binding")
+                base_row_state = (
+                    binding.get("expected_row_state")
+                    if isinstance(binding, Mapping)
+                    else None
                 )
-                attrs[KEYPOINT_APPLY_INFLIGHT_ATTR] = dict(inflight_payload)
-                try:
-                    operation_result = _apply_operation(
-                        backend_module,
-                        session,
-                        roi_idx=roi_idx,
-                        payload=payload,
+                if not isinstance(base_row_state, Mapping):
+                    raise KeypointCheckpointConflict(
+                        "Keypoint checkpoint base row state is missing."
                     )
-                    binding = _checkpoint_metadata(checkpoint).get("binding")
-                    base_row_state = (
-                        binding.get("expected_row_state")
-                        if isinstance(binding, Mapping)
-                        else None
+                if canonical_json_sha256(base_row_state) != canonical_json_sha256(
+                    intended[roi_idx]
+                ):
+                    changed_operations[roi_idx] = str(
+                        payloads[roi_idx].get("operation") or ""
                     )
-                    if not isinstance(base_row_state, Mapping):
-                        raise KeypointCheckpointConflict(
-                            "Keypoint checkpoint base row state is missing."
+            stale_touched = _mark_changed_rows_stale(session, changed_operations)
+            _verify_rows(
+                session,
+                intended,
+                message="Keypoint apply did not converge to its durable intended row state.",
+            )
+            row_results = [
+                _applied_row_result(
+                    checkpoint,
+                    payloads[int(checkpoint.get("roi_idx") or 0)],
+                    {
+                        "stale_touched": stale_touched.get(
+                            int(checkpoint.get("roi_idx") or 0), 0
                         )
-                    _converge_row_to_intended_state(
-                        session, roi_idx=roi_idx, intended=intended
-                    )
-                    actual_row_state = _row_state_document(session, roi_idx)
-                    actual_row_digest = canonical_json_sha256(actual_row_state)
-                    intended_row_digest = canonical_json_sha256(intended)
-                    if actual_row_digest != intended_row_digest:
-                        raise RuntimeError(
-                            "Keypoint apply did not converge to its durable intended row state."
-                        )
-                    stale_touched = _ensure_downstream_stale_after_row_apply(
-                        session,
-                        roi_idx=roi_idx,
-                        payload=payload,
-                        base_row_state=base_row_state,
-                        intended_row_state=intended,
-                    )
-                except Exception:
-                    _fail_closed_recovered_training_row(session, roi_idx=roi_idx)
-                    raise
-                operation_result = {
-                    **dict(operation_result),
-                    "stale_touched": max(
-                        int(operation_result.get("stale_touched") or 0),
-                        int(stale_touched),
-                    ),
-                }
-                results.append(operation_result)
-                completed_digests[checkpoint_id] = actual_row_digest
-                completed_row_results[checkpoint_id] = _applied_row_result(
-                    checkpoint, payload, operation_result
+                    },
                 )
-                inflight_payload["completed_row_state_sha256"] = dict(
-                    completed_digests
-                )
-                inflight_payload["completed_row_results"] = dict(
-                    completed_row_results
-                )
-                inflight_payload.pop("current_checkpoint_id", None)
-                inflight_payload.pop("current_roi_idx", None)
-                inflight_payload.pop("current_expected_row_state", None)
-                inflight_payload.pop("current_expected_row_state_sha256", None)
-                attrs[KEYPOINT_APPLY_INFLIGHT_ATTR] = dict(inflight_payload)
+                for checkpoint in checkpoints
+            ]
             edit_revision_after = int(edit_revision_before) + 1
             attrs["edit_revision"] = int(edit_revision_after)
             attrs["edit_revision_updated_at_utc"] = datetime.now(
@@ -605,14 +442,11 @@ def apply_keypoint_checkpoints(
                 "apply_id": apply_id_value,
                 "checkpoint_snapshot_sha256": actual_digest,
                 "applied_checkpoint_count": len(checkpoints),
-                "rows": [int(row.get("roi_idx") or 0) for row in checkpoints],
+                "rows": rows,
                 "checkpoint_ids": [
                     str(row.get("checkpoint_id") or "") for row in checkpoints
                 ],
-                "row_results": [
-                    completed_row_results[str(row.get("checkpoint_id") or "")]
-                    for row in checkpoints
-                ],
+                "row_results": row_results,
                 "edit_revision_before": edit_revision_before,
                 "edit_revision_after": edit_revision_after,
                 "applied_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -629,20 +463,13 @@ def apply_keypoint_checkpoints(
                 )
                 receipts = dict(ordered[-_RECEIPT_HISTORY_LIMIT:])
             attrs[KEYPOINT_APPLY_RECEIPTS_ATTR] = receipts
-
-            updated = store.mark_session_checkpoints_applied(
-                checkpoint_ids=[
-                    str(row.get("checkpoint_id") or "") for row in checkpoints
-                ],
+            _finalize_store(
+                store,
+                checkpoints,
                 apply_id=apply_id_value,
                 edit_revision_before=edit_revision_before,
                 edit_revision_after=edit_revision_after,
-                require_secondary_effects=True,
             )
-            if int(updated) != len(checkpoints):
-                raise RuntimeError(
-                    "The keypoint apply receipt could not finalize every claimed checkpoint."
-                )
             attrs.pop(KEYPOINT_APPLY_INFLIGHT_ATTR, None)
             if session is not getattr(runtime, "review_session"):
                 runtime.review_session = session
@@ -650,23 +477,109 @@ def apply_keypoint_checkpoints(
                 **receipt_payload,
                 "already_applied": False,
                 "canonical_zarr_mutated": any(
-                    bool(result.get("changed"))
-                    for result in completed_row_results.values()
+                    bool(result.get("changed")) for result in row_results
                 ),
                 "saved": True,
                 "applied": True,
             }
     except Exception:
-        if write_started and bool(getattr(session, "recovered_roi_only", False)):
-            for checkpoint in checkpoints:
-                _fail_closed_recovered_training_row(
-                    session, roi_idx=int(checkpoint.get("roi_idx") or 0)
-                )
-        if not write_started:
+        if write_started:
+            _fail_closed_recovered_rows(session, rows)
+        else:
             store.release_session_checkpoints_apply(
                 task_id=task_id, apply_id=apply_id_value
             )
         raise
+
+
+def _intended_row_states(
+    checkpoints: Sequence[Mapping[str, object]],
+) -> dict[int, Mapping[str, object]]:
+    intended: dict[int, Mapping[str, object]] = {}
+    for checkpoint in checkpoints:
+        document = _checkpoint_metadata(checkpoint).get("intended_row_state")
+        if not isinstance(document, Mapping):
+            raise KeypointCheckpointConflict(
+                "Keypoint checkpoint intended row state changed."
+            )
+        roi_idx = int(checkpoint.get("roi_idx") or 0)
+        if roi_idx in intended:
+            raise KeypointCheckpointConflict(
+                "A keypoint row appears twice in one snapshot."
+            )
+        intended[roi_idx] = document
+    return intended
+
+
+def _validated_current_rows(
+    checkpoints: Sequence[Mapping[str, object]],
+    apply_runtime: object,
+    session: object,
+    intended: Mapping[int, Mapping[str, object]],
+    *,
+    uncertain: bool,
+) -> tuple[dict[int, Mapping[str, object]], dict[int, Mapping[str, object]]]:
+    """Validate every checkpoint before the first write, reading each array once.
+
+    ``uncertain`` admits rows left at their intended state, or partway between
+    base and intended, by an interrupted attempt of the same apply_id.
+    """
+
+    rows = sorted(intended)
+    current = _row_state_documents(session, rows)
+    bindings = _bindings(session, rows, row_states=current)
+    payloads: dict[int, Mapping[str, object]] = {}
+    for checkpoint in checkpoints:
+        roi_idx = int(checkpoint.get("roi_idx") or 0)
+        target = intended[roi_idx]
+        payloads[roi_idx] = validate_keypoint_checkpoint(
+            checkpoint,
+            apply_runtime,
+            allowed_row_state_sha256=(
+                [canonical_json_sha256(target)] if uncertain else []
+            ),
+            allowed_intermediate_row_state=target if uncertain else None,
+            current_binding=bindings[roi_idx],
+        )
+    return payloads, current
+
+
+def _verify_rows(
+    session: object,
+    intended: Mapping[int, Mapping[str, object]],
+    *,
+    message: str,
+    checkpoints: Sequence[Mapping[str, object]] = (),
+) -> None:
+    actual = _row_state_documents(session, sorted(intended))
+    ids = {
+        int(row.get("roi_idx") or 0): str(row.get("checkpoint_id") or "")
+        for row in checkpoints
+    }
+    for roi_idx, document in intended.items():
+        if canonical_json_sha256(actual[roi_idx]) != canonical_json_sha256(document):
+            raise RuntimeError(message.format(ids.get(roi_idx, roi_idx)))
+
+
+def _finalize_store(
+    store: object,
+    checkpoints: Sequence[Mapping[str, object]],
+    *,
+    apply_id: str,
+    edit_revision_before: int,
+    edit_revision_after: int,
+) -> None:
+    updated = store.mark_session_checkpoints_applied(  # type: ignore[attr-defined]
+        checkpoint_ids=[str(row.get("checkpoint_id") or "") for row in checkpoints],
+        apply_id=apply_id,
+        edit_revision_before=int(edit_revision_before),
+        edit_revision_after=int(edit_revision_after),
+        require_secondary_effects=True,
+    )
+    if int(updated) != len(checkpoints):
+        raise RuntimeError(
+            "The keypoint apply receipt could not finalize every claimed checkpoint."
+        )
 
 
 __all__ = ["apply_keypoint_checkpoints"]

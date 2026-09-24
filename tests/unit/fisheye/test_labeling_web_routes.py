@@ -4700,9 +4700,7 @@ def _mutable_keypoint_route_session(tmp_path):
     )
 
 
-def _install_mutable_keypoint_route_backend(monkeypatch, *, failure=None):
-    failure_state = failure if failure is not None else {"real_apply_failures": 0}
-
+def _install_mutable_keypoint_route_backend(monkeypatch):
     def load_roi_payload(session, position=0):
         roi_idx = int(session.failures[int(position)])
         point = np.asarray(session.kp_roi_arr[roi_idx], dtype=np.float64)[0]
@@ -4729,14 +4727,6 @@ def _install_mutable_keypoint_route_backend(monkeypatch, *, failure=None):
         roi_idx = int(session.failures[int(position)])
         session.kp_roi_arr[roi_idx] = np.asarray(points, dtype=np.float64)
         session.reason_arr[roi_idx] = "manual_correction"
-        if (
-            type(session.root).__name__ != "_DryRunRoot"
-            and int(failure_state.get("real_apply_failures", 0)) > 0
-        ):
-            failure_state["real_apply_failures"] = int(
-                failure_state["real_apply_failures"]
-            ) - 1
-            raise RuntimeError("injected real apply failure")
         return {
             "roi_idx": roi_idx,
             "frame_idx": int(session.frame_indices[roi_idx]),
@@ -4768,7 +4758,6 @@ def _install_mutable_keypoint_route_backend(monkeypatch, *, failure=None):
             "review_status": {"state": kwargs["state"]}
         },
     )
-    return failure_state
 
 
 def test_mutable_keypoint_http_checkpoint_apply_and_pending_gates(
@@ -4901,9 +4890,19 @@ def test_mutable_keypoint_http_checkpoint_apply_and_pending_gates(
 
 
 def test_mutable_keypoint_http_apply_uncertainty_retains_id(tmp_path, monkeypatch):
-    failure = _install_mutable_keypoint_route_backend(
-        monkeypatch, failure={"real_apply_failures": 1}
-    )
+    from fisheye.labeling import web_keypoint_checkpoint_apply as apply_mod
+
+    _install_mutable_keypoint_route_backend(monkeypatch)
+    failure = {"real_apply_failures": 1}
+    real_write = apply_mod._write_intended_rows
+
+    def _interrupted_write(session, intended, current):
+        real_write(session, intended, current)
+        if failure["real_apply_failures"] > 0:
+            failure["real_apply_failures"] -= 1
+            raise RuntimeError("injected real apply failure")
+
+    monkeypatch.setattr(apply_mod, "_write_intended_rows", _interrupted_write)
     store = LabelingStore(tmp_path / "labeling_work.sqlite")
     try:
         store.initialize()
