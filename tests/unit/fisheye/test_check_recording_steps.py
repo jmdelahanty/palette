@@ -1692,6 +1692,53 @@ def test_registry_status_payload_filters_rows_to_matching_recording_id(tmp_path:
     assert payload["tuning_status"]["eye_mask_tuning"] == "ok"  # type: ignore[index]
 
 
+def test_registry_status_payload_accepts_recording_directory_id(tmp_path: Path) -> None:
+    """Registry rows keyed by the recording directory name match the H5 id."""
+    zarr_path = tmp_path / "2026-06-23T16-01-09Z_arena_1_RedScare" / "zarr" / "rec_training.zarr"
+    zarr.open_group(str(zarr_path), mode="w")
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "2026-06-23T16-01-09Z_arena_1:zabc",
+        session_uuid="session_a",
+        zarr_path=zarr_path,
+        recording_id="2026-06-23T16-01-09Z_arena_1_RedScare",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_dataset(
+        "ghost",
+        session_uuid="session_ghost",
+        zarr_path=zarr_path,
+        recording_id=None,
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id, recording_id, step_name, status, source, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?);
+        """,
+        [
+            ("2026-06-23T16-01-09Z_arena_1:zabc", "2026-06-23T16-01-09Z_arena_1_RedScare",
+             "eye_mask_tuning", "ok", "unit_test", "2026-02-23T01:00:00+00:00"),
+            ("ghost", None, "eye_mask_tuning", "missing", "unit_test", "2026-02-23T02:00:00+00:00"),
+        ],
+    )
+    registry.conn.commit()
+
+    payload = mod._registry_status_payload(  # noqa: SLF001
+        registry=registry,
+        zarr_path=zarr_path,
+        recording_id="2026-06-23T16-01-09Z_arena_1",
+        tuning_keys=["eye_mask_tuning"],
+    )
+    registry.close()
+
+    assert payload["tuning_status"]["eye_mask_tuning"] == "ok"  # type: ignore[index]
+
+
 def test_registry_status_payload_reads_track_unassigned_warning(tmp_path: Path) -> None:
     zarr_path = tmp_path / "track_warning_analysis.zarr"
     zarr.open_group(str(zarr_path), mode="w")
