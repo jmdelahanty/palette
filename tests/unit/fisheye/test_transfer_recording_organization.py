@@ -13,6 +13,25 @@ import pytest
 from fisheye.shared import recording_transfer_snapshot as transfer
 from fisheye.utils import organize_transfer_recordings as organizer
 
+
+@pytest.fixture(autouse=True)
+def _placeholder_media_sync_assessment(monkeypatch):
+    """Fixture videos are text placeholders; the real check runs in the canary."""
+    from fisheye.diagnostics.video import container
+
+    monkeypatch.setattr(
+        container,
+        "check_hevc_keyframe_flags",
+        lambda path, **_: {
+            "schema_id": "palette.video.sync_sample_assessment.v1",
+            "codec": "h264",
+            "container_inspection_status": "ok",
+            "sync_sample_proof": "container_declared",
+            "message": "placeholder media",
+        },
+    )
+
+
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures/recording_transfer_v2"
 CONTEXT = {
     "recording_type": "behavior",
@@ -263,8 +282,7 @@ def test_materialize_preserves_all_bytes_and_replays_owned_destinations(tmp_path
     for item in plan["files"]:
         for target in item["destinations"]:
             path = (
-                Path(plan["destination_root"])
-                / target["recording_id"]
+                organizer._parent_directory(plan, target["recording_id"])
                 / target["relative_path"]
             )
             assert path.read_bytes() == before[item["source"]["path"]]
@@ -288,8 +306,7 @@ def test_materialization_refuses_conflicting_evidence_and_never_retires_source(
         else:
             target = next(item["destinations"][0] for item in plan["files"])
             path = (
-                Path(plan["destination_root"])
-                / target["recording_id"]
+                organizer._parent_directory(plan, target["recording_id"])
                 / target["relative_path"]
             )
             path.unlink()
@@ -514,8 +531,7 @@ def test_verified_retirement_empties_only_source_and_preserves_every_destination
     for item in plan["files"]:
         for target in item["destinations"]:
             path = (
-                Path(plan["destination_root"])
-                / target["recording_id"]
+                organizer._parent_directory(plan, target["recording_id"])
                 / target["relative_path"]
             )
             assert path.read_bytes() == before[item["source"]["path"]]
@@ -545,8 +561,7 @@ def test_failed_retirement_gate_keeps_all_remaining_staging_bytes(
     elif failure == "changed_destination":
         target = plan["files"][0]["destinations"][0]
         path = (
-            Path(plan["destination_root"])
-            / target["recording_id"]
+            organizer._parent_directory(plan, target["recording_id"])
             / target["relative_path"]
         )
         path.unlink()
@@ -655,7 +670,7 @@ def test_all_durable_copies_and_initial_journal_precede_first_unlink(
         nonlocal retired
         if retired == 0:
             expected = {
-                Path(plan["destination_root"]) / t["recording_id"] / t["relative_path"]
+                organizer._parent_directory(plan, t["recording_id"]) / t["relative_path"]
                 for item in plan["files"]
                 for t in item["destinations"]
             }
@@ -679,3 +694,57 @@ def test_all_durable_copies_and_initial_journal_precede_first_unlink(
     organizer.finalize_transfer_staging(plan)
     assert retired == len(plan["files"])
     assert not list(source.iterdir())
+
+
+def test_recording_folders_are_readable_and_ids_stay_hashed(tmp_path):
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    for parent in plan["parents"]:
+        directory = Path(parent["destination_dir"])
+        assert directory.name == parent["recording_name"]
+        assert directory.name.endswith("_Cam" + parent["identity"]["camera_id"])
+        assert parent["identity"]["recording_id"].startswith("source_recording_")
+        assert organizer._parent_directory(plan, parent["identity"]["recording_id"]) == directory
+
+
+def test_sync_assessment_is_recorded_and_replayed(tmp_path):
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    organizer.prepare_transfer_parent_recordings(plan, batch_rows=1)
+    for parent in plan["parents"]:
+        directory = Path(parent["destination_dir"])
+        assessment = json.loads((directory / organizer.VIDEO_SYNC_ASSESSMENT).read_bytes())
+        assert assessment["videos"] and all(
+            relative.startswith("cams/acquisition/") for relative in assessment["videos"]
+        )
+        manifest = json.loads((directory / "recording_manifest.json").read_bytes())
+        assert organizer.VIDEO_SYNC_ASSESSMENT in manifest["files"]["derived"]
+    organizer.prepare_transfer_parent_recordings(plan, batch_rows=1)  # replay verifies
+
+
+@pytest.mark.parametrize(
+    ("result", "reason"),
+    [
+        ({"container_inspection_status": "unreadable", "message": "bad"}, "cannot be verified"),
+        (
+            {
+                "container_inspection_status": "ok",
+                "sync_sample_proof": "orange_idr_sidecar_contradiction",
+                "message": "contradiction",
+            },
+            "contradicts",
+        ),
+    ],
+)
+def test_unverifiable_or_contradicted_keyframes_refuse_before_manifest(
+    tmp_path, monkeypatch, result, reason
+):
+    from fisheye.diagnostics.video import container
+
+    monkeypatch.setattr(container, "check_hevc_keyframe_flags", lambda path, **_: result)
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    with pytest.raises(transfer.TransferSnapshotError, match=reason):
+        organizer.prepare_transfer_parent_recordings(plan, batch_rows=1)
+    for parent in plan["parents"]:
+        assert not (Path(parent["destination_dir"]) / "recording_manifest.json").exists()

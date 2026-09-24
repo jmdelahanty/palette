@@ -8,6 +8,25 @@ import pytest
 
 from fisheye.utils import run_citrus_session_import as runner
 
+
+@pytest.fixture(autouse=True)
+def _placeholder_media_sync_assessment(monkeypatch):
+    """Fixture videos are text placeholders; the real check runs in the canary."""
+    from fisheye.diagnostics.video import container
+
+    monkeypatch.setattr(
+        container,
+        "check_hevc_keyframe_flags",
+        lambda path, **_: {
+            "schema_id": "palette.video.sync_sample_assessment.v1",
+            "codec": "h264",
+            "container_inspection_status": "ok",
+            "sync_sample_proof": "container_declared",
+            "message": "placeholder media",
+        },
+    )
+
+
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures/recording_transfer_v2"
 
 
