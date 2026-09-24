@@ -18,7 +18,14 @@ from tempfile import TemporaryDirectory
 from typing import Any, Mapping
 
 PROFILE = "unified_experimental_h5_v1"
-MAX_DATASET_BYTES = 64 * 1024 * 1024
+# Resource profile citrus_palette.unified_h5.long_session_resources v1, from the
+# pinned admission contract contracts/unified_h5_admission_v2.json (a test keeps
+# these equal). Limits are per dataset and inclusive.
+MAX_DATASET_LOGICAL_BYTES = 2**40
+MAX_DATASET_ROWS = 2**40
+MAX_ELEMENT_BYTES = 64 * 1024 * 1024
+# Palette's own bounds for small metadata: attribute element counts and the
+# correspondence v1 whole-session JSON input (v1 keeps its original limit).
 MAX_ROWS = 2_000_000
 MAX_JSON_BYTES = 8 * 1024 * 1024
 BLOCK_BYTES = 1024 * 1024

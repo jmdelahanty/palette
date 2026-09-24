@@ -11,6 +11,7 @@ They are not Palette scientific-acceptance or activation schemas.
 | `experimental_h5_geometry_v1.json` | `0a9e2d490ab0772dbaa7fdda3f837693806caad0` | `4c0c707192cf1fa6ceafb2f632672972f41dc7e4c7cc5cdb0c0e3b7920a1474b` |
 | `experimental_h5_identity_claims_v1.json` | `0a9e2d490ab0772dbaa7fdda3f837693806caad0` | `83ca66b336f3e3a40ebaafc869d7febd020509e238243381dfe871cbeb89507e` |
 | `object_appearance_replay_dependency_manifest_v1.json` | `74083cee35196b4b1fc58e8bea180455a0b924ad` | `eccfcfcb3c6e66549b2fdfcfcf88fdc4fa9def3d6ce4a375494d011b04f2607c` |
+| `unified_h5_admission_v2.json` (resource profile only) | agent-contracts PR 52 draft `9417baa8b7d23371e15cf9d2fe75443a537cf28c` | `58460d68cd25bcb728371815ad9bdabc3bd6080a1ad423819fefda5611c498df` |
 
 The geometry and presentation adapters follow that producer's
 `src/logging/experimental_h5_geometry.cpp`, `stimulus_geometry_contract.cpp`, and
@@ -28,3 +29,10 @@ Sources were reviewed against agent-contracts PR 51 at
 `408307c9a6b11258546b4465fa43323cb3668013`, with PR 50 at
 `f775aa652e524a13fbdff9e832937eb74ba191bc`. See the repository's unified-H5
 integration handoff for provenance, scope, and validation status.
+
+Only the admission v2 resource profile (per-dataset limits) is applied so far.
+Correspondence v2, the optional pose component, and capacity-preflight evidence
+are not yet admitted. The core table definitions stay at the older producer
+bytes: the producer's later core v1 changes one field description, which enters
+the canonical table digest, so files from either definition cannot both be
+admitted. Re-pin together with regenerated producer fixtures.
