@@ -70,11 +70,7 @@ from fisheye.shared.run_provenance import git_identity
 from fisheye.shared.unified_h5 import PROFILE as UNIFIED_H5_PROFILE
 from fisheye.shared.unified_h5 import UnifiedH5ContractError, declared_unified_profile
 from fisheye.shared.unified_h5.metadata import string_attributes
-from fisheye.shared.unified_h5.storage import (
-    MANIFEST_DIGEST_ATTR,
-    load_unified_stimulus_candidate,
-)
-from fisheye.shared.unified_h5.storage_schema import new_native_run_name
+from fisheye.shared.unified_h5.reference import new_native_run_name, open_unified_source
 from fisheye.shared.source_recording_identity import (
     SOURCE_ANALYSIS_CLASSIFICATION,
     SOURCE_RECORDING_IDENTITY_PROFILE,
@@ -620,24 +616,48 @@ def import_experiment_setup(plan: RecordingAnalysisPlan) -> Optional[dict[str, A
     )
 
 
+def require_unified_source_matches_recording(
+    plan: RecordingAnalysisPlan, run_name: str
+) -> None:
+    """Refuse a unified H5 whose acquisition binding names another recording.
+
+    The recording's identity (Orange acquisition session, camera serial) comes
+    from transfer intake; the H5's comes from its validated acquisition
+    binding. Both must agree, or the stimulus data belongs to someone else.
+    """
+
+    root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+    admission = open_unified_source(
+        zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=True),
+        run_name=run_name,
+    ).admission
+    recording = (root.attrs.get("session_uuid"), root.attrs.get("camera_id"))
+    bound = (admission.get("recording_id"), admission.get("camera_serial"))
+    if recording != bound:
+        raise ValueError(
+            "unified_h5_recording_mismatch: recording (session, camera)="
+            f"{recording!r} but the H5 is bound to {bound!r}"
+        )
+
+
 def project_unified_subject_metadata(
     plan: RecordingAnalysisPlan, run_name: str
 ) -> Optional[dict[str, Any]]:
-    """Publish subject metadata and setup from an admitted native candidate.
+    """Publish subject metadata and setup from an admitted unified source.
 
-    Reads ``/metadata/subject`` from the verified native copy (not the raw H5)
-    and publishes it through the same subject/setup owners as legacy import,
+    Reads ``/metadata/subject`` through the sealed reference's verified
+    attribute snapshot (not by reopening the raw H5 unchecked) and publishes it through the same subject/setup owners as legacy import,
     to the same locations. Missing fields such as ``subject_count`` refuse;
     nothing is inferred (``subject_id`` is not ``fish_id``).
     """
 
     read_root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=True)
-    candidate = load_unified_stimulus_candidate(read_root, run_name=run_name)
+    source_reader = open_unified_source(read_root, run_name=run_name)
     run_path = f"analysis/stimulus_runs/{run_name}"
     try:
-        descriptors = candidate.typed_attributes("/metadata/subject")
+        descriptors = source_reader.typed_attributes("/metadata/subject")
     except UnifiedH5ContractError:
-        # No /metadata/subject node was copied: absent, as in legacy.
+        # No /metadata/subject node was admitted: absent, as in legacy.
         descriptors = {}
     subject_metadata = normalize_subject_metadata(string_attributes(descriptors))
     if not subject_metadata:
@@ -647,7 +667,7 @@ def project_unified_subject_metadata(
         "group_path": "/metadata/subject",
         "count_field": "subject_count",
         "native_run_path": run_path,
-        "native_manifest_sha256": str(read_root[run_path].attrs[MANIFEST_DIGEST_ATTR]),
+        "unified_reference_sha256": str(source_reader.reference_sha256),
         "source_profile": UNIFIED_H5_PROFILE,
     }
     root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
@@ -842,16 +862,35 @@ def stimulus_h5_unified_profile(h5_path: Path | None) -> str | None:
         return None
 
 
+def _manifest_finalization_receipt(recording_dir: Path) -> Path | None:
+    """Receipt declared by transfer intake in the recording manifest, if any."""
+
+    manifest_path = Path(recording_dir) / "recording_manifest.json"
+    if not manifest_path.is_file():
+        return None
+    relative = _load_recording_manifest(Path(recording_dir)).get(
+        "h5_finalization_receipt_relative_path"
+    )
+    if relative is None:
+        return None
+    return resolve_acquisition_manifest_file(
+        Path(recording_dir), relative, label="h5_finalization_receipt_relative_path"
+    )
+
+
 def run_stimulus_import(
     plan: RecordingAnalysisPlan, opts: RecordingImportOptions
 ) -> tuple[bool, int, List[str]]:
     if plan.h5_path is None:
         return False, 2, ["missing_h5_for_stimulus_import"]
     unified_profile = stimulus_h5_unified_profile(plan.h5_path)
+    receipt_path = plan.finalization_receipt_path
     if unified_profile is not None:
         if unified_profile != UNIFIED_H5_PROFILE:
             return False, 2, [f"unsupported_unified_h5_profile:{unified_profile}"]
-        if plan.finalization_receipt_path is None:
+        if receipt_path is None:
+            receipt_path = _manifest_finalization_receipt(plan.recording_dir)
+        if receipt_path is None:
             return False, 2, ["unified_h5_requires_finalization_receipt"]
         if opts.stimulus_overwrite:
             return False, 2, ["unified_h5_import_is_immutable_no_overwrite"]
@@ -871,7 +910,7 @@ def run_stimulus_import(
                 "--source-profile",
                 unified_profile,
                 "--finalization-receipt",
-                str(plan.finalization_receipt_path),
+                str(receipt_path),
             ]
         )
     if opts.stimulus_run_name:
@@ -1085,6 +1124,14 @@ def process_recording_import(
                     ),
                 )
             if unified_h5:
+                try:
+                    require_unified_source_matches_recording(
+                        plan, str(stim_opts.stimulus_run_name)
+                    )
+                except Exception as exc:
+                    return RecordingImportResult(
+                        ok=False, failed_step="unified_h5_recording_identity", error=str(exc)
+                    )
                 try:
                     setup = project_unified_subject_metadata(
                         plan, str(stim_opts.stimulus_run_name)

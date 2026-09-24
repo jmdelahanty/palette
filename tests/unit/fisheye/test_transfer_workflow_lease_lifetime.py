@@ -48,6 +48,14 @@ def harmless_writer(command, *, name, run_dir, **kwargs):
     )
 
 workflow._run_command = harmless_writer
+# The pinned transfer fixture's MP4s are text placeholders (see its README);
+# the real sync-sample check runs against real H264 in the packaged canary.
+from fisheye.diagnostics.video import container
+container.check_hevc_keyframe_flags = lambda path, **_: {
+    "container_inspection_status": "ok",
+    "sync_sample_proof": "container_declared",
+    "message": "placeholder media",
+}
 raise SystemExit(runner.main(json.loads(sys.argv[1])))
 """
 )
@@ -80,7 +88,6 @@ def test_writer_retains_workflow_lease_after_supervisor_sigkill(tmp_path):
     )
     arguments = [
         str(source),
-        "--transfer-v2",
         "--recording-only",
         "--apply",
         "--recording-type",

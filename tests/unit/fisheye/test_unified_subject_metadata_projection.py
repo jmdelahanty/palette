@@ -21,7 +21,7 @@ from fisheye.shared.experiment_setup import resolve_experiment_setup
 from fisheye.shared.subject_metadata import resolve_subject_metadata
 from fisheye.shared.unified_h5 import UnifiedH5ContractError
 from fisheye.shared.unified_h5.metadata import string_attributes
-from fisheye.shared.unified_h5.storage import MANIFEST_DIGEST_ATTR
+from fisheye.shared.unified_h5.reference import REFERENCE_DIGEST_ATTR
 from fisheye.utils import import_recording_analysis as mod
 from tests.unit.fisheye.test_import_recording_analysis import (
     _acquisition_authority_updates,
@@ -127,9 +127,9 @@ def test_setup_records_its_verified_native_source(tmp_path: Path) -> None:
     assert source["kind"] == "unified_native_subject_metadata"
     assert source["group_path"] == "/metadata/subject"
     assert source["native_run_path"] == "analysis/stimulus_runs/candidate"
-    assert source["native_manifest_sha256"] == root[
+    assert source["unified_reference_sha256"] == root[
         "analysis/stimulus_runs/candidate"
-    ].attrs[MANIFEST_DIGEST_ATTR]
+    ].attrs[REFERENCE_DIGEST_ATTR]
 
 
 def test_missing_subject_count_refuses_rather_than_inventing(tmp_path: Path) -> None:
@@ -202,12 +202,39 @@ def test_process_import_projects_after_the_native_import(
         lambda _plan, stim_opts: order.append(("import", stim_opts.stimulus_run_name)) or (True, 0, ["cmd", "x"]),
     )
     monkeypatch.setattr(
+        mod, "require_unified_source_matches_recording",
+        lambda _plan, run_name: order.append(("identity", run_name)),
+    )
+    monkeypatch.setattr(
         mod, "project_unified_subject_metadata",
         lambda _plan, run_name: order.append(("project", run_name)) or None,
     )
 
     mod.process_recording_import(plan, opts, logger=None)
 
-    assert [step for step, _ in order] == ["import", "project"]
-    assert order[0][1] == order[1][1]
+    assert [step for step, _ in order] == ["import", "identity", "project"]
+    assert len({run_name for _, run_name in order}) == 1
     assert order[0][1].startswith("unified_native_")
+
+
+@pytest.mark.parametrize(
+    ("session", "camera", "ok"),
+    [
+        ("synthetic-paired-recording", "CAM-42", True),
+        ("another-acquisition", "CAM-42", False),
+        ("synthetic-paired-recording", "CAM-43", False),
+    ],
+)
+def test_unified_source_must_match_the_recording_identity(
+    tmp_path: Path, session: str, camera: str, ok: bool
+) -> None:
+    plan = _native_candidate(tmp_path, PRODUCTION_SUBJECT)
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    root.attrs.update(session_uuid=session, camera_id=camera)
+    zarr.consolidate_metadata(str(plan.zarr_path))
+
+    if ok:
+        mod.require_unified_source_matches_recording(plan, "candidate")
+    else:
+        with pytest.raises(ValueError, match="unified_h5_recording_mismatch"):
+            mod.require_unified_source_matches_recording(plan, "candidate")

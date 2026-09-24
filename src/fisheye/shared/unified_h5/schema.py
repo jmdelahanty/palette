@@ -10,7 +10,15 @@ from importlib.resources import files
 import h5py
 import numpy as np
 
-from .common import canonical_json, internal_path, parse_json, require, same_json, text
+from .common import (
+    canonical_json,
+    current_admission_scan,
+    internal_path,
+    parse_json,
+    require,
+    same_json,
+    text,
+)
 from .hdf5_types import check_dataset_budget, dataset_bytes, iter_blocks, iter_payload
 
 APPEARANCE = "/components/visual_appearance/states"
@@ -175,6 +183,9 @@ def appearance_dependencies(h5) -> dict:
 
 
 def describe_table(h5, path: str) -> dict:
+    scan = current_admission_scan()
+    if scan is not None and path in scan.tables:
+        return deepcopy(scan.tables[path])
     schema = table_schema(path)
     require(path in h5 and isinstance(h5[path], h5py.Dataset), f"missing_table:{path}")
     dataset = h5[path]
@@ -235,10 +246,15 @@ def describe_table(h5, path: str) -> dict:
         + len(header).to_bytes(8, "little")
         + header
     )
-    for _, block in iter_blocks(dataset):
+    for start, block in iter_blocks(dataset):
         _validate_values(block, schema["fields"], path)
-        hasher.update(block.tobytes(order="C"))
+        data = block.tobytes(order="C")
+        hasher.update(data)
+        if scan is not None:
+            scan.record_block(dataset.name, start, data)
     descriptor["content_sha256"] = "sha256:" + hasher.hexdigest()
+    if scan is not None:
+        scan.tables[path] = deepcopy(descriptor)
     return descriptor
 
 
@@ -268,7 +284,14 @@ def describe_internal_dataset(dataset, component_id: str) -> dict:
         + len(header).to_bytes(8, "little")
         + header
     )
-    for block in iter_payload(dataset):
-        hasher.update(block)
+    scan = current_admission_scan()
+    if variable or scan is None:
+        for block in iter_payload(dataset):
+            hasher.update(block)
+    else:
+        for start, block in iter_blocks(dataset):
+            data = np.asarray(block, dtype=dataset.dtype).tobytes(order="C")
+            hasher.update(data)
+            scan.record_block(dataset.name, start, data)
     result["content_sha256"] = "sha256:" + hasher.hexdigest()
     return result

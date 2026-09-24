@@ -18,7 +18,11 @@ import uuid
 
 from fisheye.shared.batch_logging import JsonLogger, make_run_id
 from fisheye.shared.json_safety import write_json_atomic
-from fisheye.shared.recording_transfer_snapshot import require, strict_json
+from fisheye.shared.recording_transfer_snapshot import (
+    TRANSFER_PARENT_LAYOUTS,
+    require,
+    strict_json,
+)
 from fisheye.utils.organize_transfer_recordings import (
     _separate_destination,
     _state_directory,
@@ -95,8 +99,8 @@ def run_transfer_parent_workflow(args) -> int:
                     "resume cannot change recording context",
                 )
         require(
-            plan["recording_layout"] == "rolling_clips",
-            "opt-in parent workflow currently supports rolling_clips only",
+            plan["recording_layout"] in TRANSFER_PARENT_LAYOUTS,
+            "parent workflow supports rolling_clips or single_video only",
         )
         source = Path(plan["source_dir"])
         payload.update(
