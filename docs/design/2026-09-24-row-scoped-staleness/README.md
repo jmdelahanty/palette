@@ -1,6 +1,6 @@
 # Row-scoped staleness and stable row identity
 
-- **Status:** draft
+- **Status:** accepted
 - **Owner:** labeling/Apply work (session palette-12, for the user); last reviewed 2026-09-24
 - **Builds on:** `docs/manual_add_row_propagation_design.md` (append-only rows,
   per-row `pending_generation`, row-set digest, reconciler) and
@@ -128,13 +128,15 @@ stale?") rather than a separate truth.
 
 ## Decisions needed
 
-1. Adopt the footprint vocabulary (`row`, `window(w)`, `run`), with undeclared
-   meaning `run`?
-2. Move freshness from stored flags to computed per-row revisions, keeping
-   run-level flags as derived summaries?
-3. Start with mask QC as the first adopter?
+All three were accepted on 2026-09-24:
+1. The footprint vocabulary (`row`, `window(w)`, `run`), with undeclared
+   meaning `run`.
+2. Freshness computed from per-row source revisions, with run-level flags kept
+   as derived summaries.
+3. Mask QC as the first adopter.
 
 ## Decision log
 
+- 2026-09-24: accepted by the user (footprints, computed freshness, mask QC first).
 - 2026-09-24: opened from a discussion of why a one-row mask edit makes whole
   runs stale, and how upstream deletions propagate.

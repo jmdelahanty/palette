@@ -1,6 +1,6 @@
 # Background Apply effects for the labeling server
 
-- **Status:** draft
+- **Status:** accepted
 - **Owner:** labeling/Apply work (session palette-12, for the user); last reviewed 2026-09-24
 - **Builds on:** PR #194 (batch keypoint Apply), PR #202 (mask Apply effects
   speed-up and committed-write recovery), PR #180 (durable mask Apply effects)
@@ -174,10 +174,10 @@ Several quick Applies to the same run queue several effect jobs.
 
 ## Decisions needed
 
-1. Allow task completion while effects are pending, with approval still gated
-   (proposed), or keep blocking completion?
-2. Coalesce QC to the latest revision (proposed), and keep one tail successor
-   per Apply for now (proposed)?
+1. ~~Task completion while effects are pending~~ Decided: allowed; approval,
+   export, and activation stay gated on complete effects.
+2. ~~Coalescing~~ Decided: QC coalesces to the latest owed revision; one tail
+   successor per Apply for now.
 3. ~~Who is notified of failures~~ Decided: email to the user only.
 
 ## Follow-up: row-scoped QC
@@ -199,6 +199,8 @@ change, after the worker.
 ## Decision log
 
 - 2026-09-24: effect failures are emailed to the user only.
+- 2026-09-24: accepted by the user: completion while effects are pending,
+  QC coalescing, one tail successor per Apply.
 
 - 2026-09-24: draft opened after live receipts showed about 2 minutes of effects
   per mask Apply. The user asked for saving to be fast or transparent so
