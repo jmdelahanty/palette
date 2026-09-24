@@ -61,8 +61,11 @@ from fisheye.utils.organize_recordings import (
 PLAN_SCHEMA_ID = "palette.transfer_parent_organization_plan.v1"
 ARTIFACT_SCHEMA_ID = "orange_transfer_parent_v1"
 INDEX_DIRECTORY = "derived/recording_frame_index"
-# Citrus/Orange external finalization receipts, relative to the transfer root.
+# Orange's finalized observation collection is the path authority for each
+# unified H5 and its external receipt (agent-contracts admission v2 delivery).
+UNIFIED_COLLECTION_PATH = "recording_observation_bindings/finalized_collection.json"
 UNIFIED_RECEIPT_DIRECTORY = "recording_observation_bindings/receipts"
+UNIFIED_CONTEXT_FIELDS = ("recording_type", "recording_subtype", "behavior_mode")
 UNIFIED_CLAIMS_PATH = "/metadata/recording_association/claims_json"
 # /metadata/session attrs projected into the manifest, under the same names the
 # legacy organizer read from H5 root attrs. The Citrus per-Arena session_uuid is
@@ -83,12 +86,23 @@ UNIFIED_SESSION_CONTEXT_KEYS = (
 )
 
 
-def _unified_h5_context(source: Path, relative: str, inventory) -> tuple[str, dict, str]:
+def _strict_json_file(path: Path) -> dict:
+    raw = path.read_bytes()
+    require(len(raw) <= MAX_JSON_BYTES, f"JSON too large: {path.name}")
+    value = json.loads(raw)
+    require(isinstance(value, dict), f"JSON object required: {path.name}")
+    return value
+
+
+def _unified_h5_context(
+    source: Path, relative: str, inventory, operator_context: dict
+) -> tuple[str, dict, str]:
     """Camera, manifest context and receipt path for one unified H5.
 
-    Identity comes from the validated acquisition binding. The receipt is the
-    one named by the H5's own observation_context_id; it must be in the
-    transfer and must name this H5 (admission later checks its byte digest).
+    Identity comes from the validated acquisition binding. The receipt path
+    comes from the finalized observation collection's entry for this H5, and
+    the H5's own observation_context_id and the receipt must agree with it
+    (admission later checks the receipt's byte digest of the H5).
     """
 
     with h5py.File(source / relative, "r") as h5:
@@ -105,23 +119,50 @@ def _unified_h5_context(source: Path, relative: str, inventory) -> tuple[str, di
             if key in attrs
         }
         context["citrus_session_uuid"] = normalize_attr(attrs["session_uuid"])
+        declared = {key: normalize_attr(attrs[key]) for key in UNIFIED_CONTEXT_FIELDS if key in attrs}
+    for key, value in declared.items():
+        require(
+            value == operator_context[key],
+            f"operator {key}={operator_context[key]!r} differs from the H5's {value!r}: {relative}",
+        )
     require(
         claims.get("recording_id") == binding.acquisition_session_id,
         f"H5 association claims and acquisition binding disagree: {relative}",
     )
-    observation = claims.get("observation_context_id")
+    require(UNIFIED_COLLECTION_PATH in inventory, "finalized observation collection missing from transfer")
+    collection = _strict_json_file(source / UNIFIED_COLLECTION_PATH)
     require(
-        isinstance(observation, str) and observation and "/" not in observation,
-        f"H5 lacks an observation context id: {relative}",
+        collection.get("schema_id") == "orange.recording.observation_binding_finalization"
+        and collection.get("schema_version") == 1
+        and collection.get("status") == "finalized"
+        and collection.get("binding_status") == "bound"
+        and collection.get("recording_id") == binding.acquisition_session_id,
+        "finalized observation collection is not finalized, bound, and this acquisition's",
     )
-    receipt = f"{UNIFIED_RECEIPT_DIRECTORY}/{observation}.json"
-    require(receipt in inventory, f"unified H5 finalization receipt missing from transfer: {receipt}")
-    raw = (source / receipt).read_bytes()
-    require(len(raw) <= MAX_JSON_BYTES, f"receipt too large: {receipt}")
-    contract = json.loads(raw).get("contract", {})
+    entries = [
+        entry
+        for entry in collection.get("observation_contexts") or []
+        if isinstance(entry, dict)
+        and (entry.get("citrus_h5") or {}).get("relative_path") == relative
+    ]
+    require(len(entries) == 1, f"H5 is not listed exactly once in the finalized collection: {relative}")
+    entry = entries[0]
+    observation = entry.get("observation_context_id")
+    require(
+        entry.get("status") == "bound" and observation == claims.get("observation_context_id"),
+        f"collection and H5 observation context disagree: {relative}",
+    )
+    receipt = (entry.get("finalized_receipt") or {}).get("relative_path")
+    require(
+        isinstance(receipt, str)
+        and receipt.startswith(UNIFIED_RECEIPT_DIRECTORY + "/")
+        and receipt in inventory,
+        f"unified H5 finalization receipt missing from transfer: {receipt}",
+    )
+    contract = _strict_json_file(source / receipt).get("contract", {})
     require(
         contract.get("observation_context_id") == observation
-        and contract.get("h5_artifact", {}).get("relative_path") == relative,
+        and contract.get("h5_artifact") == entry["citrus_h5"],
         f"receipt does not name this H5: {receipt}",
     )
     context.update(
@@ -226,7 +267,7 @@ def build_transfer_organization_plan(
             unified = declared_unified_profile(h5) is not None
         receipt = None
         if unified:
-            camera, metadata, receipt = _unified_h5_context(source, relative, inventory)
+            camera, metadata, receipt = _unified_h5_context(source, relative, inventory, context)
         else:
             camera, metadata = _read_camera_context(source / relative)
         require(
@@ -297,6 +338,9 @@ def build_transfer_organization_plan(
             "recording_name": f"{parent.session_uuid}_Cam{parent.camera_id}",
             "destination_dir": str(destination / parent.recording_id),
             "recording_layout": parent.recording_layout,
+            # Producer label, preserved as given (single_video vs rolling_clips);
+            # Palette stores every transfer-v2 parent as a clip collection.
+            "acquisition_recording_layout": parent.recording_layout,
             "total_frames": parent.total_frames,
             "clip_count": len(parent.clips),
             "output_kinds": sorted(
@@ -747,6 +791,7 @@ def _parent_manifest(plan: dict, parent: dict) -> dict:
         "recording_name": parent["recording_name"],
         "source_dir": plan["source_dir"],
         "source_layout": "rolling_clips",
+        "acquisition_recording_layout": parent["acquisition_recording_layout"],
         "context_source": parent["context_source"],
         "orange_session_id": plan["acquisition_session_id"],
         "orange_producer": plan["orange_producer"],

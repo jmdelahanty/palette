@@ -1,13 +1,14 @@
-"""Transfer-v2 intake of unified H5s: identity from the binding, receipt from the H5.
+"""Transfer-v2 intake of unified H5s: identity from the binding, receipt from the collection.
 
-The receipt path is derived from the H5's own observation_context_id
-(``recording_observation_bindings/receipts/<id>.json``), must be part of the
-transfer, and must name the same H5. The session importer then uses the
-receipt the manifest declares.
+Orange's finalized observation collection names each H5 and its external
+receipt (the contract's path authority). The H5's own observation context,
+its operator-declared context and the receipt must all agree with that entry.
+The session importer then uses the receipt the manifest declares.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -26,24 +27,64 @@ OBSERVATION = RECEIPT["contract"]["observation_context_id"]
 RECEIPT_RELATIVE = f"recording_observation_bindings/receipts/{OBSERVATION}.json"
 
 
-def _transfer(tmp_path: Path, *, receipt: dict | None = RECEIPT) -> tuple[Path, dict]:
+CONTEXT = {"recording_type": "behavior", "recording_subtype": "chaser", "behavior_mode": "free"}
+
+
+def _collection(receipt_bytes: bytes, *, h5_artifact=None) -> dict:
+    contract = RECEIPT["contract"]
+    return {
+        "schema_id": "orange.recording.observation_binding_finalization",
+        "schema_version": 1,
+        "status": "finalized",
+        "binding_status": "bound",
+        "recording_id": "synthetic-paired-recording",
+        "citrus_experiment_id": contract["citrus_experiment_id"],
+        "context_count": 1,
+        "observation_contexts": [
+            {
+                "status": "bound",
+                "observation_context_id": OBSERVATION,
+                "citrus_h5": h5_artifact or contract["h5_artifact"],
+                "finalized_receipt": {
+                    "relative_path": RECEIPT_RELATIVE,
+                    "sha256": "sha256:" + hashlib.sha256(receipt_bytes).hexdigest(),
+                    "contract_sha256": RECEIPT["contract_sha256"],
+                    "receipt_id": RECEIPT["receipt_id"],
+                },
+            }
+        ],
+    }
+
+
+def _transfer(
+    tmp_path: Path, *, receipt: dict | None = RECEIPT, collection: dict | None = None
+) -> tuple[Path, dict]:
     source = tmp_path / "transfer"
     h5 = source / H5_RELATIVE
     h5.parent.mkdir(parents=True)
     shutil.move(emit_fixture(tmp_path / "fixture", "base"), h5)
     inventory = {H5_RELATIVE: {}}
+    receipt_bytes = json.dumps(receipt or RECEIPT).encode()
     if receipt is not None:
         path = source / RECEIPT_RELATIVE
         path.parent.mkdir(parents=True)
-        path.write_text(json.dumps(receipt))
+        path.write_bytes(receipt_bytes)
         inventory[RECEIPT_RELATIVE] = {}
+    path = source / organizer.UNIFIED_COLLECTION_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(collection or _collection(receipt_bytes)))
+    inventory[organizer.UNIFIED_COLLECTION_PATH] = {}
     return source, inventory
+
+
+def _context(source, inventory, operator=CONTEXT):
+    return organizer._unified_h5_context(source, H5_RELATIVE, inventory, operator)
 
 
 def test_unified_h5_identity_context_and_receipt(tmp_path: Path) -> None:
     source, inventory = _transfer(tmp_path)
 
-    camera, context, receipt = organizer._unified_h5_context(source, H5_RELATIVE, inventory)
+    camera, context, receipt = _context(source, inventory)
 
     assert camera == "CAM-42"
     assert receipt == RECEIPT_RELATIVE
@@ -59,16 +100,16 @@ def test_missing_receipt_is_refused(tmp_path: Path) -> None:
     source, inventory = _transfer(tmp_path, receipt=None)
 
     with pytest.raises(ValueError, match="receipt missing from transfer"):
-        organizer._unified_h5_context(source, H5_RELATIVE, inventory)
+        _context(source, inventory)
 
 
 def test_receipt_for_another_h5_is_refused(tmp_path: Path) -> None:
     other = json.loads(json.dumps(RECEIPT))
-    other["contract"]["h5_artifact"]["relative_path"] = "citrus/other.h5"
+    other["contract"]["h5_artifact"]["sha256"] = "sha256:" + "0" * 64
     source, inventory = _transfer(tmp_path, receipt=other)
 
     with pytest.raises(ValueError, match="does not name this H5"):
-        organizer._unified_h5_context(source, H5_RELATIVE, inventory)
+        _context(source, inventory)
 
 
 def test_claims_that_disagree_with_the_binding_are_refused(tmp_path: Path) -> None:
@@ -88,7 +129,27 @@ def test_claims_that_disagree_with_the_binding_are_refused(tmp_path: Path) -> No
             replacement.attrs[key] = value
 
     with pytest.raises(ValueError, match="claims and acquisition binding disagree"):
-        organizer._unified_h5_context(source, H5_RELATIVE, inventory)
+        _context(source, inventory)
+
+
+def test_h5_not_in_the_collection_is_refused(tmp_path: Path) -> None:
+    unlisted = dict(RECEIPT["contract"]["h5_artifact"], relative_path="citrus/other.h5")
+    source, inventory = _transfer(
+        tmp_path, collection=_collection(json.dumps(RECEIPT).encode(), h5_artifact=unlisted)
+    )
+
+    with pytest.raises(ValueError, match="not listed exactly once"):
+        _context(source, inventory)
+
+
+def test_operator_context_must_match_the_h5(tmp_path: Path) -> None:
+    source, inventory = _transfer(tmp_path)
+    with h5py.File(source / H5_RELATIVE, "r+") as h5:
+        h5["/metadata/session"].attrs["behavior_mode"] = "embedded"
+
+    with pytest.raises(ValueError, match="behavior_mode"):
+        _context(source, inventory)
+    _context(source, inventory, dict(CONTEXT, behavior_mode="embedded"))
 
 
 def _recording_with_manifest(tmp_path: Path, receipt_relative: str) -> Path:
