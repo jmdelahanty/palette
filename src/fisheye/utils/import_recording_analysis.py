@@ -862,16 +862,35 @@ def stimulus_h5_unified_profile(h5_path: Path | None) -> str | None:
         return None
 
 
+def _manifest_finalization_receipt(recording_dir: Path) -> Path | None:
+    """Receipt declared by transfer intake in the recording manifest, if any."""
+
+    manifest_path = Path(recording_dir) / "recording_manifest.json"
+    if not manifest_path.is_file():
+        return None
+    relative = _load_recording_manifest(Path(recording_dir)).get(
+        "h5_finalization_receipt_relative_path"
+    )
+    if relative is None:
+        return None
+    return resolve_acquisition_manifest_file(
+        Path(recording_dir), relative, label="h5_finalization_receipt_relative_path"
+    )
+
+
 def run_stimulus_import(
     plan: RecordingAnalysisPlan, opts: RecordingImportOptions
 ) -> tuple[bool, int, List[str]]:
     if plan.h5_path is None:
         return False, 2, ["missing_h5_for_stimulus_import"]
     unified_profile = stimulus_h5_unified_profile(plan.h5_path)
+    receipt_path = plan.finalization_receipt_path
     if unified_profile is not None:
         if unified_profile != UNIFIED_H5_PROFILE:
             return False, 2, [f"unsupported_unified_h5_profile:{unified_profile}"]
-        if plan.finalization_receipt_path is None:
+        if receipt_path is None:
+            receipt_path = _manifest_finalization_receipt(plan.recording_dir)
+        if receipt_path is None:
             return False, 2, ["unified_h5_requires_finalization_receipt"]
         if opts.stimulus_overwrite:
             return False, 2, ["unified_h5_import_is_immutable_no_overwrite"]
@@ -891,7 +910,7 @@ def run_stimulus_import(
                 "--source-profile",
                 unified_profile,
                 "--finalization-receipt",
-                str(plan.finalization_receipt_path),
+                str(receipt_path),
             ]
         )
     if opts.stimulus_run_name:

@@ -11,11 +11,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 import errno
 import fcntl
+import json
 import os
 from pathlib import Path
 import shutil
 import stat
 import tempfile
+
+import h5py
 
 from fisheye.shared.json_safety import write_json_atomic
 
@@ -43,6 +46,12 @@ from fisheye.shared.source_recording_identity import (
     SOURCE_RECORDING_ID_MAPPING_PROFILE,
     SourceRecordingIdentity,
 )
+from fisheye.shared.type_conversions import normalize_attr
+from fisheye.shared.unified_h5 import PROFILE as UNIFIED_H5_PROFILE
+from fisheye.shared.unified_h5 import declared_unified_profile
+from fisheye.shared.unified_h5.common import MAX_JSON_BYTES
+from fisheye.shared.unified_h5.correspondence import read_acquisition_binding
+from fisheye.shared.unified_h5.schema import read_json
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.utils.organize_recordings import (
     _read_camera_context,
@@ -52,6 +61,75 @@ from fisheye.utils.organize_recordings import (
 PLAN_SCHEMA_ID = "palette.transfer_parent_organization_plan.v1"
 ARTIFACT_SCHEMA_ID = "orange_transfer_parent_v1"
 INDEX_DIRECTORY = "derived/recording_frame_index"
+# Citrus/Orange external finalization receipts, relative to the transfer root.
+UNIFIED_RECEIPT_DIRECTORY = "recording_observation_bindings/receipts"
+UNIFIED_CLAIMS_PATH = "/metadata/recording_association/claims_json"
+# /metadata/session attrs projected into the manifest, under the same names the
+# legacy organizer read from H5 root attrs. The Citrus per-Arena session_uuid is
+# recorded as citrus_session_uuid; session_uuid is the acquisition session.
+UNIFIED_SESSION_CONTEXT_KEYS = (
+    "session_start_iso8601_utc",
+    "rig_id",
+    "arena_id",
+    "canvas_name",
+    "protocol_name_from_definition",
+    "loaded_protocol_filepath",
+    "stimulus_output_width",
+    "stimulus_output_height",
+    "active_ipc_source",
+    "hostname",
+    "software_version",
+    "citrus_experiment_id",
+)
+
+
+def _unified_h5_context(source: Path, relative: str, inventory) -> tuple[str, dict, str]:
+    """Camera, manifest context and receipt path for one unified H5.
+
+    Identity comes from the validated acquisition binding. The receipt is the
+    one named by the H5's own observation_context_id; it must be in the
+    transfer and must name this H5 (admission later checks its byte digest).
+    """
+
+    with h5py.File(source / relative, "r") as h5:
+        require(
+            declared_unified_profile(h5) == UNIFIED_H5_PROFILE,
+            f"unsupported unified H5 profile: {relative}",
+        )
+        binding = read_acquisition_binding(h5)
+        claims = read_json(h5, UNIFIED_CLAIMS_PATH)
+        attrs = h5["/metadata/session"].attrs
+        context = {
+            key: normalize_attr(attrs[key])
+            for key in UNIFIED_SESSION_CONTEXT_KEYS
+            if key in attrs
+        }
+        context["citrus_session_uuid"] = normalize_attr(attrs["session_uuid"])
+    require(
+        claims.get("recording_id") == binding.acquisition_session_id,
+        f"H5 association claims and acquisition binding disagree: {relative}",
+    )
+    observation = claims.get("observation_context_id")
+    require(
+        isinstance(observation, str) and observation and "/" not in observation,
+        f"H5 lacks an observation context id: {relative}",
+    )
+    receipt = f"{UNIFIED_RECEIPT_DIRECTORY}/{observation}.json"
+    require(receipt in inventory, f"unified H5 finalization receipt missing from transfer: {receipt}")
+    raw = (source / receipt).read_bytes()
+    require(len(raw) <= MAX_JSON_BYTES, f"receipt too large: {receipt}")
+    contract = json.loads(raw).get("contract", {})
+    require(
+        contract.get("observation_context_id") == observation
+        and contract.get("h5_artifact", {}).get("relative_path") == relative,
+        f"receipt does not name this H5: {receipt}",
+    )
+    context.update(
+        session_uuid=binding.acquisition_session_id,
+        camera_id=binding.camera_serial,
+        observation_context_id=observation,
+    )
+    return binding.camera_serial, context, receipt
 
 
 def _separate_destination(source: Path, destination: Path) -> Path:
@@ -139,11 +217,18 @@ def build_transfer_organization_plan(
 
     by_camera = {parent.camera_id: parent for parent in parents}
     h5_by_camera: dict[str, str] = {}
+    receipt_by_camera: dict[str, str] = {}
     producer_context: dict[str, dict] = {}
     for relative in inventory:
         if Path(relative).suffix.lower() not in (".h5", ".hdf5"):
             continue
-        camera, metadata = _read_camera_context(source / relative)
+        with h5py.File(source / relative, "r") as h5:
+            unified = declared_unified_profile(h5) is not None
+        receipt = None
+        if unified:
+            camera, metadata, receipt = _unified_h5_context(source, relative, inventory)
+        else:
+            camera, metadata = _read_camera_context(source / relative)
         require(
             camera in by_camera and "error" not in metadata,
             f"H5 lacks a readable exact camera binding: {relative}",
@@ -164,6 +249,8 @@ def build_transfer_organization_plan(
         )
         camera_owners[relative] = (camera, "camera_h5")
         h5_by_camera[camera] = relative
+        if receipt is not None:
+            receipt_by_camera[camera] = receipt
         producer_context[camera] = dict(metadata)
 
     geometry_source = _recording_geometry_bundle_source(source)
@@ -221,6 +308,11 @@ def build_transfer_organization_plan(
             "h5_relative_path": (
                 f"raw/acquisition/{h5_by_camera[parent.camera_id]}"
                 if parent.camera_id in h5_by_camera
+                else None
+            ),
+            "h5_finalization_receipt_relative_path": (
+                f"raw/acquisition/{receipt_by_camera[parent.camera_id]}"
+                if parent.camera_id in receipt_by_camera
                 else None
             ),
             "recording_geometry_bundle": geometry,
@@ -661,6 +753,11 @@ def _parent_manifest(plan: dict, parent: dict) -> dict:
         **(
             {"h5_relative_path": parent["h5_relative_path"]}
             if parent["h5_relative_path"] is not None
+            else {}
+        ),
+        **(
+            {"h5_finalization_receipt_relative_path": parent["h5_finalization_receipt_relative_path"]}
+            if parent.get("h5_finalization_receipt_relative_path") is not None
             else {}
         ),
         "files": files,
