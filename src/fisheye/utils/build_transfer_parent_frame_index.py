@@ -21,6 +21,7 @@ import pyarrow.parquet as pq
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.recording_transfer_snapshot import (
+    TRANSFER_PARENT_LAYOUTS,
     file_ref,
     frame_map,
     plan_parent_recordings,
@@ -78,8 +79,8 @@ def build_transfer_parent_frame_index(
             "organization plan source differs",
         )
         require(
-            plan.recording_layout == "rolling_clips",
-            "organized collection indexing requires rolling_clips",
+            plan.recording_layout in TRANSFER_PARENT_LAYOUTS,
+            "organized collection indexing requires rolling_clips or single_video",
         )
         index_recording_root, organized_paths = resolve_materialized_parent_sources(
             organization_plan,

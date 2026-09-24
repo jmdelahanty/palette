@@ -379,6 +379,50 @@ def test_prepare_parent_manifests_are_exact_and_retry_is_byte_stable(tmp_path):
     ] == manifests
 
 
+def _single_video_source(tmp_path: Path) -> Path:
+    source = Path(shutil.copytree(FIXTURES / "whole", tmp_path / "staging"))
+    (source / "fixture.h5").unlink()  # placeholder bytes, not an H5 container
+    _resign(source)
+    return source
+
+
+def test_single_video_parent_is_a_one_clip_collection_with_original_paths(tmp_path):
+    source = _single_video_source(tmp_path)
+    before = _bytes(source)
+    plan = _plan(source, tmp_path / "recordings")
+    assert plan["recording_layout"] == "single_video"
+    (parent,) = plan["parents"]
+    assert parent["acquisition_recording_layout"] == "single_video"
+    assert parent["clip_count"] == 1
+    organizer.prepare_transfer_parent_recordings(plan, batch_rows=1)
+    directory = Path(parent["destination_dir"])
+    manifest = json.loads((directory / "recording_manifest.json").read_bytes())
+    # Stored as a clip collection; the producer label is kept, not relabelled.
+    assert manifest["source_layout"] == "rolling_clips"
+    assert manifest["acquisition_recording_layout"] == "single_video"
+    for name in ("Cam02010093_full.mp4", "Cam02010093_full.csv"):
+        assert (directory / "cams/acquisition" / name).read_bytes() == before[name]
+    index = json.loads(
+        (
+            directory / organizer.INDEX_DIRECTORY / "recording_clip_index.json"
+        ).read_bytes()
+    )
+    assert index["recording_backend_mode"] == "single_video"
+    assert [(row["clip_index"], row["clip_directory"]) for row in index["clips"]] == [
+        (0, ".")
+    ]
+    assert _bytes(source) == before
+
+
+def test_prepare_refuses_an_unknown_producer_layout_before_any_write(tmp_path):
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    plan["recording_layout"] = "tiled_video"
+    with pytest.raises(ValueError, match="rolling_clips or single_video"):
+        organizer.prepare_transfer_parent_recordings(plan)
+    assert not (tmp_path / "recordings").exists()
+
+
 def test_original_ptp_summary_uses_existing_clock_locator_without_rewriting(tmp_path):
     source = _source(tmp_path)
     summary = (
