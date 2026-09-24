@@ -2086,6 +2086,76 @@ def _longest_skeleton_endpoint_path_xy(
     return path_xy, "ok"
 
 
+HEAD_ANCHORED_CENTERLINE_METHOD = "head_anchored_skeleton_path_v1"
+HEAD_ANCHORED_HEAD_SCORE_MARGIN_PX = 6.0
+HEAD_ANCHORED_SNOUT_SCORE_WEIGHT = 0.25
+HEAD_ANCHORED_TAIL_GEODESIC_MARGIN_PX = 5.0
+HEAD_ANCHORED_JOIN_MAX_ARCLENGTH_PX = 24.0
+HEAD_ANCHORED_JOIN_ARCLENGTH_SCORE_WEIGHT = 0.20
+
+
+def _head_anchored_skeleton_path_xy(
+    mask: np.ndarray,
+    snout_xy: np.ndarray,
+    eye_midpoint_xy: np.ndarray,
+    *,
+    crop_to_foreground: bool = False,
+) -> tuple[Optional[np.ndarray], str]:
+    """Select a skeleton route from a supported head endpoint to the caudal end.
+
+    The eye and snout anchors establish endpoint polarity independently of the
+    straight body-frame heading. Close competing endpoints are refused.
+    """
+    mask_bool = np.asarray(mask, dtype=bool)
+    if not np.any(mask_bool):
+        return None, "missing_subject_body_mask"
+    offset = np.zeros(2, dtype=np.float64)
+    working = mask_bool
+    if crop_to_foreground:
+        ys, xs = np.nonzero(mask_bool)
+        y0, x0, y1, x1 = int(ys.min()), int(xs.min()), int(ys.max()) + 1, int(xs.max()) + 1
+        working = np.pad(mask_bool[y0:y1, x0:x1], 1)
+        offset = np.asarray([x0 - 1.0, y0 - 1.0])
+    if _single_component_count(working) != 1:
+        return None, "fragmented_subject_body_mask"
+    coords = np.argwhere(skeletonize(working))
+    if len(coords) < 2:
+        return None, "skeleton_empty"
+    neighbors = _skeleton_neighbors(coords)
+    endpoints = [i for i, adjacent in enumerate(neighbors) if len(adjacent) == 1]
+    if len(endpoints) < 2:
+        return None, "skeleton_endpoint_ambiguous"
+    xy = np.stack((coords[:, 1], coords[:, 0]), axis=1).astype(np.float64) + offset
+    snout = np.asarray(snout_xy, dtype=np.float64)
+    eyes = np.asarray(eye_midpoint_xy, dtype=np.float64)
+    if snout.shape != (2,) or eyes.shape != (2,) or not (np.isfinite(snout).all() and np.isfinite(eyes).all()):
+        return None, "missing_head_anchor"
+    # The eye midpoint is a local anatomical anchor; the snout constrains the
+    # bridge. Neither score projects along the straight heading axis.
+    ranked = sorted(
+        (
+            (float(np.linalg.norm(xy[i] - eyes) + HEAD_ANCHORED_SNOUT_SCORE_WEIGHT * np.linalg.norm(xy[i] - snout)), i)
+            for i in endpoints
+        )
+    )
+    if ranked[1][0] - ranked[0][0] < HEAD_ANCHORED_HEAD_SCORE_MARGIN_PX:
+        return None, "ambiguous_head_endpoint"
+    head = ranked[0][1]
+    distances, previous = _dijkstra_path_tree(neighbors, head)
+    caudal = sorted(
+        ((float(distances[i]), i) for i in endpoints if i != head and np.isfinite(distances[i])),
+        reverse=True,
+    )
+    if not caudal:
+        return None, "centerline_order_failed"
+    if len(caudal) > 1 and caudal[0][0] - caudal[1][0] < HEAD_ANCHORED_TAIL_GEODESIC_MARGIN_PX:
+        return None, "ambiguous_tail_endpoint"
+    indices = _reconstruct_path(previous, head, caudal[0][1])
+    if indices is None or len(indices) < 2:
+        return None, "centerline_order_failed"
+    return xy[np.asarray(indices, dtype=np.int64)], "ok"
+
+
 def _polyline_arclength(points_xy: np.ndarray) -> tuple[np.ndarray, float]:
     points = np.asarray(points_xy, dtype=np.float64)
     if int(points.shape[0]) < 2:
@@ -2309,6 +2379,36 @@ def _snout_bridge_path_xy(
     return bridge, "ok"
 
 
+def _head_anchored_join(
+    mask: np.ndarray,
+    path_xy: np.ndarray,
+    snout_xy: np.ndarray,
+    origin_xy: np.ndarray,
+    left_axis_xy: np.ndarray,
+) -> tuple[int, Optional[np.ndarray], str]:
+    """Choose a mask-supported join in the first 24 px of the head branch."""
+    cumulative, _ = _polyline_arclength(path_xy)
+    eligible = np.flatnonzero(
+        (cumulative <= HEAD_ANCHORED_JOIN_MAX_ARCLENGTH_PX)
+        & (np.arange(len(path_xy)) < len(path_xy) - 1)
+    )
+    candidates = []
+    first_reason = "snout_extension_no_mask_path"
+    for idx in eligible:
+        bridge, reason = _snout_bridge_path_xy(mask, snout_xy, path_xy[idx])
+        if bridge is None:
+            if idx == 0:
+                first_reason = reason
+            continue
+        lateral = abs(float(np.dot(path_xy[idx] - origin_xy, left_axis_xy)))
+        score = lateral + HEAD_ANCHORED_JOIN_ARCLENGTH_SCORE_WEIGHT * float(cumulative[idx])
+        candidates.append((score, int(idx), bridge))
+    if not candidates:
+        return 0, None, first_reason
+    _score, idx, bridge = min(candidates, key=lambda item: (item[0], item[1]))
+    return idx, bridge, "ok"
+
+
 def _project_point_to_polyline(point_xy: np.ndarray, polyline_xy: np.ndarray) -> tuple[Optional[np.ndarray], float]:
     point = np.asarray(point_xy, dtype=np.float64).reshape(2)
     polyline = np.asarray(polyline_xy, dtype=np.float64)
@@ -2344,7 +2444,10 @@ def _compute_centerline_batch(
     source_body_qc: Optional[SourceBodyMaskQcBatch] = None,
     sample_count: int = CENTERLINE_SAMPLE_COUNT,
     crop_to_foreground: bool = False,
+    method: str = "legacy",
 ) -> CenterlineBatch:
+    if method not in {"legacy", HEAD_ANCHORED_CENTERLINE_METHOD}:
+        raise ValueError(f"Unsupported centerline method: {method}")
     masks_bool = np.asarray(body_masks, dtype=np.uint8) > 0
     row_count = int(masks_bool.shape[0])
     centerline_xy = np.full((row_count, int(sample_count), 2), np.nan, dtype=np.float32)
@@ -2368,28 +2471,40 @@ def _compute_centerline_batch(
             centerline_reasons[row_idx] = "missing_body_frame"
             tail_base_reasons[row_idx] = "missing_body_frame"
             continue
-        path_xy, reason = _longest_skeleton_endpoint_path_xy(
-            masks_bool[row_idx],
-            crop_to_foreground=bool(crop_to_foreground),
-        )
+        if method == HEAD_ANCHORED_CENTERLINE_METHOD:
+            if snout_tip is None or not bool(snout_tip.valid[row_idx]):
+                path_xy, reason = None, "missing_snout_tip"
+            else:
+                path_xy, reason = _head_anchored_skeleton_path_xy(
+                    masks_bool[row_idx],
+                    snout_tip.point_xy[row_idx],
+                    body_frame.origin_xy[row_idx],
+                    crop_to_foreground=bool(crop_to_foreground),
+                )
+        else:
+            path_xy, reason = _longest_skeleton_endpoint_path_xy(
+                masks_bool[row_idx],
+                crop_to_foreground=bool(crop_to_foreground),
+            )
         if path_xy is None:
             centerline_reasons[row_idx] = reason
             tail_base_reasons[row_idx] = "missing_centerline"
             continue
         origin = body_frame.origin_xy[row_idx].astype(np.float64)
         forward = body_frame.forward_axis_xy[row_idx].astype(np.float64)
-        first_projection = float(np.dot(path_xy[0] - origin, forward))
-        last_projection = float(np.dot(path_xy[-1] - origin, forward))
-        if not (np.isfinite(first_projection) and np.isfinite(last_projection)):
-            centerline_reasons[row_idx] = "endpoint_orientation_failed"
-            tail_base_reasons[row_idx] = "missing_centerline"
-            continue
-        if abs(first_projection - last_projection) <= 1e-6:
-            centerline_reasons[row_idx] = "ambiguous_polarity"
-            tail_base_reasons[row_idx] = "missing_centerline"
-            continue
-        if first_projection < last_projection:
-            path_xy = path_xy[::-1]
+        if method == "legacy":
+            first_projection = float(np.dot(path_xy[0] - origin, forward))
+            last_projection = float(np.dot(path_xy[-1] - origin, forward))
+            if not (np.isfinite(first_projection) and np.isfinite(last_projection)):
+                centerline_reasons[row_idx] = "endpoint_orientation_failed"
+                tail_base_reasons[row_idx] = "missing_centerline"
+                continue
+            if abs(first_projection - last_projection) <= 1e-6:
+                centerline_reasons[row_idx] = "ambiguous_polarity"
+                tail_base_reasons[row_idx] = "missing_centerline"
+                continue
+            if first_projection < last_projection:
+                path_xy = path_xy[::-1]
         if snout_tip is None or not bool(snout_tip.valid[row_idx]):
             reason = "missing_snout_tip"
             if snout_tip is not None:
@@ -2404,8 +2519,14 @@ def _compute_centerline_batch(
             centerline_reasons[row_idx] = "missing_snout_tip"
             tail_base_reasons[row_idx] = "missing_centerline"
             continue
-        join_idx = _snout_join_index(path_xy, origin, body_frame.left_axis_xy[row_idx].astype(np.float64))
-        bridge_xy, bridge_reason = _snout_bridge_path_xy(masks_bool[row_idx], snout_xy, path_xy[join_idx])
+        if method == HEAD_ANCHORED_CENTERLINE_METHOD:
+            join_idx, bridge_xy, bridge_reason = _head_anchored_join(
+                masks_bool[row_idx], path_xy, snout_xy, origin,
+                body_frame.left_axis_xy[row_idx].astype(np.float64),
+            )
+        else:
+            join_idx = _snout_join_index(path_xy, origin, body_frame.left_axis_xy[row_idx].astype(np.float64))
+            bridge_xy, bridge_reason = _snout_bridge_path_xy(masks_bool[row_idx], snout_xy, path_xy[join_idx])
         if bridge_xy is None:
             centerline_reasons[row_idx] = bridge_reason
             tail_base_reasons[row_idx] = "missing_centerline"

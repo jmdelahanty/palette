@@ -105,22 +105,33 @@ def write_refined_subject_eye_geometry(
     contours: dict[str, list[np.ndarray | None]] = {name: [] for name in EYE_COMPONENTS}
     centroids = np.full((total_rois, 2, 2), np.nan, dtype=np.float32)
 
-    for row_idx in range(total_rois):
-        for eye_idx, component_name in enumerate(EYE_COMPONENTS):
-            comp_idx = int(label_map[component_name])
-            if not _component_available(refined_group, comp_idx):
-                contours[component_name].append(None)
-                continue
-            mask = mask_store.read_dense(rows=row_idx, channels=comp_idx)[0, 0]
-            success, ellipse, centroid, contour, _failure = _measure_eye_mask(mask)
-            ellipse_params[row_idx, eye_idx] = np.asarray(ellipse, dtype=np.float32)
-            ellipse_success[row_idx, eye_idx] = bool(success)
-            centroids[row_idx, eye_idx] = np.asarray(centroid, dtype=np.float32)
-            contours[component_name].append(contour)
+    eye_available = {
+        name: _component_available(refined_group, int(label_map[name]))
+        for name in EYE_COMPONENTS
+    }
+    for start in range(0, total_rois, min(32, chunk_rois)):
+        stop = min(start + min(32, chunk_rois), total_rois)
+        eye_masks = {
+            name: mask_store.read_dense(
+                rows=slice(start, stop), channels=int(label_map[name]),
+            )[:, 0]
+            for name in EYE_COMPONENTS if eye_available[name]
+        }
+        for row_idx in range(start, stop):
+            for eye_idx, component_name in enumerate(EYE_COMPONENTS):
+                if not eye_available[component_name]:
+                    contours[component_name].append(None)
+                    continue
+                mask = eye_masks[component_name][row_idx - start]
+                success, ellipse, centroid, contour, _failure = _measure_eye_mask(mask)
+                ellipse_params[row_idx, eye_idx] = np.asarray(ellipse, dtype=np.float32)
+                ellipse_success[row_idx, eye_idx] = bool(success)
+                centroids[row_idx, eye_idx] = np.asarray(centroid, dtype=np.float32)
+                contours[component_name].append(contour)
 
-        if bool(np.all(ellipse_success[row_idx])) and bool(np.all(np.isfinite(centroids[row_idx]))):
-            separation_px[row_idx] = np.float32(np.linalg.norm(centroids[row_idx, 0] - centroids[row_idx, 1]))
-            separation_valid[row_idx] = True
+            if bool(np.all(ellipse_success[row_idx])) and bool(np.all(np.isfinite(centroids[row_idx]))):
+                separation_px[row_idx] = np.float32(np.linalg.norm(centroids[row_idx, 0] - centroids[row_idx, 1]))
+                separation_valid[row_idx] = True
 
     components_parent = refined_group.require_group("components")
     for eye_idx, component_name in enumerate(EYE_COMPONENTS):

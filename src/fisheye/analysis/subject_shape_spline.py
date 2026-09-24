@@ -54,6 +54,37 @@ def tail_sample_positions(sample_count: int = DEFAULT_TAIL_SAMPLE_COUNT) -> np.n
     return np.linspace(0.0, 1.0, int(sample_count), dtype=np.float32)
 
 
+def sample_spline_segment_by_arclength(
+    tck: tuple,
+    *,
+    start_u: float,
+    sample_count: int = 11,
+    integration_samples: int = 4097,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Sample a fitted spline by integrated arc length, including both endpoints.
+
+    This opt-in operation leaves existing analytics' parameter-spaced outputs
+    unchanged. Trapezoidal integration of spline speed and inverse interpolation
+    use a recorded, fixed resolution; distances are numerical approximations.
+    """
+    if interpolate is None:
+        raise RuntimeError("scipy is required for spline sampling")
+    if not np.isfinite(start_u) or not 0 <= start_u < 1:
+        raise ValueError("start_u must be finite and in [0,1)")
+    if sample_count < 2 or integration_samples < 33:
+        raise ValueError("Need at least two stations and 33 integration samples")
+    u = np.linspace(start_u, 1.0, integration_samples, dtype=np.float64)
+    speed = np.linalg.norm(np.asarray(interpolate.splev(u, tck, der=1)), axis=0)
+    arc = np.r_[0.0, np.cumsum((speed[1:] + speed[:-1]) * np.diff(u) * 0.5)]
+    if not np.isfinite(arc).all() or arc[-1] <= 1e-6 or np.any(np.diff(arc) <= 0):
+        raise ValueError("Spline segment has nonfinite or degenerate arc length")
+    stations = np.interp(np.linspace(0, arc[-1], sample_count), arc, u)
+    xy = np.asarray(interpolate.splev(stations, tck)).T
+    if not np.isfinite(xy).all():
+        raise ValueError("Spline stations are nonfinite")
+    return xy, stations, float(arc[-1])
+
+
 def _polyline_arclength(points_xy: np.ndarray) -> tuple[np.ndarray, float]:
     points = np.asarray(points_xy, dtype=np.float64)
     if points.ndim != 2 or points.shape[1] != 2 or int(points.shape[0]) < 2:
