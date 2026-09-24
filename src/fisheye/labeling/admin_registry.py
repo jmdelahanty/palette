@@ -79,6 +79,7 @@ def _admin_is_save_event(event_type: str) -> bool:
     normalized = str(event_type or "").strip()
     return normalized in {
         "save_keypoints",
+        "apply_keypoint_session_checkpoints",
         "save_detect_instances",
         "save_detection",
         "checkpoint_subject_mask_roi",
@@ -326,11 +327,66 @@ def _admin_keypoint_review_rows(
     rows: list[dict[str, object]] = []
     seen_roi: set[str] = set()
     for event in events:
-        if str(event.get("event_type") or "") != "save_keypoints":
+        event_type = str(event.get("event_type") or "")
+        if event_type not in {
+            "save_keypoints",
+            "apply_keypoint_session_checkpoints",
+        }:
             continue
         target = _admin_mapping(event.get("target"))
         before = _admin_mapping(event.get("before"))
         after = _admin_mapping(event.get("after"))
+        if event_type == "apply_keypoint_session_checkpoints":
+            applied_rows = after.get("row_results")
+            if not isinstance(applied_rows, list):
+                continue
+            for applied_row_value in applied_rows:
+                if not isinstance(applied_row_value, Mapping):
+                    continue
+                applied_row = dict(applied_row_value)
+                row_identity = _admin_mapping(applied_row.get("row_identity"))
+                readback = _admin_mapping(applied_row.get("readback"))
+                status = _admin_mapping(readback.get("status"))
+                applied_roi_idx = (
+                    applied_row.get("roi_idx")
+                    if applied_row.get("roi_idx") is not None
+                    else row_identity.get("roi_idx")
+                )
+                roi_key = str(applied_roi_idx)
+                if not roi_key or roi_key in seen_roi:
+                    continue
+                seen_roi.add(roi_key)
+                rows.append(
+                    {
+                        "roi_idx": applied_roi_idx,
+                        "frame_idx": (
+                            applied_row.get("frame_idx")
+                            if applied_row.get("frame_idx") is not None
+                            else row_identity.get("frame_idx")
+                        ),
+                        "event_id": str(event.get("event_id") or ""),
+                        "event_type": event_type,
+                        "saved_at_utc": str(event.get("created_at_utc") or ""),
+                        "saved_by": str(event.get("user") or ""),
+                        "changed": bool(applied_row.get("changed")),
+                        "canonical_applied": True,
+                        "apply_id": str(after.get("apply_id") or ""),
+                        "checkpoint_id": str(
+                            applied_row.get("checkpoint_id") or ""
+                        ),
+                        "operation": str(applied_row.get("operation") or ""),
+                        "row_identity": row_identity,
+                        "reason_after": str(readback.get("reason") or ""),
+                        "status_after": status,
+                        "usable_keypoints": bool(status.get("usable_keypoints")),
+                        "refined_success": bool(status.get("refined_success")),
+                        "heading": status.get("heading"),
+                        "before_points_summary": {},
+                    }
+                )
+                if len(rows) >= max_rows:
+                    return rows
+            continue
         readback = _admin_mapping(after.get("readback"))
         status = _admin_mapping(readback.get("status"))
         roi_idx = (
@@ -356,6 +412,7 @@ def _admin_keypoint_review_rows(
                     else before.get("frame_idx")
                 ),
                 "event_id": str(event.get("event_id") or ""),
+                "event_type": event_type,
                 "saved_at_utc": str(event.get("created_at_utc") or ""),
                 "saved_by": str(event.get("user") or ""),
                 "changed": bool(after.get("changed")),

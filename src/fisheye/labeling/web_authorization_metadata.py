@@ -503,6 +503,12 @@ def _browser_mutation_response_metadata(
         user=str(session.get("user") or ""),
         session=session,
     )
+    mutation_result = (
+        mutation_event.get("after")
+        if isinstance(mutation_event.get("after"), Mapping)
+        else {}
+    )
+    assert isinstance(mutation_result, Mapping)
     return {
         "schema": "palette.web_labeling_browser_mutation_response.v1",
         "workflow_kind": workflow_kind,
@@ -629,6 +635,10 @@ def _browser_mutation_response_metadata(
         "audit_event_id": str(mutation_event.get("event_id") or ""),
         "audit_event_type": str(mutation_event.get("event_type") or ""),
         "audit_events": audit_events,
+        "save_mode": str(mutation_result.get("save_mode") or ""),
+        "saved": mutation_result.get("saved"),
+        "applied": mutation_result.get("applied"),
+        "canonical_zarr_mutated": mutation_result.get("canonical_zarr_mutated"),
     }
 
 def _browser_mutation_failure_metadata(
