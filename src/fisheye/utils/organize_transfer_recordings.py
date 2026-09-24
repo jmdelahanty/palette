@@ -13,6 +13,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import stat
@@ -64,6 +65,11 @@ ARTIFACT_SCHEMA_ID = "orange_transfer_parent_v1"
 INDEX_DIRECTORY = "derived/recording_frame_index"
 # Orange's finalized observation collection is the path authority for each
 # unified H5 and its external receipt (agent-contracts admission v2 delivery).
+# Per-parent sync-sample (keyframe) assessment of every materialized video.
+VIDEO_SYNC_ASSESSMENT = "derived/video_sync_assessment.json"
+# Folder names are readable (<acquisition session>_Cam<serial>); the hashed
+# recording_id stays the identity in the manifest, Zarr and registry.
+_SAFE_FOLDER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}")
 UNIFIED_COLLECTION_PATH = "recording_observation_bindings/finalized_collection.json"
 UNIFIED_RECEIPT_DIRECTORY = "recording_observation_bindings/receipts"
 UNIFIED_CONTEXT_FIELDS = ("recording_type", "recording_subtype", "behavior_mode")
@@ -327,6 +333,7 @@ def build_transfer_organization_plan(
         }
 
     records = []
+    folder_names: set[str] = set()
     for parent in parents:
         identity = SourceRecordingIdentity(
             parent.recording_id,
@@ -336,8 +343,8 @@ def build_transfer_organization_plan(
         )
         record = {
             "identity": identity.manifest_fields(),
-            "recording_name": f"{parent.session_uuid}_Cam{parent.camera_id}",
-            "destination_dir": str(destination / parent.recording_id),
+            "recording_name": (name := _readable_folder_name(parent, folder_names)),
+            "destination_dir": str(destination / name),
             "recording_layout": parent.recording_layout,
             # Producer label, preserved as given (single_video vs rolling_clips);
             # Palette stores every transfer-v2 parent as a clip collection.
@@ -626,11 +633,13 @@ def _verify_materialized_files(plan: dict, state: dict) -> None:
     destination = Path(plan["destination_root"])
     for parent in plan["parents"]:
         key = parent["identity"]["recording_id"]
-        _require_directory(destination / key, state["parent_directory_identities"][key])
+        _require_directory(
+            _parent_directory(plan, key), state["parent_directory_identities"][key]
+        )
     for item in plan["files"]:
         for target in item["destinations"]:
             _matches_file(
-                destination / target["recording_id"],
+                _parent_directory(plan, target["recording_id"]),
                 target["relative_path"],
                 item["source"],
             )
@@ -693,7 +702,7 @@ def materialize_transfer_organization(plan: dict) -> dict:
                 _require_directory(directory, expected)
         for item in plan["files"]:
             for target in item["destinations"]:
-                parent = Path(plan["destination_root"]) / target["recording_id"]
+                parent = _parent_directory(plan, target["recording_id"])
                 _require_directory(
                     parent, state["parent_directory_identities"][target["recording_id"]]
                 )
@@ -769,9 +778,67 @@ def _verify_parent_index(plan: dict, parent: dict) -> dict:
     return manifest
 
 
+def _readable_folder_name(parent, taken: set[str]) -> str:
+    name = f"{parent.session_uuid}_Cam{parent.camera_id}"
+    require(
+        _SAFE_FOLDER_NAME.fullmatch(name) is not None,
+        f"recording folder name is not filesystem-safe: {name!r}",
+    )
+    require(name not in taken, f"two parents share a recording folder name: {name}")
+    taken.add(name)
+    return name
+
+
+def _parent_directory(plan: dict, recording_id: str) -> Path:
+    """The recorded destination of one parent; never derived from its id."""
+
+    matches = [
+        Path(parent["destination_dir"])
+        for parent in plan["parents"]
+        if parent["identity"]["recording_id"] == recording_id
+    ]
+    require(len(matches) == 1, f"unknown or duplicate parent: {recording_id}")
+    return matches[0]
+
+
+def _video_sync_assessment(plan: dict, parent: dict) -> dict:
+    """Keyframe/sync-sample check of every materialized video, fail-closed.
+
+    The same check the retired organizer ran on apply
+    (``diagnostics.video.container.check_hevc_keyframe_flags``), now recorded
+    per parent. An unreadable container or Orange evidence contradicting the
+    MP4's sync-sample declaration refuses intake rather than warning.
+    """
+    from fisheye.diagnostics.video.container import check_hevc_keyframe_flags
+
+    key = parent["identity"]["recording_id"]
+    directory = Path(parent["destination_dir"])
+    videos = sorted(
+        target["relative_path"]
+        for item in plan["files"]
+        if item["role"] == "camera_output"
+        for target in item["destinations"]
+        if target["recording_id"] == key
+        and Path(target["relative_path"]).suffix.lower() in (".mp4", ".mov", ".mkv")
+    )
+    assessments = {}
+    for relative in videos:
+        result = check_hevc_keyframe_flags(directory / relative)
+        require(
+            result.get("container_inspection_status") == "ok",
+            f"video sync samples cannot be verified: {relative}: {result.get('message')}",
+        )
+        require(
+            result.get("sync_sample_proof") != "orange_idr_sidecar_contradiction",
+            f"Orange sync-sample evidence contradicts {relative}: {result.get('message')}",
+        )
+        assessments[relative] = result
+    return {"schema_id": "palette.transfer_parent_video_sync_assessment.v1", "videos": assessments}
+
+
 def _parent_manifest(plan: dict, parent: dict) -> dict:
     key = parent["identity"]["recording_id"]
-    files = {"raw": [], "cams": [], "derived": [INDEX_DIRECTORY + "/"]}
+    files = {"raw": [], "cams": [], "derived": [INDEX_DIRECTORY + "/", VIDEO_SYNC_ASSESSMENT]}
     mapping = []
     for item in plan["files"]:
         for target in item["destinations"]:
@@ -877,6 +944,15 @@ def prepare_transfer_parent_recordings(
                     organization_plan=plan,
                 )
             _verify_parent_index(plan, parent)
+            assessment = _video_sync_assessment(plan, parent)
+            assessment_path = directory / VIDEO_SYNC_ASSESSMENT
+            if assessment_path.exists():
+                require(
+                    strict_json(assessment_path) == assessment,
+                    "existing video sync assessment differs from the materialized videos",
+                )
+            else:
+                write_json_atomic(assessment_path, assessment, overwrite=False)
             manifest = _parent_manifest(plan, parent)
             path = directory / "recording_manifest.json"
             if path.exists():
@@ -1066,7 +1142,7 @@ def finalize_transfer_staging(
             item = by_relative[relative]
             _require_directory(source, state["source_directory_identity"])
             for target in item["destinations"]:
-                parent = Path(plan["destination_root"]) / target["recording_id"]
+                parent = _parent_directory(plan, target["recording_id"])
                 _require_directory(
                     parent, state["parent_directory_identities"][target["recording_id"]]
                 )
