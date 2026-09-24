@@ -116,3 +116,53 @@ def test_pending_effect_message_keeps_reason_and_retry_id_without_pixel_reload()
  vm.runInContext('tailRefreshResult=null',context);await vm.runInContext('loadCurrent()',context);
  assert(el('summary').innerHTML.includes('new-tail-task'));
 """)
+
+
+def test_background_effects_status_line_polls_and_shows_failure_banner():
+    browser(r"""
+ const timers=[];context.setTimeout=(fn)=>{timers.push(fn);return timers.length;};
+ const bgState={...current.state,apply_effects_background:true,edit_revision:1,unapplied_session_edit_count:0,
+  pending_apply_effect_count:1,resumable_apply_id:'queued-apply',apply_effects_status:{state:'queued'}};
+ fetchImpl=async()=>({ok:true,body:{ok:true,result:{apply_id:'fixed-apply',applied_checkpoint_count:1,effects:'queued',qc_status:'pending'},state:bgState}});
+ await vm.runInContext('applySavedEdits()',context);
+ assert(el('summary').innerHTML.includes('Updating QC and tail versions'));
+ assert(el('status').textContent.includes('background'));
+ assert.strictEqual(timers.length,1);
+ fetchImpl=async()=>({ok:true,body:{ok:true,state:{...bgState,apply_effects_status:{state:'retrying',reason:'registry <busy>'}}}});
+ await timers[0]();
+ assert(requests.some(r=>r.url.endsWith('/subject-mask/state')));
+ assert(el('summary').innerHTML.includes('Background update failed'));
+ assert(el('summary').innerHTML.includes('&lt;busy&gt;'));
+ assert(el('summary').innerHTML.includes('Retrying automatically'));
+ assert.strictEqual(timers.length,2);
+ // A new Apply while effects are owed must not reuse the queued apply_id.
+ fetchImpl=async()=>({ok:true,body:{ok:true,result:{apply_id:'fixed-apply',applied_checkpoint_count:1,effects:'queued'},state:bgState}});
+ await vm.runInContext('applySavedEdits()',context);
+ const applies=requests.filter(r=>r.url.endsWith('/apply'));
+ assert.strictEqual(JSON.parse(applies[applies.length-1].body).apply_id,'fixed-apply');
+ fetchImpl=async()=>({ok:true,body:{ok:true,state:{...bgState,pending_apply_effect_count:0,apply_effects_status:null,qc_status:'complete'}}});
+ await timers[timers.length-1]();
+ assert(!el('summary').innerHTML.includes('Updating QC'));
+ assert(!el('summary').innerHTML.includes('Background update failed'));
+ const settled=timers.length;
+ vm.runInContext('renderSummary()',context);
+ assert.strictEqual(timers.length,settled);
+""")
+
+
+def test_background_refused_effects_banner_and_retry_reuses_apply_id():
+    browser(r"""
+ context.setTimeout=()=>1;
+ current=roi(0,{apply_effects_background:true,pending_apply_effect_count:1,resumable_apply_id:'refused-apply',
+  unapplied_session_edit_count:0,apply_effects_status:{state:'failed',reason:'QC cannot change declared mask_labels'}});
+ fetchImpl=async()=>({ok:true,body:current});
+ await vm.runInContext('loadCurrent()',context);
+ assert(el('summary').innerHTML.includes('Background update failed'));
+ assert(el('summary').innerHTML.includes('will not retry automatically'));
+ fetchImpl=async()=>({ok:true,body:{ok:true,result:{apply_id:'refused-apply',already_applied:true,qc_status:'complete'},
+  state:{...current.state,pending_apply_effect_count:0,apply_effects_status:null}}});
+ await vm.runInContext('applySavedEdits()',context);
+ const applies=requests.filter(r=>r.url.endsWith('/apply'));
+ assert.strictEqual(JSON.parse(applies[0].body).apply_id,'refused-apply');
+ assert(!el('summary').innerHTML.includes('Background update failed'));
+""")

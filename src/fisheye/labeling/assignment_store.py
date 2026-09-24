@@ -1911,7 +1911,14 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         rows = self.conn.execute(" ".join(sql), params).fetchall()
         return [_row_to_dict(row) for row in rows]
 
-    def update_task_state(self, *, task_id: str, state: str, user: str | None = None) -> dict[str, object]:
+    def update_task_state(
+        self,
+        *,
+        task_id: str,
+        state: str,
+        user: str | None = None,
+        completion_details: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
         self.initialize()
         task = self.get_task(task_id)
         if task is None:
@@ -1956,7 +1963,11 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                     user=str(user),
                     event_type="task_completed",
                     before={"state": task.get("state")},
-                    after={"state": state_value, "completed_at_utc": completed_at},
+                    after={
+                        "state": state_value,
+                        "completed_at_utc": completed_at,
+                        **dict(completion_details or {}),
+                    },
                 )
             if str(task.get("state") or "") == "complete" and state_value != "complete":
                 self.record_event(
@@ -2439,34 +2450,53 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         The current task is included for older tasks without an explicit scope.
         Callers that authorize a write must query under the existing run lock.
         """
-        self.initialize()
         archive = Path(zarr_path).expanduser().resolve()
-        rows = self.conn.execute(
-            """
-            SELECT r.apply_id, r.task_id, r.component_name, r.edit_revision_after,
-                   t.scope_json, t.run_name
-            FROM labeling_checkpoint_apply_receipts r
-            JOIN labeling_tasks t ON t.task_id = r.task_id
-            WHERE r.state = 'applied' AND r.secondary_effects_state = 'pending'
-              AND t.workflow_kind = 'subject_mask_component'
-            ORDER BY r.applied_at_utc, r.apply_id;
-            """
-        )
         matches = []
-        for row in rows:
-            scope = _json_loads(row["scope_json"])
-            scope = scope if isinstance(scope, Mapping) else {}
-            source_path = str(scope.get("zarr_path") or "")
-            source_run = str(scope.get("refined_run") or row["run_name"] or "")
+        for row in self.list_all_pending_subject_mask_apply_effects():
+            source_path = str(row["zarr_path"])
             if str(row["task_id"]) == str(task_id) or (
                 source_path
-                and source_run == str(refined_run)
+                and row["refined_run"] == str(refined_run)
                 and Path(source_path).expanduser().resolve() == archive
             ):
                 matches.append({key: row[key] for key in (
                     "apply_id", "task_id", "component_name", "edit_revision_after"
                 )})
         return matches
+
+    def list_all_pending_subject_mask_apply_effects(self) -> list[dict[str, object]]:
+        """All subject-mask receipts owing derived effects, in Apply order.
+
+        Each row carries its task's mask-run binding (``zarr_path`` and
+        ``refined_run`` from the task scope, falling back to ``run_name``).
+        """
+        self.initialize()
+        rows = self.conn.execute(
+            """
+            SELECT r.apply_id, r.task_id, r.component_name, r.edit_revision_after,
+                   r.applied_at_utc, t.recording_id, t.scope_json, t.run_name
+            FROM labeling_checkpoint_apply_receipts r
+            JOIN labeling_tasks t ON t.task_id = r.task_id
+            WHERE r.state = 'applied' AND r.secondary_effects_state = 'pending'
+              AND t.workflow_kind = 'subject_mask_component'
+            ORDER BY r.applied_at_utc, r.apply_id;
+            """
+        ).fetchall()
+        out = []
+        for row in rows:
+            scope = _json_loads(row["scope_json"])
+            scope = scope if isinstance(scope, Mapping) else {}
+            out.append({
+                "apply_id": row["apply_id"],
+                "task_id": row["task_id"],
+                "recording_id": row["recording_id"],
+                "component_name": row["component_name"],
+                "edit_revision_after": row["edit_revision_after"],
+                "applied_at_utc": row["applied_at_utc"],
+                "zarr_path": str(scope.get("zarr_path") or ""),
+                "refined_run": str(scope.get("refined_run") or row["run_name"] or ""),
+            })
+        return out
 
     def mark_session_checkpoint_apply_effects_complete(
         self,
