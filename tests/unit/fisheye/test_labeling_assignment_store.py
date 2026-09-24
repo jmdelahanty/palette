@@ -95,6 +95,23 @@ def _add_active_labeling_users(store: LabelingStore, *users: str) -> None:
         store.upsert_labeling_user(user_id=user, status="active")
 
 
+def test_browser_workflow_scope_contract_rejects_unknown_training_write_mode() -> None:
+    workflows = labeling_web_module._browser_workflow_capabilities()
+    for workflow in workflows:
+        if workflow.get("workflow_kind") != "keypoints":
+            continue
+        write_contract = dict(workflow["write_contract"])
+        write_contract["training_zarr_write_mode"] = "unknown_checkpoint_mode"
+        workflow["write_contract"] = write_contract
+        break
+    contract = labeling_web_module._browser_workflow_scope_contract_policy(
+        task_state_policy=labeling_web_module._browser_task_state_policy(),
+        browser_workflows=workflows,
+    )
+    assert contract["ready"] is False
+    assert contract["workflows_missing_server_owned_zarr_target"] == ["keypoints"]
+
+
 @contextmanager
 def _running_labeling_server(
     store: LabelingStore,
@@ -7614,6 +7631,12 @@ def test_export_user_handoffs_without_base_url_is_preview_not_ready(tmp_path, ca
         contract["training_zarr_mutation_target_kind"]
         for contract in workflow_write_contracts.values()
     } == {"task_scoped_training_zarr"}
+    assert workflow_write_contracts["keypoints"]["training_zarr_write_mode"] == (
+        "session_checkpoint_then_apply"
+    )
+    assert workflow_write_contracts["keypoints"]["immutable_compatibility"] == (
+        "immutable_base_browser_save_uses_existing_direct_delta_partition_writer_without_apply"
+    )
     assert workflow_write_contracts["detect_training"]["training_zarr_write_mode"] == "direct"
     assert workflow_write_contracts["detect_analysis"]["training_zarr_write_mode"] == (
         "promotion_when_configured"
@@ -13307,6 +13330,9 @@ def test_export_user_handoff_cli_writes_preview_links_and_check(tmp_path, capsys
     assert validation_checklist["browser_workflow_scope_contract"]["workflow_contracts_training_zarr_target_kind"] == (
         "task_scoped_training_zarr"
     )
+    assert validation_checklist["browser_workflow_scope_contract"]["workflow_training_zarr_write_modes"][
+        "keypoints"
+    ] == "session_checkpoint_then_apply"
     assert validation_checklist["browser_workflow_scope_contract"]["workflow_training_zarr_write_modes"][
         "detect_training"
     ] == "direct"

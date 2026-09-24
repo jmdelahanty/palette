@@ -18,6 +18,25 @@ from fisheye.shared.refined_subject_component_contours import (
 )
 
 
+def test_chunked_row_tracking_matches_serial_for_duplicate_rows_and_utf8(monkeypatch) -> None:
+    monkeypatch.setattr(contour_mod, "_utc_now", lambda: "2026-09-23T00:00:00+00:00")
+    reason = "\u00e9" * 65  # Truncation is byte based, including a final partial codepoint.
+    groups = []
+    summaries = []
+    for chunked in (False, True):
+        component = zarr.group().create_group("component")
+        summaries.append(contour_mod.mark_component_rows_updated(
+            component, (3, 1, 3), component="subject_body", roi_count=6,
+            reason=reason, chunked=chunked,
+        ))
+        groups.append(component)
+    assert summaries[0] == summaries[1]
+    assert [item.row_revision for item in summaries[1]] == [1, 1, 2]
+    for name in ("row_revision", "row_updated_at_utc_bytes", "row_update_reason_bytes"):
+        np.testing.assert_array_equal(groups[0][name][:], groups[1][name][:])
+    assert dict(groups[0].attrs) == dict(groups[1].attrs)
+
+
 def test_sampled_contour_is_invariant_to_start_and_winding() -> None:
     clockwise_y_down = np.asarray([[1, 1], [5, 1], [5, 4], [1, 4]], dtype=np.float32)
     rotated = np.roll(clockwise_y_down, 2, axis=0)

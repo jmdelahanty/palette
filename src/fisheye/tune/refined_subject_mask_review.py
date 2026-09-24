@@ -56,6 +56,7 @@ from ..shared.provenance_attrs import (
     resolve_source_keypoints_run,
 )
 from ..shared.refined_subject_component_contours import mark_component_rows_updated
+from ..shared.zarr_row_chunk_updates import update_rows_by_chunk
 from ..shared.refined_subject_mask_mutation import (
     REFINED_SUBJECT_MASK_EDITABLE_DRAFT,
     refined_subject_mask_lifecycle_state,
@@ -2820,6 +2821,9 @@ def _write_refined_subject_component_authority_rows(
     source_row_stale_arr = component_group.get("source_row_stale")
     pending_rows = sorted(set(int(v) for v in (component_group.attrs.get("source_update_pending_rows") or [])))
 
+    rows: list[int] = []
+    masks: list[np.ndarray] = []
+    edited_flags: list[bool] = []
     for row_offset, roi_idx in enumerate(roi_indices):
         row = int(roi_idx)
         binary_mask = np.asarray(edited_masks_batch[int(row_offset), comp_idx], dtype=np.uint8)
@@ -2827,18 +2831,20 @@ def _write_refined_subject_component_authority_rows(
         if source_mask is None:
             source_mask = _source_mask_for_resolved_component(component_sources, component_name, row)
         edited = not np.array_equal(binary_mask, np.asarray(source_mask, dtype=np.uint8))
-
-        masks_arr[row, comp_idx] = binary_mask
-        edit_arr[row, comp_idx] = bool(edited)
-        if component_edit_arr is not None:
-            component_edit_arr[row] = bool(edited)
-        if manual_override_arr is not None:
-            manual_override_arr[row] = bool(edited)
-        if source_row_stale_arr is not None:
-            source_row_stale_arr[row] = False
+        rows.append(row)
+        masks.append(binary_mask)
+        edited_flags.append(bool(edited))
         if row in pending_rows:
             pending_rows.remove(row)
 
+    update_rows_by_chunk(masks_arr, rows, masks, tail_index=(comp_idx,))
+    update_rows_by_chunk(edit_arr, rows, edited_flags, tail_index=(comp_idx,))
+    if component_edit_arr is not None:
+        update_rows_by_chunk(component_edit_arr, rows, edited_flags)
+    if manual_override_arr is not None:
+        update_rows_by_chunk(manual_override_arr, rows, edited_flags)
+    if source_row_stale_arr is not None:
+        update_rows_by_chunk(source_row_stale_arr, rows, [False] * len(rows))
     component_group.attrs["source_update_pending_rows"] = pending_rows
     mark_component_rows_updated(
         component_group,
@@ -2846,6 +2852,7 @@ def _write_refined_subject_component_authority_rows(
         component=component_name,
         roi_count=int(masks_arr.shape[0]),
         reason=str(row_update_reason),
+        chunked=True,
     )
     sync_source_subject_mask_stale_payload(run_group)
 
