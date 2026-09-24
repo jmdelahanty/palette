@@ -11,6 +11,7 @@ import numpy as np
 import zarr
 
 from .mask_store import MaskStoreError, open_mask_store
+from .zarr_row_chunk_updates import update_rows_by_chunk
 
 COMPONENT_CONTOUR_SCHEMA_ID = "component_contours_v1"
 SAMPLED_COMPONENT_CONTOUR_SCHEMA_ID = "sampled_component_contours_v1"
@@ -549,11 +550,15 @@ def _ensure_array(
 def _write_ascii_row(
     array: zarr.Array, row_index: int, value: str, *, width: int
 ) -> None:
+    array[int(row_index), :] = _encode_ascii_row(value, width=width)
+
+
+def _encode_ascii_row(value: str, *, width: int) -> np.ndarray:
     encoded = str(value).encode("utf-8", errors="replace")[: int(width)]
     row = np.zeros((int(width),), dtype=np.uint8)
     if encoded:
         row[: len(encoded)] = np.frombuffer(encoded, dtype=np.uint8)
-    array[int(row_index), :] = row
+    return row
 
 
 def ensure_component_row_update_tracking(
@@ -601,6 +606,7 @@ def mark_component_rows_updated(
     component: str,
     roi_count: int,
     reason: str,
+    chunked: bool = False,
 ) -> list[ComponentContourRowUpdateSummary]:
     """Bump row-local component revisions without refreshing derived payloads.
 
@@ -614,13 +620,18 @@ def mark_component_rows_updated(
     )
     now = _utc_now()
     summaries: list[ComponentContourRowUpdateSummary] = []
+    revisions: dict[int, int] = {}
     for raw_row in row_indices:
         row_idx = int(raw_row)
-        previous_revision = int(np.asarray(revision_arr[row_idx], dtype=np.int64))
+        previous_revision = revisions.get(row_idx)
+        if previous_revision is None:
+            previous_revision = int(np.asarray(revision_arr[row_idx], dtype=np.int64))
         row_revision = previous_revision + 1
-        revision_arr[row_idx] = np.int64(row_revision)
-        _write_ascii_row(updated_at_arr, row_idx, now, width=ROW_UPDATE_TIMESTAMP_WIDTH)
-        _write_ascii_row(reason_arr, row_idx, reason, width=ROW_UPDATE_REASON_WIDTH)
+        revisions[row_idx] = row_revision
+        if not chunked:
+            revision_arr[row_idx] = np.int64(row_revision)
+            _write_ascii_row(updated_at_arr, row_idx, now, width=ROW_UPDATE_TIMESTAMP_WIDTH)
+            _write_ascii_row(reason_arr, row_idx, reason, width=ROW_UPDATE_REASON_WIDTH)
         summaries.append(
             ComponentContourRowUpdateSummary(
                 component=str(component),
@@ -629,6 +640,18 @@ def mark_component_rows_updated(
                 row_revision=row_revision,
                 reason=str(reason),
             )
+        )
+
+    if chunked and summaries:
+        rows = [summary.row_index for summary in summaries]
+        update_rows_by_chunk(revision_arr, rows, [np.int64(summary.row_revision) for summary in summaries])
+        update_rows_by_chunk(
+            updated_at_arr, rows,
+            [_encode_ascii_row(now, width=ROW_UPDATE_TIMESTAMP_WIDTH)] * len(rows),
+        )
+        update_rows_by_chunk(
+            reason_arr, rows,
+            [_encode_ascii_row(reason, width=ROW_UPDATE_REASON_WIDTH)] * len(rows),
         )
 
     component_group.attrs["last_row_update_at_utc"] = now
