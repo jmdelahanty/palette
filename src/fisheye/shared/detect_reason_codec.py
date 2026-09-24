@@ -10,11 +10,21 @@ REASON_BYTES_MIN_WIDTH = 64
 
 
 def _stamp_reason_contract(group: zarr.Group, width: int) -> None:
-    group.attrs["reason_encoding"] = REASON_BYTES_ENCODING
-    group.attrs["reason_authority"] = "reason_bytes"
-    group.attrs["reason_bytes_width"] = int(width)
-    group.attrs["reason_bytes_null_terminated"] = True
-    group.attrs["reason_fallback_order"] = ["reason_bytes", "detection_source"]
+    required = {
+        "reason_encoding": REASON_BYTES_ENCODING,
+        "reason_authority": "reason_bytes",
+        "reason_bytes_width": int(width),
+        "reason_bytes_null_terminated": True,
+        "reason_fallback_order": ["reason_bytes", "detection_source"],
+    }
+    attrs = group.attrs
+    changed = {}
+    for key, value in required.items():
+        current = attrs.get(key)
+        if type(current) is not type(value) or current != value:
+            changed[key] = value
+    if changed:
+        attrs.update(changed)
 
 
 def _labels_from_detection_source(detection_source: np.ndarray) -> np.ndarray:
