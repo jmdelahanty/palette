@@ -97,3 +97,51 @@ def run_apply_effects_locked(
     if not effects_complete:
         raise RuntimeError("Subject-mask Apply effects receipt remains pending.")
     return derived
+
+
+# Background execution (``serve --background-apply-effects``) records each
+# worker attempt as a task event targeted at the exact apply_id.  The receipt
+# row stays the source of truth for *whether* effects are owed; these events
+# record *how* the latest attempt went.
+ATTEMPT_EVENT = "subject_mask_apply_effects_attempt"
+WORKER_USER = "system:apply-effects-worker"
+
+
+def latest_effects_attempt(store, *, task_id: str, apply_id: str) -> dict[str, object]:
+    event = store.get_event_for_target(
+        task_id=str(task_id), event_type=ATTEMPT_EVENT, target={"apply_id": str(apply_id)},
+    )
+    after = (event or {}).get("after")
+    return dict(after) if isinstance(after, Mapping) else {}
+
+
+def apply_effects_status(store, runtime) -> dict[str, object] | None:
+    """Labeler-facing status of the oldest owed Apply on this mask run."""
+
+    from .web_subject_mask_apply_state import pending_mask_run_effects
+
+    pending = pending_mask_run_effects(store, runtime)
+    if not pending:
+        return None
+    head = pending[0]
+    attempt = latest_effects_attempt(store, task_id=str(head["task_id"]), apply_id=str(head["apply_id"]))
+    status = str(attempt.get("status") or "")
+    state = {"running": "running", "failed": "retrying", "refused": "failed"}.get(status, "queued")
+    return {
+        "state": state,
+        "apply_id": str(head["apply_id"]),
+        "task_id": str(head["task_id"]),
+        "attempt": int(attempt.get("attempt") or 0),
+        "reason": str(attempt.get("reason") or "") or None,
+        "next_attempt_at_utc": attempt.get("next_attempt_at_utc") if state == "retrying" else None,
+        "background": bool(getattr(runtime, "apply_effects_background", False)),
+    }
+
+
+def completion_details(guard: Mapping[str, object] | None) -> dict[str, object] | None:
+    """Extra task-completion event fields when completion outran owed effects."""
+
+    count = int((guard or {}).get("pending_apply_effect_count") or 0)
+    if not count:
+        return None
+    return {"apply_effects_pending": True, "pending_apply_effect_count": count}
