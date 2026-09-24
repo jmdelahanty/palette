@@ -68,18 +68,42 @@ def test_lossless_fixed_and_variable_text_and_attributes(tmp_path):
         )
 
 
-def test_lazy_oversized_dataset_rejected_before_read(tmp_path):
-    with h5py.File(tmp_path / "oversized.h5", "w") as source:
-        dataset = source.create_dataset(
-            "oversized", shape=(2_000_001,), dtype="u8", chunks=(1024,)
-        )
-        with pytest.raises(UnifiedH5ContractError, match="budget"):
+def test_resource_profile_matches_the_pinned_admission_contract():
+    from fisheye.shared.unified_h5 import common
+    from fisheye.shared.unified_h5.schema import contract
+
+    profile = contract("unified_h5_admission_v2.json")["resource_profile"]
+    assert profile["max_dataset_logical_bytes"] == common.MAX_DATASET_LOGICAL_BYTES
+    assert profile["max_dataset_rows"] == common.MAX_DATASET_ROWS
+    assert profile["max_single_element_bytes"] == common.MAX_ELEMENT_BYTES
+    assert profile["max_json_payload_bytes"] == common.MAX_JSON_BYTES
+
+
+@pytest.mark.parametrize(
+    ("dtype", "rows", "reason"),
+    [
+        ("u8", 2**40 // 8, None),  # exact byte limit: floor(2^40 / 8) rows
+        ("u8", 2**40 // 8 + 1, "byte_budget"),
+        ("u1", 2**40, None),  # exact row limit
+        ("u1", 2**40 + 1, "row_budget"),
+        ("u8", 2_000_001, None),  # the former 2,000,000-row cap no longer applies
+        (f"S{64 * 1024 * 1024}", 1, None),  # exact single-element limit
+        (f"S{64 * 1024 * 1024 + 1}", 1, "element_budget"),
+    ],
+)
+def test_long_session_limits_are_checked_before_any_read(tmp_path, dtype, rows, reason):
+    with h5py.File(tmp_path / "limits.h5", "w") as source:
+        # Chunked and never written: HDF5 allocates nothing for these extents.
+        dataset = source.create_dataset("table", shape=(rows,), dtype=dtype, chunks=(1,))
+        if reason is None:
             check_dataset_budget(dataset)
-        byte_budget = source.create_dataset(
-            "byte_budget", shape=(1_000_000,), dtype="S128", chunks=(1024,)
-        )
-        with pytest.raises(UnifiedH5ContractError, match="byte_budget"):
-            check_dataset_budget(byte_budget)
+        else:
+            with pytest.raises(UnifiedH5ContractError, match=reason):
+                check_dataset_budget(dataset)
+
+
+def test_non_little_endian_integers_are_refused(tmp_path):
+    with h5py.File(tmp_path / "endian.h5", "w") as source:
         big_endian = source.create_dataset("big_endian", shape=(1,), dtype=">u8")
         with pytest.raises(UnifiedH5ContractError, match="integer_type"):
             check_dataset_budget(big_endian)

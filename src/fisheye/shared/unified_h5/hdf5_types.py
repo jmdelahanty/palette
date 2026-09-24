@@ -10,10 +10,11 @@ import numpy as np
 
 from .common import (
     BLOCK_BYTES,
-    MAX_DATASET_BYTES,
+    MAX_DATASET_LOGICAL_BYTES,
+    MAX_DATASET_ROWS,
+    MAX_ELEMENT_BYTES,
     MAX_DEPTH,
     MAX_JSON_BYTES,
-    MAX_ROWS,
     require,
 )
 
@@ -118,11 +119,13 @@ def check_dataset_budget(dataset: h5py.Dataset) -> dict:
     )
     spec = type_descriptor(dataset.id.get_type())
     count = math.prod(dataset.shape)
-    require(count <= MAX_ROWS, f"dataset_row_budget_exceeded:{dataset.name}")
+    require(count <= MAX_DATASET_ROWS, f"dataset_row_budget_exceeded:{dataset.name}")
     if not (spec["class"] == "string" and spec["variable_length"]):
+        width = dataset.dtype.itemsize
+        require(width <= MAX_ELEMENT_BYTES, f"dataset_element_budget_exceeded:{dataset.name}")
+        # Checked before any read: rows <= min(2^40, floor(2^40 / width)).
         require(
-            dataset.dtype.itemsize <= MAX_DATASET_BYTES
-            and count * dataset.dtype.itemsize <= MAX_DATASET_BYTES,
+            count <= MAX_DATASET_LOGICAL_BYTES // max(1, width),
             f"dataset_byte_budget_exceeded:{dataset.name}",
         )
     return spec
