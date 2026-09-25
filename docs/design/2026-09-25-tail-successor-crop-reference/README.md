@@ -1,6 +1,6 @@
 # Tail successors reference their crop run instead of copying it
 
-- **Status:** draft
+- **Status:** accepted
 - **Owner:** labeling/Apply work (session palette-12, for the user); last reviewed 2026-09-25
 - **Builds on:** `docs/design/2026-09-24-background-apply-effects/README.md`;
   the tail successor refresh (`fisheye.training.mask_tail_apply_refresh`,
@@ -94,5 +94,7 @@ real provenance boundary.
    now.
 
 ## Decision log
+
+- 2026-09-25: accepted by the user: new successor policy id; existing copied-crop successors untouched; no reclamation now. Implemented together with review-archive sharding as one successor format change.
 
 - 2026-09-25: opened. The user agreed crops should be referenced, not copied.

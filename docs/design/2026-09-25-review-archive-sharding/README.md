@@ -1,6 +1,6 @@
 # Shard training and review archive runs
 
-- **Status:** draft
+- **Status:** accepted
 - **Owner:** labeling/Apply work (session palette-12, for the user); last reviewed 2026-09-25
 - **Builds on:**
   - `docs/archive/zarr_sharding_design_note.md` (policy: shard when file
@@ -98,6 +98,8 @@ should take publish from about 50–60 s to a few seconds on `/groups`.
    as they are?
 
 ## Decision log
+
+- 2026-09-25: accepted by the user: a training/review profile in the shared planner, whole-run shards for small runs, new runs only. Implemented together with crop referencing as one successor format change.
 
 - 2026-09-25: opened. The user agreed to shard, noting that production already
   uses sharding widely.
