@@ -665,7 +665,9 @@
           body: JSON.stringify({state: reviewState, target_token: payload?.state?.target_token})
         });
         await loadCurrent();
-        setStatus("Component review state set to " + reviewState + "." + mutationStatusSuffix(result));
+        setStatus(result?.deferred
+          ? "Review state " + reviewState + " recorded; it is written once the background update finishes. You can complete the task now."
+          : "Component review state set to " + reviewState + "." + mutationStatusSuffix(result));
       } catch (error) {
         showOperatorSupport(error, "session_request_failed");
       } finally {

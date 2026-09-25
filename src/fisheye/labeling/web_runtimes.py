@@ -20,6 +20,7 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from .web_responses import _decode_uint8_payload, _raw_array_payload
 from .web_subject_mask_apply_effects import apply_effects_status
 from .web_subject_mask_apply_state import pending_mask_run_effects, tail_successor_offer
+from .web_subject_mask_deferred_review import pending_deferred_review
 
 if TYPE_CHECKING:
     from .assignment_store import LabelingStore
@@ -1038,8 +1039,13 @@ def _subject_mask_component_completion_guard(
     review_state = _subject_mask_component_review_state(runtime)
     pending_effect_count = len(pending_mask_run_effects(store, runtime))
     # With background Apply effects, completion may outrun owed effects;
-    # review-status changes (approval) stay gated on them.
-    effects_block = bool(pending_effect_count) and not getattr(runtime, "apply_effects_background", False)
+    # approval stays gated on them.  A deferred review request recorded
+    # while effects are owed counts as the component's review state.
+    background = bool(getattr(runtime, "apply_effects_background", False))
+    deferred = pending_deferred_review(store, runtime) if background and pending_effect_count else None
+    if deferred is not None:
+        review_state = str(deferred.get("state") or review_state)
+    effects_block = bool(pending_effect_count) and not background
     ready = review_state in SUBJECT_MASK_COMPLETABLE_REVIEW_STATES and not effects_block
     not_ready_reason = (
         "pending_apply_effects" if effects_block
@@ -1052,6 +1058,7 @@ def _subject_mask_component_completion_guard(
         "completable_review_states": sorted(SUBJECT_MASK_COMPLETABLE_REVIEW_STATES),
         "pending_apply_effect_count": int(pending_effect_count),
         "not_ready_reason": not_ready_reason,
+        "review_state_deferred": deferred is not None,
         "required_action": (
             "retry_pending_apply_effects" if effects_block
             else "set_component_review_status_before_completing_task" if not ready else ""
