@@ -76,6 +76,25 @@
   evidence when the task requires it, but it must remain selector-ineligible,
   must not alter production authority, and must be reported as not merge-ready
   until the required CI is green.
+- Deploying a change to the user's live labeling server (which they are
+  actively labeling on) before its CI is green is tiered by what the change
+  can damage:
+  - **Tier 1, presentation-only:** the change touches only static assets or
+    user-visible strings, and does not change which requests the browser
+    sends, their payloads, or when a write-capable control is enabled. It may
+    be deployed after the focused tests for the changed files pass, through
+    the self-checking cutover (commit-pinned checkout, no Apply or request in
+    flight, every store table fingerprinted before and after, automatic
+    rollback), and reported as not merge-ready until the required CI is green.
+  - **Tier 2, everything else:** any server-side code change other than a
+    string literal, and any change that writes, migrates, or changes the
+    format of data (Apply and save paths, publication, successor or schema
+    formats, registry, detection or mask authority). Wait for green required
+    CI, plus a real-storage measurement or replay when performance or layout
+    is affected. A server rollback does not undo written data.
+  - When unsure which tier applies, use Tier 2.
+  - The PR body and the deployment report must state the tier and a one-line
+    reason, so a misclassification is visible afterwards.
 
 ## Collaborative Development and Contract Preservation
 
