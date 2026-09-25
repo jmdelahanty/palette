@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 
 from ..registry.db import Registry, RegistryPaths
+from ..shared.zarr_helpers import archive_metadata_publication_lock
 
 if TYPE_CHECKING:
     from . import keypoint_review_backend
@@ -739,7 +740,12 @@ def _build_handler(
             if payload_error is not None:
                 self._write_json({"ok": False, **payload_error}, status=HTTPStatus.BAD_REQUEST)
                 return True
+            # Every POST here writes rows or run attrs; take the archive lock the
+            # labeling server's keypoint Apply holds, so the two never interleave.
+            with archive_metadata_publication_lock(str(state.session.zarr_path)):
+                return self._handle_api_post_locked(path, data)
 
+        def _handle_api_post_locked(self, path: str, data: Mapping[str, Any]) -> bool:
             if path == "/api/roi/current/save":
                 if "points" not in data:
                     self._write_bad_request("payload_validation", "Missing `points` field.")
