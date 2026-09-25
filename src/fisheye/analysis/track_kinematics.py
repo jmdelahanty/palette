@@ -92,6 +92,9 @@ from fisheye.shared.proof_verification import (
     proof_verification_operation,
 )
 from fisheye.shared.json_safety import json_attr_safe
+from fisheye.shared.zarr.canonical_detection_activation import (
+    canonical_detection_lineage_equivalent_runs,
+)
 from fisheye.shared.keypoint_motion_authority import (
     KeypointLineageAuthority,
     resolve_keypoint_motion_authority,
@@ -1321,10 +1324,16 @@ def prefer_refined_detection(
     if not isinstance(refined_parent, zarr.Group):
         return detection
 
+    # Refined runs record the raw run they were derived from; an activated
+    # canonical successor matches its legacy source only through its
+    # validated sealed manifest.
+    accepted_sources = canonical_detection_lineage_equivalent_runs(
+        root, detection.run_name
+    )
     candidates: List[str] = []
     for run_name in _sorted_group_keys(refined_parent):
         run_group = refined_parent[run_name]
-        if run_group.attrs.get("source_detect_run") == detection.run_name:
+        if run_group.attrs.get("source_detect_run") in accepted_sources:
             candidates.append(run_name)
 
     if not candidates:

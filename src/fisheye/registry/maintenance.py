@@ -39,6 +39,9 @@ from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     validate_canonical_detection_run_manifest,
 )
+from fisheye.shared.zarr.canonical_detection_activation import (
+    canonical_detection_lineage_equivalent_runs,
+)
 from fisheye.shared.zarr.keypoint_bundle_activation import (
     resolve_active_keypoint_bundle_from_root as _resolve_active_keypoint_bundle,
 )
@@ -4516,12 +4519,14 @@ def _resolve_group_for_source_run(
     *,
     source_run: Optional[str],
     source_run_extractor: Callable[[object], Optional[str]],
+    equivalent_source_runs: Optional[frozenset[str]] = None,
 ) -> tuple[Optional[str], Optional[object], str, Optional[str], Optional[str]]:
     latest_run, latest_group, latest_selection = _resolve_latest_group(parent)
     latest_source_run = source_run_extractor(latest_group)
     if source_run is None:
         return latest_run, latest_group, latest_selection, None, None
-    if latest_group is not None and latest_source_run == source_run:
+    accepted_sources = {source_run} | set(equivalent_source_runs or ())
+    if latest_group is not None and latest_source_run in accepted_sources:
         return latest_run, latest_group, f"source_match_{latest_selection}", None, None
 
     matches: List[str] = []
@@ -4530,7 +4535,7 @@ def _resolve_group_for_source_run(
             group = parent[name]  # type: ignore[index]
         except Exception:
             continue
-        if source_run_extractor(group) == source_run:
+        if source_run_extractor(group) in accepted_sources:
             matches.append(name)
     if matches:
         matched_run = sorted(matches)[-1]
@@ -5043,8 +5048,10 @@ def _resolve_latest_clipped_detect_collection(
 def _resolve_detect_quality_group(
     root: object,
     detect_group: object,
+    *,
+    equivalent_detect_groups: Sequence[object] = (),
 ) -> tuple[Optional[str], Optional[object], str]:
-    """Prefer the modern root run family, then historical nested reports."""
+    """Prefer the root run family, then nested reports (selected, then equivalent)."""
 
     root_parent = None
     if root is not None and hasattr(root, "get"):
@@ -5055,16 +5062,16 @@ def _resolve_detect_quality_group(
     quality_run, quality_group, selection = _resolve_latest_group(root_parent)
     if quality_group is not None:
         return quality_run, quality_group, f"root_{selection}"
-    if detect_group is None or not hasattr(detect_group, "get"):
-        return None, None, "none"
-    try:
-        nested_parent = detect_group.get("quality_reports")  # type: ignore[attr-defined]
-    except Exception:
-        nested_parent = None
-    quality_run, quality_group, selection = _resolve_latest_group(nested_parent)
-    return quality_run, quality_group, (
-        f"nested_{selection}" if selection != "none" else "none"
-    )
+    for index, candidate in enumerate((detect_group, *equivalent_detect_groups)):
+        try:
+            nested_parent = candidate.get("quality_reports")  # type: ignore[union-attr]
+        except Exception:
+            nested_parent = None
+        quality_run, quality_group, selection = _resolve_latest_group(nested_parent)
+        if selection != "none":
+            prefix = "nested" if index == 0 else "nested_lineage_equivalent"
+            return quality_run, quality_group, f"{prefix}_{selection}"
+    return None, None, "none"
 
 
 def _extract_detect_quality_details(
@@ -5586,6 +5593,12 @@ def _build_recording_step_rows_from_root(
         else _extract_detect_method(detect_group)
     )
     detect_coverage = None if detect_uses_collection else _extract_coverage_pct(detect_group)
+    # Activated canonical successor <-> legacy source, via its validated manifest.
+    detect_equivalent_runs = (
+        canonical_detection_lineage_equivalent_runs(root, detect_run) - {detect_run}
+        if detect_group is not None and not detect_uses_collection and detect_run
+        else frozenset()
+    )
     detect_manifest_digest = None
     if detect_group is not None and not detect_uses_collection:
         detect_manifest = detect_group.attrs.get("run_manifest")
@@ -5628,7 +5641,9 @@ def _build_recording_step_rows_from_root(
             detect_quality_run,
             detect_quality_group,
             detect_quality_selection,
-        ) = _resolve_detect_quality_group(root, detect_group)
+        ) = _resolve_detect_quality_group(root, detect_group, equivalent_detect_groups=[
+            detect_parent[name] for name in sorted(detect_equivalent_runs)  # type: ignore[index]
+        ])
         detect_quality_details = _extract_detect_quality_details(
             detect_quality_run,
             detect_quality_group,
@@ -5662,6 +5677,7 @@ def _build_recording_step_rows_from_root(
         refined_detect_parent,
         source_run=refined_detect_expected_source,
         source_run_extractor=_extract_source_detect_run,
+        equivalent_source_runs=None if refined_detect_collection else detect_equivalent_runs,
     )
     refined_detect_uses_collection = bool(
         refined_detect_group is None

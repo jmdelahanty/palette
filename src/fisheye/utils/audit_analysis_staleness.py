@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from fisheye.shared.run_lineage_fingerprint import normalize_lineage_value
+from fisheye.shared.zarr.canonical_detection_activation import (
+    canonical_detection_lineage_equivalent_runs,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 
 
@@ -452,6 +455,12 @@ def audit_source_ref(
             referenced_run_id=referenced_run_id,
         )
     not_latest = latest_run_id is not None and referenced_run_id is not None and latest_run_id != referenced_run_id
+    if not_latest and latest_parent_path == "detect_runs":
+        # An activated canonical successor selected in place of the recorded
+        # legacy run is the same lineage when its sealed manifest validates.
+        not_latest = referenced_run_id not in canonical_detection_lineage_equivalent_runs(
+            zarr_path if zarr_path is not None else root, latest_run_id
+        )
     if ref.expected_fingerprint and actual and ref.expected_fingerprint != actual:
         return SourceAudit(
             key=ref.key,

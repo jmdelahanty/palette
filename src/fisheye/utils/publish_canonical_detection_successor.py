@@ -60,6 +60,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--repair-latest-complete",
+        action="store_true",
+        help=(
+            "With --activate: when detect_runs latest names exactly the legacy "
+            "source and latest_complete is unset, set latest_complete to that "
+            "run (only if it is strictly complete) under the archive lock "
+            "before activation. Refuses if latest_complete names another run "
+            "or the legacy run is not strictly complete."
+        ),
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help=(
@@ -72,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.repair_latest_complete and not args.activate:
+        build_parser().error("--repair-latest-complete requires --activate.")
     if args.activate:
         return _run_activation(args)
     try:
@@ -142,6 +155,7 @@ def _run_activation(args: argparse.Namespace) -> int:
             copy_backend=args.copy_backend,
             keep_scratch=args.keep_scratch,
             result_json=args.result_json,
+            repair_latest_complete=args.repair_latest_complete,
         )
     except CanonicalDetectionActivationRefused as exc:
         result = {**base, **exc.receipt, "mode": base["mode"]}
