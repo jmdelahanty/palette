@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 import zarr
@@ -305,8 +305,11 @@ def _validated_activated_successor_source(
         or source_run_id == successor_id
         or source_run_id not in family
         or evidence.get("recording_identity") != recording_identity
-        or evidence.get("source_group_path")
-        != str((archive / "detect_runs" / source_run_id).resolve())
+        # Match the recorded source by archive-relative location: archives
+        # move between storage roots, and the recording identity plus the
+        # sealed manifest already bind the source to this recording.
+        or PurePosixPath(str(evidence.get("source_group_path") or "")).parts[-2:]
+        != ("detect_runs", source_run_id)
     ):
         return None
     return source_run_id

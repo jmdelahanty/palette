@@ -314,3 +314,23 @@ def test_non_local_or_empty_inputs_grant_no_equivalence(tmp_path: Path) -> None:
     assert canonical_detection_lineage_equivalent_runs(tmp_path / "absent", LEGACY) == {
         LEGACY
     }
+
+
+def test_equivalence_survives_moving_the_archive(
+    lineage_archive: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Archives move between storage roots; equivalence is archive-relative."""
+
+    import shutil
+
+    archive, scratch = lineage_archive
+    before = _resolve_all(archive)
+    assert _activate(archive, scratch, apply=True)["status"] == "activated"
+    moved = tmp_path / "moved_root" / archive.name
+    moved.parent.mkdir()
+    shutil.copytree(archive, moved)
+    assert canonical_detection_lineage_equivalent_runs(moved, SUCCESSOR) == {
+        SUCCESSOR,
+        LEGACY,
+    }
+    assert _resolve_all(moved) == before
