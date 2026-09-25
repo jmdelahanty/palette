@@ -309,7 +309,7 @@
         : "<p><b>Updating QC and tail versions…</b> Your mask edits are saved; you can keep working.</p>";
       const reviewWarning = pendingEffects > 0
         ? (background
-          ? "<p>Review status can be set when the QC and tail update finishes.</p>"
+          ? "<p>Approval and rejection wait for the background update. You can set <b>needs_review</b> now and complete the task.</p>"
           : "<p><b>Action needed</b> Finish the pending Apply before setting review status or completing this task.</p>")
         : (completionGuard.ready ? "" :
           "<p><b>Action needed</b> Set component review before completing this task.</p>");
@@ -340,6 +340,7 @@
         "<p><b>QC</b> " + (state.qc_status || "pending") +
         (pendingEffects ? " (" + pendingEffects + " Apply effect(s) pending)" : "") + "</p>" +
         effectsLine + reviewWarning + tailSummary;
+      updateReviewControls(background && pendingEffects > 0);
       scheduleEffectsPoll();
       const seekInput = document.getElementById("roi-seek-input");
       if (seekInput) seekInput.value = payload.roi_idx;
@@ -652,6 +653,22 @@
       } finally {
         applyInFlight = false;
       }
+    }
+
+    // While a background update is owed only needs_review can be recorded;
+    // approval and rejection wait for the update, so disable them visibly.
+    function updateReviewControls(updating) {
+      const select = document.getElementById("review-state");
+      if (!select) return;
+      for (const option of Array.from(select.options || [])) {
+        const waits = updating && option.value !== "needs_review";
+        option.disabled = waits;
+        option.textContent = option.value + (waits ? " (after update)" : "");
+      }
+      if (updating && select.selectedOptions?.[0]?.disabled) select.value = "needs_review";
+      select.title = updating
+        ? "A background QC/tail update is running. Approval and rejection are available when it finishes."
+        : "";
     }
 
     async function setReviewStatus() {

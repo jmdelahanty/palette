@@ -371,6 +371,8 @@ def test_needs_review_is_deferred_and_task_completes_without_waiting(mask_store)
         # Approval still waits for the owed effects.
         status, blocked = _request(base, _route(lease, "/review-status"), {"state": "approved", "target_token": token})
         assert status == 409 and blocked["error"] == "pending_apply_effects", blocked
+        assert "set needs_review now" in blocked["details"]
+        assert "Retry the saved" not in blocked["details"]
 
         # needs_review is recorded now and written later, without taking the run lock.
         status, deferred = _request(base, _route(lease, "/review-status"), {"state": "needs_review", "target_token": token})

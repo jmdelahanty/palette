@@ -2909,7 +2909,7 @@ def _make_handler(state: ServerState):
                     self._write_json(
                         _format_error(
                             "pending_apply_effects",
-                            details="Retry the saved subject-mask Apply to finish QC before changing review status.",
+                            details=("A background QC and tail update is still running; " + requested_state + " waits for it. You can set needs_review now and complete the task.") if state.config.background_apply_effects else "Retry the saved subject-mask Apply to finish QC before changing review status.",
                             status=HTTPStatus.CONFLICT,
                             extra={"pending_apply_effect_count": int(pending_effect_count)},
                         ),

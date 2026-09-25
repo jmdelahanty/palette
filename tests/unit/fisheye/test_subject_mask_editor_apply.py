@@ -166,3 +166,26 @@ def test_background_refused_effects_banner_and_retry_reuses_apply_id():
  assert.strictEqual(JSON.parse(applies[0].body).apply_id,'refused-apply');
  assert(!el('summary').innerHTML.includes('Background update failed'));
 """)
+
+
+def test_review_controls_offer_only_needs_review_while_background_update_runs():
+    browser(r"""
+ const select=el('review-state');
+ select.options=['approved','pending','needs_review','rejected'].map(value=>({value,textContent:value,disabled:false}));
+ select.value='approved';
+ Object.defineProperty(select,'selectedOptions',{get(){return select.options.filter(o=>o.value===select.value);}});
+ const bgState={...current.state,apply_effects_background:true,edit_revision:1,unapplied_session_edit_count:0,
+  pending_apply_effect_count:1,apply_effects_status:{state:'running'}};
+ context.__payload={...current,state:bgState};
+ vm.runInContext('payload=__payload; renderSummary()',context);
+ const byValue=v=>select.options.find(o=>o.value===v);
+ assert.strictEqual(byValue('needs_review').disabled,false);
+ for (const v of ['approved','pending','rejected']) assert.strictEqual(byValue(v).disabled,true,v);
+ assert.strictEqual(select.value,'needs_review');
+ assert(byValue('approved').textContent.includes('after update'));
+ assert(el('summary').innerHTML.includes('You can set <b>needs_review</b> now'));
+ context.__payload={...current,state:{...bgState,pending_apply_effect_count:0,apply_effects_status:null}};
+ vm.runInContext('payload=__payload; renderSummary()',context);
+ for (const o of select.options) assert.strictEqual(o.disabled,false,o.value);
+ assert.strictEqual(byValue('approved').textContent,'approved');
+""")
