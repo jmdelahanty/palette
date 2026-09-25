@@ -3,12 +3,22 @@
 The existing crop-only contracts are retained: each successor seals its mask
 pixels and derivation seed, and has its own editable annotation surface.  The
 old mask task, seeds, annotations, and selectors are never retargeted here.
+
+Successor formats (the policy id is part of every version digest):
+
+- ``v1`` (``REFRESH_POLICY``): five runs, including an identity copy of the
+  source crop run, written chunk-only. Historical; still readable, and still
+  used to resume an Apply whose v1 publication was already started.
+- ``v2`` (``REFRESH_POLICY_V2``, the default): four runs that reference the
+  existing crop run through ``source_crop_run`` (its contract digest is bound
+  in the proof), laid out with the ``training_review_run_v1`` shard profile.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 import tempfile
 
 import numpy as np
@@ -24,6 +34,7 @@ from fisheye.shared.detect_reason_codec import (
 )
 from fisheye.shared.recovered_training_review_contract import (
     NATIVE_REVIEW_SCHEMA,
+    REFERENCED_CROP_SUCCESSOR_POLICY,
     initial_contract_digest,
 )
 from fisheye.shared.refined_subject_mask_mutation import (
@@ -34,7 +45,10 @@ from fisheye.shared.zarr_helpers import (
     archive_metadata_publication_lock,
     consolidate_metadata_capture_expected_warnings,
 )
-from fisheye.shared.zarr_run_completion import is_run_complete
+from fisheye.shared.zarr.training_review_run_storage import (
+    shard_training_review_run,
+)
+from fisheye.shared.zarr_run_completion import is_run_complete, require_runs_parent
 from fisheye.training.mask_tail_keypoints import (
     LEGACY_SCHEMA_NAME,
     SCHEMA_NAME,
@@ -54,6 +68,7 @@ from fisheye.training.recover_merged_training_recording import _sha256_array
 from fisheye.training.recovered_mask_review_payload import (
     array_hashes,
     build_review_payload,
+    payload_crop_run,
     run_paths,
 )
 from fisheye.tune import keypoint_review_backend as editor
@@ -62,6 +77,13 @@ from fisheye.utils.extend_keypoint_skeleton import _schema_to_attr_payload
 
 REFRESH_SCHEMA = "palette.training.mask_apply_tail_successor.v1"
 REFRESH_POLICY = "new_mask_seed_and_review_version_preserve_recorded_manual_points_v1"
+REFRESH_POLICY_V2 = REFERENCED_CROP_SUCCESSOR_POLICY
+SUCCESSOR_FORMAT_POLICIES = {"v1": REFRESH_POLICY, "v2": REFRESH_POLICY_V2}
+DEFAULT_SUCCESSOR_FORMAT = "v2"
+_EDITABLE_RUN_KEYS = frozenset({"pose_edit", "mask_edit"})
+# The first child each format publishes: v1 its crop copy, v2 its mask snapshot.
+# A partial publication is therefore always visible in one of these families.
+_PROOF_FAMILIES = ("crop_runs", "subject_mask_runs")
 _IDENTITY_ARRAYS = (
     "frame_indices",
     "source_crop_row_ids",
@@ -128,7 +150,39 @@ def _source_file_fingerprint(archive, run_paths):
     return tuple(sorted(entries))
 
 
-def _capture(root, *, mask_name, pose_name, revision, upgrade_target_rows=None):
+def _policy_format(policy):
+    for name, value in SUCCESSOR_FORMAT_POLICIES.items():
+        if value == policy:
+            return name
+    raise ValueError(f"Unknown tail successor policy: {policy!r}")
+
+
+def _prior_apply_proofs(root, *, apply_id, source_mask_run):
+    """Refresh proofs already published (possibly partially) for this Apply."""
+    proofs = []
+    for family in _PROOF_FAMILIES:
+        parent = root.get(family)
+        if parent is None:
+            continue
+        for _, previous in parent.groups():
+            prior = (previous.attrs.get("source_bindings") or {}).get(
+                "mask_apply_refresh"
+            )
+            if (
+                isinstance(prior, dict)
+                and prior.get("apply_id") == str(apply_id)
+                and prior.get("source_mask_run") == source_mask_run
+                and prior not in proofs
+            ):
+                proofs.append(prior)
+    return proofs
+
+
+def _capture(
+    root, *, mask_name, pose_name, revision, upgrade_target_rows=None,
+    successor_format=DEFAULT_SUCCESSOR_FORMAT,
+):
+    reference_crop = successor_format == "v2"
     mask = resolve_mutable_refined_subject_mask_run(root, mask_name)
     pose = root[f"refined_keypoints_runs/{pose_name}"]
     crop_name = keypoint_source_crop_run_from_attributes(pose.attrs)
@@ -304,10 +358,17 @@ def _capture(root, *, mask_name, pose_name, revision, upgrade_target_rows=None):
     binding.pop("mask_apply_refresh", None)
     proof = {
         "schema_id": REFRESH_SCHEMA,
-        "policy": REFRESH_POLICY,
+        "policy": SUCCESSOR_FORMAT_POLICIES[successor_format],
         "source_mask_run": str(mask.path),
         "source_pose_run": str(pose.path),
         "source_crop_run": str(crop.path),
+        # v2 references these pixels instead of copying them; bind the crop's
+        # identity (its contract digest covers its initial array hashes).
+        **(
+            {"source_crop_contract_sha256": initial_contract_digest(crop)}
+            if reference_crop
+            else {}
+        ),
         "source_mask_edit_revision": int(revision),
         "source_pose_edit_revision": int(pose.attrs.get("edit_revision", 0)),
         "source_mask_contract_sha256": initial_contract_digest(mask),
@@ -353,14 +414,18 @@ def _capture(root, *, mask_name, pose_name, revision, upgrade_target_rows=None):
         **identities,
         "masks_roi": masks,
         "head_keypoints_roi": points[:, :3].copy(),
-        "roi_images": np.asarray(crop["roi_images"][:]),
-        "source_bbox_norm_coords": np.asarray(crop["source_bbox_norm_coords"][:]),
         "detection_source": np.asarray(original["detection_source"][:]),
         "target_valid_channels": np.asarray(original["target_valid_channels"][:]),
     }
-    for name in ("source_roi_coordinates_full",):
-        if name in crop:
-            arrays[name] = np.asarray(crop[name][:])
+    if not reference_crop:
+        # v1 copies the crop run's pixels and boxes into its own crop run.
+        arrays["roi_images"] = np.asarray(crop["roi_images"][:])
+        arrays["source_bbox_norm_coords"] = np.asarray(
+            crop["source_bbox_norm_coords"][:]
+        )
+        for name in ("source_roi_coordinates_full",):
+            if name in crop:
+                arrays[name] = np.asarray(crop[name][:])
     for name in ("label_origin_codes", "supervision_mode_codes"):
         if name in original:
             arrays[name] = np.asarray(original[name][:])
@@ -388,10 +453,42 @@ def _capture(root, *, mask_name, pose_name, revision, upgrade_target_rows=None):
 def _carry_labels(
     local, result, *, points, manual, origins, proof, original_reasons,
     preserved_seed=None, preserved_pose=None, preserved_seed_reasons=None,
-    selected_rows=None,
+    selected_rows=None, archive=None,
 ):
     paths = result["paths"]
     root = zarr.open_group(str(local), mode="a", use_consolidated=False)
+    if "crop" not in paths:
+        # v2: expose the referenced immutable crop to the editor session in
+        # the private scratch root only. It is read (image shape) and never
+        # written, published, or retained.
+        require_runs_parent(root, "crop_runs")
+        crop_link = Path(local) / "crop_runs" / payload_crop_run(result)
+        crop_link.symlink_to(Path(archive) / proof["source_crop_run"])
+        try:
+            return _carry_labels_into(
+                root, local, result, points=points, manual=manual,
+                origins=origins, proof=proof, original_reasons=original_reasons,
+                preserved_seed=preserved_seed, preserved_pose=preserved_pose,
+                preserved_seed_reasons=preserved_seed_reasons,
+                selected_rows=selected_rows,
+            )
+        finally:
+            crop_link.unlink()  # Remove the link itself before the parent.
+            shutil.rmtree(crop_link.parent)
+    return _carry_labels_into(
+        root, local, result, points=points, manual=manual, origins=origins,
+        proof=proof, original_reasons=original_reasons,
+        preserved_seed=preserved_seed, preserved_pose=preserved_pose,
+        preserved_seed_reasons=preserved_seed_reasons, selected_rows=selected_rows,
+    )
+
+
+def _carry_labels_into(
+    root, local, result, *, points, manual, origins, proof, original_reasons,
+    preserved_seed=None, preserved_pose=None, preserved_seed_reasons=None,
+    selected_rows=None,
+):
+    paths = result["paths"]
     seed, target = (root[paths[name]] for name in ("seed", "pose_edit"))
     if preserved_seed is not None:
         keep = np.ones(len(points), dtype=bool)
@@ -432,7 +529,7 @@ def _carry_labels(
     session = editor.resolve_review_session(
         str(local),
         refined_run=paths["pose_edit"].split("/")[1],
-        crop_run=paths["crop"].split("/")[1],
+        crop_run=payload_crop_run(result),
         include_all=True,
     )
     height, width = session.roi_images.shape[1:3]
@@ -514,6 +611,17 @@ def _reuse_completed(archive, paths, binding):
     """Accept untouched immutable children and legal edits in an existing draft."""
     if not all((archive / path).exists() for path in paths.values()):
         return False
+    proof = binding.get("mask_apply_refresh") or {}
+    if "crop" not in paths:
+        # v2: the referenced crop run is an immutable input of this version.
+        crop_path = archive / str(proof.get("source_crop_run") or "")
+        crop = zarr.open_group(str(crop_path), mode="r", use_consolidated=False)
+        if (
+            not validate_initial_payload(crop_path)["valid"]
+            or initial_contract_digest(crop)
+            != proof.get("source_crop_contract_sha256")
+        ):
+            raise ValueError("Changed immutable tail refresh source crop")
     for name, path in paths.items():
         group = zarr.open_group(str(archive / path), mode="r", use_consolidated=False)
         if (
@@ -540,7 +648,7 @@ def validate_completed_tail_version(*, archive, version, source_bindings):
     proof = source_bindings.get("mask_apply_refresh") or {}
     if (
         proof.get("schema_id") != REFRESH_SCHEMA
-        or proof.get("policy") != REFRESH_POLICY
+        or proof.get("policy") not in SUCCESSOR_FORMAT_POLICIES.values()
         or version != "mask_apply_" + sha256_payload(proof)[:24]
     ):
         raise ValueError("Invalid completed tail-version source proof")
@@ -549,6 +657,7 @@ def validate_completed_tail_version(*, archive, version, source_bindings):
         version,
         native=source_bindings.get("source_kind")
         == "native_reviewed_training_masks_v1",
+        reference_crop=proof["policy"] == REFRESH_POLICY_V2,
     )
     with archive_metadata_publication_lock(archive):
         if not _reuse_completed(archive, paths, source_bindings):
@@ -567,8 +676,14 @@ def regenerate_training_tail_version(
     expected_mask_revision,
     scratch_root=Path("/tmp"),
     upgrade_target_rows=None,
+    successor_format=None,
 ):
     """Create/reuse one unselected successor from applied masks and saved labels.
+
+    ``successor_format`` defaults to v2, except that an Apply whose earlier
+    (possibly partial) publication used v1 resumes in v1 so the same source
+    keeps the same version. Passing a format explicitly is for compatibility
+    tests and reproduction only.
 
     The caller owns the refined mask write lock. This function serializes with
     canonical keypoint Apply/publication using the archive lock. Browser-only or
@@ -585,6 +700,21 @@ def regenerate_training_tail_version(
         raise ValueError("A durable mask Apply ID is required")
     with archive_metadata_publication_lock(archive):
         root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+        prior_proofs = _prior_apply_proofs(
+            root,
+            apply_id=apply_id,
+            source_mask_run=f"refined_subject_masks_runs/{mask_name}",
+        )
+        if successor_format is None:
+            prior_formats = {_policy_format(p.get("policy")) for p in prior_proofs}
+            successor_format = (
+                prior_formats.pop()
+                if len(prior_formats) == 1
+                else DEFAULT_SUCCESSOR_FORMAT
+            )
+        if successor_format not in SUCCESSOR_FORMAT_POLICIES:
+            raise ValueError(f"Unknown tail successor format: {successor_format!r}")
+        reference_crop = successor_format == "v2"
         source_runs = _source_run_paths(
             root, mask_name=mask_name, pose_name=pose_name
         )
@@ -595,6 +725,7 @@ def regenerate_training_tail_version(
             pose_name=pose_name,
             revision=expected_mask_revision,
             upgrade_target_rows=upgrade_target_rows,
+            successor_format=successor_format,
         )
         if _source_file_fingerprint(archive, source_runs) != source_fingerprint:
             raise ValueError("Mask or keypoint source changed during tail refresh")
@@ -618,26 +749,18 @@ def regenerate_training_tail_version(
         proof = {**proof, "apply_id": str(apply_id)}
         # One durable Apply cannot silently change its source after a partial
         # publication or a later failed secondary effect.
-        for _, previous in root["crop_runs"].groups():
-            prior = (previous.attrs.get("source_bindings") or {}).get(
-                "mask_apply_refresh"
+        if any(prior != proof for prior in prior_proofs):
+            raise ValueError(
+                "Source changed since this Apply's tail version was published"
             )
-            if (
-                isinstance(prior, dict)
-                and prior.get("apply_id") == str(apply_id)
-                and prior.get("source_mask_run") == proof["source_mask_run"]
-                and prior != proof
-            ):
-                raise ValueError(
-                    "Source changed since this Apply's tail version was published"
-                )
         binding = {**original_binding, "mask_apply_refresh": proof}
         version = "mask_apply_" + sha256_payload(proof)[:24]
         native = (
             root[f"refined_keypoints_runs/{pose_name}"].attrs["schema_id"]
             == NATIVE_REVIEW_SCHEMA
         )
-        paths = run_paths(version, native=native)
+        paths = run_paths(version, native=native, reference_crop=reference_crop)
+        crop_name = proof["source_crop_run"].split("/")[-1]
         reused = _reuse_completed(archive, paths, binding)
         publications = []
         if not reused:
@@ -668,6 +791,7 @@ def regenerate_training_tail_version(
                     pose_name=pose_name,
                     revision=expected_mask_revision,
                     upgrade_target_rows=upgrade_target_rows,
+                    successor_format=successor_format,
                 )[3]
                 if {**current_proof, "apply_id": str(apply_id)} != proof:
                     raise ValueError(
@@ -692,6 +816,7 @@ def regenerate_training_tail_version(
                     pose_schema=schema_name,
                     derivation_method=derivation_method,
                     row_method_codes=row_method_codes,
+                    reference_crop_run=crop_name if reference_crop else None,
                 )
                 _carry_labels(
                     local,
@@ -705,11 +830,19 @@ def regenerate_training_tail_version(
                     preserved_pose=preserved_pose,
                     preserved_seed_reasons=preserved_seed_reasons,
                     selected_rows=selected_rows,
+                    archive=archive,
                 )
+                if reference_crop:
+                    # Single writer: each complete local run is rewritten into
+                    # its planned shards before anything is published.
+                    for key, path in paths.items():
+                        shard_training_review_run(
+                            local / path, mutable=key in _EDITABLE_RUN_KEYS
+                        )
                 provenance = build_writer_run_provenance(
                     command="fisheye.training.mask_tail_apply_refresh",
                     params={
-                        "policy": REFRESH_POLICY,
+                        "policy": proof["policy"],
                         "version": version,
                         "source": proof,
                     },
@@ -760,6 +893,9 @@ def regenerate_training_tail_version(
             "schema_id": REFRESH_SCHEMA,
             "version": version,
             "paths": paths,
+            "source_crop_run": (
+                crop_name if reference_crop else paths["crop"].split("/")[1]
+            ),
             "source_bindings": binding,
             "source_mask_edit_revision": int(expected_mask_revision),
             "source_pose_run": proof["source_pose_run"],

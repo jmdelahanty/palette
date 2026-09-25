@@ -16,6 +16,7 @@ from fisheye.shared.recovered_training_review_contract import (
     NATIVE_REVIEW_SCHEMA,
     NATIVE_COORDINATE_SYSTEM,
     initial_contract_digest,
+    review_run_crop_binding_matches,
 )
 
 
@@ -41,7 +42,7 @@ def is_recovered_roi_review(root, refined, crop):
         or any(g.attrs.get("coordinate_system") != coordinate for g in (crop, refined))
         or crop.attrs.get("sensor_pixel_origin_available") is not False
         or any(g.attrs.get("frame_index_domain") != domain for g in (crop, refined))
-        or refined.attrs.get("source_bindings") != crop.attrs.get("source_bindings")
+        or not review_run_crop_binding_matches(refined.attrs, crop)
         or keypoint_source_crop_run_from_attributes(refined.attrs)
         != str(crop.path).split("/")[-1]
         or any(

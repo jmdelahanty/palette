@@ -1,5 +1,7 @@
 """Versioned ROI-only annotation identity for recovered training archives."""
 
+from collections.abc import Mapping
+
 from fisheye.shared.run_provenance import sha256_payload
 
 REVIEW_SCHEMA = "palette.training.recovered_mask_tail_review.v1"
@@ -45,3 +47,41 @@ def initial_contract_digest(group):
         "initial_array_sha256",
     )
     return sha256_payload({key: group.attrs.get(key) for key in keys})
+
+
+# Tail-successor format v2: successors reference the existing, immutable crop
+# run through ``source_crop_run`` instead of publishing an identity copy. The
+# refresh proof binds that crop's contract digest.
+REFERENCED_CROP_SUCCESSOR_POLICY = (
+    "new_mask_seed_and_review_version_reference_crop_sharded_v2"
+)
+_REFRESH_PROOF_KEY = "mask_apply_refresh"
+
+
+def _supplier_binding(binding):
+    return {key: value for key, value in binding.items() if key != _REFRESH_PROOF_KEY}
+
+
+def review_run_crop_binding_matches(run_attrs, crop):
+    """Whether ``crop`` supplies the pixels of a review run.
+
+    Copied-crop runs (initial payloads and v1 successors) share the crop's
+    exact ``source_bindings``. A v2 successor instead carries its own refresh
+    proof, which must name this crop run and bind its contract digest, while
+    the underlying supplier declaration stays identical.
+    """
+    run_binding = run_attrs.get("source_bindings")
+    crop_binding = crop.attrs.get("source_bindings")
+    if run_binding == crop_binding:
+        return True
+    if not isinstance(run_binding, Mapping) or not isinstance(crop_binding, Mapping):
+        return False
+    proof = run_binding.get(_REFRESH_PROOF_KEY)
+    crop_name = str(crop.path).rstrip("/").split("/")[-1]
+    return (
+        isinstance(proof, Mapping)
+        and proof.get("policy") == REFERENCED_CROP_SUCCESSOR_POLICY
+        and str(proof.get("source_crop_run") or "").split("/")[-1] == crop_name
+        and proof.get("source_crop_contract_sha256") == initial_contract_digest(crop)
+        and _supplier_binding(run_binding) == _supplier_binding(crop_binding)
+    )
