@@ -110,11 +110,16 @@ def verify_stimulus(
             run["calibration/" + camera_id + "/homography_matrix"][:],
             h5["calibration_snapshot/" + camera_id + "/homography_matrix"][:],
         )
-    np.testing.assert_array_equal(
-        run["video_metadata/frame_metadata/stimulus_frame_num"][:], [1000, 1001, 1002]
+    assert expected["expected_camera_frame_ids"] == list(
+        range(1, expected["total_camera_frames"] + 1)
     )
     np.testing.assert_array_equal(
-        run["video_metadata/frame_metadata/triggering_camera_frame_id"][:], [1, 2, 3]
+        run["video_metadata/frame_metadata/stimulus_frame_num"][:],
+        expected["expected_stimulus_frames"],
+    )
+    np.testing.assert_array_equal(
+        run["video_metadata/frame_metadata/triggering_camera_frame_id"][:],
+        expected["expected_camera_frame_ids"],
     )
     assert run.attrs["protocol_semantic_status"] == "verified"
     assert run.attrs["protocol_semantic_hash"] == expected["protocol_semantic_hash"]
@@ -193,6 +198,33 @@ def main() -> None:
     fixture, producer_report = validate_synthetic_fixture(args.fixture)
     source, delivery = fixture / "source", fixture / "delivery"
     assert producer_report["includes_synthetic_h5_ptp_geometry"] is True
+    # Expected shape comes from the sealed transfer itself, cross-checked
+    # against the generator's declared layout (never from the parent import).
+    snapshot = json.loads((delivery / "_citrus_transfer/snapshot.json").read_bytes())
+    assert snapshot["recording_layout"] == producer_report["recording_layout"]
+    assert snapshot["recording_layout"] in ("rolling_clips", "single_video")
+    assert [
+        p["parent_key"]["camera_serial"] for p in snapshot["parents"]
+    ] == producer_report["camera_serials"]
+    expected_parents = {}
+    for source_parent in snapshot["parents"]:
+        clips = source_parent["clips"]
+        outputs = [{o["output_kind"]: o for o in clip["outputs"]} for clip in clips]
+        full_counts = [o["full"]["frame_map"]["frame_count"] for o in outputs]
+        crop_counts = [o["crop"]["frame_map"]["frame_count"] for o in outputs]
+        assert (
+            full_counts
+            == crop_counts
+            == producer_report["clip_frame_counts_per_parent"]
+        )
+        assert [clip["clip_index"] for clip in clips] == list(range(len(clips)))
+        total = sum(full_counts)
+        assert total >= 2  # recording frame 2 is the declared blank crop row
+        expected_parents[source_parent["parent_key"]["camera_serial"]] = {
+            "clip_count": len(clips),
+            "total_frames": total,
+            "crop_clip_local_indices": [i for n in crop_counts for i in range(n)],
+        }
     assert (
         producer_report["status"] == "actual_pinned_citrus_transfer_and_loadback_passed"
     )
@@ -278,7 +310,6 @@ def main() -> None:
             "-m",
             "fisheye.utils.run_citrus_session_import",
             delivery,
-            "--transfer-v2",
             "--apply",
             "--recording-type",
             "behavior",
@@ -406,52 +437,73 @@ def main() -> None:
                     receipt.producer_git_sha == args.commit
                     and receipt.producer_git_dirty is False
                 )
+                shape = expected_parents[camera_id]
+                total = shape["total_frames"]
+                assert parent["total_frames"] == total
+                assert parent["clip_count"] == shape["clip_count"]
+                assert (
+                    parent["acquisition_recording_layout"]
+                    == snapshot["recording_layout"]
+                )
+                manifest = json.loads(
+                    (directory / "recording_manifest.json").read_bytes()
+                )
+                # Palette storage layout is always a clip collection; the
+                # producer label is preserved separately, never relabelled.
+                assert manifest["source_layout"] == "rolling_clips"
+                assert (
+                    manifest["acquisition_recording_layout"]
+                    == snapshot["recording_layout"]
+                )
                 root = zarr.open_group(str(path), mode="r", use_consolidated=True)
                 assert root.attrs["source_layout"] == "rolling_clips"
                 assert root.attrs.get("source_video_path") is None
                 clock = resolve_acquisition_frame_clock(root, required=True)
-                assert clock.row_count == 3
+                assert clock.row_count == total
                 clock_arrays = root[clock.group_path]
                 np.testing.assert_array_equal(
-                    clock_arrays["recording_frame_id"][:], [1, 2, 3]
+                    clock_arrays["recording_frame_id"][:], list(range(1, total + 1))
                 )
                 np.testing.assert_array_equal(
-                    clock_arrays["parent_frame_index"][:], [0, 1, 2]
+                    clock_arrays["parent_frame_index"][:], list(range(total))
                 )
                 np.testing.assert_array_equal(
                     clock_arrays["camera_timestamp_ns"][:],
-                    [1700000000000000000, 1700000000500000000, 1700000001000000000],
+                    [1700000000000000000 + i * 500000000 for i in range(total)],
                 )
                 pixel = bind_crop_pixel_authority(
                     path,
                     expected_recording_identity=recording_id,
                     expected_camera_identity=camera_id,
-                    expected_n_frames=3,
+                    expected_n_frames=total,
                     expected_source_width=32,
                     expected_source_height=32,
                 )
                 assert (
                     pixel.source_video_path is None
-                    and len(pixel.source_video_paths) == 2
+                    and len(pixel.source_video_paths) == shape["clip_count"]
                 )
                 ledger = validate_current_acquisition_crop_stream_ledger(root)
                 assert (
-                    ledger.row_count == 3
+                    ledger.row_count == total
                     and ledger.blank_row_count == 1
-                    and ledger.detected_row_count == 2
+                    and ledger.detected_row_count == total - 1
                 )
                 ledger_run = root[
                     "analysis/acquisition_video_streams/streams/crop/"
                     + ledger.group_path
                 ]
                 np.testing.assert_array_equal(
-                    ledger_run["source_crop_video_frame_indices"][:], [0, 1, 0]
+                    ledger_run["source_crop_video_frame_indices"][:],
+                    shape["crop_clip_local_indices"],
                 )
                 np.testing.assert_array_equal(
-                    ledger_run["source_session_crop_video_frame_indices"][:], [0, 1, 2]
+                    ledger_run["source_session_crop_video_frame_indices"][:],
+                    list(range(total)),
                 )
                 np.testing.assert_array_equal(
-                    ledger_run["blank_frame"][:], [False, True, False]
+                    ledger_run["blank_frame"][:],
+                    [frame == 2 for frame in range(1, total + 1)],
                 )
                 geometry_root = directory / "raw/recording_geometry_bundle"
                 geometry = verify_recording_geometry_bundle(
@@ -476,11 +528,14 @@ def main() -> None:
                     }
                 )
                 if args.full_stimulus:
-                    expected = next(
-                        item
-                        for item in producer_report["stimulus_evidence"]
-                        if item["camera_id"] == camera_id
-                    )
+                    expected = {
+                        **next(
+                            item
+                            for item in producer_report["stimulus_evidence"]
+                            if item["camera_id"] == camera_id
+                        ),
+                        "total_camera_frames": total,
+                    }
                     parent_evidence[-1]["stimulus"] = verify_stimulus(
                         root,
                         path=path,

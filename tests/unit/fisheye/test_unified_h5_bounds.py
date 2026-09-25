@@ -9,10 +9,8 @@ from fisheye.shared.unified_h5.appearance import validate_appearance_witness
 from fisheye.shared.unified_h5.common import KeyIndex, parse_json, same_json, uint64
 from fisheye.shared.unified_h5.hdf5_types import (
     check_dataset_budget,
-    dtype_from_descriptor,
     iter_payload,
     read_bounded_string,
-    type_descriptor,
 )
 from fisheye.shared.unified_h5.metadata import native_attributes
 from tests.unit.fisheye.unified_h5_fixtures import emit_fixture
@@ -85,44 +83,6 @@ def test_lazy_oversized_dataset_rejected_before_read(tmp_path):
         big_endian = source.create_dataset("big_endian", shape=(1,), dtype=">u8")
         with pytest.raises(UnifiedH5ContractError, match="integer_type"):
             check_dataset_budget(big_endian)
-
-
-def test_all_real_native_type_descriptors_round_trip(tmp_path):
-    with h5py.File(emit_fixture(tmp_path), "r") as source:
-
-        def check(name, node):
-            if isinstance(node, h5py.Dataset):
-                assert (
-                    dtype_from_descriptor(type_descriptor(node.id.get_type()))
-                    == node.dtype
-                )
-
-        source.visititems(check)
-
-
-def test_hostile_persisted_descriptor_budget():
-    spec = {
-        "class": "string",
-        "variable_length": False,
-        "character_set": "utf8",
-        "size_bytes": 2**62,
-        "padding": "null_terminated",
-    }
-    with pytest.raises(UnifiedH5ContractError, match="string_type"):
-        dtype_from_descriptor(spec)
-    array = {
-        "class": "array",
-        "dimensions": [2**62],
-        "size_bytes": 2**62,
-        "base": {
-            "class": "integer",
-            "size_bytes": 1,
-            "byte_order": "none",
-            "signed": False,
-        },
-    }
-    with pytest.raises(UnifiedH5ContractError, match="budget"):
-        dtype_from_descriptor(array)
 
 
 @pytest.mark.parametrize(

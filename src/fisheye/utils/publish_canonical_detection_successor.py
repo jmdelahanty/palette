@@ -1,4 +1,13 @@
-"""Inspect or publish one selector-ineligible canonical-v3 detection successor."""
+"""Inspect, publish, or activate one canonical-v3 detection successor.
+
+Without ``--selector-eligible``/``--activate`` this publishes the historical
+selector-ineligible legacy-conversion successor.  ``--selector-eligible`` seals
+``stage_selector_eligible=true`` in the new successor manifest but leaves
+selectors unchanged.  ``--activate`` publishes such a successor when absent,
+validates it against the currently selected legacy run, and makes it the
+active canonical-v3 raw-detection authority.  Every mode is a read-only dry
+run unless ``--apply`` is given; the registry is never updated.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +18,10 @@ from typing import Sequence
 
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr.detection_snapshot_publication import (
+    CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_SCHEMA_ID,
     CANONICAL_DETECTION_SUCCESSOR_PUBLICATION_SCHEMA_ID,
+    CanonicalDetectionActivationRefused,
+    activate_canonical_detection_successor,
     inspect_canonical_detection_successor_source,
     publish_canonical_detection_successor,
 )
@@ -30,6 +42,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--keep-scratch", action="store_true")
     parser.add_argument(
+        "--selector-eligible",
+        action="store_true",
+        help=(
+            "Seal stage_selector_eligible=true in the published successor "
+            "manifest without changing selectors."
+        ),
+    )
+    parser.add_argument(
+        "--activate",
+        action="store_true",
+        help=(
+            "Publish a selector-eligible successor if absent, then activate it "
+            "as the canonical-v3 detection authority (implies "
+            "--selector-eligible). Refuses on selector drift, source drift, "
+            "or content mismatch with an existing successor."
+        ),
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help=(
@@ -42,6 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.activate:
+        return _run_activation(args)
     try:
         if args.apply:
             if args.scratch_root is None:
@@ -55,6 +87,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 copy_backend=args.copy_backend,
                 keep_scratch=args.keep_scratch,
                 result_json=args.result_json,
+                selector_eligible=args.selector_eligible,
             )
         else:
             result = inspect_canonical_detection_successor_source(
@@ -67,6 +100,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **result,
                 "mode": "dry_run",
                 "zarr_writes": False,
+                "manifest_selector_eligible": args.selector_eligible,
                 "next_action": "rerun_with_apply_after_review",
             }
             write_json_atomic(args.result_json, result)
@@ -79,6 +113,45 @@ def main(argv: Sequence[str] | None = None) -> int:
             "analysis_zarr": str(args.analysis_zarr),
             "source_group_path": args.source_detect_group,
             "successor_run_id": args.successor_run,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        write_json_atomic(args.result_json, result)
+        print(json.dumps(result, sort_keys=True))
+        return 1
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+def _run_activation(args: argparse.Namespace) -> int:
+    base = {
+        "schema_id": CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_SCHEMA_ID,
+        "schema_version": 1,
+        "mode": "apply" if args.apply else "dry_run",
+        "analysis_zarr": str(args.analysis_zarr),
+        "source_group_path": args.source_detect_group,
+        "successor_run_id": args.successor_run,
+    }
+    try:
+        result = activate_canonical_detection_successor(
+            analysis_zarr=args.analysis_zarr,
+            source_detect_group_path=args.source_detect_group,
+            recording_identity=args.recording_identity,
+            successor_run_id=args.successor_run,
+            apply=args.apply,
+            scratch_root=args.scratch_root,
+            copy_backend=args.copy_backend,
+            keep_scratch=args.keep_scratch,
+            result_json=args.result_json,
+        )
+    except CanonicalDetectionActivationRefused as exc:
+        result = {**base, **exc.receipt, "mode": base["mode"]}
+        write_json_atomic(args.result_json, result)
+        print(json.dumps(result, sort_keys=True))
+        return 1
+    except Exception as exc:
+        result = {
+            **base,
+            "status": "failed",
             "error": f"{type(exc).__name__}: {exc}",
         }
         write_json_atomic(args.result_json, result)

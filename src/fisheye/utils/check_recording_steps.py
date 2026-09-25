@@ -1077,10 +1077,19 @@ def _registry_step_rows_for_zarr(
     wanted_recording_id = _normalize_attr(recording_id)
     if wanted_recording_id is None:
         return normalized_rows
+    # The raw H5 carries the short acquisition id (``<ts>_arena_N``) while the
+    # registry keys per-recording rows by the recording directory name
+    # (``<ts>_arena_N_<Protocol>``). Accept both for a per-recording archive
+    # (``<recording>/zarr/<name>.zarr``); shared archives still match exactly.
+    accepted = {wanted_recording_id}
+    if zarr_path.parent.name == "zarr":
+        directory_id = _normalize_attr(zarr_path.parent.parent.name)
+        if directory_id is not None:
+            accepted.add(directory_id)
     return [
         row
         for row in normalized_rows
-        if _normalize_attr(row.get("recording_id")) == wanted_recording_id
+        if _normalize_attr(row.get("recording_id")) in accepted
     ]
 
 

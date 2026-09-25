@@ -29,6 +29,25 @@ from fisheye.shared.tabular_deltas import (
     create_delta_generation,
     resolve_keypoint_delta_overlay,
 )
+from fisheye.labeling.assignment_store import LabelingStore
+from fisheye.labeling import web_keypoint_checkpoints as checkpoint_mod
+from fisheye.labeling import web_keypoint_checkpoint_apply as apply_mod
+from fisheye.labeling import web_keypoint_checkpoint_routes as checkpoint_routes
+from fisheye.labeling.web_keypoint_checkpoint_apply import apply_keypoint_checkpoints
+from fisheye.labeling.web_keypoint_checkpoints import (
+    KEYPOINT_APPLY_INFLIGHT_ATTR,
+    KEYPOINT_APPLY_RECEIPTS_ATTR,
+    KeypointCheckpointConflict,
+    checkpoint_snapshot_digest,
+    current_keypoint_payload,
+    keypoint_checkpoint_state,
+    stage_keypoint_checkpoint,
+)
+from fisheye.labeling.web_runtimes import (
+    KeypointRuntimeSession,
+    _browser_runtime_target_token,
+    _keypoint_runtime_request_lock,
+)
 
 
 class _FakeArray:
@@ -36,6 +55,10 @@ class _FakeArray:
         self._data = np.asarray(data)
         self.shape = self._data.shape
         self.chunks = chunks
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self._data.dtype
 
     def __getitem__(self, item: object) -> np.ndarray:
         return self._data[item]
@@ -362,6 +385,1111 @@ def _build_session(
         manual_qc_policy=None,
         derived_metric_storage=derived_storage,
     )
+
+
+def _checkpoint_runtime(
+    tmp_path: Path,
+    *,
+    recovered: bool = False,
+) -> tuple[LabelingStore, KeypointRuntimeSession]:
+    session = _build_session(keypoint_count=3)
+    archive = tmp_path / "review.zarr"
+    archive.mkdir()
+    session.zarr_path = str(archive)
+    session.recovered_roi_only = bool(recovered)
+    if recovered:
+        session.refined["keypoint_origin"] = _FakeArray(
+            np.zeros((4, 3), dtype=np.uint8)
+        )
+        session.refined["keypoint_manual_edit"] = _FakeArray(
+            np.zeros((4, 3), dtype=bool)
+        )
+        session.refined["training_eligible"] = _FakeArray(
+            np.zeros((4,), dtype=bool)
+        )
+    store = LabelingStore(tmp_path / "labeling.sqlite")
+    store.initialize()
+    store.assign_recording(recording_id="recording-a", assignee_user="alice")
+    store.upsert_task(
+        task_id="task-a", recording_id="recording-a", workflow_kind="keypoints"
+    )
+    lease = store.create_session(task_id="task-a", user="alice", ttl_seconds=600)
+    runtime = KeypointRuntimeSession(
+        session_id=lease.session_id,
+        task_id="task-a",
+        recording_id="recording-a",
+        user="alice",
+        review_session=session,
+        task_roi_indices=np.asarray(session.failures, dtype=np.int64).copy(),
+    )
+    return store, runtime
+
+
+def _valid_points(offset: float = 0.0) -> list[list[float]]:
+    return [
+        [2.0 + offset, 2.0],
+        [5.0 + offset, 3.0],
+        [3.0 + offset, 7.0],
+    ]
+
+
+def test_keypoint_checkpoint_state_uses_bounded_descriptors_and_exact_totals(
+    tmp_path: Path,
+) -> None:
+    _store, runtime = _checkpoint_runtime(tmp_path)
+
+    class DescriptorStore:
+        def list_session_checkpoint_snapshot_descriptors(
+            self, *, state: str, limit: int, **_kwargs: object
+        ) -> list[dict[str, object]]:
+            if state != "active":
+                return []
+            assert limit == 1_000
+            return [
+                {
+                    "checkpoint_id": f"checkpoint-{roi_idx:04d}",
+                    "roi_idx": roi_idx,
+                    "snapshot_row_sha256": f"{roi_idx:064x}",
+                    "state": "active",
+                    "apply_id": None,
+                }
+                for roi_idx in range(1_000)
+            ]
+
+        def count_unapplied_session_checkpoints(self, **_kwargs: object) -> int:
+            return 1_001
+
+        def count_session_checkpoints(self, *, state: str, **_kwargs: object) -> int:
+            return 1_001 if state == "active" else 0
+
+        def list_pending_session_checkpoint_apply_effects(
+            self, **_kwargs: object
+        ) -> list[dict[str, object]]:
+            return []
+
+        def count_pending_session_checkpoint_apply_effects(
+            self, **_kwargs: object
+        ) -> int:
+            return 0
+
+    try:
+        state = keypoint_checkpoint_state(DescriptorStore(), runtime)
+        assert state["active_session_edit_count"] == 1_001
+        assert state["unapplied_session_edit_count"] == 1_001
+        assert state["selected_session_edit_count"] == 1_000
+        assert state["checkpoint_apply_batch_limit"] == 1_000
+        assert state["checkpoint_snapshot_sha256"]
+    finally:
+        _store.close()
+
+
+def test_keypoint_checkpoint_state_prioritizes_pending_apply_effect_receipt(
+    tmp_path: Path,
+) -> None:
+    _store, runtime = _checkpoint_runtime(tmp_path)
+
+    class PendingEffectStore:
+        def list_session_checkpoint_snapshot_descriptors(
+            self, *, state: str, **_kwargs: object
+        ) -> list[dict[str, object]]:
+            if state != "active":
+                return []
+            return [
+                {
+                    "checkpoint_id": "newer-active-row",
+                    "roi_idx": 2,
+                    "snapshot_row_sha256": "b" * 64,
+                    "state": "active",
+                    "apply_id": None,
+                }
+            ]
+
+        def count_unapplied_session_checkpoints(self, **_kwargs: object) -> int:
+            return 1
+
+        def count_session_checkpoints(self, *, state: str, **_kwargs: object) -> int:
+            return 1 if state == "active" else 0
+
+        def list_pending_session_checkpoint_apply_effects(
+            self, **_kwargs: object
+        ) -> list[dict[str, object]]:
+            return [
+                {
+                    "apply_id": "apply-needs-audit",
+                    "checkpoint_count": 4,
+                    "checkpoint_snapshot_sha256": "a" * 64,
+                    "applied_at_utc": "2026-09-19T12:00:00+00:00",
+                }
+            ]
+
+        def count_pending_session_checkpoint_apply_effects(
+            self, **_kwargs: object
+        ) -> int:
+            return 1
+
+    try:
+        pending_store = PendingEffectStore()
+        state = keypoint_checkpoint_state(pending_store, runtime)
+        assert state["active_session_edit_count"] == 1
+        assert state["pending_apply_effect_count"] == 1
+        assert state["unapplied_session_edit_count"] == 5
+        assert state["selected_session_edit_count"] == 4
+        assert state["checkpoint_snapshot_sha256"] == "a" * 64
+        assert state["resumable_apply_id"] == "apply-needs-audit"
+        assert state["resumable_checkpoint_snapshot_sha256"] == "a" * 64
+        assert state["apply_available"] is True
+        assert (
+            checkpoint_mod.count_unfinished_keypoint_checkpoint_edits(
+                pending_store, task_id="task-a"
+            )
+            == 5
+        )
+    finally:
+        _store.close()
+
+
+def test_checkpoint_descriptor_digest_matches_claim_and_refuses_tampered_full_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path)
+    try:
+        stage_keypoint_checkpoint(
+            store,
+            runtime,
+            user="alice",
+            operation="replace_points",
+            points=_valid_points(),
+        )
+        descriptors = store.list_session_checkpoint_snapshot_descriptors(
+            task_id="task-a",
+            state="active",
+            component_name="keypoints",
+            limit=1_000,
+        )
+        expected_digest = checkpoint_snapshot_digest(descriptors)
+        claimed = store.claim_session_checkpoints_for_apply(
+            task_id="task-a",
+            component_name="keypoints",
+            apply_id="descriptor-equivalence",
+            limit=1_000,
+            checkpoint_snapshot_sha256=expected_digest,
+        )
+        assert checkpoint_snapshot_digest(claimed) == expected_digest
+        assert (
+            store.release_session_checkpoints_apply(
+                task_id="task-a", apply_id="descriptor-equivalence"
+            )
+            == 1
+        )
+
+        original_claim = store.claim_session_checkpoints_for_apply
+
+        def tampered_claim(**kwargs: object) -> list[dict[str, object]]:
+            rows = json.loads(json.dumps(original_claim(**kwargs)))
+            rows[0]["payload"]["points"][0][0] += 1.0
+            return rows
+
+        monkeypatch.setattr(store, "claim_session_checkpoints_for_apply", tampered_claim)
+        canonical_before = np.asarray(runtime.review_session.kp_roi_arr[0]).copy()
+        with pytest.raises(
+            KeypointCheckpointConflict,
+            match="snapshot changed before apply",
+        ):
+            apply_keypoint_checkpoints(
+                store,
+                runtime,
+                mod,
+                apply_id="tampered-full-row",
+                checkpoint_snapshot_sha256=expected_digest,
+            )
+        np.testing.assert_array_equal(
+            np.asarray(runtime.review_session.kp_roi_arr[0]), canonical_before
+        )
+        assert store.count_session_checkpoints(
+            task_id="task-a", state="active", component_name="keypoints"
+        ) == 1
+    finally:
+        store.close()
+
+
+def test_apply_response_does_not_replace_target_saved_while_apply_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path)
+    apply_started = threading.Event()
+    allow_apply_to_finish = threading.Event()
+
+    def delayed_apply(*_args: object, **_kwargs: object) -> dict[str, object]:
+        apply_started.set()
+        assert allow_apply_to_finish.wait(timeout=5)
+        return {
+            "apply_id": "apply-background",
+            "checkpoint_snapshot_sha256": "a" * 64,
+            "applied_checkpoint_count": 1,
+            "rows": [0],
+            "row_results": [],
+            "saved": True,
+            "applied": True,
+            "canonical_zarr_mutated": True,
+        }
+
+    monkeypatch.setattr(
+        checkpoint_routes, "apply_keypoint_checkpoints", delayed_apply
+    )
+    monkeypatch.setattr(
+        store,
+        "mark_session_checkpoint_apply_effects_complete",
+        lambda **_kwargs: True,
+    )
+    target_token = _browser_runtime_target_token(runtime)
+    response: list[tuple[dict[str, object], object]] = []
+
+    def request_apply() -> None:
+        response.append(
+            checkpoint_routes.apply_keypoint_request(
+                store=store,
+                runtime=runtime,
+                backend_module=mod,
+                session={
+                    "task_id": "task-a",
+                    "recording_id": "recording-a",
+                    "user": "alice",
+                    "workflow_kind": "keypoints",
+                },
+                user="alice",
+                body={
+                    "apply_id": "apply-background",
+                    "checkpoint_snapshot_sha256": "a" * 64,
+                    "target_token": target_token,
+                },
+                operator_validation_mutation_gate={},
+                refresh_registry=lambda **_kwargs: True,
+            )
+        )
+
+    thread = threading.Thread(target=request_apply)
+    try:
+        thread.start()
+        assert apply_started.wait(timeout=5)
+        with _keypoint_runtime_request_lock(runtime):
+            runtime.position = 1
+            runtime.request_generation += 1
+            _browser_runtime_target_token(runtime)
+        allow_apply_to_finish.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        payload, status = response[0]
+        assert int(status) == 200
+        assert payload["current_target_changed"] is True
+        assert "roi" not in payload
+    finally:
+        allow_apply_to_finish.set()
+        thread.join(timeout=5)
+        store.close()
+
+
+def test_keypoint_checkpoint_save_overlays_without_canonical_mutation(
+    tmp_path: Path,
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path)
+    try:
+        before = np.asarray(runtime.review_session.kp_roi_arr[0]).copy()
+        result = stage_keypoint_checkpoint(
+            store,
+            runtime,
+            user="alice",
+            operation="replace_points",
+            points=_valid_points(),
+        )
+
+        assert result["saved"] is True
+        assert result["applied"] is False
+        assert result["canonical_zarr_mutated"] is False
+        np.testing.assert_array_equal(
+            np.isnan(np.asarray(runtime.review_session.kp_roi_arr[0])),
+            np.isnan(before),
+        )
+        state = keypoint_checkpoint_state(store, runtime)
+        assert state["save_mode"] == "checkpoint_v1"
+        assert state["unapplied_session_edit_count"] == 1
+        assert state["checkpoint_snapshot_sha256"]
+        roi = current_keypoint_payload(
+            store,
+            runtime,
+            mod,
+            state_payload=state,
+        )
+        assert roi["points"] == _valid_points()
+        assert roi["session_checkpoint"]["applied"] is False
+
+        reopened = KeypointRuntimeSession(
+            session_id="replacement-browser-session",
+            task_id=runtime.task_id,
+            recording_id=runtime.recording_id,
+            user=runtime.user,
+            review_session=runtime.review_session,
+            task_roi_indices=runtime.task_roi_indices,
+        )
+        reopened_roi = current_keypoint_payload(
+            store,
+            reopened,
+            mod,
+            state_payload=keypoint_checkpoint_state(store, reopened),
+        )
+        assert reopened_roi["points"] == _valid_points()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ("row", "labels", "run_contract", "qc_contract", "archive_identity"),
+)
+def test_keypoint_checkpoint_overlay_refuses_wrong_binding(
+    tmp_path: Path, drift: str
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path)
+    try:
+        stage_keypoint_checkpoint(
+            store,
+            runtime,
+            user="alice",
+            operation="replace_points",
+            points=_valid_points(),
+        )
+        session = runtime.review_session
+        if drift == "row":
+            session.reason_arr[0] = "external_direct_edit"
+        elif drift == "labels":
+            session.keypoint_labels = ["a", "b", "c"]
+        elif drift == "run_contract":
+            session.refined.attrs["initial_contract_digest"] = "changed"
+        elif drift == "qc_contract":
+            session.min_triangle_area = 999.0
+        else:
+            replacement = tmp_path / "replacement.zarr"
+            replacement.mkdir()
+            session.zarr_path = str(replacement)
+
+        with pytest.raises(KeypointCheckpointConflict, match="mismatch|changed"):
+            current_keypoint_payload(
+                store,
+                runtime,
+                mod,
+                state_payload=keypoint_checkpoint_state(store, runtime),
+            )
+    finally:
+        store.close()
+
+
+def test_keypoint_apply_prevalidates_every_row_before_first_write(
+    tmp_path: Path,
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path)
+    try:
+        runtime.position = 0
+        stage_keypoint_checkpoint(
+            store, runtime, user="alice", operation="replace_points", points=_valid_points()
+        )
+        runtime.position = 1
+        stage_keypoint_checkpoint(
+            store,
+            runtime,
+            user="alice",
+            operation="replace_points",
+            points=_valid_points(1.0),
+        )
+        state = keypoint_checkpoint_state(store, runtime)
+        runtime.review_session.reason_arr[1] = "external_direct_edit"
+
+        with pytest.raises(KeypointCheckpointConflict, match="base row changed"):
+            apply_keypoint_checkpoints(
+                store,
+                runtime,
+                mod,
+                apply_id="apply-prevalidation",
+                checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+            )
+
+        assert np.isnan(np.asarray(runtime.review_session.kp_roi_arr[0])).all()
+        assert KEYPOINT_APPLY_INFLIGHT_ATTR not in runtime.review_session.refined.attrs
+        assert store.count_unapplied_session_checkpoints(
+            task_id="task-a", component_name="keypoints"
+        ) == 2
+    finally:
+        store.close()
+
+
+def test_keypoint_apply_preserves_recovered_landmark_origin_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path, recovered=True)
+    try:
+        base = np.asarray(_valid_points(), dtype=np.float64)
+        runtime.review_session.kp_roi_arr[0] = base
+        updated = base.copy()
+        updated[0] = [4.0, 4.0]
+        stage_keypoint_checkpoint(
+            store,
+            runtime,
+            user="alice",
+            operation="replace_points",
+            points=updated.tolist(),
+        )
+        state = keypoint_checkpoint_state(store, runtime)
+        result = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id="apply-recovered",
+            checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+        )
+
+        assert result["applied_checkpoint_count"] == 1
+        np.testing.assert_array_equal(
+            np.asarray(runtime.review_session.refined["keypoint_origin"][0]),
+            [3, 0, 0],
+        )
+        np.testing.assert_array_equal(
+            np.asarray(runtime.review_session.refined["keypoint_manual_edit"][0]),
+            [True, False, False],
+        )
+        assert bool(runtime.review_session.refined["training_eligible"][0]) == bool(
+            runtime.review_session.usable_arr[0]
+        )
+        retry = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id="apply-recovered",
+            checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+        )
+        assert retry["already_applied"] is True
+        np.testing.assert_array_equal(
+            np.asarray(runtime.review_session.refined["keypoint_origin"][0]),
+            [3, 0, 0],
+        )
+    finally:
+        store.close()
+
+
+def test_keypoint_apply_history_survives_later_same_row_checkpoint(
+    tmp_path: Path,
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path)
+    try:
+        first_points = _valid_points()
+        stage_keypoint_checkpoint(
+            store,
+            runtime,
+            user="alice",
+            operation="replace_points",
+            points=first_points,
+        )
+        first_state = keypoint_checkpoint_state(store, runtime)
+        first_digest = str(first_state["checkpoint_snapshot_sha256"])
+        first_result = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id="first-same-row-apply",
+            checkpoint_snapshot_sha256=first_digest,
+        )
+        assert store.mark_session_checkpoint_apply_effects_complete(
+            task_id="task-a",
+            component_name="keypoints",
+            apply_id="first-same-row-apply",
+        )
+
+        later_points = _valid_points(2.0)
+        stage_keypoint_checkpoint(
+            store,
+            runtime,
+            user="alice",
+            operation="replace_points",
+            points=later_points,
+        )
+        later_state = keypoint_checkpoint_state(store, runtime)
+        assert later_state["active_session_edit_count"] == 1
+        assert later_state["checkpoint_snapshot_sha256"] != first_digest
+
+        replay = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id="first-same-row-apply",
+            checkpoint_snapshot_sha256=first_digest,
+        )
+        assert replay["already_applied"] is True
+        assert replay["row_results"] == first_result["row_results"]
+        np.testing.assert_allclose(
+            np.asarray(runtime.review_session.kp_roi_arr[0]), first_points
+        )
+        assert keypoint_checkpoint_state(store, runtime)[
+            "checkpoint_snapshot_sha256"
+        ] == later_state["checkpoint_snapshot_sha256"]
+    finally:
+        store.close()
+
+
+def test_keypoint_apply_new_row_survives_other_row_revision_advance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path)
+    try:
+        stage_keypoint_checkpoint(
+            store, runtime, user="alice", operation="replace_points", points=_valid_points()
+        )
+        state_a = keypoint_checkpoint_state(store, runtime)
+        real_write = apply_mod._write_intended_rows
+
+        def _write_then_stage_other_row(session, intended, current):
+            real_write(session, intended, current)
+            runtime.position = 1
+            stage_keypoint_checkpoint(
+                store,
+                runtime,
+                user="alice",
+                operation="replace_points",
+                points=_valid_points(1.0),
+            )
+
+        monkeypatch.setattr(
+            apply_mod, "_write_intended_rows", _write_then_stage_other_row
+        )
+        apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id="apply-row-zero",
+            checkpoint_snapshot_sha256=str(state_a["checkpoint_snapshot_sha256"]),
+        )
+        assert store.mark_session_checkpoint_apply_effects_complete(
+            task_id="task-a",
+            component_name="keypoints",
+            apply_id="apply-row-zero",
+        )
+        state_b = keypoint_checkpoint_state(store, runtime)
+        assert state_b["unapplied_session_edit_count"] == 1
+        assert runtime.review_session.refined.attrs["edit_revision"] == 1
+
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", real_write)
+        result_b = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id="apply-row-one",
+            checkpoint_snapshot_sha256=str(state_b["checkpoint_snapshot_sha256"]),
+        )
+        assert result_b["edit_revision_before"] == 1
+        assert result_b["edit_revision_after"] == 2
+        np.testing.assert_allclose(
+            np.asarray(runtime.review_session.kp_roi_arr[1]), _valid_points(1.0)
+        )
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("recovered_row", (False, True))
+def test_keypoint_apply_receipt_recovers_after_store_finalize_failure(
+    tmp_path: Path, recovered_row: bool
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path, recovered=recovered_row)
+    try:
+        stage_keypoint_checkpoint(
+            store, runtime, user="alice", operation="replace_points", points=_valid_points()
+        )
+        state = keypoint_checkpoint_state(store, runtime)
+        original = store.mark_session_checkpoints_applied
+        calls = 0
+
+        def fail_once(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("injected finalize failure")
+            return original(**kwargs)
+
+        store.mark_session_checkpoints_applied = fail_once  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="injected finalize failure"):
+            apply_keypoint_checkpoints(
+                store,
+                runtime,
+                mod,
+                apply_id="apply-finalize-retry",
+                checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+            )
+        assert store.count_unapplied_session_checkpoints(
+            task_id="task-a", component_name="keypoints"
+        ) == 1
+        if recovered_row:
+            assert (
+                bool(runtime.review_session.refined["training_eligible"][0])
+                is False
+            )
+
+        recovered = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id="apply-finalize-retry",
+            checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+        )
+        assert recovered["already_applied"] is True
+        assert store.count_unapplied_session_checkpoints(
+            task_id="task-a", component_name="keypoints"
+        ) == 0
+        if recovered_row:
+            assert bool(
+                runtime.review_session.refined["training_eligible"][0]
+            ) == bool(runtime.review_session.usable_arr[0])
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("failure_boundary", ("mid_write", "after_write"))
+def test_keypoint_apply_recovers_owned_snapshot_at_physical_write_boundary(
+    tmp_path: Path, failure_boundary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path)
+    try:
+        points = _valid_points()
+        stage_keypoint_checkpoint(
+            store, runtime, user="alice", operation="replace_points", points=points
+        )
+        state = keypoint_checkpoint_state(store, runtime)
+        real_write = apply_mod._write_intended_rows
+
+        def _interrupted_write(session, intended, current):
+            if failure_boundary == "mid_write":
+                session.kp_roi_arr[0] = np.asarray(points, dtype=np.float64)
+            else:
+                real_write(session, intended, current)
+            raise RuntimeError(f"injected {failure_boundary} failure")
+
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", _interrupted_write)
+        with pytest.raises(RuntimeError, match=failure_boundary):
+            apply_keypoint_checkpoints(
+                store,
+                runtime,
+                mod,
+                apply_id=f"apply-{failure_boundary}",
+                checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+            )
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", real_write)
+
+        retry_state = keypoint_checkpoint_state(store, runtime)
+        assert retry_state["resumable_apply_id"] == f"apply-{failure_boundary}"
+        if failure_boundary == "mid_write":
+            # A row holding a mix of base and intended fields is not shown.
+            with pytest.raises(KeypointCheckpointConflict, match="being applied"):
+                current_keypoint_payload(
+                    store, runtime, mod, state_payload=retry_state
+                )
+        else:
+            # A row already exactly at its intended state displays normally.
+            payload = current_keypoint_payload(
+                store, runtime, mod, state_payload=retry_state
+            )
+            assert payload["ok"] is True
+
+        recovered = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id=f"apply-{failure_boundary}",
+            checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+        )
+        assert recovered["applied_checkpoint_count"] == 1
+        assert recovered["edit_revision_before"] == 0
+        assert recovered["edit_revision_after"] == 1
+        np.testing.assert_allclose(runtime.review_session.kp_roi_arr[0], points)
+    finally:
+        store.close()
+
+
+def test_keypoint_apply_restart_recovers_rows_missing_from_new_failure_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path)
+    try:
+        runtime.position = 0
+        stage_keypoint_checkpoint(
+            store, runtime, user="alice", operation="replace_points", points=_valid_points()
+        )
+        runtime.position = 1
+        stage_keypoint_checkpoint(
+            store,
+            runtime,
+            user="alice",
+            operation="replace_points",
+            points=_valid_points(1.0),
+        )
+        state = keypoint_checkpoint_state(store, runtime)
+        real_write = apply_mod._write_intended_rows
+
+        def _second_row_interrupted(session, intended, current):
+            real_write(session, {0: intended[0]}, {0: current[0]})
+            session.kp_roi_arr[1] = np.asarray(_valid_points(1.0), dtype=np.float64)
+            raise RuntimeError("injected second row failure")
+
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", _second_row_interrupted)
+        with pytest.raises(RuntimeError, match="second row"):
+            apply_keypoint_checkpoints(
+                store,
+                runtime,
+                mod,
+                apply_id="apply-restart",
+                checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+            )
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", real_write)
+
+        runtime.review_session.failures = np.asarray([1], dtype=np.int64)
+        restarted = KeypointRuntimeSession(
+            session_id="reopened-after-crash",
+            task_id=runtime.task_id,
+            recording_id=runtime.recording_id,
+            user=runtime.user,
+            review_session=runtime.review_session,
+            task_roi_indices=np.asarray([1], dtype=np.int64),
+        )
+        recovered = apply_keypoint_checkpoints(
+            store,
+            restarted,
+            mod,
+            apply_id="apply-restart",
+            checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+        )
+        assert recovered["rows"] == [0, 1]
+        np.testing.assert_allclose(restarted.review_session.kp_roi_arr[0], _valid_points())
+        np.testing.assert_allclose(
+            restarted.review_session.kp_roi_arr[1], _valid_points(1.0)
+        )
+    finally:
+        store.close()
+
+
+def test_recovered_keypoint_midwrite_recovery_restores_landmark_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path, recovered=True)
+    try:
+        base = np.asarray(_valid_points(), dtype=np.float64)
+        runtime.review_session.kp_roi_arr[0] = base
+        updated = base.copy()
+        updated[0] = [4.0, 4.0]
+        stage_keypoint_checkpoint(
+            store,
+            runtime,
+            user="alice",
+            operation="replace_points",
+            points=updated.tolist(),
+        )
+        state = keypoint_checkpoint_state(store, runtime)
+
+        real_write = apply_mod._write_intended_rows
+
+        def _coordinates_only(session, intended, current):
+            session.kp_roi_arr[0] = updated
+            raise RuntimeError("injected after coordinate write")
+
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", _coordinates_only)
+        with pytest.raises(RuntimeError, match="coordinate write"):
+            apply_keypoint_checkpoints(
+                store,
+                runtime,
+                mod,
+                apply_id="apply-recovered-midwrite",
+                checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+            )
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", real_write)
+        np.testing.assert_array_equal(
+            runtime.review_session.refined["keypoint_origin"][0], [0, 0, 0]
+        )
+
+        recovered = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id="apply-recovered-midwrite",
+            checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+        )
+        np.testing.assert_array_equal(
+            runtime.review_session.refined["keypoint_origin"][0], [3, 0, 0]
+        )
+        np.testing.assert_array_equal(
+            runtime.review_session.refined["keypoint_manual_edit"][0],
+            [True, False, False],
+        )
+        assert bool(runtime.review_session.refined["training_eligible"][0]) == bool(
+            runtime.review_session.usable_arr[0]
+        )
+        assert recovered["row_results"][0]["changed"] is True
+    finally:
+        store.close()
+
+
+def test_recovered_keypoint_postwrite_failure_keeps_training_ineligible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path, recovered=True)
+    try:
+        stage_keypoint_checkpoint(
+            store,
+            runtime,
+            user="alice",
+            operation="replace_points",
+            points=_valid_points(),
+        )
+        state = keypoint_checkpoint_state(store, runtime)
+
+        real_write = apply_mod._write_intended_rows
+
+        def _postwrite_interrupted(session, intended, current):
+            real_write(session, intended, current)
+            assert bool(session.refined["training_eligible"][0]) is True
+            raise RuntimeError("injected recovered postwrite failure")
+
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", _postwrite_interrupted)
+        with pytest.raises(RuntimeError, match="recovered postwrite"):
+            apply_keypoint_checkpoints(
+                store,
+                runtime,
+                mod,
+                apply_id="apply-recovered-postwrite",
+                checkpoint_snapshot_sha256=str(
+                    state["checkpoint_snapshot_sha256"]
+                ),
+            )
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", real_write)
+        assert bool(runtime.review_session.refined["training_eligible"][0]) is False
+        assert (
+            keypoint_checkpoint_state(store, runtime)["resumable_apply_id"]
+            == "apply-recovered-postwrite"
+        )
+
+        recovered = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id="apply-recovered-postwrite",
+            checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+        )
+        assert recovered["applied_checkpoint_count"] == 1
+        assert bool(runtime.review_session.refined["training_eligible"][0]) == bool(
+            runtime.review_session.usable_arr[0]
+        )
+    finally:
+        store.close()
+
+
+class _HardCrash(BaseException):
+    """Bypasses ``except Exception`` cleanup, like a killed process."""
+
+
+def test_recovered_keypoint_hard_crash_mid_batch_leaves_rows_ineligible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path, recovered=True)
+    try:
+        # Start eligible so the test proves the batch clears eligibility first.
+        runtime.review_session.refined["training_eligible"][0:2] = True
+        for position, offset in ((0, 0.0), (1, 1.0)):
+            runtime.position = position
+            stage_keypoint_checkpoint(
+                store,
+                runtime,
+                user="alice",
+                operation="replace_points",
+                points=_valid_points(offset),
+            )
+        state = keypoint_checkpoint_state(store, runtime)
+        real_write_field = checkpoint_mod._write_field
+
+        def _crash_on_coordinates(array, field_name, rows, documents):
+            if field_name == "keypoints_roi":
+                raise _HardCrash()
+            real_write_field(array, field_name, rows, documents)
+
+        monkeypatch.setattr(checkpoint_mod, "_write_field", _crash_on_coordinates)
+        with pytest.raises(_HardCrash):
+            apply_keypoint_checkpoints(
+                store,
+                runtime,
+                mod,
+                apply_id="apply-hard-crash",
+                checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+            )
+        monkeypatch.setattr(checkpoint_mod, "_write_field", real_write_field)
+        eligible = np.asarray(runtime.review_session.refined["training_eligible"][:2])
+        assert not eligible.any()
+
+        recovered = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id="apply-hard-crash",
+            checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+        )
+        assert recovered["rows"] == [0, 1]
+        for row in (0, 1):
+            assert bool(runtime.review_session.refined["training_eligible"][row]) == bool(
+                runtime.review_session.usable_arr[row]
+            )
+    finally:
+        store.close()
+
+
+def test_keypoint_apply_recovery_completes_downstream_stale_side_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path)
+    try:
+        stage_keypoint_checkpoint(
+            store, runtime, user="alice", operation="replace_points", points=_valid_points()
+        )
+        state = keypoint_checkpoint_state(store, runtime)
+        stale_calls: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            checkpoint_mod,
+            "mark_downstream_subject_mask_runs_stale",
+            lambda _root, **kwargs: stale_calls.append(dict(kwargs)) or 1,
+        )
+
+        real_write = apply_mod._write_intended_rows
+
+        def _crash_before_stale(session, intended, current):
+            real_write(session, intended, current)
+            raise RuntimeError("injected before stale completion")
+
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", _crash_before_stale)
+        with pytest.raises(RuntimeError, match="before stale"):
+            apply_keypoint_checkpoints(
+                store,
+                runtime,
+                mod,
+                apply_id="apply-stale-recovery",
+                checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+            )
+        assert stale_calls == []
+        monkeypatch.setattr(apply_mod, "_write_intended_rows", real_write)
+
+        recovered = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id="apply-stale-recovery",
+            checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+        )
+        assert recovered["row_results"][0]["stale_touched"] == 1
+        assert stale_calls[0]["roi_indices"] == [0]
+        assert stale_calls[0]["frame_indices"] == [10]
+        assert stale_calls[0]["reason"] == "keypoint_manual_correction"
+    finally:
+        store.close()
+
+
+class _CrashAttrs(dict[str, object]):
+    def __init__(self, *args: object, fail_set: str | None = None, fail_pop: str | None = None, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.fail_set = fail_set
+        self.fail_pop = fail_pop
+
+    def __setitem__(self, key: str, value: object) -> None:
+        if key == self.fail_set:
+            self.fail_set = None
+            raise RuntimeError("injected receipt publication failure")
+        super().__setitem__(key, value)
+
+    def pop(self, key: str, default: object = None) -> object:
+        if key == self.fail_pop:
+            self.fail_pop = None
+            raise RuntimeError("injected inflight clear failure")
+        return super().pop(key, default)
+
+
+@pytest.mark.parametrize("crash_boundary", ("before_receipt", "after_receipt"))
+def test_keypoint_apply_revision_and_receipt_recovery_are_deterministic(
+    tmp_path: Path, crash_boundary: str
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path)
+    try:
+        stage_keypoint_checkpoint(
+            store, runtime, user="alice", operation="replace_points", points=_valid_points()
+        )
+        state = keypoint_checkpoint_state(store, runtime)
+        attrs = _CrashAttrs(
+            runtime.review_session.refined.attrs,
+            fail_set=(
+                KEYPOINT_APPLY_RECEIPTS_ATTR
+                if crash_boundary == "before_receipt"
+                else None
+            ),
+            fail_pop=(
+                KEYPOINT_APPLY_INFLIGHT_ATTR
+                if crash_boundary == "after_receipt"
+                else None
+            ),
+        )
+        runtime.review_session.refined.attrs = attrs
+        with pytest.raises(RuntimeError, match="injected"):
+            apply_keypoint_checkpoints(
+                store,
+                runtime,
+                mod,
+                apply_id=f"apply-{crash_boundary}",
+                checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+            )
+        assert attrs["edit_revision"] == 1
+
+        recovered = apply_keypoint_checkpoints(
+            store,
+            runtime,
+            mod,
+            apply_id=f"apply-{crash_boundary}",
+            checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+        )
+        assert recovered["edit_revision_before"] == 0
+        assert recovered["edit_revision_after"] == 1
+        assert attrs["edit_revision"] == 1
+        assert KEYPOINT_APPLY_INFLIGHT_ATTR not in attrs
+    finally:
+        store.close()
+
+
+def test_keypoint_apply_uses_fresh_archive_binding_before_first_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, runtime = _checkpoint_runtime(tmp_path)
+    try:
+        (Path(runtime.review_session.zarr_path) / "zarr.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        stage_keypoint_checkpoint(
+            store, runtime, user="alice", operation="replace_points", points=_valid_points()
+        )
+        state = keypoint_checkpoint_state(store, runtime)
+        fresh = _build_session(keypoint_count=3)
+        fresh.zarr_path = runtime.review_session.zarr_path
+        fresh.refined.attrs["initial_contract_digest"] = "fresh-drift"
+        monkeypatch.setattr(mod, "resolve_review_session", lambda *_args, **_kwargs: fresh)
+
+        with pytest.raises(KeypointCheckpointConflict, match="scientific_contract"):
+            apply_keypoint_checkpoints(
+                store,
+                runtime,
+                mod,
+                apply_id="apply-fresh-drift",
+                checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+            )
+
+        assert KEYPOINT_APPLY_INFLIGHT_ATTR not in fresh.refined.attrs
+        assert np.isnan(np.asarray(fresh.kp_roi_arr[0])).all()
+        assert store.list_session_checkpoints(
+            task_id="task-a", state="applying", component_name="keypoints"
+        ) == []
+    finally:
+        store.close()
 
 
 def _make_keypoint_reviewable_zarr_shell(path: Path) -> None:
@@ -1205,3 +2333,18 @@ def test_web_config_ignores_whitespace_positional_zarr_in_registry_mode(
 
     assert config.zarr_path is None
     assert config.registry_path == str(tmp_path / "palette_registry.sqlite")
+
+
+@pytest.mark.parametrize(
+    "module",
+    (
+        "fisheye.labeling.web_keypoint_checkpoint_apply",
+        "fisheye.labeling.web_keypoint_checkpoints",
+        "fisheye.labeling.web_keypoint_checkpoint_routes",
+    ),
+)
+def test_keypoint_checkpoint_modules_import_in_a_fresh_interpreter(module: str) -> None:
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", f"import {module}"], check=True)

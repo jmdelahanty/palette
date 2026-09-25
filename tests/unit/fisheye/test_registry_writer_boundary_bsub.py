@@ -31,7 +31,12 @@ def _run_citrus(
             "--run-id",
             "writer-boundary",
             "--dry-run",
-            *options,
+            *(
+                []
+                if "--no-context" in options
+                else ["--recording-type", "behavior", "--recording-subtype", "chaser", "--behavior-mode", "free"]
+            ),
+            *(option for option in options if option != "--no-context"),
         ],
         check=False,
         text=True,
@@ -166,3 +171,17 @@ def test_projection_refresh_apply_fails_closed(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "--apply is disabled" in result.stderr
     assert not (tmp_path / "projection-logs").exists()
+
+
+def test_citrus_launcher_refuses_missing_transfer_context(tmp_path: Path) -> None:
+    result = _run_citrus(tmp_path, "--writer-host", "host", "--no-context")
+    assert result.returncode == 2
+    assert "--recording-type" in result.stderr
+
+
+def test_citrus_launcher_job_runs_transfer_v2_only(tmp_path: Path) -> None:
+    result = _run_citrus(tmp_path, "--writer-host", "host")
+    assert result.returncode == 0, result.stderr
+    job = next((tmp_path / "citrus-logs").glob("**/run_citrus_session_import.sh")).read_text()
+    assert "--recording-type" in job and "--behavior-mode" in job
+    assert "diagnostics" not in job

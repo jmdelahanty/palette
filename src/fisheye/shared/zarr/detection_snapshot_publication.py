@@ -4,8 +4,11 @@ This is the production placement boundary for the frozen detection snapshot
 contracts.  It converts complete full-acquisition compatibility runs on
 node-local scratch, validates both immutable snapshots, atomically imports the
 two run groups into a recording archive, reconsolidates archive metadata, and
-validates the published result again.  It deliberately does not update a
-selector or registry.
+validates the published result again.  Publication never updates a selector
+or the registry.  The separate, explicit
+``activate_canonical_detection_successor`` step may select one
+manifest-sealed selector-eligible legacy-conversion successor through the
+shared canonical-detection activation writer; it never updates the registry.
 """
 
 from __future__ import annotations
@@ -40,11 +43,21 @@ from fisheye.shared.zarr.canonical_detection_benchmark_input import (
     CanonicalDetectionBenchmarkInput,
     load_detection_benchmark_input,
 )
+from fisheye.shared.zarr.canonical_detection_activation import (
+    CANONICAL_DETECTION_ACTIVATION_PARENT_ATTRS,
+    CanonicalDetectionSelectorActivation,
+)
 from fisheye.shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR,
+    CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3,
+    CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR,
     CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     build_legacy_detection_source_evidence,
     canonical_detection_dimensions_from_manifest,
+    canonical_detection_logical_content_digest,
+    require_active_coordinate_canonical_detection,
     validate_canonical_detection_publication,
+    validate_canonical_detection_run_manifest,
 )
 from fisheye.shared.zarr.canonical_detection_shadow import (
     CanonicalDetectionShadowPublication,
@@ -76,7 +89,9 @@ from fisheye.shared.zarr.refined_detection_transition import (
     build_accept_all_refined_detection_root,
     build_refined_detection_transition,
 )
+from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
 from fisheye.shared.zarr_helpers import (
+    archive_metadata_publication_lock,
     consolidate_metadata_capture_expected_warnings,
 )
 from fisheye.shared.zarr_io import open_zarr_root
@@ -100,6 +115,13 @@ CANONICAL_DETECTION_SUCCESSOR_PUBLICATION_SCHEMA_VERSION = 1
 CANONICAL_DETECTION_SUCCESSOR_PUBLICATION_POLICY = (
     "node_local_canonical_v3_then_atomic_selector_ineligible_import_v1"
 )
+CANONICAL_DETECTION_ELIGIBLE_SUCCESSOR_PUBLICATION_POLICY = (
+    "node_local_canonical_v3_eligible_manifest_then_atomic_unselected_import_v1"
+)
+CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_SCHEMA_ID = (
+    "palette.canonical_detection_successor.activation"
+)
+CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_SCHEMA_VERSION = 1
 ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_ID = (
     "palette.accept_all_refined_detection.production_publication"
 )
@@ -553,8 +575,18 @@ def publish_canonical_detection_successor(
     copy_backend: str = "python",
     keep_scratch: bool = False,
     result_json: Path | None = None,
+    selector_eligible: bool = False,
 ) -> dict[str, object]:
-    """Publish one canonical-v3 raw successor without selecting it."""
+    """Publish one canonical-v3 raw successor without selecting it.
+
+    With ``selector_eligible=True`` the successor manifest seals
+    ``stage_selector_eligible=true`` so an explicit, separately validated
+    activation may later select it.  The imported run itself remains
+    unselected and ``stage_selector_eligible=False`` until that activation.
+    """
+
+    if type(selector_eligible) is not bool:
+        raise TypeError("selector_eligible must be an exact bool.")
 
     started = time.perf_counter()
     inspection = inspect_canonical_detection_successor_source(
@@ -588,6 +620,7 @@ def publish_canonical_detection_successor(
             shadow_root=local_root,
             coordinate_catalog=True,
             preserve_source_instance_keys=True,
+            manifest_selector_eligible=selector_eligible,
         )
         if canonical.receipt.get("instance_key_policy") != "preserved_from_source":
             raise RuntimeError(
@@ -690,7 +723,11 @@ def publish_canonical_detection_successor(
                 run_name=successor_id,
                 lock_suffix="canonical_detection_successor_publication",
                 publish_schema_id=(CANONICAL_DETECTION_SUCCESSOR_PUBLICATION_SCHEMA_ID),
-                policy=CANONICAL_DETECTION_SUCCESSOR_PUBLICATION_POLICY,
+                policy=(
+                    CANONICAL_DETECTION_ELIGIBLE_SUCCESSOR_PUBLICATION_POLICY
+                    if selector_eligible
+                    else CANONICAL_DETECTION_SUCCESSOR_PUBLICATION_POLICY
+                ),
                 rollback_policy=DETECTION_SNAPSHOT_ROLLBACK_POLICY,
                 content_checksum=True,
             ),
@@ -750,6 +787,7 @@ def publish_canonical_detection_successor(
                     canonical.arrays["instances/instance_key"]
                 ),
                 "row_identity_contract_sha256": row_identity["record_sha256"],
+                "manifest_selector_eligible": selector_eligible,
             },
             "dimensions": canonical.dimensions.as_manifest(),
             "storage_profile_id": canonical.plans.profile.profile_id,
@@ -776,6 +814,514 @@ def publish_canonical_detection_successor(
     finally:
         if session.exists() and success and not keep_scratch:
             shutil.rmtree(session)
+
+
+class CanonicalDetectionActivationRefused(RuntimeError):
+    """Fail-closed refusal that carries the evidence receipt explaining it."""
+
+    def __init__(self, message: str, *, receipt: Mapping[str, object]) -> None:
+        super().__init__(message)
+        self.receipt = json_attr_safe(
+            {**dict(receipt), "status": "refused", "refusal": message}
+        )
+
+
+def _authority_snapshot(family: Any) -> dict[str, dict[str, object]]:
+    return {
+        name: {"present": name in family.attrs, "value": family.attrs.get(name)}
+        for name in CANONICAL_DETECTION_ACTIVATION_PARENT_ATTRS
+    }
+
+
+def _expected_successor_logical_content_digest(
+    source_path: Path,
+    *,
+    recording_identity: str,
+) -> str:
+    """Convert the current legacy source in memory and digest its content."""
+
+    benchmark = _canonical_input_preserving_source_keys(
+        source_path,
+        recording_identity=recording_identity,
+    )
+    return canonical_detection_logical_content_digest(
+        benchmark.arrays,
+        dimensions=benchmark.dimensions,
+    )
+
+
+def _legacy_successor_parity(
+    family: Any,
+    *,
+    source_run_id: str,
+    recording_identity: str,
+    exclude: set[str],
+    expected_logical_content_digest: str,
+) -> dict[str, object]:
+    """Compare every other legacy-conversion successor of the same source."""
+
+    existing: list[dict[str, object]] = []
+    for name in sorted(family.group_keys()):
+        if name in exclude:
+            continue
+        manifest = family[name].attrs.get("run_manifest")
+        if not isinstance(manifest, Mapping) or (
+            manifest.get("schema_version")
+            != CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+        ):
+            continue
+        payload = manifest.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        evidence = payload.get("source_evidence")
+        if (
+            payload.get("source_evidence_kind") != "legacy_conversion"
+            or not isinstance(evidence, Mapping)
+            or evidence.get("source_run_id") != source_run_id
+            or evidence.get("recording_identity") != recording_identity
+        ):
+            continue
+        errors = list(validate_canonical_detection_run_manifest(manifest))
+        content = payload.get("logical_content")
+        digest = content.get("digest") if isinstance(content, Mapping) else None
+        publication = payload.get("publication")
+        existing.append(
+            {
+                "run_id": name,
+                "manifest_digest": manifest.get("payload_digest"),
+                "logical_content_digest": digest,
+                "manifest_selector_eligible": (
+                    publication.get("stage_selector_eligible")
+                    if isinstance(publication, Mapping)
+                    else None
+                ),
+                "source_group_path": evidence.get("source_group_path"),
+                "source_arrays_digest": evidence.get("source_arrays_digest"),
+                "manifest_errors": errors,
+                "matches": not errors and digest == expected_logical_content_digest,
+            }
+        )
+    if not existing:
+        status = "no_existing_successor"
+    elif all(item["matches"] for item in existing):
+        status = "match"
+    else:
+        status = "mismatch"
+    return {
+        "status": status,
+        "expected_logical_content_digest": expected_logical_content_digest,
+        "existing_successors": existing,
+    }
+
+
+def _open_detect_family_direct(archive: Path, *, mode: str) -> Any:
+    """Open ``detect_runs`` by path so no nested consolidated view is used."""
+
+    return zarr.open_group(
+        str(archive / "detect_runs"), mode=mode, use_consolidated=False
+    )
+
+
+def _validated_eligible_successor(
+    archive: Path,
+    family: Any,
+    *,
+    source_relative: str,
+    successor_id: str,
+    recording_identity: str,
+    expected_logical_content_digest: str,
+) -> dict[str, Any]:
+    """Fully validate one published successor before (re)activation."""
+
+    run = family[successor_id]
+    manifest_value = run.attrs.get("run_manifest")
+    if not isinstance(manifest_value, Mapping):
+        raise ValueError("Successor lacks its run_manifest.")
+    manifest = dict(manifest_value)
+    errors = list(validate_canonical_detection_run_manifest(manifest))
+    if errors:
+        raise ValueError("Successor manifest envelope is invalid: " + "; ".join(errors))
+    payload = manifest["payload"]
+    if (
+        manifest.get("schema_version")
+        != CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+        or payload.get("run_id") != successor_id
+        or payload.get("source_evidence_kind") != "legacy_conversion"
+    ):
+        raise ValueError(
+            "Successor is not a canonical-v3 legacy conversion of this run id."
+        )
+    if payload["publication"].get("stage_selector_eligible") is not True:
+        raise ValueError(
+            "Successor manifest is sealed selector-ineligible; it cannot be "
+            "activated. Publish a new selector-eligible successor instead."
+        )
+    evidence = payload["source_evidence"]
+    expected_source_path = str((archive / source_relative).resolve())
+    if (
+        evidence.get("source_run_id") != Path(source_relative).name
+        or evidence.get("source_group_path") != expected_source_path
+        or evidence.get("recording_identity") != recording_identity
+    ):
+        raise ValueError(
+            "Successor source evidence does not bind the expected legacy run."
+        )
+    if (
+        run.attrs.get("status") != "complete"
+        or run.attrs.get("palette_run_completion_status") != "complete"
+    ):
+        raise ValueError("Successor run is not complete.")
+    if type(run.attrs.get("stage_selector_eligible")) is not bool:
+        raise ValueError("Successor stage_selector_eligible must be boolean.")
+    dimensions = canonical_detection_dimensions_from_manifest(manifest)
+    profile = storage_profile_from_manifest(payload["storage_plan"]["storage_profile"])
+    plans = plan_canonical_detection_storage(dimensions, profile=profile)
+    if plans.as_manifest() != payload["storage_plan"]:
+        raise ValueError("Successor storage plan differs from the frozen planner.")
+    # Recomputes array content, direct/consolidated metadata declarations, and
+    # reopens the legacy source to prove its arrays still match the evidence.
+    validation_errors = validate_canonical_detection_shadow_publication(
+        CanonicalDetectionShadowPublication(
+            output_path=archive,
+            run_id=successor_id,
+            dimensions=dimensions,
+            plans=plans,
+            manifest=manifest,
+            arrays=_canonical_arrays(run),
+            receipt={},
+        )
+    )
+    if validation_errors:
+        raise ValueError(
+            "Successor publication validation failed: " + "; ".join(validation_errors)
+        )
+    row_identity = _require_canonical_position_row_identity(run)
+    logical_digest = payload["logical_content"]["digest"]
+    if logical_digest != expected_logical_content_digest:
+        raise ValueError(
+            "Successor logical content differs from the current legacy source "
+            "conversion."
+        )
+    return {
+        "manifest": manifest,
+        "plans": plans,
+        "run_selector_eligible": run.attrs["stage_selector_eligible"],
+        "record": {
+            "run_id": successor_id,
+            "group_path": f"detect_runs/{successor_id}",
+            "manifest_digest": manifest["payload_digest"],
+            "logical_content_digest": logical_digest,
+            "source_arrays_digest": evidence.get("source_arrays_digest"),
+            "source_group_metadata_sha256": evidence.get(
+                "source_group_metadata_sha256"
+            ),
+            "row_identity_contract_sha256": row_identity["record_sha256"],
+        },
+    }
+
+
+def _successor_selector_state(
+    family: Any,
+    *,
+    source_run_id: str,
+    successor_id: str,
+    manifest_digest: str | None,
+    run_selector_eligible: bool | None,
+) -> str:
+    """Classify selectors, refusing any state outside source -> successor."""
+
+    latest = family.attrs.get("latest")
+    latest_complete = family.attrs.get("latest_complete")
+    contract = family.attrs.get(CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR)
+    digest = family.attrs.get(CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR)
+    if (
+        latest == latest_complete == successor_id
+        and contract == CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3
+        and digest == manifest_digest
+        and run_selector_eligible is True
+    ):
+        return "active"
+    allowed = {source_run_id} if manifest_digest is None else {
+        source_run_id,
+        successor_id,
+    }
+    if latest not in allowed or latest_complete not in allowed:
+        raise ValueError(
+            "Detection selectors drifted from the expected legacy run: "
+            f"latest={latest!r}, latest_complete={latest_complete!r}."
+        )
+    if contract not in {None, CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3} or (
+        digest not in {None, manifest_digest}
+    ):
+        raise ValueError(
+            "Detection family carries a canonical authority contract or digest "
+            "that does not belong to this successor."
+        )
+    if (
+        latest == latest_complete == source_run_id
+        and contract is None
+        and digest is None
+    ):
+        return "unactivated"
+    return "partial_activation"
+
+
+def _consolidated_view_is_active(
+    archive: Path,
+    *,
+    successor_id: str,
+    manifest_digest: str,
+) -> bool:
+    try:
+        require_active_coordinate_canonical_detection(
+            open_zarr_root(archive, mode="r", use_consolidated=True),
+            group_path=f"detect_runs/{successor_id}",
+            expected_manifest_digest=manifest_digest,
+        )
+    except (KeyError, ValueError):
+        return False
+    return True
+
+
+def _plan_successor_activation(
+    archive: Path,
+    *,
+    source_relative: str,
+    successor_id: str,
+    recording_identity: str,
+) -> dict[str, Any]:
+    root = open_zarr_root(archive, mode="r")
+    if str(root.attrs.get("recording_id") or "").strip() != recording_identity:
+        raise ValueError("Requested recording_identity differs from the archive.")
+    if "detect_runs" not in root:
+        raise FileNotFoundError("Archive has no detect_runs family.")
+    family = _open_detect_family_direct(archive, mode="r")
+    source_run_id = Path(source_relative).name
+    if source_run_id not in family:
+        raise FileNotFoundError(f"Legacy detection source missing: {source_relative}")
+    expected_digest = _expected_successor_logical_content_digest(
+        archive / source_relative,
+        recording_identity=recording_identity,
+    )
+    receipt: dict[str, Any] = {
+        "schema_id": CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_SCHEMA_ID,
+        "schema_version": CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_SCHEMA_VERSION,
+        "analysis_zarr": str(archive),
+        "recording_identity": recording_identity,
+        "source": {"group_path": source_relative, "run_id": source_run_id},
+        "successor": {
+            "run_id": successor_id,
+            "group_path": f"detect_runs/{successor_id}",
+            "expected_logical_content_digest": expected_digest,
+        },
+        "selectors_before": _authority_snapshot(family),
+        "registry_updated": False,
+    }
+    parity = _legacy_successor_parity(
+        family,
+        source_run_id=source_run_id,
+        recording_identity=recording_identity,
+        exclude={source_run_id, successor_id},
+        expected_logical_content_digest=expected_digest,
+    )
+    receipt["parity"] = parity
+    if parity["status"] == "mismatch":
+        raise CanonicalDetectionActivationRefused(
+            "An existing legacy-conversion successor differs in logical content "
+            "from the current source conversion.",
+            receipt=receipt,
+        )
+    try:
+        if successor_id in family:
+            validated = _validated_eligible_successor(
+                archive,
+                family,
+                source_relative=source_relative,
+                successor_id=successor_id,
+                recording_identity=recording_identity,
+                expected_logical_content_digest=expected_digest,
+            )
+            receipt["successor"].update(validated["record"])
+            state = _successor_selector_state(
+                family,
+                source_run_id=source_run_id,
+                successor_id=successor_id,
+                manifest_digest=validated["record"]["manifest_digest"],
+                run_selector_eligible=validated["run_selector_eligible"],
+            )
+            action = "none" if state == "active" else "activate"
+        else:
+            validated = None
+            inspect_canonical_detection_successor_source(
+                analysis_zarr=archive,
+                source_detect_group_path=source_relative,
+                recording_identity=recording_identity,
+                successor_run_id=successor_id,
+            )
+            state = _successor_selector_state(
+                family,
+                source_run_id=source_run_id,
+                successor_id=successor_id,
+                manifest_digest=None,
+                run_selector_eligible=None,
+            )
+            action = "publish_and_activate"
+    except (ValueError, FileExistsError) as exc:
+        raise CanonicalDetectionActivationRefused(str(exc), receipt=receipt) from exc
+    receipt["selector_state"] = state
+    receipt["action"] = action
+    return {"receipt": receipt, "validated": validated}
+
+
+def activate_canonical_detection_successor(
+    *,
+    analysis_zarr: Path,
+    source_detect_group_path: str,
+    recording_identity: str,
+    successor_run_id: str,
+    apply: bool = False,
+    scratch_root: Path | None = None,
+    copy_backend: str = "python",
+    keep_scratch: bool = False,
+    result_json: Path | None = None,
+) -> dict[str, object]:
+    """Publish (if needed) and activate one selector-eligible legacy successor.
+
+    Dry-run by default.  The successor must fully validate (manifest envelope,
+    payload digest, decoded array content, direct/consolidated metadata, and
+    the legacy source evidence reopened on disk), its content must equal the
+    in-memory conversion of the currently selected legacy run, every other
+    legacy-conversion successor of that run must have identical logical
+    content, and ``latest``/``latest_complete`` must still select the legacy
+    run (or a resumable partial activation of this successor).  An already
+    active successor is a no-op success.
+    """
+
+    if type(apply) is not bool:
+        raise TypeError("apply must be an exact bool.")
+    archive = analysis_zarr.expanduser().resolve()
+    if not archive.is_dir():
+        raise FileNotFoundError(f"Analysis Zarr not found: {archive}")
+    source_relative = _require_relative_group_path(
+        source_detect_group_path, label="source_detect_group_path"
+    )
+    if len(Path(source_relative).parts) != 2 or not source_relative.startswith(
+        "detect_runs/"
+    ):
+        raise ValueError("Legacy source must be exactly detect_runs/<run>.")
+    successor_id = _require_run_id(successor_run_id, label="successor_run_id")
+    if Path(source_relative).name == successor_id:
+        raise ValueError("Successor cannot replace its legacy source run.")
+    identity = str(recording_identity).strip()
+    if not identity:
+        raise ValueError("recording_identity cannot be empty.")
+
+    def plan() -> dict[str, Any]:
+        return _plan_successor_activation(
+            archive,
+            source_relative=source_relative,
+            successor_id=successor_id,
+            recording_identity=identity,
+        )
+
+    def finish(result: Mapping[str, object]) -> dict[str, object]:
+        safe = json_attr_safe(dict(result))
+        if result_json is not None:
+            write_json_atomic(result_json.expanduser().resolve(), safe)
+        return safe
+
+    planned = plan()
+    receipt = dict(planned["receipt"])
+    if not apply:
+        return finish(
+            {**receipt, "status": "planned", "mode": "dry_run", "zarr_writes": False}
+        )
+    if receipt["action"] == "none" and _consolidated_view_is_active(
+        archive,
+        successor_id=successor_id,
+        manifest_digest=str(receipt["successor"]["manifest_digest"]),
+    ):
+        return finish(
+            {
+                **receipt,
+                "status": "already_active",
+                "mode": "apply",
+                "zarr_writes": False,
+                "selectors_after": receipt["selectors_before"],
+            }
+        )
+    publication: dict[str, object] | None = None
+    if receipt["action"] == "publish_and_activate":
+        if scratch_root is None:
+            raise ValueError("Publishing a successor requires scratch_root.")
+        publication = publish_canonical_detection_successor(
+            analysis_zarr=archive,
+            source_detect_group_path=source_relative,
+            recording_identity=identity,
+            successor_run_id=successor_id,
+            scratch_root=scratch_root,
+            copy_backend=copy_backend,
+            keep_scratch=keep_scratch,
+            selector_eligible=True,
+        )
+    with archive_metadata_publication_lock(archive):
+        locked = plan()
+        locked_receipt = dict(locked["receipt"])
+        validated = locked["validated"]
+        if validated is None:
+            raise RuntimeError("Successor is absent after publication.")
+        target = archive / "detect_runs" / successor_id
+        root = open_zarr_root(archive, mode="a")
+        family = _open_detect_family_direct(archive, mode="r+")
+        run = zarr.open_group(str(target), mode="r+", use_consolidated=False)
+        writer = CanonicalDetectionSelectorActivation(
+            archive=archive,
+            run_id=successor_id,
+            manifest=validated["manifest"],
+            plans=validated["plans"],
+            run_attr_updates={"production_selector_activation": "complete"},
+        )
+        try:
+            writer.activate(root, family, run)
+        except BaseException:
+            writer.rollback()
+            writer.repair_failed_visibility(target)
+            raise
+    manifest_digest = validated["manifest"]["payload_digest"]
+    for use_consolidated in (False, True):
+        active_root = open_zarr_root(
+            archive, mode="r", use_consolidated=use_consolidated
+        )
+        require_active_coordinate_canonical_detection(
+            active_root,
+            group_path=f"detect_runs/{successor_id}",
+            expected_manifest_digest=manifest_digest,
+        )
+    after = _authority_snapshot(_open_detect_family_direct(archive, mode="r"))
+    return finish(
+        {
+            **locked_receipt,
+            "selectors_before": receipt["selectors_before"],
+            "status": "activated",
+            "mode": "apply",
+            "zarr_writes": True,
+            "action_taken": (
+                "published_and_activated"
+                if publication is not None
+                else {
+                    "partial_activation": "resumed_partial_activation",
+                    "active": "repaired_consolidated_activation_visibility",
+                }.get(
+                    str(locked_receipt["selector_state"]),
+                    "activated_existing_successor",
+                )
+            ),
+            "publication": publication,
+            "activation_visibility": writer.visibility_report,
+            "selectors_after": after,
+            "activated_at_utc": utc_now(),
+        }
+    )
 
 
 def inspect_accept_all_refined_detection_source(
@@ -1481,10 +2027,14 @@ def publish_detection_snapshot_pair(
 __all__ = [
     "ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_ID",
     "ACCEPT_ALL_REFINED_DETECTION_PUBLICATION_SCHEMA_VERSION",
+    "CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_SCHEMA_ID",
+    "CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_SCHEMA_VERSION",
     "CANONICAL_DETECTION_SUCCESSOR_PUBLICATION_SCHEMA_ID",
+    "CanonicalDetectionActivationRefused",
     "CANONICAL_DETECTION_SUCCESSOR_PUBLICATION_SCHEMA_VERSION",
     "DETECTION_SNAPSHOT_PUBLICATION_SCHEMA_ID",
     "DETECTION_SNAPSHOT_PUBLICATION_SCHEMA_VERSION",
+    "activate_canonical_detection_successor",
     "inspect_accept_all_refined_detection_source",
     "inspect_canonical_detection_successor_source",
     "publish_accept_all_refined_detection_successor",

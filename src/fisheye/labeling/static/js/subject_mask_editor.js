@@ -4,12 +4,14 @@
     let payload = null;
     let imageData = null;
     let mask = null;
+    let loadedMask = null;
     let maskWidth = 0;
     let maskHeight = 0;
     let maskOverlayCanvas = document.createElement("canvas");
     let maskOverlayCtx = maskOverlayCanvas.getContext("2d");
     let maskOverlayDirty = true;
     let maskOverlayDirtyRect = null;
+    let maskView = "overlay";
     let drawScheduled = false;
     let drawing = false;
     let lassoMode = false;
@@ -22,6 +24,11 @@
     let brushSize = 8;
     let busyAction = false;
     let applyInFlight = false;
+    let uncertainApplyId = null;
+    let tailRefreshResult = null;
+    let foregroundGeneration = 0;
+    let effectsPollTimer = null;
+    const effectsPollMs = 3000;
     const lassoMinPointStepPx = 2;
 
     function setStatus(text, isError=false) {
@@ -54,6 +61,7 @@
     }
 
     function setBusy(isBusy, text=null) {
+      if (isBusy) foregroundGeneration += 1;
       busyAction = Boolean(isBusy);
       document.querySelectorAll("button, select, input").forEach((node) => {
         node.disabled = busyAction;
@@ -102,6 +110,7 @@
       maskWidth = maskPayload.shape[1];
       mask = new Uint8Array(maskWidth * maskHeight);
       for (let i = 0; i < mask.length; i++) mask[i] = bytes[i] > 0 ? 1 : 0;
+      loadedMask = mask.slice();
       markMaskOverlayDirty();
     }
 
@@ -122,6 +131,7 @@
     function markMaskOverlayDirty(rect=null) {
       const wasFullyDirty = maskOverlayDirty && maskOverlayDirtyRect === null;
       maskOverlayDirty = true;
+      if (payload?.tail_crop_border) renderTailBorderStatus();
       if (!rect) {
         maskOverlayDirtyRect = null;
         return;
@@ -146,20 +156,29 @@
       };
     }
 
+    function setMaskView(value) {
+      maskView = value === "binary" ? "binary" : "overlay";
+      document.getElementById("mask-view").value = maskView;
+      markMaskOverlayDirty();
+      scheduleDraw();
+    }
+
     function rebuildMaskOverlay() {
       if (!mask || !maskWidth || !maskHeight) return;
+      const binary = maskView === "binary";
       const resized = maskOverlayCanvas.width !== maskWidth || maskOverlayCanvas.height !== maskHeight;
       if (maskOverlayCanvas.width !== maskWidth) maskOverlayCanvas.width = maskWidth;
       if (maskOverlayCanvas.height !== maskHeight) maskOverlayCanvas.height = maskHeight;
       if (resized || !maskOverlayDirtyRect) {
         const overlay = new ImageData(maskWidth, maskHeight);
         for (let i = 0; i < mask.length; i++) {
-          if (!mask[i]) continue;
+          if (!mask[i] && !binary) continue;
           const dst = i * 4;
-          overlay.data[dst] = 0;
-          overlay.data[dst + 1] = 200;
-          overlay.data[dst + 2] = 148;
-          overlay.data[dst + 3] = 118;
+          const value = mask[i] ? 255 : 0;
+          overlay.data[dst] = binary ? value : 0;
+          overlay.data[dst + 1] = binary ? value : 200;
+          overlay.data[dst + 2] = binary ? value : 148;
+          overlay.data[dst + 3] = binary ? 255 : 118;
         }
         maskOverlayCtx.putImageData(overlay, 0, 0);
       } else {
@@ -171,12 +190,13 @@
         for (let yy = 0; yy < h; yy++) {
           for (let xx = 0; xx < w; xx++) {
             const src = (y0 + yy) * maskWidth + (x0 + xx);
-            if (!mask[src]) continue;
+            if (!mask[src] && !binary) continue;
             const dst = (yy * w + xx) * 4;
-            overlay.data[dst] = 0;
-            overlay.data[dst + 1] = 200;
-            overlay.data[dst + 2] = 148;
-            overlay.data[dst + 3] = 118;
+            const value = mask[src] ? 255 : 0;
+            overlay.data[dst] = binary ? value : 0;
+            overlay.data[dst + 1] = binary ? value : 200;
+            overlay.data[dst + 2] = binary ? value : 148;
+            overlay.data[dst + 3] = binary ? 255 : 118;
           }
         }
         maskOverlayCtx.putImageData(overlay, x0, y0);
@@ -276,10 +296,40 @@
       const componentReview = state.component_review_status || {};
       const completionGuard = state.component_review_completion_guard || {};
       const reviewState = componentReview.state || "pending";
-      const reviewWarning = completionGuard.ready ? "" :
-        "<p><b>Action needed</b> Set component review before completing this task.</p>";
+      const pendingEffects = Number(state.pending_apply_effect_count || 0);
+      const background = Boolean(state.apply_effects_background);
+      const effectsStatus = state.apply_effects_status || {};
+      const effectsLine = !(background && pendingEffects > 0) ? ""
+        : effectsStatus.state === "failed"
+        ? "<p class=\"status error\"><b>Background update failed</b> " + escapeSupportText(effectsStatus.reason || "") +
+          " It will not retry automatically; the admin has been notified. Press Apply to retry it.</p>"
+        : effectsStatus.state === "retrying"
+        ? "<p class=\"status error\"><b>Background update failed</b> " + escapeSupportText(effectsStatus.reason || "") +
+          " Retrying automatically.</p>"
+        : "<p><b>Updating QC and tail versions…</b> Your mask edits are saved; you can keep working.</p>";
+      const reviewWarning = pendingEffects > 0
+        ? (background
+          ? "<p>Review status can be set when the QC and tail update finishes.</p>"
+          : "<p><b>Action needed</b> Finish the pending Apply before setting review status or completing this task.</p>")
+        : (completionGuard.ready ? "" :
+          "<p><b>Action needed</b> Set component review before completing this task.</p>");
+      const savedOffer = state.tail_refresh || tailRefreshResult;
+      const tailOffer = Number(savedOffer?.tail_refresh_mask_revision) === Number(state.edit_revision || 0) ? savedOffer : null;
+      const tailTasks = Array.isArray(tailOffer?.tail_refresh_tasks)
+        ? tailOffer.tail_refresh_tasks : [];
+      const tailFailures = Array.isArray(tailOffer?.tail_refresh_failures)
+        ? tailOffer.tail_refresh_failures : [];
+      const tailSummary = tailOffer?.tail_refresh_status === "complete"
+        ? "<p><b>Refreshed tail review</b> Mask revision " + Number(tailOffer.tail_refresh_mask_revision) + "; " + tailTasks.length + " new task(s); " +
+          Number(tailOffer.tail_refresh_valid_rows || 0) + " valid row(s), " +
+          Number(tailOffer.tail_refresh_training_eligible_rows || 0) + " training-eligible row(s), " +
+          Number(tailOffer.tail_refresh_manual_point_count || 0) + " manual point(s) retained, " +
+          tailFailures.length + " failure(s). " +
+          (tailTasks.length ? "Find " + tailTasks.map((task) => escapeSupportText(task.task_id)).join(", ") +
+            " in <a href=\"/my-work\">your task queue</a>." : "") + "</p>"
+        : "";
       document.getElementById("summary").innerHTML =
-        "<p><b>ROI</b> " + payload.roi_idx + " / <b>frame</b> " + (payload.frame_idx ?? "") + "</p>" +
+        "<p><b>ROI</b> " + payload.roi_idx + " / <b>" + (payload.frame_index_domain === "legacy_training_sample_row" ? "source training row" : "frame") + "</b> " + (payload.frame_idx ?? "") + "</p>" +
         "<p><b>Position</b> " + (state.position + 1) + " of " + state.total + "</p>" +
         "<p><b>Component</b> " + payload.component_name + "</p>" +
         "<p><b>Run</b> " + payload.refined_run + "</p>" +
@@ -287,16 +337,70 @@
         "<p><b>Review</b> " + reviewState + "</p>" +
         "<p><b>Session edits</b> " + (state.unapplied_session_edit_count || 0) +
         (payload.session_checkpoint ? " (current ROI is checkpoint overlay)" : "") + "</p>" +
-        reviewWarning;
+        "<p><b>QC</b> " + (state.qc_status || "pending") +
+        (pendingEffects ? " (" + pendingEffects + " Apply effect(s) pending)" : "") + "</p>" +
+        effectsLine + reviewWarning + tailSummary;
+      scheduleEffectsPoll();
       const seekInput = document.getElementById("roi-seek-input");
       if (seekInput) seekInput.value = payload.roi_idx;
+      renderTailBorderStatus();
+    }
+
+    function renderTailBorderStatus() {
+      const panel = document.getElementById("tail-border-controls");
+      if (!panel) return;
+      const info = payload?.tail_crop_border;
+      panel.hidden = !info;
+      if (!info) return;
+      const describeReason = (raw) => {
+        const value = String(raw || "");
+        if (value.includes("body_touches_crop_border")) return "Body mask reaches the crop edge (body_touches_crop_border)";
+        if (value.includes("fragmented_subject_body_mask")) return "Body mask has disconnected regions (fragmented_subject_body_mask)";
+        if (value.includes("snout_extension_too_long")) return "Snout extension exceeds the allowed limit (snout_extension_too_long)";
+        if (value.includes("snout_outside_crop")) return "Snout lies outside the crop (snout_outside_crop)";
+        if (value.includes("tail_station_outside_body")) return "A tail point lies outside the body mask (tail_station_outside_body)";
+        if (value.includes("tail_tip_is_visible_crop_endpoint")) return "Tail points derived; the last point is the visible crop-edge endpoint";
+        if (value === "tail_derived") return "Tail points derived from the current mask";
+        if (value.includes("snout_projection")) return "Snout extension exceeds the allowed geometry limit (" + value + ")";
+        return value || "not recorded";
+      };
+      const original = describeReason(info.original_queued_reason);
+      const outcome = info.latest_outcome;
+      const outcomeText = outcome
+        ? outcome.status + " at mask revision " + outcome.mask_revision + ": " + describeReason(outcome.reason)
+        : "No refreshed tail derivation for the current mask revision";
+      const pending = info.pending_action?.action
+        ? "Pending checkpoint: " + info.pending_action.action + "; use Apply saved edits to publish a new tail version."
+        : info.checkpoint_state
+          ? "Saved mask pixels await Apply; the latest derived result has not checked this checkpoint."
+          : "No acceptance action pending.";
+      const localPixelsChanged = mask && loadedMask && mask.some((value, index) => value !== loadedMask[index]);
+      const accepted = localPixelsChanged
+        ? "Unsaved painted pixels are not covered by the applied result. If the clipped endpoint is still acceptable, checkpoint acceptance for the edited mask."
+        : info.accepted
+        ? "Accepted for this exact body mask by " + info.acceptance.accepted_by +
+          " at revision " + info.acceptance.accepted_at_mask_revision + "."
+        : info.malformed_acceptance
+          ? "Saved acceptance evidence is invalid: " + info.malformed_acceptance
+          : (info.stale_acceptance ? "Prior acceptance no longer matches this body mask or row." : "Strict crop-border rule applies.");
+      document.getElementById("tail-border-status").innerHTML =
+        "<p><b>Original queued reason</b> " + escapeSupportText(original) + "</p>" +
+        "<p><b>Current acceptance</b> " + escapeSupportText(accepted) + "</p>" +
+        "<p><b>Latest applied outcome</b> " + escapeSupportText(outcomeText) + "</p>" +
+        "<p><b>Checkpoint</b> " + escapeSupportText(pending) + "</p>" +
+        (info.status_unavailable ? "<p><b>Status unavailable</b> Reload this ROI to verify the applied result.</p>" : "") +
+        (localPixelsChanged ? "<p><b>Local paint</b> Unsaved pixels differ from the latest applied result. Save and Apply to update the derivation.</p>" : "");
     }
 
     async function api(path, options={}) {
       clearMutationSupportReference();
       const response = await fetch("/api/sessions/" + encodeURIComponent(sessionId) + "/subject-mask" + path, options);
       const data = await readApiPayload(response);
-      if (!response.ok || !data.ok) throw apiFailure(response, data, "session_request_failed");
+      if (!response.ok || !data.ok) {
+        const failure = apiFailure(response, data, "session_request_failed");
+        failure.apiData = data;
+        throw failure;
+      }
       return data;
     }
 
@@ -309,6 +413,10 @@
         decodeMask(payload.mask);
         clearLasso(true);
         renderSummary();
+        const border = payload?.tail_crop_border;
+        loadTailBorderReason(border?.pending_action?.action === "accept"
+          ? (border.pending_action.reason || "")
+          : (border?.accepted ? (border.acceptance.reason || "") : ""));
         scheduleDraw();
         updateNavButtons();
         setStatus("Loaded.");
@@ -372,14 +480,15 @@
       }
     }
 
-    async function save(advance) {
+    async function save(advance, tailBorderAction=null) {
       if (busyAction) return;
       setBusy(true, advance ? "Checkpointing mask and advancing..." : "Checkpointing mask...");
       try {
         const result = await api("/save", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({mask: encodeMaskPayload(), advance, target_token: payload?.state?.target_token})
+          body: JSON.stringify({mask: encodeMaskPayload(), advance, target_token: payload?.state?.target_token,
+            ...(tailBorderAction ? {tail_crop_border_action: tailBorderAction} : {})})
         });
         await loadCurrent();
         setStatus("Checkpoint saved; area " + result.result.checkpoint_area_px + " px." + mutationStatusSuffix(result));
@@ -390,38 +499,156 @@
       }
     }
 
+    const tailBorderPresetReason = "Only the tiny tail tip is clipped; visible tail is usable.";
+    const tailBorderNotesSeparator = " Notes: ";
+
+    function updateTailBorderReasonInput() {
+      const custom = document.getElementById("tail-border-preset")?.value === "custom";
+      const input = document.getElementById("tail-border-reason");
+      const label = document.getElementById("tail-border-reason-label");
+      if (label) label.textContent = custom ? "Custom reason (required)" : "Optional notes";
+      if (input) {
+        input.placeholder = custom ? "Why is the visible tail endpoint usable?" : "Optional details for this ROI";
+        input.maxLength = custom ? 240 : 240 - tailBorderPresetReason.length - tailBorderNotesSeparator.length;
+      }
+    }
+
+    function loadTailBorderReason(reason) {
+      const preset = document.getElementById("tail-border-preset");
+      const input = document.getElementById("tail-border-reason");
+      if (!preset || !input) return;
+      const prefix = tailBorderPresetReason + tailBorderNotesSeparator;
+      const isPreset = !reason || reason === tailBorderPresetReason || reason.startsWith(prefix);
+      preset.value = isPreset ? "slight-tip" : "custom";
+      input.value = isPreset ? (reason.startsWith(prefix) ? reason.slice(prefix.length) : "") : reason;
+      updateTailBorderReasonInput();
+    }
+
+    function saveTailBorder(action) {
+      if (!payload?.tail_crop_border) return;
+      const notes = String(document.getElementById("tail-border-reason")?.value || "").trim();
+      const custom = document.getElementById("tail-border-preset")?.value === "custom";
+      const reason = custom ? notes : tailBorderPresetReason + (notes ? tailBorderNotesSeparator + notes : "");
+      if (action === "accept" && (reason.length < 3 || reason.length > 240)) {
+        setStatus(custom ? "Enter a 3–240 character custom reason." : "Shorten the optional notes to fit the 240-character reason limit.", true);
+        return;
+      }
+      return save(false, {action, reason: action === "accept" ? reason : ""});
+    }
+
+    async function refreshTailStatus(generation, roiIdx) {
+      const result = await api("/roi/status");
+      if (!payload || busyAction || foregroundGeneration !== generation || Number(payload.roi_idx) !== Number(roiIdx) || Number(result.roi_idx) !== Number(roiIdx)) return;
+      payload.tail_crop_border = result.tail_crop_border;
+      renderTailBorderStatus();
+    }
+
     function newApplyId() {
       if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
       return "apply-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
     }
 
+    function scheduleEffectsPoll() {
+      const state = payload?.state || {};
+      const owed = Boolean(state.apply_effects_background) && Number(state.pending_apply_effect_count || 0) > 0;
+      if (!owed) {
+        if (effectsPollTimer !== null) { clearTimeout(effectsPollTimer); effectsPollTimer = null; }
+        return;
+      }
+      if (effectsPollTimer !== null) return;
+      effectsPollTimer = setTimeout(async () => {
+        effectsPollTimer = null;
+        const generation = foregroundGeneration;
+        try {
+          const result = await api("/state");
+          mergeApplyState(result.state, generation);
+        } catch (_error) {
+          // Keep polling; a transient state read failure is not an Apply failure.
+        }
+        scheduleEffectsPoll();
+      }, effectsPollMs);
+    }
+
+    function mergeApplyState(state, generation) {
+      if (!payload || !state || busyAction || foregroundGeneration !== generation) return;
+      // Apply runs in the background. Never replace current pixels, ROI, token,
+      // navigation or a newer foreground request's checkpoint state.
+      for (const key of ["edit_revision", "unapplied_session_edit_count", "has_unapplied_session_edits",
+        "pending_apply_effect_count", "resumable_apply_id", "qc_status", "qc_edit_revision",
+        "component_review_completion_guard", "component_review_completion_ready", "tail_refresh",
+        "apply_effects_background", "apply_effects_status"]) {
+        if (Object.prototype.hasOwnProperty.call(state, key)) payload.state[key] = state[key];
+      }
+      renderSummary();
+    }
+
     async function applySavedEdits() {
       if (busyAction || applyInFlight) return;
       applyInFlight = true;
-      setStatus("Applying saved edits to Zarr in the background. You can continue editing other rows while this runs.");
+      const generation = foregroundGeneration;
+      // In background mode a queued Apply is finished by the server; only a
+      // failed (refused) one is retried by reusing its apply_id.
+      const backgroundOwned = Boolean(payload?.state?.apply_effects_background)
+        && payload?.state?.apply_effects_status?.state !== "failed";
+      const resumable = backgroundOwned ? null : payload?.state?.resumable_apply_id;
+      const applyId = String(resumable || uncertainApplyId || newApplyId());
+      setStatus("Applying saved edits and refreshing QC. You can continue editing other rows while this runs.");
       try {
         const result = await api("/apply", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({apply_id: newApplyId(), target_token: payload?.state?.target_token})
+          body: JSON.stringify({apply_id: applyId, target_token: payload?.state?.target_token})
         });
-        await loadCurrent();
+        uncertainApplyId = null;
+        tailRefreshResult = result.result;
+        mergeApplyState(result.state, generation);
+        try { await refreshTailStatus(generation, payload?.roi_idx); } catch (_error) {
+          if (payload?.tail_crop_border && foregroundGeneration === generation) {
+            payload.tail_crop_border.status_unavailable = true;
+            renderTailBorderStatus();
+          }
+        }
+        renderSummary();
         const applied = result.result.applied_checkpoint_count || 0;
         const stale = result.result.stale_checkpoint_count || 0;
         const staleRows = Array.isArray(result.result.stale_rows) ? result.result.stale_rows : [];
         const before = result.result.edit_revision_before;
         const after = result.result.edit_revision_after;
         const remaining = Number(payload?.state?.unapplied_session_edit_count || 0);
-        const nextStep = remaining > 0
+        const pendingEffects = Number(payload?.state?.pending_apply_effect_count || 0);
+        const qcComplete = payload?.state?.qc_status === "complete" || result.result.qc_status === "complete";
+        const nextStep = result.result.effects === "queued"
+          ? " QC and tail versions are updating in the background; you can keep working."
+          : pendingEffects > 0
+          ? " Follow-up checks are pending; use Apply again to finish them."
+          : remaining > 0
           ? " " + remaining + " saved edit(s) still need applying."
-          : " Saved edits are applied to Zarr. You can now set review status or complete the task.";
+          : qcComplete
+          ? " Saved edits and QC are complete. You can now set review status or complete the task."
+          : " No saved edits were applied.";
         const stalePreview = staleRows.slice(0, 12).join(", ");
         const staleSuffix = stale > 0
           ? " Skipped " + stale + " stale saved edit(s)" + (stalePreview ? " at ROI " + stalePreview : "") + "; revisit and save those ROI(s) again."
           : "";
         setStatus("Applied " + applied + " saved edit(s) to Zarr; revision " + before + " -> " + after + "." + staleSuffix + nextStep + mutationStatusSuffix(result));
       } catch (error) {
-        showOperatorSupport(error, "session_request_failed");
+        uncertainApplyId = applyId;
+        if (error?.operatorSupport?.error === "subject_mask_apply_effects_pending") {
+          mergeApplyState(error.apiData?.state, generation);
+          try { await refreshTailStatus(generation, payload?.roi_idx); } catch (_statusError) {
+            if (payload?.tail_crop_border && foregroundGeneration === generation) {
+              payload.tail_crop_border.status_unavailable = true;
+              renderTailBorderStatus();
+            }
+          }
+          setStatus("Mask pixels were applied; follow-up checks are pending. " + error.message + " Use Apply again to retry the same saved operation.", true);
+        } else if (["previous_update_still_running", "previous_update_failed"].includes(error?.operatorSupport?.error)) {
+          uncertainApplyId = null;  // nothing was claimed; the saved edits are kept
+          mergeApplyState(error.apiData?.state, generation);
+          setStatus(error.message + " Your saved edits are kept; press Apply again later.", true);
+        } else {
+          showOperatorSupport(error, "session_request_failed");
+        }
       } finally {
         applyInFlight = false;
       }
@@ -438,7 +665,9 @@
           body: JSON.stringify({state: reviewState, target_token: payload?.state?.target_token})
         });
         await loadCurrent();
-        setStatus("Component review state set to " + reviewState + "." + mutationStatusSuffix(result));
+        setStatus(result?.deferred
+          ? "Review state " + reviewState + " recorded; it is written once the background update finishes. You can complete the task now."
+          : "Component review state set to " + reviewState + "." + mutationStatusSuffix(result));
       } catch (error) {
         showOperatorSupport(error, "session_request_failed");
       } finally {
@@ -698,4 +927,3 @@
       }
     });
     loadCurrent();
-  

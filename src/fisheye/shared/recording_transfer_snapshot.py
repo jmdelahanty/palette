@@ -33,6 +33,8 @@ SNAPSHOT_PATH = f"{CONTROL_DIR}/snapshot.json"
 MAX_JSON_BYTES = 64 * 1024 * 1024
 MAX_CSV_LINE = 65536
 MARKER_NAME = "_citrus_transfer_complete.json"
+# Producer layouts that share parents[].clips[]; both are stored as clip collections.
+TRANSFER_PARENT_LAYOUTS = ("rolling_clips", "single_video")
 
 
 class TransferSnapshotError(ValueError):
