@@ -568,20 +568,24 @@ def register_admin_api_routes(app: Flask, state: Any) -> None:
         try:
             from fisheye.tune import keypoint_review_backend as backend_module
 
-            review_session = backend_module.resolve_review_session(
-                zarr_path,
-                refined_run=str(scope.get("refined_run") or "").strip() or None,
-                crop_run=str(scope.get("crop_run") or "").strip() or None,
-                include_all=True,
-                target_roi_indices=[roi_idx],
-            )
-            before = dict(backend_module.load_roi_payload(review_session, position=0))
-            before_points = before.get("points") if isinstance(before.get("points"), list) else []
-            result = backend_module.save_roi_correction(
-                review_session,
-                position=0,
-                points=points,  # type: ignore[arg-type]
-            )
+            from fisheye.shared.zarr_helpers import archive_metadata_publication_lock
+
+            # Same lock as keypoint checkpoint Apply: rows share chunks/shards.
+            with archive_metadata_publication_lock(zarr_path):
+                review_session = backend_module.resolve_review_session(
+                    zarr_path,
+                    refined_run=str(scope.get("refined_run") or "").strip() or None,
+                    crop_run=str(scope.get("crop_run") or "").strip() or None,
+                    include_all=True,
+                    target_roi_indices=[roi_idx],
+                )
+                before = dict(backend_module.load_roi_payload(review_session, position=0))
+                before_points = before.get("points") if isinstance(before.get("points"), list) else []
+                result = backend_module.save_roi_correction(
+                    review_session,
+                    position=0,
+                    points=points,  # type: ignore[arg-type]
+                )
             readback = result.get("readback") if isinstance(result.get("readback"), Mapping) else {}
             after_points = points
             labels = before.get("labels") if isinstance(before.get("labels"), list) else []

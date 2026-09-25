@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import fcntl
+import functools
 import hashlib
 import os
 import sys
@@ -451,8 +452,20 @@ def _refined_subject_write_lock(
     This intentionally starts with a run-scoped lock. It is coarser than the
     eventual physical-chunk lock set, but it safely covers dense pixels,
     row-revision arrays, and run-level stale attrs as one write boundary.
+
+    Lock order: take this run lock before the archive publication lock
+    (``archive_metadata_publication_lock``).  Taking it while this thread
+    already holds that archive's publication lock is refused, because the
+    reverse order can deadlock against a writer holding this lock.
     """
 
+    from fisheye.shared.zarr_helpers import archive_publication_lock_held_by_current_thread
+
+    if archive_publication_lock_held_by_current_thread(zarr_path):
+        raise RuntimeError(
+            "Lock order violation: take the refined subject-mask run lock before the "
+            "archive publication lock, not while holding it."
+        )
     archive_path = Path(zarr_path).expanduser().resolve()
     lock_root = archive_path.parent / f".{archive_path.name}.palette_write_locks"
     lock_root.mkdir(parents=True, exist_ok=True)
@@ -3461,6 +3474,18 @@ def write_refined_subject_mask_edit(
     return result
 
 
+def _holding_refined_run_lock(function):
+    """Run a maintenance writer under its refined run's write lock."""
+
+    @functools.wraps(function)
+    def wrapper(zarr_path, *args, refined_run, **kwargs):
+        with _refined_subject_write_lock(zarr_path, refined_run=str(refined_run)):
+            return function(zarr_path, *args, refined_run=refined_run, **kwargs)
+
+    return wrapper
+
+
+@_holding_refined_run_lock
 def sync_refined_subject_mask_metadata(
     zarr_path: str | Path,
     *,
@@ -3560,6 +3585,7 @@ def sync_refined_subject_mask_metadata(
     }
 
 
+@_holding_refined_run_lock
 def check_refined_subject_source_updates(
     zarr_path: str | Path,
     *,
