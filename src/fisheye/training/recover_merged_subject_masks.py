@@ -42,6 +42,7 @@ from fisheye.training.recover_merged_training_recording import (
 from fisheye.training.recovered_mask_review_payload import (
     array_hashes,
     build_review_payload,
+    payload_crop_run,
     run_paths,
 )
 from fisheye.training.recovered_subject_mask_source import (
@@ -87,7 +88,7 @@ def review_tasks(archive, recording_id, result, version):
     }
     scope = {
         "zarr_path": str(archive),
-        "crop_run": paths["crop"].split("/")[1],
+        "crop_run": payload_crop_run(result),
         "selector_eligible": False,
         "registry_activation": "deferred",
         "review_method": "manual",

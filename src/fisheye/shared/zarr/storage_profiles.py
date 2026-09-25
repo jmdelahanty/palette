@@ -55,6 +55,10 @@ class StorageProfile:
     shard_immutable: bool = True
     shard_owned_appends: bool = True
     target_chunk_bytes_by_access: tuple[tuple[str, int], ...] = ()
+    # Opt-in: a mutable (random-update) array may be sharded only when one
+    # serialized writer owns every shard, e.g. a review run behind its run lock.
+    # Profiles that leave this False keep their exact v2 manifest bytes.
+    shard_serialized_random_updates: bool = False
 
     def __post_init__(self) -> None:
         positive_fields = {
@@ -114,11 +118,15 @@ class StorageProfile:
         return int(self.target_shard_bytes)
 
     def as_manifest(self) -> dict[str, object]:
-        """Return the exact JSON-safe byte and object budgets."""
+        """Return the exact JSON-safe byte and object budgets.
 
-        return {
+        Schema version 3 adds ``shard_serialized_random_updates`` and is used
+        only by profiles that enable it; all other profiles keep version 2.
+        """
+
+        manifest: dict[str, object] = {
             "schema_id": "palette.storage_profile",
-            "schema_version": 2,
+            "schema_version": 3 if self.shard_serialized_random_updates else 2,
             "profile_id": self.profile_id,
             "target_chunk_bytes": self.target_chunk_bytes,
             "min_chunk_bytes": self.min_chunk_bytes,
@@ -135,6 +143,9 @@ class StorageProfile:
                 self.target_chunk_bytes_by_access
             ),
         }
+        if self.shard_serialized_random_updates:
+            manifest["shard_serialized_random_updates"] = True
+        return manifest
 
 
 SCRATCH_COMPUTE_V1 = StorageProfile(
@@ -273,6 +284,30 @@ TRAINING_RANDOM_ROW_IMMUTABLE_V1 = StorageProfile(
 )
 
 
+# Training/review runs (mask-tail successor format v2). Each array keeps its
+# established inner chunk shape: the one-byte chunk targets are a sentinel so
+# the planner's chunk equals the declared access unit (the producer's existing
+# chunk). Small runs therefore get one whole-run shard per array, and large
+# per-row arrays (dense masks, materialized images) get 16 MiB shards bounded
+# at 64 MiB. Editable review runs are mutated only by one serialized writer
+# (the run lock), so their random updates rewrite one owned shard.
+TRAINING_REVIEW_RUN_V1 = StorageProfile(
+    profile_id="training_review_run_v1",
+    target_chunk_bytes=1,
+    min_chunk_bytes=1,
+    max_chunk_bytes=1,
+    eager_max_bytes=1,
+    target_shard_bytes=16 * MIB,
+    per_row_target_shard_bytes=16 * MIB,
+    max_shard_bytes=64 * MIB,
+    max_payload_objects=4_096,
+    codec_profile_id="zstd_fast_v1",
+    shard_immutable=True,
+    shard_owned_appends=False,
+    shard_serialized_random_updates=True,
+)
+
+
 STORAGE_PROFILES = {
     profile.profile_id: profile
     for profile in (
@@ -284,6 +319,7 @@ STORAGE_PROFILES = {
         DETECTION_REGULAR_ROLLBACK_V1,
         TRAINING_IMMUTABLE_V1,
         TRAINING_RANDOM_ROW_IMMUTABLE_V1,
+        TRAINING_REVIEW_RUN_V1,
     )
 }
 
@@ -301,7 +337,7 @@ def get_storage_profile(profile_id: str) -> StorageProfile:
 
 
 def storage_profile_from_manifest(value: Mapping[str, Any]) -> StorageProfile:
-    """Parse one exact v2 profile and enforce registered-profile identity."""
+    """Parse one exact v2/v3 profile and enforce registered-profile identity."""
 
     expected_fields = {
         "schema_id",
@@ -320,13 +356,18 @@ def storage_profile_from_manifest(value: Mapping[str, Any]) -> StorageProfile:
         "shard_owned_appends",
         "target_chunk_bytes_by_access",
     }
+    schema_version = value.get("schema_version")
+    if schema_version == 3:
+        expected_fields = expected_fields | {"shard_serialized_random_updates"}
     if set(value) != expected_fields:
         raise ValueError("storage_profile has an unexpected field set")
-    if (
-        value.get("schema_id") != "palette.storage_profile"
-        or value.get("schema_version") != 2
+    if value.get("schema_id") != "palette.storage_profile" or schema_version not in (
+        2,
+        3,
     ):
         raise ValueError("storage_profile schema identity mismatch")
+    if schema_version == 3 and value.get("shard_serialized_random_updates") is not True:
+        raise ValueError("storage_profile v3 requires shard_serialized_random_updates")
     integer_fields = (
         "target_chunk_bytes",
         "min_chunk_bytes",
@@ -374,6 +415,7 @@ def storage_profile_from_manifest(value: Mapping[str, Any]) -> StorageProfile:
         shard_immutable=value["shard_immutable"],
         shard_owned_appends=value["shard_owned_appends"],
         target_chunk_bytes_by_access=tuple(overrides.items()),
+        shard_serialized_random_updates=schema_version == 3,
     )
     if profile.as_manifest() != dict(value):
         raise ValueError("storage_profile is not in canonical persisted form")

@@ -22,6 +22,15 @@ from fisheye.training.mask_tail_border_acceptance import (
 )
 
 
+@pytest.fixture(autouse=True, params=["v2", "v1"])
+def successor_format(request, monkeypatch):
+    """Every successor behavior holds for the current (v2) and historical (v1) format."""
+    from fisheye.training import mask_tail_apply_refresh as refresh_mod
+
+    monkeypatch.setattr(refresh_mod, "DEFAULT_SUCCESSOR_FORMAT", request.param)
+    return request.param
+
+
 @pytest.fixture(params=[False, True], ids=["recovered", "native"])
 def reviewed_archive(tmp_path, request):
     path = tmp_path / "training.zarr"
@@ -379,7 +388,7 @@ def test_visible_endpoint_acceptance_survives_successor_and_revocation_restores_
     assert seed["keypoint_origin"][0, 13] == 2
     assert "tail_tip_is_visible_crop_endpoint" in read_reason_labels(seed)[0]
     next_mask = published[first["paths"]["mask_edit"]]
-    assert next_mask.attrs[TAIL_ACCEPTANCE_ATTR]["0"]["source_crop_run"] == first["paths"]["crop"].split("/")[1]
+    assert next_mask.attrs[TAIL_ACCEPTANCE_ATTR]["0"]["source_crop_run"] == first["source_crop_run"]
     next_mask.attrs["edit_revision"] = 2
     second = regenerate_training_tail_version(
         archive=path,
