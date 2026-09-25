@@ -97,7 +97,7 @@ from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
 from fisheye.shared.zarr_io import open_zarr_root
-from fisheye.shared.zarr_run_completion import mark_run_complete
+from fisheye.shared.zarr_run_completion import is_run_complete, mark_run_complete
 
 
 DETECTION_SNAPSHOT_PUBLICATION_SCHEMA_ID = (
@@ -1029,11 +1029,20 @@ def _successor_selector_state(
     successor_id: str,
     manifest_digest: str | None,
     run_selector_eligible: bool | None,
+    planned_latest_complete: str | None = None,
 ) -> str:
-    """Classify selectors, refusing any state outside source -> successor."""
+    """Classify selectors, refusing any state outside source -> successor.
+
+    ``planned_latest_complete`` classifies the state as it will be after an
+    explicitly planned ``latest_complete`` repair.
+    """
 
     latest = family.attrs.get("latest")
-    latest_complete = family.attrs.get("latest_complete")
+    latest_complete = (
+        planned_latest_complete
+        if planned_latest_complete is not None
+        else family.attrs.get("latest_complete")
+    )
     contract = family.attrs.get(CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR)
     digest = family.attrs.get(CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR)
     if (
@@ -1068,6 +1077,44 @@ def _successor_selector_state(
     return "partial_activation"
 
 
+def _plan_latest_complete_repair(
+    family: Any,
+    *,
+    source_run_id: str,
+) -> dict[str, object] | None:
+    """Plan the opt-in ``latest_complete`` repair, or refuse it.
+
+    Returns ``None`` when ``latest_complete`` is already set (the ordinary
+    selector-drift gate then applies unchanged).  When it is unset, the repair
+    is planned only if ``latest`` names exactly the expected legacy run and
+    that run passes strict completion validation (no legacy default).
+    """
+
+    if family.attrs.get("latest_complete") is not None:
+        return None
+    latest = family.attrs.get("latest")
+    if latest != source_run_id:
+        raise ValueError(
+            "latest_complete repair requires latest to name the expected legacy "
+            f"run {source_run_id!r}; found latest={latest!r}."
+        )
+    if not is_run_complete(family[source_run_id], legacy_default=False):
+        raise ValueError(
+            "latest_complete repair refused: legacy run "
+            f"{source_run_id!r} is not strictly complete."
+        )
+    return {
+        "action": "set_latest_complete",
+        "before": {
+            "present": "latest_complete" in family.attrs,
+            "value": family.attrs.get("latest_complete"),
+        },
+        "after": {"present": True, "value": source_run_id},
+        "legacy_strict_completion": True,
+        "completion_policy": "is_run_complete_legacy_default_false",
+    }
+
+
 def _consolidated_view_is_active(
     archive: Path,
     *,
@@ -1091,6 +1138,7 @@ def _plan_successor_activation(
     source_relative: str,
     successor_id: str,
     recording_identity: str,
+    repair_latest_complete: bool = False,
 ) -> dict[str, Any]:
     root = open_zarr_root(archive, mode="r")
     if str(root.attrs.get("recording_id") or "").strip() != recording_identity:
@@ -1133,7 +1181,15 @@ def _plan_successor_activation(
             "from the current source conversion.",
             receipt=receipt,
         )
+    repair: dict[str, object] | None = None
     try:
+        if repair_latest_complete:
+            repair = _plan_latest_complete_repair(family, source_run_id=source_run_id)
+            receipt["latest_complete_repair"] = {
+                "requested": True,
+                "planned": repair,
+            }
+        planned_latest_complete = source_run_id if repair is not None else None
         if successor_id in family:
             validated = _validated_eligible_successor(
                 archive,
@@ -1150,6 +1206,7 @@ def _plan_successor_activation(
                 successor_id=successor_id,
                 manifest_digest=validated["record"]["manifest_digest"],
                 run_selector_eligible=validated["run_selector_eligible"],
+                planned_latest_complete=planned_latest_complete,
             )
             action = "none" if state == "active" else "activate"
         else:
@@ -1166,13 +1223,14 @@ def _plan_successor_activation(
                 successor_id=successor_id,
                 manifest_digest=None,
                 run_selector_eligible=None,
+                planned_latest_complete=planned_latest_complete,
             )
             action = "publish_and_activate"
     except (ValueError, FileExistsError) as exc:
         raise CanonicalDetectionActivationRefused(str(exc), receipt=receipt) from exc
     receipt["selector_state"] = state
     receipt["action"] = action
-    return {"receipt": receipt, "validated": validated}
+    return {"receipt": receipt, "validated": validated, "repair": repair}
 
 
 def activate_canonical_detection_successor(
@@ -1186,6 +1244,7 @@ def activate_canonical_detection_successor(
     copy_backend: str = "python",
     keep_scratch: bool = False,
     result_json: Path | None = None,
+    repair_latest_complete: bool = False,
 ) -> dict[str, object]:
     """Publish (if needed) and activate one selector-eligible legacy successor.
 
@@ -1197,10 +1256,20 @@ def activate_canonical_detection_successor(
     content, and ``latest``/``latest_complete`` must still select the legacy
     run (or a resumable partial activation of this successor).  An already
     active successor is a no-op success.
+
+    With the explicit opt-in ``repair_latest_complete=True``, an unset
+    ``latest_complete`` is planned to be set to the legacy run when ``latest``
+    names exactly that run and it passes strict completion validation; the
+    dry run reports the repair and ``apply`` performs it under the same
+    archive lock immediately before activation, recording before/after in the
+    receipt and restoring the prior state if activation fails.  Without the
+    opt-in, an unset ``latest_complete`` is refused as selector drift.
     """
 
     if type(apply) is not bool:
         raise TypeError("apply must be an exact bool.")
+    if type(repair_latest_complete) is not bool:
+        raise TypeError("repair_latest_complete must be an exact bool.")
     archive = analysis_zarr.expanduser().resolve()
     if not archive.is_dir():
         raise FileNotFoundError(f"Analysis Zarr not found: {archive}")
@@ -1224,6 +1293,7 @@ def activate_canonical_detection_successor(
             source_relative=source_relative,
             successor_id=successor_id,
             recording_identity=identity,
+            repair_latest_complete=repair_latest_complete,
         )
 
     def finish(result: Mapping[str, object]) -> dict[str, object]:
@@ -1270,12 +1340,20 @@ def activate_canonical_detection_successor(
         locked = plan()
         locked_receipt = dict(locked["receipt"])
         validated = locked["validated"]
+        repair = locked["repair"]
         if validated is None:
             raise RuntimeError("Successor is absent after publication.")
         target = archive / "detect_runs" / successor_id
         root = open_zarr_root(archive, mode="a")
         family = _open_detect_family_direct(archive, mode="r+")
         run = zarr.open_group(str(target), mode="r+", use_consolidated=False)
+        source_run_id = Path(source_relative).name
+        if repair is not None:
+            family.attrs["latest_complete"] = source_run_id
+            locked_receipt["latest_complete_repair"] = {
+                **dict(locked_receipt["latest_complete_repair"]),
+                "applied": True,
+            }
         writer = CanonicalDetectionSelectorActivation(
             archive=archive,
             run_id=successor_id,
@@ -1291,6 +1369,10 @@ def activate_canonical_detection_successor(
             writer.activate(root, family, run)
         except BaseException:
             writer.rollback()
+            if repair is not None:
+                _rollback_latest_complete_repair(
+                    archive, source_run_id=source_run_id, repair=repair
+                )
             writer.repair_failed_visibility(target)
             raise
     manifest_digest = validated["manifest"]["payload_digest"]
@@ -1328,6 +1410,24 @@ def activate_canonical_detection_successor(
             "activated_at_utc": utc_now(),
         }
     )
+
+
+def _rollback_latest_complete_repair(
+    archive: Path,
+    *,
+    source_run_id: str,
+    repair: Mapping[str, Any],
+) -> None:
+    """Restore ``latest_complete`` if it still holds the value this repair set."""
+
+    family = _open_detect_family_direct(archive, mode="r+")
+    if family.attrs.get("latest_complete") != source_run_id:
+        return
+    before = repair["before"]
+    if before["present"]:
+        family.attrs["latest_complete"] = before["value"]
+    else:
+        del family.attrs["latest_complete"]
 
 
 def inspect_accept_all_refined_detection_source(

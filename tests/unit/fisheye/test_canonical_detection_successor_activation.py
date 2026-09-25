@@ -493,3 +493,187 @@ def test_activation_ignores_stale_nested_family_consolidation(
 
     assert result["status"] == "activated"
     _assert_active(archive, SUCCESSOR, published["successor"]["manifest_digest"])
+
+
+def _set_legacy_repair_state(archive: Path, *, strictly_complete: bool) -> None:
+    family = zarr.open_group(str(archive), mode="a", use_consolidated=False)[
+        "detect_runs"
+    ]
+    del family.attrs["latest_complete"]
+    if strictly_complete:
+        family["detect_source"].attrs["palette_run_completion_status"] = "complete"
+    zarr.consolidate_metadata(str(archive))
+
+
+def _direct_family_attrs(archive: Path) -> dict:
+    return dict(
+        zarr.open_group(str(archive / "detect_runs"), mode="r", use_consolidated=False)
+        .attrs.asdict()
+    )
+
+
+def test_unset_latest_complete_without_repair_flag_is_refused(
+    archive: Path, scratch: Path
+) -> None:
+    _set_legacy_repair_state(archive, strictly_complete=True)
+    before = _tree_digest(archive)
+
+    with pytest.raises(CanonicalDetectionActivationRefused, match="drifted") as info:
+        _activate(archive, scratch, apply=True)
+
+    assert "latest_complete_repair" not in info.value.receipt
+    assert _tree_digest(archive) == before
+
+
+def test_repair_latest_complete_dry_run_reports_and_writes_nothing(
+    archive: Path, scratch: Path
+) -> None:
+    _set_legacy_repair_state(archive, strictly_complete=True)
+    before = _tree_digest(archive)
+
+    result = _activate(archive, scratch, repair_latest_complete=True)
+
+    assert result["status"] == "planned"
+    assert result["selector_state"] == "unactivated"
+    repair = result["latest_complete_repair"]
+    assert repair["requested"] is True
+    assert repair["planned"]["before"] == {"present": False, "value": None}
+    assert repair["planned"]["after"] == {"present": True, "value": "detect_source"}
+    assert "applied" not in repair
+    assert _tree_digest(archive) == before
+
+
+def test_repair_latest_complete_then_activate(archive: Path, scratch: Path) -> None:
+    _set_legacy_repair_state(archive, strictly_complete=True)
+
+    result = _activate(archive, scratch, apply=True, repair_latest_complete=True)
+
+    assert result["status"] == "activated"
+    assert result["latest_complete_repair"]["applied"] is True
+    assert result["selectors_before"]["latest_complete"] == {
+        "present": False,
+        "value": None,
+    }
+    assert result["selectors_after"]["latest_complete"]["value"] == SUCCESSOR
+    _assert_active(archive, SUCCESSOR, result["successor"]["manifest_digest"])
+
+
+def test_repair_refused_when_legacy_not_strictly_complete(
+    archive: Path, scratch: Path
+) -> None:
+    _set_legacy_repair_state(archive, strictly_complete=False)
+    before = _tree_digest(archive)
+
+    with pytest.raises(CanonicalDetectionActivationRefused, match="strictly complete"):
+        _activate(archive, scratch, apply=True, repair_latest_complete=True)
+
+    assert _tree_digest(archive) == before
+
+
+def test_repair_refused_when_latest_complete_names_other_run(
+    archive: Path, scratch: Path
+) -> None:
+    family = zarr.open_group(str(archive), mode="a", use_consolidated=False)[
+        "detect_runs"
+    ]
+    family["detect_source"].attrs["palette_run_completion_status"] = "complete"
+    family.create_group("detect_other")
+    family.attrs["latest_complete"] = "detect_other"
+    zarr.consolidate_metadata(str(archive))
+    before = _tree_digest(archive)
+
+    with pytest.raises(CanonicalDetectionActivationRefused, match="drifted"):
+        _activate(archive, scratch, apply=True, repair_latest_complete=True)
+
+    assert _tree_digest(archive) == before
+    assert _direct_family_attrs(archive)["latest_complete"] == "detect_other"
+
+
+def test_repair_refused_when_latest_names_other_run(
+    archive: Path, scratch: Path
+) -> None:
+    _set_legacy_repair_state(archive, strictly_complete=True)
+    family = zarr.open_group(str(archive), mode="a", use_consolidated=False)[
+        "detect_runs"
+    ]
+    family.create_group("detect_other")
+    family.attrs["latest"] = "detect_other"
+    zarr.consolidate_metadata(str(archive))
+
+    with pytest.raises(CanonicalDetectionActivationRefused, match="latest to name"):
+        _activate(archive, scratch, apply=True, repair_latest_complete=True)
+
+
+def test_repair_rolled_back_when_activation_fails(
+    archive: Path, scratch: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_legacy_repair_state(archive, strictly_complete=True)
+    _publish(archive, scratch, SUCCESSOR, eligible=True)
+    before = _direct_family_attrs(archive)
+    assert "latest_complete" not in before
+
+    def fail_visibility(self) -> dict:
+        raise RuntimeError("injected visibility failure")
+
+    monkeypatch.setattr(
+        CanonicalDetectionSelectorActivation, "_validate_visibility", fail_visibility
+    )
+    with pytest.raises(RuntimeError, match="injected visibility failure"):
+        _activate(archive, scratch, apply=True, repair_latest_complete=True)
+
+    after = _direct_family_attrs(archive)
+    assert after == before
+    assert "latest_complete" not in after
+    consolidated = zarr.open_group(str(archive), mode="r", use_consolidated=True)
+    assert "latest_complete" not in consolidated["detect_runs"].attrs
+
+
+def test_cli_repair_flag_requires_activate(
+    archive: Path, scratch: Path, tmp_path: Path
+) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "--analysis-zarr",
+                str(archive),
+                "--source-detect-group",
+                SOURCE,
+                "--recording-identity",
+                RECORDING_IDENTITY,
+                "--successor-run",
+                SUCCESSOR,
+                "--result-json",
+                str(tmp_path / "r.json"),
+                "--repair-latest-complete",
+            ]
+        )
+
+
+def test_cli_repair_flag_activates(
+    archive: Path, scratch: Path, tmp_path: Path
+) -> None:
+    _set_legacy_repair_state(archive, strictly_complete=True)
+    receipt = tmp_path / "receipt.json"
+    args = [
+        "--analysis-zarr",
+        str(archive),
+        "--source-detect-group",
+        SOURCE,
+        "--recording-identity",
+        RECORDING_IDENTITY,
+        "--successor-run",
+        SUCCESSOR,
+        "--scratch-root",
+        str(scratch),
+        "--result-json",
+        str(receipt),
+        "--activate",
+        "--repair-latest-complete",
+    ]
+
+    assert cli.main(args) == 0
+    assert json.loads(receipt.read_text())["latest_complete_repair"]["planned"]
+    assert cli.main([*args, "--apply"]) == 0
+    applied = json.loads(receipt.read_text())
+    assert applied["status"] == "activated"
+    assert applied["latest_complete_repair"]["applied"] is True
