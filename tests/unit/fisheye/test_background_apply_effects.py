@@ -351,3 +351,77 @@ def test_failure_classification():
     assert worker_mod.classify_failure(ValueError("identity mismatch")) == "refused"
     assert worker_mod.classify_failure(RuntimeError("Tail successor receipt has a conflicting source binding")) == "refused"
     assert worker_mod.classify_failure(worker_mod.ApplyEffectsRefused("x")) == "refused"
+
+
+def _component_review_state(zarr_path, component="subject_body"):
+    reviews = _run_attrs(zarr_path).attrs.get("component_review_statuses") or {}
+    entry = reviews.get(component) if isinstance(reviews, dict) else None
+    return entry.get("state") if isinstance(entry, dict) else None
+
+
+def test_needs_review_is_deferred_and_task_completes_without_waiting(mask_store):
+    store, lease, zarr_path = mask_store
+    with _server(store) as (base, state):
+        token = _save_row(base, lease, 0, _edited())
+        status, applied = _apply(base, lease, "bg-deferred", token)
+        assert status == 200 and applied["result"]["effects"] == "queued", applied
+        token = applied["state"]["target_token"]
+        assert applied["state"]["component_review_completion_ready"] is False
+
+        # Approval still waits for the owed effects.
+        status, blocked = _request(base, _route(lease, "/review-status"), {"state": "approved", "target_token": token})
+        assert status == 409 and blocked["error"] == "pending_apply_effects", blocked
+
+        # needs_review is recorded now and written later, without taking the run lock.
+        status, deferred = _request(base, _route(lease, "/review-status"), {"state": "needs_review", "target_token": token})
+        assert status == 202 and deferred["deferred"] is True, deferred
+        assert deferred["state"]["component_review_completion_guard"]["review_state_deferred"] is True
+        assert deferred["state"]["component_review_completion_ready"] is True
+        assert _component_review_state(zarr_path) != "needs_review"
+
+        status, completed = _request(base, "/api/tasks/task-a/complete", {
+            "session_id": lease.session_id, "expected_user": "alice",
+        })
+        assert status == 200, completed
+
+        _start_worker(state)
+        assert _wait_until(lambda: store.count_pending_session_checkpoint_apply_effects(task_id="task-a") == 0)
+    assert _component_review_state(zarr_path) == "needs_review"
+    written = store.list_events(task_id="task-a", event_type="set_review_status")
+    assert written and written[0]["user"] == "alice"
+
+
+def test_failed_deferred_review_write_keeps_effects_owed(mask_store, monkeypatch):
+    from fisheye.tune import refined_subject_mask_review as review_mod
+
+    store, lease, zarr_path = mask_store
+    real_write = review_mod.apply_component_review_status
+    fail_once = {"pending": True}
+
+    def flaky_write(*args, **kwargs):
+        if fail_once["pending"]:
+            fail_once["pending"] = False
+            raise OSError("injected review write failure")
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(review_mod, "apply_component_review_status", flaky_write)
+    with _server(store) as (base, state):
+        token = _save_row(base, lease, 0, _edited())
+        status, applied = _apply(base, lease, "bg-deferred-fail", token)
+        assert status == 200, applied
+        status, _ = _request(base, _route(lease, "/review-status"), {
+            "state": "needs_review", "target_token": applied["state"]["target_token"],
+        })
+        assert status == 202
+        worker = worker_mod.ApplyEffectsWorker(
+            store=store, refresh_registry=lambda **kwargs: labeling_web._refresh_registry_for_scope(**kwargs),
+            backoff_seconds=(0.0,),
+        )
+        state.apply_effects_worker = worker
+        worker.run_once()
+        # The status write failed before the receipt was completed: effects stay owed.
+        assert store.count_pending_session_checkpoint_apply_effects(task_id="task-a") == 1
+        worker.wake(force_retry=True)
+        worker.run_once()
+    assert store.count_pending_session_checkpoint_apply_effects(task_id="task-a") == 0
+    assert _component_review_state(zarr_path) == "needs_review"

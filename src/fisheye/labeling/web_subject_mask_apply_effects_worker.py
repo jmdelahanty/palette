@@ -221,6 +221,22 @@ class ApplyEffectsWorker:
             after=after,
         )
 
+    def _finish_effects(self, runtime, *, user, apply_id, derived, registry_scope) -> None:
+        """Record the effects and write any deferred review status before the
+        receipt is marked complete, so a failed status write keeps effects owed."""
+
+        from .web_subject_mask_deferred_review import apply_pending_deferred_review_locked
+
+        self.store.record_event(
+            task_id=runtime.task_id, recording_id=runtime.recording_id, user=user,
+            event_type=BACKGROUND_EFFECTS_EVENT, target={"apply_id": apply_id},
+            after={"apply_id": apply_id, **derived},
+        )
+        reopen_mask_run(runtime)
+        apply_pending_deferred_review_locked(
+            self.store, runtime, refresh_registry=self.refresh_registry, registry_scope=registry_scope,
+        )
+
     def process(self, receipt, *, previous_attempt: int = 0) -> bool:
         from fisheye.tune import refined_subject_mask_review as review_mod
 
@@ -240,10 +256,8 @@ class ApplyEffectsWorker:
                         store=self.store, runtime=runtime, root=reopen_mask_run(runtime),
                         apply_id=apply_id, expected_revision=int(owed[0]["edit_revision_after"]),
                         refresh_registry=self.refresh_registry, registry_scope=registry_scope, user=user,
-                        before_complete=lambda derived: self.store.record_event(
-                            task_id=runtime.task_id, recording_id=runtime.recording_id, user=user,
-                            event_type=BACKGROUND_EFFECTS_EVENT, target={"apply_id": apply_id},
-                            after={"apply_id": apply_id, **derived},
+                        before_complete=lambda derived: self._finish_effects(
+                            runtime, user=user, apply_id=apply_id, derived=derived, registry_scope=registry_scope,
                         ),
                     )
         except Exception as exc:

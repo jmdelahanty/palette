@@ -36,6 +36,11 @@ from .web_subject_mask_apply_effects import (
     run_apply_effects_locked,
 )
 from .web_subject_mask_apply_effects_worker import ApplyEffectsWorker, start_worker_for_state, wait_for_prior_apply_effects
+from .web_subject_mask_deferred_review import (
+    DEFERRABLE_REVIEW_STATES,
+    apply_review_status_locked,
+    record_deferred_review,
+)
 from .web_subject_mask_apply_state import (
     classify_apply_checkpoints,
     commit_mask_edit_revision,
@@ -2888,7 +2893,18 @@ def _make_handler(state: ServerState):
             if subject_mask_path == "/review-status":
                 if self._reject_browser_mutation_preflight(session, body, runtime):
                     return True
+                requested_state = str(body.get("state") or "").strip()
+                review_request = {key: body.get(key) for key in ("state", "method", "intended_use", "notes")}
                 pending_effect_count = len(pending_mask_run_effects(state.store, runtime))
+                if pending_effect_count and state.config.background_apply_effects and requested_state in DEFERRABLE_REVIEW_STATES:
+                    # Recorded now; the effects worker writes it once owed effects finish.
+                    record_deferred_review(state.store, runtime, user=user, request=review_request)
+                    if state.apply_effects_worker is not None:
+                        state.apply_effects_worker.wake()
+                    pending_effect_count = len(pending_mask_run_effects(state.store, runtime))
+                    if pending_effect_count:
+                        self._write_json({"ok": True, "deferred": True, "result": {"deferred_review_state": requested_state}, "state": _subject_mask_runtime_state(runtime, store=state.store)}, status=HTTPStatus.ACCEPTED)
+                        return True
                 if pending_effect_count:
                     self._write_json(
                         _format_error(
@@ -2920,7 +2936,6 @@ def _make_handler(state: ServerState):
                         status=HTTPStatus.CONFLICT,
                     )
                     return True
-                requested_state = str(body.get("state") or "").strip()
                 if not requested_state:
                     self._write_json(_format_error("payload_validation", details="Missing review state."), status=HTTPStatus.BAD_REQUEST)
                     return True
@@ -2932,48 +2947,10 @@ def _make_handler(state: ServerState):
                         require_mask_apply_ownership(state.store, runtime, "")
                         runtime.root = review_mod.open_zarr_root(runtime.zarr_path, mode="a")
                         runtime.refined = review_mod._open_existing_refined_subject_run(runtime.root, runtime.refined.run_name)
-                        before_component_reviews = runtime.refined.group.attrs.get("component_review_statuses")
-                        before_run_review = runtime.refined.group.attrs.get("refined_subject_mask_review_status")
-                        component_payload, run_payload = review_mod.apply_component_review_status(
-                            runtime.refined.parent,
-                            str(runtime.refined.run_name),
-                            runtime.refined.group,
-                            component_name=runtime.component_name,
-                            state=requested_state,
-                            method=str(body.get("method") or runtime.review_method or "manual"),
-                            intended_use=str(body.get("intended_use") or runtime.review_intended_use or "training"),
-                            reviewer=user,
-                            notes=str(body.get("notes") or runtime.review_notes or "").strip() or None,
-                            zarr_path=runtime.zarr_path,
-                        )
-                        mutation_event = state.store.record_event(
-                            task_id=runtime.task_id,
-                            recording_id=runtime.recording_id,
-                            user=user,
-                            event_type="set_review_status",
-                            target={
-                                "component_name": runtime.component_name,
-                                "refined_run": str(runtime.refined.run_name),
-                            },
-                            before={
-                                "component_review_statuses": dict(before_component_reviews) if isinstance(before_component_reviews, Mapping) else None,
-                                "run_review_status": dict(before_run_review) if isinstance(before_run_review, Mapping) else None,
-                            },
-                            after={
-                                "component_review_status": component_payload,
-                                "run_review_status": run_payload,
-                            },
-                        )
-                        _refresh_registry_for_scope(
-                            store=state.store,
-                            task_id=runtime.task_id,
-                            recording_id=runtime.recording_id,
-                            user=user,
-                            workflow_kind="subject_mask_component",
-                            scope=_session_scope(session),
-                            zarr_path=runtime.zarr_path,
-                            dataset_id=str(session.get("dataset_id") or "") or None,
-                            zarr_use=str(session.get("zarr_use") or "") or None,
+                        component_payload, run_payload, mutation_event = apply_review_status_locked(
+                            state.store, runtime, user=user, request=review_request,
+                            refresh_registry=_refresh_registry_for_scope,
+                            registry_scope={"scope": _session_scope(session), "dataset_id": str(session.get("dataset_id") or "") or None, "zarr_use": str(session.get("zarr_use") or "") or None},
                         )
                 except Exception as exc:
                     self._write_json(_format_error("review_status_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
