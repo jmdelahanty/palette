@@ -181,6 +181,15 @@ def test_v2_publishes_four_runs_that_reference_and_bind_the_crop(paired):
     v1_proof = paired.v1["source_bindings"]["mask_apply_refresh"]
     assert v1_proof["policy"] == REFRESH_POLICY
     assert "source_crop_contract_sha256" not in v1_proof
+    # The proof grammar is versioned with the format.
+    assert v1_proof["schema_id"] == "palette.training.mask_apply_tail_successor.v1"
+    assert proof["schema_id"] == "palette.training.mask_apply_tail_successor.v2"
+    assert paired.v2["schema_id"] == proof["schema_id"]
+    mismatched = {**paired.v2["source_bindings"], "mask_apply_refresh": {**proof, "schema_id": v1_proof["schema_id"]}}
+    with pytest.raises(ValueError, match="source proof"):
+        validate_completed_tail_version(
+            archive=paired.v2_path, version=paired.v2["version"], source_bindings=mismatched,
+        )
     assert paired.v1["version"] != paired.v2["version"]
     # Completed-effect validation accepts both formats with their own paths.
     for path, result in ((paired.v1_path, paired.v1), (paired.v2_path, paired.v2)):

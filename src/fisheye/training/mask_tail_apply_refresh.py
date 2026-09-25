@@ -76,9 +76,12 @@ from fisheye.tune.recovered_keypoint_review import is_recovered_roi_review
 from fisheye.utils.extend_keypoint_skeleton import _schema_to_attr_payload
 
 REFRESH_SCHEMA = "palette.training.mask_apply_tail_successor.v1"
+# v2 proofs add ``source_crop_contract_sha256``; the grammar version says so.
+REFRESH_SCHEMA_V2 = "palette.training.mask_apply_tail_successor.v2"
 REFRESH_POLICY = "new_mask_seed_and_review_version_preserve_recorded_manual_points_v1"
 REFRESH_POLICY_V2 = REFERENCED_CROP_SUCCESSOR_POLICY
 SUCCESSOR_FORMAT_POLICIES = {"v1": REFRESH_POLICY, "v2": REFRESH_POLICY_V2}
+SUCCESSOR_FORMAT_SCHEMAS = {REFRESH_POLICY: REFRESH_SCHEMA, REFRESH_POLICY_V2: REFRESH_SCHEMA_V2}
 DEFAULT_SUCCESSOR_FORMAT = "v2"
 _EDITABLE_RUN_KEYS = frozenset({"pose_edit", "mask_edit"})
 # The first child each format publishes: v1 its crop copy, v2 its mask snapshot.
@@ -357,7 +360,7 @@ def _capture(
     # Retain the original supplier declaration without recursive generations.
     binding.pop("mask_apply_refresh", None)
     proof = {
-        "schema_id": REFRESH_SCHEMA,
+        "schema_id": SUCCESSOR_FORMAT_SCHEMAS[SUCCESSOR_FORMAT_POLICIES[successor_format]],
         "policy": SUCCESSOR_FORMAT_POLICIES[successor_format],
         "source_mask_run": str(mask.path),
         "source_pose_run": str(pose.path),
@@ -647,8 +650,8 @@ def validate_completed_tail_version(*, archive, version, source_bindings):
     """
     proof = source_bindings.get("mask_apply_refresh") or {}
     if (
-        proof.get("schema_id") != REFRESH_SCHEMA
-        or proof.get("policy") not in SUCCESSOR_FORMAT_POLICIES.values()
+        proof.get("policy") not in SUCCESSOR_FORMAT_SCHEMAS
+        or proof.get("schema_id") != SUCCESSOR_FORMAT_SCHEMAS[proof.get("policy")]
         or version != "mask_apply_" + sha256_payload(proof)[:24]
     ):
         raise ValueError("Invalid completed tail-version source proof")
@@ -890,7 +893,7 @@ def regenerate_training_tail_version(
                 )
         result = {
             "status": "reused" if reused else "generated",
-            "schema_id": REFRESH_SCHEMA,
+            "schema_id": proof["schema_id"],
             "version": version,
             "paths": paths,
             "source_crop_run": (
