@@ -147,3 +147,35 @@ A targeted mask task is diagnostic coverage of the listed rows. Its completion
 does not establish a new whole-recording mask review or activate authority.
 Historical eye-union supervision remains a union; it is not split into invented
 left/right eye labels.
+
+## Mask-Apply successors: format v1 and v2
+
+Applying body or swim-bladder mask edits in the browser publishes a new,
+selector-ineligible tail successor version
+(`fisheye.training.mask_tail_apply_refresh`). The version digest covers the
+refresh proof, including its policy identifier, so the two formats never share
+a version:
+
+| Format | Policy id | Runs | Layout |
+| --- | --- | --- | --- |
+| v1 (historical) | `new_mask_seed_and_review_version_preserve_recorded_manual_points_v1` | crop identity copy, mask snapshot, mask edit, keypoint seed, keypoint edit | chunk-only |
+| v2 (current) | `new_mask_seed_and_review_version_reference_crop_sharded_v2` | mask snapshot, mask edit, keypoint seed, keypoint edit | `training_review_run_v1` shards |
+
+v2 publishes no crop run. All four runs record the existing crop run as
+`source_crop_run`, and the proof binds that crop's contract digest
+(`source_crop_contract_sha256`); its pixels are revalidated before publication
+and before a completed version is reused. Row identity is unchanged: rows are
+the crop run's rows in order (`source_crop_row_ids`). Review tasks carry the
+referenced crop as `scope.crop_run`.
+
+v2 runs keep each array's inner chunk shape (for example one row of
+`keypoints_roi`) inside indexed outer shards planned by the shared storage
+planner: whole-run shards for small arrays, 16 MiB shards (64 MiB maximum) for
+large per-row arrays. Each run records `review_storage_plan` and
+`physical_storage_layout`. The payload is sharded in private scratch by one
+writer before atomic publication; editable runs are then written only by the
+serialized review writer, which rewrites the containing shard.
+
+v1 successors remain valid and readable; nothing historical is rewritten. An
+Apply whose v1 publication had already started resumes in v1, so a retry of the
+same source keeps the same version.

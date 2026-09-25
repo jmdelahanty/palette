@@ -43,7 +43,12 @@ from fisheye.tune.keypoint_failure_review import (
 from fisheye.utils.extend_keypoint_skeleton import _schema_to_attr_payload
 
 
-def run_paths(version, *, native=False):
+def run_paths(version, *, native=False, reference_crop=False):
+    """Archive-relative run paths of one payload version.
+
+    ``reference_crop`` (tail-successor format v2) omits the crop run: those
+    successors bind the existing crop run through ``source_crop_run``.
+    """
     if (
         not version
         or version.startswith(".")
@@ -54,20 +59,32 @@ def run_paths(version, *, native=False):
     ):
         raise ValueError("Version must be a safe non-hidden path component")
     if native:
-        return {
+        paths = {
             "crop": f"crop_runs/mask_tail_full_roi_{version}",
             "mask": f"subject_mask_runs/mask_tail_snapshot_{version}",
             "mask_edit": f"refined_subject_masks_runs/mask_tail_edit_{version}",
             "seed": f"keypoints_runs/head_tail11_fins_seed_{version}",
             "pose_edit": f"refined_keypoints_runs/head_tail11_fins_edit_{version}",
         }
-    return {
-        "crop": f"crop_runs/recovered_full_roi_{version}",
-        "mask": f"subject_mask_runs/recovered_masks_{version}",
-        "mask_edit": f"refined_subject_masks_runs/recovered_masks_edit_{version}",
-        "seed": f"keypoints_runs/head_tail11_fins_seed_{version}",
-        "pose_edit": f"refined_keypoints_runs/head_tail11_fins_edit_{version}",
-    }
+    else:
+        paths = {
+            "crop": f"crop_runs/recovered_full_roi_{version}",
+            "mask": f"subject_mask_runs/recovered_masks_{version}",
+            "mask_edit": f"refined_subject_masks_runs/recovered_masks_edit_{version}",
+            "seed": f"keypoints_runs/head_tail11_fins_seed_{version}",
+            "pose_edit": f"refined_keypoints_runs/head_tail11_fins_edit_{version}",
+        }
+    if reference_crop:
+        del paths["crop"]
+    return paths
+
+
+def payload_crop_run(result):
+    """Crop run name supplying a built/published payload's pixels."""
+    paths = result["paths"]
+    if "crop" in paths:
+        return paths["crop"].split("/")[1]
+    return str(result["source_crop_run"])
 
 
 def array_hashes(group):
@@ -97,7 +114,18 @@ def build_review_payload(
     root, arrays, labels, binding, *, version, pose_schema=SCHEMA_NAME, native=False,
     derivation_method="legacy",
     row_method_codes=None,
+    reference_crop_run=None,
 ):
+    """Build one payload version in a private local root.
+
+    With ``reference_crop_run`` (tail-successor format v2) no crop run is
+    written; every run records that existing crop run as ``source_crop_run``
+    and ``arrays`` need not carry ``roi_images``/``source_bbox_norm_coords``.
+    """
+    reference_crop = reference_crop_run is not None
+    n = len(arrays["masks_roi"])
+    if not reference_crop and len(arrays["roi_images"]) != n:
+        raise ValueError("Crop and mask row axes disagree")
     source_proof = binding.get("mask_apply_refresh") or {}
     acceptance_records = source_proof.get(
         "tail_crop_border_acceptances", {}
@@ -106,7 +134,7 @@ def build_review_payload(
         raise ValueError("Invalid tail crop-border acceptance binding")
     accepted_rows = None
     if acceptance_records:
-        accepted_rows = np.zeros(len(arrays["roi_images"]), dtype=bool)
+        accepted_rows = np.zeros(n, dtype=bool)
         body_idx = labels.index("subject_body")
         for key, record in acceptance_records.items():
             if not isinstance(key, str):
@@ -134,8 +162,10 @@ def build_review_payload(
         }
     _, schema = _schema_to_attr_payload(pose_schema)
     point_count = len(schema["keypoint_labels"])
-    paths = run_paths(version, native=native)
-    n = len(arrays["roi_images"])
+    paths = run_paths(version, native=native, reference_crop=reference_crop)
+    crop_name = (
+        str(reference_crop_run) if reference_crop else paths["crop"].split("/")[1]
+    )
     lineage = {
         "frame_indices": arrays["frame_indices"],
         "source_crop_row_ids": np.arange(n, dtype=np.int64),
@@ -165,7 +195,7 @@ def build_review_payload(
         "sensor_pixel_origin_available": False,
         "row_count": n,
         "source_bindings": binding,
-        "source_crop_run": paths["crop"].split("/")[1],
+        "source_crop_run": crop_name,
     }
     provenance = build_writer_run_provenance(
         command=(
@@ -194,7 +224,7 @@ def build_review_payload(
             _array(run, key, value)
         return run
 
-    crop = create(
+    crop = None if reference_crop else create(
         paths["crop"],
         {
             **lineage,
@@ -207,7 +237,7 @@ def build_review_payload(
             "pixel_operation": "identity_copy",
         },
     )
-    if "source_roi_coordinates_full" in arrays:
+    if crop is not None and "source_roi_coordinates_full" in arrays:
         _array(
             crop, "source_roi_coordinates_full", arrays["source_roi_coordinates_full"]
         )
@@ -245,11 +275,11 @@ def build_review_payload(
         )
     else:
         codes = (
-            np.ones(len(arrays["roi_images"]), dtype=np.uint8)
+            np.ones(n, dtype=np.uint8)
             if row_method_codes is None else np.asarray(row_method_codes)
         )
         if (
-            codes.shape != (len(arrays["roi_images"]),)
+            codes.shape != (n,)
             or codes.dtype != np.dtype("uint8")
             or not np.isin(codes, [0, 1]).all()
         ):
@@ -405,7 +435,7 @@ def build_review_payload(
             key: {
                 **record,
                 "accepted_source_crop_run": record.get("accepted_source_crop_run", record["source_crop_run"]),
-                "source_crop_run": paths["crop"].split("/")[1],
+                "source_crop_run": crop_name,
             }
             for key, record in acceptance_records.items()
         }
@@ -414,9 +444,12 @@ def build_review_payload(
             _array(mask_edit, name, values)
     stamp_refined_subject_mask_editable_draft(mask_edit)
     np.testing.assert_array_equal(mask_edit["masks_roi"][:], arrays["masks_roi"])
-    for path, group in zip(
-        paths.values(), (crop, mask, mask_edit, seed, pose_edit), strict=True
-    ):
+    groups = {
+        "crop": crop, "mask": mask, "mask_edit": mask_edit,
+        "seed": seed, "pose_edit": pose_edit,
+    }
+    for key, path in paths.items():
+        group = groups[key]
         group.attrs["initial_array_sha256"] = array_hashes(group)
         group.attrs["initial_contract_sha256"] = initial_contract_digest(group)
         family, name = path.split("/")
@@ -452,6 +485,7 @@ def build_review_payload(
     ]
     return {
         "paths": paths,
+        "source_crop_run": crop_name,
         "row_count": n,
         "pose_schema": pose_schema,
         "keypoint_count": point_count,

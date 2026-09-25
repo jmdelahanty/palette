@@ -62926,9 +62926,9 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/training/recovered_mask_review_payload.py",
-      "line": 211,
-      "occurrence_id": "schema-writer-8aaf718dca411cfc",
-      "path_pattern": "<create(paths['crop'], {**lineage, 'roi_images': arrays['roi_images'], 'source_bbox_norm_coords': arrays['source_bbox_norm_coords']}, {'crop_storage_mode': 'materialized', 'roi_size': list(arrays['roi_images'].shape[1:]), 'pixel_operation': 'identity_copy'})>/source_roi_coordinates_full",
+      "line": 241,
+      "occurrence_id": "schema-writer-bb0d827097c1ace1",
+      "path_pattern": "<crop>/source_roi_coordinates_full",
       "required": null,
       "shape_expression": "shape(arrays['source_roi_coordinates_full'])",
       "shape_template": null,
@@ -62939,7 +62939,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-8b55da4ffc16f710"
+      "writer_site_id": "writer-9bb6675bd35f70c9"
     },
     {
       "access_pattern": "windowed",
@@ -75960,12 +75960,12 @@
     "array_spec_unique_leaf_name_count": 270,
     "array_spec_unique_signature_count": 343,
     "direct_zarr_api_site_count": 671,
-    "dynamic_or_unresolved_writer_site_count": 362,
+    "dynamic_or_unresolved_writer_site_count": 363,
     "manual_zarr_metadata_site_count": 1,
-    "parsed_writer_candidate_module_count": 413,
+    "parsed_writer_candidate_module_count": 414,
     "reader_required_array_declaration_count": 117,
     "resolved_writer_leaf_name_count": 642,
-    "scanned_python_module_count": 1768,
+    "scanned_python_module_count": 1769,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
@@ -75977,15 +75977,15 @@
       "reader_required_array_declaration": 117,
       "writer_observed_schema": 1307
     },
-    "writer_site_count": 1669,
+    "writer_site_count": 1670,
     "writer_site_with_chunks_expression_count": 739,
     "writer_site_with_codec_expression_count": 16,
     "writer_site_with_shards_expression_count": 17,
     "writer_site_with_stage_classification_count": 493,
-    "writer_site_without_dtype_evidence_count": 1023,
-    "writer_site_without_shape_evidence_count": 166,
+    "writer_site_without_dtype_evidence_count": 1024,
+    "writer_site_without_shape_evidence_count": 167,
     "writer_sites_by_status": {
-      "current": 1534,
+      "current": 1535,
       "unclear": 135
     },
     "writer_sites_by_surface": {
@@ -75996,8 +75996,8 @@
       "migration_or_maintenance": 47,
       "production": 1237,
       "publication": 73,
-      "training": 200
+      "training": 201
     },
-    "writer_wrapper_call_site_count": 997
+    "writer_wrapper_call_site_count": 998
   }
 }
