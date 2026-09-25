@@ -28,6 +28,9 @@ from scipy.ndimage import gaussian_filter
 from scipy.stats import gaussian_kde
 
 from fisheye.analysis.chaser_metrics_loader import load_chaser_metrics
+from fisheye.shared.zarr.canonical_detection_activation import (
+    canonical_detection_lineage_equivalent_runs,
+)
 
 try:
     from PIL import Image, PngImagePlugin
@@ -107,6 +110,9 @@ def _collect_pipeline_provenance(root: Any) -> Dict[str, Any]:
 
     detect_parent = root.get("detect_runs")
     detect_run, detect_group = _resolve_latest_run(detect_parent)
+    # Products recorded against the legacy source of an activated canonical
+    # successor (validated sealed manifest) match the selected run.
+    detect_lineage = canonical_detection_lineage_equivalent_runs(root, detect_run)
     detect_rows = _safe_len_dataset(detect_group, "bbox_norm_coords")
 
     refined_parent = root.get("refined_detect_runs") or root.get("refined_runs")
@@ -117,7 +123,7 @@ def _collect_pipeline_provenance(root: Any) -> Dict[str, Any]:
         interp_group = refined_group.get("interpolated")
         refined_rows = _safe_len_dataset(interp_group, "bbox_norm_coords")
         refined_source_detect = refined_group.attrs.get("source_detect_run")
-        if detect_run and refined_source_detect and detect_run != refined_source_detect:
+        if detect_run and refined_source_detect and refined_source_detect not in detect_lineage:
             issues.append(
                 f"Refined detect run '{refined_run}' references detect '{refined_source_detect}' while latest detect is '{detect_run}'."
             )
@@ -138,7 +144,9 @@ def _collect_pipeline_provenance(root: Any) -> Dict[str, Any]:
                 )
         elif detect_run:
             expected = f"detect_runs/{detect_run}"
-            if crop_source and crop_source != expected:
+            if crop_source and crop_source not in {
+                f"detect_runs/{name}" for name in detect_lineage
+            }:
                 issues.append(
                     f"Crop run '{crop_run}' sourced from '{crop_source}' but latest detect run is '{expected}'."
                 )
@@ -157,7 +165,7 @@ def _collect_pipeline_provenance(root: Any) -> Dict[str, Any]:
     arena_rows = _safe_len_dataset(arena_group, "arena_ids")
     arena_source_detect = arena_group.attrs.get("source_detect_run") if arena_group is not None else None
     arena_source_refined = arena_group.attrs.get("source_refined_run") if arena_group is not None else None
-    if arena_source_detect and detect_run and arena_source_detect != detect_run:
+    if arena_source_detect and detect_run and arena_source_detect not in detect_lineage:
         issues.append(
             f"Arena assignment run '{arena_run}' references detect '{arena_source_detect}' but latest detect is '{detect_run}'."
         )
@@ -376,6 +384,11 @@ class ChaserPhaseAnalyzer:
             return None
 
         candidates = ("arena_assignment_runs",)
+        # Assignments recorded against the legacy source of an activated
+        # canonical successor (validated sealed manifest) still apply.
+        accepted_sources = canonical_detection_lineage_equivalent_runs(
+            self.root, self.source_detect_run
+        )
         for parent_name in candidates:
             if parent_name not in self.root:
                 continue
@@ -390,7 +403,7 @@ class ChaserPhaseAnalyzer:
             for run_name in run_names:
                 assign_group = parent_group[run_name]
                 source_detect = assign_group.attrs.get("source_detect_run")
-                if self.source_detect_run and source_detect != self.source_detect_run:
+                if self.source_detect_run and source_detect not in accepted_sources:
                     continue
                 if "arena_ids" not in assign_group:
                     continue

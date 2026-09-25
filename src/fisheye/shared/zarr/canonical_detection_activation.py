@@ -11,6 +11,13 @@ this writer still owns.
 Native candidate publication runs the writer inside the atomic publisher's
 activation callback; legacy-conversion successors run it under the same
 archive publication lock after independent successor validation.
+
+Because consumers bind downstream products (refined detections, detect-quality
+reports) to the raw detection *run name* they were derived from, this module
+also owns the lineage-equivalence rule for an activated legacy-conversion
+successor: ``canonical_detection_lineage_equivalent_runs`` returns the legacy
+source and its activated successor as one equivalence class, established only
+from the successor's validated sealed manifest evidence, never from names.
 """
 
 from __future__ import annotations
@@ -26,7 +33,11 @@ from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR,
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3,
     CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR,
+    CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    CANONICAL_DETECTION_RUN_MANIFEST_ATTRIBUTE,
     validate_canonical_detection_publication,
+    validate_canonical_detection_run_manifest,
+    validate_legacy_detection_source_evidence,
 )
 from fisheye.shared.zarr.canonical_detection_shadow import (
     canonical_detection_metadata_declaration_maps,
@@ -54,6 +65,10 @@ CANONICAL_DETECTION_ACTIVATION_CONSOLIDATION_POLICY = (
 CANONICAL_DETECTION_FAILED_ACTIVATION_REPAIR_POLICY = (
     "canonical_detection_v3_failed_activation_rollback_verified_v1"
 )
+# Run attr stamped by ``activate_canonical_detection_successor`` through
+# ``run_attr_updates``; rollback restores its prior state.
+CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_RUN_ATTR = "production_selector_activation"
+CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_RUN_VALUE = "complete"
 
 
 @dataclass
@@ -217,10 +232,170 @@ class CanonicalDetectionSelectorActivation:
         )
 
 
+def _archive_path_from(archive_or_root: Any) -> Path | None:
+    """Return the on-disk archive root, or ``None`` for non-local groups."""
+
+    if isinstance(archive_or_root, (str, Path)):
+        return Path(archive_or_root).expanduser().resolve()
+    if str(getattr(archive_or_root, "path", "") or "").strip("/"):
+        return None
+    store_root = getattr(getattr(archive_or_root, "store", None), "root", None)
+    if store_root is None:
+        return None
+    return Path(str(store_root)).expanduser().resolve()
+
+
+def _validated_activated_successor_source(
+    archive: Path,
+    family: Any,
+    *,
+    successor_id: str,
+    recording_identity: str,
+) -> str | None:
+    """Return the legacy source bound by one activated successor, else ``None``.
+
+    Every claim comes from the successor's sealed run manifest: the envelope
+    and payload digest validate, it is a canonical-v3 ``legacy_conversion`` of
+    this run id sealed selector eligible, its legacy source evidence validates
+    and binds this archive's recording and the on-disk ``detect_runs/<source>``
+    group, and the run carries the completed-activation markers that a failed
+    activation rolls back.
+    """
+
+    try:
+        run = family[successor_id]
+    except KeyError:
+        return None
+    attrs = run.attrs
+    manifest = attrs.get(CANONICAL_DETECTION_RUN_MANIFEST_ATTRIBUTE)
+    if not isinstance(manifest, Mapping):
+        return None
+    if validate_canonical_detection_run_manifest(manifest):
+        return None
+    payload = manifest.get("payload")
+    if (
+        manifest.get("schema_version")
+        != CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+        or not isinstance(payload, Mapping)
+        or payload.get("run_id") != successor_id
+        or payload.get("source_evidence_kind") != "legacy_conversion"
+    ):
+        return None
+    publication = payload.get("publication")
+    if (
+        not isinstance(publication, Mapping)
+        or publication.get("stage_selector_eligible") is not True
+    ):
+        return None
+    if (
+        attrs.get("stage_selector_eligible") is not True
+        or attrs.get("palette_run_completion_status") != "complete"
+        or attrs.get(CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_RUN_ATTR)
+        != CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_RUN_VALUE
+    ):
+        return None
+    evidence = payload.get("source_evidence")
+    if not isinstance(evidence, Mapping) or validate_legacy_detection_source_evidence(
+        evidence
+    ):
+        return None
+    source_run_id = evidence.get("source_run_id")
+    if (
+        not isinstance(source_run_id, str)
+        or source_run_id == successor_id
+        or source_run_id not in family
+        or evidence.get("recording_identity") != recording_identity
+        or evidence.get("source_group_path")
+        != str((archive / "detect_runs" / source_run_id).resolve())
+    ):
+        return None
+    return source_run_id
+
+
+def canonical_detection_lineage_equivalent_runs(
+    archive_or_root: Any,
+    run_id: str | None,
+) -> frozenset[str]:
+    """Return the raw detection run names content-equivalent to ``run_id``.
+
+    Downstream products record the raw detection run name they were derived
+    from.  After ``activate_canonical_detection_successor`` moves the
+    selectors from a legacy run to its canonical-v3 conversion successor, a
+    consumer that matches that recorded name against the selected run must
+    treat the two names as one lineage.  The result always contains
+    ``run_id``; it adds the legacy source when ``run_id`` is an activated
+    successor whose sealed manifest validates, and adds every such validated
+    activated successor when ``run_id`` is their legacy source.  Invalid,
+    tampered, unactivated, or rolled-back successors, successors whose
+    recorded source is absent, and non-local archives grant no equivalence.
+    Metadata is read directly (unconsolidated) so a stale consolidated view
+    cannot grant or hide equivalence.
+    """
+
+    name = str(run_id).strip() if isinstance(run_id, str) else ""
+    if not name:
+        return frozenset()
+    result = {name}
+    archive = _archive_path_from(archive_or_root)
+    if archive is None or not (archive / "detect_runs").is_dir():
+        return frozenset(result)
+    try:
+        root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+        family = zarr.open_group(
+            str(archive / "detect_runs"), mode="r", use_consolidated=False
+        )
+        recording_identity = str(root.attrs.get("recording_id") or "").strip()
+        if not recording_identity or name not in family:
+            return frozenset(result)
+        source = _validated_activated_successor_source(
+            archive,
+            family,
+            successor_id=name,
+            recording_identity=recording_identity,
+        )
+        if source is not None:
+            result.add(source)
+        for candidate in sorted(family.group_keys()):
+            if candidate in result:
+                continue
+            manifest = family[candidate].attrs.get(
+                CANONICAL_DETECTION_RUN_MANIFEST_ATTRIBUTE
+            )
+            payload = (
+                manifest.get("payload") if isinstance(manifest, Mapping) else None
+            )
+            evidence = (
+                payload.get("source_evidence")
+                if isinstance(payload, Mapping)
+                else None
+            )
+            if (
+                not isinstance(evidence, Mapping)
+                or evidence.get("source_run_id") != name
+            ):
+                continue
+            if (
+                _validated_activated_successor_source(
+                    archive,
+                    family,
+                    successor_id=candidate,
+                    recording_identity=recording_identity,
+                )
+                == name
+            ):
+                result.add(candidate)
+    except (OSError, KeyError, TypeError, ValueError):
+        return frozenset({name})
+    return frozenset(result)
+
+
 __all__ = [
     "CANONICAL_DETECTION_ACTIVATION_CONSOLIDATION_POLICY",
     "CANONICAL_DETECTION_ACTIVATION_PARENT_ATTRS",
     "CANONICAL_DETECTION_FAILED_ACTIVATION_REPAIR_POLICY",
     "CANONICAL_DETECTION_SELECTOR_ATTRS",
+    "CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_RUN_ATTR",
+    "CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_RUN_VALUE",
     "CanonicalDetectionSelectorActivation",
+    "canonical_detection_lineage_equivalent_runs",
 ]

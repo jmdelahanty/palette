@@ -19,6 +19,9 @@ from fisheye.shared.refined_detect_curation import (
 )
 from fisheye.shared.refined_detect_resolution import resolve_detection_read_source
 from fisheye.shared.experiment_setup import subdish_required
+from fisheye.shared.zarr.canonical_detection_activation import (
+    canonical_detection_lineage_equivalent_runs,
+)
 from fisheye.shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
@@ -2283,6 +2286,17 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
             detect_method = _extract_detect_method(detect_group)
             detect_coverage, detect_coverage_basis = _extract_detect_coverage(detect_group, root)
             quality_info = _extract_detect_quality(detect_group)
+            if not quality_info.get("present"):
+                # Nested reports of the legacy source of an activated canonical
+                # successor (validated sealed manifest) still describe it.
+                for equivalent in sorted(
+                    canonical_detection_lineage_equivalent_runs(root, detect_candidate)
+                    - {detect_candidate}
+                ):
+                    equivalent_info = _extract_detect_quality(detect_parent[equivalent])
+                    if equivalent_info.get("present"):
+                        quality_info = equivalent_info
+                        break
             detect_quality_present = bool(quality_info["present"])
             detect_quality_run = _normalize_attr(quality_info["run"])
             detect_quality_grade = _normalize_attr(quality_info["grade"])

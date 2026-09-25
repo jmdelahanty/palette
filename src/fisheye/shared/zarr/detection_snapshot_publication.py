@@ -45,6 +45,8 @@ from fisheye.shared.zarr.canonical_detection_benchmark_input import (
 )
 from fisheye.shared.zarr.canonical_detection_activation import (
     CANONICAL_DETECTION_ACTIVATION_PARENT_ATTRS,
+    CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_RUN_ATTR,
+    CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_RUN_VALUE,
     CanonicalDetectionSelectorActivation,
 )
 from fisheye.shared.zarr.canonical_detection_manifest import (
@@ -1279,7 +1281,11 @@ def activate_canonical_detection_successor(
             run_id=successor_id,
             manifest=validated["manifest"],
             plans=validated["plans"],
-            run_attr_updates={"production_selector_activation": "complete"},
+            run_attr_updates={
+                CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_RUN_ATTR: (
+                    CANONICAL_DETECTION_SUCCESSOR_ACTIVATION_RUN_VALUE
+                )
+            },
         )
         try:
             writer.activate(root, family, run)

@@ -50,6 +50,9 @@ from ..shared.zarr_run_completion import (
     require_runs_parent,
 )
 from ..shared.zarr_helpers import open_zarr_group_direct
+from ..shared.zarr.canonical_detection_activation import (
+    canonical_detection_lineage_equivalent_runs,
+)
 from ..shared.zarr.canonical_detection_manifest import (
     require_active_coordinate_canonical_detection,
     resolve_expected_canonical_detection_manifest_digest,
@@ -593,6 +596,7 @@ def _modern_quality_slice(
     source_detect_path: str,
     detect_group: zarr.Group,
     total_detections: int,
+    equivalent_source_paths: frozenset[str] = frozenset(),
 ) -> np.ndarray:
     detect_table = resolve_detection_instance_table(detect_group)
     if not is_run_complete(quality_group):
@@ -616,7 +620,10 @@ def _modern_quality_slice(
         raise ValueError("modern quality run has no source_detection_group_path")
     start = 0
     stop = int(quality_group["instance_key"].shape[0])
-    if source_group_path != source_detect_path:
+    if (
+        source_group_path != source_detect_path
+        and source_group_path not in equivalent_source_paths
+    ):
         source_group = _group_at(root, source_group_path)
         raw_slices = source_group.attrs.get("source_slices")
         slices = [
@@ -688,6 +695,18 @@ def _resolve_detection_quality_labels(
 ) -> Tuple[np.ndarray, Optional[str], Optional[zarr.Group]]:
     """Resolve per-detection quality labels and fail closed when required."""
     total = int(total_detections)
+    # Quality recorded against a lineage-equivalent raw run (an activated
+    # canonical successor and its legacy source, proven by the successor's
+    # validated sealed manifest) applies; instance keys are still compared.
+    equivalent_runs: list[str] = []
+    if source_detect_path == _join_group_path(DEFAULT_DETECT_FAMILY_PATH, detect_run):
+        equivalent_runs = sorted(
+            canonical_detection_lineage_equivalent_runs(root, detect_run)
+            - {detect_run}
+        )
+    equivalent_source_paths = frozenset(
+        _join_group_path(DEFAULT_DETECT_FAMILY_PATH, name) for name in equivalent_runs
+    )
     modern_path: Optional[str] = None
     modern_group: Optional[zarr.Group] = None
     modern_error: Optional[str] = None
@@ -705,6 +724,7 @@ def _resolve_detection_quality_labels(
                     source_detect_path=source_detect_path,
                     detect_group=detect_group,
                     total_detections=total,
+                    equivalent_source_paths=equivalent_source_paths,
                 )
                 resolved = modern_path.rsplit("/", 1)[-1]
                 if console is not None:
@@ -725,6 +745,10 @@ def _resolve_detection_quality_labels(
                 modern_group = None
 
     quality_reports = detect_group.get("quality_reports")
+    for equivalent_path in sorted(equivalent_source_paths):
+        if quality_reports is not None:
+            break
+        quality_reports = _group_at(root, equivalent_path).get("quality_reports")
     requested_quality_run = normalize_attr(quality_run)
     resolved_quality_run = requested_quality_run
     quality_group: Optional[zarr.Group] = None
