@@ -76,6 +76,20 @@
   evidence when the task requires it, but it must remain selector-ineligible,
   must not alter production authority, and must be reported as not merge-ready
   until the required CI is green.
+- Previewing a change on a user's labeling server before its CI is green is
+  tiered by what the change can damage:
+  - **Presentation-only changes** (browser UI, labels, messages, display state
+    that writes nothing): may be deployed to the preview after the focused
+    tests for the changed files pass, through the self-checking cutover
+    (commit-pinned checkout, no Apply or request in flight, every store table
+    fingerprinted before and after, automatic rollback). Report it as not
+    merge-ready until the required CI is green.
+  - **Changes that write, migrate, or change the format of data** (Apply and
+    save paths, publication, successor or schema formats, registry, detection
+    or mask authority): wait for green required CI, plus a real-storage
+    measurement or replay when performance or layout is affected. A server
+    rollback does not undo written data.
+  - When unsure which tier applies, use the second.
 
 ## Collaborative Development and Contract Preservation
 

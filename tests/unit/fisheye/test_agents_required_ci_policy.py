@@ -47,3 +47,16 @@ def test_required_ci_policy_defines_fail_closed_same_tree_integration() -> None:
     assert "attested tested PR tree" in policy
     assert "active strict required-check ruleset has no bypass actors" in policy
     assert "requires a successful manual full CI run" in policy
+
+
+def test_required_ci_policy_tiers_preview_deployments_by_data_risk() -> None:
+    policy = _required_ci_policy()
+
+    assert "Presentation-only changes" in policy
+    assert "after the focused tests for the changed files pass" in policy
+    assert "self-checking cutover" in policy
+    assert "automatic rollback" in policy
+    assert "Changes that write, migrate, or change the format of data" in policy
+    assert "wait for green required CI" in policy
+    assert "A server rollback does not undo written data" in policy
+    assert "When unsure which tier applies, use the second" in policy
