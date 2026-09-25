@@ -18,7 +18,9 @@ import numpy as np
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 from .web_responses import _decode_uint8_payload, _raw_array_payload
+from .web_subject_mask_apply_effects import apply_effects_status
 from .web_subject_mask_apply_state import pending_mask_run_effects, tail_successor_offer
+from .web_subject_mask_deferred_review import pending_deferred_review
 
 if TYPE_CHECKING:
     from .assignment_store import LabelingStore
@@ -109,6 +111,7 @@ class SubjectMaskRuntimeSession:
     component_source_component: str = ""
     component_source_resolution: str = ""
     component_source_seed_masks_present: bool = False
+    apply_effects_background: bool = False
 
 def _session_scope(session: Mapping[str, object]) -> Mapping[str, object]:
     scope = session.get("scope")
@@ -467,6 +470,7 @@ def _get_subject_mask_runtime(state: Any, session: Mapping[str, object]) -> Subj
         component_source_component=component_source_component,
         component_source_resolution=component_source_resolution,
         component_source_seed_masks_present=component_source_seed_masks_present,
+        apply_effects_background=bool(getattr(getattr(state, "config", None), "background_apply_effects", False)),
     )
     state.subject_mask_sessions[session_id] = runtime
     return runtime
@@ -1034,9 +1038,17 @@ def _subject_mask_component_completion_guard(
 ) -> dict[str, object]:
     review_state = _subject_mask_component_review_state(runtime)
     pending_effect_count = len(pending_mask_run_effects(store, runtime))
-    ready = review_state in SUBJECT_MASK_COMPLETABLE_REVIEW_STATES and pending_effect_count == 0
+    # With background Apply effects, completion may outrun owed effects;
+    # approval stays gated on them.  A deferred review request recorded
+    # while effects are owed counts as the component's review state.
+    background = bool(getattr(runtime, "apply_effects_background", False))
+    deferred = pending_deferred_review(store, runtime) if background and pending_effect_count else None
+    if deferred is not None:
+        review_state = str(deferred.get("state") or review_state)
+    effects_block = bool(pending_effect_count) and not background
+    ready = review_state in SUBJECT_MASK_COMPLETABLE_REVIEW_STATES and not effects_block
     not_ready_reason = (
-        "pending_apply_effects" if pending_effect_count
+        "pending_apply_effects" if effects_block
         else "component_review_pending" if not ready else ""
     )
     return {
@@ -1046,8 +1058,9 @@ def _subject_mask_component_completion_guard(
         "completable_review_states": sorted(SUBJECT_MASK_COMPLETABLE_REVIEW_STATES),
         "pending_apply_effect_count": int(pending_effect_count),
         "not_ready_reason": not_ready_reason,
+        "review_state_deferred": deferred is not None,
         "required_action": (
-            "retry_pending_apply_effects" if pending_effect_count
+            "retry_pending_apply_effects" if effects_block
             else "set_component_review_status_before_completing_task" if not ready else ""
         ),
     }
@@ -1119,6 +1132,11 @@ def _subject_mask_runtime_state(
         "has_unapplied_session_edits": bool(unapplied_checkpoint_count > 0),
         "pending_apply_effect_count": int(pending_effect_count),
         "resumable_apply_id": str(pending_effects[0].get("apply_id") or "") if pending_effects else None,
+        "apply_effects_background": bool(getattr(runtime, "apply_effects_background", False)),
+        "apply_effects_status": (
+            apply_effects_status(store, runtime)
+            if pending_effect_count and getattr(runtime, "apply_effects_background", False) else None
+        ),
         "qc_status": "complete" if qc_current else "pending" if pending_effects else "not_recorded",
         "qc_edit_revision": qc_policy.get("edit_revision") if isinstance(qc_policy, Mapping) else None,
         "tail_refresh": tail_successor_offer(store, runtime),

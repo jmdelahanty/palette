@@ -8,11 +8,11 @@ from typing import Callable, Mapping
 from fisheye.shared.zarr_helpers import archive_metadata_publication_lock
 
 from .web_authorization_metadata import _browser_mutation_response_metadata
+from .web_keypoint_checkpoint_apply import apply_keypoint_checkpoints
 from .web_keypoint_checkpoints import (
     KEYPOINT_CHECKPOINT_SAVE_MODE,
     KEYPOINT_IMMUTABLE_DIRECT_SAVE_MODE,
     KeypointCheckpointConflict,
-    apply_keypoint_checkpoints,
     current_keypoint_payload,
     keypoint_browser_save_mode,
     stage_keypoint_checkpoint,

@@ -28,7 +28,22 @@ from .assignment_store import (
     LabelingStore,
     default_store_path,
 )
+from .web_subject_mask_apply_effects import (
+    completion_details,
+    latest_effects_attempt,
+    registry_scope_from_row,
+    reopen_mask_run,
+    run_apply_effects_locked,
+)
+from .web_subject_mask_apply_effects_worker import ApplyEffectsWorker, start_worker_for_state, wait_for_prior_apply_effects
+from .web_subject_mask_deferred_review import (
+    DEFERRABLE_REVIEW_STATES,
+    apply_review_status_locked,
+    record_deferred_review,
+)
 from .web_subject_mask_apply_state import (
+    classify_apply_checkpoints,
+    commit_mask_edit_revision,
     pending_mask_run_effects,
     require_mask_apply_ownership,
     tail_successor_offer,
@@ -337,7 +352,6 @@ from .web_runtimes import (
     _redact_labeler_runtime_payload,
     _refresh_keypoint_queue,
     _session_scope,
-    _subject_mask_checkpoint_mask,
     _subject_mask_component_completion_guard,
     _subject_mask_current_payload,
     _subject_mask_edit_revision,
@@ -574,6 +588,8 @@ class ServerConfig:
     production: bool = False
     validation_checklist_path: Path | None = None
     require_operator_validation_for_start: bool = False
+    background_apply_effects: bool = False
+    background_apply_wait_seconds: float = 300.0
 
 
 @dataclass
@@ -584,7 +600,7 @@ class ServerState:
     detect_sessions: dict[str, "DetectRuntimeSession"] = field(default_factory=dict)
     video_detect_sessions: dict[str, "VideoDetectRuntimeSession"] = field(default_factory=dict)
     subject_mask_sessions: dict[str, "SubjectMaskRuntimeSession"] = field(default_factory=dict)
-
+    apply_effects_worker: "ApplyEffectsWorker | None" = None
 
 
 
@@ -2543,6 +2559,12 @@ def _make_handler(state: ServerState):
                 if self._reject_browser_mutation_preflight(session, body, runtime):
                     return True
                 apply_id = str(body.get("apply_id") or "").strip() or str(uuid.uuid4())
+                if state.config.background_apply_effects and (prior := wait_for_prior_apply_effects(
+                        state, runtime, apply_id, timeout_seconds=state.config.background_apply_wait_seconds)):
+                    extra = {**prior, "state": _subject_mask_runtime_state(runtime, store=state.store)}
+                    error = _format_error(extra.pop("error"), details=extra.pop("details"), status=HTTPStatus.CONFLICT, extra=extra)
+                    self._write_json(error, status=HTTPStatus.CONFLICT)
+                    return True
                 claimed_apply_id: str | None = None
                 canonical_write_started = False
                 canonical_receipt_applied = False
@@ -2579,49 +2601,14 @@ def _make_handler(state: ServerState):
                             (row for row in pending_effects if str(row.get("apply_id") or "") == apply_id),
                             None,
                         )
+                        queue_retry = matching_pending is not None and state.config.background_apply_effects and (
+                            latest_effects_attempt(state.store, task_id=runtime.task_id, apply_id=apply_id).get("status") != "refused")
                         retry_lock = review_mod._refined_subject_write_lock(
                             runtime.zarr_path, refined_run=runtime.refined.run_name,
-                        ) if matching_pending is not None else nullcontext()
-                        with retry_lock:
-                            if matching_pending is not None:
-                                from .web_subject_mask_apply_qc import refresh_subject_mask_apply_qc_locked
-                                from .web_mask_tail_refresh import refresh_training_tail_after_mask_apply
-                                canonical_receipt_applied = True
-                                require_mask_apply_ownership(state.store, runtime, apply_id)
-                                fresh_root = review_mod.open_zarr_root(runtime.zarr_path, mode="a")
-                                runtime.root = fresh_root
-                                runtime.refined = review_mod._open_existing_refined_subject_run(
-                                    fresh_root, runtime.refined.run_name,
-                                )
-                                result.update(refresh_subject_mask_apply_qc_locked(
-                                    root=fresh_root,
-                                    refined_run=runtime.refined.run_name,
-                                    expected_edit_revision=int(matching_pending["edit_revision_after"]),
-                                ))
-                                runtime.refined = review_mod._open_existing_refined_subject_run(fresh_root, runtime.refined.run_name)
-                                result.update(refresh_training_tail_after_mask_apply(
-                                    store=state.store, runtime=runtime, apply_id=apply_id,
-                                    expected_mask_revision=int(matching_pending["edit_revision_after"]),
-                                ))
-                                if not _refresh_registry_for_scope(
-                                    store=state.store,
-                                    task_id=runtime.task_id,
-                                    recording_id=runtime.recording_id,
-                                    user=user,
-                                    workflow_kind="subject_mask_component",
-                                    scope=_session_scope(session),
-                                    zarr_path=runtime.zarr_path,
-                                    dataset_id=str(session.get("dataset_id") or "") or None,
-                                    zarr_use=str(session.get("zarr_use") or "") or None,
-                                ):
-                                    raise RuntimeError("Subject-mask registry refresh remains pending.")
-                            else:
-                                result["qc_status"] = "legacy_or_complete"
-                                result.update(tail_successor_offer(
-                                    state.store, runtime, apply_id=apply_id,
-                                    expected_mask_revision=int(result["edit_revision_after"]),
-                                ))
-                            mutation_event = state.store.record_event(
+                        ) if matching_pending is not None and not queue_retry else nullcontext()
+                        def _record_retry(derived=None):
+                            result.update(derived or {})
+                            return state.store.record_event(
                                 task_id=runtime.task_id,
                                 recording_id=runtime.recording_id,
                                 user=user,
@@ -2629,14 +2616,29 @@ def _make_handler(state: ServerState):
                                 target={"apply_id": apply_id},
                                 after=result,
                             )
-                            if matching_pending is not None:
-                                effects_complete = state.store.mark_session_checkpoint_apply_effects_complete(
-                                    task_id=runtime.task_id,
-                                    component_name=runtime.component_name,
-                                    apply_id=apply_id,
+
+                        with retry_lock:
+                            if queue_retry:  # background: the worker owns non-refused owed effects
+                                mutation_event = _record_retry({"effects": "queued", "qc_status": "pending"})
+                            elif matching_pending is not None:
+                                canonical_receipt_applied = True
+                                require_mask_apply_ownership(state.store, runtime, apply_id)
+                                retry_events = []
+                                run_apply_effects_locked(
+                                    store=state.store, runtime=runtime, root=reopen_mask_run(runtime),
+                                    apply_id=apply_id, expected_revision=int(matching_pending["edit_revision_after"]),
+                                    refresh_registry=_refresh_registry_for_scope,
+                                    registry_scope=registry_scope_from_row(session), user=user,
+                                    before_complete=lambda derived: retry_events.append(_record_retry(derived)),
                                 )
-                                if not effects_complete:
-                                    raise RuntimeError("Subject-mask Apply effects receipt remains pending.")
+                                mutation_event = retry_events[0]
+                            else:
+                                result["qc_status"] = "legacy_or_complete"
+                                result.update(tail_successor_offer(
+                                    state.store, runtime, apply_id=apply_id,
+                                    expected_mask_revision=int(result["edit_revision_after"]),
+                                ))
+                                mutation_event = _record_retry()
                     else:
                         checkpoints = state.store.claim_session_checkpoints_for_apply(
                             task_id=runtime.task_id,
@@ -2676,76 +2678,18 @@ def _make_handler(state: ServerState):
                                 runtime.root = fresh_root
                                 runtime.refined = fresh_refined
                                 edit_revision_before = _subject_mask_edit_revision(runtime)
-                                checkpoint_ids: list[str] = []
-                                applied_rows: list[int] = []
-                                edited_stacks: list[np.ndarray] = []
-                                before_area_total = 0
-                                after_area_total = 0
                                 compute_workers_used = 1
-                                stale_checkpoint_ids: list[str] = []
-                                stale_rows: list[int] = []
-                                tail_border_actions: list[dict[str, object]] = []
-                                masks_array = runtime.refined.group["masks_roi"]
-                                tail_border.preflight_run(runtime)
-                                row_chunk: int | None = None
-                                cached_chunk_index = -1
-                                cached_chunk: np.ndarray | None = None
-                                scoped_row_set = set(int(value) for value in runtime.roi_indices.tolist())
-                                for checkpoint in checkpoints:
-                                    checkpoint_target_path = str(checkpoint.get("target_run_path") or "")
-                                    if checkpoint_target_path != target_path:
-                                        raise ValueError(
-                                            f"checkpoint target mismatch: expected {target_path}, got {checkpoint_target_path}"
-                                        )
-                                    checkpoint_source_rowset = str(checkpoint.get("source_rowset_path") or "")
-                                    if checkpoint_source_rowset and checkpoint_source_rowset != source_rowset_path:
-                                        raise ValueError(
-                                            f"checkpoint source rowset mismatch: expected {source_rowset_path}, got {checkpoint_source_rowset}"
-                                        )
-                                    checkpoint_revision = int(checkpoint.get("target_edit_revision") or 0)
-                                    roi_idx = int(checkpoint.get("roi_idx") or 0)
-                                    if roi_idx not in scoped_row_set:
-                                        raise ValueError(f"checkpoint row {roi_idx} is outside the active task row scope.")
-                                    if checkpoint_revision != edit_revision_before:
-                                        stale_checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
-                                        stale_rows.append(roi_idx)
-                                        continue
-                                    metadata = checkpoint.get("metadata")
-                                    if isinstance(metadata, Mapping):
-                                        expected_identity = metadata.get("row_identity")
-                                        if isinstance(expected_identity, Mapping):
-                                            current_identity = _subject_mask_row_identity(runtime, roi_idx)
-                                            for key, expected_value in expected_identity.items():
-                                                if key not in current_identity:
-                                                    continue
-                                                if str(current_identity.get(key)) != str(expected_value):
-                                                    raise ValueError(
-                                                        f"checkpoint row identity mismatch for row {roi_idx}, field {key}: "
-                                                        f"expected {expected_value}, got {current_identity.get(key)}"
-                                                    )
-                                    edited_mask = _subject_mask_checkpoint_mask(checkpoint)
-                                    if row_chunk is None:
-                                        row_chunk = int(masks_array.chunks[0])
-                                    chunk_index = roi_idx // row_chunk
-                                    if chunk_index != cached_chunk_index:
-                                        chunk_start = chunk_index * row_chunk
-                                        cached_chunk = np.asarray(
-                                            masks_array[chunk_start:min(chunk_start + row_chunk, int(masks_array.shape[0]))],
-                                            dtype=np.uint8,
-                                        )
-                                        cached_chunk_index = chunk_index
-                                    assert cached_chunk is not None
-                                    current_stack = cached_chunk[roi_idx - chunk_index * row_chunk]
-                                    before_mask = (np.asarray(current_stack[runtime.comp_idx], dtype=np.uint8) > 0).astype(np.uint8)
-                                    edited_stack, tail_action = tail_border.prepare_apply_row(runtime, checkpoint, roi_idx=roi_idx, current_stack=current_stack, before_mask=before_mask, edited_mask=edited_mask)
-                                    if tail_action is not None:
-                                        tail_border_actions.append(tail_action)
-                                    checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
-                                    applied_rows.append(roi_idx)
-                                    edited_stacks.append(edited_stack)
-                                    before_area_total += int(before_mask.sum())
-                                    after_area_total += int(edited_mask.sum())
-                                if not edited_stacks:
+                                plan = classify_apply_checkpoints(
+                                    runtime, checkpoints, apply_id=apply_id, edit_revision=edit_revision_before,
+                                    target_path=target_path, source_rowset_path=source_rowset_path,
+                                )
+                                checkpoint_ids, applied_rows, edited_stacks = plan.checkpoint_ids, plan.applied_rows, plan.edited_stacks
+                                stale_checkpoint_ids, stale_rows, tail_border_actions = plan.stale_checkpoint_ids, plan.stale_rows, plan.tail_border_actions
+                                committed_checkpoint_ids, committed_rows = plan.committed_checkpoint_ids, plan.committed_rows
+                                before_area_total, after_area_total = plan.before_area_total, plan.after_area_total
+                                if committed_checkpoint_ids and edited_stacks:
+                                    raise ValueError(f"Apply {apply_id} mixes committed and unwritten checkpoints.")
+                                if not edited_stacks and not committed_checkpoint_ids:
                                     released_stale_checkpoint_count = 0
                                     if stale_checkpoint_ids:
                                         released_stale_checkpoint_count = state.store.release_session_checkpoints_apply(
@@ -2814,13 +2758,16 @@ def _make_handler(state: ServerState):
                                             update_reason="web_labeling_subject_mask_session_apply",
                                             compute_workers=compute_workers,
                                         )
-                                    tail_border.commit_actions(runtime, tail_border_actions, revision=int(edit_revision_before) + 1)
-                                    edit_revision_after = int(edit_revision_before) + 1
-                                    runtime.refined.group.attrs["edit_revision"] = int(edit_revision_after)
-                                    runtime.refined.group.attrs["edit_revision_updated_at_utc"] = datetime.now(timezone.utc).isoformat()
-                                    runtime.refined.group.attrs["edit_revision_last_apply_id"] = apply_id
-                                    if "mask_rle" in runtime.refined.group:
-                                        runtime.refined.group.attrs["mask_rle_stale_since_edit_revision"] = int(edit_revision_after)
+                                    if committed_checkpoint_ids:
+                                        # Finalize this apply's already-committed write; pixels,
+                                        # border actions, and the revision are not rewritten.
+                                        edit_revision_after = int(edit_revision_before)
+                                        edit_revision_before = edit_revision_after - 1
+                                        checkpoint_ids, applied_rows = committed_checkpoint_ids, committed_rows
+                                    else:
+                                        tail_border.commit_actions(runtime, tail_border_actions, revision=int(edit_revision_before) + 1)
+                                        edit_revision_after = int(edit_revision_before) + 1
+                                        commit_mask_edit_revision(runtime, apply_id=apply_id, revision=edit_revision_after)
                                     updated_count = state.store.mark_session_checkpoints_applied(
                                         checkpoint_ids=checkpoint_ids,
                                         apply_id=apply_id,
@@ -2835,79 +2782,61 @@ def _make_handler(state: ServerState):
                                             task_id=runtime.task_id,
                                             apply_id=apply_id,
                                         )
-                                    from .web_subject_mask_apply_qc import refresh_subject_mask_apply_qc_locked
-                                    from .web_mask_tail_refresh import refresh_training_tail_after_mask_apply
-                                    result_qc = refresh_subject_mask_apply_qc_locked(
-                                        root=fresh_root,
-                                        refined_run=runtime.refined.run_name,
-                                        expected_edit_revision=edit_revision_after,
-                                    )
-                                    runtime.refined = review_mod._open_existing_refined_subject_run(fresh_root, runtime.refined.run_name)
-                                    result_tail = refresh_training_tail_after_mask_apply(
-                                        store=state.store, runtime=runtime, apply_id=apply_id,
-                                        expected_mask_revision=edit_revision_after,
-                                    )
-                                    result = {
-                                        "apply_id": apply_id,
-                                        "already_applied": False,
-                                        "applied_checkpoint_count": int(updated_count),
-                                        "requested_checkpoint_count": len(checkpoints),
-                                        "stale_checkpoint_count": len(stale_checkpoint_ids),
-                                        "stale_rows": stale_rows,
-                                        "released_stale_checkpoint_count": int(released_stale_checkpoint_count),
-                                        "skipped_checkpoint_count": len(stale_checkpoint_ids),
-                                        "component_name": runtime.component_name,
-                                        "rows": applied_rows,
-                                        "edit_revision_before": edit_revision_before,
-                                        "edit_revision_after": edit_revision_after,
-                                        "before_area_px_total": before_area_total,
-                                        "after_area_px_total": after_area_total,
-                                        "compute_workers": int(compute_workers_used),
-                                        "canonical_zarr_mutated": True,
-                                        **result_qc,
-                                        **result_tail,
-                                    }
-                                    mutation_event = state.store.record_event(
-                                        task_id=runtime.task_id,
-                                        recording_id=runtime.recording_id,
-                                        user=user,
-                                        event_type="apply_subject_mask_session_checkpoints",
-                                        target={
+                                    applied_holder: dict[str, object] = {}
+
+                                    def _record_apply(derived):
+                                        applied_holder["result"] = {
                                             "apply_id": apply_id,
-                                            "component_name": runtime.component_name,
-                                            "refined_run": str(runtime.refined.run_name),
-                                            "target_run_path": target_path,
-                                        },
-                                        before={
-                                            "edit_revision": edit_revision_before,
-                                            "area_px_total": before_area_total,
-                                        },
-                                        after={
-                                            "edit_revision": edit_revision_after,
-                                            "area_px_total": after_area_total,
+                                            "already_applied": False,
                                             "applied_checkpoint_count": int(updated_count),
+                                            "requested_checkpoint_count": len(checkpoints),
+                                            "stale_checkpoint_count": len(stale_checkpoint_ids),
+                                            "stale_rows": stale_rows,
+                                            "released_stale_checkpoint_count": int(released_stale_checkpoint_count),
+                                            "skipped_checkpoint_count": len(stale_checkpoint_ids),
+                                            "component_name": runtime.component_name,
+                                            "rows": applied_rows,
+                                            "edit_revision_before": edit_revision_before,
+                                            "edit_revision_after": edit_revision_after,
+                                            "before_area_px_total": before_area_total,
+                                            "after_area_px_total": after_area_total,
                                             "compute_workers": int(compute_workers_used),
-                                        },
-                                    )
-                                    if not _refresh_registry_for_scope(
-                                        store=state.store,
-                                        task_id=runtime.task_id,
-                                        recording_id=runtime.recording_id,
-                                        user=user,
-                                        workflow_kind="subject_mask_component",
-                                        scope=_session_scope(session),
-                                        zarr_path=runtime.zarr_path,
-                                        dataset_id=str(session.get("dataset_id") or "") or None,
-                                        zarr_use=str(session.get("zarr_use") or "") or None,
-                                    ):
-                                        raise RuntimeError("Subject-mask registry refresh remains pending.")
-                                    effects_complete = state.store.mark_session_checkpoint_apply_effects_complete(
-                                        task_id=runtime.task_id,
-                                        component_name=runtime.component_name,
-                                        apply_id=apply_id,
-                                    )
-                                    if not effects_complete:
-                                        raise RuntimeError("Subject-mask Apply effects receipt remains pending.")
+                                            "canonical_zarr_mutated": True,
+                                            **derived,
+                                        }
+                                        applied_holder["event"] = state.store.record_event(
+                                            task_id=runtime.task_id,
+                                            recording_id=runtime.recording_id,
+                                            user=user,
+                                            event_type="apply_subject_mask_session_checkpoints",
+                                            target={
+                                                "apply_id": apply_id,
+                                                "component_name": runtime.component_name,
+                                                "refined_run": str(runtime.refined.run_name),
+                                                "target_run_path": target_path,
+                                            },
+                                            before={
+                                                "edit_revision": edit_revision_before,
+                                                "area_px_total": before_area_total,
+                                            },
+                                            after={
+                                                "edit_revision": edit_revision_after,
+                                                "area_px_total": after_area_total,
+                                                "applied_checkpoint_count": int(updated_count),
+                                                "compute_workers": int(compute_workers_used),
+                                            },
+                                        )
+                                    if state.config.background_apply_effects:
+                                        _record_apply({"effects": "queued", "qc_status": "pending"})
+                                    else:
+                                        run_apply_effects_locked(
+                                            store=state.store, runtime=runtime, root=fresh_root,
+                                            apply_id=apply_id, expected_revision=edit_revision_after,
+                                            refresh_registry=_refresh_registry_for_scope,
+                                            registry_scope=registry_scope_from_row(session), user=user,
+                                            after_derived=_record_apply,
+                                        )
+                                    result, mutation_event = applied_holder["result"], applied_holder["event"]
                 except Exception as exc:
                     if canonical_receipt_applied and claimed_apply_id:
                         try:
@@ -2942,6 +2871,8 @@ def _make_handler(state: ServerState):
                         return True
                     self._write_json(_format_error("apply_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
                     return True
+                if state.config.background_apply_effects and state.apply_effects_worker is not None:
+                    state.apply_effects_worker.wake(force_retry=True)
                 self._write_json(
                     _redact_labeler_runtime_payload(
                         {
@@ -2962,7 +2893,18 @@ def _make_handler(state: ServerState):
             if subject_mask_path == "/review-status":
                 if self._reject_browser_mutation_preflight(session, body, runtime):
                     return True
+                requested_state = str(body.get("state") or "").strip()
+                review_request = {key: body.get(key) for key in ("state", "method", "intended_use", "notes")}
                 pending_effect_count = len(pending_mask_run_effects(state.store, runtime))
+                if pending_effect_count and state.config.background_apply_effects and requested_state in DEFERRABLE_REVIEW_STATES:
+                    # Recorded now; the effects worker writes it once owed effects finish.
+                    record_deferred_review(state.store, runtime, user=user, request=review_request)
+                    if state.apply_effects_worker is not None:
+                        state.apply_effects_worker.wake()
+                    pending_effect_count = len(pending_mask_run_effects(state.store, runtime))
+                    if pending_effect_count:
+                        self._write_json({"ok": True, "deferred": True, "result": {"deferred_review_state": requested_state}, "state": _subject_mask_runtime_state(runtime, store=state.store)}, status=HTTPStatus.ACCEPTED)
+                        return True
                 if pending_effect_count:
                     self._write_json(
                         _format_error(
@@ -2994,7 +2936,6 @@ def _make_handler(state: ServerState):
                         status=HTTPStatus.CONFLICT,
                     )
                     return True
-                requested_state = str(body.get("state") or "").strip()
                 if not requested_state:
                     self._write_json(_format_error("payload_validation", details="Missing review state."), status=HTTPStatus.BAD_REQUEST)
                     return True
@@ -3006,48 +2947,10 @@ def _make_handler(state: ServerState):
                         require_mask_apply_ownership(state.store, runtime, "")
                         runtime.root = review_mod.open_zarr_root(runtime.zarr_path, mode="a")
                         runtime.refined = review_mod._open_existing_refined_subject_run(runtime.root, runtime.refined.run_name)
-                        before_component_reviews = runtime.refined.group.attrs.get("component_review_statuses")
-                        before_run_review = runtime.refined.group.attrs.get("refined_subject_mask_review_status")
-                        component_payload, run_payload = review_mod.apply_component_review_status(
-                            runtime.refined.parent,
-                            str(runtime.refined.run_name),
-                            runtime.refined.group,
-                            component_name=runtime.component_name,
-                            state=requested_state,
-                            method=str(body.get("method") or runtime.review_method or "manual"),
-                            intended_use=str(body.get("intended_use") or runtime.review_intended_use or "training"),
-                            reviewer=user,
-                            notes=str(body.get("notes") or runtime.review_notes or "").strip() or None,
-                            zarr_path=runtime.zarr_path,
-                        )
-                        mutation_event = state.store.record_event(
-                            task_id=runtime.task_id,
-                            recording_id=runtime.recording_id,
-                            user=user,
-                            event_type="set_review_status",
-                            target={
-                                "component_name": runtime.component_name,
-                                "refined_run": str(runtime.refined.run_name),
-                            },
-                            before={
-                                "component_review_statuses": dict(before_component_reviews) if isinstance(before_component_reviews, Mapping) else None,
-                                "run_review_status": dict(before_run_review) if isinstance(before_run_review, Mapping) else None,
-                            },
-                            after={
-                                "component_review_status": component_payload,
-                                "run_review_status": run_payload,
-                            },
-                        )
-                        _refresh_registry_for_scope(
-                            store=state.store,
-                            task_id=runtime.task_id,
-                            recording_id=runtime.recording_id,
-                            user=user,
-                            workflow_kind="subject_mask_component",
-                            scope=_session_scope(session),
-                            zarr_path=runtime.zarr_path,
-                            dataset_id=str(session.get("dataset_id") or "") or None,
-                            zarr_use=str(session.get("zarr_use") or "") or None,
+                        component_payload, run_payload, mutation_event = apply_review_status_locked(
+                            state.store, runtime, user=user, request=review_request,
+                            refresh_registry=_refresh_registry_for_scope,
+                            registry_scope={"scope": _session_scope(session), "dataset_id": str(session.get("dataset_id") or "") or None, "zarr_use": str(session.get("zarr_use") or "") or None},
                         )
                 except Exception as exc:
                     self._write_json(_format_error("review_status_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
@@ -4365,6 +4268,7 @@ def _make_handler(state: ServerState):
                             status=HTTPStatus.CONFLICT,
                         )
                         return
+                review_completion_guard = None
                 if str(session.get("workflow_kind") or "") == "subject_mask_component":
                     try:
                         runtime = _get_subject_mask_runtime(state, session)
@@ -4413,7 +4317,8 @@ def _make_handler(state: ServerState):
                         )
                         return
                 closed_session_ids = _open_session_ids_for_task(state.store, task_id)
-                updated = state.store.update_task_state(task_id=task_id, state="complete", user=user)
+                effects_details = completion_details(review_completion_guard)
+                updated = state.store.update_task_state(task_id=task_id, state="complete", user=user, completion_details=effects_details)
                 if closed_session_ids:
                     _drop_runtime_sessions(state, closed_session_ids)
                 self._write_json(
@@ -4714,6 +4619,7 @@ def _make_handler(state: ServerState):
                             status=HTTPStatus.CONFLICT,
                         )
                         return
+                review_completion_guard = None
                 if str(session.get("workflow_kind") or "") == "subject_mask_component":
                     try:
                         runtime = _get_subject_mask_runtime(state, session)
@@ -4762,7 +4668,8 @@ def _make_handler(state: ServerState):
                         )
                         return
                 closed_session_ids = _open_session_ids_for_task(state.store, str(task["task_id"]))
-                updated = state.store.update_task_state(task_id=str(task["task_id"]), state="complete", user=user)
+                effects_details = completion_details(review_completion_guard)
+                updated = state.store.update_task_state(task_id=str(task["task_id"]), state="complete", user=user, completion_details=effects_details)
                 if closed_session_ids:
                     _drop_runtime_sessions(state, closed_session_ids)
                 self._write_json(
@@ -4859,6 +4766,8 @@ def serve(config: ServerConfig) -> int:
     store = LabelingStore(config.store_path)
     store.initialize()
     state = ServerState(store=store, config=config)
+    if config.background_apply_effects:
+        start_worker_for_state(state, refresh_registry=lambda **kwargs: _refresh_registry_for_scope(**kwargs))
     server = ThreadingHTTPServer((config.host, int(config.port)), _make_handler(state))
     url_host = "localhost" if config.host in {"0.0.0.0", "::"} else config.host
     print(f"Palette labeling work UI: http://{url_host}:{config.port}")
@@ -4877,6 +4786,7 @@ def serve(config: ServerConfig) -> int:
     print(f"access_log={'enabled' if config.access_log else 'disabled'}")
     print(f"allow_non_loopback={'enabled' if config.allow_non_loopback else 'disabled'}")
     print(f"production={'enabled' if config.production else 'disabled'}")
+    print(f"background_apply_effects={'enabled' if config.background_apply_effects else 'disabled'}")
     safety = _server_safety_payload(config, include_admin_details=False)
     if safety["warnings"]:
         print(f"preflight_warnings={','.join(str(item) for item in safety['warnings'])}")
@@ -4888,6 +4798,8 @@ def serve(config: ServerConfig) -> int:
         pass
     finally:
         server.server_close()
+        if state.apply_effects_worker is not None:
+            state.apply_effects_worker.stop(timeout=60.0)
         store.close()
     return 0
 
@@ -7596,6 +7508,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Clearer alias for --require-operator-validation-for-start; blocks browser Start/Open and browser mutations until every required gate in --validation-checklist is passed or not_applicable.",
     )
     serve_cmd.add_argument(
+        "--background-apply-effects",
+        action="store_true",
+        help="Return subject-mask Apply after the pixel commit; a background worker runs QC, tail, and registry effects.",
+    )
+    serve_cmd.add_argument(
         "--admin-user",
         action="append",
         default=None,
@@ -7685,6 +7602,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 args.require_operator_validation_for_start
                 or args.require_operator_validation_for_browser_work
             ),
+            background_apply_effects=bool(getattr(args, "background_apply_effects", False)),
         )
         if args.command == "preflight":
             errors = _server_config_errors(config)

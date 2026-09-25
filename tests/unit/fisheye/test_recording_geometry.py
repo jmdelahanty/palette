@@ -25,11 +25,6 @@ from fisheye.shared.recording_geometry_recovery import (
     publish_recording_geometry_recovery,
     validate_recording_geometry_recovery_receipt,
 )
-from fisheye.shared.source_recording_identity import (
-    SOURCE_RECORDING_IDENTITY_PROFILE,
-    SOURCE_RECORDING_IDENTITY_PROFILE_ATTR,
-)
-from fisheye.utils import organize_recordings
 
 
 def _sha(payload: bytes) -> str:
@@ -41,13 +36,6 @@ def _json_bytes(payload: object, *, newline: bool = False) -> bytes:
     return result + (b"\n" if newline else b"")
 
 
-def _source_identity_meta() -> dict[str, str]:
-    return {
-        SOURCE_RECORDING_IDENTITY_PROFILE_ATTR: SOURCE_RECORDING_IDENTITY_PROFILE,
-        "recording_id": "recording-1",
-        "session_uuid": "session-1",
-        "camera_id": "2010093",
-    }
 
 
 def _rim_entry(
@@ -460,82 +448,8 @@ def test_bundle_verifier_rejects_tampered_asset(tmp_path: Path) -> None:
         verify_recording_geometry_bundle(tmp_path)
 
 
-def test_organizer_atomically_preserves_bundle_and_records_manifest(tmp_path: Path) -> None:
-    source = tmp_path / "staging"
-    _write_folder_bundle(source)
-    ordinary = source / "experiment.h5"
-    ordinary.write_bytes(b"h5-placeholder")
-    destination = tmp_path / "recordings" / "recording-1"
-    plan = organize_recordings.RecordingPlan(
-        name="recording-1",
-        source_dir=source,
-        dest_dir=destination,
-        raw_files=[organize_recordings.PlannedFile(ordinary, ordinary.name)],
-        cam_files=[],
-        derived_files=[],
-        camera_id="2010093",
-        meta=_source_identity_meta(),
-        geometry_bundle_source=source,
-    )
-
-    warnings = organize_recordings._apply_plan(
-        [plan],
-        create_empty=False,
-        write_manifest=True,
-        snapshot=None,
-        snapshot_mode="copy",
-        logger=None,
-        run_id="test-run",
-        log_path=None,
-    )
-
-    assert warnings == []
-    bundle = destination / "raw/recording_geometry_bundle"
-    assert verify_recording_geometry_bundle(bundle).contract_sha256
-    assert (source / "recording_geometry_contract.json").exists()
-    assert not ordinary.exists()
-    manifest = json.loads((destination / "recording_manifest.json").read_text())
-    assert manifest["recording_geometry_bundle"]["verification_status"] == "verified"
-    assert manifest["recording_geometry_bundle"]["snapshot_pointer_status"] == "verified"
 
 
-def test_organizer_fails_before_moves_when_geometry_is_invalid(tmp_path: Path) -> None:
-    source = tmp_path / "staging"
-    _write_folder_bundle(source)
-    ordinary = source / "experiment.h5"
-    ordinary.write_bytes(b"h5-placeholder")
-    observation = (
-        source
-        / "recording_geometry_assets/cameras/Cam2010093/daily_registration/"
-        "rim_observation/observation.json"
-    )
-    observation.write_bytes(b"tampered")
-    plan = organize_recordings.RecordingPlan(
-        name="recording-1",
-        source_dir=source,
-        dest_dir=tmp_path / "recordings" / "recording-1",
-        raw_files=[organize_recordings.PlannedFile(ordinary, ordinary.name)],
-        cam_files=[],
-        derived_files=[],
-        camera_id="2010093",
-        meta=_source_identity_meta(),
-        geometry_bundle_source=source,
-    )
-
-    with pytest.raises(organize_recordings.RecordingGeometryApplyError):
-        organize_recordings._apply_plan(
-            [plan],
-            create_empty=False,
-            write_manifest=True,
-            snapshot=None,
-            snapshot_mode="copy",
-            logger=None,
-            run_id="test-run",
-            log_path=None,
-        )
-
-    assert ordinary.exists()
-    assert not plan.dest_dir.exists()
 
 
 def test_folder_loader_rejects_inward_gate(tmp_path: Path) -> None:

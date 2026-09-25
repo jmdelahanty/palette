@@ -7,6 +7,7 @@ old mask task, seeds, annotations, and selectors are never retargeted here.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import tempfile
 
@@ -78,6 +79,53 @@ def _safe_name(value):
     if not value or value.startswith(".") or "/" in value or "\\" in value:
         raise ValueError("Expected a non-hidden run name")
     return value
+
+
+def _source_run_paths(root, *, mask_name, pose_name):
+    """Archive-relative run groups whose contents `_capture` reads."""
+
+    mask = root[f"refined_subject_masks_runs/{mask_name}"]
+    pose = root[f"refined_keypoints_runs/{pose_name}"]
+    paths = [
+        f"refined_subject_masks_runs/{mask_name}",
+        f"refined_keypoints_runs/{pose_name}",
+        f"crop_runs/{_safe_name(keypoint_source_crop_run_from_attributes(pose.attrs))}",
+    ]
+    if mask.attrs.get("source_subject_mask_run"):
+        paths.append(f"subject_mask_runs/{_safe_name(mask.attrs['source_subject_mask_run'])}")
+    seed_name = pose.attrs.get("source_seed_run")
+    if seed_name:
+        paths.append(f"keypoints_runs/{_safe_name(seed_name)}")
+        seed = root.get(f"keypoints_runs/{seed_name}")
+        seed_mask = seed.attrs.get("source_subject_mask_run") if seed is not None else None
+        if seed_mask:
+            paths.append(f"subject_mask_runs/{_safe_name(seed_mask)}")
+    return tuple(sorted(set(paths)))
+
+
+def _source_file_fingerprint(archive, run_paths):
+    """Stat identity of every file in the source runs.
+
+    Zarr stores replace files atomically (new inode) on every write, so any
+    write to a source run changes this fingerprint without re-reading and
+    re-hashing the array contents.
+    """
+
+    entries = []
+    for run_path in run_paths:
+        for directory, _dirs, files in os.walk(archive / run_path):
+            for name in files:
+                path = Path(directory) / name
+                stat = path.stat()
+                entries.append(
+                    (
+                        str(path.relative_to(archive)),
+                        stat.st_ino,
+                        stat.st_size,
+                        stat.st_mtime_ns,
+                    )
+                )
+    return tuple(sorted(entries))
 
 
 def _capture(root, *, mask_name, pose_name, revision, upgrade_target_rows=None):
@@ -537,6 +585,10 @@ def regenerate_training_tail_version(
         raise ValueError("A durable mask Apply ID is required")
     with archive_metadata_publication_lock(archive):
         root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+        source_runs = _source_run_paths(
+            root, mask_name=mask_name, pose_name=pose_name
+        )
+        source_fingerprint = _source_file_fingerprint(archive, source_runs)
         captured = _capture(
             root,
             mask_name=mask_name,
@@ -544,6 +596,8 @@ def regenerate_training_tail_version(
             revision=expected_mask_revision,
             upgrade_target_rows=upgrade_target_rows,
         )
+        if _source_file_fingerprint(archive, source_runs) != source_fingerprint:
+            raise ValueError("Mask or keypoint source changed during tail refresh")
         (
             arrays,
             labels,
@@ -597,6 +651,14 @@ def regenerate_training_tail_version(
                     raise ValueError("Immutable source crop/mask payload is invalid")
 
             def source_check(_current=None):
+                # Called before each child publication: the stat fingerprint
+                # detects any write to the captured source runs cheaply.
+                if _source_file_fingerprint(archive, source_runs) != source_fingerprint:
+                    raise ValueError(
+                        "Mask or keypoint source changed during tail refresh"
+                    )
+
+            def full_source_check():
                 current = zarr.open_group(
                     str(archive), mode="r", use_consolidated=False
                 )
@@ -656,6 +718,7 @@ def regenerate_training_tail_version(
                 for path in paths.values():
                     target_root[path].attrs["run_provenance"] = provenance
                 source_check()
+                full_source_check()
                 publications = publish_review_payload(
                     archive, local, paths, binding, source_check, resume=True
                 )

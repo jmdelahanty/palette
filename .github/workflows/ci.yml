@@ -308,7 +308,10 @@ jobs:
         with:
           name: pytest-duration-shard-${{ matrix.shard }}
           path: .ci-results/pytest-shard-${{ matrix.shard }}.*
-          if-no-files-found: warn
+          # .ci-results is a dot directory; upload-artifact@v4 skips hidden
+          # files by default, which silently dropped every duration artifact.
+          include-hidden-files: true
+          if-no-files-found: error
           retention-days: 14
 
       - name: Save canonical subject-shape source fixture

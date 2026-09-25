@@ -1,5 +1,7 @@
 # Organize Recordings: Logging Schema
 
+> **Retired 2026-09-24:** the legacy per-H5 organizer CLI described here was removed. New recordings enter only through transfer-v2 parent intake (`fisheye.utils.run_citrus_session_import`, launched by `scripts/submit_citrus_session_import_bsub.sh`). Kept for historical reference.
+
 This document describes the JSONL logging produced by
 `src/fisheye/utils/organize_recordings.py`.
 

@@ -27,6 +27,8 @@
     let uncertainApplyId = null;
     let tailRefreshResult = null;
     let foregroundGeneration = 0;
+    let effectsPollTimer = null;
+    const effectsPollMs = 3000;
     const lassoMinPointStepPx = 2;
 
     function setStatus(text, isError=false) {
@@ -295,8 +297,20 @@
       const completionGuard = state.component_review_completion_guard || {};
       const reviewState = componentReview.state || "pending";
       const pendingEffects = Number(state.pending_apply_effect_count || 0);
+      const background = Boolean(state.apply_effects_background);
+      const effectsStatus = state.apply_effects_status || {};
+      const effectsLine = !(background && pendingEffects > 0) ? ""
+        : effectsStatus.state === "failed"
+        ? "<p class=\"status error\"><b>Background update failed</b> " + escapeSupportText(effectsStatus.reason || "") +
+          " It will not retry automatically; the admin has been notified. Press Apply to retry it.</p>"
+        : effectsStatus.state === "retrying"
+        ? "<p class=\"status error\"><b>Background update failed</b> " + escapeSupportText(effectsStatus.reason || "") +
+          " Retrying automatically.</p>"
+        : "<p><b>Updating QC and tail versions…</b> Your mask edits are saved; you can keep working.</p>";
       const reviewWarning = pendingEffects > 0
-        ? "<p><b>Action needed</b> Finish the pending Apply before setting review status or completing this task.</p>"
+        ? (background
+          ? "<p>Review status can be set when the QC and tail update finishes.</p>"
+          : "<p><b>Action needed</b> Finish the pending Apply before setting review status or completing this task.</p>")
         : (completionGuard.ready ? "" :
           "<p><b>Action needed</b> Set component review before completing this task.</p>");
       const savedOffer = state.tail_refresh || tailRefreshResult;
@@ -325,7 +339,8 @@
         (payload.session_checkpoint ? " (current ROI is checkpoint overlay)" : "") + "</p>" +
         "<p><b>QC</b> " + (state.qc_status || "pending") +
         (pendingEffects ? " (" + pendingEffects + " Apply effect(s) pending)" : "") + "</p>" +
-        reviewWarning + tailSummary;
+        effectsLine + reviewWarning + tailSummary;
+      scheduleEffectsPoll();
       const seekInput = document.getElementById("roi-seek-input");
       if (seekInput) seekInput.value = payload.roi_idx;
       renderTailBorderStatus();
@@ -533,13 +548,35 @@
       return "apply-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
     }
 
+    function scheduleEffectsPoll() {
+      const state = payload?.state || {};
+      const owed = Boolean(state.apply_effects_background) && Number(state.pending_apply_effect_count || 0) > 0;
+      if (!owed) {
+        if (effectsPollTimer !== null) { clearTimeout(effectsPollTimer); effectsPollTimer = null; }
+        return;
+      }
+      if (effectsPollTimer !== null) return;
+      effectsPollTimer = setTimeout(async () => {
+        effectsPollTimer = null;
+        const generation = foregroundGeneration;
+        try {
+          const result = await api("/state");
+          mergeApplyState(result.state, generation);
+        } catch (_error) {
+          // Keep polling; a transient state read failure is not an Apply failure.
+        }
+        scheduleEffectsPoll();
+      }, effectsPollMs);
+    }
+
     function mergeApplyState(state, generation) {
       if (!payload || !state || busyAction || foregroundGeneration !== generation) return;
       // Apply runs in the background. Never replace current pixels, ROI, token,
       // navigation or a newer foreground request's checkpoint state.
       for (const key of ["edit_revision", "unapplied_session_edit_count", "has_unapplied_session_edits",
         "pending_apply_effect_count", "resumable_apply_id", "qc_status", "qc_edit_revision",
-        "component_review_completion_guard", "component_review_completion_ready", "tail_refresh"]) {
+        "component_review_completion_guard", "component_review_completion_ready", "tail_refresh",
+        "apply_effects_background", "apply_effects_status"]) {
         if (Object.prototype.hasOwnProperty.call(state, key)) payload.state[key] = state[key];
       }
       renderSummary();
@@ -549,7 +586,12 @@
       if (busyAction || applyInFlight) return;
       applyInFlight = true;
       const generation = foregroundGeneration;
-      const applyId = String(payload?.state?.resumable_apply_id || uncertainApplyId || newApplyId());
+      // In background mode a queued Apply is finished by the server; only a
+      // failed (refused) one is retried by reusing its apply_id.
+      const backgroundOwned = Boolean(payload?.state?.apply_effects_background)
+        && payload?.state?.apply_effects_status?.state !== "failed";
+      const resumable = backgroundOwned ? null : payload?.state?.resumable_apply_id;
+      const applyId = String(resumable || uncertainApplyId || newApplyId());
       setStatus("Applying saved edits and refreshing QC. You can continue editing other rows while this runs.");
       try {
         const result = await api("/apply", {
@@ -575,7 +617,9 @@
         const remaining = Number(payload?.state?.unapplied_session_edit_count || 0);
         const pendingEffects = Number(payload?.state?.pending_apply_effect_count || 0);
         const qcComplete = payload?.state?.qc_status === "complete" || result.result.qc_status === "complete";
-        const nextStep = pendingEffects > 0
+        const nextStep = result.result.effects === "queued"
+          ? " QC and tail versions are updating in the background; you can keep working."
+          : pendingEffects > 0
           ? " Follow-up checks are pending; use Apply again to finish them."
           : remaining > 0
           ? " " + remaining + " saved edit(s) still need applying."
@@ -598,6 +642,10 @@
             }
           }
           setStatus("Mask pixels were applied; follow-up checks are pending. " + error.message + " Use Apply again to retry the same saved operation.", true);
+        } else if (["previous_update_still_running", "previous_update_failed"].includes(error?.operatorSupport?.error)) {
+          uncertainApplyId = null;  // nothing was claimed; the saved edits are kept
+          mergeApplyState(error.apiData?.state, generation);
+          setStatus(error.message + " Your saved edits are kept; press Apply again later.", true);
         } else {
           showOperatorSupport(error, "session_request_failed");
         }
@@ -617,7 +665,9 @@
           body: JSON.stringify({state: reviewState, target_token: payload?.state?.target_token})
         });
         await loadCurrent();
-        setStatus("Component review state set to " + reviewState + "." + mutationStatusSuffix(result));
+        setStatus(result?.deferred
+          ? "Review state " + reviewState + " recorded; it is written once the background update finishes. You can complete the task now."
+          : "Component review state set to " + reviewState + "." + mutationStatusSuffix(result));
       } catch (error) {
         showOperatorSupport(error, "session_request_failed");
       } finally {
