@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from contextlib import nullcontext
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -742,7 +743,9 @@ def _build_handler(
                 return True
             # Every POST here writes rows or run attrs; take the archive lock the
             # labeling server's keypoint Apply holds, so the two never interleave.
-            with archive_metadata_publication_lock(str(state.session.zarr_path)):
+            # (In-memory test sessions have no archive on disk to protect.)
+            archive = Path(str(state.session.zarr_path)).expanduser()
+            with archive_metadata_publication_lock(archive) if archive.exists() else nullcontext():
                 return self._handle_api_post_locked(path, data)
 
         def _handle_api_post_locked(self, path: str, data: Mapping[str, Any]) -> bool:
