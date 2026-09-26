@@ -1127,11 +1127,19 @@
     window.addEventListener("keydown", (event) => {
       const targetTag = event.target?.tagName?.toLowerCase();
       if (targetTag === "input" || targetTag === "textarea" || targetTag === "select") return;
+      // Browser shortcuts (Ctrl/Cmd/Alt + key) are never editor hotkeys.
+      if (event.ctrlKey || event.metaKey || event.altKey) {
+        // The one exception: Ctrl/Cmd+Z undoes the last fill or stray removal.
+        if ((event.ctrlKey || event.metaKey) && (event.key === "z" || event.key === "Z")) {
+          event.preventDefault();
+          undoBulkEdit();
+        }
+        return;
+      }
       if (event.key === "n") { event.preventDefault(); nav(1); return; }
       if (event.key === "p") { event.preventDefault(); nav(-1); return; }
       if (event.key === "s") { event.preventDefault(); save(false); return; }
       if (event.key === "S") { event.preventDefault(); save(true); return; }
-      if ((event.ctrlKey || event.metaKey) && (event.key === "z" || event.key === "Z")) { event.preventDefault(); undoBulkEdit(); return; }
       if (event.key === "h" || event.key === "H") { event.preventDefault(); setTool("fill"); return; }
       if (event.key === "r" || event.key === "R") { event.preventDefault(); removeStrayPiecesAction(); return; }
       if (event.key === "b" || event.key === "B") { event.preventDefault(); setTool("paint"); return; }
