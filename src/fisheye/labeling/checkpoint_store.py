@@ -251,6 +251,7 @@ SUPERSEDED_TASK_STATE = "superseded"
 # for audit and ignored by claims, counts, and carry-forward.
 CHECKPOINT_STATES = ("active", "applying", "applied", "discarded")
 APPLY_RECEIPT_STATES = ("applying", "applied")
+APPLY_EFFECTS_STATES = ("not_ready", "pending", "complete")
 
 
 def _require_task_not_superseded(conn: sqlite3.Connection, task_id: str) -> None:

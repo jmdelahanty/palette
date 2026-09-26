@@ -1059,10 +1059,12 @@ def test_task_state_domain_is_enforced_and_reported(reviewed_archive, tmp_path):
     with pytest.raises(ValueError, match="Unknown task state"):
         store.upsert_task(recording_id="rec", task_id="x", workflow_kind="keypoints", state="finished")
     assert validate_labeling_sqlite(tmp_path / "review.sqlite")["state_violations"] == {}
-    store.conn.execute("UPDATE labeling_tasks SET state = 'typo' WHERE task_id = 'original-pose';")
-    store.conn.commit()
-    report = validate_labeling_sqlite(tmp_path / "review.sqlite")
-    assert report["state_violations"] == {"labeling_tasks": {"typo": 1}}
+    # Since schema v9 the database itself refuses an unknown state.
+    import sqlite3
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.conn.execute("UPDATE labeling_tasks SET state = 'typo' WHERE task_id = 'original-pose';")
+    store.conn.rollback()
     store.close()
 
 

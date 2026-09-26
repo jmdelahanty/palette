@@ -20,7 +20,8 @@ SCRIPT = (
 # does) and runs the JSON commands read from stdin against it.
 HARNESS = r"""
 const fs=require("fs"),vm=require("vm");
-const nodes=new Map(),frames=[],errors=[],requests=[];
+const nodes=new Map(),frames=[],errors=[],requests=[],listeners={};
+const press=(key,mods={})=>{for(const fn of listeners.keydown||[])fn({key,target:{tagName:"canvas"},preventDefault(){},ctrlKey:false,metaKey:false,altKey:false,shiftKey:false,...mods});};
 function surface(){const t={width:0,height:0};const ctx=new Proxy({},{get:(o,k)=>o[k]||(()=>{})});
   return Object.assign(t,{getContext:()=>ctx,style:{},addEventListener(){}});}
 function getNode(id){if(!nodes.has(id))nodes.set(id,Object.assign(surface(),{innerHTML:"",textContent:"",value:"overlay",
@@ -35,7 +36,7 @@ const viewport={imageWidth:w,imageHeight:h,view:{scale:1,offsetX:0,offsetY:0},ha
   drawImage(){},drawCanvas(){},imageToCanvas:(x,y)=>[x,y],pointerEvent:e=>e,canvasPoint:e=>[e.x,e.y],
   canvasToImage:(x,y)=>[x,y],beginPan:()=>false,panMove:()=>false,endPan(){},fit(){}};
 const context=vm.createContext({console,Number,Math,JSON,Uint8Array,Int32Array,
-  window:{PALETTE_SUBJECT_MASK_SESSION_ID:"test",addEventListener(){},requestAnimationFrame:fn=>frames.push(fn)},
+  window:{PALETTE_SUBJECT_MASK_SESSION_ID:"test",addEventListener(type,fn){(listeners[type]=listeners[type]||[]).push(fn);},requestAnimationFrame:fn=>frames.push(fn)},
   document:{getElementById:getNode,createElement:surface,querySelectorAll:()=>[]},
   ImageData:class{constructor(a,b){this.width=a;this.height=b;this.data=new Uint8Array(a*b*4);}},
   atob:v=>Buffer.from(v,"base64").toString("binary"),btoa:v=>Buffer.from(v,"binary").toString("base64"),
@@ -51,6 +52,7 @@ vm.runInContext(fs.readFileSync(process.argv[1],"utf8"),context);
   const out={};
   for(const step of input.steps){
     if(step.run)run(step.run);
+    if(step.press)press(step.press.key,step.press.mods||{});
     flush();
     out[step.name]={mask:maskBytes(),pieces:getNode("mask-pieces").textContent,
       warn:getNode("mask-pieces").classes.has("warn"),removeDisabled:getNode("remove-stray-button").disabled,
@@ -145,3 +147,34 @@ def test_fill_holes_tool_fills_only_the_clicked_piece():
     np.testing.assert_array_equal(_as_mask(out["filled"]["mask"], mask.shape), expected)
     assert "Filled 25 px" in out["filled"]["status"]
     np.testing.assert_array_equal(_as_mask(out["undone"]["mask"], mask.shape), mask)
+
+
+def test_browser_shortcuts_are_not_editor_hotkeys():
+    """Ctrl/Cmd/Alt + key belongs to the browser (e.g. Ctrl+R reloads)."""
+    mask = np.zeros((20, 20), np.uint8)
+    mask[5:15, 5:15] = 1
+    mask[1, 18] = 1  # One stray pixel.
+    out = _run(mask, [
+        {"name": "ctrl_r", "press": {"key": "r", "mods": {"ctrlKey": True}}},
+        {"name": "cmd_r", "press": {"key": "r", "mods": {"metaKey": True}}},
+        {"name": "alt_r", "press": {"key": "r", "mods": {"altKey": True}}},
+        {"name": "r", "press": {"key": "r"}},
+        {"name": "ctrl_z", "press": {"key": "z", "mods": {"ctrlKey": True}}},
+    ])
+    for name in ("ctrl_r", "cmd_r", "alt_r"):
+        np.testing.assert_array_equal(_as_mask(out[name]["mask"], mask.shape), mask, err_msg=name)
+    removed = mask.copy(); removed[1, 18] = 0
+    np.testing.assert_array_equal(_as_mask(out["r"]["mask"], mask.shape), removed)
+    np.testing.assert_array_equal(_as_mask(out["ctrl_z"]["mask"], mask.shape), mask)
+
+
+@pytest.mark.parametrize("name", ["detect_editor.js", "keypoint_editor.js", "video_detect_editor.js", "subject_mask_editor.js"])
+def test_every_editor_ignores_modified_keys_before_any_hotkey(name):
+    source = (SCRIPT.parent / name).read_text()
+    start = source.rindex('window.addEventListener("keydown"')
+    handler = source[start:]
+    guard = handler.index("event.ctrlKey || event.metaKey || event.altKey")
+    first_hotkey = handler.index('event.key === "')
+    busy = handler.find("foregroundBusy")
+    assert guard < first_hotkey
+    assert busy == -1 or guard < busy
