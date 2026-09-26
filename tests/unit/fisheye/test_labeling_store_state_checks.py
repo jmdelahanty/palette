@@ -146,3 +146,23 @@ def test_backup_validator_reports_out_of_domain_states_in_legacy_stores(tmp_path
     conn.commit()
     conn.close()
     assert validate_labeling_sqlite(path)["state_violations"] == {"labeling_tasks": {"typo": 1}}
+
+
+@pytest.mark.parametrize("dependent", [
+    "CREATE TRIGGER t_audit AFTER UPDATE ON labeling_tasks BEGIN SELECT 1; END;",
+    "CREATE VIEW v_open AS SELECT task_id FROM labeling_session_checkpoints;",
+])
+def test_upgrade_refuses_when_a_trigger_or_view_depends_on_a_rebuilt_table(tmp_path, dependent):
+    path = tmp_path / "s.sqlite"
+    store = LabelingStore(path)
+    _seed(store)
+    store.close()
+    _as_v8(path)
+    conn = sqlite3.connect(path)
+    conn.execute(dependent)
+    conn.commit()
+    conn.close()
+    before = {t: _table_sql(path, t) for t in STATE_TABLES}
+    with pytest.raises(RuntimeError, match="triggers or views depend"):
+        LabelingStore(path).initialize()
+    assert {t: _table_sql(path, t) for t in STATE_TABLES} == before

@@ -106,6 +106,21 @@ def _enforce_state_checks(conn: sqlite3.Connection) -> list[str]:
             "Labeling store has state values outside their allowed sets; fix them before "
             f"upgrading to schema {SCHEMA_VERSION}: {violations}"
         )
+    # The rebuild recreates tables and indexes only. A trigger or view on a
+    # rebuilt table would be dropped or left dangling, so refuse instead.
+    names = [table for table, _sql, _clauses in pending]
+    dependents = [
+        f"{row[0]} {row[1]}"
+        for row in conn.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE type IN ('trigger', 'view');"
+        )
+        if row[2] in names or any(re.search(rf"\b{name}\b", str(row[3] or "")) for name in names)
+    ]
+    if dependents:
+        raise RuntimeError(
+            f"Cannot upgrade to schema {SCHEMA_VERSION}: triggers or views depend on "
+            f"tables being rebuilt ({', '.join(dependents)}); drop or migrate them first."
+        )
     conn.commit()
     conn.execute("PRAGMA foreign_keys = OFF;")
     try:
