@@ -1,7 +1,8 @@
 """Palette's read-only Citrus transfer-v2 boundary and parent intake plans.
 
 Protocol-specific reconstruction is adapted from Citrus's reference validator at
-e881f5258be83231b62a00a6f9c4e5fcd69cd548 (scripts/recording_transfer_snapshot.py).
+859a7972104a829e1cc603a614cd4cf79e5cda06 (scripts/recording_transfer_snapshot.py):
+snapshot v2 with a producer-declared parent recording context (v1 or v2).
 The exact external canonicalization, frame-map and finalization grammar is kept
 here; Palette identity and JSON reading use their existing owners. This module
 never copies payloads, submits jobs, publishes authority, or mints import receipts.
@@ -27,6 +28,15 @@ from fisheye.shared.source_recording_identity import (
 )
 
 SNAPSHOT_SCHEMA = "citrus.recording_transfer_snapshot"
+SNAPSHOT_VERSION = 2
+CONSUMER_PROFILE = "parent_recording_intake_v2"
+CONTEXT_SCHEMA = "citrus.parent_recording_context"
+CONTEXT_FIELDS = (
+    "schema_id", "schema_version", "recording_type", "recording_subtype",
+    "behavior_mode", "recording_intent", "data_origin",
+)
+OBSERVATION_BINDING_DIR = "recording_observation_bindings"
+OBSERVATION_FINALIZATION_PATH = f"{OBSERVATION_BINDING_DIR}/finalized_collection.json"
 MARKER_SCHEMA = "citrus.transfer_completion_marker.v2"
 CONTROL_DIR = "_citrus_transfer"
 SNAPSHOT_PATH = f"{CONTROL_DIR}/snapshot.json"
@@ -203,6 +213,237 @@ def file_ref(root: Path, relative: str) -> dict:
     return {"path": relative, "size_bytes": after.st_size, "sha256": digest.hexdigest()}
 
 
+def _sha256_prefixed(value: bytes) -> str:
+    return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def _canonical_contract_sha256(value: Any) -> str:
+    return _sha256_prefixed(
+        json.dumps(
+            value, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+
+
+def parent_contexts(manifest: dict, cameras: list[str]) -> dict:
+    """Producer-declared context per camera parent, copied exactly.
+
+    Context v2 makes ``recording_subtype`` optional: omission means "not
+    specified" and stays absent. Media or H5 presence never implies intent.
+    """
+    contexts = manifest.get("recording_contexts")
+    require(
+        type(contexts) is dict and set(contexts) == set(cameras),
+        "recording_contexts must declare exactly every camera parent",
+    )
+    fields = set(CONTEXT_FIELDS)
+    for context in contexts.values():
+        require(
+            type(context) is dict
+            and set(context) <= fields
+            and fields - {"recording_subtype"} <= set(context),
+            "unsupported parent recording context fields",
+        )
+        require(
+            context["schema_id"] == CONTEXT_SCHEMA
+            and type(context["schema_version"]) is int
+            and context["schema_version"] in (1, 2),
+            "unsupported parent recording context version",
+        )
+        require(
+            context["schema_version"] != 1 or "recording_subtype" in context,
+            "parent context v1 requires recording_subtype",
+        )
+        for key in ("recording_type", "recording_subtype"):
+            if key not in context:
+                continue
+            label = identifier(context[key], key)
+            try:
+                encoded = label.encode("utf-8", errors="strict")
+            except UnicodeError as error:
+                raise TransferSnapshotError(f"invalid {key} UTF-8") from error
+            require(len(encoded) <= 1024, f"invalid {key} UTF-8 byte budget")
+            require(
+                not any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F for c in label),
+                f"invalid {key} control character",
+            )
+            require(
+                label.strip() == label
+                and not label.startswith("\ufeff")
+                and not label.endswith("\ufeff"),
+                f"invalid {key} whitespace",
+            )
+        for key, values in (
+            ("behavior_mode", ("free", "embedded", "none")),
+            ("recording_intent", ("stimulus_experiment", "recording_only")),
+            ("data_origin", ("acquired", "synthetic")),
+        ):
+            require(context[key] in values, f"unsupported parent context {key}")
+    # A bound Citrus observation cannot belong to a recording-only parent.
+    observations = manifest.get("observation_contexts", [])
+    require(type(observations) is list, "invalid observation context list")
+    for observation in observations:
+        require(type(observation) is dict, "invalid observation context")
+        envelope = observation.get("observation_identity")
+        require(
+            type(envelope) is dict and type(envelope.get("identity")) is dict,
+            "invalid observation identity envelope",
+        )
+        identity = envelope["identity"]
+        require(type(identity.get("camera")) is dict, "missing observation camera identity")
+        camera = identity["camera"].get("source_camera_stream_id")
+        require(isinstance(camera, str), "invalid observation source camera stream")
+        require(camera in contexts, "observation context camera missing from recording_contexts")
+        require(
+            contexts[camera]["recording_intent"] == "stimulus_experiment",
+            "recording_only parent has a Citrus observation binding",
+        )
+    return contexts
+
+
+def require_observation_binding_transfer_admission(
+    root: Path, manifest: dict, refs: dict[str, dict]
+) -> None:
+    """Rebuild the producer's transfer gate for bound sessions.
+
+    Transfer safety only, not Palette admission: a bound session must carry
+    Orange's finalized collection, each H5 and its post-close receipt with
+    matching bytes. Organization re-reads these for Palette's own checks.
+    """
+    binding_paths = {
+        path
+        for path in refs
+        if PurePosixPath(path).parts[:1] == (OBSERVATION_BINDING_DIR,)
+    }
+    projected = manifest.get("recording_observation_bindings")
+    if projected is None:
+        require(
+            not binding_paths,
+            "observation binding exists without finalized manifest projection",
+        )
+        return
+    require(isinstance(projected, dict), "invalid recording-observation finalization projection")
+    require(
+        OBSERVATION_FINALIZATION_PATH in refs,
+        "bound recording lacks finalized observation collection",
+    )
+    collection = strict_json(root / OBSERVATION_FINALIZATION_PATH)
+    require(
+        collection == projected,
+        "recording manifest observation projection differs from finalized collection",
+    )
+    require(
+        collection.get("schema_id") == "orange.recording.observation_binding_finalization"
+        and type(collection.get("schema_version")) is int
+        and collection["schema_version"] == 1
+        and collection.get("status") == "finalized"
+        and collection.get("binding_status") == "bound",
+        "recording observation binding is not finalized and bound",
+    )
+    require(
+        collection.get("recording_id") == manifest.get("session_id"),
+        "observation finalization recording identity mismatch",
+    )
+    contexts = collection.get("observation_contexts")
+    require(
+        isinstance(contexts, list)
+        and bool(contexts)
+        and type(collection.get("context_count")) is int
+        and collection["context_count"] == len(contexts),
+        "invalid finalized observation context set",
+    )
+    require(
+        manifest.get("observation_contexts") == contexts,
+        "recording manifest observation contexts differ from finalization",
+    )
+    seen_contexts: set[str] = set()
+    seen_h5: set[str] = set()
+    experiment_id = identifier(
+        collection.get("citrus_experiment_id"), "Citrus experiment identity"
+    )
+    for context in contexts:
+        require(
+            isinstance(context, dict) and context.get("status") == "bound",
+            "observation context is not bound",
+        )
+        context_id = identifier(
+            context.get("observation_context_id"), "observation context identity"
+        )
+        require(context_id not in seen_contexts, "duplicate observation context identity")
+        seen_contexts.add(context_id)
+        h5 = context.get("citrus_h5")
+        require(isinstance(h5, dict), "missing finalized Citrus H5 reference")
+        h5_relative = normalized_path(h5.get("relative_path"))
+        require(
+            h5_relative in refs and Path(h5_relative).suffix.lower() in (".h5", ".hdf5"),
+            "finalized Citrus H5 is absent from transfer inventory",
+        )
+        require(h5_relative not in seen_h5, "duplicate finalized Citrus H5 reference")
+        seen_h5.add(h5_relative)
+        h5_ref = refs[h5_relative]
+        require(
+            type(h5.get("size_bytes")) is int
+            and h5["size_bytes"] == h5_ref["size_bytes"]
+            and h5.get("sha256") == "sha256:" + h5_ref["sha256"],
+            "finalized Citrus H5 size or SHA-256 mismatch",
+        )
+        receipt_ref = context.get("finalized_receipt")
+        require(isinstance(receipt_ref, dict), "missing finalized Citrus H5 receipt reference")
+        receipt_relative = normalized_path(receipt_ref.get("relative_path"))
+        require(
+            receipt_relative in refs
+            and PurePosixPath(receipt_relative).parts[:2]
+            == (OBSERVATION_BINDING_DIR, "receipts"),
+            "finalized receipt is absent from transfer inventory",
+        )
+        receipt_inventory = refs[receipt_relative]
+        declared_size = receipt_ref.get("size_bytes", receipt_inventory["size_bytes"])
+        require(
+            type(declared_size) is int
+            and declared_size == receipt_inventory["size_bytes"]
+            and receipt_ref.get("sha256") == "sha256:" + receipt_inventory["sha256"],
+            "finalized receipt byte binding mismatch",
+        )
+        receipt = strict_json(root / receipt_relative)
+        contract = receipt.get("contract")
+        require(
+            receipt.get("schema_id") == "citrus.recording_observation_finalized_receipt"
+            and type(receipt.get("schema_version")) is int
+            and receipt["schema_version"] == 1
+            and receipt.get("canonicalization") == "canonical_json_utf8_sort_keys_compact_v1"
+            and isinstance(contract, dict),
+            "unsupported finalized Citrus H5 receipt",
+        )
+        contract_sha = _canonical_contract_sha256(contract)
+        require(
+            receipt.get("contract_sha256") == contract_sha
+            and receipt.get("receipt_id") == "obsbindfin_" + contract_sha.removeprefix("sha256:")
+            and receipt_ref.get("contract_sha256") == contract_sha
+            and receipt_ref.get("receipt_id") == receipt.get("receipt_id"),
+            "finalized Citrus H5 receipt envelope mismatch",
+        )
+        require(
+            contract.get("schema_id") == "citrus.recording_observation_finalized_receipt"
+            and type(contract.get("schema_version")) is int
+            and contract["schema_version"] == 1
+            and contract.get("session_status") == "COMPLETE"
+            and contract.get("observation_context_id") == context_id
+            and contract.get("citrus_experiment_id") == experiment_id
+            and contract.get("h5_artifact") == h5,
+            "finalized Citrus H5 receipt contract mismatch",
+        )
+        identity_camera = context["observation_identity"]["identity"]["camera"]
+        target = contract.get("target")
+        require(
+            type(target) is dict
+            and target.get("source_camera_stream_id")
+            == identity_camera.get("source_camera_stream_id")
+            and target.get("camera_id") == identity_camera.get("camera_id"),
+            "finalized receipt camera differs from observation context",
+        )
+
+
 def inventory(root: Path, marker_name: str, *, destination: bool = False) -> list[dict]:
     result = []
     for directory, dirs, files in os.walk(root, followlinks=False):
@@ -366,7 +607,9 @@ def build_snapshot(root: Path, marker_name: str, *, destination: bool = False) -
     require(isinstance(cameras, list) and cameras, "missing cameras")
     cameras = [identifier(c, "camera serial") for c in cameras]
     require(len(cameras) == len(set(cameras)), "duplicate camera serial")
+    contexts = parent_contexts(manifest, cameras)
     declared_root = manifest.get("recording_folder", "")
+    require_observation_binding_transfer_admission(root, manifest, refs)
     clips = manifest.get("clips")
     require(
         isinstance(clips, list) and clips and (rolling or len(clips) == 1),
@@ -374,7 +617,11 @@ def build_snapshot(root: Path, marker_name: str, *, destination: bool = False) -
     )
     ids = set()
     parents = {
-        c: {"parent_key": {"recording_id": session, "camera_serial": c}, "clips": []}
+        c: {
+            "parent_key": {"recording_id": session, "camera_serial": c},
+            "recording_context": contexts[c],
+            "clips": [],
+        }
         for c in sorted(cameras)
     }
     previous: dict[tuple, int] = {}
@@ -628,7 +875,7 @@ def build_snapshot(root: Path, marker_name: str, *, destination: bool = False) -
     )
     return {
         "schema_id": SNAPSHOT_SCHEMA,
-        "schema_version": 1,
+        "schema_version": SNAPSHOT_VERSION,
         "canonicalization": "json_sort_keys_ascii_compact_lf_v1",
         "recording_layout": layout,
         "recording_payload_kind": payload,
@@ -706,6 +953,8 @@ class ParentRecordingIntakePlan:
     snapshot_id: str
     total_frames: int
     clips: tuple[IntakeClip, ...]
+    # Producer-declared citrus.parent_recording_context, exactly as delivered.
+    recording_context: dict
 
 
 def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
@@ -731,14 +980,14 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
         "schema_id": MARKER_SCHEMA,
         "schema_version": 2,
         "status": "transfer_complete",
-        "required_consumer_profile": "parent_recording_intake_v1",
+        "required_consumer_profile": CONSUMER_PROFILE,
         "snapshot_id": identity,
         "snapshot": {
             "path": SNAPSHOT_PATH,
             "size_bytes": len(data),
             "sha256": hashlib.sha256(data).hexdigest(),
             "schema_id": SNAPSHOT_SCHEMA,
-            "schema_version": 1,
+            "schema_version": SNAPSHOT_VERSION,
         },
         "recording_layout": snapshot["recording_layout"],
         "recording_payload_kind": snapshot["recording_payload_kind"],
@@ -935,6 +1184,7 @@ def plan_parent_recordings(
                 current.snapshot_id,
                 total_frames,
                 tuple(clips),
+                dict(parent["recording_context"]),
             )
         )
     return tuple(plans)

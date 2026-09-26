@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:citrus:recording-transfer:v2",
-  "title": "Parent-recording transfer snapshot and v2 completion marker",
+  "$id": "urn:citrus:recording-transfer:parent-context-v2",
+  "title": "Parent-recording snapshot v2, context v1/v2 and completion marker v2",
   "description": "Shape validation only. Verify digests, source manifest semantics, exact frame correspondence, membership, and finalization with the documented contract. Does not grant scientific/receipt admission.",
   "oneOf": [
     {
@@ -230,14 +230,37 @@
         }
       }
     },
+    "recording_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_id", "schema_version", "recording_type", "behavior_mode", "recording_intent", "data_origin"],
+      "properties": {
+        "schema_id": {"const": "citrus.parent_recording_context"},
+        "schema_version": {"type": "integer", "enum": [1, 2]},
+        "recording_type": {"$ref": "#/$defs/recordingLabel"},
+        "recording_subtype": {"$ref": "#/$defs/recordingLabel"},
+        "behavior_mode": {"enum": ["free", "embedded", "none"]},
+        "recording_intent": {"enum": ["stimulus_experiment", "recording_only"]},
+        "data_origin": {"enum": ["acquired", "synthetic"]}
+      },
+      "if": {"properties": {"schema_version": {"const": 1}}},
+      "then": {"required": ["recording_subtype"]}
+    },
+    "recordingLabel": {
+      "type": "string", "minLength": 1, "maxLength": 1024,
+      "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f-\\u009f])(?![\\s\\uFEFF])[\\s\\S]*[^\\s\\uFEFF]$",
+      "description": "Nonempty, well-formed UTF-8 label, at most 1024 UTF-8 bytes (parser enforced; maxLength counts characters). No C0/DEL/C1 controls, no boundary ECMA whitespace or BOM. Never trim or synthesize."
+    },
     "parent": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "parent_key",
+        "recording_context",
         "clips"
       ],
       "properties": {
+        "recording_context": {"$ref": "#/$defs/recording_context"},
         "parent_key": {
           "type": "object",
           "additionalProperties": false,
@@ -289,7 +312,7 @@
         },
         "schema_version": {
           "type": "integer",
-          "const": 1
+          "const": 2
         },
         "canonicalization": {
           "const": "json_sort_keys_ascii_compact_lf_v1"
@@ -411,7 +434,7 @@
           "const": "transfer_complete"
         },
         "required_consumer_profile": {
-          "const": "parent_recording_intake_v1"
+          "const": "parent_recording_intake_v2"
         },
         "snapshot_id": {
           "type": "string",
@@ -445,7 +468,7 @@
             },
             "schema_version": {
               "type": "integer",
-              "const": 1
+              "const": 2
             }
           }
         },

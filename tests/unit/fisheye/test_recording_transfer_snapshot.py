@@ -22,9 +22,9 @@ from fisheye.shared.recording_transfer_snapshot import (
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures/recording_transfer_v2"
 GOLDENS = {
-    "whole": "8dfeac35339f39b031cb2b33b4358cba0435bcad2e6967322518755d24d5ae21",
-    "rolling": "5f25f35c56561e6d8ac5c00948948373d18f1d9eafedbfedc019f0c6a8e5a97f",
-    "failed_optional_proof": "51ab32e4d2f4be1ebf58703181a1c8bb1a6927e0b1db3f3a0d5546f06679795b",
+    "whole": "42f31170f90744e0969c43fa99b630832fe643077db771bcf11c0b49ad8c4bfc",
+    "rolling": "ad6f52b43b706f1316c450f6476ec0c1f3161df6e201df7abc42805627755cdf",
+    "failed_optional_proof": "5cc2beff1c5a289ce3d957a9c17775f1d73c87f86d291b830788f40623eef5db",
 }
 REVIEW_CASES = json.loads((FIXTURES / "review_cases.json").read_bytes())
 

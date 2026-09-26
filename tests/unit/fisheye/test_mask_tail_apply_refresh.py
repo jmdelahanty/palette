@@ -919,4 +919,96 @@ def test_carry_forward_moves_stranded_edit_into_newest_version(reviewed_archive,
     # Carried once; a second plan finds nothing left to carry.
     again = [p for p in carry.plan_recording(store, "rec") if "rows" in p][0]["rows"]
     assert {r["disposition"] for r in again} <= {"already_present", "target_edit_newer"}
+
+
+def _staged_successor_keypoint_edits(reviewed_archive, tmp_path):
+    """Stage an edit on every row of a fresh successor's keypoint task."""
+    from fisheye.labeling.web_keypoint_checkpoints import stage_keypoint_checkpoint
+    from fisheye.labeling.web_mask_tail_refresh import (
+        refresh_training_tail_after_mask_apply,
+    )
+    from fisheye.labeling.web_runtimes import _get_keypoint_runtime
+    from types import SimpleNamespace
+
+    store, runtime = browser_context(reviewed_archive, tmp_path)
+    offer = refresh_training_tail_after_mask_apply(
+        store=store, runtime=runtime, apply_id="mask-apply", expected_mask_revision=1
+    )
+    task_id = next(t["task_id"] for t in offer["tail_refresh_tasks"] if t["workflow_kind"] == "keypoints")
+    lease = store.create_session(task_id=task_id, user="reviewer")
+    keypoints = _get_keypoint_runtime(
+        SimpleNamespace(keypoint_sessions={}), store.get_session(lease.session_id)
+    )
+    run = keypoints.review_session.refined_run
+    expected = {}
+    for position, roi in enumerate(np.asarray(keypoints.review_session.failures).tolist()):
+        keypoints.position = position
+        points = np.asarray(keypoints.review_session.kp_roi_arr[roi], dtype=np.float64).copy()
+        points[~np.isfinite(points).all(axis=1)] = [64.0, 70.0]  # A save needs every landmark.
+        points[16] += 1.5 + position
+        stage_keypoint_checkpoint(
+            store, keypoints, user="reviewer", operation="replace_points", points=points.tolist()
+        )
+        expected[roi] = points
+    assert len(expected) >= 2
+    return store, keypoints, run, expected
+
+
+def test_batch_keypoint_apply_writes_every_row_of_a_successor_version(reviewed_archive, tmp_path):
+    """Regression (2026-09-26): multi-row Apply into a sharded v2 successor failed."""
+    from fisheye.labeling.web_keypoint_checkpoint_apply import apply_keypoint_checkpoints
+    from fisheye.labeling.web_keypoint_checkpoints import keypoint_checkpoint_state
+
+    path, _root, _result = reviewed_archive
+    store, keypoints, run, expected = _staged_successor_keypoint_edits(reviewed_archive, tmp_path)
+    state = keypoint_checkpoint_state(store, keypoints)
+    apply_keypoint_checkpoints(
+        store, keypoints, editor, apply_id="batch",
+        checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+    )
+    stored = zarr.open_group(str(path), mode="r", use_consolidated=False)[
+        f"refined_keypoints_runs/{run}/keypoints_roi"
+    ]
+    for roi, points in expected.items():
+        np.testing.assert_allclose(np.asarray(stored[roi]), points, equal_nan=True)
+    store.close()
+
+
+def test_interrupted_batch_apply_fails_closed_under_the_archive_lock(
+    reviewed_archive, tmp_path, monkeypatch
+):
+    from fisheye.labeling import web_keypoint_checkpoint_apply as apply_mod
+    from fisheye.labeling.web_keypoint_checkpoints import keypoint_checkpoint_state
+    from fisheye.shared.zarr_helpers import archive_publication_lock_held_by_current_thread
+
+    path, _root, _result = reviewed_archive
+    store, keypoints, run, expected = _staged_successor_keypoint_edits(reviewed_archive, tmp_path)
+    before = np.asarray(
+        zarr.open_group(str(path), mode="r", use_consolidated=False)[f"refined_keypoints_runs/{run}/keypoints_roi"][:]
+    ).copy()
+    real_write, real_fail_closed = apply_mod._write_intended_rows, apply_mod._fail_closed_recovered_rows
+    held = []
+
+    def interrupted(*args, **kwargs):
+        real_write(*args, **kwargs)
+        raise OSError("storage went away mid-apply")
+
+    def recording_fail_closed(session, rows):
+        held.append(archive_publication_lock_held_by_current_thread(str(session.zarr_path)))
+        real_fail_closed(session, rows)
+
+    monkeypatch.setattr(apply_mod, "_write_intended_rows", interrupted)
+    monkeypatch.setattr(apply_mod, "_fail_closed_recovered_rows", recording_fail_closed)
+    state = keypoint_checkpoint_state(store, keypoints)
+    with pytest.raises(OSError):
+        apply_mod.apply_keypoint_checkpoints(
+            store, keypoints, editor, apply_id="interrupted",
+            checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+        )
+    assert held and all(held)
+    after = np.asarray(
+        zarr.open_group(str(path), mode="r", use_consolidated=False)[f"refined_keypoints_runs/{run}/keypoints_roi"][:]
+    )
+    changed = {i for i in range(len(after)) if not np.array_equal(after[i], before[i], equal_nan=True)}
+    assert changed <= set(expected)
     store.close()

@@ -64,16 +64,13 @@ def test_import_log_errors_cannot_be_ignored(tmp_path: Path, payload: str) -> No
         _read_zarr_paths_from_import_log(log)
 
 
-def test_runner_requires_explicit_recording_context(capsys) -> None:
-    with pytest.raises(SystemExit) as exc:
-        import_mod.main(["/unused"])
-    assert exc.value.code == 2
-    assert "--recording-type" in capsys.readouterr().err
-
-
 @pytest.mark.parametrize(
     "legacy_flag",
-    ["--transfer-v2", "--run-h5-diagnostics", "--run-video-diagnostics", "--no-rename-cams"],
+    [
+        "--transfer-v2", "--run-h5-diagnostics", "--run-video-diagnostics", "--no-rename-cams",
+        # Recording context now comes only from the producer's transfer snapshot.
+        "--recording-only",
+    ],
 )
 def test_legacy_poller_options_are_gone(legacy_flag, capsys) -> None:
     with pytest.raises(SystemExit) as exc:
@@ -87,8 +84,5 @@ def test_runner_dispatches_only_to_transfer_parent_workflow(monkeypatch) -> None
 
     seen = []
     monkeypatch.setattr(workflow, "run_transfer_parent_workflow", lambda args: seen.append(args) or 0)
-    assert import_mod.main([
-        "/session", "--recording-type", "behavior", "--recording-subtype", "chaser",
-        "--behavior-mode", "free",
-    ]) == 0
+    assert import_mod.main(["/session"]) == 0
     assert seen[0].dry_run and not seen[0].apply
