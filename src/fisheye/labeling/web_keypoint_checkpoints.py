@@ -157,6 +157,16 @@ def _write_rows(array: object, rows: Sequence[int], values: Sequence[object]) ->
         array[int(rows[0])] = values[0]  # type: ignore[index]
         return
     index = np.asarray(rows, dtype=np.int64)
+    if getattr(array, "shards", None) is not None:
+        # zarr 3.1.3 cannot write an orthogonal row selection into a sharded
+        # multi-dimensional array ("shape mismatch ... indexing result of
+        # shape (n,)"). Rewrite the covering row span instead: the caller holds
+        # the archive lock, and each shard is still written once.
+        lo, hi = int(index.min()), int(index.max()) + 1
+        block = np.asarray(array[lo:hi]).copy()  # type: ignore[index]
+        block[index - lo] = np.asarray(values)
+        array[lo:hi] = block  # type: ignore[index]
+        return
     oindex = getattr(array, "oindex", None)
     if oindex is not None:
         oindex[index] = values

@@ -698,3 +698,51 @@ def test_completed_browser_effect_refuses_damaged_publication(
             )
     finally:
         store.close()
+
+
+def test_batch_keypoint_apply_writes_every_row_of_a_successor_version(reviewed_archive, tmp_path):
+    """Regression (2026-09-26): multi-row Apply into a sharded v2 successor failed."""
+    from fisheye.labeling.web_keypoint_checkpoint_apply import apply_keypoint_checkpoints
+    from fisheye.labeling.web_keypoint_checkpoints import (
+        keypoint_checkpoint_state,
+        stage_keypoint_checkpoint,
+    )
+    from fisheye.labeling.web_mask_tail_refresh import (
+        refresh_training_tail_after_mask_apply,
+    )
+    from fisheye.labeling.web_runtimes import _get_keypoint_runtime
+    from types import SimpleNamespace
+
+    path, root, _result = reviewed_archive
+    store, runtime = browser_context(reviewed_archive, tmp_path)
+    offer = refresh_training_tail_after_mask_apply(
+        store=store, runtime=runtime, apply_id="mask-apply", expected_mask_revision=1
+    )
+    task_id = next(t["task_id"] for t in offer["tail_refresh_tasks"] if t["workflow_kind"] == "keypoints")
+    lease = store.create_session(task_id=task_id, user="reviewer")
+    keypoints = _get_keypoint_runtime(
+        SimpleNamespace(keypoint_sessions={}), store.get_session(lease.session_id)
+    )
+    run = keypoints.review_session.refined_run
+    expected = {}
+    for position, roi in enumerate(np.asarray(keypoints.review_session.failures).tolist()):
+        keypoints.position = position
+        points = np.asarray(keypoints.review_session.kp_roi_arr[roi], dtype=np.float64).copy()
+        points[~np.isfinite(points).all(axis=1)] = [64.0, 70.0]  # A save needs every landmark.
+        points[16] += 1.5 + position
+        stage_keypoint_checkpoint(
+            store, keypoints, user="reviewer", operation="replace_points", points=points.tolist()
+        )
+        expected[roi] = points
+    assert len(expected) >= 2
+    state = keypoint_checkpoint_state(store, keypoints)
+    apply_keypoint_checkpoints(
+        store, keypoints, editor, apply_id="batch",
+        checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+    )
+    stored = zarr.open_group(str(path), mode="r", use_consolidated=False)[
+        f"refined_keypoints_runs/{run}/keypoints_roi"
+    ]
+    for roi, points in expected.items():
+        np.testing.assert_allclose(np.asarray(stored[roi]), points, equal_nan=True)
+    store.close()
