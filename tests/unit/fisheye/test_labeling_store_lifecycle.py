@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .labeling_store_legacy import strip_state_checks
 import base64
 import hashlib
 import json
@@ -1091,6 +1092,7 @@ def test_v7_sidecar_migration_backfills_current_and_historical_snapshot_digests(
         "UPDATE labeling_checkpoint_apply_receipts SET checkpoints_json = ? WHERE apply_id = ?;",
         (legacy_receipt_json, "v7-applied"),
     )
+    strip_state_checks(store.conn)  # v7 predates the v9 state CHECKs.
     store.conn.execute("DROP INDEX idx_labeling_session_checkpoints_snapshot_order;")
     store.conn.execute("DROP INDEX idx_labeling_checkpoint_apply_effects_pending;")
     store.conn.execute(
@@ -1161,6 +1163,7 @@ def test_v7_nonfinite_checkpoint_migration_remains_openable(tmp_path):
             checkpoint["checkpoint_id"],
         ),
     )
+    strip_state_checks(store.conn)  # v7 predates the v9 state CHECKs.
     store.conn.execute("DROP INDEX idx_labeling_session_checkpoints_snapshot_order;")
     store.conn.execute("DROP INDEX idx_labeling_checkpoint_apply_effects_pending;")
     store.conn.execute(
