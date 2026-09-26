@@ -292,6 +292,11 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
         "recording_identity_authority",
         "_migration_073_recording_identity_authority",
     ),
+    (
+        74,
+        "recording_producer_context",
+        "_migration_074_recording_producer_context",
+    ),
 )
 
 

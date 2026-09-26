@@ -8,6 +8,7 @@ from uuid import UUID
 
 import pytest
 
+from fisheye.registry.migrations import MIGRATION_METHODS
 from fisheye.registry.db import Registry
 from fisheye.registry import recording_identity_authority as authority_module
 from fisheye.registry.recording_identity_authority import (
@@ -33,6 +34,9 @@ from fisheye.shared.recording_import_receipt import (
 DECIDED_AT = "2026-08-25T12:00:00+00:00"
 _UNSET = object()
 
+
+
+LATEST_SCHEMA_VERSION = MIGRATION_METHODS[-1][0]
 
 def _write_artifact(
     tmp_path: Path,
@@ -501,7 +505,7 @@ def test_receipt_projection_inserts_exact_binding_and_returns_digest(
             result.identity_snapshot_id,
             "pytest",
             DECIDED_AT,
-            73,
+            LATEST_SCHEMA_VERSION,
         )
         assert _receipt_authority_counts(registry)[
             "recording_import_receipt_bindings"
@@ -1495,13 +1499,13 @@ def test_physical_v72_registry_upgrades_to_v73(tmp_path: Path) -> None:
             conn.execute(f"DROP TABLE {table};")
         conn.execute("DROP INDEX idx_recordings_exact_identity;")
         conn.execute("DROP INDEX idx_datasets_exact_identity;")
-        conn.execute("DELETE FROM schema_version WHERE version = 73;")
+        conn.execute("DELETE FROM schema_version WHERE version >= 73;")
         conn.execute("PRAGMA user_version = 72;")
         conn.commit()
 
     upgraded = Registry(registry_path)
     try:
-        assert upgraded._current_schema_version() == 73
+        assert upgraded._current_schema_version() == LATEST_SCHEMA_VERSION
         tables = {
             str(row[0])
             for row in upgraded.conn.execute(
@@ -1534,7 +1538,7 @@ def test_migration73_rejects_preexisting_authority_tables(tmp_path: Path) -> Non
             conn.execute(f"DROP TABLE {table};")
         conn.execute("DROP INDEX idx_recordings_exact_identity;")
         conn.execute("DROP INDEX idx_datasets_exact_identity;")
-        conn.execute("DELETE FROM schema_version WHERE version = 73;")
+        conn.execute("DELETE FROM schema_version WHERE version >= 73;")
         conn.execute("PRAGMA user_version = 72;")
         conn.execute(
             "CREATE TABLE recording_identity_evidence(evidence_digest TEXT);"
