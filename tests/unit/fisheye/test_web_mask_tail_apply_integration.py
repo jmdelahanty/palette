@@ -171,7 +171,7 @@ def test_http_changed_body_after_accept_checkpoint_clears_pending_action(reviewe
 
 
 @pytest.mark.parametrize("repair", [True, False], ids=["repaired", "still_fragmented"])
-def test_http_apply_offers_durable_successor_and_keeps_original_session(
+def test_http_apply_offers_durable_successor_and_supersedes_original_pose(
     reviewed_archive, context, repair
 ):
     path, root, initial = reviewed_archive
@@ -202,8 +202,15 @@ def test_http_apply_offers_durable_successor_and_keeps_original_session(
         if failures:
             assert failures[0]["source_frame_idx"] == 31
             assert failures[0]["reason"]
-        assert store.get_task("original-pose") == original_task
-        assert store.get_session(pose_session.session_id)["closed_at_utc"] is None
+        # Enforcement correction (2026-09-26): the replaced pose task is
+        # superseded and its session closed, so later edits cannot be stranded.
+        superseded = store.get_task("original-pose")
+        assert superseded["state"] == "superseded"
+        assert {k: v for k, v in superseded.items() if k not in {"state", "updated_at_utc"}} == {
+            k: v for k, v in original_task.items() if k not in {"state", "updated_at_utc"}
+        }
+        assert store.get_session(pose_session.session_id)["closed_at_utc"] is not None
+        assert store.get_task("original-mask")["state"] == "pending"
 
         task = next(
             t for t in result["tail_refresh_tasks"] if t["workflow_kind"] == "keypoints"
@@ -213,7 +220,6 @@ def test_http_apply_offers_durable_successor_and_keeps_original_session(
         )
         assert status == 200, opened
         assert opened["session"]["task_id"] == task["task_id"]
-        assert store.get_session(pose_session.session_id)["closed_at_utc"] is None
         new_run = store.get_task(task["task_id"])["run_name"]
         current = zarr.open_group(str(path), mode="r", use_consolidated=False)
         np.testing.assert_array_equal(
@@ -395,10 +401,14 @@ def test_tail_publication_failure_blocks_sibling_task_until_locked_retry(
         status, sibling_state = request(base, sibling_route + "/state")
         assert status == 200, sibling_state
         assert sibling_state["state"]["pending_apply_effect_count"] == 0
-        assert store.get_session(pose_session.session_id)["closed_at_utc"] is None
+        # Another component's task on the applied run stays open; the replaced
+        # pose task is superseded once the successor is published.
+        assert store.get_task("sibling-swim")["state"] == "pending"
+        assert store.get_task("original-pose")["state"] == "superseded"
+        assert store.get_session(pose_session.session_id)["closed_at_utc"] is not None
 
 
-def test_registry_retry_reuses_completed_snapshot_and_retains_later_source_labels(
+def test_registry_retry_reuses_completed_snapshot_and_refuses_later_source_edits(
     reviewed_archive, context, monkeypatch
 ):
     from fisheye.tune import keypoint_review_backend as editor
@@ -445,22 +455,25 @@ def test_registry_retry_reuses_completed_snapshot_and_retains_later_source_label
         later_points = np.asarray(source.kp_roi_arr[0]).copy()
         later_points[14, 0] += 2
         editor.save_roi_correction(source, position=0, points=later_points)
-        # This later checkpoint also belongs to the unchanged original task. A
-        # retry of completed publication must neither consume it nor rebase it.
-        store.upsert_session_checkpoint(
-            session_id=pose_session.session_id,
-            task_id="original-pose",
-            recording_id="rec",
-            user="reviewer",
-            workflow_kind="keypoints",
-            target_run_path=initial["paths"]["pose_edit"],
-            target_edit_revision=0,
-            source_rowset_path=initial["paths"]["crop"],
-            roi_idx=0,
-            component_name="keypoints",
-            payload={"later_checkpoint": True},
-            metadata={},
-        )
+        # The original pose task was superseded when the successor published,
+        # so a later browser checkpoint there is refused instead of stranded.
+        # (The direct Zarr edit above stands in for historical data.) A retry
+        # of the completed publication must not rebase onto that edit.
+        with pytest.raises(RuntimeError, match="replaced by a newer one"):
+            store.upsert_session_checkpoint(
+                session_id=pose_session.session_id,
+                task_id="original-pose",
+                recording_id="rec",
+                user="reviewer",
+                workflow_kind="keypoints",
+                target_run_path=initial["paths"]["pose_edit"],
+                target_edit_revision=0,
+                source_rowset_path=initial["paths"]["crop"],
+                roi_idx=0,
+                component_name="keypoints",
+                payload={"later_checkpoint": True},
+                metadata={},
+            )
 
     with _running_server(store, user="reviewer") as base:
         status, state = request(base, route + "/state")
@@ -481,7 +494,7 @@ def test_registry_retry_reuses_completed_snapshot_and_retains_later_source_label
             store.count_unapplied_session_checkpoints(
                 task_id="original-pose", component_name="keypoints"
             )
-            == 1
+            == 0
         )
         assert (
             store.count_pending_session_checkpoint_apply_effects(
@@ -501,4 +514,4 @@ def test_registry_retry_reuses_completed_snapshot_and_retains_later_source_label
             {"session_id": mask_session.session_id, "expected_user": "reviewer"},
         )
         assert status == 200, completed
-        assert store.get_session(pose_session.session_id)["closed_at_utc"] is None
+        assert store.get_session(pose_session.session_id)["closed_at_utc"] is not None

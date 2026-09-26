@@ -246,6 +246,26 @@ def backfill_legacy_apply_receipts(conn: sqlite3.Connection) -> None:
         )
 
 
+SUPERSEDED_TASK_STATE = "superseded"
+# Every labeling_session_checkpoints.state value. ``discarded`` rows are kept
+# for audit and ignored by claims, counts, and carry-forward.
+CHECKPOINT_STATES = ("active", "applying", "applied", "discarded")
+APPLY_RECEIPT_STATES = ("applying", "applied")
+
+
+def _require_task_not_superseded(conn: sqlite3.Connection, task_id: str) -> None:
+    """Refuse new edits to a task whose review version was replaced."""
+
+    row = conn.execute(
+        "SELECT state FROM labeling_tasks WHERE task_id = ?;", (str(task_id),)
+    ).fetchone()
+    if row is not None and str(row["state"]) == SUPERSEDED_TASK_STATE:
+        raise RuntimeError(
+            "This task's review version was replaced by a newer one; "
+            "edits here would not reach it. Open the newest task instead."
+        )
+
+
 def upsert_checkpoint(
     conn: sqlite3.Connection,
     *,
@@ -265,6 +285,7 @@ def upsert_checkpoint(
     now = _utc_now()
     conn.execute("BEGIN IMMEDIATE;")
     try:
+        _require_task_not_superseded(conn, task_id)
         existing = conn.execute(
             """
             SELECT checkpoint_id, state FROM labeling_session_checkpoints
@@ -554,6 +575,9 @@ def claim_checkpoints(
             conn.rollback()
             return []
 
+        # A fresh claim is a new edit; replays of an existing receipt above
+        # still finish so an interrupted Apply can always be recovered.
+        _require_task_not_superseded(conn, task_id)
         id_rows = conn.execute(
             """
             SELECT checkpoint_id FROM labeling_session_checkpoints

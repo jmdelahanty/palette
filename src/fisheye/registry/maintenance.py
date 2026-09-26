@@ -33,6 +33,7 @@ from .registered_geometry_readiness import project_registered_geometry_stages
 from .zarr_open import import_zarr as _import_zarr
 from fisheye.shared.experiment_setup import subdish_required
 from fisheye.shared.recording_manifest_context import PRODUCER_CONTEXT_SOURCE
+from fisheye.registry.recording_context_audit import recording_context_row_issues
 from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR,
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3,
@@ -64,7 +65,6 @@ DEFAULT_ALLOWED_RECORDING_SUBTYPES_BY_TYPE = {
     "microscopy": {"lightsheet", "confocal", "2p"},
     "histology": {"section", "wholemount"},
 }
-ALLOWED_BEHAVIOR_MODES = {"free", "embedded", "none"}
 RECORDING_TUNING_STEP_NAMES: tuple[str, ...] = recording_tuning_stage_ids()
 RECORDING_STEP_NAMES: tuple[str, ...] = recording_status_stage_ids()
 RECORDING_STEP_STATUS_VALUES: tuple[str, ...] = ("ok", "missing", "absent", "na", "error")
@@ -8424,97 +8424,25 @@ def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
     # Recordings should declare type/schema for downstream validation.
     recording_rows = registry.conn.execute(
         """
-        SELECT recording_id, recording_type, recording_subtype, behavior_mode, artifact_schema_id
+        SELECT recording_id, recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+               context_source, recording_context_schema_version, recording_intent, data_origin
         FROM recordings
         ORDER BY recording_id;
         """
     ).fetchall()
     for row in recording_rows:
         recording_id = str(row["recording_id"])
-        recording_type = (str(row["recording_type"]).strip() if row["recording_type"] is not None else "")
-        recording_subtype = (
-            str(row["recording_subtype"]).strip() if row["recording_subtype"] is not None else ""
-        )
-        behavior_mode = (str(row["behavior_mode"]).strip() if row["behavior_mode"] is not None else "")
         artifact_schema_id = (
             str(row["artifact_schema_id"]).strip() if row["artifact_schema_id"] is not None else ""
         )
-        if not recording_type:
-            issues.append(
-                IntegrityIssue(
-                    code="recording_missing_type",
-                    run_id=recording_id,
-                    detail=f"recording_id={recording_id} has NULL/empty recording_type",
-                )
+        issues.extend(
+            IntegrityIssue(code=code, run_id=recording_id, detail=detail)
+            for code, detail in recording_context_row_issues(
+                row,
+                allowed_recording_types=allowed_recording_types,
+                allowed_subtypes_by_type=allowed_subtypes_by_type,
             )
-        elif recording_type not in allowed_recording_types:
-            issues.append(
-                IntegrityIssue(
-                    code="recording_invalid_type",
-                    run_id=recording_id,
-                    detail=(
-                        f"recording_id={recording_id} recording_type={recording_type} "
-                        f"not in allowed={','.join(sorted(allowed_recording_types))}"
-                    ),
-                )
-            )
-        allowed_subtypes = allowed_subtypes_by_type.get(recording_type)
-        if allowed_subtypes is not None:
-            if not recording_subtype:
-                issues.append(
-                    IntegrityIssue(
-                        code="recording_missing_subtype",
-                        run_id=recording_id,
-                        detail=(
-                            f"recording_id={recording_id} recording_type={recording_type} "
-                            "has NULL/empty recording_subtype"
-                        ),
-                    )
-                )
-            elif recording_subtype not in allowed_subtypes:
-                issues.append(
-                    IntegrityIssue(
-                        code="recording_invalid_subtype",
-                        run_id=recording_id,
-                        detail=(
-                            f"recording_id={recording_id} recording_type={recording_type} "
-                            f"recording_subtype={recording_subtype} "
-                            f"not in allowed={','.join(sorted(allowed_subtypes))}"
-                        ),
-                    )
-                )
-        if not behavior_mode:
-            issues.append(
-                IntegrityIssue(
-                    code="recording_missing_behavior_mode",
-                    run_id=recording_id,
-                    detail=f"recording_id={recording_id} has NULL/empty behavior_mode",
-                )
-            )
-        elif behavior_mode not in ALLOWED_BEHAVIOR_MODES:
-            issues.append(
-                IntegrityIssue(
-                    code="recording_invalid_behavior_mode",
-                    run_id=recording_id,
-                    detail=(
-                        f"recording_id={recording_id} behavior_mode={behavior_mode} "
-                        f"not in allowed={','.join(sorted(ALLOWED_BEHAVIOR_MODES))}"
-                    ),
-                )
-            )
-        if recording_type == "behavior" and recording_subtype and behavior_mode:
-            if recording_subtype != behavior_mode:
-                issues.append(
-                    IntegrityIssue(
-                        code="recording_behavior_mode_mismatch",
-                        run_id=recording_id,
-                        detail=(
-                            f"recording_id={recording_id} recording_type=behavior "
-                            f"requires recording_subtype==behavior_mode, got "
-                            f"{recording_subtype}!={behavior_mode}"
-                        ),
-                    )
-                )
+        )
         if not artifact_schema_id:
             issues.append(
                 IntegrityIssue(

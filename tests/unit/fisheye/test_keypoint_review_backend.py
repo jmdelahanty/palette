@@ -1306,10 +1306,10 @@ def test_recovered_keypoint_hard_crash_mid_batch_leaves_rows_ineligible(
         state = keypoint_checkpoint_state(store, runtime)
         real_write_field = checkpoint_mod._write_field
 
-        def _crash_on_coordinates(array, field_name, rows, documents):
+        def _crash_on_coordinates(array, field_name, rows, documents, **kwargs):
             if field_name == "keypoints_roi":
                 raise _HardCrash()
-            real_write_field(array, field_name, rows, documents)
+            real_write_field(array, field_name, rows, documents, **kwargs)
 
         monkeypatch.setattr(checkpoint_mod, "_write_field", _crash_on_coordinates)
         with pytest.raises(_HardCrash):

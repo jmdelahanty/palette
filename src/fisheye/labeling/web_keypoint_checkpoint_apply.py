@@ -484,7 +484,9 @@ def apply_keypoint_checkpoints(
             }
     except Exception:
         if write_started:
-            _fail_closed_recovered_rows(session, rows)
+            # The write lock was released when the ``with`` block unwound.
+            with archive_metadata_publication_lock(str(getattr(session, "zarr_path"))):
+                _fail_closed_recovered_rows(session, rows)
         else:
             store.release_session_checkpoints_apply(
                 task_id=task_id, apply_id=apply_id_value

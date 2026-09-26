@@ -570,8 +570,28 @@ def register_admin_api_routes(app: Flask, state: Any) -> None:
 
             from fisheye.shared.zarr_helpers import archive_metadata_publication_lock
 
+            from fisheye.labeling.tail_successor_lineage import (
+                newer_version_of,
+            )
+
             # Same lock as keypoint checkpoint Apply: rows share chunks/shards.
             with archive_metadata_publication_lock(zarr_path):
+                replaced_by = newer_version_of(
+                    zarr_path, str(scope.get("refined_run") or task.get("run_name") or "")
+                )
+                if replaced_by:
+                    return _json(
+                        _format_error(
+                            "task_version_superseded",
+                            details=(
+                                "This task's keypoint version was replaced by "
+                                f"{replaced_by}; a correction here would not reach it. "
+                                "Correct the newest version instead."
+                            ),
+                            status=HTTPStatus.CONFLICT,
+                        ),
+                        status=HTTPStatus.CONFLICT,
+                    )
                 review_session = backend_module.resolve_review_session(
                     zarr_path,
                     refined_run=str(scope.get("refined_run") or "").strip() or None,

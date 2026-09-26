@@ -8,6 +8,7 @@ archive mutation lock.
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timezone
 from dataclasses import asdict, is_dataclass
 import math
 from pathlib import Path
@@ -18,6 +19,7 @@ import numpy as np
 from fisheye.shared.frame_flags import row_identity_payload
 from fisheye.shared.subject_mask_stale import mark_downstream_subject_mask_runs_stale
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr_helpers import archive_publication_lock_held_by_current_thread
 
 from .assignment_store import session_checkpoint_snapshot_row_sha256
 
@@ -150,13 +152,39 @@ def _read_rows(array: object, rows: np.ndarray) -> Sequence[object]:
     return oindex[rows] if oindex is not None else array[rows]  # type: ignore[index]
 
 
-def _write_rows(array: object, rows: Sequence[int], values: Sequence[object]) -> None:
-    """Write selected rows, touching each physical chunk at most once."""
+def _write_rows(
+    array: object,
+    rows: Sequence[int],
+    values: Sequence[object],
+    *,
+    archive: str | Path | None = None,
+) -> None:
+    """Write selected rows, touching each physical chunk at most once.
+
+    ``archive`` is the Zarr archive that owns ``array``. Sharded arrays are
+    written by rewriting the covering row span, which is only safe while this
+    thread holds that archive's publication lock; the lock is checked.
+    """
 
     if len(rows) == 1:
         array[int(rows[0])] = values[0]  # type: ignore[index]
         return
     index = np.asarray(rows, dtype=np.int64)
+    if getattr(array, "shards", None) is not None:
+        # zarr 3.1.3 cannot write an orthogonal row selection into a sharded
+        # multi-dimensional array ("shape mismatch ... indexing result of
+        # shape (n,)"). Rewrite the covering row span instead. Rows between the
+        # selected ones are read and written back, so another writer's edit in
+        # that span would be reverted unless the archive lock excludes it.
+        if archive is None or not archive_publication_lock_held_by_current_thread(archive):
+            raise RuntimeError(
+                "Sharded row writes require the archive publication lock."
+            )
+        lo, hi = int(index.min()), int(index.max()) + 1
+        block = np.asarray(array[lo:hi]).copy()  # type: ignore[index]
+        block[index - lo] = np.asarray(values)
+        array[lo:hi] = block  # type: ignore[index]
+        return
     oindex = getattr(array, "oindex", None)
     if oindex is not None:
         oindex[index] = values
@@ -496,8 +524,13 @@ def stage_keypoint_checkpoint(
     user: str,
     operation: str,
     points: Sequence[Sequence[float]] | None = None,
+    carried_from: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Persist one final-row browser edit without touching canonical Zarr."""
+    """Persist one final-row browser edit without touching canonical Zarr.
+
+    ``carried_from`` records the older-version edit this checkpoint replays
+    (see ``fisheye.labeling.carry_forward_tail_keypoints``).
+    """
 
     session = getattr(runtime, "review_session")
     if keypoint_browser_save_mode(session) != KEYPOINT_CHECKPOINT_SAVE_MODE:
@@ -548,6 +581,10 @@ def stage_keypoint_checkpoint(
             "reopen_policy": "same_task_recording_user_may_resume",
         },
     }
+    # Apply later overwrites updated_at_utc; keep when the edit was made.
+    metadata["edited_at_utc"] = datetime.now(timezone.utc).isoformat()
+    if carried_from is not None:
+        metadata["carried_from"] = dict(carried_from)
     checkpoint = store.upsert_session_checkpoint(
         session_id=str(getattr(runtime, "session_id")),
         task_id=str(getattr(runtime, "task_id")),
@@ -1331,13 +1368,15 @@ def _write_field(
     field_name: str,
     rows: Sequence[int],
     documents: Mapping[int, Mapping[str, object]],
+    *,
+    archive: str | Path,
 ) -> None:
     decoded = [
         _decoded_json_value(documents[row]["fields"][field_name])  # type: ignore[index]
         for row in rows
     ]
     dtype = object if field_name == "reason" else getattr(array, "dtype", None)
-    _write_rows(array, rows, np.asarray(decoded, dtype=dtype))
+    _write_rows(array, rows, np.asarray(decoded, dtype=dtype), archive=archive)
 
 
 def _fail_closed_recovered_rows(session: object, roi_indices: Sequence[int]) -> None:
@@ -1349,7 +1388,12 @@ def _fail_closed_recovered_rows(session: object, roi_indices: Sequence[int]) -> 
     eligible = getter("training_eligible") if callable(getter) else None
     if eligible is not None:
         rows = sorted(int(row) for row in roi_indices)
-        _write_rows(eligible, rows, np.zeros(len(rows), dtype=bool))
+        _write_rows(
+            eligible,
+            rows,
+            np.zeros(len(rows), dtype=bool),
+            archive=str(getattr(session, "zarr_path")),
+        )
 
 
 def _write_intended_rows(
@@ -1393,7 +1437,12 @@ def _write_intended_rows(
         _fail_closed_recovered_rows(session, dirty)
         usable = arrays.get("usable_keypoints")
         if usable is not None and dirty:
-            _write_rows(usable, dirty, np.zeros(len(dirty), dtype=bool))
+            _write_rows(
+                usable,
+                dirty,
+                np.zeros(len(dirty), dtype=bool),
+                archive=str(getattr(session, "zarr_path")),
+            )
             pending["usable_keypoints"] = [
                 row
                 for row in dirty
@@ -1409,7 +1458,13 @@ def _write_intended_rows(
     for field_name in final_fields:
         rows = pending.get(field_name) or []
         if rows:
-            _write_field(arrays[field_name], field_name, rows, intended)
+            _write_field(
+                arrays[field_name],
+                field_name,
+                rows,
+                intended,
+                archive=str(getattr(session, "zarr_path")),
+            )
 
 
 __all__ = [
