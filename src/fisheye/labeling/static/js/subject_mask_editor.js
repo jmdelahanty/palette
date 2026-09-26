@@ -30,6 +30,97 @@
     let effectsPollTimer = null;
     const effectsPollMs = 3000;
     const lassoMinPointStepPx = 2;
+    let maskPieceInfo = null;
+    let maskPiecesTimer = null;
+    let bulkUndoMask = null;
+    let bulkUndoLabel = "";
+
+    // Connected pieces of a binary mask. Pixels that touch at an edge or a
+    // corner (8-connectivity) are one piece, as in the server's
+    // fragmented_subject_body_mask check, so the counts agree.
+    function maskPieces(values, width, height) {
+      const labels = new Int32Array(width * height);
+      const sizes = [0];
+      const boxes = [null];
+      const stack = new Int32Array(width * height);
+      let next = 0;
+      for (let start = 0; start < values.length; start++) {
+        if (!values[start] || labels[start]) continue;
+        next += 1;
+        let top = 0;
+        stack[top++] = start;
+        labels[start] = next;
+        let size = 0, x0 = width, y0 = height, x1 = -1, y1 = -1;
+        while (top > 0) {
+          const idx = stack[--top];
+          const x = idx % width, y = (idx - x) / width;
+          size += 1;
+          if (x < x0) x0 = x; if (x > x1) x1 = x;
+          if (y < y0) y0 = y; if (y > y1) y1 = y;
+          for (let dy = -1; dy <= 1; dy++) {
+            const ny = y + dy;
+            if (ny < 0 || ny >= height) continue;
+            for (let dx = -1; dx <= 1; dx++) {
+              const nx = x + dx;
+              if ((dx || dy) && nx >= 0 && nx < width) {
+                const n = ny * width + nx;
+                if (values[n] && !labels[n]) { labels[n] = next; stack[top++] = n; }
+              }
+            }
+          }
+        }
+        sizes.push(size);
+        boxes.push({x0, y0, x1, y1});
+      }
+      let main = 0;
+      for (let id = 1; id < sizes.length; id++) if (sizes[id] > (sizes[main] || 0)) main = id;
+      return {labels, sizes, boxes, main, count: sizes.length - 1};
+    }
+
+    // Fill every hole enclosed by the piece under (x, y). Background pixels
+    // that cannot reach the image edge without crossing that piece (moving
+    // edge-to-edge, 4-connectivity) are holes. Returns the pixels filled, or
+    // -1 when (x, y) is not on the mask.
+    function fillPieceHoles(values, width, height, x, y) {
+      const at = y * width + x;
+      if (!values[at]) return -1;
+      const pieces = maskPieces(values, width, height);
+      const piece = pieces.labels[at];
+      const reached = new Uint8Array(width * height);
+      const stack = new Int32Array(width * height);
+      let top = 0;
+      const seed = (idx) => {
+        if (!reached[idx] && pieces.labels[idx] !== piece) { reached[idx] = 1; stack[top++] = idx; }
+      };
+      for (let xx = 0; xx < width; xx++) { seed(xx); seed((height - 1) * width + xx); }
+      for (let yy = 0; yy < height; yy++) { seed(yy * width); seed(yy * width + width - 1); }
+      while (top > 0) {
+        const idx = stack[--top];
+        const xx = idx % width, yy = (idx - xx) / width;
+        if (xx > 0) seed(idx - 1);
+        if (xx < width - 1) seed(idx + 1);
+        if (yy > 0) seed(idx - width);
+        if (yy < height - 1) seed(idx + width);
+      }
+      let filled = 0;
+      for (let i = 0; i < values.length; i++) {
+        if (!reached[i] && pieces.labels[i] !== piece) {
+          if (!values[i]) filled += 1;
+          values[i] = 1;
+        }
+      }
+      return filled;
+    }
+
+    // Keep only the largest piece. Returns the pixels removed.
+    function removeStrayPieces(values, width, height) {
+      const pieces = maskPieces(values, width, height);
+      let removed = 0;
+      for (let i = 0; i < values.length; i++) {
+        if (values[i] && pieces.labels[i] !== pieces.main) { values[i] = 0; removed += 1; }
+      }
+      return removed;
+    }
 
     function setStatus(text, isError=false) {
       const node = document.getElementById("status");
@@ -111,6 +202,7 @@
       mask = new Uint8Array(maskWidth * maskHeight);
       for (let i = 0; i < mask.length; i++) mask[i] = bytes[i] > 0 ? 1 : 0;
       loadedMask = mask.slice();
+      forgetUndo();
       markMaskOverlayDirty();
     }
 
@@ -128,7 +220,90 @@
       };
     }
 
+    function schedulePieceRefresh() {
+      // Recount once per frame, after this frame's edits.
+      if (maskPiecesTimer !== null) return;
+      maskPiecesTimer = true;
+      window.requestAnimationFrame(() => {
+        maskPiecesTimer = null;
+        refreshPieces();
+      });
+    }
+
+    function refreshPieces() {
+      if (!mask || !maskWidth || !maskHeight) return;
+      maskPieceInfo = maskPieces(mask, maskWidth, maskHeight);
+      renderPieces();
+      scheduleDraw();
+    }
+
+    function renderPieces() {
+      const target = document.getElementById("mask-pieces");
+      const button = document.getElementById("remove-stray-button");
+      if (!target) return;
+      const info = maskPieceInfo;
+      const stray = info ? info.count - (info.count > 0 ? 1 : 0) : 0;
+      if (button) button.disabled = stray <= 0;
+      if (!info || info.count <= 1) {
+        target.textContent = info && info.count === 1 ? "Mask is one piece." : "Mask is empty.";
+        target.classList.toggle("warn", false);
+        return;
+      }
+      const straySizes = [];
+      for (let id = 1; id < info.sizes.length; id++) if (id !== info.main) straySizes.push(info.sizes[id]);
+      straySizes.sort((a, b) => b - a);
+      target.textContent = stray + " stray piece" + (stray === 1 ? "" : "s") + " outside the main body ("
+        + straySizes.slice(0, 5).join(", ") + (straySizes.length > 5 ? ", …" : "") + " px), circled on the image.";
+      target.classList.toggle("warn", true);
+    }
+
+    function rememberForUndo(label) {
+      bulkUndoMask = mask.slice();
+      bulkUndoLabel = label;
+      const button = document.getElementById("undo-bulk-button");
+      if (button) { button.disabled = false; button.textContent = "Undo " + label; }
+    }
+
+    function forgetUndo() {
+      bulkUndoMask = null;
+      bulkUndoLabel = "";
+      const button = document.getElementById("undo-bulk-button");
+      if (button) { button.disabled = true; button.textContent = "Undo"; }
+    }
+
+    function undoBulkEdit() {
+      if (!bulkUndoMask || !mask || bulkUndoMask.length !== mask.length) return;
+      mask.set(bulkUndoMask);
+      const label = bulkUndoLabel;
+      forgetUndo();
+      markMaskOverlayDirty();
+      scheduleDraw();
+      setStatus("Undid " + label + " locally.");
+    }
+
+    function removeStrayPiecesAction() {
+      if (!mask) return;
+      rememberForUndo("stray-piece removal");
+      const removed = removeStrayPieces(mask, maskWidth, maskHeight);
+      if (!removed) { forgetUndo(); setStatus("No stray pieces to remove."); return; }
+      markMaskOverlayDirty();
+      scheduleDraw();
+      setStatus("Removed " + removed + " stray px locally. Save to persist.");
+    }
+
+    function fillHolesAt(event) {
+      const [mx, my] = maskPointFromEvent(event);
+      rememberForUndo("hole fill");
+      const filled = fillPieceHoles(mask, maskWidth, maskHeight, mx, my);
+      if (filled < 0) { forgetUndo(); setStatus("Click on a mask piece to fill its holes.", true); return; }
+      if (filled === 0) { forgetUndo(); setStatus("That piece has no holes."); return; }
+      markMaskOverlayDirty();
+      scheduleDraw();
+      setStatus("Filled " + filled + " px of holes locally. Save to persist.");
+    }
+
     function markMaskOverlayDirty(rect=null) {
+      schedulePieceRefresh();
       const wasFullyDirty = maskOverlayDirty && maskOverlayDirtyRect === null;
       maskOverlayDirty = true;
       if (payload?.tail_crop_border) renderTailBorderStatus();
@@ -219,6 +394,7 @@
       if (maskOverlayDirty) rebuildMaskOverlay();
       viewport.drawImage();
       viewport.drawCanvas(maskOverlayCanvas);
+      drawStrayPieceRings();
       drawLassoOverlay();
       drawCursorOverlay();
     }
@@ -228,6 +404,26 @@
         (Number(mx) + 0.5) * viewport.imageWidth / maskWidth,
         (Number(my) + 0.5) * viewport.imageHeight / maskHeight
       );
+    }
+
+    function drawStrayPieceRings() {
+      const info = maskPieceInfo;
+      if (!info || info.count <= 1) return;
+      ctx.save();
+      ctx.strokeStyle = "#ff4fd8";
+      ctx.lineWidth = 2;
+      for (let id = 1; id < info.boxes.length; id++) {
+        if (id === info.main) continue;
+        const box = info.boxes[id];
+        const [cx, cy] = maskToCanvasPoint((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2);
+        const [ex] = maskToCanvasPoint(box.x1 + 1, box.y1 + 1);
+        // At least 10 screen pixels so a one-pixel piece is visible when zoomed out.
+        const radius = Math.max(10, Math.abs(ex - cx) + 4);
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
     }
 
     function drawLassoOverlay() {
@@ -276,6 +472,13 @@
         ctx.arc(x, y, 3, 0, Math.PI * 2);
         ctx.fillStyle = "#fff176";
         ctx.fill();
+      } else if (tool === "fill") {
+        ctx.strokeStyle = "#ff4fd8";
+        ctx.beginPath();
+        ctx.arc(x, y, 6, 0, Math.PI * 2);
+        ctx.moveTo(x - 10, y); ctx.lineTo(x + 10, y);
+        ctx.moveTo(x, y - 10); ctx.lineTo(x, y + 10);
+        ctx.stroke();
       } else {
         const radiusMask = Math.max(1, Math.round(brushSize * maskWidth / viewport.imageWidth));
         const radiusCanvas = Math.max(2, radiusMask * viewport.imageWidth * viewport.view.scale / maskWidth);
@@ -712,11 +915,13 @@
       tool = nextTool;
       document.getElementById("paint-button").classList.toggle("active", tool === "paint");
       document.getElementById("erase-button").classList.toggle("active", tool === "erase");
+      document.getElementById("fill-holes-button")?.classList.toggle("active", tool === "fill");
+      if (tool === "fill") setStatus("Fill holes: click a mask piece to fill the holes inside it.");
       scheduleDraw();
     }
 
     function toggleBrushMode() {
-      setTool(tool === "paint" ? "erase" : "paint");
+      setTool(tool === "erase" ? "paint" : "erase");
       setStatus("Brush mode: " + tool + ".");
     }
 
@@ -875,6 +1080,10 @@
         scheduleDraw();
         return;
       }
+      if (tool === "fill") {
+        fillHolesAt(event);
+        return;
+      }
       drawing = true;
       paintAt(event);
     }
@@ -922,6 +1131,9 @@
       if (event.key === "p") { event.preventDefault(); nav(-1); return; }
       if (event.key === "s") { event.preventDefault(); save(false); return; }
       if (event.key === "S") { event.preventDefault(); save(true); return; }
+      if ((event.ctrlKey || event.metaKey) && (event.key === "z" || event.key === "Z")) { event.preventDefault(); undoBulkEdit(); return; }
+      if (event.key === "h" || event.key === "H") { event.preventDefault(); setTool("fill"); return; }
+      if (event.key === "r" || event.key === "R") { event.preventDefault(); removeStrayPiecesAction(); return; }
       if (event.key === "b" || event.key === "B") { event.preventDefault(); setTool("paint"); return; }
       if (event.key === "x" || event.key === "X") { event.preventDefault(); toggleBrushMode(); return; }
       if (event.key === "[") { event.preventDefault(); setBrushSize(brushSize - 1); return; }
