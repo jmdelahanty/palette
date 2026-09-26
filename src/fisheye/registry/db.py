@@ -800,7 +800,17 @@ def _extract_recording_context(
         "canvas_name": first_text("canvas_name"),
         "protocol_name": (first_text("protocol_name", "protocol_name_from_definition") or protocol_name),
         "dish_design": first_text("dish_design") or _decode_attr(acquisition.get("dish_design")),
+        "context_source": first_text("context_source"),
+        "recording_context_schema_version": _optional_int(
+            first_text("recording_context_schema_version")
+        ),
+        "recording_intent": first_text("recording_intent"),
+        "data_origin": first_text("data_origin"),
     }
+
+
+def _optional_int(value: Optional[str]) -> Optional[int]:
+    return int(value) if value is not None else None
 
 
 def _extract_arena_config(root: zarr.Group) -> Dict[str, Any]:
@@ -2577,6 +2587,10 @@ class Registry(
         canvas_name: Optional[str] = None,
         protocol_name: Optional[str] = None,
         dish_design: Optional[str] = None,
+        context_source: Optional[str] = None,
+        recording_context_schema_version: Optional[int] = None,
+        recording_intent: Optional[str] = None,
+        data_origin: Optional[str] = None,
     ) -> None:
         now = _utc_now()
         payload = {
@@ -2599,6 +2613,10 @@ class Registry(
             "canvas_name": canvas_name,
             "protocol_name": protocol_name,
             "dish_design": dish_design,
+            "context_source": context_source,
+            "recording_context_schema_version": recording_context_schema_version,
+            "recording_intent": recording_intent,
+            "data_origin": data_origin,
             "created_utc": now,
             "updated_utc": now,
         }
@@ -2610,7 +2628,9 @@ class Registry(
                 experiment_context_status, experiment_context_source,
                 experiment_context_status_detail, stimulus_runs_available,
                 rig_id, arena_id, camera_id, canvas_name,
-                protocol_name, dish_design, created_utc, updated_utc
+                protocol_name, dish_design, context_source,
+                recording_context_schema_version, recording_intent, data_origin,
+                created_utc, updated_utc
             )
             VALUES (
                 :recording_id, :session_uuid, :recording_name, :recording_path, :started_utc,
@@ -2618,7 +2638,9 @@ class Registry(
                 :experiment_context_status, :experiment_context_source,
                 :experiment_context_status_detail, :stimulus_runs_available,
                 :rig_id, :arena_id, :camera_id, :canvas_name,
-                :protocol_name, :dish_design, :created_utc, :updated_utc
+                :protocol_name, :dish_design, :context_source,
+                :recording_context_schema_version, :recording_intent, :data_origin,
+                :created_utc, :updated_utc
             )
             ON CONFLICT(recording_id) DO UPDATE SET
                 session_uuid=COALESCE(excluded.session_uuid, recordings.session_uuid),
@@ -2651,6 +2673,13 @@ class Registry(
                 canvas_name=COALESCE(excluded.canvas_name, recordings.canvas_name),
                 protocol_name=COALESCE(excluded.protocol_name, recordings.protocol_name),
                 dish_design=COALESCE(excluded.dish_design, recordings.dish_design),
+                context_source=COALESCE(excluded.context_source, recordings.context_source),
+                recording_context_schema_version=COALESCE(
+                    excluded.recording_context_schema_version,
+                    recordings.recording_context_schema_version
+                ),
+                recording_intent=COALESCE(excluded.recording_intent, recordings.recording_intent),
+                data_origin=COALESCE(excluded.data_origin, recordings.data_origin),
                 updated_utc=excluded.updated_utc;
             """,
             payload,

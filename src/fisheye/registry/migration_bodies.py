@@ -8653,6 +8653,26 @@ class RegistryMigrationMixin:
         self._migration_061_stimulus_protocol_registry()
         self._ensure_stimulus_protocol_semantic_columns()
 
+    def _migration_074_recording_producer_context(self) -> None:
+        """Record where a recording's scientific context came from.
+
+        ``context_source='citrus.parent_recording_context'`` marks a producer
+        declaration (subtype optional and independent of behavior_mode).
+        Existing rows stay NULL: operator/legacy context, historical rules.
+        """
+
+        if not self._table_exists("recordings"):
+            return
+        self._ensure_columns(
+            "recordings",
+            {
+                "context_source": "TEXT",
+                "recording_context_schema_version": "INTEGER",
+                "recording_intent": "TEXT",
+                "data_origin": "TEXT",
+            },
+        )
+
     def _migration_073_recording_identity_authority(self) -> None:
         """Add opt-in, revision-bound recording identity authority.
 
