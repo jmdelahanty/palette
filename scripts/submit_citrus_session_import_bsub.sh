@@ -18,10 +18,6 @@ WRITER_HOST="${PALETTE_REGISTRY_WRITER_HOST:-}"
 WRITER_LOCK_PATH="${PALETTE_REGISTRY_WRITER_LOCK_PATH:-/tmp/palette-registry-writer.lock}"
 SHADOW_TEMP_ROOT="${PALETTE_REGISTRY_SHADOW_TEMP_ROOT:-/tmp/palette-registry-shadows}"
 SHADOW_BACKUP_DIR="${PALETTE_REGISTRY_SHADOW_BACKUP_DIR:-}"
-RECORDING_ONLY=0
-RECORDING_TYPE=""
-RECORDING_SUBTYPE=""
-BEHAVIOR_MODE=""
 RESUME_TRANSFER_PLAN=""
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -54,10 +50,6 @@ Options:
   --registry PATH                Registry SQLite path used with --register
                                 (default: $PALETTE_REGISTRY or /groups/.../palette_registry.sqlite)
   --writer-host HOST             Designated registry writer host; required with --register
-  --recording-only               Import camera-video-only recordings without stimulus
-  --recording-type TYPE          Recording context (required unless resuming)
-  --recording-subtype SUBTYPE    Recording subtype (required unless resuming)
-  --behavior-mode MODE           free, embedded or none (required unless resuming)
   --resume-transfer-plan PATH    Exact saved organization plan for a retry
   --dry-run                      Print files and submit command; do not submit
   -h, --help                     Show this message
@@ -80,10 +72,6 @@ while [[ $# -gt 0 ]]; do
     --no-register) REGISTER=0; shift;;
     --registry) REGISTRY="$2"; shift 2;;
     --writer-host) WRITER_HOST="$2"; shift 2;;
-    --recording-only) RECORDING_ONLY=1; shift;;
-    --recording-type) RECORDING_TYPE="$2"; shift 2;;
-    --recording-subtype) RECORDING_SUBTYPE="$2"; shift 2;;
-    --behavior-mode) BEHAVIOR_MODE="$2"; shift 2;;
     --resume-transfer-plan) RESUME_TRANSFER_PLAN="$2"; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage; exit 0;;
@@ -128,11 +116,6 @@ if [[ "$DRY_RUN" != "1" && ! -d "$SESSION_DIR" ]]; then
   exit 2
 fi
 
-if [[ -z "$RESUME_TRANSFER_PLAN" && ( -z "$RECORDING_TYPE" || -z "$RECORDING_SUBTYPE" || -z "$BEHAVIOR_MODE" ) ]]; then
-  echo "Transfer-v2 intake requires --recording-type, --recording-subtype and --behavior-mode (or --resume-transfer-plan)" >&2
-  exit 2
-fi
-
 SESSION_PARENT="$(dirname -- "$SESSION_DIR")"
 SESSION_NAME="$(basename -- "$SESSION_DIR")"
 if [[ -z "$RUN_ID" ]]; then
@@ -174,9 +157,6 @@ quoted_writer_host="$(printf '%q' "$WRITER_HOST")"
 quoted_writer_lock_path="$(printf '%q' "$WRITER_LOCK_PATH")"
 quoted_shadow_temp_root="$(printf '%q' "$SHADOW_TEMP_ROOT")"
 quoted_shadow_backup_dir="$(printf '%q' "$SHADOW_BACKUP_DIR")"
-quoted_recording_type="$(printf '%q' "$RECORDING_TYPE")"
-quoted_recording_subtype="$(printf '%q' "$RECORDING_SUBTYPE")"
-quoted_behavior_mode="$(printf '%q' "$BEHAVIOR_MODE")"
 quoted_resume_plan="$(printf '%q' "$RESUME_TRANSFER_PLAN")"
 
 cat >"$JOB_SCRIPT" <<JOBSCRIPT
@@ -195,10 +175,6 @@ export PALETTE_REGISTRY_SHADOW_TEMP_ROOT=${quoted_shadow_temp_root}
 export PALETTE_REGISTRY_SHADOW_BACKUP_DIR=${quoted_shadow_backup_dir}
 JOB_DRY_RUN=${JOB_DRY_RUN}
 REGISTER=${REGISTER}
-RECORDING_ONLY=${RECORDING_ONLY}
-RECORDING_TYPE=${quoted_recording_type}
-RECORDING_SUBTYPE=${quoted_recording_subtype}
-BEHAVIOR_MODE=${quoted_behavior_mode}
 RESUME_TRANSFER_PLAN=${quoted_resume_plan}
 JOB_ID="\${LSB_JOBID:-manual}"
 STATUS_FILE="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.status.txt"
@@ -225,13 +201,8 @@ fi
 if [[ "\${REGISTER}" == "1" ]]; then
   cmd+=(--register --registry "\${REGISTRY}")
 fi
-if [[ "\${RECORDING_ONLY}" == "1" ]]; then
-  cmd+=(--recording-only)
-fi
 if [[ -n "\${RESUME_TRANSFER_PLAN}" ]]; then
   cmd+=(--resume-transfer-plan "\${RESUME_TRANSFER_PLAN}")
-else
-  cmd+=(--recording-type "\${RECORDING_TYPE}" --recording-subtype "\${RECORDING_SUBTYPE}" --behavior-mode "\${BEHAVIOR_MODE}")
 fi
 
 printf 'payload_command='

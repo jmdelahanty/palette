@@ -1,7 +1,7 @@
 # Structural transfer-v2 fixtures — fake media only
 
 These bundles reproduce the Citrus producer at commit
-`e881f5258be83231b62a00a6f9c4e5fcd69cd548`. Their MP4/H5 files are conspicuously
+`859a7972104a829e1cc603a614cd4cf79e5cda06`. Their MP4/H5 files are conspicuously
 labeled text placeholders and their finalization records are test stubs. **Never
 submit these to production staging or treat them as scientific/codec evidence.**
 

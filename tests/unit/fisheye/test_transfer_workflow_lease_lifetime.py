@@ -82,20 +82,10 @@ def test_writer_retains_workflow_lease_after_supervisor_sigkill(tmp_path):
     plan = organizer.build_transfer_organization_plan(
         source,
         destination_root=destination,
-        recording_type="behavior",
-        recording_subtype="free",
-        behavior_mode="free",
     )
     arguments = [
         str(source),
-        "--recording-only",
         "--apply",
-        "--recording-type",
-        "behavior",
-        "--recording-subtype",
-        "free",
-        "--behavior-mode",
-        "free",
         "--dest-root",
         str(destination),
         "--run-dir",

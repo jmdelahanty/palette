@@ -162,14 +162,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--run-dir", type=Path, help="Directory for workflow logs/status.")
     parser.add_argument("--apply", action="store_true", help="Apply organization/import writes.")
     parser.add_argument("--dry-run", action="store_true", help="Plan organization/import without writes.")
-    parser.add_argument("--recording-only", action="store_true", help="Import camera-video-only recordings without stimulus.")
     parser.add_argument("--register", action="store_true", help="Scan imported analysis Zarrs into the registry.")
     parser.add_argument("--registry", type=Path, help="Palette registry SQLite path used with --register.")
     parser.add_argument("--status-json", type=Path, help="Optional path for final status JSON.")
     parser.add_argument("--resume-transfer-plan", type=Path, help="Exact saved organization plan for retry, including interrupted retirement.")
-    parser.add_argument("--recording-type", help="Recording context under the existing manifest vocabulary.")
-    parser.add_argument("--recording-subtype", help="Recording subtype.")
-    parser.add_argument("--behavior-mode", help="Behavior mode.")
 
     args = parser.parse_args(argv)
     if args.apply and args.dry_run:
@@ -178,10 +174,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.dry_run = True
     if args.register and args.registry is None:
         parser.error("--register requires --registry.")
-    if args.resume_transfer_plan is None and not all(
-        (args.recording_type, args.recording_subtype, args.behavior_mode)
-    ):
-        parser.error("--recording-type, --recording-subtype and --behavior-mode are required.")
     from fisheye.utils.citrus_transfer_parent_workflow import run_transfer_parent_workflow
 
     return run_transfer_parent_workflow(args)

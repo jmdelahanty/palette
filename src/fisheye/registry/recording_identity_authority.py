@@ -816,6 +816,7 @@ def _verify_current_import_surfaces(
     from fisheye.shared.source_recording_identity import load_source_recording_identity
     from fisheye.shared.recording_preflight import preflight_gate_reason
     from fisheye.shared.recording_manifest_context import (
+        manifest_context_attrs,
         validate_recording_manifest_context,
     )
     from fisheye.shared.acquisition_video_streams import (
@@ -910,8 +911,9 @@ def _verify_current_import_surfaces(
             expected_frame_count=frame.record.source_total_frames,
         )
     root = zarr.open_group(str(resolved), mode="r", use_consolidated=False)
+    context_attrs = manifest_context_attrs(manifest)
     for field in ("recording_type", "recording_subtype", "behavior_mode"):
-        if root.attrs.get(field) != manifest[field].strip():
+        if root.attrs.get(field) != context_attrs.get(field):
             raise RecordingIdentityAuthorityError(
                 f"published {field} differs from its manifest"
             )

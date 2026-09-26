@@ -32,6 +32,7 @@ from .recording_identity_authority import recording_directory_for_source_target
 from .registered_geometry_readiness import project_registered_geometry_stages
 from .zarr_open import import_zarr as _import_zarr
 from fisheye.shared.experiment_setup import subdish_required
+from fisheye.shared.recording_manifest_context import PRODUCER_CONTEXT_SOURCE
 from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR,
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3,
@@ -874,7 +875,9 @@ def _backfill_recording_entities(
         )
         recording_type = manifest.get("recording_type") or "behavior"
         recording_subtype = manifest.get("recording_subtype")
-        if recording_subtype is None and recording_type == "behavior":
+        # A producer-declared context omits the subtype on purpose: never fill it.
+        producer_context = manifest.get("context_source") == PRODUCER_CONTEXT_SOURCE
+        if recording_subtype is None and recording_type == "behavior" and not producer_context:
             recording_subtype = "free"
         behavior_mode = manifest.get("behavior_mode")
         if behavior_mode is None:

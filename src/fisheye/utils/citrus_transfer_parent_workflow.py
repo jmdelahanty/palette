@@ -42,6 +42,38 @@ from fisheye.utils.run_citrus_session_import import (
 )
 
 
+CANONICAL_REGISTRY = Path(
+    "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite"
+)
+
+
+def _refuse_synthetic_canonical_registration(plan: dict, args) -> None:
+    """Producer-declared synthetic data only registers into an isolated registry."""
+
+    synthetic = any(
+        parent["context"]["data_origin"] == "synthetic" for parent in plan["parents"]
+    )
+    require(
+        not (
+            synthetic
+            and args.register
+            and Path(args.registry).resolve() == CANONICAL_REGISTRY.resolve()
+        ),
+        "synthetic transfer cannot register into the canonical registry",
+    )
+
+
+def _plan_recording_only(plan: dict) -> bool:
+    """Stimulus import follows the producer's declared intent, never H5 presence."""
+
+    intents = {parent["context"]["recording_intent"] for parent in plan["parents"]}
+    require(
+        len(intents) == 1,
+        f"one transfer must declare one recording intent, got {sorted(intents)}",
+    )
+    return intents == {"recording_only"}
+
+
 def run_transfer_parent_workflow(args) -> int:
     """Invoke only through run_citrus_session_import's explicit v2 dispatch."""
     payload = {
@@ -75,11 +107,7 @@ def run_transfer_parent_workflow(args) -> int:
         source = args.session_dir.absolute()
         if args.resume_transfer_plan is None:
             plan = build_transfer_organization_plan(
-                source,
-                destination_root=args.dest_root,
-                recording_type=args.recording_type,
-                recording_subtype=args.recording_subtype,
-                behavior_mode=args.behavior_mode,
+                source, destination_root=args.dest_root
             )
         else:
             plan = strict_json(args.resume_transfer_plan)
@@ -92,16 +120,12 @@ def run_transfer_parent_workflow(args) -> int:
                 plan["destination_root"] == str(args.dest_root.resolve()),
                 "resume plan names another destination root",
             )
-            for field in ("recording_type", "recording_subtype", "behavior_mode"):
-                value = getattr(args, field)
-                require(
-                    value is None or value == plan["context"][field],
-                    "resume cannot change recording context",
-                )
         require(
             plan["recording_layout"] in TRANSFER_PARENT_LAYOUTS,
             "parent workflow supports rolling_clips or single_video only",
         )
+        recording_only = _plan_recording_only(plan)
+        _refuse_synthetic_canonical_registration(plan, args)
         source = Path(plan["source_dir"])
         payload.update(
             plan=plan,
@@ -192,11 +216,11 @@ def run_transfer_parent_workflow(args) -> int:
                 "retirement replay requires --resume-transfer-plan",
             )
             final = finalize_transfer_staging(
-                plan, registry_path=registry, require_stimulus=not args.recording_only
+                plan, registry_path=registry, require_stimulus=not recording_only
             )
         else:
             prepare_transfer_parent_recordings(
-                plan, registry_path=registry, require_stimulus=not args.recording_only
+                plan, registry_path=registry, require_stimulus=not recording_only
             )
             organize_log = run_dir / "organized_parents.jsonl"
             logger = JsonLogger(organize_log, make_run_id())
@@ -217,7 +241,7 @@ def run_transfer_parent_workflow(args) -> int:
                 organize_log=organize_log,
                 log_dir=import_log_dir,
                 apply=True,
-                recording_only=args.recording_only,
+                recording_only=recording_only,
                 registry=registry,
             )
             result = _run_command(
@@ -245,7 +269,7 @@ def run_transfer_parent_workflow(args) -> int:
                 import_log=import_log,
                 recording_dirs=[Path(p["destination_dir"]) for p in plan["parents"]],
                 zarr_paths=zarr_paths,
-                recording_only=args.recording_only,
+                recording_only=recording_only,
             )
             payload.update(
                 import_log=str(import_log),
@@ -254,7 +278,7 @@ def run_transfer_parent_workflow(args) -> int:
             )
             verify_workflow_lock()
             final = finalize_transfer_staging(
-                plan, registry_path=registry, require_stimulus=not args.recording_only
+                plan, registry_path=registry, require_stimulus=not recording_only
             )
         payload.update(
             status="complete",

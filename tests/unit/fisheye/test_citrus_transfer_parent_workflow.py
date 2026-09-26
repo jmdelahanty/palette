@@ -34,13 +34,6 @@ def _arguments(tmp_path, name="rolling"):
     source = Path(shutil.copytree(FIXTURES / name, tmp_path / "staging"))
     arguments = [
         str(source),
-        "--recording-only",
-        "--recording-type",
-        "behavior",
-        "--recording-subtype",
-        "free",
-        "--behavior-mode",
-        "free",
         "--dest-root",
         str(tmp_path / "recordings"),
         "--run-dir",
@@ -93,15 +86,46 @@ def test_transfer_v2_single_video_dry_run_is_planned_not_refused(
 
 
 @pytest.mark.parametrize(
-    "field", ["--recording-type", "--recording-subtype", "--behavior-mode"]
+    "flag",
+    [
+        ["--recording-type", "behavior"],
+        ["--recording-subtype", "free"],
+        ["--behavior-mode", "free"],
+        ["--recording-only"],
+    ],
 )
-def test_transfer_v2_requires_explicit_scientific_context(tmp_path, field):
+def test_operator_context_flags_are_gone(tmp_path, flag):
     _source, arguments = _arguments(tmp_path)
-    position = arguments.index(field)
-    del arguments[position : position + 2]
     with pytest.raises(SystemExit):
-        runner.main(arguments)
+        runner.main([*arguments, *flag])
     assert not (tmp_path / "recordings").exists()
+
+
+def test_stimulus_import_follows_the_declared_intent():
+    from fisheye.utils.citrus_transfer_parent_workflow import _plan_recording_only
+
+    def plan(*intents):
+        return {"parents": [{"context": {"recording_intent": i}} for i in intents]}
+
+    assert _plan_recording_only(plan("recording_only", "recording_only"))
+    assert not _plan_recording_only(plan("stimulus_experiment"))
+    with pytest.raises(ValueError, match="one recording intent"):
+        _plan_recording_only(plan("recording_only", "stimulus_experiment"))
+
+
+def test_synthetic_transfer_never_registers_into_the_canonical_registry(tmp_path):
+    from argparse import Namespace
+
+    from fisheye.utils import citrus_transfer_parent_workflow as workflow
+
+    plan = {"parents": [{"context": {"data_origin": "synthetic"}}]}
+    canonical = Namespace(register=True, registry=workflow.CANONICAL_REGISTRY)
+    with pytest.raises(ValueError, match="canonical registry"):
+        workflow._refuse_synthetic_canonical_registration(plan, canonical)
+    isolated = Namespace(register=True, registry=tmp_path / "isolated.sqlite")
+    workflow._refuse_synthetic_canonical_registration(plan, isolated)
+    acquired = {"parents": [{"context": {"data_origin": "acquired"}}]}
+    workflow._refuse_synthetic_canonical_registration(acquired, canonical)
 
 
 def test_transfer_v2_failed_import_keeps_every_source_and_reports_incomplete(
@@ -157,9 +181,6 @@ def test_transfer_v2_logs_cannot_modify_source_or_parent_recording(tmp_path, loc
         plan = build_transfer_organization_plan(
             source,
             destination_root=tmp_path / "recordings",
-            recording_type="behavior",
-            recording_subtype="free",
-            behavior_mode="free",
         )
         output = Path(plan["parents"][0]["destination_dir"]) / "logs"
     arguments[arguments.index("--run-dir") + 1] = str(output)
@@ -205,9 +226,6 @@ def test_status_destination_never_overwrites_existing_or_reserved_evidence(
         plan = build_transfer_organization_plan(
             source,
             destination_root=tmp_path / "recordings",
-            recording_type="behavior",
-            recording_subtype="free",
-            behavior_mode="free",
         )
         status = _state_directory(plan).with_suffix(".lock")
     before = protected.read_bytes() if protected is not None else None
