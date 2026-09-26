@@ -30,6 +30,9 @@ ADMIN_REVIEW_STATES = (
     "rejected",
 )
 LABELER_START_TASK_STATES = ("pending", "in_progress")
+# A task whose run was replaced by a newer review version. It is read-only:
+# no checkpoint may be staged or claimed for Apply, and labeler views hide it.
+TASK_SUPERSEDED_STATE = "superseded"
 USER_SUMMARY_REDACT_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w])(?:/[^\s,;:'\"<>]+)+")
 USER_SUMMARY_REDACT_ZARR_TOKEN_RE = re.compile(r"(?<![\w./-])[\w./-]*\.zarr(?:[/\w.-]*)?")
 USER_SUMMARY_SAFE_LOCAL_URL_PATHS = ("/work", "/datasets", "/identity")
@@ -1837,6 +1840,7 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         *,
         states: Iterable[str] | None = None,
         include_completed: bool = False,
+        include_superseded: bool = False,
     ) -> list[dict[str, object]]:
         self.initialize()
         user = str(user).strip()
@@ -1862,8 +1866,12 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
             placeholders = ",".join("?" for _ in state_values)
             sql.append(f"AND t.state IN ({placeholders})")
             params.extend(state_values)
-        elif not include_completed:
-            sql.append("AND t.state != 'complete'")
+        else:
+            if not include_superseded:
+                sql.append("AND t.state != ?")
+                params.append(TASK_SUPERSEDED_STATE)
+            if not include_completed:
+                sql.append("AND t.state != 'complete'")
         sql.append(
             """
             ORDER BY
@@ -1929,6 +1937,10 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
             raise ValueError("state is required.")
         if str(task.get("state") or "") == state_value:
             return task
+        if str(task.get("state") or "") == TASK_SUPERSEDED_STATE and state_value in LABELER_START_TASK_STATES:
+            raise ValueError(
+                "This task's review version was replaced by a newer one; open the newest task instead."
+            )
         completed_at = now if state_value == "complete" else None
         self.conn.execute(
             """
@@ -1978,6 +1990,10 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                     before={"state": task.get("state"), "completed_at_utc": task.get("completed_at_utc")},
                     after={"state": state_value, "completed_at_utc": None},
                 )
+        if state_value == "complete" and str(task.get("workflow_kind") or "") == "subject_mask_component":
+            self.retire_untouched_review_successors(
+                source_task_id=str(task_id), user=str(user or "system")
+            )
         return updated
 
     def list_current_task_sessions(
@@ -2589,6 +2605,140 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 after={"closed_at_utc": now, "expires_at_utc": session.get("expires_at_utc")},
             )
         return cleaned
+
+    def supersede_tasks(
+        self,
+        *,
+        task_ids: Sequence[str],
+        user: str,
+        reason: str,
+        details: Mapping[str, object] | None = None,
+    ) -> dict[str, str]:
+        """Mark open tasks read-only because a newer review version replaced them.
+
+        Returns each changed task's previous state so a failed publication can
+        restore it. Completed and already superseded tasks are left unchanged.
+        """
+
+        self.initialize()
+        previous: dict[str, str] = {}
+        for task_id in dict.fromkeys(str(item) for item in task_ids):
+            task = self.get_task(task_id)
+            if task is None:
+                raise KeyError(f"Unknown task_id: {task_id}")
+            state = str(task.get("state") or "")
+            if state in ("complete", TASK_SUPERSEDED_STATE):
+                continue
+            self.conn.execute(
+                "UPDATE labeling_tasks SET state = ?, updated_at_utc = ? WHERE task_id = ?;",
+                (TASK_SUPERSEDED_STATE, utc_now(), task_id),
+            )
+            self.conn.commit()
+            previous[task_id] = state
+            self.close_sessions_for_task(
+                task_id=task_id, user=user, event_type="session_closed_by_task_superseded"
+            )
+            self.record_event(
+                task_id=task_id,
+                recording_id=str(task["recording_id"]),
+                user=str(user),
+                event_type="task_superseded",
+                before={"state": state},
+                after={
+                    "state": TASK_SUPERSEDED_STATE,
+                    "reason": str(reason),
+                    **dict(details or {}),
+                },
+            )
+        return previous
+
+    def restore_superseded_tasks(
+        self, *, previous_states: Mapping[str, str], user: str, reason: str
+    ) -> None:
+        """Undo :meth:`supersede_tasks` after the replacing version failed to publish."""
+
+        self.initialize()
+        for task_id, state in previous_states.items():
+            task = self.get_task(task_id)
+            if task is None or str(task.get("state") or "") != TASK_SUPERSEDED_STATE:
+                continue
+            self.conn.execute(
+                "UPDATE labeling_tasks SET state = ?, updated_at_utc = ? WHERE task_id = ?;",
+                (str(state), utc_now(), str(task_id)),
+            )
+            self.conn.commit()
+            self.record_event(
+                task_id=str(task_id),
+                recording_id=str(task["recording_id"]),
+                user=str(user),
+                event_type="task_supersede_reverted",
+                before={"state": TASK_SUPERSEDED_STATE},
+                after={"state": str(state), "reason": str(reason)},
+            )
+
+    def retire_untouched_review_successors(
+        self, *, source_task_id: str, user: str
+    ) -> list[str]:
+        """Supersede untouched mask successors created by Applies of a completed task.
+
+        Each mask Apply offers a successor mask task for the new version. Once
+        the source mask review is completed, an untouched successor holds the
+        same masks and is not further work. It is superseded, not completed, so
+        no review is claimed for it.
+        """
+
+        self.initialize()
+        source = self.get_task(source_task_id)
+        if source is None or str(source.get("state") or "") != "complete":
+            return []
+        apply_ids = {
+            str(row["apply_id"])
+            for row in self.conn.execute(
+                "SELECT apply_id FROM labeling_checkpoint_apply_receipts WHERE task_id = ?;",
+                (str(source_task_id),),
+            ).fetchall()
+        }
+        if not apply_ids:
+            return []
+        retire = []
+        for task in self.list_tasks(recording_id=str(source["recording_id"])):
+            scope = task.get("scope") or {}
+            if (
+                str(task.get("workflow_kind") or "") != str(source.get("workflow_kind") or "")
+                or str(task.get("state") or "") not in LABELER_START_TASK_STATES
+                or not isinstance(scope, Mapping)
+                or str(scope.get("source_mask_apply_id") or "") not in apply_ids
+            ):
+                continue
+            touched = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM labeling_session_checkpoints WHERE task_id = ?;",
+                (str(task["task_id"]),),
+            ).fetchone()
+            if int(touched["n"]) == 0:
+                retire.append(str(task["task_id"]))
+        self.supersede_tasks(
+            task_ids=retire,
+            user=user,
+            reason="review_completed_in_source_task",
+            details={"source_task_id": str(source_task_id)},
+        )
+        return retire
+
+    def list_recording_applied_checkpoints(
+        self, *, recording_id: str, workflow_kind: str
+    ) -> list[dict[str, object]]:
+        """Every applied checkpoint of one workflow for a recording, oldest first."""
+
+        self.initialize()
+        rows = self.conn.execute(
+            """
+            SELECT * FROM labeling_session_checkpoints
+            WHERE recording_id = ? AND workflow_kind = ? AND state = 'applied'
+            ORDER BY applied_at_utc ASC, roi_idx ASC, checkpoint_id ASC;
+            """,
+            (str(recording_id), str(workflow_kind)),
+        ).fetchall()
+        return [_checkpoint_store.checkpoint_row(row) for row in rows]
 
     def close_sessions_for_task(
         self,

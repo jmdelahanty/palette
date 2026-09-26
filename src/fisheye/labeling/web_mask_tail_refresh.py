@@ -4,6 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import zarr
+
+from fisheye.labeling.assignment_store import TASK_SUPERSEDED_STATE
+from fisheye.labeling.tail_successor_lineage import (
+    KEYPOINT_FAMILY,
+    MASK_FAMILY,
+    lineage_tasks,
+    read_family_lineage,
+    stranded_keypoint_rows,
+    task_run,
+)
 from fisheye.shared.keypoint_motion_authority import (
     keypoint_source_crop_run_from_attributes,
 )
@@ -93,32 +104,35 @@ def refresh_training_tail_after_mask_apply(
         )
     pose_name = candidates[0]
     archive = Path(runtime.zarr_path).resolve()
-    source_tasks = []
-    for task in store.list_tasks(recording_id=runtime.recording_id):
-        scope = task.get("scope") or {}
-        if (
-            task.get("workflow_kind") != "keypoints"
-            or str(scope.get("refined_run") or task.get("run_name") or "") != pose_name
-            or Path(str(scope.get("zarr_path") or "")).resolve() != archive
-        ):
-            continue
-        task_id = str(task["task_id"])
-        if store.count_unapplied_session_checkpoints(
-            task_id=task_id, component_name="keypoints"
-        ) or store.count_pending_session_checkpoint_apply_effects(
-            task_id=task_id, component_name="keypoints"
-        ):
-            raise RuntimeError(
-                "Apply the paired keypoint task's saved checkpoints before retrying mask Apply; its manual labels are waiting to be copied."
-            )
-        source_tasks.append(task_id)
-    result = regenerate_training_tail_version(
-        archive=archive,
-        refined_mask_run=runtime.refined.run_name,
-        refined_keypoint_run=pose_name,
-        apply_id=apply_id,
-        expected_mask_revision=expected_mask_revision,
+    replaced, source_tasks = _replaced_tasks(
+        store, runtime, archive=archive, pose_name=pose_name
     )
+    _refuse_unfinished_work(store, replaced)
+    _refuse_stranded_keypoints(store, runtime, archive=archive, pose_name=pose_name)
+    # Close the older versions before the snapshot so nothing new can be
+    # applied to them afterwards; claims made earlier are visible as applying.
+    previous = store.supersede_tasks(
+        task_ids=[str(task["task_id"]) for task in replaced],
+        user=runtime.user,
+        reason="replaced_by_tail_successor",
+        details={"source_mask_apply_id": str(apply_id), "source_task_id": runtime.task_id},
+    )
+    try:
+        _refuse_unfinished_work(store, replaced)
+        result = regenerate_training_tail_version(
+            archive=archive,
+            refined_mask_run=runtime.refined.run_name,
+            refined_keypoint_run=pose_name,
+            apply_id=apply_id,
+            expected_mask_revision=expected_mask_revision,
+        )
+    except BaseException:
+        store.restore_superseded_tasks(
+            previous_states=previous,
+            user=runtime.user,
+            reason="tail_successor_not_published",
+        )
+        raise
     tasks = []
     for task in result["tasks"]:
         task = dict(task)
@@ -180,6 +194,83 @@ def refresh_training_tail_after_mask_apply(
             "training_eligible_count": result["training_eligible_count"],
             "failures": result["failures"],
             "tail_refresh": offer,
+            "superseded_task_ids": sorted(previous),
         },
     )
+    # A review completed while this effect was pending retires its successors now.
+    store.retire_untouched_review_successors(
+        source_task_id=runtime.task_id, user=runtime.user
+    )
     return offer
+
+
+def _replaced_tasks(store, runtime, *, archive: Path, pose_name: str):
+    """Open tasks on older versions in this lineage, and the paired keypoint tasks.
+
+    Mask tasks on the applied mask run itself (the task being applied and any
+    other component's task on that run) stay open: the run is still editable,
+    and its next Apply snapshots every component again, so nothing there can
+    be stranded. Its review can also still be completed.
+    """
+
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    tasks = store.list_tasks(recording_id=runtime.recording_id)
+    keypoints = read_family_lineage(root, KEYPOINT_FAMILY)
+    masks = read_family_lineage(root, MASK_FAMILY)
+    keypoint_tasks = lineage_tasks(
+        tasks, archive=archive, family=KEYPOINT_FAMILY,
+        component=keypoints.component(pose_name),
+    )
+    mask_tasks = lineage_tasks(
+        tasks, archive=archive, family=MASK_FAMILY,
+        component=masks.component(runtime.refined.run_name),
+    )
+    source_tasks = [
+        str(task["task_id"]) for task in keypoint_tasks if task_run(task) == pose_name
+    ]
+    replaced = [
+        task
+        for task in (
+            *keypoint_tasks,
+            *(t for t in mask_tasks if task_run(t) != runtime.refined.run_name),
+        )
+        if str(task["task_id"]) != str(runtime.task_id)
+        and str(task.get("state") or "") not in ("complete", TASK_SUPERSEDED_STATE)
+    ]
+    return replaced, source_tasks
+
+
+def _refuse_unfinished_work(store, tasks) -> None:
+    for task in tasks:
+        task_id = str(task["task_id"])
+        if store.count_unapplied_session_checkpoints(
+            task_id=task_id
+        ) or store.count_pending_session_checkpoint_apply_effects(task_id=task_id):
+            kind = "keypoint" if task.get("workflow_kind") == "keypoints" else "mask"
+            raise RuntimeError(
+                f"Apply the saved {kind} edits in task {task_id} before retrying mask Apply; "
+                "that task is replaced by the new version and its edits are waiting to be copied."
+            )
+
+
+def _refuse_stranded_keypoints(store, runtime, *, archive: Path, pose_name: str) -> None:
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    stranded = [
+        row
+        for row in stranded_keypoint_rows(
+            root=root,
+            checkpoints=store.list_recording_applied_checkpoints(
+                recording_id=runtime.recording_id, workflow_kind="keypoints"
+            ),
+            lineage=read_family_lineage(root, KEYPOINT_FAMILY),
+            target_run=pose_name,
+        )
+        if row.disposition in ("carry", "not_carryable")
+    ]
+    if stranded:
+        runs = sorted({row.source_run for row in stranded})
+        raise RuntimeError(
+            f"{len(stranded)} keypoint rows labeled in an older version ({', '.join(runs)}) "
+            "are not in the current one. Carry them forward first "
+            "(python -m fisheye.labeling.carry_forward_tail_keypoints) so this Apply does not drop them."
+        )

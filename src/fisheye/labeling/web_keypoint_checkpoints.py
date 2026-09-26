@@ -496,8 +496,13 @@ def stage_keypoint_checkpoint(
     user: str,
     operation: str,
     points: Sequence[Sequence[float]] | None = None,
+    carried_from: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Persist one final-row browser edit without touching canonical Zarr."""
+    """Persist one final-row browser edit without touching canonical Zarr.
+
+    ``carried_from`` records the older-version edit this checkpoint replays
+    (see ``fisheye.labeling.carry_forward_tail_keypoints``).
+    """
 
     session = getattr(runtime, "review_session")
     if keypoint_browser_save_mode(session) != KEYPOINT_CHECKPOINT_SAVE_MODE:
@@ -548,6 +553,8 @@ def stage_keypoint_checkpoint(
             "reopen_policy": "same_task_recording_user_may_resume",
         },
     }
+    if carried_from is not None:
+        metadata["carried_from"] = dict(carried_from)
     checkpoint = store.upsert_session_checkpoint(
         session_id=str(getattr(runtime, "session_id")),
         task_id=str(getattr(runtime, "task_id")),
