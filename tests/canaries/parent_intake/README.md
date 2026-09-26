@@ -10,7 +10,7 @@ job, or uses the live registry/poller. Do not run pytest on login nodes or LSF.
 Prerequisites: an existing Palette `scripts/py` environment with the test
 dependencies, `/usr/bin/ffmpeg` with libx264, `/usr/bin/ffprobe`, and an explicitly
 supplied Citrus source directory. The four hashes in `generate_fixture.py`
-must match Citrus commit `e881f5258be83231b62a00a6f9c4e5fcd69cd548` and the
+must match Citrus commit `859a7972104a829e1cc603a614cd4cf79e5cda06` and the
 recorded transfer schema. A source snapshot is sufficient; no Citrus Git
 checkout or acquisition-agent connection is required. Do not replace the pins
 with whatever is currently installed just to obtain a pass.

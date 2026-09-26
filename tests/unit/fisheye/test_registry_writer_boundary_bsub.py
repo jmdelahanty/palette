@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import subprocess
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[3]
 CITRUS_SCRIPT = REPO / "scripts" / "submit_citrus_session_import_bsub.sh"
 PROJECTION_SCRIPT = REPO / "scripts" / "submit_registry_zarr_projection_refresh_bsub.sh"
@@ -31,12 +33,7 @@ def _run_citrus(
             "--run-id",
             "writer-boundary",
             "--dry-run",
-            *(
-                []
-                if "--no-context" in options
-                else ["--recording-type", "behavior", "--recording-subtype", "chaser", "--behavior-mode", "free"]
-            ),
-            *(option for option in options if option != "--no-context"),
+            *options,
         ],
         check=False,
         text=True,
@@ -173,15 +170,20 @@ def test_projection_refresh_apply_fails_closed(tmp_path: Path) -> None:
     assert not (tmp_path / "projection-logs").exists()
 
 
-def test_citrus_launcher_refuses_missing_transfer_context(tmp_path: Path) -> None:
-    result = _run_citrus(tmp_path, "--writer-host", "host", "--no-context")
+@pytest.mark.parametrize(
+    "flag", ["--recording-type", "--recording-subtype", "--behavior-mode", "--recording-only"]
+)
+def test_citrus_launcher_refuses_operator_context_flags(tmp_path: Path, flag: str) -> None:
+    # Recording context comes only from the producer's transfer snapshot.
+    extra = [flag] if flag == "--recording-only" else [flag, "free"]
+    result = _run_citrus(tmp_path, "--writer-host", "host", *extra)
     assert result.returncode == 2
-    assert "--recording-type" in result.stderr
+    assert f"Unknown arg: {flag}" in result.stderr
 
 
 def test_citrus_launcher_job_runs_transfer_v2_only(tmp_path: Path) -> None:
     result = _run_citrus(tmp_path, "--writer-host", "host")
     assert result.returncode == 0, result.stderr
     job = next((tmp_path / "citrus-logs").glob("**/run_citrus_session_import.sh")).read_text()
-    assert "--recording-type" in job and "--behavior-mode" in job
+    assert "--recording-type" not in job and "--behavior-mode" not in job
     assert "diagnostics" not in job

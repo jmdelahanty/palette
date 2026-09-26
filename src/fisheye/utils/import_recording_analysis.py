@@ -58,7 +58,10 @@ from fisheye.shared.clipped_video_collection import (
     build_clipped_video_collection_metadata,
 )
 from fisheye.shared.recording_preflight import preflight_gate_reason
-from fisheye.shared.recording_manifest_context import validate_recording_manifest_context
+from fisheye.shared.recording_manifest_context import (
+    manifest_context_attrs,
+    validate_recording_manifest_context,
+)
 from fisheye.shared.recording_import_receipt import (
     CURRENT_RECORDING_IMPORT_PRODUCER_ID,
     RecordingImportReceipt,
@@ -347,9 +350,11 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
             field for field, value in identity.analysis_root_fields().items()
             if existing.attrs.get(field) != value
         ]
+        context_attrs = manifest_context_attrs(manifest)
         conflicts.extend(
-            field for field in ("recording_type", "recording_subtype", "behavior_mode")
-            if existing.attrs.get(field) != manifest[field].strip()
+            field
+            for field in ("recording_type", "recording_subtype", "behavior_mode")
+            if existing.attrs.get(field) != context_attrs.get(field)
         )
         if conflicts:
             raise SourceRecordingIdentityError(
@@ -372,8 +377,8 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
         attrs.update(identity.analysis_root_fields())
     attrs.setdefault("recording_name", _manifest_text(manifest, "recording_name") or recording_id)
     attrs.setdefault("recording_path", str(plan.recording_dir))
-    for field in ("recording_type", "recording_subtype", "behavior_mode"):
-        attrs.setdefault(field, manifest[field].strip())
+    for field, value in manifest_context_attrs(manifest).items():
+        attrs.setdefault(field, value)
     attrs.setdefault("artifact_schema_id", "recording_analysis_v1")
     for key in (
         "camera_id",

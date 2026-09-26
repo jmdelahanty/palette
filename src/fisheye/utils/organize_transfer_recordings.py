@@ -31,6 +31,7 @@ from fisheye.shared.recording_geometry_bundle import (
     iter_recording_geometry_bundle_files,
 )
 from fisheye.shared.recording_manifest_context import (
+    PRODUCER_CONTEXT_SOURCE,
     validate_recording_manifest_context,
 )
 from fisheye.shared.recording_preflight import default_preflight_payload
@@ -60,7 +61,7 @@ from fisheye.utils.organize_recordings import (
     _recording_geometry_bundle_source,
 )
 
-PLAN_SCHEMA_ID = "palette.transfer_parent_organization_plan.v1"
+PLAN_SCHEMA_ID = "palette.transfer_parent_organization_plan.v2"
 ARTIFACT_SCHEMA_ID = "orange_transfer_parent_v1"
 INDEX_DIRECTORY = "derived/recording_frame_index"
 # Orange's finalized observation collection is the path authority for each
@@ -102,7 +103,7 @@ def _strict_json_file(path: Path) -> dict:
 
 
 def _unified_h5_context(
-    source: Path, relative: str, inventory, operator_context: dict
+    source: Path, relative: str, inventory, parent_contexts: dict[str, dict]
 ) -> tuple[str, dict, str]:
     """Camera, manifest context and receipt path for one unified H5.
 
@@ -127,10 +128,22 @@ def _unified_h5_context(
         }
         context["citrus_session_uuid"] = normalize_attr(attrs["session_uuid"])
         declared = {key: normalize_attr(attrs[key]) for key in UNIFIED_CONTEXT_FIELDS if key in attrs}
+    require(
+        binding.camera_serial in parent_contexts,
+        f"H5 camera has no producer recording context: {relative}",
+    )
+    expected = {
+        key: parent_contexts[binding.camera_serial][key]
+        for key in UNIFIED_CONTEXT_FIELDS
+        if key in parent_contexts[binding.camera_serial]
+    }
+    # The profile leaves these attributes optional, but every one the H5 declares
+    # must equal the producer's, and a subtype-free context has no H5 subtype.
     for key, value in declared.items():
         require(
-            value == operator_context[key],
-            f"operator {key}={operator_context[key]!r} differs from the H5's {value!r}: {relative}",
+            key in expected and value == expected[key],
+            f"H5 {key}={value!r} differs from the producer's "
+            f"{expected.get(key, '<not specified>')!r}: {relative}",
         )
     require(
         claims.get("recording_id") == binding.acquisition_session_id,
@@ -200,31 +213,47 @@ def _separate_destination(source: Path, destination: Path) -> Path:
     return candidate
 
 
+def producer_manifest_context(recording_context: dict) -> dict:
+    """Manifest fields for one producer-declared parent context, never filled.
+
+    An omitted subtype (context v2) stays absent: it means "not specified".
+    """
+    context = {
+        "context_source": PRODUCER_CONTEXT_SOURCE,
+        "recording_context_schema_version": recording_context["schema_version"],
+        "artifact_schema_id": ARTIFACT_SCHEMA_ID,
+        **{
+            key: recording_context[key]
+            for key in (
+                "recording_type", "recording_subtype", "behavior_mode",
+                "recording_intent", "data_origin",
+            )
+            if key in recording_context
+        },
+    }
+    validate_recording_manifest_context(context)
+    return context
+
+
 def build_transfer_organization_plan(
     recording_dir: Path,
     *,
     destination_root: Path,
-    recording_type: str,
-    recording_subtype: str,
-    behavior_mode: str,
 ) -> dict:
     """Assign all inventory/control bytes to exact camera parents, without writes.
 
-    The three scientific context fields are explicit operator inputs under the
-    existing manifest vocabulary, not guessed from H5 presence or video names.
-    H5 camera/session mapping uses the existing producer-context reader. Other
-    session context is preserved for every parent, never dropped or relabeled as
-    camera-specific evidence. Source retention is not implied by this plan.
+    Scientific context is the producer's per-camera declaration in the
+    transfer snapshot, not an operator input and not guessed from H5 presence
+    or video names. H5 camera/session mapping uses the existing producer-context
+    reader. Other session context is preserved for every parent, never dropped
+    or relabeled as camera-specific evidence. Source retention is not implied.
     """
-    context = {
-        "recording_type": recording_type,
-        "recording_subtype": recording_subtype,
-        "behavior_mode": behavior_mode,
-        "artifact_schema_id": ARTIFACT_SCHEMA_ID,
-    }
-    validate_recording_manifest_context(context)
     current = verify_transfer_snapshot(recording_dir)
     parents = plan_parent_recordings(current)
+    contexts = {parent.camera_id: parent.recording_context for parent in parents}
+    manifest_contexts = {
+        camera: producer_manifest_context(context) for camera, context in contexts.items()
+    }
     source = current.root
     destination = _separate_destination(source, destination_root)
     inventory = {item["path"]: dict(item) for item in current.snapshot["inventory"]}
@@ -274,7 +303,7 @@ def build_transfer_organization_plan(
             unified = declared_unified_profile(h5) is not None
         receipt = None
         if unified:
-            camera, metadata, receipt = _unified_h5_context(source, relative, inventory, context)
+            camera, metadata, receipt = _unified_h5_context(source, relative, inventory, contexts)
         else:
             camera, metadata = _read_camera_context(source / relative)
         require(
@@ -354,9 +383,14 @@ def build_transfer_organization_plan(
             "output_kinds": sorted(
                 output.output_kind for output in parent.clips[0].outputs
             ),
-            "context": dict(context),
-            "context_source": "explicit_operator_recording_context",
-            "producer_context": producer_context.get(parent.camera_id, {}),
+            "context": manifest_contexts[parent.camera_id],
+            "context_source": PRODUCER_CONTEXT_SOURCE,
+            # H5 metadata never supplies scientific context the producer omitted.
+            "producer_context": {
+                key: value
+                for key, value in producer_context.get(parent.camera_id, {}).items()
+                if key not in UNIFIED_CONTEXT_FIELDS
+            },
             "h5_relative_path": (
                 f"raw/acquisition/{h5_by_camera[parent.camera_id]}"
                 if parent.camera_id in h5_by_camera
@@ -415,7 +449,6 @@ def build_transfer_organization_plan(
         "recording_payload_kind": current.recording_payload_kind,
         "acquisition_session_id": current.snapshot["acquisition_session_id"],
         "orange_producer": session.get("producer"),
-        "context": context,
         "parents": records,
         "files": files,
         "status": "organization_planned",
@@ -464,18 +497,11 @@ def _validate_plan(plan: dict, *, live_source: bool) -> None:
     _directory_identity(source)
     _separate_destination(source, destination)
     if live_source:
-        context = plan["context"]
         rebuilt = build_transfer_organization_plan(
             Path(plan["source_dir"]),
             destination_root=Path(plan["destination_root"]),
-            **{
-                key: context[key]
-                for key in ("recording_type", "recording_subtype", "behavior_mode")
-            },
         )
-        require(
-            rebuilt == plan, "organization plan differs from live source or context"
-        )
+        require(rebuilt == plan, "organization plan differs from live source")
 
 
 def _fsync_regular_file(path: Path) -> None:

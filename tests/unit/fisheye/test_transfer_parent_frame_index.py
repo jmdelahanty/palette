@@ -29,9 +29,6 @@ def _organized(tmp_path, name="rolling"):
     plan = organizer.build_transfer_organization_plan(
         root,
         destination_root=tmp_path / "recordings",
-        recording_type="behavior",
-        recording_subtype="free",
-        behavior_mode="free",
     )
     organizer.materialize_transfer_organization(plan)
     parent = next(
