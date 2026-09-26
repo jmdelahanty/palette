@@ -1,5 +1,12 @@
 # Training head-anchored tail geometry v4
 
+> **Since 2026-09-26 (tail successor format v3):** ordinary mask Apply selects
+> each row's method itself: legacy first, then head-anchored only where
+> legacy fails at the snout join (`snout_extension_too_long` or
+> `snout_extension_no_mask_path`) and head-anchored yields a valid tail. See
+> `docs/design/2026-09-26-head-anchored-upgrade-scope/README.md`. The explicit
+> targeted upgrade below remains available but is no longer needed for these rows.
+
 This opt-in recipe refreshes only named rows in existing 19-landmark training
 reviews whose saved status contains `tail_derivation_failed:snout_extension_too_long`.
 It does not change the production subject-shape writer, the legacy centerline

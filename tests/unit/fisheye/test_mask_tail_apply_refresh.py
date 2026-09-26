@@ -22,9 +22,9 @@ from fisheye.training.mask_tail_border_acceptance import (
 )
 
 
-@pytest.fixture(autouse=True, params=["v2", "v1"])
+@pytest.fixture(autouse=True, params=["v3", "v2", "v1"])
 def successor_format(request, monkeypatch):
-    """Every successor behavior holds for the current (v2) and historical (v1) format."""
+    """Every successor behavior holds for the current (v3) and historical (v2, v1) formats."""
     from fisheye.training import mask_tail_apply_refresh as refresh_mod
 
     monkeypatch.setattr(refresh_mod, "DEFAULT_SUCCESSOR_FORMAT", request.param)
@@ -1064,3 +1064,36 @@ def test_task_state_domain_is_enforced_and_reported(reviewed_archive, tmp_path):
     report = validate_labeling_sqlite(tmp_path / "review.sqlite")
     assert report["state_violations"] == {"labeling_tasks": {"typo": 1}}
     store.close()
+
+
+def test_v3_matches_v2_exactly_on_rows_legacy_derives(reviewed_archive, tmp_path, successor_format):
+    """Preservation: v3 changes nothing where the legacy method succeeds."""
+    if successor_format != "v3":
+        pytest.skip("compares v3 against v2 once")
+    path, root, result = reviewed_archive
+    outputs = {}
+    for fmt in ("v2", "v3"):
+        outputs[fmt] = refresh(reviewed_archive, apply_id=f"compare-{fmt}", successor_format=fmt)
+    current = zarr.open_group(str(path), mode="r", use_consolidated=False)
+    v3_seed = current[outputs["v3"]["paths"]["seed"]]
+    codes = np.asarray(v3_seed["tail_derivation_method_code"][:])
+    proof = outputs["v3"]["source_bindings"]["mask_apply_refresh"]["tail_method_selection"]
+    assert proof["policy"] == "legacy_first_head_anchored_fallback_v1"
+    assert proof["head_anchored_rows"] == [int(r) for r in np.flatnonzero(codes)]
+    v2_valid = np.asarray(current[outputs["v2"]["paths"]["seed"]]["tail_valid"][:], dtype=bool)
+    assert v2_valid.any() and not codes[v2_valid].any()  # Legacy-derived rows stay legacy.
+    legacy_rows = codes == 0
+    for key in ("seed", "pose_edit", "mask", "mask_edit"):
+        v2 = current[outputs["v2"]["paths"][key]]
+        v3 = current[outputs["v3"]["paths"][key]]
+        for name, array in v2.arrays():
+            if name not in v3 or not array.shape or array.shape[0] != len(codes):
+                continue
+            if name == "reason_bytes":
+                # Fixed-width column sized to the longest label: compare labels.
+                a, b = read_reason_labels(v2), read_reason_labels(v3)
+                assert [str(x) for x in a[legacy_rows]] == [str(x) for x in b[legacy_rows]], key
+                continue
+            a, b = np.asarray(array[:]), np.asarray(v3[name][:])
+            assert a.dtype == b.dtype and a.shape == b.shape, (key, name)
+            assert a[legacy_rows].tobytes() == b[legacy_rows].tobytes(), (key, name)

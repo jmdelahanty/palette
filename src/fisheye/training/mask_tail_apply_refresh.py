@@ -9,9 +9,15 @@ Successor formats (the policy id is part of every version digest):
 - ``v1`` (``REFRESH_POLICY``): five runs, including an identity copy of the
   source crop run, written chunk-only. Historical; still readable, and still
   used to resume an Apply whose v1 publication was already started.
-- ``v2`` (``REFRESH_POLICY_V2``, the default): four runs that reference the
-  existing crop run through ``source_crop_run`` (its contract digest is bound
-  in the proof), laid out with the ``training_review_run_v1`` shard profile.
+- ``v2`` (``REFRESH_POLICY_V2``): four runs that reference the existing crop
+  run through ``source_crop_run`` (its contract digest is bound in the
+  proof), laid out with the ``training_review_run_v1`` shard profile.
+- ``v3`` (``REFRESH_POLICY_V3``, the default): v2's layout, and each row's
+  tail method is selected from the current masks: the legacy method first,
+  and the head-anchored method only where legacy fails at the snout join
+  (``FALLBACK_FAILURE_REASONS``) and head-anchored yields a valid tail. Rows
+  legacy derives keep exactly the legacy output. Per-row method codes and
+  the selection policy are recorded in the proof.
 """
 
 from __future__ import annotations
@@ -34,6 +40,8 @@ from fisheye.shared.detect_reason_codec import (
 )
 from fisheye.shared.recovered_training_review_contract import (
     NATIVE_REVIEW_SCHEMA,
+    HEAD_ANCHORED_FALLBACK_SUCCESSOR_POLICY,
+    REFERENCED_CROP_SUCCESSOR_POLICIES,
     REFERENCED_CROP_SUCCESSOR_POLICY,
     initial_contract_digest,
 )
@@ -80,9 +88,20 @@ REFRESH_SCHEMA = "palette.training.mask_apply_tail_successor.v1"
 REFRESH_SCHEMA_V2 = "palette.training.mask_apply_tail_successor.v2"
 REFRESH_POLICY = "new_mask_seed_and_review_version_preserve_recorded_manual_points_v1"
 REFRESH_POLICY_V2 = REFERENCED_CROP_SUCCESSOR_POLICY
-SUCCESSOR_FORMAT_POLICIES = {"v1": REFRESH_POLICY, "v2": REFRESH_POLICY_V2}
-SUCCESSOR_FORMAT_SCHEMAS = {REFRESH_POLICY: REFRESH_SCHEMA, REFRESH_POLICY_V2: REFRESH_SCHEMA_V2}
-DEFAULT_SUCCESSOR_FORMAT = "v2"
+# v3 proofs add ``tail_method_selection``.
+REFRESH_SCHEMA_V3 = "palette.training.mask_apply_tail_successor.v3"
+REFRESH_POLICY_V3 = HEAD_ANCHORED_FALLBACK_SUCCESSOR_POLICY
+SUCCESSOR_FORMAT_POLICIES = {"v1": REFRESH_POLICY, "v2": REFRESH_POLICY_V2, "v3": REFRESH_POLICY_V3}
+SUCCESSOR_FORMAT_SCHEMAS = {
+    REFRESH_POLICY: REFRESH_SCHEMA,
+    REFRESH_POLICY_V2: REFRESH_SCHEMA_V2,
+    REFRESH_POLICY_V3: REFRESH_SCHEMA_V3,
+}
+DEFAULT_SUCCESSOR_FORMAT = "v3"
+_REFERENCED_CROP_FORMATS = frozenset({"v2", "v3"})
+TAIL_METHOD_SELECTION_POLICY = "legacy_first_head_anchored_fallback_v1"
+# Legacy failures at the snout join, which the head-anchored route addresses.
+FALLBACK_FAILURE_REASONS = ("snout_extension_too_long", "snout_extension_no_mask_path")
 _EDITABLE_RUN_KEYS = frozenset({"pose_edit", "mask_edit"})
 # The first child each format publishes: v1 its crop copy, v2 its mask snapshot.
 # A partial publication is therefore always visible in one of these families.
@@ -185,7 +204,7 @@ def _capture(
     root, *, mask_name, pose_name, revision, upgrade_target_rows=None,
     successor_format=DEFAULT_SUCCESSOR_FORMAT,
 ):
-    reference_crop = successor_format == "v2"
+    reference_crop = successor_format in _REFERENCED_CROP_FORMATS
     mask = resolve_mutable_refined_subject_mask_run(root, mask_name)
     pose = root[f"refined_keypoints_runs/{pose_name}"]
     crop_name = keypoint_source_crop_run_from_attributes(pose.attrs)
@@ -411,6 +430,21 @@ def _capture(
         }
     if row_method_codes is not None:
         proof["source_row_method_codes_sha256"] = _sha256_array(row_method_codes)
+    fallback = (
+        successor_format == "v3"
+        and upgrade_target_rows is None
+        and upgraded_recipe is not None
+    )
+    if fallback:
+        row_method_codes = _fallback_method_codes(
+            masks, labels, points, schema_name=schema_name, accepted=accepted
+        )
+        proof["tail_method_selection"] = {
+            "policy": TAIL_METHOD_SELECTION_POLICY,
+            "fallback_failure_reasons": list(FALLBACK_FAILURE_REASONS),
+            "row_method_codes_sha256": _sha256_array(row_method_codes),
+            "head_anchored_rows": [int(row) for row in np.flatnonzero(row_method_codes)],
+        }
     if accepted:
         proof["tail_crop_border_acceptances"] = accepted
     arrays = {
@@ -444,13 +478,44 @@ def _capture(
         origins,
         schema_name,
         original_reasons,
-        HEAD_ANCHORED_CENTERLINE_METHOD if (selected_rows is not None or source_is_upgraded) else "legacy",
+        HEAD_ANCHORED_CENTERLINE_METHOD
+        if (selected_rows is not None or source_is_upgraded or fallback)
+        else "legacy",
         preserved_seed,
         preserved_pose,
         preserved_seed_reasons,
         selected_rows,
         row_method_codes,
     )
+
+
+def _fallback_method_codes(masks, labels, points, *, schema_name, accepted):
+    """Per-row tail method under legacy-first, head-anchored fallback.
+
+    ``1`` only where legacy fails with a ``FALLBACK_FAILURE_REASONS`` reason
+    and the head-anchored method derives a valid tail; otherwise ``0``.
+    """
+
+    n = len(masks)
+    accepted_rows = np.zeros(n, dtype=bool)
+    for key in accepted:
+        accepted_rows[int(key)] = True
+    border = {"accepted_crop_border_rows": accepted_rows} if accepted else {}
+    legacy = derive_tail_seed(masks, labels, points[:, :3], schema_name=schema_name, **border)
+    reasons = [str(value) for value in legacy["tail_failure_reason"]]
+    valid = np.asarray(legacy["tail_valid"], dtype=bool)
+    candidates = np.flatnonzero(
+        ~valid & np.asarray([reason in FALLBACK_FAILURE_REASONS for reason in reasons])
+    )
+    codes = np.zeros(n, dtype=np.uint8)
+    if candidates.size:
+        retry = derive_tail_seed(
+            masks[candidates], labels, points[candidates][:, :3],
+            schema_name=schema_name, method=HEAD_ANCHORED_CENTERLINE_METHOD,
+            **({"accepted_crop_border_rows": accepted_rows[candidates]} if accepted else {}),
+        )
+        codes[candidates[np.asarray(retry["tail_valid"], dtype=bool)]] = 1
+    return codes
 
 
 def _carry_labels(
@@ -660,7 +725,7 @@ def validate_completed_tail_version(*, archive, version, source_bindings):
         version,
         native=source_bindings.get("source_kind")
         == "native_reviewed_training_masks_v1",
-        reference_crop=proof["policy"] == REFRESH_POLICY_V2,
+        reference_crop=proof["policy"] in REFERENCED_CROP_SUCCESSOR_POLICIES,
     )
     with archive_metadata_publication_lock(archive):
         if not _reuse_completed(archive, paths, source_bindings):
@@ -717,7 +782,7 @@ def regenerate_training_tail_version(
             )
         if successor_format not in SUCCESSOR_FORMAT_POLICIES:
             raise ValueError(f"Unknown tail successor format: {successor_format!r}")
-        reference_crop = successor_format == "v2"
+        reference_crop = successor_format in _REFERENCED_CROP_FORMATS
         source_runs = _source_run_paths(
             root, mask_name=mask_name, pose_name=pose_name
         )
