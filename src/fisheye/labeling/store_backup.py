@@ -107,12 +107,37 @@ def validate_labeling_sqlite(path: Path) -> dict[str, object]:
             for table in tables
             if not table.startswith("sqlite_")
         }
+        state_violations = _state_violations(conn, tables)
     return {
         "integrity_check": "ok",
         "foreign_key_violations": 0,
         "schema_version": None if schema_row is None else str(schema_row[0]),
         "row_counts": row_counts,
+        # Reported, not raised: an unknown state must never stop a backup.
+        "state_violations": state_violations,
     }
+
+
+def _state_violations(conn, tables) -> dict[str, dict[str, int]]:
+    """Counts of state values outside each table's known domain."""
+
+    from .assignment_store import TASK_STATES
+    from .checkpoint_store import APPLY_RECEIPT_STATES, CHECKPOINT_STATES
+
+    domains = {
+        "labeling_tasks": TASK_STATES,
+        "labeling_session_checkpoints": CHECKPOINT_STATES,
+        "labeling_checkpoint_apply_receipts": APPLY_RECEIPT_STATES,
+    }
+    found: dict[str, dict[str, int]] = {}
+    for table, allowed in domains.items():
+        if table not in tables:
+            continue
+        rows = conn.execute(f'SELECT state, COUNT(*) FROM "{table}" GROUP BY state;').fetchall()
+        bad = {str(state): int(count) for state, count in rows if state not in allowed}
+        if bad:
+            found[table] = bad
+    return found
 
 
 def write_validated_copy(
