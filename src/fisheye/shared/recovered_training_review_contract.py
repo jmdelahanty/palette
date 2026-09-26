@@ -55,6 +55,15 @@ def initial_contract_digest(group):
 REFERENCED_CROP_SUCCESSOR_POLICY = (
     "new_mask_seed_and_review_version_reference_crop_sharded_v2"
 )
+# Format v3 keeps v2's layout and crop reference, and selects each row's tail
+# method by legacy-first, head-anchored fallback (see mask_tail_apply_refresh).
+HEAD_ANCHORED_FALLBACK_SUCCESSOR_POLICY = (
+    "new_mask_seed_and_review_version_reference_crop_sharded_head_anchored_fallback_v3"
+)
+REFERENCED_CROP_SUCCESSOR_POLICIES = (
+    REFERENCED_CROP_SUCCESSOR_POLICY,
+    HEAD_ANCHORED_FALLBACK_SUCCESSOR_POLICY,
+)
 _REFRESH_PROOF_KEY = "mask_apply_refresh"
 
 
@@ -80,7 +89,7 @@ def review_run_crop_binding_matches(run_attrs, crop):
     crop_name = str(crop.path).rstrip("/").split("/")[-1]
     return (
         isinstance(proof, Mapping)
-        and proof.get("policy") == REFERENCED_CROP_SUCCESSOR_POLICY
+        and proof.get("policy") in REFERENCED_CROP_SUCCESSOR_POLICIES
         and str(proof.get("source_crop_run") or "").split("/")[-1] == crop_name
         and proof.get("source_crop_contract_sha256") == initial_contract_digest(crop)
         and _supplier_binding(run_binding) == _supplier_binding(crop_binding)
