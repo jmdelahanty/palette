@@ -696,6 +696,8 @@
     window.addEventListener("keydown", (event) => {
       const targetTag = event.target?.tagName?.toLowerCase();
       if (targetTag === "input" || targetTag === "textarea" || targetTag === "select") return;
+      // Browser shortcuts (Ctrl/Cmd/Alt + key) are never editor hotkeys.
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
       if (foregroundBusy) {
         event.preventDefault();
         return;
