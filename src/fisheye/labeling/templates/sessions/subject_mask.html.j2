@@ -146,6 +146,7 @@
       </div>
       <aside class="panel">
         <div id="summary" class="meta"></div>
+        <p id="mask-pieces" class="meta" aria-live="polite"></p>
         <section id="tail-border-controls" hidden aria-label="Visible tail endpoint acceptance">
           <h3>Tail reaches crop edge</h3>
           <p class="meta">Accept only when the slightly clipped tail is usable. The last derived point represents the visible endpoint at the crop edge; it does not reconstruct the missing anatomical tip. Checkpoint this decision, then use Apply saved edits to regenerate the tail. This does not approve the mask or training labels.</p>
@@ -177,6 +178,9 @@
           <button id="paint-button" type="button" class="active" onclick="setTool('paint')">Paint</button>
           <button id="erase-button" type="button" class="secondary" onclick="setTool('erase')">Erase</button>
           <button id="lasso-button" type="button" class="secondary" onclick="toggleLassoMode()">Lasso</button>
+          <button id="fill-holes-button" type="button" class="secondary" onclick="setTool('fill')">Fill holes</button>
+          <button id="remove-stray-button" type="button" class="secondary" onclick="removeStrayPiecesAction()" disabled>Remove stray pieces</button>
+          <button id="undo-bulk-button" type="button" class="secondary" onclick="undoBulkEdit()" disabled>Undo</button>
           <button type="button" class="secondary" onclick="fillLasso(false, null)">Fill lasso</button>
           <button type="button" class="secondary" onclick="fillLasso(true, null)">Fill outside</button>
           <button type="button" class="secondary" onclick="fillLasso(true, 0)">Erase outside</button>
@@ -203,7 +207,7 @@
           <button type="button" onclick="setReviewStatus()">Set review</button>
           <button type="button" class="secondary" onclick="loadCurrent()">Reload ROI</button>
         </div>
-        <p class="meta">Draw directly on the ROI. Hotkeys: wheel zooms, middle-drag pans, <b>f</b> fits outside lasso, <b>s</b> save, <b>n</b>/<b>p</b> navigate, <b>b</b>/<b>e</b> brush paint/erase, <b>x</b> toggles brush mode, <b>[</b>/<b>]</b> brush size, <b>v</b> lasso, lasso <b>f</b> fills inside, <b>g</b> fills outside, <b>e</b> erases outside, <b>u</b> undoes point, <b>d</b> clears contour.</p>
+        <p class="meta">Draw directly on the ROI. Hotkeys: wheel zooms, middle-drag pans, <b>f</b> fits outside lasso, <b>s</b> save, <b>n</b>/<b>p</b> navigate, <b>b</b>/<b>e</b> brush paint/erase, <b>x</b> toggles brush mode, <b>[</b>/<b>]</b> brush size, <b>v</b> lasso, lasso <b>f</b> fills inside, <b>g</b> fills outside, <b>e</b> erases outside, <b>u</b> undoes point, <b>d</b> clears contour, <b>h</b> fill holes (click a piece), <b>r</b> removes stray pieces, <b>Ctrl+Z</b> undoes the last fill or removal.</p>
       </aside>
     </section>
   </main>
