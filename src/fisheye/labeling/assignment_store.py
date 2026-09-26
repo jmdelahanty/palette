@@ -19,7 +19,8 @@ from . import checkpoint_store as _checkpoint_store
 
 STORE_ENV_VAR = "PALETTE_LABELING_STORE_PATH"
 DEFAULT_STORE_PATH = "~/.palette/labeling_work.sqlite"
-SCHEMA_VERSION = 8
+# v9: CHECK constraints on task, checkpoint, and Apply receipt state columns.
+SCHEMA_VERSION = 9
 LABELING_USER_ROLES = ("labeler", "operator", "admin")
 LABELING_USER_STATUSES = ("active", "inactive")
 ADMIN_REVIEW_STATES = (
@@ -35,6 +36,114 @@ LABELER_START_TASK_STATES = ("pending", "in_progress")
 TASK_SUPERSEDED_STATE = "superseded"
 # ``blocked`` is a non-startable task that is not finished.
 TASK_STATES = (*LABELER_START_TASK_STATES, "blocked", "complete", TASK_SUPERSEDED_STATE)
+
+
+def _sql_in(column: str, values: Sequence[str]) -> str:
+    quoted = ", ".join("'" + value.replace("'", "''") + "'" for value in values)
+    return f"CHECK ({column} IN ({quoted}))"
+
+
+def _state_checks() -> dict[str, tuple[str, ...]]:
+    """The CHECK clause each state-bearing table must carry, by table.
+
+    Built from the same constants the code validates against, so the
+    database and the application cannot disagree about a state domain.
+    """
+
+    return {
+        "labeling_tasks": (_sql_in("state", TASK_STATES),),
+        "labeling_session_checkpoints": (
+            _sql_in("state", _checkpoint_store.CHECKPOINT_STATES),
+        ),
+        "labeling_checkpoint_apply_receipts": (
+            _sql_in("state", _checkpoint_store.APPLY_RECEIPT_STATES),
+            _sql_in("secondary_effects_state", _checkpoint_store.APPLY_EFFECTS_STATES),
+        ),
+    }
+
+
+def _enforce_state_checks(conn: sqlite3.Connection) -> list[str]:
+    """Rebuild any state-bearing table that lacks its CHECK constraints.
+
+    SQLite cannot add a constraint in place, so each table is rebuilt with
+    its current definition plus the CHECK clauses (SQLite's documented
+    rebuild procedure): copy rows, drop, rename, recreate its indexes, all in
+    one transaction with a foreign-key check before commit. Refuses, changing
+    nothing, if any existing row has an out-of-domain state. Returns the
+    tables rebuilt.
+    """
+
+    domains = {
+        "labeling_tasks": {"state": TASK_STATES},
+        "labeling_session_checkpoints": {"state": _checkpoint_store.CHECKPOINT_STATES},
+        "labeling_checkpoint_apply_receipts": {
+            "state": _checkpoint_store.APPLY_RECEIPT_STATES,
+            "secondary_effects_state": _checkpoint_store.APPLY_EFFECTS_STATES,
+        },
+    }
+    pending = []
+    for table, clauses in _state_checks().items():
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?;", (table,)
+        ).fetchone()
+        if sql is not None and not all(clause in str(sql[0]) for clause in clauses):
+            pending.append((table, str(sql[0]), clauses))
+    if not pending:
+        return []
+    violations = {}
+    for table, _sql, _clauses in pending:
+        for column, allowed in domains[table].items():
+            placeholders = ", ".join("?" for _ in allowed)
+            rows = conn.execute(
+                f'SELECT {column}, COUNT(*) FROM "{table}" '
+                f"WHERE {column} IS NULL OR {column} NOT IN ({placeholders}) GROUP BY {column};",
+                tuple(allowed),
+            ).fetchall()
+            if rows:
+                violations[f"{table}.{column}"] = {str(row[0]): int(row[1]) for row in rows}
+    if violations:
+        raise RuntimeError(
+            "Labeling store has state values outside their allowed sets; fix them before "
+            f"upgrading to schema {SCHEMA_VERSION}: {violations}"
+        )
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF;")
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        try:
+            for table, sql, clauses in pending:
+                columns = [
+                    str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}");')
+                ]
+                indexes = [
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT sql FROM sqlite_master WHERE type = 'index' "
+                        "AND tbl_name = ? AND sql IS NOT NULL;",
+                        (table,),
+                    )
+                ]
+                body = sql[sql.index("(") + 1 : sql.rindex(")")].rstrip()
+                rebuilt = f'CREATE TABLE "{table}__v9" ({body},\n    ' + ",\n    ".join(clauses) + "\n)"
+                conn.execute(rebuilt)
+                column_list = ", ".join(f'"{name}"' for name in columns)
+                conn.execute(
+                    f'INSERT INTO "{table}__v9" ({column_list}) SELECT {column_list} FROM "{table}";'
+                )
+                conn.execute(f'DROP TABLE "{table}";')
+                conn.execute(f'ALTER TABLE "{table}__v9" RENAME TO "{table}";')
+                for index_sql in indexes:
+                    conn.execute(index_sql)
+            broken = conn.execute("PRAGMA foreign_key_check;").fetchall()
+            if broken:
+                raise RuntimeError(f"Foreign key check failed after rebuild: {len(broken)} rows")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON;")
+    return [table for table, _sql, _clauses in pending]
 
 
 def _require_task_state(value: str) -> str:
@@ -577,6 +686,7 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
             );
             """
         )
+        _enforce_state_checks(conn)
         now = utc_now()
         cur.execute(
             """
