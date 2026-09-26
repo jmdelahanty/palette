@@ -151,3 +151,17 @@ def manifest_context_attrs(payload: Mapping[str, Any]) -> dict[str, Any]:
         key: payload[key].strip()
         for key in ("recording_type", "recording_subtype", "behavior_mode")
     }
+
+
+def producer_context_row_issues(row: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Registry-row checks for a producer-declared context (intent, origin, version)."""
+
+    return [
+        (f"invalid_{field}", repr(row[field]))
+        for field, allowed in (
+            ("recording_context_schema_version", PRODUCER_CONTEXT_VERSIONS),
+            ("recording_intent", RECORDING_INTENTS),
+            ("data_origin", DATA_ORIGINS),
+        )
+        if row[field] not in allowed
+    ]

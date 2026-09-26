@@ -1157,6 +1157,10 @@ class RegistryRecordingIdentityMixin:
             "canvas_name",
             "protocol_name",
             "dish_design",
+            "context_source",
+            "recording_context_schema_version",
+            "recording_intent",
+            "data_origin",
         )
         updates = {
             field: context[field]
