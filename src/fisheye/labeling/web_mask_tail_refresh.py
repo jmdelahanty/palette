@@ -9,6 +9,7 @@ import zarr
 from fisheye.labeling.assignment_store import TASK_SUPERSEDED_STATE
 from fisheye.labeling.tail_successor_lineage import (
     KEYPOINT_FAMILY,
+    checkpoint_edit_times,
     MASK_FAMILY,
     lineage_tasks,
     read_family_lineage,
@@ -255,15 +256,22 @@ def _refuse_unfinished_work(store, tasks) -> None:
 
 def _refuse_stranded_keypoints(store, runtime, *, archive: Path, pose_name: str) -> None:
     root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    checkpoints = store.list_recording_applied_checkpoints(
+        recording_id=runtime.recording_id, workflow_kind="keypoints"
+    )
     stranded = [
         row
         for row in stranded_keypoint_rows(
             root=root,
-            checkpoints=store.list_recording_applied_checkpoints(
-                recording_id=runtime.recording_id, workflow_kind="keypoints"
-            ),
+            checkpoints=checkpoints,
             lineage=read_family_lineage(root, KEYPOINT_FAMILY),
             target_run=pose_name,
+            edit_times=checkpoint_edit_times(
+                checkpoints,
+                store.list_recording_events(
+                    recording_id=runtime.recording_id, event_type="checkpoint_keypoints"
+                ),
+            ),
         )
         if row.disposition in ("carry", "not_carryable")
     ]

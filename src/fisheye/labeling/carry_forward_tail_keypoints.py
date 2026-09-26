@@ -35,6 +35,7 @@ from fisheye.labeling.assignment_store import (
 from fisheye.labeling.tail_successor_lineage import (
     KEYPOINT_FAMILY,
     MASK_FAMILY,
+    checkpoint_edit_times,
     lineage_tasks,
     read_family_lineage,
     stranded_keypoint_rows,
@@ -63,6 +64,13 @@ def plan_recording(store: LabelingStore, recording_id: str) -> list[dict[str, ob
     checkpoints = store.list_recording_applied_checkpoints(
         recording_id=recording_id, workflow_kind="keypoints"
     )
+    pending = store.list_recording_applied_checkpoints(
+        recording_id=recording_id, workflow_kind="keypoints", states=("active", "applying")
+    )
+    edit_times = checkpoint_edit_times(
+        checkpoints,
+        store.list_recording_events(recording_id=recording_id, event_type="checkpoint_keypoints"),
+    )
     plans = []
     for archive in sorted({task_archive(t) for t in tasks if task_run(t) and task_archive(t)}):
         root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
@@ -82,7 +90,8 @@ def plan_recording(store: LabelingStore, recording_id: str) -> list[dict[str, ob
             )
             target_tasks = [t for t in members if task_run(t) == target]
             rows = stranded_keypoint_rows(
-                root=root, checkpoints=checkpoints, lineage=keypoints, target_run=target
+                root=root, checkpoints=checkpoints, lineage=keypoints, target_run=target,
+                pending_checkpoints=pending, edit_times=edit_times,
             )
             plans.append(
                 {
@@ -206,7 +215,7 @@ def carry_rows(store: LabelingStore, plan: dict[str, object], *, user: str) -> d
                     "source_run": row["source_run"],
                     "source_task_id": row["source_task_id"],
                     "source_checkpoint_ids": row["checkpoint_ids"],
-                    "source_applied_at_utc": row["applied_at_utc"],
+                    "source_edited_at_utc": row["applied_at_utc"],
                     "manual_keypoints": row["manual_keypoints"],
                 },
             )

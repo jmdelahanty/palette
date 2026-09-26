@@ -8,6 +8,7 @@ archive mutation lock.
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timezone
 from dataclasses import asdict, is_dataclass
 import math
 from pathlib import Path
@@ -580,6 +581,8 @@ def stage_keypoint_checkpoint(
             "reopen_policy": "same_task_recording_user_may_resume",
         },
     }
+    # Apply later overwrites updated_at_utc; keep when the edit was made.
+    metadata["edited_at_utc"] = datetime.now(timezone.utc).isoformat()
     if carried_from is not None:
         metadata["carried_from"] = dict(carried_from)
     checkpoint = store.upsert_session_checkpoint(

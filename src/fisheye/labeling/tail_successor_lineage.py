@@ -174,8 +174,8 @@ class StrandedRow:
     source_run: str
     source_task_id: str
     checkpoint_ids: list[str]
-    applied_at_utc: str
-    disposition: str  # carry | already_present | target_edit_newer | not_carryable
+    applied_at_utc: str  # when the winning edit was made (see checkpoint_edit_times)
+    disposition: str  # carry | already_present | target_edit_newer | target_edit_pending | not_carryable
     manual_keypoints: list[int] = field(default_factory=list)
     points: list[list[float]] | None = None
     detail: str | None = None
@@ -194,6 +194,49 @@ class StrandedRow:
         }
 
 
+def checkpoint_edit_times(
+    checkpoints: Sequence[Mapping[str, object]],
+    save_events: Sequence[Mapping[str, object]],
+) -> dict[str, str]:
+    """When each checkpoint's edit was made, by checkpoint ID.
+
+    Apply overwrites a checkpoint's ``updated_at_utc``, so the edit time comes
+    from, in order: the checkpoint's own ``edited_at_utc`` metadata (or, for a
+    carried row, the source edit it replays); else the latest browser save
+    event for the same task and row at or before it was applied; else the
+    apply time.
+    """
+
+    saves: dict[tuple[str, int], list[str]] = {}
+    for event in save_events:
+        target = event.get("target") or {}
+        roi = target.get("roi_idx") if isinstance(target, Mapping) else None
+        if roi is None:
+            continue
+        saves.setdefault((str(event.get("task_id")), int(roi)), []).append(
+            str(event.get("created_at_utc") or "")
+        )
+    times: dict[str, str] = {}
+    for checkpoint in checkpoints:
+        checkpoint_id = str(checkpoint.get("checkpoint_id") or "")
+        metadata = checkpoint.get("metadata") or {}
+        carried = metadata.get("carried_from") if isinstance(metadata, Mapping) else None
+        recorded = (
+            (carried or {}).get("source_edited_at_utc") if isinstance(carried, Mapping) else None
+        ) or (metadata.get("edited_at_utc") if isinstance(metadata, Mapping) else None)
+        if recorded:
+            times[checkpoint_id] = str(recorded)
+            continue
+        bound = str(checkpoint.get("applied_at_utc") or checkpoint.get("updated_at_utc") or "")
+        earlier = [
+            stamp
+            for stamp in saves.get((str(checkpoint.get("task_id")), int(checkpoint["roi_idx"])), [])
+            if stamp <= bound
+        ]
+        times[checkpoint_id] = max(earlier) if earlier else bound
+    return times
+
+
 def _run_path(run: str) -> str:
     return f"{KEYPOINT_FAMILY}/{run}"
 
@@ -204,6 +247,8 @@ def stranded_keypoint_rows(
     checkpoints: Sequence[Mapping[str, object]],
     lineage: FamilyLineage,
     target_run: str,
+    pending_checkpoints: Sequence[Mapping[str, object]] = (),
+    edit_times: Mapping[str, str] | None = None,
 ) -> list[StrandedRow]:
     """Rows of ``target_run`` missing a newer manual edit applied elsewhere in its lineage.
 
@@ -213,7 +258,20 @@ def stranded_keypoint_rows(
     ``target_run`` if it was applied to ``target_run`` or to an ancestor before
     that ancestor was snapshotted. Only manually set landmarks are carried;
     automatic (mask-derived) points in the target come from its newer masks.
+
+    Edits are ranked by when they were made (``edit_times``, see
+    ``checkpoint_edit_times``), never by when they were applied, so an old
+    draft applied late cannot beat newer work. ``applied_at_utc`` decides only
+    whether an edit is already inside ``target_run`` (applied to it, or to an
+    ancestor before the snapshot). A row with an unapplied edit in
+    ``target_run`` (``pending_checkpoints``) is never carried.
     """
+
+    def edited(checkpoint: Mapping[str, object]) -> str:
+        checkpoint_id = str(checkpoint.get("checkpoint_id") or "")
+        return str(
+            (edit_times or {}).get(checkpoint_id) or checkpoint.get("applied_at_utc") or ""
+        )
 
     component = lineage.component(target_run)
     cutoffs = lineage.snapshot_cutoffs(target_run)
@@ -228,12 +286,18 @@ def stranded_keypoint_rows(
         roi = int(checkpoint["roi_idx"])
         applied = str(checkpoint.get("applied_at_utc") or "")
         if run in cutoffs and (cutoffs[run] is None or applied < str(cutoffs[run])):
-            if applied > present.get(roi, ""):
-                present[roi] = applied
+            if edited(checkpoint) > present.get(roi, ""):
+                present[roi] = edited(checkpoint)
         else:
             candidates.setdefault(roi, []).append(checkpoint)
     if not candidates:
         return []
+    pending_rows = {
+        int(checkpoint["roi_idx"])
+        for checkpoint in pending_checkpoints
+        if str(checkpoint.get("state") or "") in ("active", "applying")
+        and _run_name(checkpoint.get("target_run_path")) == target_run
+    }
     target = root[_run_path(target_run)]
     target_points = np.asarray(target["keypoints_roi"][:], dtype=np.float64)
     target_manual = np.asarray(target["keypoint_manual_edit"][:], dtype=bool)
@@ -241,16 +305,14 @@ def stranded_keypoint_rows(
     source_arrays: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     rows: list[StrandedRow] = []
     for roi in sorted(candidates):
-        latest_run_edits = sorted(
-            candidates[roi], key=lambda item: str(item.get("applied_at_utc") or "")
-        )
+        latest_run_edits = sorted(candidates[roi], key=edited)
         latest = latest_run_edits[-1]
         source_run = str(_run_name(latest.get("target_run_path")))
         same_run = [
             item for item in latest_run_edits
             if _run_name(item.get("target_run_path")) == source_run
         ]
-        applied = str(latest.get("applied_at_utc") or "")
+        applied = edited(latest)
         row = StrandedRow(
             roi_idx=roi,
             source_run=source_run,
@@ -262,6 +324,10 @@ def stranded_keypoint_rows(
         rows.append(row)
         if present.get(roi, "") > applied:
             row.disposition = "target_edit_newer"
+            continue
+        if roi in pending_rows:
+            row.disposition = "target_edit_pending"
+            row.detail = "the newest version has an unapplied edit on this row; apply it first"
             continue
         if source_run not in source_arrays:
             group = root[_run_path(source_run)]

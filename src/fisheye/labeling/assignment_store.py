@@ -33,6 +33,14 @@ LABELER_START_TASK_STATES = ("pending", "in_progress")
 # A task whose run was replaced by a newer review version. It is read-only:
 # no checkpoint may be staged or claimed for Apply, and labeler views hide it.
 TASK_SUPERSEDED_STATE = "superseded"
+# ``blocked`` is a non-startable task that is not finished.
+TASK_STATES = (*LABELER_START_TASK_STATES, "blocked", "complete", TASK_SUPERSEDED_STATE)
+
+
+def _require_task_state(value: str) -> str:
+    if value not in TASK_STATES:
+        raise ValueError(f"Unknown task state {value!r}; expected one of {', '.join(TASK_STATES)}.")
+    return value
 USER_SUMMARY_REDACT_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w])(?:/[^\s,;:'\"<>]+)+")
 USER_SUMMARY_REDACT_ZARR_TOKEN_RE = re.compile(r"(?<![\w./-])[\w./-]*\.zarr(?:[/\w.-]*)?")
 USER_SUMMARY_SAFE_LOCAL_URL_PATHS = ("/work", "/datasets", "/identity")
@@ -1628,7 +1636,7 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
             raise ValueError("workflow_kind is required.")
         resolved_task_id = str(task_id or uuid.uuid4()).strip()
         now = utc_now()
-        state_value = str(state or "pending").strip()
+        state_value = _require_task_state(str(state or "pending").strip())
         completed_at = now if state_value == "complete" else None
         scope_payload = scope if scope is not None else {}
         scope_json = _json_dumps(scope_payload)
@@ -1935,6 +1943,7 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         state_value = str(state).strip()
         if not state_value:
             raise ValueError("state is required.")
+        _require_task_state(state_value)
         if str(task.get("state") or "") == state_value:
             return task
         if str(task.get("state") or "") == TASK_SUPERSEDED_STATE and state_value in LABELER_START_TASK_STATES:
@@ -2724,19 +2733,104 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         )
         return retire
 
-    def list_recording_applied_checkpoints(
-        self, *, recording_id: str, workflow_kind: str
+    def discard_session_checkpoints(
+        self,
+        *,
+        task_id: str,
+        checkpoint_ids: Sequence[str],
+        user: str,
+        reason: str,
     ) -> list[dict[str, object]]:
-        """Every applied checkpoint of one workflow for a recording, oldest first."""
+        """Mark unapplied checkpoints ``discarded`` (kept, not deleted) with an audit event.
+
+        Only ``active`` checkpoints of ``task_id`` can be discarded; a claimed
+        (``applying``) or applied checkpoint is refused. Discarded rows are
+        ignored by Apply claims, unapplied counts, and carry-forward.
+        """
+
+        self.initialize()
+        task = self.get_task(task_id)
+        if task is None:
+            raise KeyError(f"Unknown task_id: {task_id}")
+        ids = list(dict.fromkeys(str(item) for item in checkpoint_ids))
+        if not ids or not str(reason).strip():
+            raise ValueError("Checkpoint IDs and a reason are required.")
+        placeholders = ", ".join("?" for _ in ids)
+        self.conn.execute("BEGIN IMMEDIATE;")
+        try:
+            rows = self.conn.execute(
+                f"SELECT * FROM labeling_session_checkpoints WHERE task_id = ? "
+                f"AND checkpoint_id IN ({placeholders});",
+                [str(task_id), *ids],
+            ).fetchall()
+            found = {str(row["checkpoint_id"]): row for row in rows}
+            missing = [item for item in ids if item not in found]
+            not_active = [item for item, row in found.items() if str(row["state"]) != "active"]
+            if missing or not_active:
+                raise RuntimeError(
+                    f"Only this task's unapplied checkpoints can be discarded "
+                    f"(missing: {missing}, not unapplied: {not_active})."
+                )
+            now = utc_now()
+            self.conn.execute(
+                f"UPDATE labeling_session_checkpoints SET state = 'discarded', updated_at_utc = ? "
+                f"WHERE task_id = ? AND state = 'active' AND checkpoint_id IN ({placeholders});",
+                [now, str(task_id), *ids],
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        discarded = [_checkpoint_store.checkpoint_row(found[item]) for item in ids]
+        self.record_event(
+            task_id=str(task_id),
+            recording_id=str(task["recording_id"]),
+            user=str(user),
+            event_type="checkpoints_discarded",
+            target={"checkpoint_ids": ids},
+            before={"state": "active"},
+            after={
+                "state": "discarded",
+                "reason": str(reason),
+                "checkpoints": [
+                    {
+                        "checkpoint_id": str(row["checkpoint_id"]),
+                        "roi_idx": int(row["roi_idx"]),
+                        "updated_at_utc": row.get("updated_at_utc"),
+                        "snapshot_row_sha256": row.get("snapshot_row_sha256"),
+                    }
+                    for row in discarded
+                ],
+            },
+        )
+        return discarded
+
+    def list_recording_events(self, *, recording_id: str, event_type: str) -> list[dict[str, object]]:
+        """Every event of one type for a recording, oldest first."""
 
         self.initialize()
         rows = self.conn.execute(
-            """
+            "SELECT * FROM labeling_task_events WHERE recording_id = ? AND event_type = ? "
+            "ORDER BY created_at_utc ASC;",
+            (str(recording_id), str(event_type)),
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def list_recording_applied_checkpoints(
+        self, *, recording_id: str, workflow_kind: str, states: Sequence[str] = ("applied",)
+    ) -> list[dict[str, object]]:
+        """Checkpoints of one workflow for a recording in ``states`` (applied by default)."""
+
+        self.initialize()
+        wanted = [str(item) for item in states]
+        placeholders = ", ".join("?" for _ in wanted)
+        rows = self.conn.execute(
+            f"""
             SELECT * FROM labeling_session_checkpoints
-            WHERE recording_id = ? AND workflow_kind = ? AND state = 'applied'
-            ORDER BY applied_at_utc ASC, roi_idx ASC, checkpoint_id ASC;
+            WHERE recording_id = ? AND workflow_kind = ? AND state IN ({placeholders})
+            ORDER BY applied_at_utc ASC, updated_at_utc ASC, roi_idx ASC, checkpoint_id ASC;
             """,
-            (str(recording_id), str(workflow_kind)),
+            (str(recording_id), str(workflow_kind), *wanted),
         ).fetchall()
         return [_checkpoint_store.checkpoint_row(row) for row in rows]
 

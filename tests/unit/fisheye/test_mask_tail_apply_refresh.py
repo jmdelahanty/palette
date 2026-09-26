@@ -1012,3 +1012,55 @@ def test_interrupted_batch_apply_fails_closed_under_the_archive_lock(
     changed = {i for i in range(len(after)) if not np.array_equal(after[i], before[i], equal_nan=True)}
     assert changed <= set(expected)
     store.close()
+
+
+def test_discard_marks_only_unapplied_checkpoints_and_audits(reviewed_archive, tmp_path):
+    store, _runtime = browser_context(reviewed_archive, tmp_path)
+    lease = store.create_session(task_id="original-pose", user="reviewer")
+
+    def stage(roi):
+        return store.upsert_session_checkpoint(
+            session_id=lease.session_id, task_id="original-pose", recording_id="rec",
+            user="reviewer", workflow_kind="keypoints",
+            target_run_path="refined_keypoints_runs/source", target_edit_revision=0,
+            source_rowset_path=None, roi_idx=roi, component_name="keypoints", payload={},
+        )["checkpoint_id"]
+
+    draft, applied = stage(0), stage(1)
+    store.conn.execute(
+        "UPDATE labeling_session_checkpoints SET state = 'applied' WHERE checkpoint_id = ?;",
+        (applied,),
+    )
+    store.conn.commit()
+    with pytest.raises(RuntimeError, match="not unapplied"):
+        store.discard_session_checkpoints(
+            task_id="original-pose", checkpoint_ids=[draft, applied], user="reviewer", reason="redo"
+        )
+    assert store.count_unapplied_session_checkpoints(task_id="original-pose") == 1
+    store.discard_session_checkpoints(
+        task_id="original-pose", checkpoint_ids=[draft], user="reviewer", reason="redone in newest version"
+    )
+    assert store.count_unapplied_session_checkpoints(task_id="original-pose") == 0
+    kept = store.conn.execute(
+        "SELECT state FROM labeling_session_checkpoints WHERE checkpoint_id = ?;", (draft,)
+    ).fetchone()
+    assert kept["state"] == "discarded"
+    events = store.list_events(task_id="original-pose", event_type="checkpoints_discarded")
+    assert len(events) == 1 and events[0]["after"]["checkpoints"][0]["checkpoint_id"] == draft
+    store.close()
+
+
+def test_task_state_domain_is_enforced_and_reported(reviewed_archive, tmp_path):
+    from fisheye.labeling.store_backup import validate_labeling_sqlite
+
+    store, _runtime = browser_context(reviewed_archive, tmp_path)
+    with pytest.raises(ValueError, match="Unknown task state"):
+        store.update_task_state(task_id="original-pose", state="done", user="reviewer")
+    with pytest.raises(ValueError, match="Unknown task state"):
+        store.upsert_task(recording_id="rec", task_id="x", workflow_kind="keypoints", state="finished")
+    assert validate_labeling_sqlite(tmp_path / "review.sqlite")["state_violations"] == {}
+    store.conn.execute("UPDATE labeling_tasks SET state = 'typo' WHERE task_id = 'original-pose';")
+    store.conn.commit()
+    report = validate_labeling_sqlite(tmp_path / "review.sqlite")
+    assert report["state_violations"] == {"labeling_tasks": {"typo": 1}}
+    store.close()

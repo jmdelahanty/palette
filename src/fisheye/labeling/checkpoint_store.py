@@ -247,6 +247,10 @@ def backfill_legacy_apply_receipts(conn: sqlite3.Connection) -> None:
 
 
 SUPERSEDED_TASK_STATE = "superseded"
+# Every labeling_session_checkpoints.state value. ``discarded`` rows are kept
+# for audit and ignored by claims, counts, and carry-forward.
+CHECKPOINT_STATES = ("active", "applying", "applied", "discarded")
+APPLY_RECEIPT_STATES = ("applying", "applied")
 
 
 def _require_task_not_superseded(conn: sqlite3.Connection, task_id: str) -> None:
