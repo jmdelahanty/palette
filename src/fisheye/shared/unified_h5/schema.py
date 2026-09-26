@@ -28,6 +28,7 @@ CONTRACT_HASHES = {
     "experimental_h5_geometry_v1.json": "4c0c707192cf1fa6ceafb2f632672972f41dc7e4c7cc5cdb0c0e3b7920a1474b",
     "experimental_h5_identity_claims_v1.json": "83ca66b336f3e3a40ebaafc869d7febd020509e238243381dfe871cbeb89507e",
     "object_appearance_replay_dependency_manifest_v1.json": "eccfcfcb3c6e66549b2fdfcfcf88fdc4fa9def3d6ce4a375494d011b04f2607c",
+    "unified_h5_admission_v2.json": "58460d68cd25bcb728371815ad9bdabc3bd6080a1ad423819fefda5611c498df",
 }
 
 
