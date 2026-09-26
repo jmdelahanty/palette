@@ -605,8 +605,16 @@ def test_browser_offers_successor_without_resetting_source_or_opened_successor(
         store=store, runtime=runtime, apply_id="mask-apply", expected_mask_revision=1
     )
     assert result["tail_refresh_status"] == "complete"
-    assert store.get_task("original-pose") == original
-    assert store.get_session(lease.session_id)["closed_at_utc"] is None
+    # Enforcement correction (2026-09-26): the replaced pose task is superseded
+    # and its session closed, so no edit can land in the older version.
+    superseded = store.get_task("original-pose")
+    assert superseded["state"] == "superseded"
+    assert {k: v for k, v in superseded.items() if k not in {"state", "updated_at_utc"}} == {
+        k: v for k, v in original.items() if k not in {"state", "updated_at_utc"}
+    }
+    assert store.get_session(lease.session_id)["closed_at_utc"] is not None
+    # The applied mask task stays open so its review can be completed.
+    assert store.get_task("original-mask")["state"] == "pending"
     task = next(
         task
         for task in result["tail_refresh_tasks"]
@@ -644,7 +652,7 @@ def test_pending_paired_pose_checkpoint_blocks_successor_publication(
         payload={"test_checkpoint": True},
         metadata={},
     )
-    with pytest.raises(RuntimeError, match="Apply the paired keypoint"):
+    with pytest.raises(RuntimeError, match="Apply the saved keypoint edits in task original-pose"):
         refresh_training_tail_after_mask_apply(
             store=store,
             runtime=runtime,
@@ -653,6 +661,7 @@ def test_pending_paired_pose_checkpoint_blocks_successor_publication(
         )
     assert len(list(runtime.root["refined_keypoints_runs"].group_keys())) == 1
     assert store.count_unapplied_session_checkpoints(task_id="original-pose") == 1
+    assert store.get_task("original-pose")["state"] == "pending"
     store.close()
 
 
@@ -698,3 +707,360 @@ def test_completed_browser_effect_refuses_damaged_publication(
             )
     finally:
         store.close()
+
+
+def _stage_applied_pose_checkpoint(store, *, roi_idx, applied_at, target_run):
+    """An applied keypoint checkpoint as the store records one (test setup only)."""
+
+    lease = store.create_session(task_id="original-pose", user="reviewer")
+    checkpoint = store.upsert_session_checkpoint(
+        session_id=lease.session_id,
+        task_id="original-pose",
+        recording_id="rec",
+        user="reviewer",
+        workflow_kind="keypoints",
+        target_run_path=f"refined_keypoints_runs/{target_run}",
+        target_edit_revision=0,
+        source_rowset_path="crop_runs/source",
+        roi_idx=roi_idx,
+        component_name="keypoints",
+        payload={"operation": "replace_points"},
+        metadata={},
+    )
+    store.conn.execute(
+        "UPDATE labeling_session_checkpoints SET state = 'applied', applied_at_utc = ? "
+        "WHERE checkpoint_id = ?;",
+        (applied_at, checkpoint["checkpoint_id"]),
+    )
+    store.conn.commit()
+    store.close_session(session_id=lease.session_id, user="reviewer")
+    return checkpoint["checkpoint_id"]
+
+
+def test_superseded_task_refuses_new_edits_and_is_hidden(reviewed_archive, tmp_path):
+    from fisheye.labeling.web_mask_tail_refresh import (
+        refresh_training_tail_after_mask_apply,
+    )
+
+    store, runtime = browser_context(reviewed_archive, tmp_path)
+    result = refresh_training_tail_after_mask_apply(
+        store=store, runtime=runtime, apply_id="mask-apply", expected_mask_revision=1
+    )
+    visible = {t["task_id"] for t in store.list_tasks_for_user("reviewer")}
+    offered = {t["task_id"] for t in result["tail_refresh_tasks"]}
+    assert "original-pose" not in visible
+    assert offered <= visible and "original-mask" in visible
+    with pytest.raises(PermissionError):
+        store.create_session(task_id="original-pose", user="reviewer")
+    with pytest.raises(RuntimeError, match="replaced by a newer one"):
+        store.upsert_session_checkpoint(
+            session_id="any",
+            task_id="original-pose",
+            recording_id="rec",
+            user="reviewer",
+            workflow_kind="keypoints",
+            target_run_path="refined_keypoints_runs/source",
+            target_edit_revision=0,
+            source_rowset_path=None,
+            roi_idx=0,
+            component_name="keypoints",
+            payload={},
+        )
+    with pytest.raises(ValueError, match="replaced by a newer one"):
+        store.update_task_state(task_id="original-pose", state="pending", user="reviewer")
+    store.close()
+
+
+def test_failed_successor_publication_restores_superseded_tasks(
+    reviewed_archive, tmp_path, monkeypatch
+):
+    from fisheye.training import mask_tail_apply_refresh as refresh_mod
+    from fisheye.labeling.web_mask_tail_refresh import (
+        refresh_training_tail_after_mask_apply,
+    )
+
+    store, runtime = browser_context(reviewed_archive, tmp_path)
+
+    def fail(**_kwargs):
+        assert store.get_task("original-pose")["state"] == "superseded"
+        raise OSError("publication interrupted")
+
+    monkeypatch.setattr(refresh_mod, "regenerate_training_tail_version", fail)
+    with pytest.raises(OSError):
+        refresh_training_tail_after_mask_apply(
+            store=store, runtime=runtime, apply_id="mask-apply", expected_mask_revision=1
+        )
+    assert store.get_task("original-pose")["state"] == "pending"
+    events = [
+        row["event_type"]
+        for row in store.conn.execute(
+            "SELECT event_type FROM labeling_task_events WHERE task_id = 'original-pose'"
+        )
+    ]
+    assert "task_superseded" in events and "task_supersede_reverted" in events
+    store.close()
+
+
+def test_stranded_older_version_edit_blocks_mask_apply(
+    reviewed_archive, tmp_path, monkeypatch
+):
+    from fisheye.labeling import web_mask_tail_refresh as refresh_web
+    from fisheye.labeling.tail_successor_lineage import StrandedRow
+
+    store, runtime = browser_context(reviewed_archive, tmp_path)
+    monkeypatch.setattr(
+        refresh_web,
+        "stranded_keypoint_rows",
+        lambda **_kwargs: [
+            StrandedRow(
+                roi_idx=0, source_run="older", source_task_id="t",
+                checkpoint_ids=["c"], applied_at_utc="2999", disposition="carry",
+            )
+        ],
+    )
+    with pytest.raises(RuntimeError, match="labeled in an older version"):
+        refresh_web.refresh_training_tail_after_mask_apply(
+            store=store, runtime=runtime, apply_id="mask-apply", expected_mask_revision=1
+        )
+    assert store.get_task("original-pose")["state"] == "pending"
+    assert len(list(runtime.root["refined_keypoints_runs"].group_keys())) == 1
+    store.close()
+
+
+@pytest.mark.parametrize("touched", [False, True])
+def test_completing_mask_review_retires_untouched_mask_successor(
+    reviewed_archive, tmp_path, touched
+):
+    from fisheye.labeling.web_mask_tail_refresh import (
+        refresh_training_tail_after_mask_apply,
+    )
+
+    store, runtime = browser_context(reviewed_archive, tmp_path)
+    store.conn.execute(
+        "INSERT INTO labeling_checkpoint_apply_receipts (apply_id, task_id, component_name, "
+        "state, checkpoint_count, checkpoints_json, claimed_at_utc) VALUES "
+        "('mask-apply', 'original-mask', 'subject_body', 'applied', 0, '[]', '2026-01-01');"
+    )
+    store.conn.commit()
+    result = refresh_training_tail_after_mask_apply(
+        store=store, runtime=runtime, apply_id="mask-apply", expected_mask_revision=1
+    )
+    by_kind = {t["workflow_kind"]: t["task_id"] for t in result["tail_refresh_tasks"]}
+    if touched:
+        lease = store.create_session(task_id=by_kind["subject_mask_component"], user="reviewer")
+        store.upsert_session_checkpoint(
+            session_id=lease.session_id,
+            task_id=by_kind["subject_mask_component"],
+            recording_id="rec",
+            user="reviewer",
+            workflow_kind="subject_mask_component",
+            target_run_path="refined_subject_masks_runs/x",
+            target_edit_revision=0,
+            source_rowset_path=None,
+            roi_idx=0,
+            component_name="subject_body",
+            payload={},
+        )
+    store.update_task_state(task_id="original-mask", state="complete", user="reviewer")
+    mask_state = store.get_task(by_kind["subject_mask_component"])["state"]
+    assert mask_state == ("pending" if touched else "superseded")
+    # Keypoint review of the new version is still real work.
+    assert store.get_task(by_kind["keypoints"])["state"] == "pending"
+    store.close()
+
+
+def test_carry_forward_moves_stranded_edit_into_newest_version(reviewed_archive, tmp_path):
+    from fisheye.labeling import carry_forward_tail_keypoints as carry
+    from fisheye.labeling.web_mask_tail_refresh import (
+        refresh_training_tail_after_mask_apply,
+    )
+
+    path, root, result = reviewed_archive
+    store, runtime = browser_context(reviewed_archive, tmp_path)
+    source_run = result["paths"]["pose_edit"].split("/")[1]
+    checkpoint_id = _stage_applied_pose_checkpoint(
+        store, roi_idx=0, applied_at="2000-01-01T00:00:00+00:00", target_run=source_run
+    )
+    offer = refresh_training_tail_after_mask_apply(
+        store=store, runtime=runtime, apply_id="mask-apply", expected_mask_revision=1
+    )
+    newest_task = next(t for t in offer["tail_refresh_tasks"] if t["workflow_kind"] == "keypoints")
+    newest_run = store.get_task(newest_task["task_id"])["run_name"]
+    before = np.asarray(root[f"refined_keypoints_runs/{newest_run}/keypoints_roi"][0]).copy()
+
+    # A labeler kept editing the older version after the snapshot (the bug).
+    session = editor.resolve_review_session(str(path), refined_run=source_run, include_all=True)
+    points = np.asarray(session.kp_roi_arr[0]).copy()
+    points[15] += 2.0
+    editor.save_roi_correction(session, position=0, points=points)
+    store.conn.execute(
+        "UPDATE labeling_session_checkpoints SET applied_at_utc = '2999-01-01T00:00:00+00:00' "
+        "WHERE checkpoint_id = ?;",
+        (checkpoint_id,),
+    )
+    store.conn.commit()
+
+    plans = [p for p in carry.plan_recording(store, "rec") if "rows" in p]
+    assert len(plans) == 1 and plans[0]["target_run"] == newest_run
+    rows = plans[0]["rows"]
+    assert [(r["roi_idx"], r["disposition"]) for r in rows] == [(0, "carry")]
+    assert 15 in rows[0]["manual_keypoints"]
+
+    outcome = carry.carry_rows(store, plans[0], user="reviewer")
+    assert outcome["carried_rows"] == 1
+    assert carry.verify_carried(plans[0])["rows_not_matching"] == []
+    after = np.asarray(root[f"refined_keypoints_runs/{newest_run}/keypoints_roi"][0])
+    np.testing.assert_allclose(after[15], points[15])
+    untouched = [i for i in range(len(after)) if i not in rows[0]["manual_keypoints"]]
+    np.testing.assert_allclose(after[untouched], before[untouched], equal_nan=True)
+    carried = store.list_recording_applied_checkpoints(recording_id="rec", workflow_kind="keypoints")
+    provenance = [c["metadata"].get("carried_from") for c in carried if c["task_id"] == newest_task["task_id"]]
+    assert provenance and provenance[0]["source_checkpoint_ids"] == [checkpoint_id]
+    # Carried once; a second plan finds nothing left to carry.
+    again = [p for p in carry.plan_recording(store, "rec") if "rows" in p][0]["rows"]
+    assert {r["disposition"] for r in again} <= {"already_present", "target_edit_newer"}
+
+
+def _staged_successor_keypoint_edits(reviewed_archive, tmp_path):
+    """Stage an edit on every row of a fresh successor's keypoint task."""
+    from fisheye.labeling.web_keypoint_checkpoints import stage_keypoint_checkpoint
+    from fisheye.labeling.web_mask_tail_refresh import (
+        refresh_training_tail_after_mask_apply,
+    )
+    from fisheye.labeling.web_runtimes import _get_keypoint_runtime
+    from types import SimpleNamespace
+
+    store, runtime = browser_context(reviewed_archive, tmp_path)
+    offer = refresh_training_tail_after_mask_apply(
+        store=store, runtime=runtime, apply_id="mask-apply", expected_mask_revision=1
+    )
+    task_id = next(t["task_id"] for t in offer["tail_refresh_tasks"] if t["workflow_kind"] == "keypoints")
+    lease = store.create_session(task_id=task_id, user="reviewer")
+    keypoints = _get_keypoint_runtime(
+        SimpleNamespace(keypoint_sessions={}), store.get_session(lease.session_id)
+    )
+    run = keypoints.review_session.refined_run
+    expected = {}
+    for position, roi in enumerate(np.asarray(keypoints.review_session.failures).tolist()):
+        keypoints.position = position
+        points = np.asarray(keypoints.review_session.kp_roi_arr[roi], dtype=np.float64).copy()
+        points[~np.isfinite(points).all(axis=1)] = [64.0, 70.0]  # A save needs every landmark.
+        points[16] += 1.5 + position
+        stage_keypoint_checkpoint(
+            store, keypoints, user="reviewer", operation="replace_points", points=points.tolist()
+        )
+        expected[roi] = points
+    assert len(expected) >= 2
+    return store, keypoints, run, expected
+
+
+def test_batch_keypoint_apply_writes_every_row_of_a_successor_version(reviewed_archive, tmp_path):
+    """Regression (2026-09-26): multi-row Apply into a sharded v2 successor failed."""
+    from fisheye.labeling.web_keypoint_checkpoint_apply import apply_keypoint_checkpoints
+    from fisheye.labeling.web_keypoint_checkpoints import keypoint_checkpoint_state
+
+    path, _root, _result = reviewed_archive
+    store, keypoints, run, expected = _staged_successor_keypoint_edits(reviewed_archive, tmp_path)
+    state = keypoint_checkpoint_state(store, keypoints)
+    apply_keypoint_checkpoints(
+        store, keypoints, editor, apply_id="batch",
+        checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+    )
+    stored = zarr.open_group(str(path), mode="r", use_consolidated=False)[
+        f"refined_keypoints_runs/{run}/keypoints_roi"
+    ]
+    for roi, points in expected.items():
+        np.testing.assert_allclose(np.asarray(stored[roi]), points, equal_nan=True)
+    store.close()
+
+
+def test_interrupted_batch_apply_fails_closed_under_the_archive_lock(
+    reviewed_archive, tmp_path, monkeypatch
+):
+    from fisheye.labeling import web_keypoint_checkpoint_apply as apply_mod
+    from fisheye.labeling.web_keypoint_checkpoints import keypoint_checkpoint_state
+    from fisheye.shared.zarr_helpers import archive_publication_lock_held_by_current_thread
+
+    path, _root, _result = reviewed_archive
+    store, keypoints, run, expected = _staged_successor_keypoint_edits(reviewed_archive, tmp_path)
+    before = np.asarray(
+        zarr.open_group(str(path), mode="r", use_consolidated=False)[f"refined_keypoints_runs/{run}/keypoints_roi"][:]
+    ).copy()
+    real_write, real_fail_closed = apply_mod._write_intended_rows, apply_mod._fail_closed_recovered_rows
+    held = []
+
+    def interrupted(*args, **kwargs):
+        real_write(*args, **kwargs)
+        raise OSError("storage went away mid-apply")
+
+    def recording_fail_closed(session, rows):
+        held.append(archive_publication_lock_held_by_current_thread(str(session.zarr_path)))
+        real_fail_closed(session, rows)
+
+    monkeypatch.setattr(apply_mod, "_write_intended_rows", interrupted)
+    monkeypatch.setattr(apply_mod, "_fail_closed_recovered_rows", recording_fail_closed)
+    state = keypoint_checkpoint_state(store, keypoints)
+    with pytest.raises(OSError):
+        apply_mod.apply_keypoint_checkpoints(
+            store, keypoints, editor, apply_id="interrupted",
+            checkpoint_snapshot_sha256=str(state["checkpoint_snapshot_sha256"]),
+        )
+    assert held and all(held)
+    after = np.asarray(
+        zarr.open_group(str(path), mode="r", use_consolidated=False)[f"refined_keypoints_runs/{run}/keypoints_roi"][:]
+    )
+    changed = {i for i in range(len(after)) if not np.array_equal(after[i], before[i], equal_nan=True)}
+    assert changed <= set(expected)
+    store.close()
+
+
+def test_discard_marks_only_unapplied_checkpoints_and_audits(reviewed_archive, tmp_path):
+    store, _runtime = browser_context(reviewed_archive, tmp_path)
+    lease = store.create_session(task_id="original-pose", user="reviewer")
+
+    def stage(roi):
+        return store.upsert_session_checkpoint(
+            session_id=lease.session_id, task_id="original-pose", recording_id="rec",
+            user="reviewer", workflow_kind="keypoints",
+            target_run_path="refined_keypoints_runs/source", target_edit_revision=0,
+            source_rowset_path=None, roi_idx=roi, component_name="keypoints", payload={},
+        )["checkpoint_id"]
+
+    draft, applied = stage(0), stage(1)
+    store.conn.execute(
+        "UPDATE labeling_session_checkpoints SET state = 'applied' WHERE checkpoint_id = ?;",
+        (applied,),
+    )
+    store.conn.commit()
+    with pytest.raises(RuntimeError, match="not unapplied"):
+        store.discard_session_checkpoints(
+            task_id="original-pose", checkpoint_ids=[draft, applied], user="reviewer", reason="redo"
+        )
+    assert store.count_unapplied_session_checkpoints(task_id="original-pose") == 1
+    store.discard_session_checkpoints(
+        task_id="original-pose", checkpoint_ids=[draft], user="reviewer", reason="redone in newest version"
+    )
+    assert store.count_unapplied_session_checkpoints(task_id="original-pose") == 0
+    kept = store.conn.execute(
+        "SELECT state FROM labeling_session_checkpoints WHERE checkpoint_id = ?;", (draft,)
+    ).fetchone()
+    assert kept["state"] == "discarded"
+    events = store.list_events(task_id="original-pose", event_type="checkpoints_discarded")
+    assert len(events) == 1 and events[0]["after"]["checkpoints"][0]["checkpoint_id"] == draft
+    store.close()
+
+
+def test_task_state_domain_is_enforced_and_reported(reviewed_archive, tmp_path):
+    from fisheye.labeling.store_backup import validate_labeling_sqlite
+
+    store, _runtime = browser_context(reviewed_archive, tmp_path)
+    with pytest.raises(ValueError, match="Unknown task state"):
+        store.update_task_state(task_id="original-pose", state="done", user="reviewer")
+    with pytest.raises(ValueError, match="Unknown task state"):
+        store.upsert_task(recording_id="rec", task_id="x", workflow_kind="keypoints", state="finished")
+    assert validate_labeling_sqlite(tmp_path / "review.sqlite")["state_violations"] == {}
+    store.conn.execute("UPDATE labeling_tasks SET state = 'typo' WHERE task_id = 'original-pose';")
+    store.conn.commit()
+    report = validate_labeling_sqlite(tmp_path / "review.sqlite")
+    assert report["state_violations"] == {"labeling_tasks": {"typo": 1}}
+    store.close()
