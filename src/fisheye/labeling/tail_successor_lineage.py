@@ -112,6 +112,25 @@ def read_family_lineage(root: object, family: str) -> FamilyLineage:
     return FamilyLineage(family, parent, started)
 
 
+def newer_version_of(archive: str | Path, keypoint_run: str) -> str | None:
+    """The newest successor of ``keypoint_run`` in ``archive``, or None if it is current."""
+
+    import zarr
+
+    if not keypoint_run or not Path(archive).exists():
+        return None
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    lineage = read_family_lineage(root, KEYPOINT_FAMILY)
+    if not keypoint_run or not lineage.children(keypoint_run):
+        return None
+    descendants = [
+        name
+        for name in lineage.component(keypoint_run)
+        if keypoint_run in lineage.path_to_root(name) and name != keypoint_run
+    ]
+    return lineage.newest_leaf(descendants) if descendants else None
+
+
 def task_family(task: Mapping[str, object]) -> str | None:
     return _WORKFLOW_FAMILY.get(str(task.get("workflow_kind") or ""))
 

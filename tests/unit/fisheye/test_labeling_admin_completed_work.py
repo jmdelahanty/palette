@@ -359,3 +359,39 @@ def test_admin_keypoint_correction_uses_task_scope_and_records_audit(
         assert store.count_admin_correction_events("task-a") == 1
     finally:
         store.close()
+
+
+def test_admin_keypoint_correction_refuses_a_replaced_version(tmp_path, monkeypatch):
+    import zarr
+
+    archive = tmp_path / "task.zarr"
+    root = zarr.open_group(str(archive), mode="w", use_consolidated=False)
+    runs = root.create_group("refined_keypoints_runs")
+    runs.create_group("refined-a").attrs.update(palette_run_started_at_utc="2026-09-01")
+    runs.create_group("refined-b").attrs.update(
+        palette_run_started_at_utc="2026-09-02",
+        source_bindings={"mask_apply_refresh": {"source_pose_run": "refined_keypoints_runs/refined-a"}},
+    )
+    saves = []
+    _fake_module(
+        monkeypatch,
+        "fisheye.tune.keypoint_review_backend",
+        resolve_review_session=lambda *a, **k: SimpleNamespace(refined_run="refined-a", crop_run="crop-a"),
+        load_roi_payload=lambda *_a, **_k: {"points": [], "labels": []},
+        save_roi_correction=lambda *_a, **_k: saves.append(True) or {},
+    )
+    store = LabelingStore(tmp_path / "labeling_work.sqlite")
+    try:
+        _completed_keypoint_task(store, zarr_path=str(archive))
+        with _running_server(store, user="admin", admin_users=("admin",)) as base_url:
+            status, payload = _json_request(
+                base_url,
+                "/api/admin/keypoint-corrections",
+                method="POST",
+                payload={"task_id": "task-a", "roi_idx": 7, "points": [[2.0, 3.0], [3.0, 4.0]]},
+            )
+        assert status == 409, payload
+        assert "refined-b" in str(payload)
+        assert saves == []
+    finally:
+        store.close()
