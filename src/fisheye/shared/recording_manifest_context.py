@@ -2,6 +2,11 @@
 
 This owns the existing manifest utility's vocabulary and required-field rules;
 it does not infer context, validate source identity, or classify output products.
+
+Manifests whose context came from the producer (``context_source`` is
+``citrus.parent_recording_context``) follow that contract instead: the subtype
+is a free producer label that may be absent ("not specified"), independent of
+``behavior_mode``, and is never filled or trimmed.
 """
 
 from __future__ import annotations
@@ -19,6 +24,48 @@ DEFAULT_ALLOWED_BEHAVIOR_MODES = {"free", "embedded", "none"}
 REQUIRED_FIELDS = (
     "recording_type", "recording_subtype", "behavior_mode", "artifact_schema_id",
 )
+PRODUCER_CONTEXT_SOURCE = "citrus.parent_recording_context"
+PRODUCER_CONTEXT_VERSIONS = (1, 2)
+RECORDING_INTENTS = ("stimulus_experiment", "recording_only")
+DATA_ORIGINS = ("acquired", "synthetic")
+
+
+def _producer_context_issues(
+    payload: Mapping[str, Any], types: set[str]
+) -> list[tuple[str, str]]:
+    issues: list[tuple[str, str]] = []
+    version = payload.get("recording_context_schema_version")
+    if type(version) is not int or version not in PRODUCER_CONTEXT_VERSIONS:
+        issues.append(("invalid_recording_context_version", repr(version)))
+    for field in ("recording_type", "behavior_mode", "artifact_schema_id"):
+        if not (isinstance(payload.get(field), str) and payload[field]):
+            issues.append(("missing_required_field", field))
+    recording_type = payload.get("recording_type")
+    if isinstance(recording_type, str) and recording_type and recording_type not in types:
+        issues.append((
+            "invalid_recording_type",
+            f"{recording_type} (allowed={','.join(sorted(types))})",
+        ))
+    if "recording_subtype" in payload:
+        subtype = payload["recording_subtype"]
+        if not (isinstance(subtype, str) and subtype and subtype.strip() == subtype):
+            issues.append(("invalid_recording_subtype", repr(subtype)))
+    elif version == 1:
+        issues.append(("missing_required_field", "recording_subtype"))
+    behavior_mode = payload.get("behavior_mode")
+    if isinstance(behavior_mode, str) and behavior_mode and (
+        behavior_mode not in DEFAULT_ALLOWED_BEHAVIOR_MODES
+    ):
+        issues.append((
+            "invalid_behavior_mode",
+            f"{behavior_mode} (allowed={','.join(sorted(DEFAULT_ALLOWED_BEHAVIOR_MODES))})",
+        ))
+    for field, allowed in (
+        ("recording_intent", RECORDING_INTENTS), ("data_origin", DATA_ORIGINS)
+    ):
+        if payload.get(field) not in allowed:
+            issues.append((f"invalid_{field}", repr(payload.get(field))))
+    return issues
 
 
 def recording_manifest_context_issues(
@@ -30,6 +77,8 @@ def recording_manifest_context_issues(
     """Return the existing diagnostic codes without repairing the payload."""
 
     types = DEFAULT_ALLOWED_TYPES if allowed_types is None else allowed_types
+    if payload.get("context_source") == PRODUCER_CONTEXT_SOURCE:
+        return _producer_context_issues(payload, types)
     subtypes = DEFAULT_ALLOWED_SUBTYPES if allowed_subtypes is None else allowed_subtypes
     issues: list[tuple[str, str]] = []
     values: dict[str, str] = {}
@@ -78,3 +127,27 @@ def validate_recording_manifest_context(payload: Mapping[str, Any]) -> None:
         raise ValueError("invalid recording manifest context: " + "; ".join(
             f"{code}: {detail}" for code, detail in issues
         ))
+
+
+def manifest_context_attrs(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Context fields to project into an analysis root, from a validated manifest.
+
+    Producer labels are copied exactly and an omitted subtype stays absent; the
+    producer's intent, origin and context version travel with them. Operator
+    manifests keep the historical stripped strings.
+    """
+
+    if payload.get("context_source") == PRODUCER_CONTEXT_SOURCE:
+        return {
+            key: payload[key]
+            for key in (
+                "recording_type", "recording_subtype", "behavior_mode",
+                "context_source", "recording_context_schema_version",
+                "recording_intent", "data_origin",
+            )
+            if key in payload
+        }
+    return {
+        key: payload[key].strip()
+        for key in ("recording_type", "recording_subtype", "behavior_mode")
+    }

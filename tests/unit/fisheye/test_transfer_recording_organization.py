@@ -33,10 +33,14 @@ def _placeholder_media_sync_assessment(monkeypatch):
 
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures/recording_transfer_v2"
-CONTEXT = {
+CONTEXT_FIXTURE = {
+    "schema_id": "citrus.parent_recording_context",
+    "schema_version": 1,
     "recording_type": "behavior",
-    "recording_subtype": "free",
+    "recording_subtype": "synthetic_transfer_test",
     "behavior_mode": "free",
+    "recording_intent": "recording_only",
+    "data_origin": "synthetic",
 }
 
 
@@ -65,10 +69,21 @@ def _resign(root: Path) -> None:
     path.write_bytes(transfer.canonical_bytes(marker))
 
 
-def _plan(source: Path, destination: Path, **context):
+def _plan(source: Path, destination: Path):
     return organizer.build_transfer_organization_plan(
-        source, destination_root=destination, **{**CONTEXT, **context}
+        source, destination_root=destination
     )
+
+
+def _set_contexts(root: Path, *, drop=(), **changes) -> None:
+    """Rewrite every camera's producer context in the source manifest."""
+    path = root / "recording_session.json"
+    manifest = json.loads(path.read_bytes())
+    for context in manifest["recording_contexts"].values():
+        context.update(changes)
+        for key in drop:
+            context.pop(key, None)
+    path.write_bytes(transfer.canonical_bytes(manifest))
 
 
 def test_plan_covers_every_file_and_does_not_write(tmp_path):
@@ -143,14 +158,74 @@ def test_transfer_namespace_control_files_are_preserved_and_retired(
             ]
 
 
-@pytest.mark.parametrize("field", list(CONTEXT))
-@pytest.mark.parametrize("value", [None, "", "invented", 17])
-def test_context_is_explicit_and_validated(tmp_path, field, value):
+def test_fixture_context_is_the_producer_declaration(tmp_path):
+    plan = _plan(_source(tmp_path), tmp_path / "recordings")
+    for parent in plan["parents"]:
+        assert parent["context_source"] == "citrus.parent_recording_context"
+        assert parent["context"] == {
+            "context_source": "citrus.parent_recording_context",
+            "recording_context_schema_version": 1,
+            "artifact_schema_id": organizer.ARTIFACT_SCHEMA_ID,
+            **{k: v for k, v in CONTEXT_FIXTURE.items() if k not in ("schema_id", "schema_version")},
+        }
+
+
+def test_subtype_free_context_v2_stays_absent(tmp_path):
     source = _source(tmp_path)
+    _set_contexts(source, drop=("recording_subtype",), schema_version=2)
+    _resign(source)
+    plan = _plan(source, tmp_path / "recordings")
+    for parent in plan["parents"]:
+        assert "recording_subtype" not in parent["context"]
+        assert parent["context"]["recording_context_schema_version"] == 2
+        manifest = organizer._parent_manifest(plan, parent)
+        assert "recording_subtype" not in manifest
+        assert manifest["recording_context_schema_version"] == 2
+
+
+def test_subtype_is_a_free_label_independent_of_behavior_mode(tmp_path):
+    source = _source(tmp_path)
+    _set_contexts(source, recording_subtype="dish_stimulus", behavior_mode="embedded")
+    _resign(source)
+    plan = _plan(source, tmp_path / "recordings")
+    for parent in plan["parents"]:
+        assert parent["context"]["recording_subtype"] == "dish_stimulus"
+        assert parent["context"]["behavior_mode"] == "embedded"
+
+
+@pytest.mark.parametrize(
+    "changes, drop",
+    [
+        ({}, ("recording_subtype",)),  # v1 requires the subtype
+        ({"schema_version": 2, "recording_subtype": None}, ()),
+        ({"schema_version": 2, "recording_subtype": ""}, ()),
+        ({"schema_version": 2, "recording_subtype": " padded"}, ()),
+        ({"schema_version": 3}, ()),
+        ({"behavior_mode": "invented"}, ()),
+        ({"recording_intent": "unknown"}, ()),
+        ({"data_origin": "guessed"}, ()),
+        ({"unexpected": "field"}, ()),
+        ({}, ("behavior_mode",)),
+    ],
+)
+def test_invalid_producer_context_is_refused(tmp_path, changes, drop):
+    source = _source(tmp_path)
+    _set_contexts(source, drop=drop, **changes)
     destination = tmp_path / "recordings"
-    with pytest.raises(ValueError, match="manifest context"):
-        _plan(source, destination, **{field: value})
+    with pytest.raises(ValueError):
+        _resign(source)
+        _plan(source, destination)
     assert not destination.exists()
+
+
+def test_manifest_without_producer_contexts_is_refused(tmp_path):
+    source = _source(tmp_path)
+    path = source / "recording_session.json"
+    manifest = json.loads(path.read_bytes())
+    del manifest["recording_contexts"]
+    path.write_bytes(transfer.canonical_bytes(manifest))
+    with pytest.raises(ValueError, match="recording_contexts"):
+        _resign(source)
 
 
 @pytest.mark.parametrize("target", ["source", "child", "ancestor", "symlink"])
@@ -230,13 +305,11 @@ def test_plan_digest_binds_every_destination_and_context(tmp_path):
     first = _plan(source, tmp_path / "recordings")
     assert first == _plan(source, tmp_path / "recordings")
     assert first["plan_sha256"] != _plan(source, tmp_path / "elsewhere")["plan_sha256"]
-    changed = _plan(
-        source,
-        tmp_path / "recordings",
-        recording_subtype="embedded",
-        behavior_mode="embedded",
-    )
-    assert changed["snapshot_id"] == first["snapshot_id"]
+    _set_contexts(source, recording_subtype="embedded", behavior_mode="embedded")
+    _resign(source)
+    changed = _plan(source, tmp_path / "recordings")
+    # Context is bound through the producer manifest bytes the snapshot hashes.
+    assert changed["snapshot_id"] != first["snapshot_id"]
     assert changed["plan_sha256"] != first["plan_sha256"]
 
 

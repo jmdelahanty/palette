@@ -24,14 +24,14 @@ from tests.canaries.parent_intake.safety import (
 )
 
 
-CITRUS_COMMIT = "e881f5258be83231b62a00a6f9c4e5fcd69cd548"
+CITRUS_COMMIT = "859a7972104a829e1cc603a614cd4cf79e5cda06"
 CONTRACTS_COMMIT = "6cb56b4deae6a9a56bf4b3a3186168c15e91f542"
 PALETTE_DEFAULT = Path(__file__).resolve().parents[3]
 PINNED_FILES = {
-    "scripts/recording_transfer_v2.py": "2b64d27d424f9bc71fe3a893b0f0b8c940d79cd8e79d0d19000ce81a4384e081",
-    "scripts/recording_transfer_snapshot.py": "f158aca1b2cb7b046e6f667e99a202c9c074c4883594d7df502e81d237e68271",
-    "tests/recording_transfer_fixture.py": "71ff518bca11818b10e68bd69c82b31a691dbac4f63b3ccbefe2342ba2cae4d5",
-    "src/schemas/recording_transfer_v2.schema.json": "65828a1e327a8cd1884c59d51f8422546a6f60d1f6abf2e3f9cd3d104dbb2df7",
+    "scripts/recording_transfer_v2.py": "559955a27a3e44916c8287ddf51f3aa11c24a73f829f2756f2de78fbe9463481",
+    "scripts/recording_transfer_snapshot.py": "03f19b9746edc68057eaa25d6ef2cda49ae980afdd24f756a45fb44297f6babb",
+    "tests/recording_transfer_fixture.py": "b8d0fca2b092c2f54eb38d81ae05c992831be49d94267b3817bb5acbbfbc9182",
+    "src/schemas/recording_transfer_v2.schema.json": "4cf611312e911e165e2a9bbfeb0eb8ce0efb62b68cf3672239055e1c58ab22f1",
 }
 CAMERAS = ["02010093", "02010094"]
 RATE = 2

@@ -57,6 +57,12 @@ look like a fully processed one.
 - `session_uuid`, `recording_id`, `recording_name`, `recording_path`
 - `recording_type`, `recording_subtype`, `behavior_mode`,
   `artifact_schema_id`
+- For transfer-v2 intake, `context_source`
+  (`"citrus.parent_recording_context"`), `recording_context_schema_version`
+  (1 or 2), `recording_intent` and `data_origin`: the producer's per-camera
+  declaration, copied exactly. `recording_subtype` is a free producer label
+  independent of `behavior_mode`, and is absent when the producer did not
+  specify one (context v2); it is never filled.
 - `experiment_context_status` (`"present"` when an H5/protocol source is
   available, `"absent"` for recording-only/video-only archives)
 - `experiment_context_source` (`"h5"` or `"none"`)

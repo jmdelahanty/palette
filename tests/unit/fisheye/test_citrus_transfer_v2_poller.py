@@ -19,10 +19,6 @@ def _config(tmp_path: Path, **overrides) -> dict:
         "staging_dir": str(tmp_path / "staging"),
         "state_dir": str(tmp_path / "state"),
         "log_dir": str(tmp_path / "logs"),
-        "recording_type": "behavior",
-        "recording_subtype": "free",
-        "behavior_mode": "free",
-        "recording_only": True,  # the pinned rolling fixture is video_only
         "submit": {"transport": "ssh", "host": "submit-host", "repo": "/groups/palette"},
     }
     config.update(overrides)
@@ -48,7 +44,7 @@ class FakeRunner:
         return subprocess.CompletedProcess(command, self.returncode, "job_id=42\n", "")
 
 
-def test_v2_marker_submits_launcher_with_context(tmp_path):
+def test_v2_marker_submits_launcher_without_operator_context(tmp_path):
     session = _session(tmp_path)
     runner = FakeRunner()
     assert poller.poll(_config(tmp_path), dry_run=False, runner=runner) == 0
@@ -56,9 +52,9 @@ def test_v2_marker_submits_launcher_with_context(tmp_path):
     assert command[:2] == ["ssh", "submit-host"]
     remote = command[2]
     assert remote.startswith("cd /groups/palette && scripts/submit_citrus_session_import_bsub.sh")
-    for flag in ("--recording-type behavior", "--recording-subtype free",
-                 "--behavior-mode free", "--recording-only", f"--session-dir {session}"):
-        assert flag in remote
+    assert f"--session-dir {session}" in remote
+    for flag in ("--recording-type", "--recording-subtype", "--behavior-mode", "--recording-only"):
+        assert flag not in remote
     [submitted] = (tmp_path / "state").glob("*.submitted")
     assert submitted.read_text() == "job_id=42\n"
 
@@ -75,22 +71,29 @@ def test_v1_marker_ignored(tmp_path, capsys):
     assert list((tmp_path / "state").iterdir()) == []
 
 
-@pytest.mark.parametrize("drop", ["recording_type", "recording_subtype", "behavior_mode"])
-def test_missing_context_refuses(tmp_path, drop):
-    with pytest.raises(poller.PollerRefusal, match=drop):
-        _config(tmp_path, **{drop: ""})
+@pytest.mark.parametrize(
+    "stale", ["recording_type", "recording_subtype", "behavior_mode", "recording_only"]
+)
+def test_config_that_still_declares_context_refuses(tmp_path, stale):
+    with pytest.raises(poller.PollerRefusal, match=stale):
+        _config(tmp_path, **{stale: "free"})
 
 
-def test_main_refuses_without_context(tmp_path):
+def test_main_refuses_incomplete_config(tmp_path):
     (tmp_path / "poller.json").write_text(json.dumps({"staging_dir": str(tmp_path)}))
     assert poller.main(["--config", str(tmp_path / "poller.json")]) == 2
 
 
-def test_payload_kind_must_match_recording_only(tmp_path):
-    _session(tmp_path)
+def test_marker_for_the_old_consumer_profile_is_refused(tmp_path, capsys):
+    session = _session(tmp_path)
+    marker_path = session / poller.MARKER_NAME
+    marker = json.loads(marker_path.read_text())
+    marker["required_consumer_profile"] = "parent_recording_intake_v1"
+    marker_path.write_text(json.dumps(marker))
     runner = FakeRunner()
-    poller.poll(_config(tmp_path, recording_only=False), dry_run=False, runner=runner)
+    poller.poll(_config(tmp_path), dry_run=False, runner=runner)
     assert runner.calls == []
+    assert "not a complete transfer-v2 marker" in capsys.readouterr().out
 
 
 def test_duplicate_run_does_not_resubmit_but_changed_marker_does(tmp_path):

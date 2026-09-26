@@ -1,8 +1,9 @@
 """Transfer-v2 intake of unified H5s: identity from the binding, receipt from the collection.
 
 Orange's finalized observation collection names each H5 and its external
-receipt (the contract's path authority). The H5's own observation context,
-its operator-declared context and the receipt must all agree with that entry.
+receipt (the contract's path authority). The H5's own observation context and
+the receipt must agree with that entry, and its session context must equal the
+producer's declared parent context exactly, including an omitted subtype.
 The session importer then uses the receipt the manifest declares.
 """
 
@@ -28,6 +29,7 @@ RECEIPT_RELATIVE = f"recording_observation_bindings/receipts/{OBSERVATION}.json"
 
 
 CONTEXT = {"recording_type": "behavior", "recording_subtype": "chaser", "behavior_mode": "free"}
+CONTEXTS = {"CAM-42": CONTEXT}
 
 
 def _collection(receipt_bytes: bytes, *, h5_artifact=None) -> dict:
@@ -77,8 +79,8 @@ def _transfer(
     return source, inventory
 
 
-def _context(source, inventory, operator=CONTEXT):
-    return organizer._unified_h5_context(source, H5_RELATIVE, inventory, operator)
+def _context(source, inventory, contexts=CONTEXTS):
+    return organizer._unified_h5_context(source, H5_RELATIVE, inventory, contexts)
 
 
 def test_unified_h5_identity_context_and_receipt(tmp_path: Path) -> None:
@@ -142,14 +144,33 @@ def test_h5_not_in_the_collection_is_refused(tmp_path: Path) -> None:
         _context(source, inventory)
 
 
-def test_operator_context_must_match_the_h5(tmp_path: Path) -> None:
+def test_producer_context_must_match_the_h5(tmp_path: Path) -> None:
     source, inventory = _transfer(tmp_path)
     with h5py.File(source / H5_RELATIVE, "r+") as h5:
         h5["/metadata/session"].attrs["behavior_mode"] = "embedded"
 
     with pytest.raises(ValueError, match="behavior_mode"):
         _context(source, inventory)
-    _context(source, inventory, dict(CONTEXT, behavior_mode="embedded"))
+    _context(source, inventory, {"CAM-42": dict(CONTEXT, behavior_mode="embedded")})
+
+
+def test_omitted_subtype_refuses_an_h5_that_declares_one(tmp_path: Path) -> None:
+    source, inventory = _transfer(tmp_path)
+    subtype_free = {"CAM-42": {k: v for k, v in CONTEXT.items() if k != "recording_subtype"}}
+    _context(source, inventory, subtype_free)
+    with h5py.File(source / H5_RELATIVE, "r+") as h5:
+        h5["/metadata/session"].attrs["recording_subtype"] = "chaser"
+
+    with pytest.raises(ValueError, match="recording_subtype"):
+        _context(source, inventory, subtype_free)
+    _context(source, inventory)
+
+
+def test_h5_camera_without_a_producer_context_is_refused(tmp_path: Path) -> None:
+    source, inventory = _transfer(tmp_path)
+
+    with pytest.raises(ValueError, match="no producer recording context"):
+        _context(source, inventory, {"CAM-7": CONTEXT})
 
 
 def _recording_with_manifest(tmp_path: Path, receipt_relative: str) -> Path:
