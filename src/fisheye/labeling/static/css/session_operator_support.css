@@ -29,6 +29,14 @@
       outline-offset: 3px;
       border-radius: 6px;
     }
+    .operator-support.reference {
+      border-color: rgba(23, 32, 27, 0.14);
+      background: transparent;
+    }
+    .operator-support.reference summary {
+      color: #56625a;
+      font-weight: 600;
+    }
     .operator-support pre {
       white-space: pre-wrap;
       overflow-wrap: anywhere;

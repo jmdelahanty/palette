@@ -197,14 +197,15 @@
         <label for="brush-size">Brush size: <span id="brush-label">8</span> px</label>
         <input id="brush-size" type="range" min="1" max="48" value="8" oninput="setBrushSize(Number(this.value));">
         <label for="review-state">Component review state</label>
-        <select id="review-state">
+        <p id="review-current" class="meta"></p>
+        <select id="review-state" onchange="reviewSelectChanged()">
           <option value="approved">approved</option>
           <option value="pending">pending</option>
           <option value="needs_review">needs_review</option>
           <option value="rejected">rejected</option>
         </select>
         <div class="buttons">
-          <button type="button" onclick="setReviewStatus()">Set review</button>
+          <button id="set-review-button" type="button" onclick="setReviewStatus()">Set review</button>
           <button type="button" class="secondary" onclick="loadCurrent()">Reload ROI</button>
         </div>
         <p class="meta">Draw directly on the ROI. Hotkeys: wheel zooms, middle-drag pans, <b>f</b> fits outside lasso, <b>s</b> save, <b>n</b>/<b>p</b> navigate, <b>b</b>/<b>e</b> brush paint/erase, <b>x</b> toggles brush mode, <b>[</b>/<b>]</b> brush size, <b>v</b> lasso, lasso <b>f</b> fills inside, <b>g</b> fills outside, <b>e</b> erases outside, <b>u</b> undoes point, <b>d</b> clears contour, <b>h</b> fill holes (click a piece), <b>r</b> removes stray pieces, <b>Ctrl+Z</b> undoes the last fill or removal.</p>
