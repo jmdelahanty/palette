@@ -78,7 +78,7 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-fisheye = ["**/*.json", "**/*.yaml", "**/*.yml", "**/*.html", "**/*.css", "**/*.js"]
+fisheye = ["**/*.json", "**/*.yaml", "**/*.yml", "**/*.html", "**/*.j2", "**/*.css", "**/*.js"]
 
 [tool.setuptools.data-files]
 "share/palette/configs/fisheye" = [

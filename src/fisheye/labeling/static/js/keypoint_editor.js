@@ -12,6 +12,41 @@
     let checkpointStateGeneration = 0;
     let foregroundOperationGeneration = 0;
     let uncertainApplyAttempt = null;
+    let savedPointsJson = "[]";
+    let reviewSelectTouched = false;
+
+    function hasUnsavedEdits() {
+      return Boolean(payload) && JSON.stringify(points) !== savedPointsJson;
+    }
+
+    // Leaving a row (Prev/Next/closing the tab) must never drop unsaved
+    // points silently.
+    function confirmDiscardUnsaved(action) {
+      if (!hasUnsavedEdits()) return true;
+      const roi = payload?.roi_idx ?? "this row";
+      return window.confirm(
+        "ROI " + roi + " has unsaved keypoint changes. Discard them and " + action + "?\n\n" +
+        "Cancel keeps you here; press S to save."
+      );
+    }
+
+    function currentReviewState() {
+      return String(payload?.state?.review_status?.state || "pending");
+    }
+
+    // The control shows the saved state; it never preselects a value to apply.
+    function syncReviewControl() {
+      const select = document.getElementById("review-state");
+      const current = currentReviewState();
+      if (select && !reviewSelectTouched) select.value = current;
+      const label = document.getElementById("review-current");
+      if (label) label.textContent = "Current: " + current;
+    }
+
+    function reviewSelectChanged() {
+      reviewSelectTouched = true;
+      refreshControls();
+    }
     const foregroundControlIds = [
       "nav-prev-button",
       "nav-next-button",
@@ -112,7 +147,11 @@
       const reviewButton = document.getElementById("set-review-button");
       const reviewSelect = document.getElementById("review-state");
       const completeButton = document.getElementById("complete-task-button");
-      if (reviewButton) reviewButton.disabled = foregroundBusy || pendingGuard;
+      syncReviewControl();
+      if (reviewButton) {
+        reviewButton.disabled = foregroundBusy || pendingGuard
+          || (reviewSelect && reviewSelect.value === currentReviewState());
+      }
       if (reviewSelect) reviewSelect.disabled = foregroundBusy || pendingGuard;
       if (completeButton) completeButton.disabled = foregroundBusy || pendingGuard;
       const applyButton = document.getElementById("apply-button");
@@ -299,6 +338,7 @@
       const nextState = responseState || roi?.state || {};
       payload = {...roi, state: nextState};
       points = decodeKeypoints(Array.isArray(payload.points) ? payload.points : []);
+      savedPointsJson = JSON.stringify(points);
       const firstMissing = points.findIndex((point) =>
         point.some((value) => !Number.isFinite(value)));
       activePoint = firstMissing >= 0
@@ -369,6 +409,10 @@
     }
 
     async function nav(delta) {
+      if (!confirmDiscardUnsaved(delta < 0 ? "go to the previous ROI" : "go to the next ROI")) {
+        setStatus("Stayed on this ROI. Your unsaved changes are still here.");
+        return;
+      }
       if (!beginForeground()) return;
       try {
         await api("/nav", {
@@ -417,6 +461,7 @@
         : null;
       try {
         validateSavePoints();
+        const sentPointsJson = JSON.stringify(points);
         const result = await api("/save", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
@@ -432,6 +477,9 @@
         } else {
           mergeCheckpointState(result.state);
         }
+        // The row on screen is clean when it still holds exactly what was saved
+        // (a reload after Save already set the baseline itself).
+        if (JSON.stringify(points) === sentPointsJson) savedPointsJson = sentPointsJson;
         setStatus(saveStatusText(result, result.result?.roi_idx ?? savedRoiIdx, saveMode));
       } catch (error) {
         showOperatorSupport(error, "session_request_failed");
@@ -482,11 +530,16 @@
       if (!beginForeground()) return;
       try {
         const reviewState = document.getElementById("review-state").value;
+        if (reviewState === currentReviewState()) {
+          setStatus(`Review state is already ${reviewState}.`);
+          return;
+        }
         const result = await api("/review-status", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({state: reviewState, target_token: payload?.state?.target_token})
         });
+        reviewSelectTouched = false;
         await loadCurrent();
         setStatus(`Review state set to ${reviewState}.` + mutationStatusSuffix(result));
       } catch (error) {
@@ -693,6 +746,11 @@
     document.getElementById("points").addEventListener("click", selectPointRow);
     document.getElementById("points").addEventListener("keydown", selectPointRow);
     canvas.addEventListener("wheel", viewport.handleWheel, {passive: false});
+    window.addEventListener("beforeunload", (event) => {
+      if (!hasUnsavedEdits()) return;
+      event.preventDefault();
+      event.returnValue = "";
+    });
     window.addEventListener("keydown", (event) => {
       const targetTag = event.target?.tagName?.toLowerCase();
       if (targetTag === "input" || targetTag === "textarea" || targetTag === "select") return;

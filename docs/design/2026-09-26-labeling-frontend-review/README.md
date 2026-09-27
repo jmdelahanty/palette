@@ -1,6 +1,6 @@
 # Labeling web app: front-end review and simplification plan
 
-- **Status:** proposed; three decisions are needed (see the end)
+- **Status:** accepted in part: framework and P6 decided, CSP (P5) open
 - **Owner:** labeling/Apply work (session palette-12, for the user); last reviewed 2026-09-26
 - **Evidence:** four parallel read-only reviews of main at 2d182a06, covering UX and visual design, JavaScript structure, server-rendered HTML and payloads, and serving/security/styling. Where measurements were needed, they were taken against a copy of the store on a private port.
 
@@ -79,10 +79,16 @@
 | **P3 style** | `palette.css` and tokens; migrate templates, then renderers; editor layout redesign | UI change | ~2,500 inline CSS lines → one sheet |
 | **P4 JS core** | `core/` modules (api, status, busy, apply, hotkeys, image, bbox); editors migrate one at a time (video_detect → detect → keypoint → mask) with ported tests; Preact+htm for the queue and admin panels; 84 inline handlers → 0 | refactor | ~6,100 → ~5,200 JS lines; one tested Apply and error path |
 | **P5 harden** | CSP `script-src 'self'; style-src 'self'` (versioned: supersedes recorded header evidence); finish moving routes to Flask and retire the stdlib handler | enforcement | real XSS protection for 51 `innerHTML` sites |
-| **P6 decide** | the ~18k-line handoff/launch/evidence CLI family | your decision | −18k source, −10k test lines if removed |
+| **P6** | the ~18k-line handoff/launch/evidence CLI family | kept as is (see the decision log) | none |
 
 ## Decisions needed
 
 1. **Framework:** native ES modules plus vendored Preact+htm, no build step (recommended), or a Vite build?
 2. **The campus-launch CLI family (P6):** freeze and move it into a separate package outside the served app, or delete it now and rebuild a smaller version when campus hosting is real?
 3. **CSP tightening (P5):** OK to supersede the header evidence recorded by the current operator-validation contract?
+
+## Decision log
+
+- 2026-09-27, framework: native ES modules plus vendored Preact + htm, with no build step. Canvas editing stays in plain JS modules. The user accepted this; Vite was not chosen.
+- 2026-09-27, campus-launch code (P6): leave it as is. The campus admin said this code may be needed for multi-user hosting, so it is neither deleted nor extracted.
+- Open: CSP tightening (P5).
