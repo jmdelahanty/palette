@@ -165,6 +165,29 @@ jobs:
         run: |
           python -c "import pathlib, fisheye, fisheye.analysis, fisheye.pose; path = pathlib.Path(fisheye.__file__).resolve(); assert 'site-packages' in path.parts, path; print(fisheye.__version__, path)"
 
+      - name: Load installed labeling templates
+        working-directory: /tmp
+        run: |
+          python - <<'PY'
+          import pathlib
+          from importlib import resources
+
+          import fisheye.labeling.web_session_renderers  # reads its assets at import
+          from fisheye.labeling.template_assets import read_labeling_asset
+
+          root = resources.files("fisheye.labeling")
+          assert "site-packages" in pathlib.Path(str(root)).parts, root
+          names = [
+              f"templates/{group.name}/{item.name}"
+              for group in (root / "templates").iterdir() if group.is_dir()
+              for item in group.iterdir() if item.name.endswith(".html.j2")
+          ]
+          assert len(names) >= 11, names
+          for name in names:
+              assert read_labeling_asset(name).strip(), name
+          print(f"{len(names)} labeling templates load from the installed wheel")
+          PY
+
       - name: Load installed runtime contracts
         working-directory: /tmp
         run: |
