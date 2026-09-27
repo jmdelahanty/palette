@@ -33,6 +33,42 @@
     let maskPieceInfo = null;
     let maskPiecesTimer = null;
     let bulkUndoMask = null;
+    let reviewSelectTouched = false;
+
+    function hasUnsavedEdits() {
+      return Boolean(mask && loadedMask && mask.some((value, index) => value !== loadedMask[index]));
+    }
+
+    // Leaving a row (Prev/Next/Go to ROI/closing the tab) must never drop
+    // unsaved pixels silently.
+    function confirmDiscardUnsaved(action) {
+      if (!hasUnsavedEdits()) return true;
+      const roi = payload?.roi_idx ?? "this row";
+      return window.confirm(
+        "ROI " + roi + " has unsaved mask changes. Discard them and " + action + "?\n\n" +
+        "Cancel keeps you here; press S to save, or Shift+S to save and go to the next ROI."
+      );
+    }
+
+    function currentReviewState() {
+      return String(payload?.state?.component_review_status?.state || "pending");
+    }
+
+    // The control shows the saved state; it never preselects a value to apply.
+    function syncReviewControl() {
+      const select = document.getElementById("review-state");
+      const current = currentReviewState();
+      if (select && !reviewSelectTouched) select.value = current;
+      const label = document.getElementById("review-current");
+      if (label) label.textContent = "Current: " + current;
+      const button = document.getElementById("set-review-button");
+      if (button) button.disabled = !select || select.value === current;
+    }
+
+    function reviewSelectChanged() {
+      reviewSelectTouched = true;
+      syncReviewControl();
+    }
     let bulkUndoLabel = "";
 
     // Connected pieces of a binary mask. Pixels that touch at an edge or a
@@ -499,6 +535,7 @@
       const componentReview = state.component_review_status || {};
       const completionGuard = state.component_review_completion_guard || {};
       const reviewState = componentReview.state || "pending";
+      syncReviewControl();
       const pendingEffects = Number(state.pending_apply_effect_count || 0);
       const background = Boolean(state.apply_effects_background);
       const effectsStatus = state.apply_effects_status || {};
@@ -645,6 +682,10 @@
         updateNavButtons();
         return;
       }
+      if (!confirmDiscardUnsaved(delta < 0 ? "go to the previous ROI" : "go to the next ROI")) {
+        setStatus("Stayed on this ROI. Your unsaved changes are still here.");
+        return;
+      }
       setBusy(true, delta < 0 ? "Loading previous ROI..." : "Loading next ROI...");
       try {
         await api("/nav", {
@@ -667,6 +708,10 @@
       const roiIdx = Number(rawValue);
       if (!rawValue || !Number.isInteger(roiIdx) || roiIdx < 0) {
         setStatus("Enter a non-negative integer ROI number.", true);
+        return;
+      }
+      if (!confirmDiscardUnsaved("go to ROI " + roiIdx)) {
+        setStatus("Stayed on this ROI. Your unsaved changes are still here.");
         return;
       }
       setBusy(true, "Loading ROI " + roiIdx + "...");
@@ -879,11 +924,16 @@
       setBusy(true, "Setting component review status...");
       try {
         const reviewState = document.getElementById("review-state").value;
+        if (reviewState === currentReviewState()) {
+          setStatus("Review state is already " + reviewState + ".");
+          return;
+        }
         const result = await api("/review-status", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({state: reviewState, target_token: payload?.state?.target_token})
         });
+        reviewSelectTouched = false;
         await loadCurrent();
         setStatus(result?.deferred
           ? "Review state " + reviewState + " recorded; it is written once the background update finishes. You can complete the task now."
@@ -1112,6 +1162,11 @@
     window.addEventListener("mouseup", () => { drawing = false; lassoDrawing = false; viewport.endPan(); });
     window.addEventListener("touchend", () => { drawing = false; lassoDrawing = false; viewport.endPan(); });
     canvas.addEventListener("wheel", viewport.handleWheel, {passive: false});
+    window.addEventListener("beforeunload", (event) => {
+      if (!hasUnsavedEdits()) return;
+      event.preventDefault();
+      event.returnValue = "";
+    });
     window.addEventListener("keydown", (event) => {
       if (event.key === "Shift" && cursorMaskPoint) {
         cursorShiftInvert = true;

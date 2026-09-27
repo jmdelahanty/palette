@@ -31,12 +31,14 @@ const [h,w]=input.shape;
 let response={ok:true,roi_idx:0,frame_idx:0,mask_area_px:0,
   roi_image:{shape:[h,w],pixels:Buffer.alloc(h*w,70).toString("base64")},
   mask:{shape:[h,w],pixels:Buffer.from(input.mask).toString("base64")},
-  state:{position:0,total:1,component_review_completion_guard:{ready:true}}};
+  state:input.state||{position:0,total:1,component_review_completion_guard:{ready:true}}};
+const confirms=[];
 const viewport={imageWidth:w,imageHeight:h,view:{scale:1,offsetX:0,offsetY:0},hasImage:()=>true,setImageData(){},
   drawImage(){},drawCanvas(){},imageToCanvas:(x,y)=>[x,y],pointerEvent:e=>e,canvasPoint:e=>[e.x,e.y],
   canvasToImage:(x,y)=>[x,y],beginPan:()=>false,panMove:()=>false,endPan(){},fit(){}};
 const context=vm.createContext({console,Number,Math,JSON,Uint8Array,Int32Array,
-  window:{PALETTE_SUBJECT_MASK_SESSION_ID:"test",addEventListener(type,fn){(listeners[type]=listeners[type]||[]).push(fn);},requestAnimationFrame:fn=>frames.push(fn)},
+  window:{PALETTE_SUBJECT_MASK_SESSION_ID:"test",addEventListener(type,fn){(listeners[type]=listeners[type]||[]).push(fn);},requestAnimationFrame:fn=>frames.push(fn),
+    confirm:(msg)=>{confirms.push(msg);return input.confirm!==false;}},
   document:{getElementById:getNode,createElement:surface,querySelectorAll:()=>[]},
   ImageData:class{constructor(a,b){this.width=a;this.height=b;this.data=new Uint8Array(a*b*4);}},
   atob:v=>Buffer.from(v,"base64").toString("binary"),btoa:v=>Buffer.from(v,"binary").toString("base64"),
@@ -51,12 +53,19 @@ vm.runInContext(fs.readFileSync(process.argv[1],"utf8"),context);
   await new Promise(r=>setImmediate(r));flush();
   const out={};
   for(const step of input.steps){
-    if(step.run)run(step.run);
+    if(step.run)await run(step.run);
+    if(step.select!==undefined){getNode("review-state").value=step.select;run("reviewSelectChanged()");}
     if(step.press)press(step.press.key,step.press.mods||{});
     flush();
     out[step.name]={mask:maskBytes(),pieces:getNode("mask-pieces").textContent,
       warn:getNode("mask-pieces").classes.has("warn"),removeDisabled:getNode("remove-stray-button").disabled,
-      undoDisabled:getNode("undo-bulk-button").disabled,status:getNode("status").textContent};
+      undoDisabled:getNode("undo-bulk-button").disabled,status:getNode("status").textContent,
+      reviewValue:getNode("review-state").value,reviewCurrent:getNode("review-current").textContent,
+      reviewButtonDisabled:getNode("set-review-button").disabled,
+      navRequests:requests.filter(r=>r.url.endsWith("/nav")).length,
+      reviewRequests:requests.filter(r=>r.url.endsWith("/review-status")).length,
+      confirms:confirms.length,
+      unloadBlocked:(()=>{let blocked=false;for(const fn of listeners.beforeunload||[])fn({preventDefault(){blocked=true;}});return blocked;})()};
   }
   if(input.pure)out.pure=run(input.pure);
   out.errors=errors;
@@ -72,9 +81,9 @@ def _node():
     return node
 
 
-def _run(mask: np.ndarray, steps, pure=None):
+def _run(mask: np.ndarray, steps, pure=None, state=None, confirm=True):
     payload = {"shape": list(mask.shape), "mask": mask.astype(np.uint8).ravel().tolist(),
-               "steps": steps, "pure": pure}
+               "steps": steps, "pure": pure, "state": state, "confirm": confirm}
     result = subprocess.run(
         [_node(), "-e", HARNESS, str(SCRIPT)], input=json.dumps(payload),
         capture_output=True, text=True, timeout=60,
@@ -178,3 +187,40 @@ def test_every_editor_ignores_modified_keys_before_any_hotkey(name):
     busy = handler.find("foregroundBusy")
     assert guard < first_hotkey
     assert busy == -1 or guard < busy
+
+
+def _state(review="needs_review"):
+    return {"position": 1, "total": 5, "component_review_status": {"state": review},
+            "component_review_completion_guard": {"ready": True}}
+
+
+def test_review_control_shows_the_saved_state_and_never_preselects_approval():
+    mask = np.zeros((10, 10), np.uint8)
+    out = _run(mask, [
+        {"name": "loaded"},
+        {"name": "same", "run": "setReviewStatus()"},
+        {"name": "picked", "select": "approved"},
+    ], state=_state("needs_review"))
+    assert out["loaded"]["reviewValue"] == "needs_review"
+    assert out["loaded"]["reviewCurrent"] == "Current: needs_review"
+    assert out["loaded"]["reviewButtonDisabled"] is True
+    assert out["same"]["reviewRequests"] == 0 and "already needs_review" in out["same"]["status"]
+    assert out["picked"]["reviewValue"] == "approved"
+    assert out["picked"]["reviewButtonDisabled"] is False
+
+
+@pytest.mark.parametrize("answer", [False, True])
+def test_leaving_a_row_with_unsaved_pixels_asks_first(answer):
+    mask = np.zeros((10, 10), np.uint8)
+    mask[3:6, 3:6] = 1
+    out = _run(mask, [
+        {"name": "clean_next", "run": "nav(1)"},
+        {"name": "painted", "run": "brushSize=1; tool='paint'; paintAt({x:8,y:8,shiftKey:false})"},
+        {"name": "dirty_next", "run": "nav(1)"},
+    ], state=_state(), confirm=answer)
+    assert out["clean_next"]["confirms"] == 0 and out["clean_next"]["navRequests"] == 1
+    assert out["painted"]["unloadBlocked"] is True
+    assert out["dirty_next"]["confirms"] == 1
+    assert out["dirty_next"]["navRequests"] == (2 if answer else 1)
+    if not answer:
+        assert "Stayed on this ROI" in out["dirty_next"]["status"]
