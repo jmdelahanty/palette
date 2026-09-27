@@ -175,7 +175,8 @@
         </p>
         <div id="mutable-review-controls">
           <label for="review-state">Review state</label>
-          <select id="review-state">
+          <p id="review-current" class="meta"></p>
+          <select id="review-state" onchange="reviewSelectChanged()">
             <option value="approved">approved</option>
             <option value="pending">pending</option>
             <option value="needs_review">needs_review</option>

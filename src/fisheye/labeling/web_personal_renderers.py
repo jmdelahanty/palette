@@ -506,13 +506,24 @@ def _dashboard_html() -> bytes:
         `task_open_browser_label_write_target=${contract.browser_label_write_target || ""}`,
         `task_open_browser_writes_csv_or_handoff_files=${contract.browser_writes_csv_or_handoff_files ?? ""}`,
         `task_open_browser_has_direct_zarr_write_authority=${contract.browser_has_direct_zarr_write_authority ?? ""}`
-      ].join("\n");
+      ].join("\\n");
     }
 
     function clearDashboardError() {
       const target = document.getElementById("dashboard-error");
       target.className = "";
       target.innerHTML = "";
+    }
+
+    // Dataset support text is built when its details box is first opened,
+    // not for every row on each render.
+    let dashboardSupportSources = new Map();
+    function fillSupportDetails(details) {
+      if (!details.open) return;
+      const pre = details.querySelector("pre");
+      if (!pre || pre.textContent) return;
+      const build = dashboardSupportSources.get(details.dataset.supportKey || "");
+      pre.textContent = build ? build() : "";
     }
 
     function copySupportDetails(button) {
@@ -1116,6 +1127,7 @@ def _dashboard_html() -> bytes:
         return;
       }
       target.className = "dataset-queue";
+      dashboardSupportSources = new Map();
       target.innerHTML = `<h2>Datasets waiting for completion</h2>` + queue.map((dataset) => {
         const workflowText = Object.entries(dataset.workflow_counts || {}).map(([workflow, count]) =>
           `${workflow}:${count}`
@@ -1124,13 +1136,14 @@ def _dashboard_html() -> bytes:
           `<a href="${escapeText(recording.expected_user_work_url || recording.work_url || dataset.expected_user_work_url || dataset.work_url || "/work")}">${escapeText(recording.recording_id)}</a> (${escapeText(recording.open_task_count || 0)} startable - ${escapeText(recording.labeler_action || "open_recording")})`
         ).join(", ");
         const workUrl = dataset.expected_user_work_url || dataset.work_url || "/work";
-        const supportDetails = dashboardQueueSupportText(dataset);
+        const supportKey = String(dashboardSupportSources.size + 1);
+        dashboardSupportSources.set(supportKey, () => dashboardQueueSupportText(dataset));
         return `<div class="dataset-row">
           <b><a href="${escapeText(workUrl)}">${escapeText(dataset.dataset_label || dataset.dataset_id || "Unspecified dataset")}</a></b>
           <br><span class="muted">${escapeText(dataset.open_task_count || 0)} startable / ${escapeText(dataset.task_count || 0)} shown tasks - ${escapeText(dataset.recording_count || 0)} recordings - action ${escapeText(dataset.labeler_action || "open_dataset")}${workflowText ? " - workflows " + escapeText(workflowText) : ""}</span>
           <br><span class="muted">Writes: ${escapeText(dataset.data_plane_write_target || "server_owned_assigned_task_zarr_scope")} - handoff metadata only: ${escapeText(dataset.handoff_artifacts_are_metadata_only)}</span>
           <br><span>${recordingText}</span>
-          <details class="operator-error"><summary>Dataset support details</summary><pre>${escapeText(supportDetails)}</pre><button type="button" onclick="copySupportDetails(this)">Copy support details</button></details>
+          <details class="operator-error" data-support-key="${supportKey}" ontoggle="fillSupportDetails(this)"><summary>Dataset support details</summary><pre></pre><button type="button" onclick="copySupportDetails(this)">Copy support details</button></details>
         </div>`;
       }).join("");
     }
@@ -1605,6 +1618,19 @@ def _datasets_html() -> bytes:
       document.getElementById("landing-link").href = guardedPath("/");
       document.getElementById("work-link").href = guardedPath("/work");
       document.getElementById("identity-link").href = guardedPath("/identity");
+    }
+
+    // Support text is built when its Copy button is clicked, not for every row
+    // on each render (it was ~27 KB per row of hidden DOM text).
+    let supportSources = new Map();
+    function registerSupport(build) {
+      const key = String(supportSources.size + 1);
+      supportSources.set(key, build);
+      return key;
+    }
+    function copySupportByKey(button, resetText) {
+      const build = supportSources.get(button.dataset.supportKey || "");
+      return copyText(button, build ? build() : "", resetText);
     }
 
     async function copyText(button, text, resetText) {
@@ -2642,19 +2668,20 @@ def _datasets_html() -> bytes:
         return;
       }
       target.className = "";
+      supportSources = new Map();
       const startableTaskStates = new Set(((payload.dataset_queue_direct_start_policy || {}).startable_task_states || []).map(String));
       const operatorValidationStartGate = payload.operator_validation_start_gate || {};
       const operatorValidationBlocksStart = operatorValidationStartGate.blocks_task_open === true || operatorValidationStartGate.blocks_task_open === "true";
       target.innerHTML = queue.map((dataset) => {
         const workUrl = dataset.expected_user_work_url || dataset.work_url || guardedPath("/work");
         const workflows = Object.entries(dataset.workflow_counts || {}).map(([workflow, count]) => `${workflow}:${count}`).join(", ");
-        const datasetSupportDetails = supportDetailsText({...dataset.operator_support, ...dataset});
+        const datasetSupportKey = registerSupport(() => supportDetailsText({...dataset.operator_support, ...dataset}));
         const recordings = (dataset.recordings || []).map((recording) => {
           const url = recording.expected_user_work_url || recording.work_url || workUrl;
-          const recordingSupportDetails = supportDetailsText({...recording.operator_support, ...recording});
+          const recordingSupportKey = registerSupport(() => supportDetailsText({...recording.operator_support, ...recording}));
           return `<span class="recording-chip">
             <a href="${escapeText(url)}">${escapeText(recording.recording_id)} - ${escapeText(recording.open_task_count || 0)} open - ${escapeText(recording.labeler_action || "open_recording")}</a>
-            <button type="button" class="secondary" onclick="copyText(this, this.dataset.supportDetails || '', 'Copy recording support')" data-support-details="${escapeText(recordingSupportDetails)}">Copy recording support</button>
+            <button type="button" class="secondary" onclick="copySupportByKey(this, 'Copy recording support')" data-support-key="${recordingSupportKey}">Copy recording support</button>
           </span>`;
         }).join("");
         const taskRows = (dataset.recordings || []).flatMap((recording) =>
@@ -2671,7 +2698,7 @@ def _datasets_html() -> bytes:
               support.task_id ? `task ${support.task_id}` : "",
               support.workflow_kind ? `workflow ${support.workflow_kind}` : ""
             ].filter(Boolean).join(" - ");
-            const supportDetails = supportDetailsText({...support, ...task});
+            const supportKey = registerSupport(() => supportDetailsText({...support, ...task}));
             const notes = task.notes ? `<div class="task-note">${escapeText(task.notes)}</div>` : "";
             const directStartEndpoint = task.direct_browser_start_endpoint || "";
             const directStartContractReady = task.direct_browser_start_authorization_contract_ready === true || task.direct_browser_start_authorization_contract_ready === "true";
@@ -2694,7 +2721,7 @@ def _datasets_html() -> bytes:
               ${directStartOperatorAction ? `<div class="task-meta">Direct start operator action: ${escapeText(directStartOperatorAction)}</div>` : ""}
               <div class="task-meta">Title: ${escapeText(task.title || task.task_id || "Open task")}</div>
               <div class="task-meta">Support: ${escapeText(supportId)}</div>
-              <button type="button" class="secondary" onclick="copyText(this, this.dataset.supportDetails || '', 'Copy task support details')" data-support-details="${escapeText(supportDetails)}">Copy task support details</button>
+              <button type="button" class="secondary" onclick="copySupportByKey(this, 'Copy task support details')" data-support-key="${supportKey}">Copy task support details</button>
               ${notes}
             </div>`;
           })
@@ -2702,7 +2729,7 @@ def _datasets_html() -> bytes:
         return `<article class="dataset">
           <h2><a href="${escapeText(workUrl)}">${escapeText(dataset.dataset_label || dataset.dataset_id || "Unspecified dataset")}</a></h2>
           <div class="muted">${escapeText(dataset.open_task_count || 0)} startable / ${escapeText(dataset.task_count || 0)} shown tasks - ${escapeText(dataset.recording_count || 0)} recordings - action ${escapeText(dataset.labeler_action || "open_dataset")}${workflows ? " - workflows " + escapeText(workflows) : ""}</div>
-          <button type="button" class="secondary" onclick="copyText(this, this.dataset.supportDetails || '', 'Copy dataset support')" data-support-details="${escapeText(datasetSupportDetails)}">Copy dataset support</button>
+          <button type="button" class="secondary" onclick="copySupportByKey(this, 'Copy dataset support')" data-support-key="${datasetSupportKey}">Copy dataset support</button>
           <div class="recordings">${recordings}</div>
           <div class="tasks">${taskRows}</div>
         </article>`;
