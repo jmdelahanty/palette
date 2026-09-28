@@ -1,12 +1,15 @@
 """The personal queue pages' JavaScript parses and builds support text lazily.
 
-The page scripts live inside Python strings, where a single "\\n" becomes a
-real newline and silently breaks the whole script (as it did on /my-work
-from 2026-07-04 until 2026-09-27).
+The page scripts lived inside Python strings until 2026-09-28, where a single
+"\\n" became a real newline and silently broke the whole script (as it did on
+/my-work from 2026-07-04 until 2026-09-27). They now live in
+templates/personal/*.html; the pinned digests below prove that move served
+identical bytes.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -17,6 +20,23 @@ import pytest
 from fisheye.labeling.web_personal_renderers import _dashboard_html, _datasets_html
 
 SCRIPT_RE = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)</script>")
+
+# sha256 of the served pages when they moved out of Python (PR #233). An
+# intentional page edit must update the digest here in the same change.
+PINNED_PAGE_SHA256 = {
+    "my-work": "fd445371c3aac4997effa49426902b892df0d34cd3696fb59deecd8fce59fb5d",
+    "my-datasets": "0f71791494a91ae05abacdea3d5ef2f6f0516dc079dcd7042e98ad91e7a6c06f",
+}
+
+
+@pytest.mark.parametrize(
+    ("page_id", "page"),
+    [("my-work", _dashboard_html), ("my-datasets", _datasets_html)],
+)
+def test_served_page_bytes_match_pinned_digest(page_id, page):
+    assert hashlib.sha256(page()).hexdigest() == PINNED_PAGE_SHA256[page_id], (
+        f"/{page_id} bytes changed; if intentional, update PINNED_PAGE_SHA256"
+    )
 
 
 def _node():
