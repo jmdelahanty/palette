@@ -286,8 +286,9 @@ def stimulus_runs_present(zarr_path: Path) -> bool:
     # A sealed unified reference run is complete but deliberately not selector
     # eligible (no adapter yet), so it never becomes "latest". Its completion
     # and an openable reference still satisfy the intake contract.
-    for name, run in stim.groups():
-        if run.attrs.get("source_profile") == UNIFIED_H5_PROFILE and is_run_complete_in_parent(
+    for name in stim.group_keys():
+        run = stim.get(name)
+        if run is not None and run.attrs.get("source_profile") == UNIFIED_H5_PROFILE and is_run_complete_in_parent(
             stim, run, legacy_default=False
         ):
             try:
