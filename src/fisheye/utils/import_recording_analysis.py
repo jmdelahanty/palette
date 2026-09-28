@@ -92,6 +92,7 @@ from fisheye.shared.subject_metadata import (
 from fisheye.shared.zarr_run_completion import (
     PALETTE_STORE_EPOCH_ATTR,
     PALETTE_STORE_EPOCH_FAIL_CLOSED_COMPLETION,
+    is_run_complete_in_parent,
     resolve_latest_complete_run_name,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
@@ -280,7 +281,21 @@ def stimulus_runs_present(zarr_path: Path) -> bool:
         return False
     # Only the maintained completion contract can justify reuse. Historical
     # group presence is not an ingestion completion signal.
-    return resolve_latest_complete_run_name(stim, legacy_default=False) is not None
+    if resolve_latest_complete_run_name(stim, legacy_default=False) is not None:
+        return True
+    # A sealed unified reference run is complete but deliberately not selector
+    # eligible (no adapter yet), so it never becomes "latest". Its completion
+    # and an openable reference still satisfy the intake contract.
+    for name, run in stim.groups():
+        if run.attrs.get("source_profile") == UNIFIED_H5_PROFILE and is_run_complete_in_parent(
+            stim, run, legacy_default=False
+        ):
+            try:
+                open_unified_source(root, run_name=name)
+            except (UnifiedH5ContractError, KeyError, ValueError):
+                continue
+            return True
+    return False
 
 
 def validate_recording_import_plan(
