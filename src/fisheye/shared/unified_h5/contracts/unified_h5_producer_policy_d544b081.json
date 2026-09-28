@@ -5,7 +5,7 @@
   "producer_candidate": {
     "repository": "JohnsonLabJanelia/citrus",
     "branch": "agent/unified-h5-streamed-correspondence-20260923",
-    "commit": "6bd8cbc443c3af699f9f13cbc2db037d8d99d82d"
+    "commit": "e437fa4752679e5a614378d824e636104c4f095a"
   },
   "artifact_profile": "unified_experimental_h5_v1",
   "versions": {
@@ -39,14 +39,6 @@
     },
     "chaser_state": {
       "schema_id": "citrus.experimental_h5.chaser_state",
-      "schema_version": 2
-    },
-    "live_frame_identity": {
-      "schema_id": "citrus.experimental_h5.live_frame_identity.v2",
-      "schema_version": 2
-    },
-    "live_chaser_identity": {
-      "schema_id": "citrus.experimental_h5.live_chaser_identity.v2",
       "schema_version": 2
     }
   },
@@ -121,63 +113,5 @@
       },
       "admitted_by_this_revision": true
     }
-  },
-  "correspondence_definition_pins": {
-    "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
-    "catalog": {
-      "path": "docs/schemas/experimental_h5_correspondence_tables_v2.json",
-      "file_sha256": "sha256:cb3ac574c76750c23de730129c4a32371328ffb34d792b1cfab164b7201ba1ea",
-      "canonical_json_sha256": "sha256:ea7051ceddaa39cc56cd42a8f0d9e3c6dcecf4ce4f842c789f223fc49ce62ee9",
-      "tables": [
-        {
-          "schema_id": "citrus.experimental_h5.live_frame_identity.v2",
-          "schema_version": 2,
-          "path": "/correspondence/acquisition/live_frame_identities",
-          "definition_canonical_json_sha256": "sha256:63d6736a91a77b52bcade1dbfa2eb344a08849b657a74ce8f082c2e85b1fd9f0"
-        },
-        {
-          "schema_id": "citrus.experimental_h5.live_chaser_identity.v2",
-          "schema_version": 2,
-          "path": "/correspondence/acquisition/live_chaser_identities",
-          "definition_canonical_json_sha256": "sha256:a466f73341bbc90fe86baa11d1eccf3e78c10d8612203ef9f6934497355f1c49"
-        }
-      ]
-    },
-    "input_schema": {
-      "path": "docs/schemas/experimental_h5_correspondence_input_v2.schema.json",
-      "file_sha256": "sha256:a33e06819e966b7273015bfffe4aa0d01f24a04fb9ffac69abb29ed5c76329a3",
-      "canonical_json_sha256": "sha256:dd2c1f297046b76582078216e96f4ee36bc5aab7b3d96a0c07de2173544f8e23",
-      "schema_id": "citrus.experimental_h5.correspondence_input",
-      "schema_version": 2,
-      "h5_path": "/correspondence/acquisition/raw_live_identity_provenance_json"
-    },
-    "receipt_schema": {
-      "path": "docs/schemas/experimental_h5_correspondence_receipt_v2.schema.json",
-      "file_sha256": "sha256:8d2a414f46f6d6263f2609c55e15add9d7a2b61ad98349cf1ac3aef598b8d4e8",
-      "canonical_json_sha256": "sha256:6f8a5cf2370b7172edc133c9e3c69af183c5a17299b5f459fe8549f2aad90139",
-      "schema_id": "citrus.experimental_h5.correspondence_receipt",
-      "schema_version": 2,
-      "h5_path": "/correspondence/receipt_json"
-    }
-  },
-  "capacity_preflight_definition_pin": {
-    "path": "docs/schemas/experimental_h5_capacity_preflight_v1.schema.json",
-    "file_sha256": "sha256:d5d7ebf5249de35ce7234ddfec3c7cb51b57ac3b6fdcb25bf75724f25223d068",
-    "canonical_json_sha256": "sha256:b811754e7c5497e24c60319fd7e63398ff63038b0ac7013e15a379e6197f9104",
-    "schema_id": "citrus.experimental_h5.capacity_preflight",
-    "schema_version": 1,
-    "h5_path": "/metadata/admission/capacity_preflight_json"
-  },
-  "producer_policy_pin": {
-    "path": "citrus-palette/producer_policies/unified_h5_admission_d544b081.json",
-    "file_sha256": "sha256:d544b0814006360b11b02cd9d171eefbddae7cc9cc41ad57470bbd240bc83cb9",
-    "canonical_json_sha256": "sha256:cb8714b9a0743b4ac443b0c1905d7d1f2014f224fcd9d3b5df2bf36617f62c13",
-    "repository": "jmdelahanty/agent-contracts",
-    "source_commit": "f3620fe1a05611db14497035d88f8c734449ac79",
-    "h5_evidence_path": "/metadata/admission/capacity_preflight_json",
-    "h5_digest_field": "admission_policy_sha256",
-    "h5_digest_representation": "lowercase_sha256_hex_without_prefix",
-    "relationship": "exact_frozen_producer_policy_not_the_hash_of_this_consumer_definition_pin_document",
-    "compatibility": "same_resource_storage_operations_delivery_digest_and_core_definitions; existing_versions_unchanged; adds_machine_definition_pins_only"
   }
 }

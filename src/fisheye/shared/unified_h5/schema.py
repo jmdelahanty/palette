@@ -28,8 +28,25 @@ CONTRACT_HASHES = {
     "experimental_h5_geometry_v1.json": "4c0c707192cf1fa6ceafb2f632672972f41dc7e4c7cc5cdb0c0e3b7920a1474b",
     "experimental_h5_identity_claims_v1.json": "83ca66b336f3e3a40ebaafc869d7febd020509e238243381dfe871cbeb89507e",
     "object_appearance_replay_dependency_manifest_v1.json": "eccfcfcb3c6e66549b2fdfcfcf88fdc4fa9def3d6ce4a375494d011b04f2607c",
-    "unified_h5_admission_v2.json": "58460d68cd25bcb728371815ad9bdabc3bd6080a1ad423819fefda5611c498df",
+    "unified_h5_admission_v2.json": "851ba36a7ab0757c90399e785ea350f285c5b1984f74409e125a79b6ba0b82b5",
+    "unified_h5_producer_policy_d544b081.json": "d544b0814006360b11b02cd9d171eefbddae7cc9cc41ad57470bbd240bc83cb9",
+    "experimental_h5_core_chaser_v2.json": "cb68ab6ecea614030b8f2a3d2096e9122b1efa5156b56ed7a495b3072c70316a",
+    "experimental_h5_correspondence_tables_v2.json": "cb3ac574c76750c23de730129c4a32371328ffb34d792b1cfab164b7201ba1ea",
+    "experimental_h5_correspondence_input_v2.schema.json": "a33e06819e966b7273015bfffe4aa0d01f24a04fb9ffac69abb29ed5c76329a3",
+    "experimental_h5_correspondence_receipt_v2.schema.json": "8d2a414f46f6d6263f2609c55e15add9d7a2b61ad98349cf1ac3aef598b8d4e8",
+    "experimental_h5_capacity_preflight_v1.schema.json": "d5d7ebf5249de35ce7234ddfec3c7cb51b57ac3b6fdcb25bf75724f25223d068",
 }
+# Core catalogs by the chaser state table's declared schema_version: v2 is the
+# admission-v2 revision (explicit camera-id validity); v1 is the earlier
+# revision, admitted only until producer fixtures are regenerated under v2.
+# Only the chaser table differs between them.
+CORE_CATALOGS = {
+    1: "experimental_h5_core_v1.json",
+    2: "experimental_h5_core_chaser_v2.json",
+}
+CORE_CATALOG = CORE_CATALOGS[2]
+CHASER_STATES = "/components/chaser/states"
+CORRESPONDENCE_CATALOG = "experimental_h5_correspondence_tables_v2.json"
 
 
 @lru_cache(maxsize=4)
@@ -54,7 +71,62 @@ def read_json(h5, path: str, *, canonical: bool = False) -> dict:
     return parse_json(dataset_bytes(h5[path]), label=path, canonical=canonical)
 
 
-def table_schema(path: str) -> dict:
+def correspondence_table_paths() -> frozenset[str]:
+    return frozenset(t["path"] for t in _contract(CORRESPONDENCE_CATALOG)["tables"])
+
+
+def validate_catalog_table(h5, path: str) -> dict:
+    """Layout, attributes and value rules of a correspondence-catalog table.
+
+    These tables are digested as closed logical values, so the catalog is
+    checked here, separately, and never folded into their digests.
+    """
+    matches = [
+        table
+        for table in _contract(CORRESPONDENCE_CATALOG)["tables"]
+        if table["path"] == path
+    ]
+    require(len(matches) == 1, f"unknown_correspondence_table:{path}")
+    schema = deepcopy(matches[0])
+    require(path in h5 and isinstance(h5[path], h5py.Dataset), f"missing_table:{path}")
+    dataset = h5[path]
+    check_dataset_budget(dataset)
+    require(dataset.ndim == schema["rank"], f"table_rank:{path}")
+    _validate_fields(dataset.id.get_type(), schema["fields"], schema["itemsize"], path)
+    required = schema["required_attributes"]
+    require(set(dataset.attrs) == set(required), f"table_attributes:{path}")
+    for name, spec in required.items():
+        value = dataset.attrs.get(name)
+        if spec["dtype"] == "utf8":
+            require(
+                text(value, f"{path}@{name}") == spec["value"],
+                f"table_attribute_mismatch:{path}:{name}",
+            )
+        else:
+            attr = dataset.attrs.get_id(name)
+            require(
+                attr.shape == () and attr.dtype == np.dtype(spec["dtype"])
+                and int(value) == spec["value"],
+                f"table_attribute_mismatch:{path}:{name}",
+            )
+    for _, block in iter_blocks(dataset):
+        _validate_values(block, schema["fields"], path)
+    return schema
+
+
+def table_version(h5, path: str) -> int | None:
+    """The declared schema_version that selects the chaser table's catalog."""
+    if path != CHASER_STATES or path not in h5:
+        return None
+    version = h5[path].attrs.get("schema_version")
+    require(
+        version is not None and int(version) in CORE_CATALOGS,
+        f"unsupported_table_version:{path}",
+    )
+    return int(version)
+
+
+def table_schema(path: str, version: int | None = None) -> dict:
     template = path
     if path.startswith("/definitions/enums/") and len(path.split("/")) == 4:
         template = "/definitions/enums/{component}"
@@ -65,9 +137,10 @@ def table_schema(path: str) -> dict:
     ):
         require(len(path.split("/")) == 4, f"unknown_table:{path}")
         template = "/correspondence/{component}/sources"
+    catalog = CORE_CATALOGS[version] if version is not None else CORE_CATALOG
     matches = [
         table
-        for table in _contract("experimental_h5_core_v1.json")["tables"]
+        for table in _contract(catalog)["tables"]
         if table["path"] == template
     ]
     require(len(matches) == 1, f"unknown_table:{path}")
@@ -187,7 +260,7 @@ def describe_table(h5, path: str) -> dict:
     scan = current_admission_scan()
     if scan is not None and path in scan.tables:
         return deepcopy(scan.tables[path])
-    schema = table_schema(path)
+    schema = table_schema(path, table_version(h5, path))
     require(path in h5 and isinstance(h5[path], h5py.Dataset), f"missing_table:{path}")
     dataset = h5[path]
     check_dataset_budget(dataset)
