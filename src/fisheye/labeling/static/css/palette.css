@@ -64,13 +64,19 @@ p { margin: 4px 0 0; }
 .notice-danger { color: var(--danger); background: var(--danger-bg); border-color: #efc4bc; }
 .notice-pending { color: var(--pending); background: var(--pending-bg); border-color: #f0dca8; }
 
-.queue-row { display: grid; grid-template-columns: minmax(0, 2.4fr) minmax(0, 1.2fr) minmax(0, 1fr) minmax(150px, 1fr); gap: 16px; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--ground); }
+.queue-row { display: grid; grid-template-columns: minmax(0, 2.4fr) minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 0.8fr) minmax(130px, 0.9fr); gap: 16px; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--ground); }
 .queue-row:last-child { border-bottom: 0; }
 .queue-head { padding: 12px 20px; border-bottom: 1px solid var(--line-soft); font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); }
 .queue-cell-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .queue-recording { font-weight: 600; overflow-wrap: anywhere; }
 .queue-action { justify-self: end; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; text-align: right; }
 .queue-state { font-size: 13px; color: var(--ink-2); }
+.queue-progress { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.progress-line { display: flex; align-items: center; gap: 10px; }
+.progress-track { flex-grow: 1; height: 6px; background: #e1e6df; border-radius: 3px; overflow: hidden; }
+.progress-fill { height: 6px; background: var(--accent); }
+.text-pending { color: var(--pending); }
+.clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .state-blocked { color: var(--danger); }
 .state-complete { color: var(--ok); }
 .empty { padding: 20px; margin: 0; }
@@ -83,5 +89,6 @@ p { margin: 4px 0 0; }
   .page { padding: 20px 16px; }
   .queue-head { display: none; }
   .queue-row { grid-template-columns: 1fr auto; }
+  .queue-progress { grid-column: 1 / -1; }
   .queue-action { grid-column: 1 / -1; justify-self: stretch; align-items: stretch; text-align: left; }
 }
