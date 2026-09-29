@@ -22,7 +22,10 @@
 
   <div class="editor-body">
     <div id="canvas-stage" class="editor-stage">
-      <canvas id="canvas"></canvas>
+      <div class="canvas-frame">
+        <canvas id="canvas"></canvas>
+        <canvas id="detect-overlay" class="canvas-overlay" aria-hidden="true"></canvas>
+      </div>
       <div class="stage-hint">Drag empty space to add a box · click a box to select it · scroll to zoom</div>
     </div>
 
@@ -85,6 +88,8 @@
 </script>
 <script>
   fitCanvasToStage(document.getElementById("canvas"), document.getElementById("canvas-stage"));
+  // Boxes and labels draw at screen resolution; redraw when the size changes.
+  new ResizeObserver(() => draw()).observe(document.getElementById("canvas"));
 </script>
 </body>
 </html>

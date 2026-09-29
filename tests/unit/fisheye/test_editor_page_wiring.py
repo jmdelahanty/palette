@@ -145,3 +145,14 @@ def test_editor_canvases_keep_a_visible_pointer():
     assert "cursor: crosshair" in stage_rule and "cursor: none" not in stage_rule
     assert 'canvas.style.cursor = "none"' in (JS_ROOT / "subject_mask_editor.js").read_text()
     assert "cursor" not in (JS_ROOT / "keypoint_editor.js").read_text()
+
+
+def test_detection_boxes_and_labels_draw_on_a_screen_resolution_overlay():
+    html = _page("detect_training")
+    assert 'id="detect-overlay"' in html and 'class="canvas-overlay"' in html
+    source = (JS_ROOT / "detect_editor.js").read_text()
+    assert 'document.getElementById("detect-overlay")' in source
+    # The overlay never takes pointer input or hides the frame beneath it.
+    css = (web_static.STATIC_ROOT / "css" / "editor.css").read_text()
+    rule = re.search(r"\.editor-stage canvas\.canvas-overlay \{([^}]*)\}", css).group(1)
+    assert "pointer-events: none" in rule and "background: transparent" in rule

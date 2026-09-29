@@ -147,34 +147,75 @@
       return null;
     }
 
+    // Boxes and labels go on a transparent overlay at screen resolution when
+    // the page provides one, so they stay sharp over the pixelated frame; the
+    // frame canvas itself is used otherwise.
+    const overlay = document.getElementById("detect-overlay");
+    const overlayCtx = overlay && typeof overlay.getContext === "function" ? overlay.getContext("2d") : null;
+
+    function markerLayer() {
+      if (overlayCtx && typeof canvas.getBoundingClientRect === "function") {
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const width = Math.max(1, Math.round(rect.width * dpr));
+        const height = Math.max(1, Math.round(rect.height * dpr));
+        if (overlay.width !== width) overlay.width = width;
+        if (overlay.height !== height) overlay.height = height;
+        overlayCtx.clearRect(0, 0, width, height);
+        if (rect.width > 0 && canvas.width > 0) {
+          return {ctx: overlayCtx, sx: width / canvas.width, sy: height / canvas.height,
+            line: 2 * dpr, thin: 1 * dpr, font: 12 * dpr, pad: 4 * dpr, dash: [8 * dpr, 6 * dpr], outline: 3 * dpr};
+        }
+      }
+      return {ctx, sx: 1, sy: 1, line: Math.max(2, canvas.width / 160), thin: Math.max(1, canvas.width / 320),
+        font: Math.max(12, canvas.width / 90), pad: 4, dash: [8, 6], outline: 0};
+    }
+
     function draw() {
       if (!payload) return;
       viewport.drawImage();
+      const layer = markerLayer();
+      const g = layer.ctx;
+      const toLayer = (x, y) => {
+        const [cx, cy] = viewport.imageToCanvas(x, y);
+        return [cx * layer.sx, cy * layer.sy];
+      };
       detections.forEach((detection, index) => {
         const rect = bboxToRect(detection.bbox_norm);
         if (!rect) return;
-        const [x0, y0] = viewport.imageToCanvas(rect.x, rect.y);
-        const [x1, y1] = viewport.imageToCanvas(rect.x + rect.w, rect.y + rect.h);
-        ctx.lineWidth = Math.max(2, canvas.width / 160);
-        ctx.strokeStyle = index === selectedIndex ? "#f28f3b" : "#22d3ee";
-        ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
-        ctx.fillStyle = index === selectedIndex ? "rgba(242,143,59,0.16)" : "rgba(34,211,238,0.08)";
-        ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
-        ctx.fillStyle = index === selectedIndex ? "#f28f3b" : "#22d3ee";
-        ctx.font = Math.max(12, canvas.width / 90) + "px sans-serif";
+        const [x0, y0] = toLayer(rect.x, rect.y);
+        const [x1, y1] = toLayer(rect.x + rect.w, rect.y + rect.h);
+        const selected = index === selectedIndex;
+        g.lineWidth = layer.line;
+        g.strokeStyle = selected ? "#f28f3b" : "#22d3ee";
+        g.strokeRect(x0, y0, x1 - x0, y1 - y0);
+        g.fillStyle = selected ? "rgba(242,143,59,0.16)" : "rgba(34,211,238,0.08)";
+        g.fillRect(x0, y0, x1 - x0, y1 - y0);
+        g.font = `${layer.font}px "IBM Plex Sans", system-ui, sans-serif`;
         const identity = detection.instance_key ? String(detection.instance_key).slice(-6) : "new";
-        ctx.fillText(String(index + 1) + ":" + identity, x0 + 4, Math.max(14, y0 - 4));
+        const text = String(index + 1) + ":" + identity;
+        const tx = x0 + layer.pad;
+        const ty = Math.max(layer.font + 2, y0 - layer.pad);
+        if (layer.outline && typeof g.strokeText === "function") {
+          // A dark outline keeps the label readable over any pixel.
+          g.lineWidth = layer.outline;
+          g.lineJoin = "round";
+          g.strokeStyle = "rgba(15, 20, 17, 0.85)";
+          g.strokeText(text, tx, ty);
+        }
+        g.fillStyle = selected ? "#f28f3b" : "#22d3ee";
+        g.fillText(text, tx, ty);
       });
       const display = bboxDisplayTransform();
       if (display.x > 0 || display.y > 0 || display.w < viewport.imageWidth || display.h < viewport.imageHeight) {
-        const [x0, y0] = viewport.imageToCanvas(display.x, display.y);
-        const [x1, y1] = viewport.imageToCanvas(display.x + display.w, display.y + display.h);
-        ctx.save();
-        ctx.lineWidth = Math.max(1, canvas.width / 320);
-        ctx.strokeStyle = "rgba(255,255,255,0.35)";
-        ctx.setLineDash([8, 6]);
-        ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
-        ctx.restore();
+        const [x0, y0] = toLayer(display.x, display.y);
+        const [x1, y1] = toLayer(display.x + display.w, display.y + display.h);
+        g.save();
+        g.lineWidth = layer.thin;
+        g.strokeStyle = "rgba(255,255,255,0.35)";
+        g.setLineDash(layer.dash);
+        g.strokeRect(x0, y0, x1 - x0, y1 - y0);
+        g.restore();
       }
     }
 
