@@ -62,7 +62,7 @@ function TaskRow({ row, busy, onStart }) {
     </div>
     <span class=${`chip chip-${row.kind}`}>${row.kindLabel}</span>
     <${Progress} progress=${row.progress} />
-    <span class=${`queue-state state-${row.state}`}>${row.stateLabel}</span>
+    <span class=${`queue-state state-${row.shownState}`}>${row.stateLabel}</span>
     <div class="queue-action">
       ${row.action &&
       (row.canStart

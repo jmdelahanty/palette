@@ -119,7 +119,7 @@
         queue.personalized_labeler_entry_url ||
         queue.preferred_labeler_entry_url ||
         queue.expected_user_dataset_queue_url ||
-        "/my-datasets"
+        "/queue"
       );
     }
     function postCompletionStatusText(result) {
@@ -127,10 +127,10 @@
       const completion = queue.labeler_work_completion || result.labeler_work_completion || {};
       const status = String(completion.status || "");
       if (status === "complete") return "Task marked complete. All assigned labeling work is complete.";
-      if (status === "waiting") return "Task marked complete. Returning to your datasets waiting queue.";
+      if (status === "waiting") return "Task marked complete. Returning to your queue.";
       if (status === "blocked") return "Task marked complete. Returning to your queue; operator action is required before more labeling.";
       if (status === "unassigned") return "Task marked complete. No active assignments remain.";
-      return "Task marked complete. Returning to your datasets waiting queue.";
+      return "Task marked complete. Returning to your queue.";
     }
     function handleTaskCompletionSuccess(result) {
       setStatus(postCompletionStatusText(result));

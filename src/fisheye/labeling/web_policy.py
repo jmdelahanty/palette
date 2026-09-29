@@ -40,6 +40,9 @@ LABELING_HOME_PATH = "/labeling"
 
 PERSONAL_WORK_PATH = "/my-work"
 
+# The labeler queue page (Preact, on /api/me/queue); where Complete returns.
+LABELER_QUEUE_PAGE_PATH = "/queue"
+
 IDENTITY_PROBE_PATH = "/identity"
 
 BROWSER_TASK_STATE_POLICY: dict[str, object] = {
