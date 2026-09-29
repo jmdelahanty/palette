@@ -94,6 +94,25 @@ def test_keypoint_editor_uses_the_editor_shell_and_category_colours():
     assert 'document.getElementById("keypoint-overlay")' in (JS_ROOT / "keypoint_editor.js").read_text()
 
 
+@pytest.mark.parametrize("kind", ["detect_training", "detect_analysis"])
+def test_detection_editors_use_the_editor_shell(kind):
+    html = _page(kind)
+    assert '<body class="editor">' in html
+    assert static_links(html) == ["css/palette.css", "css/editor.css", "js/canvas_stage_fit.js"]
+
+
+def test_every_editor_uses_the_editor_shell():
+    for kind in EDITORS:
+        assert '<body class="editor">' in _page(kind), kind
+
+
+def test_video_draw_layer_stays_transparent_over_the_video():
+    css = (web_static.STATIC_ROOT / "css" / "editor.css").read_text()
+    rule = re.search(r"\.editor-stage canvas\.video-draw-layer \{([^}]*)\}", css).group(1)
+    assert "background: transparent" in rule and "position: absolute" in rule
+    assert 'class="video-draw-layer"' in _page("detect_analysis")
+
+
 def static_links(html: str) -> list[str]:
     return [url.split("/", 3)[3] for url in re.findall(r'(?:href|src)="(/static/[^"]+)"', html)]
 
