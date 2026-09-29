@@ -39,6 +39,7 @@
         </div>
         <label for="brush-size">Brush size <span><span id="brush-label">8</span> px <kbd>[</kbd> <kbd>]</kbd></span></label>
         <input id="brush-size" type="range" min="1" max="48" value="8" oninput="setBrushSize(Number(this.value));">
+        <button id="copy-previous-button" type="button" class="btn" data-key="C" onclick="copyPreviousMask()" disabled>Copy previous mask</button>
         <button id="undo-bulk-button" type="button" class="btn" onclick="undoBulkEdit()" disabled>Undo</button>
       </section>
 
@@ -116,7 +117,7 @@
 
       <details class="side-section">
         <summary class="side-heading">Keyboard shortcuts</summary>
-        <p class="meta">Wheel zooms, middle-drag pans. <kbd>S</kbd> save, <kbd>⇧ S</kbd> save + next, <kbd>N</kbd>/<kbd>P</kbd> navigate, <kbd>B</kbd>/<kbd>E</kbd> paint/erase, <kbd>X</kbd> toggles brush mode, <kbd>[</kbd>/<kbd>]</kbd> brush size, <kbd>V</kbd> lasso; in lasso <kbd>F</kbd> fills inside, <kbd>G</kbd> fills outside, <kbd>E</kbd> erases outside, <kbd>U</kbd> undoes a point, <kbd>D</kbd> clears the contour. <kbd>H</kbd> fill holes (click a piece), <kbd>R</kbd> removes stray pieces, <kbd>Ctrl Z</kbd> undoes the last fill or removal.</p>
+        <p class="meta">Wheel zooms, middle-drag pans. <kbd>S</kbd> save, <kbd>⇧ S</kbd> save + next, <kbd>N</kbd>/<kbd>P</kbd> navigate, <kbd>B</kbd>/<kbd>E</kbd> paint/erase, <kbd>X</kbd> toggles brush mode, <kbd>[</kbd>/<kbd>]</kbd> brush size, <kbd>V</kbd> lasso; in lasso <kbd>F</kbd> fills inside, <kbd>G</kbd> fills outside, <kbd>E</kbd> erases outside, <kbd>U</kbd> undoes a point, <kbd>D</kbd> clears the contour. <kbd>H</kbd> fill holes (click a piece), <kbd>R</kbd> removes stray pieces, <kbd>C</kbd> copies the previous row's mask (same crop position), <kbd>Ctrl Z</kbd> undoes the last fill, removal or copy.</p>
       </details>
 
       <details class="side-section">
