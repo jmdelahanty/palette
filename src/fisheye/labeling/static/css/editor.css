@@ -105,3 +105,8 @@ body.editor .btn[data-key]::after { content: attr(data-key); font-family: var(--
 /* A screen-resolution layer over the crop canvas for markers and labels. */
 .canvas-frame { position: relative; line-height: 0; }
 .editor-stage canvas.canvas-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; background: transparent; }
+
+/* Video detection: the box-drawing canvas lies exactly over the video, in
+   the same frame, and must stay transparent so the video shows through. */
+.editor-stage video { display: block; background: #101410; }
+.editor-stage canvas.video-draw-layer { position: absolute; inset: 0; width: 100%; height: 100%; background: transparent; }
