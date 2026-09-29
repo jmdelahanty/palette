@@ -28,7 +28,7 @@ CONTRACT_HASHES = {
     "experimental_h5_geometry_v1.json": "4c0c707192cf1fa6ceafb2f632672972f41dc7e4c7cc5cdb0c0e3b7920a1474b",
     "experimental_h5_identity_claims_v1.json": "83ca66b336f3e3a40ebaafc869d7febd020509e238243381dfe871cbeb89507e",
     "object_appearance_replay_dependency_manifest_v1.json": "eccfcfcb3c6e66549b2fdfcfcf88fdc4fa9def3d6ce4a375494d011b04f2607c",
-    "unified_h5_admission_v2.json": "851ba36a7ab0757c90399e785ea350f285c5b1984f74409e125a79b6ba0b82b5",
+    "unified_h5_admission_v2.json": "ad0aab702e6714131db857afe8d96323999df184e0a3b357705c1acf56a90c38",
     "unified_h5_producer_policy_d544b081.json": "d544b0814006360b11b02cd9d171eefbddae7cc9cc41ad57470bbd240bc83cb9",
     "experimental_h5_core_chaser_v2.json": "cb68ab6ecea614030b8f2a3d2096e9122b1efa5156b56ed7a495b3072c70316a",
     "experimental_h5_correspondence_tables_v2.json": "cb3ac574c76750c23de730129c4a32371328ffb34d792b1cfab164b7201ba1ea",
@@ -36,15 +36,16 @@ CONTRACT_HASHES = {
     "experimental_h5_correspondence_receipt_v2.schema.json": "8d2a414f46f6d6263f2609c55e15add9d7a2b61ad98349cf1ac3aef598b8d4e8",
     "experimental_h5_capacity_preflight_v1.schema.json": "d5d7ebf5249de35ce7234ddfec3c7cb51b57ac3b6fdcb25bf75724f25223d068",
 }
-# Core catalogs by the chaser state table's declared schema_version: v2 is the
-# admission-v2 revision (explicit camera-id validity); v1 is the earlier
-# revision, admitted only until producer fixtures are regenerated under v2.
+# Core catalogs by the chaser state table's schema_version. Only v2 (explicit
+# camera-id validity) is admitted; the original v1 catalog stays pinned
+# byte-for-byte for provenance and for the legacy adapter, never for admission.
 # Only the chaser table differs between them.
 CORE_CATALOGS = {
     1: "experimental_h5_core_v1.json",
     2: "experimental_h5_core_chaser_v2.json",
 }
-CORE_CATALOG = CORE_CATALOGS[2]
+ADMITTED_CHASER_VERSION = 2
+CORE_CATALOG = CORE_CATALOGS[ADMITTED_CHASER_VERSION]
 CHASER_STATES = "/components/chaser/states"
 CORRESPONDENCE_CATALOG = "experimental_h5_correspondence_tables_v2.json"
 
@@ -115,12 +116,12 @@ def validate_catalog_table(h5, path: str) -> dict:
 
 
 def table_version(h5, path: str) -> int | None:
-    """The declared schema_version that selects the chaser table's catalog."""
+    """The chaser table's declared schema_version; only v2 is admitted."""
     if path != CHASER_STATES or path not in h5:
         return None
     version = h5[path].attrs.get("schema_version")
     require(
-        version is not None and int(version) in CORE_CATALOGS,
+        version is not None and int(version) == ADMITTED_CHASER_VERSION,
         f"unsupported_table_version:{path}",
     )
     return int(version)
