@@ -1,0 +1,87 @@
+/* Palette labeling design system: tokens and shared components.
+   Pages migrate onto this sheet one at a time (front-end plan P3). */
+
+:root {
+  --ground: #eef1ed;
+  --surface: #ffffff;
+  --ink: #17201b;
+  --ink-2: #56625a;
+  --line: #d5dbd4;
+  --line-soft: #e3e8e2;
+  --accent: #0f6f5c;
+  --accent-ink: #0a5042;
+  --ok: #1f7a3a;
+  --ok-bg: #e6f4ea;
+  --pending: #8a5a00;
+  --pending-bg: #fff2d6;
+  --info: #1d5fa8;
+  --info-bg: #e6effa;
+  --danger: #9a3027;
+  --danger-bg: #fbe8e4;
+  --mask: #7a1f6a;
+  --mask-bg: #fbe9f8;
+  --focus: #1479ff;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --r-control: 6px;
+  --r-card: 10px;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; font-family: var(--sans); font-size: 14px; color: var(--ink); background: var(--ground); }
+a { color: var(--accent); }
+a:hover { color: var(--accent-ink); }
+button { font-family: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+h1 { margin: 0; font-size: 28px; font-weight: 700; }
+p { margin: 4px 0 0; }
+
+.muted { color: var(--ink-2); }
+.ink { color: var(--ink); }
+.small { font-size: 12px; }
+.mono { font-family: var(--mono); font-size: 12px; }
+.spacer { flex-grow: 1; }
+
+.topbar { height: 56px; padding: 0 32px; display: flex; align-items: center; gap: 16px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.brand { font-size: 16px; font-weight: 700; }
+.page { max-width: 1200px; margin: 0 auto; padding: 32px; display: flex; flex-direction: column; gap: 20px; }
+.page-head { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 16px 24px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-card); overflow: hidden; }
+
+.btn { height: 36px; padding: 0 14px; border-radius: var(--r-control); border: 1px solid var(--line); background: var(--surface); color: var(--ink); font-size: 13px; font-weight: 600; cursor: pointer; }
+.btn-primary { border-color: var(--accent); background: var(--accent); color: #ffffff; }
+.btn-primary:hover { background: var(--accent-ink); }
+.btn:disabled { border-style: dashed; background: #f3f5f2; color: #8a958d; cursor: not-allowed; }
+.btn-small { height: 32px; padding: 0 12px; }
+.segmented { display: flex; gap: 6px; flex-wrap: wrap; }
+.segmented [aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: #ffffff; }
+
+.chip { justify-self: start; font-size: 12px; font-weight: 600; padding: 4px 8px; border-radius: 999px; color: var(--info); background: var(--info-bg); }
+.chip-subject_mask_component { color: var(--mask); background: var(--mask-bg); }
+.chip-detect_training, .chip-detect_analysis { color: var(--pending); background: var(--pending-bg); }
+
+.notice { padding: 12px 16px; border-radius: var(--r-card); border: 1px solid; }
+.notice-danger { color: var(--danger); background: var(--danger-bg); border-color: #efc4bc; }
+.notice-pending { color: var(--pending); background: var(--pending-bg); border-color: #f0dca8; }
+
+.queue-row { display: grid; grid-template-columns: minmax(0, 2.4fr) minmax(0, 1.2fr) minmax(0, 1fr) minmax(150px, 1fr); gap: 16px; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--ground); }
+.queue-row:last-child { border-bottom: 0; }
+.queue-head { padding: 12px 20px; border-bottom: 1px solid var(--line-soft); font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); }
+.queue-cell-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.queue-recording { font-weight: 600; overflow-wrap: anywhere; }
+.queue-action { justify-self: end; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; text-align: right; }
+.queue-state { font-size: 13px; color: var(--ink-2); }
+.state-blocked { color: var(--danger); }
+.state-complete { color: var(--ok); }
+.empty { padding: 20px; margin: 0; }
+
+.disclosure { width: 100%; display: flex; align-items: center; gap: 10px; padding: 14px 20px; border: 0; background: transparent; cursor: pointer; font-size: 14px; font-weight: 600; color: var(--ink); text-align: left; }
+.disclosure-body { padding: 0 20px 16px 44px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+
+@media (max-width: 720px) {
+  .topbar { padding: 0 16px; }
+  .page { padding: 20px 16px; }
+  .queue-head { display: none; }
+  .queue-row { grid-template-columns: 1fr auto; }
+  .queue-action { grid-column: 1 / -1; justify-self: stretch; align-items: stretch; text-align: left; }
+}
