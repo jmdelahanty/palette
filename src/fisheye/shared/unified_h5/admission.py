@@ -7,7 +7,11 @@ from pathlib import Path
 
 from .appearance import validate_appearance_witness
 from .common import PROFILE, canonical_json, digest, require
-from .correspondence import BINDING, validate_component_correspondence
+from .correspondence import (
+    BINDING,
+    validate_capacity_preflight,
+    validate_component_correspondence,
+)
 from .geometry import validate_geometry
 from .identity import validate_recording_identity
 from .integrity import (
@@ -78,8 +82,10 @@ def _accounting(h5, integrity, correspondence):
         name: h5[path].shape[0] for name, path in TABLE_COMPONENTS.items() if path in h5
     }
     counts.update(
+        # The correspondence receipt's scope is canonical frames and chaser;
+        # grid/grating rows are validated as frame-source joins, not counted here.
         correspondence=correspondence.mapped_frame_count
-        + sum(correspondence.component_rows.values()),
+        + correspondence.component_rows.get("chaser", 0),
         geometry=1,
         recording_association=1,
     )
@@ -110,6 +116,7 @@ def validate_artifact(
         h5, source_h5=source_h5, receipt=finalization_receipt
     )
     integrity = validate_internal_integrity(h5)
+    validate_capacity_preflight(h5)
     validate_table_relations(h5, integrity.table_descriptors)
     correspondence = validate_component_correspondence(h5)
     snapshot, execution = validate_protocol(h5)

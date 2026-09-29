@@ -5,7 +5,7 @@
   "producer_candidate": {
     "repository": "JohnsonLabJanelia/citrus",
     "branch": "agent/unified-h5-streamed-correspondence-20260923",
-    "commit": "6bd8cbc443c3af699f9f13cbc2db037d8d99d82d"
+    "commit": "2a0ae13358c1604583eac24f33b508bd7291f150"
   },
   "artifact_profile": "unified_experimental_h5_v1",
   "versions": {
@@ -160,6 +160,36 @@
       "h5_path": "/correspondence/receipt_json"
     }
   },
+  "correspondence_scope": {
+    "correspondence_schema_version": 2,
+    "emitted_source_tables": [
+      "/correspondence/frames/sources",
+      "/correspondence/chaser/sources"
+    ],
+    "chaser_sources_presence": "conditional_on_chaser_rows",
+    "component_current_source_join": {
+      "state_tables": [
+        "/components/independent_motion_grid/states",
+        "/components/moving_grating/states"
+      ],
+      "state_key": "stimulus_frame_num",
+      "source_table": "/correspondence/frames/sources",
+      "source_key": "stimulus_frame_num",
+      "join": "exact_integer_equality",
+      "matches_required_per_state_row": 1,
+      "value_field": "source_acquisition_frame_index",
+      "validity_field": "source_acquisition_frame_valid",
+      "validity_required_value": 1,
+      "many_state_rows_per_stimulus_frame": true,
+      "repeated_acquisition_index_across_stimulus_frames": true,
+      "missing_or_invalid_source": "no_verified_correspondence_do_not_substitute_zero",
+      "per_component_source_table": "not_emitted_or_required",
+      "held_target_correspondence": "not_defined",
+      "meaning": "current_acquisition_source_for_stimulus_update_not_prior_reactive_trigger_or_physical_presentation_time",
+      "consumer_validation": "validate_component_definition_and_frame_key_join_in_addition_to_correspondence_receipt"
+    },
+    "receipt_scope": "canonical_frames_and_chaser_only_not_other_component_state_row_joins"
+  },
   "capacity_preflight_definition_pin": {
     "path": "docs/schemas/experimental_h5_capacity_preflight_v1.schema.json",
     "file_sha256": "sha256:d5d7ebf5249de35ce7234ddfec3c7cb51b57ac3b6fdcb25bf75724f25223d068",
@@ -178,6 +208,6 @@
     "h5_digest_field": "admission_policy_sha256",
     "h5_digest_representation": "lowercase_sha256_hex_without_prefix",
     "relationship": "exact_frozen_producer_policy_not_the_hash_of_this_consumer_definition_pin_document",
-    "compatibility": "same_resource_storage_operations_delivery_digest_and_core_definitions; existing_versions_unchanged; adds_machine_definition_pins_only"
+    "compatibility": "same_resource_storage_operations_delivery_digest_and_core_definitions; existing_versions_unchanged; adds_definition_pins_and_explicit_existing_correspondence_scope"
   }
 }
