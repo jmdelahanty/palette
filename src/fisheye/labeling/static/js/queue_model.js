@@ -41,6 +41,29 @@ function kindLabel(task) {
   return component ? `${base} · ${component}` : base;
 }
 
+function plural(count, word) {
+  return `${count} ${word}${count === 1 ? "" : "s"}`;
+}
+
+// Row counts come from the store (palette.labeler_queue.v1 task.progress).
+// row_total is null when the task covers every row; then no bar is drawn.
+export function taskProgress(progress) {
+  const p = progress || {};
+  const saved = Number(p.saved_row_count) || 0;
+  const total = p.row_total === null || p.row_total === undefined ? null : Number(p.row_total);
+  const carried = Number(p.carried_row_count) || 0;
+  const unapplied = Number(p.unapplied_row_count) || 0;
+  const details = [];
+  if (carried) details.push(`${carried} carried forward`);
+  if (unapplied) details.push(`${plural(unapplied, "row")} awaiting Apply`);
+  return {
+    text: total === null ? `${plural(saved, "row")} saved` : `${saved} / ${total}`,
+    percent: total ? Math.min(100, Math.round((saved / total) * 100)) : null,
+    details,
+    awaitingApply: unapplied > 0,
+  };
+}
+
 function actionLabel(state) {
   if (state === "in_progress") return "Continue";
   if (state === "pending") return "Start";
@@ -61,6 +84,7 @@ export function queueRows(payload) {
           recordingBlocked: recording.blocked_reason || "",
           title: task.title || task.task_id,
           notes: task.notes || "",
+          progress: taskProgress(task.progress),
           kind: task.workflow_kind || "",
           kindLabel: kindLabel(task),
           state: task.state || "",

@@ -114,7 +114,14 @@ import * as m from {json.dumps((STATIC_JS / "queue_model.js").as_uri())};
 const payload = {json.dumps(payload)};
 const rows = m.queueRows(payload);
 console.log(JSON.stringify({{
-  rows: rows.map((r) => [r.taskId, r.kindLabel, r.stateLabel, r.action, r.canStart, r.startEndpoint, r.notes]),
+  rows: rows.map((r) => [r.taskId, r.kindLabel, r.stateLabel, r.action, r.canStart, r.startEndpoint, r.notes, r.progress.text]),
+  progress: [
+    m.taskProgress({{row_total: 91, saved_row_count: 90, applied_row_count: 90, unapplied_row_count: 0, carried_row_count: 90}}),
+    m.taskProgress({{row_total: null, saved_row_count: 191, applied_row_count: 188, unapplied_row_count: 3, carried_row_count: 81}}),
+    m.taskProgress({{row_total: 1, saved_row_count: 1, applied_row_count: 0, unapplied_row_count: 1, carried_row_count: 0}}),
+    m.taskProgress({{row_total: 0, saved_row_count: 0}}),
+    m.taskProgress(undefined),
+  ],
   filters: m.queueFilters(rows).map((f) => f.id),
   keypointsOnly: m.filterRows(rows, "keypoints").map((r) => r.taskId),
   summary: m.queueSummary(payload, rows),
@@ -130,8 +137,17 @@ console.log(JSON.stringify({{
     # Highest priority first; Start comes from start.ready, never recomputed.
     assert model["rows"] == [
         ["task-open", "Keypoints", "Not started", "Start", tasks["task-open"]["start"]["ready"],
-         "/api/tasks/task-open/open", "Rows 3-9"],
-        ["task-blocked", "Mask · body", "Blocked", "", False, "", ""],
+         "/api/tasks/task-open/open", "Rows 3-9", "0 rows saved"],
+        ["task-blocked", "Mask · body", "Blocked", "", False, "", "", "0 rows saved"],
+    ]
+    # A known total draws a bar; an all-rows task (null total) shows a count only.
+    assert model["progress"] == [
+        {"text": "90 / 91", "percent": 99, "details": ["90 carried forward"], "awaitingApply": False},
+        {"text": "191 rows saved", "percent": None,
+         "details": ["81 carried forward", "3 rows awaiting Apply"], "awaitingApply": True},
+        {"text": "1 / 1", "percent": 100, "details": ["1 row awaiting Apply"], "awaitingApply": True},
+        {"text": "0 / 0", "percent": None, "details": [], "awaitingApply": False},
+        {"text": "0 rows saved", "percent": None, "details": [], "awaitingApply": False},
     ]
     assert model["filters"] == ["", "keypoints", "subject_mask_component"]
     assert model["keypointsOnly"] == ["task-open"]

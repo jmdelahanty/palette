@@ -40,14 +40,28 @@ function Problem({ problem }) {
   </div>`;
 }
 
+function Progress({ progress }) {
+  return html`<div class="queue-progress">
+    <div class="progress-line">
+      ${progress.percent !== null &&
+      html`<div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+        aria-valuenow=${progress.percent}><div class="progress-fill" style=${`width: ${progress.percent}%`}></div></div>`}
+      <span class="mono muted">${progress.text}</span>
+    </div>
+    ${progress.details.length > 0 &&
+    html`<span class=${`small ${progress.awaitingApply ? "text-pending" : "muted"}`}>${progress.details.join(" · ")}</span>`}
+  </div>`;
+}
+
 function TaskRow({ row, busy, onStart }) {
   return html`<div class="queue-row" data-task-id=${row.taskId}>
     <div class="queue-cell-main">
-      <span class="queue-recording">${row.recording}</span>
-      <span class="muted small">${[row.dataset, row.title !== row.taskId ? row.title : ""].filter(Boolean).join(" · ")}</span>
-      ${row.notes && html`<span class="muted small">${row.notes}</span>`}
+      <span class="queue-recording" title=${row.dataset ? `Dataset: ${row.dataset}` : ""}>${row.recording}</span>
+      ${row.title !== row.taskId && html`<span class="ink">${row.title}</span>`}
+      ${row.notes && html`<span class="muted small clamp-2" title=${row.notes}>${row.notes}</span>`}
     </div>
     <span class=${`chip chip-${row.kind}`}>${row.kindLabel}</span>
+    <${Progress} progress=${row.progress} />
     <span class=${`queue-state state-${row.state}`}>${row.stateLabel}</span>
     <div class="queue-action">
       ${row.action &&
@@ -158,7 +172,7 @@ function QueuePage() {
       html`<div class="notice notice-pending">${payload.labeler.message}</div>`}
       ${payload &&
       html`<section class="card queue-table" aria-label="Tasks">
-        <div class="queue-row queue-head"><span>Recording</span><span>Task</span><span>Status</span><span></span></div>
+        <div class="queue-row queue-head"><span>Recording</span><span>Task</span><span>Progress</span><span>Status</span><span></span></div>
         ${shown.length
           ? shown.map(
               (row) => html`<${TaskRow} key=${row.key} row=${row} busy=${starting === row.taskId} onStart=${start} />`,
