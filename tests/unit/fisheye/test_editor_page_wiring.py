@@ -89,6 +89,9 @@ def test_keypoint_editor_uses_the_editor_shell_and_category_colours():
     assert static_links(html) == [
         "css/palette.css", "css/editor.css", "js/canvas_stage_fit.js", "js/keypoint_style.js",
     ]
+    # Markers and labels draw on a screen-resolution overlay above the crop.
+    assert 'id="keypoint-overlay"' in html
+    assert 'document.getElementById("keypoint-overlay")' in (JS_ROOT / "keypoint_editor.js").read_text()
 
 
 def static_links(html: str) -> list[str]:

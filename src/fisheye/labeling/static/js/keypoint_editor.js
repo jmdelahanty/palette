@@ -245,38 +245,88 @@
       viewport.setImageData(image, {resetView: sizeChanged});
     }
 
+    // Points and labels go on a transparent overlay at screen resolution when
+    // the page provides one, so they stay sharp over the pixelated crop; the
+    // crop canvas itself is used otherwise.
+    const overlay = document.getElementById("keypoint-overlay");
+    const overlayCtx = overlay && typeof overlay.getContext === "function" ? overlay.getContext("2d") : null;
+
+    function markerLayer() {
+      if (overlayCtx && typeof canvas.getBoundingClientRect === "function") {
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const width = Math.max(1, Math.round(rect.width * dpr));
+        const height = Math.max(1, Math.round(rect.height * dpr));
+        if (overlay.width !== width) overlay.width = width;
+        if (overlay.height !== height) overlay.height = height;
+        overlayCtx.clearRect(0, 0, width, height);
+        if (rect.width > 0 && canvas.width > 0) {
+          return {
+            ctx: overlayCtx,
+            sx: width / canvas.width,
+            sy: height / canvas.height,
+            radius: 5 * dpr,
+            font: 12 * dpr,
+            thin: 1.5 * dpr,
+            ring: 2.5 * dpr,
+          };
+        }
+      }
+      return {
+        ctx,
+        sx: 1,
+        sy: 1,
+        radius: Math.max(2, Math.min(5, canvas.width / 120)),
+        font: Math.max(8, Math.min(12, canvas.width / 38)),
+        thin: Math.max(1, Math.min(2, canvas.width / 320)),
+        ring: Math.max(2, Math.min(3, canvas.width / 160)),
+      };
+    }
+
     function draw() {
       if (!payload || !viewport.hasImage()) return;
       viewport.drawImage();
-      const pointRadius = Math.max(2, Math.min(5, canvas.width / 120));
-      const labelFontPx = Math.max(8, Math.min(12, canvas.width / 38));
-      const labelOffset = pointRadius + 3;
-      ctx.lineWidth = Math.max(1, Math.min(2, canvas.width / 320));
-      ctx.font = `${labelFontPx}px "IBM Plex Sans", system-ui, sans-serif`;
+      const layer = markerLayer();
+      const g = layer.ctx;
+      const labelOffset = layer.radius + layer.ring + 2;
+      g.font = `${layer.font}px "IBM Plex Sans", system-ui, sans-serif`;
+      g.textBaseline = "alphabetic";
       points.forEach((point, index) => {
         const x = Number(point[0]);
         const y = Number(point[1]);
         if (!Number.isFinite(x) || !Number.isFinite(y)) return;
         const [canvasX, canvasY] = imageToCanvas(x, y);
+        const px = canvasX * layer.sx;
+        const py = canvasY * layer.sy;
         const style = pointStyle(index);
-        const thinLine = Math.max(1, Math.min(2, canvas.width / 320));
-        ctx.beginPath();
-        ctx.arc(canvasX, canvasY, pointRadius, 0, Math.PI * 2);
+        g.beginPath();
+        g.arc(px, py, layer.radius, 0, Math.PI * 2);
         // Left (or unpaired) points are solid; the right of a pair is a ring.
-        ctx.fillStyle = style.hollow ? "#0f1411" : style.color;
-        ctx.fill();
-        ctx.lineWidth = style.hollow ? Math.max(2, Math.min(3, canvas.width / 160)) : thinLine;
-        ctx.strokeStyle = style.hollow ? style.color : "#0f1411";
-        ctx.stroke();
+        g.fillStyle = style.hollow ? "#0f1411" : style.color;
+        g.fill();
+        g.lineWidth = style.hollow ? layer.ring : layer.thin;
+        g.strokeStyle = style.hollow ? style.color : "#0f1411";
+        g.stroke();
         if (index === activePoint) {
-          ctx.beginPath();
-          ctx.arc(canvasX, canvasY, pointRadius + 3, 0, Math.PI * 2);
-          ctx.strokeStyle = "white";
-          ctx.stroke();
+          g.beginPath();
+          g.arc(px, py, layer.radius + layer.ring + 1, 0, Math.PI * 2);
+          g.lineWidth = layer.thin;
+          g.strokeStyle = "white";
+          g.stroke();
         }
         if (showText) {
-          ctx.fillStyle = "white";
-          ctx.fillText(payload.labels[index] || String(index + 1), canvasX + labelOffset, canvasY - labelOffset);
+          const text = payload.labels[index] || String(index + 1);
+          const tx = px + labelOffset;
+          const ty = py - labelOffset;
+          // A dark outline keeps white text readable over any pixel.
+          if (typeof g.strokeText === "function") {
+            g.lineWidth = layer.ring;
+            g.strokeStyle = "rgba(15, 20, 17, 0.85)";
+            g.lineJoin = "round";
+            g.strokeText(text, tx, ty);
+          }
+          g.fillStyle = "white";
+          g.fillText(text, tx, ty);
         }
       });
     }

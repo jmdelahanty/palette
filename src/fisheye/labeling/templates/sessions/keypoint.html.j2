@@ -22,7 +22,10 @@
 
   <div class="editor-body">
     <div id="canvas-stage" class="editor-stage">
-      <canvas id="canvas"></canvas>
+      <div class="canvas-frame">
+        <canvas id="canvas"></canvas>
+        <canvas id="keypoint-overlay" class="canvas-overlay" aria-hidden="true"></canvas>
+      </div>
       <div class="stage-hint top">Scroll to zoom · middle-drag to pan · click to place the selected point</div>
       <div id="keypoint-legend" class="stage-legend" aria-label="Keypoint colours"></div>
     </div>
@@ -122,6 +125,9 @@
 </script>
 <script>
   fitCanvasToStage(document.getElementById("canvas"), document.getElementById("canvas-stage"));
+  // The marker overlay is drawn at screen resolution; redraw it when the
+  // displayed canvas size changes.
+  new ResizeObserver(() => draw()).observe(document.getElementById("canvas"));
 </script>
 </body>
 </html>
