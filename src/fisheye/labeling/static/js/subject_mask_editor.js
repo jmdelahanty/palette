@@ -34,6 +34,10 @@
     let maskPiecesTimer = null;
     let bulkUndoMask = null;
     let reviewSelectTouched = false;
+    // The last row shown before this one, as last saved or loaded (never its
+    // discarded strokes). Its mask can be copied onto the current row when
+    // the animal holds the same position, even across non-adjacent frames.
+    let previousRow = null;
 
     function hasUnsavedEdits() {
       return Boolean(mask && loadedMask && mask.some((value, index) => value !== loadedMask[index]));
@@ -194,6 +198,7 @@
         node.disabled = busyAction;
       });
       updateNavButtons();
+      updateCopyPreviousButton();
       if (text) setStatus(text);
     }
 
@@ -315,6 +320,36 @@
       markMaskOverlayDirty();
       scheduleDraw();
       setStatus("Undid " + label + " locally.");
+    }
+
+    function updateCopyPreviousButton() {
+      const button = document.getElementById("copy-previous-button");
+      if (!button) return;
+      const sameSize = Boolean(previousRow && mask
+        && previousRow.width === maskWidth && previousRow.height === maskHeight);
+      button.disabled = busyAction || !sameSize;
+      button.textContent = previousRow ? "Copy mask from ROI " + previousRow.roi : "Copy previous mask";
+      button.title = !previousRow
+        ? "Open another row first; its mask can then be copied here."
+        : sameSize ? "" : "ROI " + previousRow.roi + " has a different crop size.";
+    }
+
+    function copyPreviousMask() {
+      if (!mask) return;
+      if (!previousRow) {
+        setStatus("No previous row yet: open another row first, then come back to copy its mask.", true);
+        return;
+      }
+      if (previousRow.width !== maskWidth || previousRow.height !== maskHeight) {
+        setStatus("ROI " + previousRow.roi + " is " + previousRow.width + " × " + previousRow.height
+          + " px; this row is " + maskWidth + " × " + maskHeight + " px, so its mask can't be copied.", true);
+        return;
+      }
+      rememberForUndo("copy from ROI " + previousRow.roi);
+      mask.set(previousRow.mask);
+      markMaskOverlayDirty();
+      scheduleDraw();
+      setStatus("Copied the mask from ROI " + previousRow.roi + " locally (same crop position). Check it, then save.");
     }
 
     function removeStrayPiecesAction() {
@@ -647,7 +682,11 @@
 
     async function loadCurrent() {
       try {
+        const leaving = payload && loadedMask
+          ? {roi: payload.roi_idx, mask: loadedMask.slice(), width: maskWidth, height: maskHeight}
+          : null;
         payload = await api("/roi/current");
+        if (leaving && leaving.roi !== payload.roi_idx) previousRow = leaving;
         imageData = decodeRawImage(payload.roi_image);
         const sizeChanged = viewport.imageWidth !== imageData.width || viewport.imageHeight !== imageData.height;
         viewport.setImageData(imageData, {resetView: sizeChanged});
@@ -660,6 +699,7 @@
           : (border?.accepted ? (border.acceptance.reason || "") : ""));
         scheduleDraw();
         updateNavButtons();
+        updateCopyPreviousButton();
         setStatus("Loaded.");
       } catch (error) {
         updateNavButtons();
@@ -739,6 +779,9 @@
           body: JSON.stringify({mask: encodeMaskPayload(), advance, target_token: payload?.state?.target_token,
             ...(tailBorderAction ? {tail_crop_border_action: tailBorderAction} : {})})
         });
+        // What was just saved is this row's baseline; Save + Next hands it to
+        // the next row as the copy-previous source.
+        if (mask) loadedMask = mask.slice();
         await loadCurrent();
         setStatus("Checkpoint saved; area " + result.result.checkpoint_area_px + " px." + mutationStatusSuffix(result));
       } catch (error) {
@@ -1197,6 +1240,7 @@
       if (event.key === "S") { event.preventDefault(); save(true); return; }
       if (event.key === "h" || event.key === "H") { event.preventDefault(); setTool("fill"); return; }
       if (event.key === "r" || event.key === "R") { event.preventDefault(); removeStrayPiecesAction(); return; }
+      if (event.key === "c" || event.key === "C") { event.preventDefault(); copyPreviousMask(); return; }
       if (event.key === "b" || event.key === "B") { event.preventDefault(); setTool("paint"); return; }
       if (event.key === "x" || event.key === "X") { event.preventDefault(); toggleBrushMode(); return; }
       if (event.key === "[") { event.preventDefault(); setBrushSize(brushSize - 1); return; }
