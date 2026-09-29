@@ -27,7 +27,14 @@ from .common import (
     uint64,
 )
 from .hdf5_types import dataset_bytes
-from .schema import contract, describe_internal_dataset, describe_table, read_json
+from .schema import (
+    CORE_CATALOG,
+    contract,
+    correspondence_table_paths,
+    describe_internal_dataset,
+    describe_table,
+    read_json,
+)
 
 COMPLETION = "/metadata/completion_json"
 OUTCOMES = "/metadata/component_outcomes_json"
@@ -402,6 +409,7 @@ def validate_internal_integrity(h5) -> InternalIntegrity:
                 "citrus.experimental_h5."
             )
             and path not in tables
+            and path not in correspondence_table_paths()
         ):
             tables[path] = describe_table(h5, path)
     outcomes = read_json(h5, OUTCOMES, canonical=True)
@@ -419,7 +427,7 @@ def validate_internal_integrity(h5) -> InternalIntegrity:
         digest(dataset_bytes(h5[OUTCOMES])) == final["component_outcomes_sha256"],
         "component_outcomes_digest_mismatch",
     )
-    rules = contract("experimental_h5_core_v1.json")["component_outcomes"]
+    rules = contract(CORE_CATALOG)["component_outcomes"]
     components = {}
     for outcome in outcomes["components"]:
         exact_keys(outcome, rules["closed_entry_fields"], "component_outcome")

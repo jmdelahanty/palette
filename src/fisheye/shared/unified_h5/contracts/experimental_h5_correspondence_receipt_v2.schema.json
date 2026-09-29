@@ -1,0 +1,875 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:citrus:experimental_h5:correspondence_receipt:v2",
+  "title": "Citrus streamed correspondence receipt v2",
+  "description": "Closed receipt at /correspondence/receipt_json. Structural validation does not establish correspondence: independently verify all definition pins, digest bytes, declared/observed mapping digest equality, receipt references, actual rows/counts, ordering/unique keys, range checks and canonical row joins. Input descriptors remain generic HDF5 digests, not canonical core descriptors. Failed evidence may retain partial outputs/dependencies; pending is not terminal/admitted. Core descriptor schema_version is the digest encoding version (1), not the embedded table version. Table definitions require separate exact pin comparison.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "schema_version",
+    "status",
+    "reason",
+    "binding_ref",
+    "input_ref",
+    "binding_sha256",
+    "input_sha256",
+    "source_record_ref",
+    "source_record_declared_sha256",
+    "source_record_observed_sha256",
+    "mapping_validation",
+    "dependencies",
+    "outputs",
+    "scope"
+  ],
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "citrus.experimental_h5.correspondence_receipt"
+    },
+    "schema_version": {
+      "type": "integer",
+      "const": 2
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "complete",
+        "failed"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "binding_ref": {
+      "type": "string",
+      "const": "/correspondence/acquisition/binding_json"
+    },
+    "input_ref": {
+      "type": "string",
+      "const": "/correspondence/acquisition/raw_live_identity_provenance_json"
+    },
+    "binding_sha256": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "input_sha256": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source_record_ref": {
+      "type": "string",
+      "const": "/correspondence/acquisition/source_semantic_record_json"
+    },
+    "source_record_declared_sha256": {
+      "type": "string",
+      "description": "Exact caller-supplied declaration, possibly malformed in failed evidence; a complete receipt requires a valid digest equal to the observed digest."
+    },
+    "source_record_observed_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "mapping_validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "validator",
+        "status",
+        "reason",
+        "total_acquisitions"
+      ],
+      "properties": {
+        "validator": {
+          "type": "string",
+          "const": "orange_acquisition_index_mapping_v1"
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "valid",
+            "invalid"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "total_acquisitions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/u64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/core_descriptor"
+          },
+          {
+            "$ref": "#/$defs/input_descriptor"
+          }
+        ]
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/core_descriptor"
+      }
+    },
+    "scope": {
+      "type": "string",
+      "const": "validated_index_correspondence_not_complete_experiment_or_geometry_admission"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "complete"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "const": ""
+          },
+          "binding_sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "input_sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "source_record_declared_sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "mapping_validation": {
+            "properties": {
+              "status": {
+                "const": "valid"
+              },
+              "reason": {
+                "const": ""
+              },
+              "total_acquisitions": {
+                "$ref": "#/$defs/u64"
+              }
+            }
+          },
+          "dependencies": {
+            "oneOf": [
+              {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "prefixItems": [
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/core_descriptor"
+                      },
+                      {
+                        "properties": {
+                          "table": {
+                            "properties": {
+                              "path": {
+                                "type": "string",
+                                "const": "/frames/stimulus"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/input_descriptor"
+                      },
+                      {
+                        "properties": {
+                          "path": {
+                            "type": "string",
+                            "const": "/correspondence/acquisition/live_frame_identities"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/input_descriptor"
+                      },
+                      {
+                        "properties": {
+                          "path": {
+                            "type": "string",
+                            "const": "/correspondence/acquisition/live_chaser_identities"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "items": false
+              },
+              {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "prefixItems": [
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/core_descriptor"
+                      },
+                      {
+                        "properties": {
+                          "table": {
+                            "properties": {
+                              "path": {
+                                "type": "string",
+                                "const": "/frames/stimulus"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/core_descriptor"
+                      },
+                      {
+                        "properties": {
+                          "table": {
+                            "properties": {
+                              "path": {
+                                "type": "string",
+                                "const": "/components/chaser/states"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/input_descriptor"
+                      },
+                      {
+                        "properties": {
+                          "path": {
+                            "type": "string",
+                            "const": "/correspondence/acquisition/live_frame_identities"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/input_descriptor"
+                      },
+                      {
+                        "properties": {
+                          "path": {
+                            "type": "string",
+                            "const": "/correspondence/acquisition/live_chaser_identities"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "items": false
+              }
+            ]
+          },
+          "outputs": {
+            "oneOf": [
+              {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 1,
+                "prefixItems": [
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/core_descriptor"
+                      },
+                      {
+                        "properties": {
+                          "table": {
+                            "properties": {
+                              "path": {
+                                "type": "string",
+                                "const": "/correspondence/frames/sources"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "items": false
+              },
+              {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "prefixItems": [
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/core_descriptor"
+                      },
+                      {
+                        "properties": {
+                          "table": {
+                            "properties": {
+                              "path": {
+                                "type": "string",
+                                "const": "/correspondence/frames/sources"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/core_descriptor"
+                      },
+                      {
+                        "properties": {
+                          "table": {
+                            "properties": {
+                              "path": {
+                                "type": "string",
+                                "const": "/correspondence/chaser/sources"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "items": false
+              }
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "dependencies": {
+                  "minItems": 4
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "outputs": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "prefixItems": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/$defs/core_descriptor"
+                        },
+                        {
+                          "properties": {
+                            "table": {
+                              "properties": {
+                                "path": {
+                                  "type": "string",
+                                  "const": "/correspondence/frames/sources"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/$defs/core_descriptor"
+                        },
+                        {
+                          "properties": {
+                            "table": {
+                              "properties": {
+                                "path": {
+                                  "type": "string",
+                                  "const": "/correspondence/chaser/sources"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ],
+                  "items": false
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "outputs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 1,
+                  "prefixItems": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/$defs/core_descriptor"
+                        },
+                        {
+                          "properties": {
+                            "table": {
+                              "properties": {
+                                "path": {
+                                  "type": "string",
+                                  "const": "/correspondence/frames/sources"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ],
+                  "items": false
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mapping_validation": {
+            "properties": {
+              "status": {
+                "const": "valid"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "mapping_validation": {
+            "properties": {
+              "total_acquisitions": {
+                "$ref": "#/$defs/u64"
+              },
+              "reason": {
+                "const": ""
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "mapping_validation": {
+            "properties": {
+              "total_acquisitions": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "u64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "core_field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "boolean",
+        "count",
+        "dtype",
+        "meaning",
+        "name",
+        "offset",
+        "units",
+        "validity_field"
+      ],
+      "properties": {
+        "boolean": {
+          "type": "boolean"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "dtype": {
+          "enum": [
+            "<u8",
+            "<i8",
+            "<f4",
+            "|u1"
+          ]
+        },
+        "meaning": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "offset": {
+          "$ref": "#/$defs/u64"
+        },
+        "units": {
+          "type": "string"
+        },
+        "validity_field": {
+          "type": "string"
+        }
+      }
+    },
+    "core_table": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "fields",
+        "id",
+        "itemsize",
+        "key_fields",
+        "path",
+        "rank",
+        "required_reference_attributes",
+        "row_order",
+        "schema_version"
+      ],
+      "properties": {
+        "component": {
+          "enum": [
+            "frames",
+            "chaser",
+            "correspondence"
+          ]
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/core_field"
+          }
+        },
+        "id": {
+          "enum": [
+            "citrus.experimental_h5.stimulus_frame",
+            "citrus.experimental_h5.chaser_state",
+            "citrus.experimental_h5.frame_source",
+            "citrus.experimental_h5.state_source"
+          ]
+        },
+        "itemsize": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "key_fields": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/[^{}]+[^/]$"
+        },
+        "rank": {
+          "type": "integer",
+          "const": 1
+        },
+        "required_reference_attributes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "frame_table_ref",
+              "geometry_ref",
+              "acquisition_binding_ref",
+              "state_table_ref"
+            ]
+          }
+        },
+        "row_order": {
+          "type": "string",
+          "const": "append_order"
+        },
+        "schema_version": {
+          "type": "integer",
+          "enum": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    "core_descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content_sha256",
+        "encoding",
+        "references",
+        "schema_id",
+        "schema_version",
+        "shape",
+        "table"
+      ],
+      "properties": {
+        "content_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "encoding": {
+          "type": "string",
+          "const": "core_schema_json_and_packed_le_v1"
+        },
+        "references": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "frame_table_ref": {
+              "type": "string",
+              "pattern": "^/[^{}]+[^/]$"
+            },
+            "geometry_ref": {
+              "type": "string",
+              "pattern": "^/[^{}]+[^/]$"
+            },
+            "acquisition_binding_ref": {
+              "type": "string",
+              "pattern": "^/[^{}]+[^/]$"
+            },
+            "state_table_ref": {
+              "type": "string",
+              "pattern": "^/[^{}]+[^/]$"
+            }
+          }
+        },
+        "schema_id": {
+          "type": "string",
+          "const": "citrus.experimental_h5.core_dataset_digest"
+        },
+        "schema_version": {
+          "type": "integer",
+          "const": 1
+        },
+        "shape": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "$ref": "#/$defs/u64"
+          }
+        },
+        "table": {
+          "$ref": "#/$defs/core_table"
+        }
+      }
+    },
+    "integer_type": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "byte_order",
+        "class",
+        "signed",
+        "size_bytes"
+      ],
+      "properties": {
+        "byte_order": {
+          "enum": [
+            "little_endian",
+            "none"
+          ]
+        },
+        "class": {
+          "type": "string",
+          "const": "integer"
+        },
+        "signed": {
+          "type": "boolean"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "enum": [
+            1,
+            8
+          ]
+        }
+      }
+    },
+    "packed_type": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class",
+        "members",
+        "size_bytes"
+      ],
+      "properties": {
+        "class": {
+          "type": "string",
+          "const": "packed_compound"
+        },
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "offset",
+              "type"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "offset": {
+                "$ref": "#/$defs/u64"
+              },
+              "type": {
+                "$ref": "#/$defs/integer_type"
+              }
+            }
+          }
+        },
+        "size_bytes": {
+          "type": "integer",
+          "enum": [
+            16,
+            33
+          ]
+        }
+      }
+    },
+    "input_descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component_id",
+        "content_sha256",
+        "encoding",
+        "kind",
+        "logical_payload_size_bytes",
+        "path",
+        "shape",
+        "type"
+      ],
+      "properties": {
+        "component_id": {
+          "type": "string",
+          "const": "correspondence_input"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "encoding": {
+          "type": "string",
+          "const": "hdf5_closed_logical_values_v1"
+        },
+        "kind": {
+          "type": "string",
+          "const": "internal_dataset"
+        },
+        "logical_payload_size_bytes": {
+          "$ref": "#/$defs/u64"
+        },
+        "path": {
+          "enum": [
+            "/correspondence/acquisition/live_frame_identities",
+            "/correspondence/acquisition/live_chaser_identities"
+          ]
+        },
+        "shape": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "$ref": "#/$defs/u64"
+          }
+        },
+        "type": {
+          "$ref": "#/$defs/packed_type"
+        }
+      }
+    }
+  }
+}
