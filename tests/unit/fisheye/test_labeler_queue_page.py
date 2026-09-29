@@ -125,6 +125,14 @@ console.log(JSON.stringify({{
   filters: m.queueFilters(rows).map((f) => f.id),
   keypointsOnly: m.filterRows(rows, "keypoints").map((r) => r.taskId),
   summary: m.queueSummary(payload, rows),
+  shown: [
+    m.displayState("pending", {{saved_row_count: 191, carried_row_count: 81}}),
+    m.displayState("pending", {{saved_row_count: 189, carried_row_count: 189}}),
+    m.displayState("pending", {{saved_row_count: 0, carried_row_count: 0}}),
+    m.displayState("pending", undefined),
+    m.displayState("blocked", {{saved_row_count: 5, carried_row_count: 0}}),
+    m.displayState("complete", {{saved_row_count: 5, carried_row_count: 0}}),
+  ],
   params: m.authParams("?expected_user=alice&invite=abc&other=1").toString(),
   merged: m.withParams("/api/tasks/t/open?x=1", m.authParams("?expected_user=alice")),
 }}));
@@ -152,5 +160,7 @@ console.log(JSON.stringify({{
     assert model["filters"] == ["", "keypoints", "subject_mask_component"]
     assert model["keypointsOnly"] == ["task-open"]
     assert model["summary"] == "1 open task across 1 recording."
+    # Pending shows "in progress" only once the labeler saved a row of their own.
+    assert model["shown"] == ["in_progress", "pending", "pending", "pending", "blocked", "complete"]
     assert model["params"] == "expected_user=alice&invite=abc"
     assert model["merged"] == "/api/tasks/t/open?x=1&expected_user=alice"

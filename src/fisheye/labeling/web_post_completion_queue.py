@@ -12,7 +12,7 @@ from .web_auth import (
     PERSONAL_DATASET_QUEUE_PATH,
     _dashboard_url_for_expected_user,
 )
-from .web_policy import LABELING_HOME_PATH, PERSONAL_WORK_PATH
+from .web_policy import LABELER_QUEUE_PAGE_PATH, LABELING_HOME_PATH, PERSONAL_WORK_PATH
 from .work_queue import (
     _add_direct_start_contracts_to_work_tasks,
     _add_work_summary_fields,
@@ -89,15 +89,16 @@ def _post_completion_queue_metadata(
         or work.get("labeler_action")
         or "open_dataset_queue"
     )
-    next_labeler_url = str(
-        work.get("expected_user_personal_dataset_queue_url")
-        or work.get("expected_user_dataset_queue_url")
-        or PERSONAL_DATASET_QUEUE_PATH
+    # Complete returns to the labeler queue page; the older personal pages
+    # remain reachable through the return_* links below.
+    next_labeler_url = (
+        _dashboard_url_for_expected_user(LABELER_QUEUE_PAGE_PATH, guarded_user)
+        or LABELER_QUEUE_PAGE_PATH
     )
     return_expected_user = guarded_user
     return_personal_dataset_queue_url = str(
         work.get("expected_user_personal_dataset_queue_url")
-        or next_labeler_url
+        or work.get("expected_user_dataset_queue_url")
         or PERSONAL_DATASET_QUEUE_PATH
     )
     return_personal_work_url = str(

@@ -2487,7 +2487,7 @@ def test_direct_task_complete_route_honors_expected_user_guard(tmp_path):
         assert post_queue["expected_user_guard_checked_server_side"] is True
         assert post_queue["expected_user_matches_resolved_user"] is True
         assert post_queue["next_labeler_action"] == "open_dataset_queue"
-        assert post_queue["next_labeler_url"] == "/my-datasets?expected_user=alice"
+        assert post_queue["next_labeler_url"] == "/queue?expected_user=alice"
         assert post_queue["next_labeler_url_role"] == "preferred_queue"
         assert post_queue["return_expected_user"] == "alice"
         assert post_queue["return_personal_dataset_queue_url"] == (
@@ -2505,7 +2505,7 @@ def test_direct_task_complete_route_honors_expected_user_guard(tmp_path):
         assert post_queue["browser_writes_intermediate_csv"] is False
         assert post_queue["browser_has_direct_zarr_write_authority"] is False
         assert complete_payload["post_completion_next_labeler_url"] == (
-            "/my-datasets?expected_user=alice"
+            "/queue?expected_user=alice"
         )
         assert complete_payload["post_completion_return_expected_user"] == "alice"
         assert complete_payload["post_completion_return_personal_dataset_queue_url"] == (
@@ -2905,7 +2905,7 @@ def test_session_complete_route_closes_session_and_marks_task_complete(tmp_path)
         assert post_queue["expected_user_guard_checked_server_side"] is True
         assert post_queue["expected_user_matches_resolved_user"] is True
         assert post_queue["next_labeler_action"] == "complete"
-        assert post_queue["next_labeler_url"] == "/my-datasets?expected_user=alice"
+        assert post_queue["next_labeler_url"] == "/queue?expected_user=alice"
         assert post_queue["return_expected_user"] == "alice"
         assert post_queue["return_personal_dataset_queue_url"] == (
             "/my-datasets?expected_user=alice"
@@ -2922,7 +2922,7 @@ def test_session_complete_route_closes_session_and_marks_task_complete(tmp_path)
         assert post_queue["browser_writes_csv_or_handoff_files"] is False
         assert post_queue["browser_has_direct_zarr_write_authority"] is False
         assert payload["post_completion_next_labeler_action"] == "complete"
-        assert payload["post_completion_next_labeler_url"] == "/my-datasets?expected_user=alice"
+        assert payload["post_completion_next_labeler_url"] == "/queue?expected_user=alice"
         assert payload["post_completion_return_expected_user"] == "alice"
         assert payload["post_completion_return_personal_dataset_queue_url"] == (
             "/my-datasets?expected_user=alice"

@@ -26,10 +26,15 @@ from .web_identity import (
     _mark_identity_probe_unknown_labeling_user,
 )
 from .web_personal_renderers import _dashboard_html, _datasets_html, _queue_html
-from .web_policy import IDENTITY_PROBE_PATH, LABELING_HOME_PATH, PERSONAL_WORK_PATH
+from .web_policy import (
+    IDENTITY_PROBE_PATH,
+    LABELER_QUEUE_PAGE_PATH,
+    LABELING_HOME_PATH,
+    PERSONAL_WORK_PATH,
+)
 from .web_responses import _format_error
 
-QUEUE_PAGE_PATH = "/queue"
+QUEUE_PAGE_PATH = LABELER_QUEUE_PAGE_PATH
 
 PersonalPageResponder = Callable[..., tuple[bytes, HTTPStatus, str]]
 

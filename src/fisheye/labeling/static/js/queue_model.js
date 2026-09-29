@@ -70,12 +70,23 @@ function actionLabel(state) {
   return "";
 }
 
+// A pending task shows as in progress once the labeler has saved a row of
+// their own. Carried-forward rows were copied from an earlier review version,
+// not saved by the labeler, so they alone do not count. Display only: the
+// task's stored state and the server's Start decision are unchanged.
+export function displayState(state, progress) {
+  const p = progress || {};
+  const ownSaved = (Number(p.saved_row_count) || 0) - (Number(p.carried_row_count) || 0);
+  return state === "pending" && ownSaved > 0 ? "in_progress" : state || "";
+}
+
 export function queueRows(payload) {
   const rows = [];
   for (const dataset of payload.datasets || []) {
     for (const recording of dataset.recordings || []) {
       for (const task of recording.tasks || []) {
         const start = task.start || {};
+        const shownState = displayState(task.state, task.progress);
         rows.push({
           key: task.task_id,
           taskId: task.task_id,
@@ -88,9 +99,10 @@ export function queueRows(payload) {
           kind: task.workflow_kind || "",
           kindLabel: kindLabel(task),
           state: task.state || "",
-          stateLabel: stateLabel(task.state),
+          shownState,
+          stateLabel: stateLabel(shownState),
           priority: Number(task.priority) || 0,
-          action: actionLabel(task.state),
+          action: actionLabel(shownState),
           canStart: start.ready === true && Boolean(start.endpoint),
           startEndpoint: start.ready === true ? start.endpoint || "" : "",
           notReadyReason: start.ready === true ? "" : start.operator_action || start.not_ready_reason || "",
