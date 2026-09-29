@@ -34,6 +34,9 @@ LABELER_START_TASK_STATES = ("pending", "in_progress")
 # A task whose run was replaced by a newer review version. It is read-only:
 # no checkpoint may be staged or claimed for Apply, and labeler views hide it.
 TASK_SUPERSEDED_STATE = "superseded"
+# Session client label of carry_forward_tail_keypoints; its checkpoints are
+# the rows carried forward from an earlier review version.
+CARRY_FORWARD_SESSION_CLIENT_LABEL = "carry_forward_tail_keypoints"
 # ``blocked`` is a non-startable task that is not finished.
 TASK_STATES = (*LABELER_START_TASK_STATES, "blocked", "complete", TASK_SUPERSEDED_STATE)
 
@@ -2958,6 +2961,69 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
             (str(recording_id), str(workflow_kind), *wanted),
         ).fetchall()
         return [_checkpoint_store.checkpoint_row(row) for row in rows]
+
+    def task_row_progress(self, task_ids: Sequence[str]) -> dict[str, dict[str, object]]:
+        """Per-task row counts from the store alone (no Zarr reads).
+
+        ``row_total`` is the task's ``target_roi_indices`` length, or None when
+        the task covers every row (``include_all``), whose count lives only in
+        the Zarr. A row is saved when it has a non-discarded checkpoint,
+        unapplied while any of its checkpoints is active or applying, applied
+        otherwise, and carried when a checkpoint was written by the carry-forward
+        session (checkpoint metadata can be ~100 KB, so it is not read here).
+        Rows outside a task's targets are not counted.
+        """
+
+        self.initialize()
+        wanted = sorted({str(task_id) for task_id in task_ids if str(task_id)})
+        targets: dict[str, set[int] | None] = {}
+        rows_by_task: dict[str, dict[int, dict[str, bool]]] = {}
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start : start + 500]
+            placeholders = ", ".join("?" for _ in chunk)
+            for row in self.conn.execute(
+                f"SELECT task_id, scope_json FROM labeling_tasks WHERE task_id IN ({placeholders});",
+                chunk,
+            ):
+                scope = _json_loads(row["scope_json"])
+                indices = scope.get("target_roi_indices") if isinstance(scope, Mapping) else None
+                targets[row["task_id"]] = (
+                    {int(index) for index in indices} if isinstance(indices, list) and indices else None
+                )
+            for row in self.conn.execute(
+                f"""
+                SELECT k.task_id, k.roi_idx, k.state,
+                       COALESCE(s.client_label = ?, 0) AS carried
+                FROM labeling_session_checkpoints k
+                LEFT JOIN labeling_sessions s ON s.session_id = k.session_id
+                WHERE k.task_id IN ({placeholders}) AND k.state != 'discarded';
+                """,
+                (CARRY_FORWARD_SESSION_CLIENT_LABEL, *chunk),
+            ):
+                task_targets = targets.get(row["task_id"])
+                roi_idx = int(row["roi_idx"])
+                if task_targets is not None and roi_idx not in task_targets:
+                    continue
+                flags = rows_by_task.setdefault(row["task_id"], {}).setdefault(
+                    roi_idx, {"unapplied": False, "carried": False}
+                )
+                flags["unapplied"] |= row["state"] in {"active", "applying"}
+                flags["carried"] |= bool(row["carried"])
+        progress: dict[str, dict[str, object]] = {}
+        for task_id in wanted:
+            if task_id not in targets:
+                continue
+            rows = rows_by_task.get(task_id, {})
+            unapplied = sum(1 for flags in rows.values() if flags["unapplied"])
+            task_targets = targets[task_id]
+            progress[task_id] = {
+                "row_total": len(task_targets) if task_targets is not None else None,
+                "saved_row_count": len(rows),
+                "applied_row_count": len(rows) - unapplied,
+                "unapplied_row_count": unapplied,
+                "carried_row_count": sum(1 for flags in rows.values() if flags["carried"]),
+            }
+        return progress
 
     def close_sessions_for_task(
         self,

@@ -25,8 +25,10 @@ DATASET_KEYS = {"dataset_id", "label", "open_task_count", "task_count", "recordi
                 "workflow_counts", "work_url", "recordings"}
 RECORDING_KEYS = {"recording_id", "open_task_count", "task_count", "blocked_reason", "work_url", "tasks"}
 TASK_KEYS = {"task_id", "title", "workflow_kind", "component_name", "state", "priority",
-             "notes", "work_url", "start"}
+             "notes", "work_url", "start", "progress"}
 START_KEYS = {"ready", "endpoint", "method", "not_ready_reason", "operator_action"}
+PROGRESS_KEYS = {"row_total", "saved_row_count", "applied_row_count", "unapplied_row_count",
+                 "carried_row_count"}
 
 
 def _store(tmp_path) -> LabelingStore:
@@ -66,6 +68,7 @@ def test_queue_payload_shape_is_pinned(tmp_path):
                 for task in recording["tasks"]:
                     assert set(task) == TASK_KEYS
                     assert set(task["start"]) == START_KEYS
+                    assert set(task["progress"]) == PROGRESS_KEYS
         assert payload["links"]["diagnostics"] == "/api/me/datasets?expected_user=alice"
     finally:
         store.close()
@@ -137,3 +140,30 @@ def test_blocking_operator_validation_gate_is_reported_and_blocks_start(tmp_path
     assert start == {"ready": False, "endpoint": "", "method": "POST",
                      "not_ready_reason": "evidence_missing", "operator_action": "Record launch evidence."}
     assert payload["blockers"] == [{"code": "evidence_missing", "message": "Record launch evidence."}]
+
+
+def test_queue_reports_store_row_progress_per_task(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_task(recording_id="rec-a", task_id="task-open", workflow_kind="keypoints",
+                      title="Fix fins", priority=5, notes="Rows 3-9",
+                      scope={"zarr_path": "/nowhere.zarr", "target_roi_indices": [3, 4, 5]})
+    session = store.create_session(task_id="task-open", user="alice").session_id
+    store.upsert_session_checkpoint(
+        session_id=session, task_id="task-open", recording_id="rec-a", user="alice",
+        workflow_kind="keypoints", target_run_path="refined_keypoints_runs/r",
+        target_edit_revision=0, source_rowset_path=None, roi_idx=4,
+        component_name="keypoints", payload={},
+    )
+    try:
+        with _running_server(store, user="alice") as base_url:
+            status, payload = _json_request(base_url, "/api/me/queue?expected_user=alice")
+        assert status == 200
+        tasks = _tasks(payload, full=False)
+        assert tasks["task-open"]["progress"] == {
+            "row_total": 3, "saved_row_count": 1, "applied_row_count": 0,
+            "unapplied_row_count": 1, "carried_row_count": 0,
+        }
+        assert tasks["task-blocked"]["progress"]["row_total"] is None
+        assert tasks["task-blocked"]["progress"]["saved_row_count"] == 0
+    finally:
+        store.close()

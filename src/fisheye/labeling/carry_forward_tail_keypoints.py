@@ -28,6 +28,7 @@ import numpy as np
 import zarr
 
 from fisheye.labeling.assignment_store import (
+    CARRY_FORWARD_SESSION_CLIENT_LABEL,
     LABELER_START_TASK_STATES,
     TASK_SUPERSEDED_STATE,
     LabelingStore,
@@ -193,7 +194,7 @@ def carry_rows(store: LabelingStore, plan: dict[str, object], *, user: str) -> d
         raise RuntimeError(f"Newest-version task {task_id} is not open for labeling")
     if store.count_unapplied_session_checkpoints(task_id=task_id):
         raise RuntimeError(f"Task {task_id} has unapplied checkpoints; apply them first")
-    lease = store.create_session(task_id=task_id, user=user, client_label="carry_forward_tail_keypoints")
+    lease = store.create_session(task_id=task_id, user=user, client_label=CARRY_FORWARD_SESSION_CLIENT_LABEL)
     session_id = str(getattr(lease, "session_id", None) or lease["session_id"])
     session = store.get_session(session_id)
     try:
