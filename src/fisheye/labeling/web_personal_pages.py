@@ -25,9 +25,11 @@ from .web_identity import (
     _identity_probe_payload,
     _mark_identity_probe_unknown_labeling_user,
 )
-from .web_personal_renderers import _dashboard_html, _datasets_html
+from .web_personal_renderers import _dashboard_html, _datasets_html, _queue_html
 from .web_policy import IDENTITY_PROBE_PATH, LABELING_HOME_PATH, PERSONAL_WORK_PATH
 from .web_responses import _format_error
+
+QUEUE_PAGE_PATH = "/queue"
 
 PersonalPageResponder = Callable[..., tuple[bytes, HTTPStatus, str]]
 
@@ -140,6 +142,8 @@ def _personal_page_response_payload(
 
     if path in {DASHBOARD_PATH, PERSONAL_WORK_PATH}:
         return _dashboard_html(), HTTPStatus.OK, "text/html; charset=utf-8"
+    if path == QUEUE_PAGE_PATH:
+        return _queue_html(), HTTPStatus.OK, "text/html; charset=utf-8"
     if path in {"/", "/me", LABELING_HOME_PATH, DATASET_QUEUE_PATH, PERSONAL_DATASET_QUEUE_PATH}:
         return _datasets_html(), HTTPStatus.OK, "text/html; charset=utf-8"
 
@@ -202,6 +206,10 @@ def register_personal_page_routes(
     def personal_work_dashboard_alias() -> Response:
         return _respond(state, response_builder, path="/my-work")
 
+    @claimed_route(app, QUEUE_PAGE_PATH, methods=["GET"])
+    def labeler_queue_page() -> Response:
+        return _respond(state, response_builder, path=QUEUE_PAGE_PATH)
+
     @claimed_route(app, "/datasets", methods=["GET"])
     def personal_dataset_queue() -> Response:
         return _respond(state, response_builder, path="/datasets")
@@ -211,4 +219,4 @@ def register_personal_page_routes(
         return _respond(state, response_builder, path="/my-datasets")
 
 
-__all__ = ["_personal_page_response_payload", "register_personal_page_routes"]
+__all__ = ["QUEUE_PAGE_PATH", "_personal_page_response_payload", "register_personal_page_routes"]
