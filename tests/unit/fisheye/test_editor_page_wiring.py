@@ -115,3 +115,14 @@ def test_shared_session_banner_has_no_inline_styles():
     banner = renderers._session_status_banner({**SESSION, "workflow_kind": "keypoints"})
     assert "style=" not in banner and 'class="session-banner"' in banner
     assert Path(web_static.STATIC_ROOT / "css" / "session_operator_support.css").exists()
+
+
+def test_editor_canvases_keep_a_visible_pointer():
+    # The shared stylesheet must not hide the pointer: the keypoint editor
+    # draws no cursor of its own. Only the mask editor, which draws its brush
+    # outline, hides the system cursor, and it does so from its own script.
+    css = (web_static.STATIC_ROOT / "css" / "editor.css").read_text()
+    stage_rule = re.search(r"\.editor-stage canvas \{([^}]*)\}", css).group(1)
+    assert "cursor: crosshair" in stage_rule and "cursor: none" not in stage_rule
+    assert 'canvas.style.cursor = "none"' in (JS_ROOT / "subject_mask_editor.js").read_text()
+    assert "cursor" not in (JS_ROOT / "keypoint_editor.js").read_text()

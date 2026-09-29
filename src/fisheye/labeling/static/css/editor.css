@@ -18,7 +18,9 @@ body.editor kbd { font-family: var(--mono); font-size: 11px; padding: 1px 5px; b
 
 .editor-body { flex-grow: 1; min-height: 0; display: flex; }
 .editor-stage { flex-grow: 1; min-width: 0; position: relative; display: flex; align-items: center; justify-content: center; background: #0f1411; overflow: hidden; }
-.editor-stage canvas { display: block; image-rendering: pixelated; background: #101410; cursor: none; touch-action: none; }
+/* Crosshair by default (keypoint and detection editors rely on it); the mask
+   editor hides it from its script because it draws its own brush cursor. */
+.editor-stage canvas { display: block; image-rendering: pixelated; background: #101410; cursor: crosshair; touch-action: none; }
 .stage-hint { position: absolute; left: 20px; bottom: 14px; font-size: 12px; color: #a9b5ad; pointer-events: none; }
 
 .editor-side { width: 340px; flex-shrink: 0; overflow-y: auto; background: var(--surface); border-left: 1px solid var(--line); }
