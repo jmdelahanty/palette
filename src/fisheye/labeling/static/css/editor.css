@@ -1,0 +1,78 @@
+/* Editor shell shared by the labeling editors (front-end plan P3).
+   Loads after palette.css and uses its tokens. Layout: top bar, dark canvas
+   stage with a side panel, and a bottom action bar. */
+
+html, body.editor { height: 100%; }
+body.editor { display: flex; flex-direction: column; overflow: hidden; }
+body.editor code { font-family: var(--mono); font-size: 12px; }
+body.editor kbd { font-family: var(--mono); font-size: 11px; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--ink-2); background: var(--surface); }
+
+.editor-top { flex-shrink: 0; min-height: 56px; padding: 8px 20px; display: flex; align-items: center; gap: 16px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.editor-return { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.editor-return a[data-session-return="queue"] { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--r-control); color: var(--ink); font-size: 14px; font-weight: 600; text-decoration: none; }
+.editor-return a[data-session-return="queue"]::before { content: "‹"; font-size: 18px; line-height: 1; }
+.editor-return a:not([data-session-return="queue"]) { color: var(--ink-2); }
+.editor-title { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.editor-title h1 { font-size: 15px; font-weight: 600; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-title span { font-size: 12px; color: var(--ink-2); }
+
+.editor-body { flex-grow: 1; min-height: 0; display: flex; }
+.editor-stage { flex-grow: 1; min-width: 0; position: relative; display: flex; align-items: center; justify-content: center; background: #0f1411; overflow: hidden; }
+.editor-stage canvas { display: block; image-rendering: pixelated; background: #101410; cursor: none; touch-action: none; }
+.stage-hint { position: absolute; left: 20px; bottom: 14px; font-size: 12px; color: #a9b5ad; pointer-events: none; }
+
+.editor-side { width: 340px; flex-shrink: 0; overflow-y: auto; background: var(--surface); border-left: 1px solid var(--line); }
+.side-section { padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--line-soft); }
+.side-section:last-child { border-bottom: 0; }
+.side-section h2, .side-section summary.side-heading { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); }
+.side-section summary.side-heading { cursor: pointer; }
+.side-section .meta { font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; margin: 0; }
+.side-section .meta p { margin: 0 0 4px; }
+.side-section label { font-size: 13px; color: var(--ink-2); display: flex; justify-content: space-between; }
+.side-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.side-row { display: flex; gap: 6px; align-items: center; }
+.side-row > * { flex-grow: 1; }
+
+body.editor select, body.editor input[type="text"], body.editor input[type="number"] { font: inherit; font-size: 14px; height: 38px; padding: 0 10px; border-radius: var(--r-control); border: 1px solid var(--line); background: var(--surface); color: var(--ink); box-sizing: border-box; width: 100%; }
+body.editor input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+body.editor .btn { height: 40px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; }
+body.editor .btn kbd { border-color: currentColor; color: inherit; opacity: 0.75; background: transparent; }
+body.editor .btn-primary kbd { border-color: rgba(255, 255, 255, 0.6); }
+body.editor .btn-outline { border-color: var(--accent); color: var(--accent); }
+body.editor .btn-danger { border-color: var(--danger); color: var(--danger); }
+body.editor .btn:disabled kbd { opacity: 0.5; }
+body.editor .tool { height: 44px; justify-content: space-between; padding: 0 12px; font-size: 14px; }
+body.editor .tool.active { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+body.editor .tool.active kbd { border-color: rgba(255, 255, 255, 0.6); }
+
+.mask-check { font-size: 14px; font-weight: 600; color: var(--ok); }
+.mask-check.warn { color: var(--mask); background: var(--mask-bg); padding: 10px 12px; border-radius: 8px; }
+
+.editor-actions { flex-shrink: 0; min-height: 68px; padding: 10px 20px; display: flex; align-items: center; gap: 10px; background: var(--surface); border-top: 1px solid var(--line); }
+.editor-actions .btn { height: 44px; font-size: 14px; padding: 0 14px; }
+.editor-actions .status-area { flex-grow: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
+.editor-actions .status { margin: 0; font-size: 13px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.editor-actions .status.error { color: var(--danger); font-weight: 600; }
+
+body.editor .session-banner { font-size: 12px; color: var(--ink-2); display: flex; flex-direction: column; gap: 4px; border: 0; border-radius: 0; background: none; padding: 0; margin: 0; box-shadow: none; }
+body.editor .session-banner span, body.editor .session-banner > span:first-of-type { display: block; margin: 0; }
+body.editor .session-banner b { color: var(--ink); }
+
+@media (max-width: 900px) {
+  body.editor { overflow: auto; height: auto; }
+  .editor-top { flex-wrap: wrap; padding: 8px 16px; }
+  .editor-return a:not([data-session-return="queue"]), .editor-return { font-size: 0; }
+  .editor-return a:not([data-session-return="queue"]) { display: none; }
+  .editor-body { flex-direction: column; }
+  .editor-stage { height: min(100vw, 70vh); flex-grow: 0; }
+  .editor-side { width: auto; border-left: 0; border-top: 1px solid var(--line); }
+  .editor-actions { position: sticky; bottom: 0; z-index: 2; flex-wrap: wrap; padding: 10px 16px; }
+  .editor-actions .status-area { order: -1; flex-basis: 100%; }
+}
+
+/* Editors disable every control while a request is in flight; dim instead of
+   the design system's dashed disabled style so a save does not flash the UI. */
+body.editor .btn:disabled { border-style: solid; background: var(--surface); color: var(--ink); opacity: 0.5; }
+body.editor .btn-primary:disabled, body.editor .tool.active:disabled { background: var(--accent); color: #ffffff; }
+body.editor .btn-outline:disabled { color: var(--accent); }

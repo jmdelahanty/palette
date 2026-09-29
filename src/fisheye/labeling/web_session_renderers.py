@@ -13,7 +13,8 @@ from .web_auth import (
     PERSONAL_DATASET_QUEUE_PATH,
     _dashboard_url_for_expected_user,
 )
-from .web_policy import PERSONAL_WORK_PATH
+from .web_policy import LABELER_QUEUE_PAGE_PATH, PERSONAL_WORK_PATH
+from .web_static import static_url
 
 __all__ = [
     "_BROWSER_MUTATION_STATUS_JS",
@@ -45,15 +46,16 @@ def _session_status_banner(session: Mapping[str, object]) -> str:
     recording_id = html.escape(str(session.get("recording_id") or ""))
     personal_queue_url = html.escape(_session_return_url(session, PERSONAL_DATASET_QUEUE_PATH))
     personal_work_url = html.escape(_session_return_url(session, PERSONAL_WORK_PATH))
+    queue_url = html.escape(_session_return_url(session, LABELER_QUEUE_PAGE_PATH))
     closed_at = str(session.get("closed_at_utc") or "").strip()
     state_text = "closed" if closed_at else "active"
     closed_bits = f" Closed at {html.escape(closed_at)}." if closed_at else ""
     return f"""
-    <section style="border:1px solid #d7ded5;border-radius:18px;background:rgba(255,253,245,.82);padding:12px 14px;margin:-4px 0 18px;color:#5f6d62;box-shadow:0 10px 28px rgba(23,32,26,.08);">
-      <b style="color:#17201a;">Session {state_text}</b>
+    <section class="session-banner">
+      <b>Session {state_text}</b>
       <span>Task <code>{task_id}</code> for recording <code>{recording_id}</code> expires at <code>{expires_at}</code>.{closed_bits}</span>
-      <span style="display:block;margin-top:4px;">If this tab reports a superseded session, expired session, or completed task, return to <a href="{personal_queue_url}">your personalized dataset queue</a> or <a href="{personal_work_url}">your personalized work dashboard</a> and reopen the task.</span>
-      <span style="display:block;margin-top:4px;font-size:.88rem;">Session <code>{session_id}</code></span>
+      <span>If this tab reports a superseded session, expired session, or completed task, return to <a href="{queue_url}">your queue</a>, <a href="{personal_queue_url}">your personalized dataset queue</a> or <a href="{personal_work_url}">your personalized work dashboard</a> and reopen the task.</span>
+      <span class="session-banner-id">Session <code>{session_id}</code></span>
     </section>
 """
 
@@ -71,7 +73,9 @@ def _session_return_url(session: Mapping[str, object], path: str) -> str:
 def _session_return_links_html(session: Mapping[str, object]) -> str:
     personal_queue_url = html.escape(_session_return_url(session, PERSONAL_DATASET_QUEUE_PATH))
     personal_work_url = html.escape(_session_return_url(session, PERSONAL_WORK_PATH))
+    queue_url = html.escape(_session_return_url(session, LABELER_QUEUE_PAGE_PATH))
     return (
+        f'<a href="{queue_url}" class="meta" data-session-return="queue">Queue</a> '
         f'<a href="{personal_queue_url}" class="meta" data-session-return="dataset-queue">Personalized dataset queue</a> - '
         f'<a href="{personal_work_url}" class="meta" data-session-return="work-dashboard">Personalized work dashboard</a>'
     )
@@ -169,6 +173,9 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
             "browser_mutation_status_js": _BROWSER_MUTATION_STATUS_JS,
             "image_canvas_viewport_js": _IMAGE_CANVAS_VIEWPORT_JS,
             "subject_mask_editor_js": read_labeling_asset("static/js/subject_mask_editor.js"),
+            "palette_css": static_url("css/palette.css"),
+            "editor_css": static_url("css/editor.css"),
+            "canvas_stage_fit_js": static_url("js/canvas_stage_fit.js"),
             "session_id_json": json.dumps(str(session.get("session_id") or "")),
         },
     )

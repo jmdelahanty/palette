@@ -28,6 +28,8 @@
 }
 
 * { box-sizing: border-box; }
+/* Components set display; the hidden attribute must still win. */
+[hidden] { display: none !important; }
 body { margin: 0; font-family: var(--sans); font-size: 14px; color: var(--ink); background: var(--ground); }
 a { color: var(--accent); }
 a:hover { color: var(--accent-ink); }
