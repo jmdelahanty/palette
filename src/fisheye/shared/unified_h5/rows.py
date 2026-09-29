@@ -6,7 +6,7 @@ import numpy as np
 
 from .common import KeyIndex, require, text
 from .hdf5_types import iter_blocks
-from .schema import table_schema
+from .schema import table_schema, table_version
 
 
 def row_key(row, fields):
@@ -52,7 +52,9 @@ def validate_table_relations(h5, descriptors):
 
         for path in descriptors:
             for _, block in iter_blocks(h5[path]):
-                fields_valid(block, table_schema(path)["fields"], path)
+                fields_valid(
+                    block, table_schema(path, table_version(h5, path))["fields"], path
+                )
                 if (
                     path.startswith("/components/")
                     and "stimulus_frame_num" in block.dtype.names

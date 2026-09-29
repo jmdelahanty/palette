@@ -128,6 +128,13 @@
       "producer_commit": "0a9e2d490ab0772dbaa7fdda3f837693806caad0",
       "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-unified-h5-component-scope-supplement-0a9e2d4-v1/cases/moving_grating/session.h5",
       "scope": "component_only_not_globally_finalized"
+    },
+    "admission_v2_roundtrip": {
+      "sha256": "82b1eef11f825531f2de09829b3591fa381113dc88868a49c5ef4de9fc74ff2b",
+      "size_bytes": 1007646,
+      "producer_commit": "e1bbc75cbe41c67103c1d0d830c2cd3f44343794",
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-orange-roundtrip-e1bbc75-a481250-20260927/transfer/citrus/citsess_4f7734ce5a9efaf93e8c20668343339d6f178713035ce065311c71e5055b3cde_synthetic_roundtrip_chaser.h5",
+      "scope": "globally_finalized"
     }
   }
 }
