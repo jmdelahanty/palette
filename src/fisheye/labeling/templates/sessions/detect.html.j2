@@ -4,146 +4,73 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>@@safe_title@@</title>
+  <link rel="stylesheet" href="@@palette_css@@">
+  <link rel="stylesheet" href="@@editor_css@@">
   <style>
-    :root {
-      --ink: #17201a;
-      --muted: #5f6d62;
-      --line: #d8ded5;
-      --card: #fffdf5;
-      --accent: #0f6f5c;
-      --bad: #9a3027;
-      --box: #f28f3b;
-    }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background:
-        radial-gradient(circle at 10% 12%, rgba(242, 143, 59, 0.18), transparent 28rem),
-        linear-gradient(135deg, #f7f0dc, #ecf4ef 64%, #fbf8ed);
-      color: var(--ink);
-      font-family: "Trebuchet MS", Verdana, sans-serif;
-    }
-    main {
-      max-width: 1180px;
-      margin: 0 auto;
-      padding: 28px 18px 56px;
-    }
-    header {
-      display: flex;
-      justify-content: space-between;
-      gap: 18px;
-      align-items: end;
-      margin-bottom: 18px;
-    }
-    h1 {
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2rem, 5vw, 4.2rem);
-      letter-spacing: -0.055em;
-      line-height: 0.92;
-      margin: 0;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 340px;
-      gap: 18px;
-      align-items: start;
-    }
-    .panel {
-      background: rgba(255, 253, 245, 0.88);
-      border: 1px solid var(--line);
-      border-radius: 22px;
-      box-shadow: 0 18px 44px rgba(23, 32, 26, 0.13);
-      padding: 16px;
-    }
-    canvas {
-      display: block;
-      width: 100%;
-      image-rendering: pixelated;
-      background: #111;
-      border-radius: 16px;
-      cursor: crosshair;
-    }
-    .meta {
-      color: var(--muted);
-      overflow-wrap: anywhere;
-      font-size: 0.92rem;
-    }
-    .buttons {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 9px;
-      margin: 12px 0;
-    }
-    button {
-      font: inherit;
-      border: 0;
-      border-radius: 999px;
-      background: var(--accent);
-      color: white;
-      font-weight: 700;
-      cursor: pointer;
-      padding: 10px 12px;
-    }
-    button.secondary {
-      background: #33423a;
-    }
-    button.warn {
-      background: var(--bad);
-    }
-    .status {
-      min-height: 1.4em;
-      color: var(--muted);
-    }
-    .status.error {
-      color: var(--bad);
-    }
+    :root { --bad: var(--danger); --muted: var(--ink-2); }
     @@session_operator_support_css@@
-    @media (max-width: 860px) {
-      header, .grid {
-        display: block;
-      }
-      .panel {
-        margin-bottom: 14px;
-      }
-    }
   </style>
 </head>
-<body>
-  <main>
-    <header>
-      <div>
-        <h1>@@safe_title@@</h1>
-        <p class="meta">Scoped detection session <code>@@session_id@@</code></p>
-      </div>
-      @@return_links@@
-    </header>
-    @@status_banner@@
-    <section class="grid">
-      <div class="panel">
-        <canvas id="canvas"></canvas>
-        <p id="status" class="status">Loading frame...</p>
-        <button id="copy-mutation-support-reference" type="button" class="secondary" hidden onclick="copyMutationSupportReference(this)">Copy support reference</button>
-        @@session_operator_support_html@@
-      </div>
-      <aside class="panel">
+<body class="editor">
+  <header class="editor-top">
+    <nav class="editor-return" aria-label="Return">@@return_links@@</nav>
+    <div class="editor-title">
+      <h1>@@safe_title@@</h1>
+      <span>Scoped detection session <code>@@session_id@@</code></span>
+    </div>
+  </header>
+
+  <div class="editor-body">
+    <div id="canvas-stage" class="editor-stage">
+      <canvas id="canvas"></canvas>
+      <div class="stage-hint">Drag empty space to add a box · click a box to select it · scroll to zoom</div>
+    </div>
+
+    <aside class="editor-side" aria-label="Detection tools">
+      @@session_operator_support_html@@
+
+      <section class="side-section" aria-labelledby="boxes-heading">
+        <h2 id="boxes-heading">Boxes</h2>
+        <button type="button" class="btn" data-key="T" onclick="placeTypicalBox()">Add typical box</button>
+        <button type="button" class="btn" data-key="Delete" onclick="clearSelectedBox()">Remove selected box</button>
+        <p class="meta">Drag empty image space to add a box. Click a box to select it; drag from the selected box to redraw it. Delete removes only the selected observation. Stable instance identities are assigned and checked by the server.</p>
+      </section>
+
+      <section class="side-section" aria-labelledby="frame-heading">
+        <h2 id="frame-heading">This frame</h2>
         <div id="summary" class="meta"></div>
-        <div class="buttons">
-          <button type="button" onclick="nav(-1)">Previous</button>
-          <button type="button" onclick="nav(1)">Next</button>
-          <button type="button" onclick="save(false)">Save detections</button>
-          <button type="button" onclick="save(true)">Save + next</button>
-          <button type="button" class="secondary" onclick="clearSelectedBox()">Remove selected</button>
-          <button type="button" class="secondary" onclick="placeTypicalBox()">Add typical box</button>
-          <button type="button" class="warn" onclick="markNegative()">Mark negative + next</button>
-          <button type="button" class="warn" onclick="completeTask()">Complete task</button>
-        </div>
-        <p class="meta">Drag empty image space to add a box. Click a box to select it; drag from the selected box to redraw it. Delete removes only the selected observation. Use <b>Mark negative</b> only for an empty frame where the subject is outside the dish. Stable instance identities are assigned and checked by the server. Hotkeys: wheel zooms, middle-drag pans, <b>f</b> fits, <b>t</b> adds a typical box, <b>Delete</b> removes selected, <b>s</b> saves, <b>x</b> marks an empty frame negative, <b>n</b>/<b>p</b> navigate.</p>
-      </aside>
-    </section>
-  </main>
+        <button type="button" class="btn btn-danger" data-key="X" onclick="markNegative()">Mark negative + next</button>
+        <p class="meta">Use <b>Mark negative</b> only for an empty frame where the subject is outside the dish.</p>
+      </section>
+
+      <details class="side-section">
+        <summary class="side-heading">Keyboard shortcuts</summary>
+        <p class="meta">Wheel zooms, middle-drag pans, <kbd>F</kbd> fits, <kbd>T</kbd> adds a typical box, <kbd>Delete</kbd> removes selected, <kbd>S</kbd> saves, <kbd>X</kbd> marks an empty frame negative, <kbd>N</kbd>/<kbd>P</kbd> navigate.</p>
+      </details>
+
+      <details class="side-section">
+        <summary class="side-heading">Session</summary>
+        @@status_banner@@
+      </details>
+    </aside>
+  </div>
+
+  <footer class="editor-actions">
+    <button type="button" class="btn" data-key="P" onclick="nav(-1)">‹ Prev</button>
+    <button type="button" class="btn btn-outline" data-key="S" onclick="save(false)">Save</button>
+    <button type="button" class="btn btn-primary" onclick="save(true)">Save + Next</button>
+    <button type="button" class="btn" data-key="N" onclick="nav(1)">Next ›</button>
+    <div class="status-area">
+      <p id="status" class="status" role="status">Loading frame...</p>
+      <button id="copy-mutation-support-reference" type="button" class="btn" hidden onclick="copyMutationSupportReference(this)">Copy support reference</button>
+    </div>
+    <button type="button" class="btn" onclick="completeTask()">Complete task</button>
+  </footer>
+
   <script>
   window.PALETTE_DETECT_SESSION_ID = @@session_id_json@@;
 </script>
+<script src="@@canvas_stage_fit_js@@"></script>
 <script>
 @@operator_support_js@@
 </script>
@@ -155,6 +82,9 @@
 </script>
 <script>
 @@detect_editor_js@@
+</script>
+<script>
+  fitCanvasToStage(document.getElementById("canvas"), document.getElementById("canvas-stage"));
 </script>
 </body>
 </html>
