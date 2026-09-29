@@ -87,6 +87,30 @@
       return keypointPalette[Math.abs(Number(index) || 0) % keypointPalette.length];
     }
 
+    // Category colours from keypoint_style.js when the page loads it; the
+    // index palette otherwise.
+    let pointStyleCache = {labels: null, styles: []};
+    function pointStyles() {
+      const labels = (payload && payload.labels) || [];
+      if (pointStyleCache.labels !== labels) {
+        pointStyleCache = {
+          labels,
+          styles: typeof keypointStyles === "function" ? keypointStyles(labels) : [],
+        };
+      }
+      return pointStyleCache.styles;
+    }
+
+    function pointStyle(index) {
+      return pointStyles()[index]
+        || {color: keypointColor(index), hollow: false, category: "other", categoryName: "Landmarks"};
+    }
+
+    function pointHotkey(index) {
+      if (index < 9) return String(index + 1);
+      return index === 9 ? "0" : "";
+    }
+
     function decodeKeypoints(values) {
       // JSON null is a missing landmark; Number(null) would invent (0, 0).
       return values.map((point) => point.map((v) =>
@@ -221,50 +245,130 @@
       viewport.setImageData(image, {resetView: sizeChanged});
     }
 
+    // Points and labels go on a transparent overlay at screen resolution when
+    // the page provides one, so they stay sharp over the pixelated crop; the
+    // crop canvas itself is used otherwise.
+    const overlay = document.getElementById("keypoint-overlay");
+    const overlayCtx = overlay && typeof overlay.getContext === "function" ? overlay.getContext("2d") : null;
+
+    function markerLayer() {
+      if (overlayCtx && typeof canvas.getBoundingClientRect === "function") {
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const width = Math.max(1, Math.round(rect.width * dpr));
+        const height = Math.max(1, Math.round(rect.height * dpr));
+        if (overlay.width !== width) overlay.width = width;
+        if (overlay.height !== height) overlay.height = height;
+        overlayCtx.clearRect(0, 0, width, height);
+        if (rect.width > 0 && canvas.width > 0) {
+          return {
+            ctx: overlayCtx,
+            sx: width / canvas.width,
+            sy: height / canvas.height,
+            radius: 5 * dpr,
+            font: 12 * dpr,
+            thin: 1.5 * dpr,
+            ring: 2.5 * dpr,
+          };
+        }
+      }
+      return {
+        ctx,
+        sx: 1,
+        sy: 1,
+        radius: Math.max(2, Math.min(5, canvas.width / 120)),
+        font: Math.max(8, Math.min(12, canvas.width / 38)),
+        thin: Math.max(1, Math.min(2, canvas.width / 320)),
+        ring: Math.max(2, Math.min(3, canvas.width / 160)),
+      };
+    }
+
     function draw() {
       if (!payload || !viewport.hasImage()) return;
       viewport.drawImage();
-      const pointRadius = Math.max(2, Math.min(5, canvas.width / 120));
-      const labelFontPx = Math.max(8, Math.min(12, canvas.width / 38));
-      const labelOffset = pointRadius + 3;
-      ctx.lineWidth = Math.max(1, Math.min(2, canvas.width / 320));
-      ctx.font = `${labelFontPx}px Trebuchet MS`;
+      const layer = markerLayer();
+      const g = layer.ctx;
+      const labelOffset = layer.radius + layer.ring + 2;
+      g.font = `${layer.font}px "IBM Plex Sans", system-ui, sans-serif`;
+      g.textBaseline = "alphabetic";
       points.forEach((point, index) => {
         const x = Number(point[0]);
         const y = Number(point[1]);
         if (!Number.isFinite(x) || !Number.isFinite(y)) return;
         const [canvasX, canvasY] = imageToCanvas(x, y);
-        ctx.beginPath();
-        ctx.arc(canvasX, canvasY, pointRadius, 0, Math.PI * 2);
-        ctx.fillStyle = keypointColor(index);
-        ctx.fill();
-        ctx.lineWidth = index === activePoint ? Math.max(2, Math.min(3, canvas.width / 180)) : Math.max(1, Math.min(2, canvas.width / 320));
-        ctx.strokeStyle = index === activePoint ? "#101410" : "white";
-        ctx.stroke();
+        const px = canvasX * layer.sx;
+        const py = canvasY * layer.sy;
+        const style = pointStyle(index);
+        g.beginPath();
+        g.arc(px, py, layer.radius, 0, Math.PI * 2);
+        // Left (or unpaired) points are solid; the right of a pair is a ring.
+        g.fillStyle = style.hollow ? "#0f1411" : style.color;
+        g.fill();
+        g.lineWidth = style.hollow ? layer.ring : layer.thin;
+        g.strokeStyle = style.hollow ? style.color : "#0f1411";
+        g.stroke();
         if (index === activePoint) {
-          ctx.beginPath();
-          ctx.arc(canvasX, canvasY, pointRadius + 3, 0, Math.PI * 2);
-          ctx.strokeStyle = "white";
-          ctx.stroke();
+          g.beginPath();
+          g.arc(px, py, layer.radius + layer.ring + 1, 0, Math.PI * 2);
+          g.lineWidth = layer.thin;
+          g.strokeStyle = "white";
+          g.stroke();
         }
         if (showText) {
-          ctx.fillStyle = "white";
-          ctx.fillText(payload.labels[index] || String(index + 1), canvasX + labelOffset, canvasY - labelOffset);
+          const text = payload.labels[index] || String(index + 1);
+          const tx = px + labelOffset;
+          const ty = py - labelOffset;
+          // A dark outline keeps white text readable over any pixel.
+          if (typeof g.strokeText === "function") {
+            g.lineWidth = layer.ring;
+            g.strokeStyle = "rgba(15, 20, 17, 0.85)";
+            g.lineJoin = "round";
+            g.strokeText(text, tx, ty);
+          }
+          g.fillStyle = "white";
+          g.fillText(text, tx, ty);
         }
       });
     }
 
     function renderPoints() {
-      const rows = points.map((point, index) => {
+      const row = (index) => {
+        const point = points[index];
         const x = Number(point[0]);
         const y = Number(point[1]);
         const label = payload.labels[index] || String(index + 1);
-        const marker = index === activePoint ? "▶ " : "";
-        const color = keypointColor(index);
+        const active = index === activePoint;
+        const style = pointStyle(index);
+        const key = pointHotkey(index);
         const coordinates = Number.isFinite(x) && Number.isFinite(y) ? `${x.toFixed(1)}, ${y.toFixed(1)}` : "missing";
-        return `<div class="point-row" role="button" tabindex="0" data-point-index="${index}"><b><span style="display:inline-block;width:0.75em;height:0.75em;border-radius:999px;background:${color};margin-right:0.4em;border:1px solid rgba(0,0,0,.24);"></span>${marker}${label}</b><span>${coordinates}</span></div>`;
+        return `<div class="point-row${active ? " active" : ""}" role="button" tabindex="0" data-point-index="${index}"${active ? ' aria-current="true"' : ""}>`
+          + `<span class="kp-swatch${style.hollow ? " hollow" : ""}" style="--kp:${style.color}"></span>`
+          + `<span class="kp-name">${label}</span><span class="kp-coord">${coordinates}</span>`
+          + (key ? `<kbd>${key}</kbd>` : "") + `</div>`;
+      };
+      const styles = points.map((_, index) => pointStyle(index));
+      const groups = typeof keypointGroups === "function" && pointStyles().length === points.length
+        ? keypointGroups(styles)
+        : [{name: "Landmarks", indices: points.map((_, index) => index)}];
+      document.getElementById("points").innerHTML = groups.map((group) => {
+        const first = styles[group.indices[0]].color;
+        const last = styles[group.indices[group.indices.length - 1]].color;
+        return `<div class="kp-group"><div class="kp-group-head">`
+          + `<span class="kp-ramp" style="background:linear-gradient(90deg, ${first}, ${last})"></span>`
+          + `<b>${group.name}</b><span>${group.indices.length}</span></div>`
+          + group.indices.map(row).join("") + `</div>`;
       }).join("");
-      document.getElementById("points").innerHTML = rows;
+      const placed = points.filter((point) => Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1]))).length;
+      const count = document.getElementById("points-placed");
+      if (count) count.textContent = `${placed} of ${points.length} placed`;
+      const legend = document.getElementById("keypoint-legend");
+      if (legend) legend.innerHTML = groups.map((group) => {
+        const first = styles[group.indices[0]].color;
+        const last = styles[group.indices[group.indices.length - 1]].color;
+        return `<span><span class="kp-ramp" style="background:linear-gradient(90deg, ${first}, ${last})"></span>${group.name}</span>`;
+      }).join("") + (styles.some((style) => style.hollow)
+        ? `<span><span class="kp-swatch" style="--kp:#e6ece7"></span>left</span><span><span class="kp-swatch hollow" style="--kp:#e6ece7"></span>right</span>`
+        : "");
     }
 
     function renderSummary() {
@@ -310,19 +414,15 @@
       const applyButton = document.getElementById("apply-button");
       if (applyButton) applyButton.textContent = finishApply
         ? "Finish Apply"
-        : "Apply saved checkpoints";
+        : "Apply saved rows";
       const applyHelp = document.getElementById("apply-help");
       if (applyHelp) applyHelp.textContent = finishApply
         ? "The labels are already applied. Finish Apply before review approval or task completion."
         : "Apply writes the saved snapshot under the exclusive canonical writer. You can keep reviewing other rows while it runs.";
       const saveButton = document.getElementById("save-button");
       const saveNextButton = document.getElementById("save-next-button");
-      if (saveButton) saveButton.textContent = !knownSaveMode
-        ? "Save"
-        : directDeltaSave ? "Save direct delta" : "Save checkpoint";
-      if (saveNextButton) saveNextButton.textContent = !knownSaveMode
-        ? "Save + next"
-        : directDeltaSave ? "Save direct delta + next" : "Save checkpoint + next";
+      if (saveButton) saveButton.textContent = directDeltaSave ? "Save direct delta" : "Save";
+      if (saveNextButton) saveNextButton.textContent = directDeltaSave ? "Save direct delta + next" : "Save + Next";
       document.getElementById("summary").innerHTML = `
         <p><b>ROI</b> ${payload.roi_idx} / <b>${payload.frame_index_domain === "legacy_training_sample_row" ? "source training row" : "frame"}</b> ${payload.frame_idx}</p>
         <p><b>Position</b> ${state.position + 1} of ${state.total}</p>

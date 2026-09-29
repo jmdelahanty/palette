@@ -76,3 +76,30 @@ body.editor .session-banner b { color: var(--ink); }
 body.editor .btn:disabled { border-style: solid; background: var(--surface); color: var(--ink); opacity: 0.5; }
 body.editor .btn-primary:disabled, body.editor .tool.active:disabled { background: var(--accent); color: #ffffff; }
 body.editor .btn-outline:disabled { color: var(--accent); }
+
+/* Key hints drawn from data-key, for buttons whose text the editor script
+   rewrites (so the hint cannot live inside the button's text). */
+body.editor .btn[data-key]::after { content: attr(data-key); font-family: var(--mono); font-size: 11px; padding: 1px 5px; border-radius: 4px; border: 1px solid currentColor; opacity: 0.75; }
+
+/* Keypoint landmarks: category colour ramps, solid left / hollow right. */
+.kp-swatch { display: inline-block; flex-shrink: 0; width: 12px; height: 12px; border-radius: 50%; box-sizing: border-box; background: var(--kp); border: 2px solid var(--kp); }
+.kp-swatch.hollow { background: transparent; border-width: 2.5px; }
+.kp-ramp { display: inline-block; flex-shrink: 0; width: 22px; height: 8px; border-radius: 4px; }
+#points { display: flex; flex-direction: column; gap: 10px; }
+.kp-group { display: flex; flex-direction: column; gap: 2px; }
+.kp-group-head { display: flex; align-items: center; gap: 8px; padding: 2px 8px; font-size: 12px; color: var(--ink-2); }
+.kp-group-head b { color: var(--ink); }
+.point-row { min-height: 32px; display: flex; align-items: center; gap: 10px; padding: 0 8px; border-radius: var(--r-control); cursor: pointer; font-size: 13px; }
+.point-row:hover { background: var(--ground); }
+.point-row.active { background: #e1f1ec; box-shadow: inset 3px 0 0 var(--accent); }
+.point-row .kp-name { flex-grow: 1; overflow-wrap: anywhere; }
+.point-row .kp-coord { font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+.point-row kbd { min-width: 18px; text-align: center; }
+.stage-legend { position: absolute; left: 20px; bottom: 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 8px 12px; border-radius: 8px; background: rgba(15, 20, 17, 0.82); color: #e6ece7; font-size: 12px; }
+.stage-legend:empty { display: none; }
+.stage-legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.stage-hint.top { top: 14px; bottom: auto; }
+
+/* A screen-resolution layer over the crop canvas for markers and labels. */
+.canvas-frame { position: relative; line-height: 0; }
+.editor-stage canvas.canvas-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; background: transparent; }

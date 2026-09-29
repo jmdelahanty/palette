@@ -83,6 +83,17 @@ def test_mask_editor_uses_the_editor_shell():
     assert 'id="nav-prev-button"' in html and 'id="nav-next-button"' in html
 
 
+def test_keypoint_editor_uses_the_editor_shell_and_category_colours():
+    html = _page("keypoints")
+    assert '<body class="editor">' in html
+    assert static_links(html) == [
+        "css/palette.css", "css/editor.css", "js/canvas_stage_fit.js", "js/keypoint_style.js",
+    ]
+    # Markers and labels draw on a screen-resolution overlay above the crop.
+    assert 'id="keypoint-overlay"' in html
+    assert 'document.getElementById("keypoint-overlay")' in (JS_ROOT / "keypoint_editor.js").read_text()
+
+
 def static_links(html: str) -> list[str]:
     return [url.split("/", 3)[3] for url in re.findall(r'(?:href|src)="(/static/[^"]+)"', html)]
 

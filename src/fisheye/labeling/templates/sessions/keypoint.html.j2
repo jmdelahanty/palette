@@ -4,202 +4,113 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>@@safe_title@@</title>
+  <link rel="stylesheet" href="@@palette_css@@">
+  <link rel="stylesheet" href="@@editor_css@@">
   <style>
-    :root {
-      --ink: #17201a;
-      --muted: #5f6d62;
-      --line: #d8ded5;
-      --paper: #f7f2df;
-      --card: #fffdf5;
-      --accent: #0f6f5c;
-      --bad: #9a3027;
-      --point: #e4572e;
-      --active: #1479ff;
-    }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background:
-        radial-gradient(circle at 12% 10%, rgba(15, 111, 92, 0.14), transparent 30rem),
-        linear-gradient(135deg, #f6f0dc, #edf5ee 62%, #fbf8ed);
-      color: var(--ink);
-      font-family: "Trebuchet MS", Verdana, sans-serif;
-    }
-    main {
-      max-width: 1180px;
-      margin: 0 auto;
-      padding: 28px 18px 56px;
-    }
-    header {
-      display: flex;
-      justify-content: space-between;
-      gap: 18px;
-      align-items: end;
-      margin-bottom: 18px;
-    }
-    h1 {
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2rem, 5vw, 4.2rem);
-      letter-spacing: -0.055em;
-      line-height: 0.92;
-      margin: 0;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 340px;
-      gap: 18px;
-      align-items: start;
-    }
-    .panel {
-      background: rgba(255, 253, 245, 0.88);
-      border: 1px solid var(--line);
-      border-radius: 22px;
-      box-shadow: 0 18px 44px rgba(23, 32, 26, 0.13);
-      padding: 16px;
-    }
-    canvas {
-      display: block;
-      width: 100%;
-      image-rendering: pixelated;
-      background: #111;
-      border-radius: 16px;
-      cursor: crosshair;
-    }
-    .meta {
-      color: var(--muted);
-      overflow-wrap: anywhere;
-      font-size: 0.92rem;
-    }
-    .buttons {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 9px;
-      margin: 12px 0;
-    }
-    button, select, input {
-      font: inherit;
-      border-radius: 999px;
-      border: 1px solid var(--line);
-      padding: 10px 12px;
-      background: white;
-    }
-    button {
-      border: 0;
-      background: var(--accent);
-      color: white;
-      font-weight: 700;
-      cursor: pointer;
-    }
-    button.secondary {
-      background: #33423a;
-    }
-    button.warn {
-      background: var(--bad);
-    }
-    button:disabled, select:disabled {
-      cursor: not-allowed;
-      opacity: 0.52;
-    }
-    label {
-      display: block;
-      margin: 12px 0 5px;
-      color: var(--muted);
-      font-size: 0.86rem;
-    }
-    .point-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      border-top: 1px solid var(--line);
-      padding: 8px 0;
-      font-size: 0.92rem;
-    }
-    .point-row b {
-      overflow-wrap: anywhere;
-    }
-    .status {
-      min-height: 1.4em;
-      color: var(--muted);
-    }
-    .status.error {
-      color: var(--bad);
-    }
+    :root { --bad: var(--danger); --muted: var(--ink-2); }
     @@session_operator_support_css@@
-    @media (max-width: 860px) {
-      header, .grid {
-        display: block;
-      }
-      .panel {
-        margin-bottom: 14px;
-      }
-    }
   </style>
 </head>
-<body>
-  <main>
-    <header>
-      <div>
-        <h1>@@safe_title@@</h1>
-        <p class="meta">Scoped keypoint session <code>@@session_id@@</code></p>
-      </div>
-      @@return_links@@
-    </header>
-    @@status_banner@@
-    <section class="grid">
-      <div class="panel">
+<body class="editor">
+  <header class="editor-top">
+    <nav class="editor-return" aria-label="Return">@@return_links@@</nav>
+    <div class="editor-title">
+      <h1>@@safe_title@@</h1>
+      <span>Scoped keypoint session <code>@@session_id@@</code></span>
+    </div>
+  </header>
+
+  <div class="editor-body">
+    <div id="canvas-stage" class="editor-stage">
+      <div class="canvas-frame">
         <canvas id="canvas"></canvas>
-        <p id="status" class="status">Loading ROI...</p>
-        <button id="copy-mutation-support-reference" type="button" class="secondary" hidden onclick="copyMutationSupportReference(this)">Copy support reference</button>
-        @@session_operator_support_html@@
+        <canvas id="keypoint-overlay" class="canvas-overlay" aria-hidden="true"></canvas>
       </div>
-      <aside class="panel">
+      <div class="stage-hint top">Scroll to zoom · middle-drag to pan · click to place the selected point</div>
+      <div id="keypoint-legend" class="stage-legend" aria-label="Keypoint colours"></div>
+    </div>
+
+    <aside class="editor-side" aria-label="Keypoint tools">
+      @@session_operator_support_html@@
+
+      <section class="side-section" aria-labelledby="landmarks-heading">
+        <div class="side-row" style="justify-content: space-between">
+          <h2 id="landmarks-heading" style="flex-grow: 0">Landmarks</h2>
+          <span id="points-placed" class="meta" style="flex-grow: 0"></span>
+        </div>
+        <div id="points"></div>
+      </section>
+
+      <section class="side-section" aria-labelledby="row-heading">
+        <h2 id="row-heading">This row</h2>
+        <div class="side-grid">
+          <button id="no-keypoints-button" type="button" class="btn" data-key="X" onclick="action('mark_no_keypoints')">No keypoints</button>
+          <button id="detection-issue-button" type="button" class="btn" onclick="action('mark_detection_issue')">Detection issue</button>
+        </div>
         <div id="summary" class="meta"></div>
-        <div class="buttons">
-          <button id="nav-prev-button" type="button" onclick="nav(-1)">Previous</button>
-          <button id="nav-next-button" type="button" onclick="nav(1)">Next</button>
-          <button id="save-button" type="button" onclick="save(false)">Save</button>
-          <button id="save-next-button" type="button" onclick="save(true)">Save + next</button>
-          <button id="no-keypoints-button" type="button" class="secondary" onclick="action('mark_no_keypoints')">No keypoints</button>
-          <button id="detection-issue-button" type="button" class="secondary" onclick="action('mark_detection_issue')">Detection issue</button>
-        </div>
+      </section>
+
+      <section class="side-section" aria-labelledby="saving-heading">
+        <h2 id="saving-heading">Saving</h2>
         <p id="checkpoint-status" class="meta" hidden></p>
-        <div id="apply-controls" hidden>
-          <div class="buttons">
-            <button id="apply-button" type="button" onclick="applyCheckpoints()">Apply saved checkpoints</button>
-          </div>
-          <p id="apply-help" class="meta">Apply writes the saved snapshot under the exclusive canonical writer. You can keep reviewing other rows while it runs.</p>
-        </div>
-        <p id="immutable-direct-save-note" class="status" hidden>
+        <p id="apply-help" class="meta">Apply writes the saved snapshot under the exclusive canonical writer. You can keep reviewing other rows while it runs.</p>
+        <p id="immutable-direct-save-note" class="meta" hidden>
           Direct delta mode: Save writes this row directly to the task-bound immutable delta. There is no separate Apply step and the immutable base is not changed.
         </p>
+      </section>
+
+      <section class="side-section" aria-labelledby="review-heading">
+        <h2 id="review-heading">Row review</h2>
         <div id="mutable-review-controls">
-          <label for="review-state">Review state</label>
           <p id="review-current" class="meta"></p>
-          <select id="review-state" onchange="reviewSelectChanged()">
-            <option value="approved">approved</option>
-            <option value="pending">pending</option>
-            <option value="needs_review">needs_review</option>
-            <option value="rejected">rejected</option>
-          </select>
-          <div class="buttons">
-            <button id="set-review-button" type="button" onclick="setReviewStatus()">Set review</button>
+          <label for="review-state">Review state</label>
+          <div class="side-row">
+            <select id="review-state" onchange="reviewSelectChanged()">
+              <option value="approved">approved</option>
+              <option value="pending">pending</option>
+              <option value="needs_review">needs_review</option>
+              <option value="rejected">rejected</option>
+            </select>
+            <button id="set-review-button" type="button" class="btn btn-outline" onclick="setReviewStatus()">Set review</button>
           </div>
         </div>
-        <p id="immutable-delta-review-note" class="muted" hidden>
+        <p id="immutable-delta-review-note" class="meta" hidden>
           Edits are being recorded in a task-bound delta generation. Complete the task when review is finished; an operator will freeze, validate, and compact those edits into a new immutable candidate before approval.
         </p>
-        <div class="buttons">
-          <button id="complete-task-button" type="button" class="warn" onclick="completeTask()">Complete task</button>
-        </div>
-        <p class="muted">Hotkeys: wheel zooms, middle-drag pans, f fits, n/p move ROI, s saves, Shift+s saves + next, t toggles text, [/ ] cycles points, 1-9 selects keypoints 1-9, 0 selects keypoint 10, r resets, x marks no-keypoints.</p>
-        <div id="points"></div>
-      </aside>
-    </section>
-  </main>
+      </section>
+
+      <details class="side-section">
+        <summary class="side-heading">Keyboard shortcuts</summary>
+        <p class="meta">Wheel zooms, middle-drag pans, <kbd>F</kbd> fits. <kbd>N</kbd>/<kbd>P</kbd> move ROI, <kbd>S</kbd> saves, <kbd>⇧ S</kbd> saves + next, <kbd>T</kbd> toggles text, <kbd>[</kbd>/<kbd>]</kbd> cycle points, <kbd>1</kbd>–<kbd>9</kbd> select keypoints 1–9, <kbd>0</kbd> selects keypoint 10, <kbd>R</kbd> resets, <kbd>X</kbd> marks no keypoints.</p>
+      </details>
+
+      <details class="side-section">
+        <summary class="side-heading">Session</summary>
+        @@status_banner@@
+      </details>
+    </aside>
+  </div>
+
+  <footer class="editor-actions">
+    <button id="nav-prev-button" type="button" class="btn" data-key="P" onclick="nav(-1)">‹ Prev</button>
+    <button id="save-button" type="button" class="btn btn-outline" data-key="S" onclick="save(false)">Save</button>
+    <button id="save-next-button" type="button" class="btn btn-primary" data-key="⇧ S" onclick="save(true)">Save + Next</button>
+    <button id="nav-next-button" type="button" class="btn" data-key="N" onclick="nav(1)">Next ›</button>
+    <div class="status-area">
+      <p id="status" class="status" role="status">Loading ROI...</p>
+      <button id="copy-mutation-support-reference" type="button" class="btn" hidden onclick="copyMutationSupportReference(this)">Copy support reference</button>
+    </div>
+    <div id="apply-controls" hidden>
+      <button id="apply-button" type="button" class="btn btn-primary" onclick="applyCheckpoints()">Apply saved rows</button>
+    </div>
+    <button id="complete-task-button" type="button" class="btn" onclick="completeTask()">Complete task</button>
+  </footer>
+
   <script>
   window.PALETTE_KEYPOINT_SESSION_ID = @@session_id_json@@;
 </script>
+<script src="@@canvas_stage_fit_js@@"></script>
+<script src="@@keypoint_style_js@@"></script>
 <script>
 @@operator_support_js@@
 </script>
@@ -211,6 +122,12 @@
 </script>
 <script>
 @@keypoint_editor_js@@
+</script>
+<script>
+  fitCanvasToStage(document.getElementById("canvas"), document.getElementById("canvas-stage"));
+  // The marker overlay is drawn at screen resolution; redraw it when the
+  // displayed canvas size changes.
+  new ResizeObserver(() => draw()).observe(document.getElementById("canvas"));
 </script>
 </body>
 </html>

@@ -99,6 +99,10 @@ def _keypoint_session_html(session: Mapping[str, object]) -> bytes:
             "browser_mutation_status_js": _BROWSER_MUTATION_STATUS_JS,
             "image_canvas_viewport_js": _IMAGE_CANVAS_VIEWPORT_JS,
             "keypoint_editor_js": read_labeling_asset("static/js/keypoint_editor.js"),
+            "palette_css": static_url("css/palette.css"),
+            "editor_css": static_url("css/editor.css"),
+            "canvas_stage_fit_js": static_url("js/canvas_stage_fit.js"),
+            "keypoint_style_js": static_url("js/keypoint_style.js"),
             "session_id_json": json.dumps(str(session.get("session_id") or "")),
         },
     )
