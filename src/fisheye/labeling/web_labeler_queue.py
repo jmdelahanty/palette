@@ -68,7 +68,23 @@ def _task_start(
     }
 
 
-def _task(task: Mapping[str, Any], *, fallback_url: str, **start: Any) -> dict[str, object]:
+_EMPTY_PROGRESS = {
+    "row_total": None,
+    "saved_row_count": 0,
+    "applied_row_count": 0,
+    "unapplied_row_count": 0,
+    "carried_row_count": 0,
+}
+
+
+def _task(
+    task: Mapping[str, Any],
+    *,
+    fallback_url: str,
+    row_progress: Mapping[str, Mapping[str, object]],
+    **start: Any,
+) -> dict[str, object]:
+    task_id = _text(task.get("task_id"))
     return {
         "task_id": _text(task.get("task_id")),
         "title": _text(task.get("title") or task.get("task_id")),
@@ -79,11 +95,35 @@ def _task(task: Mapping[str, Any], *, fallback_url: str, **start: Any) -> dict[s
         "notes": _text(task.get("notes")),
         "work_url": _text(task.get("expected_user_work_url") or task.get("work_url") or fallback_url),
         "start": _task_start(task, **start),
+        "progress": dict(row_progress.get(task_id) or _EMPTY_PROGRESS),
     }
 
 
-def labeler_queue_payload(work: Mapping[str, Any], *, user: str) -> dict[str, object]:
-    """Project the labeler's queue from the full personal `work` summary."""
+def queue_task_ids(work: Mapping[str, Any]) -> list[str]:
+    """Every task id the queue will list, for one batched row-progress query."""
+
+    return [
+        _text(task.get("task_id"))
+        for dataset in work.get("dataset_queue") or []
+        for recording in dataset.get("recordings") or []
+        for task in recording.get("tasks") or []
+        if _text(task.get("task_id"))
+    ]
+
+
+def labeler_queue_payload(
+    work: Mapping[str, Any],
+    *,
+    user: str,
+    row_progress: Mapping[str, Mapping[str, object]] | None = None,
+) -> dict[str, object]:
+    """Project the labeler's queue from the full personal `work` summary.
+
+    ``row_progress`` is ``LabelingStore.task_row_progress`` for the listed
+    tasks; a task missing from it reports no saved rows and an unknown total.
+    """
+
+    row_progress = row_progress or {}
 
     policy = _mapping(work.get("dataset_queue_direct_start_policy"))
     start = {
@@ -107,7 +147,7 @@ def labeler_queue_payload(work: Mapping[str, Any], *, user: str) -> dict[str, ob
                 "blocked_reason": _text(recording.get("blocked_reason")),
                 "work_url": recording_url,
                 "tasks": [
-                    _task(task, fallback_url=recording_url, **start)
+                    _task(task, fallback_url=recording_url, row_progress=row_progress, **start)
                     for task in recording.get("tasks") or []
                 ],
             })

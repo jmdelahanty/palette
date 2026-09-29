@@ -32,7 +32,7 @@ from .admin_dashboard import (
     _zarr_backup_policy,
 )
 from .web_app import claimed_route
-from .web_labeler_queue import labeler_queue_payload
+from .web_labeler_queue import labeler_queue_payload, queue_task_ids
 from .web_auth import (
     DASHBOARD_PATH,
     DATASET_QUEUE_PATH,
@@ -497,7 +497,8 @@ def _personal_api_response_payload(
         )
 
     if path == "/api/me/queue":
-        return labeler_queue_payload(work, user=str(user)), HTTPStatus.OK
+        row_progress = state.store.task_row_progress(queue_task_ids(work))
+        return labeler_queue_payload(work, user=str(user), row_progress=row_progress), HTTPStatus.OK
 
     if path == "/api/me/datasets":
         return (
