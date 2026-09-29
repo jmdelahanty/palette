@@ -11,7 +11,7 @@ They are not Palette scientific-acceptance or activation schemas.
 | `experimental_h5_geometry_v1.json` | `0a9e2d490ab0772dbaa7fdda3f837693806caad0` | `4c0c707192cf1fa6ceafb2f632672972f41dc7e4c7cc5cdb0c0e3b7920a1474b` |
 | `experimental_h5_identity_claims_v1.json` | `0a9e2d490ab0772dbaa7fdda3f837693806caad0` | `83ca66b336f3e3a40ebaafc869d7febd020509e238243381dfe871cbeb89507e` |
 | `object_appearance_replay_dependency_manifest_v1.json` | `74083cee35196b4b1fc58e8bea180455a0b924ad` | `eccfcfcb3c6e66549b2fdfcfcf88fdc4fa9def3d6ce4a375494d011b04f2607c` |
-| `unified_h5_admission_v2.json` | agent-contracts PR 52 `13b48a1ed4a50a945796de995bc70b1a10684811` | `851ba36a7ab0757c90399e785ea350f285c5b1984f74409e125a79b6ba0b82b5` |
+| `unified_h5_admission_v2.json` | agent-contracts PR 52 `86638d74a9cf9b0f883683c0c695e7310b403158` | `ad0aab702e6714131db857afe8d96323999df184e0a3b357705c1acf56a90c38` |
 | `unified_h5_producer_policy_d544b081.json` (frozen producer policy named by capacity preflight) | agent-contracts `f3620fe1a05611db14497035d88f8c734449ac79` | `d544b0814006360b11b02cd9d171eefbddae7cc9cc41ad57470bbd240bc83cb9` |
 | `experimental_h5_core_chaser_v2.json` (core v1 with chaser state table v2) | `e437fa4752679e5a614378d824e636104c4f095a` | `cb68ab6ecea614030b8f2a3d2096e9122b1efa5156b56ed7a495b3072c70316a` |
 | `experimental_h5_correspondence_tables_v2.json` | `6bd8cbc443c3af699f9f13cbc2db037d8d99d82d` | `cb3ac574c76750c23de730129c4a32371328ffb34d792b1cfab164b7201ba1ea` |
@@ -36,12 +36,13 @@ Sources were reviewed against agent-contracts PR 51 at
 `f775aa652e524a13fbdff9e832937eb74ba191bc`. See the repository's unified-H5
 integration handoff for provenance, scope, and validation status.
 
-Admission v2 is applied: the resource profile, the chaser state table at v2
-(explicit camera-id validity), streamed correspondence v2 (live identity
-tables checked against the catalog separately from their closed-logical-value
-digests; closed input/receipt schemas) and capacity-preflight evidence naming
-the frozen producer policy. Each file's declared chaser/correspondence versions
-select its rules, with no mixing in one file. The earlier revision (chaser v1 /
-correspondence v1, catalog `experimental_h5_core_v1.json`) stays admissible
-only until Citrus regenerates the consumer fixture corpus under v2; then it is
-deleted. Optional pose v1 is not yet admitted.
+Admission v2 is applied and is the only admitted revision: the resource
+profile, the chaser state table at v2 (explicit camera-id validity), streamed
+correspondence v2 (live identity tables checked against the catalog separately
+from their closed-logical-value digests; closed input/receipt schemas),
+grid/grating state rows validated as exact `stimulus_frame_num` joins to
+`/correspondence/frames/sources` (the contract's `correspondence_scope`; no
+per-component source tables), and whole-recording capacity-preflight evidence
+naming the frozen producer policy. `experimental_h5_core_v1.json` stays pinned
+byte-for-byte for provenance only; chaser v1 / correspondence v1 files are
+refused. Optional pose v1 is not yet admitted.

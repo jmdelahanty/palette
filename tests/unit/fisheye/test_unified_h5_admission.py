@@ -19,7 +19,8 @@ from tests.unit.fisheye.unified_h5_fixtures import (
 
 
 @pytest.mark.parametrize(
-    "name,count,appearance", [("base", 79, 0), ("appearance", 89, 2)]
+    # Citrus 2a0ae13 v2 corpus: chaser v2, correspondence v2, capacity preflight.
+    "name,count,appearance", [("base", 90, 0), ("appearance", 92, 2)]
 )
 def test_real_producer_success_without_companion(tmp_path, name, count, appearance):
     path = emit_fixture(tmp_path, name)

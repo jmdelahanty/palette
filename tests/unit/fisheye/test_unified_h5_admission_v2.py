@@ -20,6 +20,7 @@ from fisheye.shared.unified_h5 import (
 from fisheye.shared.unified_h5.correspondence import (
     LIVE_CHASERS,
     PREFLIGHT,
+    validate_capacity_preflight,
     validate_component_correspondence,
 )
 from fisheye.shared.unified_h5.schema import (
@@ -103,12 +104,12 @@ def _mutable_copy(tmp_path):
     return emit_fixture(tmp_path, NAME)
 
 
-def test_a_file_cannot_mix_chaser_v1_with_correspondence_v2(tmp_path):
+def test_chaser_v1_is_no_longer_admitted(tmp_path):
     path = _mutable_copy(tmp_path)
     with h5py.File(path, "r+") as h5:
         h5[CHASER_STATES].attrs.modify("schema_version", np.uint64(1))
     with h5py.File(path, "r") as h5, pytest.raises(
-        UnifiedH5ContractError, match="correspondence_revision_mismatch"
+        UnifiedH5ContractError, match="unsupported_table_version"
     ):
         validate_component_correspondence(h5)
 
@@ -127,7 +128,7 @@ def test_preflight_must_name_the_pinned_producer_policy(tmp_path):
     with h5py.File(path, "r") as h5, pytest.raises(
         UnifiedH5ContractError, match="capacity_preflight"
     ):
-        validate_component_correspondence(h5)
+        validate_capacity_preflight(h5)
 
 
 def test_live_chaser_validity_fill_is_enforced_by_the_catalog(tmp_path):
@@ -149,4 +150,21 @@ def test_tampered_live_identity_is_refused(tmp_path):
         rows[1]["source_recording_frame_id"] = 3  # disagrees with its live frame
         h5[LIVE_CHASERS][...] = rows
     with h5py.File(path, "r") as h5, pytest.raises(UnifiedH5ContractError):
+        validate_component_correspondence(h5)
+
+
+@pytest.mark.parametrize("name", ["independent_motion_grid", "moving_grating"])
+def test_grid_and_grating_rows_join_through_frame_sources(tmp_path, name):
+    path = emit_fixture(tmp_path, name)
+    with h5py.File(path, "r") as h5:
+        rows = h5[f"/components/{name}/states"].shape[0]
+        summary = validate_component_correspondence(h5)
+    assert summary.component_rows[name] == rows > 0
+    with h5py.File(path, "r+") as h5:
+        states = h5[f"/components/{name}/states"][()]
+        states[0]["stimulus_frame_num"] = 10**9  # no frame source for this frame
+        h5[f"/components/{name}/states"][...] = states
+    with h5py.File(path, "r") as h5, pytest.raises(
+        UnifiedH5ContractError, match=f"component_frame_source_unresolved:{name}"
+    ):
         validate_component_correspondence(h5)
