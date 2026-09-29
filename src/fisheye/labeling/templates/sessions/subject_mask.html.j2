@@ -4,217 +4,145 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>@@safe_title@@</title>
+  <link rel="stylesheet" href="@@palette_css@@">
+  <link rel="stylesheet" href="@@editor_css@@">
   <style>
-    :root {
-      --ink: #182018;
-      --muted: #62705f;
-      --line: #d6ddcf;
-      --card: #fffdf4;
-      --accent: #0d745f;
-      --bad: #9a3027;
-      --mask: #00c894;
-      --erase: #d14a32;
-    }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background:
-        radial-gradient(circle at 78% 12%, rgba(0, 200, 148, 0.16), transparent 28rem),
-        linear-gradient(135deg, #f7efd8, #eef5eb 58%, #fbf8ed);
-      color: var(--ink);
-      font-family: "Trebuchet MS", Verdana, sans-serif;
-    }
-    main {
-      max-width: 1240px;
-      margin: 0 auto;
-      padding: 28px 18px 56px;
-    }
-    header {
-      display: flex;
-      justify-content: space-between;
-      gap: 18px;
-      align-items: end;
-      margin-bottom: 18px;
-    }
-    h1 {
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2rem, 5vw, 4.2rem);
-      letter-spacing: -0.055em;
-      line-height: 0.92;
-      margin: 0;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 360px;
-      gap: 18px;
-      align-items: start;
-    }
-    .panel {
-      background: rgba(255, 253, 244, 0.9);
-      border: 1px solid var(--line);
-      border-radius: 22px;
-      box-shadow: 0 18px 44px rgba(23, 32, 26, 0.13);
-      padding: 16px;
-    }
-    canvas {
-      display: block;
-      width: 100%;
-      image-rendering: pixelated;
-      background: #101410;
-      border-radius: 16px;
-      cursor: none;
-      touch-action: none;
-    }
-    .meta {
-      color: var(--muted);
-      overflow-wrap: anywhere;
-      font-size: 0.92rem;
-    }
-    .buttons {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 9px;
-      margin: 12px 0;
-    }
-    button, select, input {
-      font: inherit;
-      border-radius: 999px;
-      border: 1px solid var(--line);
-      padding: 10px 12px;
-      background: white;
-    }
-    button {
-      border: 0;
-      background: var(--accent);
-      color: white;
-      font-weight: 700;
-      cursor: pointer;
-    }
-    button.secondary {
-      background: #33423a;
-    }
-    button.warn {
-      background: var(--bad);
-    }
-    button.active {
-      box-shadow: 0 0 0 3px rgba(0, 200, 148, 0.24);
-      outline: 2px solid var(--mask);
-    }
-    label {
-      display: block;
-      margin: 12px 0 5px;
-      color: var(--muted);
-      font-size: 0.86rem;
-    }
-    input[type="range"] {
-      width: calc(100% - 24px);
-    }
-    .status {
-      min-height: 1.4em;
-      color: var(--muted);
-    }
-    .status.error {
-      color: var(--bad);
-    }
+    :root { --bad: var(--danger); --muted: var(--ink-2); }
     @@session_operator_support_css@@
-    @media (max-width: 900px) {
-      header, .grid {
-        display: block;
-      }
-      .panel {
-        margin-bottom: 14px;
-      }
-    }
   </style>
 </head>
-<body>
-  <main>
-    <header>
-      <div>
-        <h1>@@safe_title@@</h1>
-        <p class="meta">Scoped subject-mask session <code>@@session_id@@</code></p>
-      </div>
-      @@return_links@@
-    </header>
-    @@status_banner@@
-    <section class="grid">
-      <div class="panel">
-        <canvas id="canvas"></canvas>
-        <p id="status" class="status">Loading ROI...</p>
-        <button id="copy-mutation-support-reference" type="button" class="secondary" hidden onclick="copyMutationSupportReference(this)">Copy support reference</button>
-        @@session_operator_support_html@@
-      </div>
-      <aside class="panel">
-        <div id="summary" class="meta"></div>
-        <p id="mask-pieces" class="meta" aria-live="polite"></p>
-        <section id="tail-border-controls" hidden aria-label="Visible tail endpoint acceptance">
-          <h3>Tail reaches crop edge</h3>
-          <p class="meta">Accept only when the slightly clipped tail is usable. The last derived point represents the visible endpoint at the crop edge; it does not reconstruct the missing anatomical tip. Checkpoint this decision, then use Apply saved edits to regenerate the tail. This does not approve the mask or training labels.</p>
-          <label for="tail-border-preset">Reason for accepting this ROI</label>
-          <select id="tail-border-preset" onchange="updateTailBorderReasonInput()">
-            <option value="slight-tip">Only the tiny tail tip is clipped; visible tail is usable.</option>
-            <option value="custom">Write a custom reason</option>
+<body class="editor">
+  <header class="editor-top">
+    <nav class="editor-return" aria-label="Return">@@return_links@@</nav>
+    <div class="editor-title">
+      <h1>@@safe_title@@</h1>
+      <span>Scoped subject-mask session <code>@@session_id@@</code></span>
+    </div>
+  </header>
+
+  <div class="editor-body">
+    <div id="canvas-stage" class="editor-stage">
+      <canvas id="canvas"></canvas>
+      <div class="stage-hint">Scroll to zoom · middle-drag to pan</div>
+    </div>
+
+    <aside class="editor-side" aria-label="Mask tools">
+      @@session_operator_support_html@@
+
+      <section class="side-section" aria-labelledby="tools-heading">
+        <h2 id="tools-heading">Tools</h2>
+        <div class="side-grid">
+          <button id="paint-button" type="button" class="btn tool active" onclick="setTool('paint')">Paint <kbd>B</kbd></button>
+          <button id="erase-button" type="button" class="btn tool" onclick="setTool('erase')">Erase <kbd>E</kbd></button>
+          <button id="lasso-button" type="button" class="btn tool" onclick="toggleLassoMode()">Lasso <kbd>V</kbd></button>
+          <button id="fill-holes-button" type="button" class="btn tool" onclick="setTool('fill')">Fill holes <kbd>H</kbd></button>
+        </div>
+        <label for="brush-size">Brush size <span><span id="brush-label">8</span> px <kbd>[</kbd> <kbd>]</kbd></span></label>
+        <input id="brush-size" type="range" min="1" max="48" value="8" oninput="setBrushSize(Number(this.value));">
+        <button id="undo-bulk-button" type="button" class="btn" onclick="undoBulkEdit()" disabled>Undo</button>
+      </section>
+
+      <section class="side-section" aria-labelledby="check-heading">
+        <h2 id="check-heading">Mask check</h2>
+        <p id="mask-pieces" class="mask-check" aria-live="polite"></p>
+        <button id="remove-stray-button" type="button" class="btn" onclick="removeStrayPiecesAction()" disabled>Remove stray pieces <kbd>R</kbd></button>
+      </section>
+
+      <section class="side-section" aria-labelledby="lasso-heading">
+        <h2 id="lasso-heading">Lasso</h2>
+        <div class="side-grid">
+          <button type="button" class="btn" onclick="fillLasso(false, null)">Fill inside <kbd>F</kbd></button>
+          <button type="button" class="btn" onclick="fillLasso(true, null)">Fill outside <kbd>G</kbd></button>
+          <button type="button" class="btn" onclick="fillLasso(true, 0)">Erase outside <kbd>E</kbd></button>
+          <button type="button" class="btn" onclick="undoLassoPoint()">Undo point <kbd>U</kbd></button>
+          <button type="button" class="btn" onclick="clearLasso()">Clear lasso <kbd>D</kbd></button>
+        </div>
+      </section>
+
+      <section id="tail-border-controls" class="side-section" hidden aria-label="Visible tail endpoint acceptance">
+        <h2>Tail reaches crop edge</h2>
+        <p class="meta">Accept only when the slightly clipped tail is usable. The last derived point represents the visible endpoint at the crop edge; it does not reconstruct the missing anatomical tip. Checkpoint this decision, then use Apply saved edits to regenerate the tail. This does not approve the mask or training labels.</p>
+        <label for="tail-border-preset">Reason for accepting this ROI</label>
+        <select id="tail-border-preset" onchange="updateTailBorderReasonInput()">
+          <option value="slight-tip">Only the tiny tail tip is clipped; visible tail is usable.</option>
+          <option value="custom">Write a custom reason</option>
+        </select>
+        <label id="tail-border-reason-label" for="tail-border-reason">Optional notes</label>
+        <input id="tail-border-reason" type="text" maxlength="240" placeholder="Optional details for this ROI">
+        <div class="side-grid">
+          <button type="button" class="btn" onclick="saveTailBorder('accept')">Checkpoint acceptance</button>
+          <button type="button" class="btn" onclick="saveTailBorder('revoke')">Checkpoint revocation</button>
+        </div>
+        <div id="tail-border-status" class="meta"></div>
+      </section>
+
+      <section class="side-section" aria-labelledby="review-heading">
+        <h2 id="review-heading">Row review</h2>
+        <p id="review-current" class="meta"></p>
+        <label for="review-state">Component review state</label>
+        <div class="side-row">
+          <select id="review-state" onchange="reviewSelectChanged()">
+            <option value="approved">approved</option>
+            <option value="pending">pending</option>
+            <option value="needs_review">needs_review</option>
+            <option value="rejected">rejected</option>
           </select>
-          <label id="tail-border-reason-label" for="tail-border-reason">Optional notes</label>
-          <input id="tail-border-reason" type="text" maxlength="240" placeholder="Optional details for this ROI">
-          <div class="buttons">
-            <button type="button" class="secondary" onclick="saveTailBorder('accept')">Checkpoint acceptance</button>
-            <button type="button" class="secondary" onclick="saveTailBorder('revoke')">Checkpoint revocation</button>
-          </div>
-          <div id="tail-border-status" class="meta"></div>
-        </section>
-        <label for="mask-view">View</label>
+          <button id="set-review-button" type="button" class="btn btn-outline" onclick="setReviewStatus()">Set review</button>
+        </div>
+      </section>
+
+      <section class="side-section" aria-labelledby="view-heading">
+        <h2 id="view-heading">View</h2>
         <select id="mask-view" onchange="setMaskView(this.value)" aria-describedby="mask-view-help">
           <option value="overlay">Image + mask</option>
           <option value="binary">Binary mask</option>
         </select>
         <p id="mask-view-help" class="meta">Binary view shows the selected label in white and background in black. Paint, erase, and lasso work in either view.</p>
-        <div class="buttons">
-          <button type="button" onclick="nav(-1)">Previous</button>
-          <button type="button" onclick="nav(1)">Next</button>
-          <button type="button" onclick="save(false)">Checkpoint mask</button>
-          <button type="button" onclick="save(true)">Checkpoint + next</button>
-          <button type="button" class="secondary" onclick="applySavedEdits()">Apply saved edits to Zarr</button>
-          <button id="paint-button" type="button" class="active" onclick="setTool('paint')">Paint</button>
-          <button id="erase-button" type="button" class="secondary" onclick="setTool('erase')">Erase</button>
-          <button id="lasso-button" type="button" class="secondary" onclick="toggleLassoMode()">Lasso</button>
-          <button id="fill-holes-button" type="button" class="secondary" onclick="setTool('fill')">Fill holes</button>
-          <button id="remove-stray-button" type="button" class="secondary" onclick="removeStrayPiecesAction()" disabled>Remove stray pieces</button>
-          <button id="undo-bulk-button" type="button" class="secondary" onclick="undoBulkEdit()" disabled>Undo</button>
-          <button type="button" class="secondary" onclick="fillLasso(false, null)">Fill lasso</button>
-          <button type="button" class="secondary" onclick="fillLasso(true, null)">Fill outside</button>
-          <button type="button" class="secondary" onclick="fillLasso(true, 0)">Erase outside</button>
-          <button type="button" class="secondary" onclick="undoLassoPoint()">Undo point</button>
-          <button type="button" class="secondary" onclick="clearLasso()">Clear lasso</button>
-          <button type="button" class="secondary" onclick="clearMask()">Clear local</button>
-          <button type="button" class="warn" onclick="completeTask()">Complete task</button>
-        </div>
-        <div class="buttons">
-          <label for="roi-seek-input">Go to ROI</label>
+      </section>
+
+      <section class="side-section" aria-labelledby="row-heading">
+        <h2 id="row-heading">This row</h2>
+        <div id="summary" class="meta"></div>
+        <label for="roi-seek-input">Go to ROI</label>
+        <div class="side-row">
           <input id="roi-seek-input" type="number" min="0" step="1" placeholder="ROI #" onkeydown="if (event.key === 'Enter') seekRoi();">
-          <button type="button" class="secondary" onclick="seekRoi()">Go</button>
+          <button type="button" class="btn" onclick="seekRoi()">Go</button>
         </div>
-        <label for="brush-size">Brush size: <span id="brush-label">8</span> px</label>
-        <input id="brush-size" type="range" min="1" max="48" value="8" oninput="setBrushSize(Number(this.value));">
-        <label for="review-state">Component review state</label>
-        <p id="review-current" class="meta"></p>
-        <select id="review-state" onchange="reviewSelectChanged()">
-          <option value="approved">approved</option>
-          <option value="pending">pending</option>
-          <option value="needs_review">needs_review</option>
-          <option value="rejected">rejected</option>
-        </select>
-        <div class="buttons">
-          <button id="set-review-button" type="button" onclick="setReviewStatus()">Set review</button>
-          <button type="button" class="secondary" onclick="loadCurrent()">Reload ROI</button>
+        <div class="side-grid">
+          <button type="button" class="btn" onclick="loadCurrent()">Reload ROI</button>
+          <button type="button" class="btn btn-danger" onclick="clearMask()">Clear local</button>
         </div>
-        <p class="meta">Draw directly on the ROI. Hotkeys: wheel zooms, middle-drag pans, <b>f</b> fits outside lasso, <b>s</b> save, <b>n</b>/<b>p</b> navigate, <b>b</b>/<b>e</b> brush paint/erase, <b>x</b> toggles brush mode, <b>[</b>/<b>]</b> brush size, <b>v</b> lasso, lasso <b>f</b> fills inside, <b>g</b> fills outside, <b>e</b> erases outside, <b>u</b> undoes point, <b>d</b> clears contour, <b>h</b> fill holes (click a piece), <b>r</b> removes stray pieces, <b>Ctrl+Z</b> undoes the last fill or removal.</p>
-      </aside>
-    </section>
-  </main>
+      </section>
+
+      <details class="side-section">
+        <summary class="side-heading">Keyboard shortcuts</summary>
+        <p class="meta">Wheel zooms, middle-drag pans. <kbd>S</kbd> save, <kbd>⇧ S</kbd> save + next, <kbd>N</kbd>/<kbd>P</kbd> navigate, <kbd>B</kbd>/<kbd>E</kbd> paint/erase, <kbd>X</kbd> toggles brush mode, <kbd>[</kbd>/<kbd>]</kbd> brush size, <kbd>V</kbd> lasso; in lasso <kbd>F</kbd> fills inside, <kbd>G</kbd> fills outside, <kbd>E</kbd> erases outside, <kbd>U</kbd> undoes a point, <kbd>D</kbd> clears the contour. <kbd>H</kbd> fill holes (click a piece), <kbd>R</kbd> removes stray pieces, <kbd>Ctrl Z</kbd> undoes the last fill or removal.</p>
+      </details>
+
+      <details class="side-section">
+        <summary class="side-heading">Session</summary>
+        @@status_banner@@
+      </details>
+    </aside>
+  </div>
+
+  <footer class="editor-actions">
+    <button id="nav-prev-button" type="button" class="btn" onclick="nav(-1)">‹ Prev <kbd>P</kbd></button>
+    <button type="button" class="btn btn-outline" onclick="save(false)">Save <kbd>S</kbd></button>
+    <button type="button" class="btn btn-primary" onclick="save(true)">Save + Next <kbd>⇧ S</kbd></button>
+    <button id="nav-next-button" type="button" class="btn" onclick="nav(1)">Next › <kbd>N</kbd></button>
+    <div class="status-area">
+      <p id="status" class="status" role="status">Loading ROI...</p>
+      <button id="copy-mutation-support-reference" type="button" class="btn" hidden onclick="copyMutationSupportReference(this)">Copy support reference</button>
+    </div>
+    <button type="button" class="btn btn-primary" onclick="applySavedEdits()">Apply saved rows</button>
+    <button type="button" class="btn" onclick="completeTask()">Complete task</button>
+  </footer>
+
   <script>
   window.PALETTE_SUBJECT_MASK_SESSION_ID = @@session_id_json@@;
 </script>
+<script src="@@canvas_stage_fit_js@@"></script>
 <script>
 @@operator_support_js@@
 </script>
@@ -226,6 +154,9 @@
 </script>
 <script>
 @@subject_mask_editor_js@@
+</script>
+<script>
+  fitCanvasToStage(document.getElementById("canvas"), document.getElementById("canvas-stage"));
 </script>
 </body>
 </html>
