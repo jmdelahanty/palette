@@ -676,6 +676,12 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 "ALTER TABLE labeling_checkpoint_apply_receipts "
                 "ADD COLUMN secondary_effects_completed_at_utc TEXT;"
             )
+        if "released_checkpoint_count" not in receipt_columns:
+            # Older receipts released nothing; 0 is also the CREATE default.
+            conn.execute(
+                "ALTER TABLE labeling_checkpoint_apply_receipts "
+                "ADD COLUMN released_checkpoint_count INTEGER NOT NULL DEFAULT 0;"
+            )
         conn.execute(
             """
             UPDATE labeling_checkpoint_apply_receipts
