@@ -43,8 +43,13 @@ class AdminApplyRefused(RuntimeError):
     """The task is not in a state where an operator may apply for the labeler."""
 
 
-def apply_plan(store: LabelingStore, task_id: str) -> dict[str, object]:
-    """Read-only summary of what an Apply on behalf would do, with refusals."""
+def apply_plan(store: LabelingStore, task_id: str, *, retry_apply_id: str | None = None) -> dict[str, object]:
+    """Read-only summary of what an Apply on behalf would do, with refusals.
+
+    With ``retry_apply_id`` the plan is to resume that Apply, whose pixels were
+    written but whose derived effects (QC) are still owed, as the editor's own
+    retry does; it must name this task's unfinished receipt.
+    """
 
     task = store.get_task(task_id)
     if task is None:
@@ -95,10 +100,27 @@ def apply_plan(store: LabelingStore, task_id: str) -> dict[str, object]:
         refusals.append(f"task state is {task.get('state')!r}")
     if open_sessions:
         refusals.append(f"{len(open_sessions)} open editor session(s) on this task; the labeler may be working")
-    if applying_rows or unfinished_receipts:
-        refusals.append("an Apply is unfinished on this task; let it finish or retry it from the editor")
-    if not pending_rows:
-        refusals.append("no saved, unapplied rows")
+    unfinished_ids = [
+        str(row[0]) for row in conn.execute(
+            """
+            SELECT apply_id FROM labeling_checkpoint_apply_receipts
+            WHERE task_id = ? AND (state != 'applied' OR secondary_effects_state != 'complete');
+            """,
+            (task_id,),
+        )
+    ]
+    if retry_apply_id:
+        if unfinished_ids != [retry_apply_id]:
+            refusals.append(f"retry needs exactly this task's unfinished Apply {retry_apply_id}; found {unfinished_ids}")
+        if applying_rows:
+            refusals.append("rows are still being claimed by an Apply; let it finish")
+    else:
+        if applying_rows or unfinished_receipts:
+            refusals.append(
+                f"an Apply is unfinished on this task ({unfinished_ids}); retry it with --retry-apply-id"
+            )
+        if not pending_rows:
+            refusals.append("no saved, unapplied rows")
     return {
         "task_id": task_id,
         "recording_id": str(task.get("recording_id") or ""),
@@ -110,6 +132,8 @@ def apply_plan(store: LabelingStore, task_id: str) -> dict[str, object]:
         "pending_rows_by_user": pending_by_user,
         "open_sessions": open_sessions,
         "unfinished_receipts": unfinished_receipts,
+        "unfinished_apply_ids": unfinished_ids,
+        "retry_apply_id": retry_apply_id,
         "refusals": refusals,
         "ok": not refusals,
     }
@@ -136,6 +160,7 @@ def apply_on_behalf(
     actor: str,
     backup_dir: Path | None = None,
     skip_backup: bool = False,
+    retry_apply_id: str | None = None,
 ) -> dict[str, object]:
     """Apply one task's saved edits for its assignee through the editor's route."""
 
@@ -143,7 +168,7 @@ def apply_on_behalf(
 
     store = LabelingStore(store_path)
     try:
-        plan = apply_plan(store, task_id)
+        plan = apply_plan(store, task_id, retry_apply_id=retry_apply_id)
         if not plan["ok"]:
             raise AdminApplyRefused("; ".join(plan["refusals"]))
         assignee = str(plan["assignee"])
@@ -165,7 +190,7 @@ def apply_on_behalf(
         thread.start()
         lease = store.create_session(task_id=task_id, user=assignee, client_label=ADMIN_APPLY_CLIENT_LABEL)
         session_id = str(lease.session_id)
-        apply_id = str(uuid.uuid4())
+        apply_id = retry_apply_id or str(uuid.uuid4())
         try:
             host, port = server.server_address
             base = f"http://{host}:{port}/api/sessions/{session_id}/subject-mask"
@@ -189,6 +214,8 @@ def apply_on_behalf(
             "edit_revision_before": result.get("edit_revision_before"),
             "edit_revision_after": result.get("edit_revision_after"),
             "qc_status": result.get("qc_status"),
+            "already_applied": result.get("already_applied"),
+            "retry": bool(retry_apply_id),
             "error": response.get("error"),
             "details": response.get("details"),
         }
@@ -212,6 +239,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--actor", required=True, help="Operator recorded on the admin_apply_on_behalf event.")
     parser.add_argument("--execute", action="store_true", help="Apply; without it, only print the plan.")
+    parser.add_argument("--retry-apply-id", help="Resume this task's written Apply whose QC/effects are still owed.")
     parser.add_argument("--backup-dir", type=Path, default=Path(os.environ.get("PALETTE_LABELING_BACKUP_DIR", DEFAULT_BACKUP_DIR)))
     return parser
 
@@ -222,13 +250,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.execute:
         store = LabelingStore(store_path)
         try:
-            plan = apply_plan(store, args.task_id)
+            plan = apply_plan(store, args.task_id, retry_apply_id=args.retry_apply_id)
         finally:
             store.close()
         print(json.dumps({"dry_run": True, "plan": plan}, indent=2, default=str))
         return 0 if plan["ok"] else 2
     try:
-        report = apply_on_behalf(store_path, args.task_id, actor=args.actor, backup_dir=args.backup_dir)
+        report = apply_on_behalf(
+            store_path, args.task_id, actor=args.actor, backup_dir=args.backup_dir,
+            retry_apply_id=args.retry_apply_id,
+        )
     except AdminApplyRefused as exc:
         print(json.dumps({"ok": False, "refused": str(exc)}, indent=2))
         return 2
