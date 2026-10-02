@@ -112,6 +112,7 @@ from .web_auth import (
 )
 from .web_app import create_labeling_app
 from .web_static import register_static_routes
+from .web_admin_inspect import register_admin_inspect_routes
 from .web_admin_api import register_admin_api_routes
 from .web_admin_pages import _admin_page_response_payload, register_admin_page_routes
 from .web_admin_renderers import (
@@ -1154,6 +1155,7 @@ def _make_handler(state: ServerState):
     register_personal_api_routes(flask_app, state, _personal_api_response_payload)
     register_personal_page_routes(flask_app, state, _personal_page_response_payload)
     register_static_routes(flask_app)
+    register_admin_inspect_routes(flask_app, state)
 
     class LabelingWorkHandler(BaseHTTPRequestHandler):
         server_version = "PaletteLabelingWork/0.1"
