@@ -71,23 +71,22 @@ def _mask_sources(task: Mapping[str, Any]):
     component = str(task.get("component_name") or scope.get("component_name") or "")
     if component not in labels:
         raise InspectError(f"Component {component!r} is not in {labels}.")
-    candidates = []
-    if scope.get("crop_run"):
-        candidates.append(("task scope", str(scope["crop_run"])))
-    subject_runs = root.get("subject_mask_runs")
-    subject_run = str(scope.get("subject_run") or "")
-    if subject_runs is not None and subject_run in subject_runs:
-        crop = subject_runs[subject_run].attrs.get("crop_run")
-        if crop:
-            candidates.append(("source subject run", str(crop)))
-    if run.attrs.get("source_crop_run"):
-        candidates.append(("refined run", str(run.attrs["source_crop_run"])))
-    if not candidates:
+    # Same crop resolution as the mask editor: the task scope's crop_run, else
+    # the source subject run's crop run from the review module's own loader
+    # (which also checks that run's declared lineage). Read-only.
+    from fisheye.tune import refined_subject_mask_review as review_mod
+
+    crop_name = str(scope.get("crop_run") or "").strip()
+    if not crop_name:
+        try:
+            source = review_mod._load_source_subject_mask_run(  # type: ignore[attr-defined]
+                root, str(scope.get("subject_run") or "").strip() or None
+            )
+        except Exception as exc:
+            raise InspectError(f"Could not resolve the source subject run: {exc}") from exc
+        crop_name = str(source.crop_run or "")
+    if not crop_name:
         raise InspectError("No crop run is declared for this mask run.")
-    names = {name for _where, name in candidates}
-    if len(names) > 1:
-        raise InspectError(f"Crop run sources disagree: {candidates}.")
-    crop_name = candidates[0][1]
     crops = root.get("crop_runs")
     if crops is None or crop_name not in crops or "roi_images" not in crops[crop_name]:
         raise InspectError(f"crop_runs/{crop_name}/roi_images not found.")
