@@ -27,7 +27,8 @@ import threading
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -153,6 +154,50 @@ def _request(base: str, path: str, payload: dict | None = None) -> tuple[int, di
         return exc.code, json.loads(exc.read() or b"{}")
 
 
+@contextmanager
+def private_assignee_session(
+    store: LabelingStore,
+    store_path: Path,
+    task_id: str,
+    *,
+    assignee: str,
+    actor: str,
+    client_label: str,
+) -> Iterator[tuple[str, str]]:
+    """A private in-process labeling server and a session as the task's assignee.
+
+    Yields the task's ``/api/sessions/<id>/subject-mask`` base URL and the
+    session id; requests to it run the editor's own routes. The session is
+    closed and the server stopped on exit.
+    """
+
+    from fisheye.labeling import web as labeling_web
+
+    config = labeling_web.ServerConfig(
+        store_path=Path(store_path),
+        host="127.0.0.1",
+        port=0,
+        fixed_user=assignee,
+        auth_header="X-Forwarded-User",
+        session_ttl_seconds=3600,
+        admin_users=(actor,),
+    )
+    state = labeling_web.ServerState(store=store, config=config)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), labeling_web._make_handler(state))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    lease = store.create_session(task_id=task_id, user=assignee, client_label=client_label)
+    session_id = str(lease.session_id)
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}/api/sessions/{session_id}/subject-mask", session_id
+    finally:
+        store.close_session(session_id=session_id, user=assignee)
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+
+
 def apply_on_behalf(
     store_path: Path,
     task_id: str,
@@ -164,8 +209,6 @@ def apply_on_behalf(
 ) -> dict[str, object]:
     """Apply one task's saved edits for its assignee through the editor's route."""
 
-    from fisheye.labeling import web as labeling_web
-
     store = LabelingStore(store_path)
     try:
         plan = apply_plan(store, task_id, retry_apply_id=retry_apply_id)
@@ -175,38 +218,22 @@ def apply_on_behalf(
         backup = None if skip_backup else backup_labeling_store(
             store_path, backup_dir or DEFAULT_BACKUP_DIR, label=Path(store_path).stem
         )
-        config = labeling_web.ServerConfig(
-            store_path=Path(store_path),
-            host="127.0.0.1",
-            port=0,
-            fixed_user=assignee,
-            auth_header="X-Forwarded-User",
-            session_ttl_seconds=3600,
-            admin_users=(actor,),
-        )
-        state = labeling_web.ServerState(store=store, config=config)
-        server = ThreadingHTTPServer(("127.0.0.1", 0), labeling_web._make_handler(state))
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        lease = store.create_session(task_id=task_id, user=assignee, client_label=ADMIN_APPLY_CLIENT_LABEL)
-        session_id = str(lease.session_id)
         apply_id = retry_apply_id or str(uuid.uuid4())
-        try:
-            host, port = server.server_address
-            base = f"http://{host}:{port}/api/sessions/{session_id}/subject-mask"
+        with private_assignee_session(
+            store, store_path, task_id, assignee=assignee, actor=actor, client_label=ADMIN_APPLY_CLIENT_LABEL,
+        ) as (base, session_id):
             status, current = _request(base, "/state")
             if status != 200 or not current.get("ok"):
                 raise RuntimeError(f"Could not load the task state ({status}): {current.get('error')}: {current.get('details')}")
             target_token = (current.get("state") or current).get("target_token")
             status, response = _request(base, "/apply", {"apply_id": apply_id, "target_token": target_token})
-        finally:
-            store.close_session(session_id=session_id, user=assignee)
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=10)
         result = response.get("result") if isinstance(response.get("result"), dict) else {}
+        stale = int(result.get("stale_checkpoint_count") or 0)
+        applied = int(result.get("applied_checkpoint_count") or 0)
         outcome = {
-            "ok": status == 200 and bool(response.get("ok")),
+            # Every row skipped as stale is not a success: nothing was applied.
+            "ok": status == 200 and bool(response.get("ok")) and not (stale and not applied and not retry_apply_id),
+            "stale_checkpoint_count": stale,
             "http_status": status,
             "apply_id": apply_id,
             "session_id": session_id,
