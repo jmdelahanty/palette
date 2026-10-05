@@ -669,7 +669,8 @@ def project_unified_subject_metadata(
     Reads ``/metadata/subject`` through the sealed reference's verified
     attribute snapshot (not by reopening the raw H5 unchecked) and publishes it through the same subject/setup owners as legacy import,
     to the same locations. Missing fields such as ``subject_count`` refuse;
-    nothing is inferred (``subject_id`` is not ``fish_id``).
+    nothing is inferred. ``subject_id`` is the Citrus-local identity and
+    legacy ``fish_id`` its alias; a source carrying both refuses.
     """
 
     read_root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=True)
