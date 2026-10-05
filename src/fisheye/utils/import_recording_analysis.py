@@ -72,7 +72,8 @@ from fisheye.shared.recording_import_receipt import (
 from fisheye.shared.run_provenance import git_identity
 from fisheye.shared.unified_h5 import PROFILE as UNIFIED_H5_PROFILE
 from fisheye.shared.unified_h5 import UnifiedH5ContractError, declared_unified_profile
-from fisheye.shared.unified_h5.metadata import string_attributes
+from fisheye.shared.unified_h5.citrus_subject_snapshot import SNAPSHOT_PATH as CITRUS_SNAPSHOT_PATH
+from fisheye.shared.unified_h5.citrus_subject_snapshot import admit_subject_snapshot, subject_attributes
 from fisheye.shared.unified_h5.reference import new_native_run_name, open_unified_source
 from fisheye.shared.source_recording_identity import (
     SOURCE_ANALYSIS_CLASSIFICATION,
@@ -738,10 +739,19 @@ def project_unified_subject_metadata(
     except UnifiedH5ContractError:
         # No /metadata/subject node was admitted: absent, as in legacy.
         descriptors = {}
-    subject_metadata = normalize_subject_metadata(string_attributes(descriptors))
+    attributes = subject_attributes(descriptors)
+    try:
+        snapshot = source_reader.read_json(CITRUS_SNAPSHOT_PATH)
+    except UnifiedH5ContractError as exc:
+        if "unified_dataset_not_admitted" not in str(exc):
+            raise
+        snapshot = None
+    snapshot_admission = admit_subject_snapshot(snapshot, attributes)
+    subject_metadata = normalize_subject_metadata(attributes)
     if not subject_metadata:
         return None
     source = {
+        **snapshot_admission,
         "kind": "unified_native_subject_metadata",
         "group_path": "/metadata/subject",
         "count_field": "subject_count",
