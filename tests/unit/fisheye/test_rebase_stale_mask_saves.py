@@ -55,6 +55,17 @@ def stale_body_save(reviewed_archive, tmp_path):
         with _running_server(store, user="reviewer") as base:
             _save(base, session.session_id, 1, mask)
         store.close_session(session_id=session.session_id, user="reviewer")
+    # The body save stands for one made before saves recorded their base
+    # component digest (the case this tool exists for): without that digest,
+    # Apply cannot judge it by content and keeps the revision rule.
+    legacy = store.get_session_checkpoint(task_id="original-mask", roi_idx=1, component_name="subject_body")
+    metadata = {k: v for k, v in legacy["metadata"].items() if k != "base_component_sha256"}
+    store.upsert_session_checkpoint(
+        session_id=legacy["session_id"], task_id="original-mask", recording_id="rec", user="reviewer",
+        workflow_kind="subject_mask_component", target_run_path=legacy["target_run_path"],
+        target_edit_revision=legacy["target_edit_revision"], source_rowset_path=legacy["source_rowset_path"],
+        roi_idx=1, component_name="subject_body", payload=legacy["payload"], metadata=metadata,
+    )
     first = apply_on_behalf(store.path, "eyes-task", actor="operator", skip_backup=True)["outcome"]
     assert first["ok"] and first["applied_checkpoint_count"] == 1, first
     try:
