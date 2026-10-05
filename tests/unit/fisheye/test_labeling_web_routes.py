@@ -5949,8 +5949,12 @@ def test_subject_mask_apply_refreshes_locked_run_and_releases_prewrite_refusals(
         run_name="refined-subject-a", component_names=("body",),
         component_to_index={"body": 0}, parent=SimpleNamespace(),
     )
+    # The concurrent writer changed this component row (revision 0 -> 1), so
+    # the checkpoint saved against revision 0 is stale by content as well.
+    fresh_masks = masks.copy()
+    fresh_masks[0, 0, 0, 0] = 1
     fresh = SimpleNamespace(
-        group=FakeGroup({"masks_roi": masks.copy()}, attrs={"edit_revision": 1}),
+        group=FakeGroup({"masks_roi": fresh_masks}, attrs={"edit_revision": 1}),
         run_name="refined-subject-a", component_names=("body",),
         component_to_index={"body": 0}, parent=SimpleNamespace(),
     )
@@ -6071,7 +6075,8 @@ def test_subject_mask_http_apply_uses_real_run_lock_and_fresh_revision(tmp_path)
         ]
 
         def configure(state):
-            for lease, roi_idx in zip(leases, (0, 1)):
+            # Both tasks edit row 0: the first Apply changes the second's base row.
+            for lease, roi_idx in zip(leases, (0, 0)):
                 session_root = review_mod.open_zarr_root(zarr_path, mode="a")
                 session_refined = review_mod._open_existing_refined_subject_run(
                     session_root, "refined_subject_masks_001",
