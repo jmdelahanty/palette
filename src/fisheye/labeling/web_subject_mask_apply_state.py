@@ -21,6 +21,21 @@ TAIL_OFFER_KEYS = (
 )
 
 
+def component_row_sha256(mask) -> str:
+    """Digest of one component's binary row, as recorded on a mask save.
+
+    A save made at an older run revision is still applicable when its
+    component row is byte-identical to what the save was made against:
+    the newer revision changed only other components (or other rows).
+    """
+
+    import hashlib
+    import json
+
+    values = (np.asarray(mask) > 0).astype(np.uint8)
+    return hashlib.sha256(json.dumps(list(values.shape)).encode() + values.tobytes()).hexdigest()
+
+
 def committed_by_this_apply(runtime, *, apply_id, checkpoint_revision, edit_revision, committed_mask, checkpoint_mask):
     """True when a retried apply finds its own committed canonical write.
 
@@ -44,7 +59,9 @@ def classify_apply_checkpoints(runtime, checkpoints, *, apply_id, edit_revision,
 
     Rows at the current revision get their edited stack prepared (one masks_roi
     chunk read per chunk).  Rows one revision behind that this apply already
-    committed are verified pixel-exact; other revision mismatches are stale.
+    committed are verified pixel-exact.  Rows saved at another revision are
+    written too when their component row still matches the recorded
+    ``base_component_sha256``; other revision mismatches are stale.
     """
 
     from . import web_mask_tail_border as tail_border
@@ -81,6 +98,7 @@ def classify_apply_checkpoints(runtime, checkpoints, *, apply_id, edit_revision,
         roi_idx = int(checkpoint.get("roi_idx") or 0)
         if roi_idx not in scoped_row_set:
             raise ValueError(f"checkpoint row {roi_idx} is outside the active task row scope.")
+        metadata = checkpoint.get("metadata")
         if checkpoint_revision != edit_revision:
             if committed_by_this_apply(
                 runtime, apply_id=apply_id, checkpoint_revision=checkpoint_revision,
@@ -90,10 +108,18 @@ def classify_apply_checkpoints(runtime, checkpoints, *, apply_id, edit_revision,
                 committed_checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
                 committed_rows.append(roi_idx)
                 continue
-            stale_checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
-            stale_rows.append(roi_idx)
-            continue
-        metadata = checkpoint.get("metadata")
+            # The run revision is shared by all components. A save whose own
+            # component row is byte-identical to the base it was made against
+            # is still applicable; without that recorded base it stays stale.
+            base_sha = metadata.get("base_component_sha256") if isinstance(metadata, Mapping) else None
+            if not (
+                isinstance(base_sha, str)
+                and base_sha
+                and component_row_sha256(masks_array[roi_idx, runtime.comp_idx]) == base_sha
+            ):
+                stale_checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
+                stale_rows.append(roi_idx)
+                continue
         if isinstance(metadata, Mapping):
             expected_identity = metadata.get("row_identity")
             if isinstance(expected_identity, Mapping):
