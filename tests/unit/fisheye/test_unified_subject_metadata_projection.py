@@ -148,39 +148,50 @@ def test_pre_contract_citrus_snapshot_is_recorded_not_paired(tmp_path: Path) -> 
     assert source["citrus_snapshot_status"] == "pre_contract"
 
 
-def test_v3_session_without_a_dish_records_absence_and_publishes_nothing(
-    tmp_path: Path, monkeypatch
-) -> None:
-    # Citrus v3 writes /metadata/subject in every session; with no dish it holds
-    # only the lookup statuses, which must not demand a subject_count. (A real
-    # v3 file needs Citrus's resealed dependency manifest, so the source reader
-    # is stubbed here; the first real v3 recording exercises the full path.)
-    from tests.unit.fisheye.test_citrus_subject_snapshot import V3
+# Citrus 288f14d sealed full_bound_pair fixtures, subject identity v3
+# (agent-contracts PR 52 #6026862148): admitted and projected unmodified.
+V3_EXPECTED = {
+    "v3_dish_collected": {"count": 1, "subject_type": "individual", "uuid": True,
+                          "lookup": "collected", "fish": ("not_collected", "operator_did_not_select"),
+                          "pin": True},
+    "v3_dish_group": {"count": 3, "subject_type": "dish_group", "uuid": True,
+                      "lookup": "collected", "fish": ("not_collected", "dish_group_subject"),
+                      "pin": True},
+    "v3_lookup_failed": {"count": 1, "subject_type": "individual", "uuid": False,
+                         "lookup": "lookup_failed", "fish": ("lookup_failed", "dish_lookup_failed"),
+                         "pin": True},
+    "v3_version_read_failed": {"count": 1, "subject_type": "individual", "uuid": True,
+                               "lookup": "collected", "fish": ("not_collected", "operator_did_not_select"),
+                               "pin": None},
+}
 
-    statuses = {
-        "subject_lookup_status": "not_collected", "subject_lookup_reason": "no_dish_declared",
-        "fish_reference_status": "not_collected", "fish_reference_reason": "no_dish_declared",
-    }
-    snapshot = json.loads(json.dumps(V3))
-    snapshot.update(
-        dish_id=None, subject_lookup_status="not_collected",
-        subject_lookup_reason="no_dish_declared", dish=None,
-        subject={"subject_id": None, "subject_type": None, "subject_count": None},
-    )
-    snapshot["fish_reference"]["reason"] = "no_dish_declared"
 
-    class Source:
-        reference_sha256 = "0" * 64
+@pytest.mark.parametrize("fixture", sorted(V3_EXPECTED))
+def test_citrus_v3_fixtures_project_their_declared_subject(tmp_path: Path, fixture: str) -> None:
+    expected = V3_EXPECTED[fixture]
+    plan = _native_candidate(tmp_path, None, fixture=fixture)
 
-        def typed_attributes(self, path):
-            return {}
+    published = mod.project_unified_subject_metadata(plan, "candidate")
 
-        def read_json(self, path):
-            return snapshot
+    root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+    subject = resolve_subject_metadata(root, allow_legacy=False).metadata
+    source = dict(resolve_experiment_setup(root, allow_legacy=False).source)
+    assert published["expected_subject_count"] == expected["count"]
+    assert subject["subject_type"] == expected["subject_type"]
+    assert ("dish_uuid" in subject) is expected["uuid"]
+    assert subject["subject_lookup_status"] == expected["lookup"]
+    assert (subject["fish_reference_status"], subject["fish_reference_reason"]) == expected["fish"]
+    assert source["citrus_snapshot_status"] == "admitted"
+    assert source["citrus_snapshot_schema_version"] == 3
+    assert source["zebrobot_consumer_schema_matches_pin"] is expected["pin"]
+    if fixture == "v3_lookup_failed":  # operator-declared, unverified fish
+        assert subject["mzb_fish_id"] == "F-1" and "mzb_fish_revision" not in subject
 
-    plan = _native_candidate(tmp_path, None)
-    monkeypatch.setattr(mod, "open_unified_source", lambda root, run_name: Source())
-    monkeypatch.setattr(mod, "subject_attributes", lambda descriptors: dict(statuses))
+
+def test_citrus_v3_no_dish_fixture_records_absence_and_publishes_nothing(tmp_path: Path) -> None:
+    # v3 writes /metadata/subject in every session; with no dish it holds only
+    # the lookup statuses, which must not demand a subject_count.
+    plan = _native_candidate(tmp_path, None, fixture="v3_no_dish")
 
     assert mod.project_unified_subject_metadata(plan, "candidate") is None
 

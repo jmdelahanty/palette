@@ -1,0 +1,37 @@
+{
+  "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+  "contract": {
+    "acceptance_contract_sha256": "sha256:3d5fa82b39048b09e3481bb75d749f220654c2d4e4d981c7fed364bc332256e0",
+    "acceptance_id": "obsbindacc_3d5fa82b39048b09e3481bb75d749f220654c2d4e4d981c7fed364bc332256e0",
+    "citrus_experiment_id": "citexp_55062fec5d10a3e31205f4f499d55819745c7d79b536f0576ea732d09135d4c3",
+    "citrus_session_uuid": "citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80",
+    "finalized_at_utc": "2026-09-07T12:00:00Z",
+    "h5_artifact": {
+      "relative_path": "citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair.h5",
+      "sha256": "sha256:2745191ce6cf7d198dcae9912928e40e7aa409b708d872977a78e90b669fe08e",
+      "size_bytes": 886432
+    },
+    "observation_context_id": "obsctx_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80",
+    "protocol_semantic": {
+      "semantic_sha256": "sha256:28da03093926963c0600189b3142c4950db7c7806abbb60e3c440346a89a7e3d",
+      "status": "available"
+    },
+    "request_contract_sha256": "sha256:a6a3f9dbd0e677d9d6071fe921b3175bab0c076360ba4d35b90fc6bf8acde591",
+    "request_id": "obsbindreq_a6a3f9dbd0e677d9d6071fe921b3175bab0c076360ba4d35b90fc6bf8acde591",
+    "runtime_geometry_contract_sha256": "sha256:c2ef8af5fe938246ada55d9b0ceea1b7b75f99bdc9b93b6395eb8ef8fc246a0a",
+    "schema_id": "citrus.recording_observation_finalized_receipt",
+    "schema_version": 1,
+    "session_status": "COMPLETE",
+    "target": {
+      "arena_id": "arena_1",
+      "camera_id": "CAM-42",
+      "canvas_name": "synthetic-canvas",
+      "rig_id": "synthetic-preservation-rig",
+      "source_camera_stream_id": "CAM-42"
+    }
+  },
+  "contract_sha256": "sha256:f3f4c5094300b34ae757236b0af7b8f8cc6bcb0b752dc44acd423b58a9c0cd89",
+  "receipt_id": "obsbindfin_f3f4c5094300b34ae757236b0af7b8f8cc6bcb0b752dc44acd423b58a9c0cd89",
+  "schema_id": "citrus.recording_observation_finalized_receipt",
+  "schema_version": 1
+}
