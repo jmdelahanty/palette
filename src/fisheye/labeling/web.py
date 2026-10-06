@@ -42,6 +42,7 @@ from .web_subject_mask_deferred_review import (
     record_deferred_review,
 )
 from .web_subject_mask_apply_state import (
+    component_row_sha256,
     classify_apply_checkpoints,
     commit_mask_edit_revision,
     pending_mask_run_effects,
@@ -2499,6 +2500,9 @@ def _make_handler(state: ServerState):
                             "schema": "palette.web_labeling_subject_mask_checkpoint_metadata.v1",
                             "row_identity": row_identity,
                             "component_name": runtime.component_name,
+                            # The component row this edit was made against; lets Apply
+                            # accept it after another component's Apply bumps the revision.
+                            "base_component_sha256": component_row_sha256(canonical_mask),
                             "target_run_path": _subject_mask_target_run_path(runtime),
                             "source_rowset_path": _subject_mask_source_rowset_path(runtime),
                         },
