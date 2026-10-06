@@ -38,6 +38,11 @@
     // discarded strokes). Its mask can be copied onto the current row when
     // the animal holds the same position, even across non-adjacent frames.
     let previousRow = null;
+    // Move tool: one move session per contiguous drag/nudge sequence. Offsets
+    // are always applied to the mask as it was when the session began, so
+    // pixels pushed past the crop edge come back if the mask is moved back.
+    let moveSession = null;
+    let moveDragging = false;
 
     function hasUnsavedEdits() {
       return Boolean(mask && loadedMask && mask.some((value, index) => value !== loadedMask[index]));
@@ -243,6 +248,7 @@
       mask = new Uint8Array(maskWidth * maskHeight);
       for (let i = 0; i < mask.length; i++) mask[i] = bytes[i] > 0 ? 1 : 0;
       loadedMask = mask.slice();
+      endMoveSession();
       forgetUndo();
       markMaskOverlayDirty();
     }
@@ -314,6 +320,7 @@
 
     function undoBulkEdit() {
       if (!bulkUndoMask || !mask || bulkUndoMask.length !== mask.length) return;
+      endMoveSession();
       mask.set(bulkUndoMask);
       const label = bulkUndoLabel;
       forgetUndo();
@@ -350,6 +357,51 @@
       markMaskOverlayDirty();
       scheduleDraw();
       setStatus("Copied the mask from ROI " + previousRow.roi + " locally (same crop position). Check it, then save.");
+    }
+
+    // Shift a binary mask by whole pixels; pixels landing outside are dropped.
+    function translateMask(source, width, height, dx, dy) {
+      const out = new Uint8Array(width * height);
+      let lost = 0;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          if (!source[y * width + x]) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) { lost++; continue; }
+          out[ny * width + nx] = 1;
+        }
+      }
+      return {mask: out, lost};
+    }
+
+    function beginMoveSession() {
+      if (moveSession || !mask) return;
+      rememberForUndo("move");
+      moveSession = {origin: mask.slice(), dx: 0, dy: 0, dragStart: null, dragBase: [0, 0]};
+    }
+
+    function endMoveSession() {
+      moveSession = null;
+      moveDragging = false;
+    }
+
+    function setMoveOffset(dx, dy) {
+      if (!moveSession || !mask) return;
+      moveSession.dx = dx;
+      moveSession.dy = dy;
+      const moved = translateMask(moveSession.origin, maskWidth, maskHeight, dx, dy);
+      mask.set(moved.mask);
+      markMaskOverlayDirty();
+      scheduleDraw();
+      const lostText = moved.lost ? " " + moved.lost + " px are outside the crop; move back to keep them." : "";
+      setStatus("Moved the mask " + dx + ", " + dy + " px locally." + lostText + " Save to persist.");
+    }
+
+    function nudgeMask(dx, dy) {
+      if (!mask || busyAction) return;
+      beginMoveSession();
+      setMoveOffset(moveSession.dx + dx, moveSession.dy + dy);
     }
 
     function removeStrayPiecesAction() {
@@ -527,6 +579,7 @@
 
     function drawCursorOverlay() {
       if (!cursorMaskPoint || !maskWidth || !maskHeight) return;
+      if (tool === "move" && !lassoMode) return;  // the system "grab" cursor shows instead
       const [x, y] = maskToCanvasPoint(cursorMaskPoint[0], cursorMaskPoint[1]);
       ctx.save();
       ctx.lineWidth = 2;
@@ -782,6 +835,7 @@
         // What was just saved is this row's baseline; Save + Next hands it to
         // the next row as the copy-previous source.
         if (mask) loadedMask = mask.slice();
+        endMoveSession();
         await loadCurrent();
         setStatus("Checkpoint saved; area " + result.result.checkpoint_area_px + " px." + mutationStatusSuffix(result));
       } catch (error) {
@@ -1005,11 +1059,16 @@
     }
 
     function setTool(nextTool) {
+      if (nextTool !== "move") endMoveSession();
       tool = nextTool;
+      if (tool === "move" && lassoMode) setLassoMode(false);
       document.getElementById("paint-button").classList.toggle("active", tool === "paint");
       document.getElementById("erase-button").classList.toggle("active", tool === "erase");
       document.getElementById("fill-holes-button")?.classList.toggle("active", tool === "fill");
+      document.getElementById("move-button")?.classList.toggle("active", tool === "move");
+      canvas.style.cursor = tool === "move" ? "grab" : "none";
       if (tool === "fill") setStatus("Fill holes: click a mask piece to fill the holes inside it.");
+      if (tool === "move") setStatus("Move: drag the mask, or use the arrow keys (Shift for 10 px). One Undo reverts the whole move.");
       scheduleDraw();
     }
 
@@ -1177,6 +1236,15 @@
         fillHolesAt(event);
         return;
       }
+      if (tool === "move") {
+        if (!mask || busyAction) return;
+        beginMoveSession();
+        moveDragging = true;
+        moveSession.dragStart = cursorMaskPoint;
+        moveSession.dragBase = [moveSession.dx, moveSession.dy];
+        canvas.style.cursor = "grabbing";
+        return;
+      }
       drawing = true;
       paintAt(event);
     }
@@ -1193,8 +1261,25 @@
         scheduleDraw();
         return;
       }
+      if (moveDragging && moveSession && moveSession.dragStart) {
+        event.preventDefault();
+        const [bx, by] = moveSession.dragBase;
+        const [sx, sy] = moveSession.dragStart;
+        setMoveOffset(bx + cursorMaskPoint[0] - sx, by + cursorMaskPoint[1] - sy);
+        return;
+      }
       if (drawing) paintAt(event);
       else scheduleDraw();
+    }
+
+    function endCanvasEdit() {
+      drawing = false;
+      lassoDrawing = false;
+      if (moveDragging) {
+        moveDragging = false;
+        if (tool === "move") canvas.style.cursor = "grab";
+      }
+      viewport.endPan();
     }
 
     canvas.addEventListener("mousedown", beginCanvasEdit);
@@ -1202,8 +1287,8 @@
     canvas.addEventListener("mouseleave", () => { cursorMaskPoint = null; lassoCursor = null; scheduleDraw(); });
     canvas.addEventListener("touchstart", beginCanvasEdit, {passive: false});
     canvas.addEventListener("touchmove", moveCanvasEdit, {passive: false});
-    window.addEventListener("mouseup", () => { drawing = false; lassoDrawing = false; viewport.endPan(); });
-    window.addEventListener("touchend", () => { drawing = false; lassoDrawing = false; viewport.endPan(); });
+    window.addEventListener("mouseup", endCanvasEdit);
+    window.addEventListener("touchend", endCanvasEdit);
     canvas.addEventListener("wheel", viewport.handleWheel, {passive: false});
     window.addEventListener("beforeunload", (event) => {
       if (!hasUnsavedEdits()) return;
@@ -1241,6 +1326,14 @@
       if (event.key === "h" || event.key === "H") { event.preventDefault(); setTool("fill"); return; }
       if (event.key === "r" || event.key === "R") { event.preventDefault(); removeStrayPiecesAction(); return; }
       if (event.key === "c" || event.key === "C") { event.preventDefault(); copyPreviousMask(); return; }
+      if (event.key === "m" || event.key === "M") { event.preventDefault(); setTool("move"); return; }
+      if (tool === "move" && event.key.startsWith("Arrow")) {
+        event.preventDefault();
+        const step = event.shiftKey ? 10 : 1;
+        const delta = {ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step]}[event.key];
+        if (delta) nudgeMask(delta[0], delta[1]);
+        return;
+      }
       if (event.key === "b" || event.key === "B") { event.preventDefault(); setTool("paint"); return; }
       if (event.key === "x" || event.key === "X") { event.preventDefault(); toggleBrushMode(); return; }
       if (event.key === "[") { event.preventDefault(); setBrushSize(brushSize - 1); return; }
