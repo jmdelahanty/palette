@@ -30,6 +30,7 @@ from fisheye.shared.recording_geometry import (
 from fisheye.shared.recording_geometry_bundle import (
     iter_recording_geometry_bundle_files,
 )
+from fisheye.shared.zebrobot_subject_reference import validate_subject_references
 from fisheye.shared.recording_manifest_context import (
     PRODUCER_CONTEXT_SOURCE,
     validate_recording_manifest_context,
@@ -268,6 +269,14 @@ def build_transfer_organization_plan(
         require(relative.startswith("_citrus_transfer/"), "unplanned source artifact")
         inventory[relative] = file_ref(source, relative)
     session = strict_json(source / "recording_session.json")
+    # Orange's sealed per-camera Zebrobot references (absent in older sessions).
+    subject_references = (
+        validate_subject_references(
+            session["subject_references"], [parent.camera_id for parent in parents]
+        )
+        if "subject_references" in session
+        else {}
+    )
 
     # Explicit producer refs, not filenames, own camera artifacts. All other
     # payload members stay durable session context unless the H5 owner binds
@@ -402,6 +411,7 @@ def build_transfer_organization_plan(
                 else None
             ),
             "recording_geometry_bundle": geometry,
+            "zebrobot_subject_reference": subject_references.get(parent.camera_id),
         }
         records.append(record)
 
@@ -901,6 +911,11 @@ def _parent_manifest(plan: dict, parent: dict) -> dict:
         ),
         "files": files,
         "recording_geometry_bundle": parent["recording_geometry_bundle"],
+        **(
+            {"zebrobot_subject_reference": parent["zebrobot_subject_reference"]}
+            if parent.get("zebrobot_subject_reference") is not None
+            else {}
+        ),
         "preflight": default_preflight_payload(),
         "source_transfer": {
             "schema_id": "palette.organized_recording_transfer.v1",

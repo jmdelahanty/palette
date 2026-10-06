@@ -1,0 +1,685 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jmdelahanty/agent-contracts/citrus-palette/citrus_zebrobot_snapshot_v3.schema.json",
+  "title": "Citrus MetaZebrobot snapshot v3 (H5 /metadata/zebrobot)",
+  "description": "Citrus's own snapshot version 3; distinct from the MetaZebrobot API schema_version, recorded as api_schema_version. v2 plus the sealed MetaZebrobot GET /version identity (zebrobot_service) and the subject identity (subject). See subject_identity_v3_2026-10-05.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "api_schema_version",
+    "queried_at_utc",
+    "dish_id",
+    "subject_lookup_status",
+    "subject_lookup_reason",
+    "dish",
+    "cross",
+    "fish_reference",
+    "errors",
+    "zebrobot_service",
+    "subject"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 3
+    },
+    "api_schema_version": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "queried_at_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "dish_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "subject_lookup_status": {
+      "$ref": "#/$defs/status"
+    },
+    "subject_lookup_reason": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "no_dish_declared",
+            "zebrobot_not_configured",
+            "dish_lookup_transport_failure",
+            "dish_lookup_invalid_body",
+            "dish_lookup_api_schema_mismatch",
+            "dish_lookup_identity_mismatch"
+          ]
+        },
+        {
+          "type": "string",
+          "pattern": "^dish_lookup_http_[0-9]{3}$"
+        },
+        {
+          "type": "string",
+          "pattern": "^dish_lookup_missing_[a-z_]+$"
+        }
+      ]
+    },
+    "dish": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/dish"
+        }
+      ]
+    },
+    "cross": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/cross"
+        }
+      ]
+    },
+    "fish_reference": {
+      "$ref": "#/$defs/fish_reference"
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/error"
+      }
+    },
+    "zebrobot_service": {
+      "$ref": "#/$defs/zebrobot_service"
+    },
+    "subject": {
+      "$ref": "#/$defs/subject"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "subject_lookup_status": {
+            "const": "collected"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "dish_id": {
+            "type": "string"
+          },
+          "api_schema_version": {
+            "const": 2
+          },
+          "subject_lookup_reason": {
+            "type": "null"
+          },
+          "dish": {
+            "$ref": "#/$defs/dish"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "subject_lookup_reason": {
+            "type": "string"
+          },
+          "dish": {
+            "type": "null"
+          },
+          "cross": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "subject_lookup_status": {
+            "const": "not_collected"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "dish_id": {
+            "type": "null"
+          },
+          "subject_lookup_reason": {
+            "const": "no_dish_declared"
+          },
+          "fish_reference": {
+            "properties": {
+              "status": {
+                "const": "not_collected"
+              },
+              "reason": {
+                "const": "no_dish_declared"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "subject_lookup_status": {
+            "const": "lookup_failed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "dish_id": {
+            "type": "string"
+          },
+          "errors": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dish_id": {
+            "type": "null"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "subject": {
+            "properties": {
+              "subject_id": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "subject": {
+            "properties": {
+              "subject_id": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "status": {
+      "enum": [
+        "collected",
+        "not_collected",
+        "lookup_failed"
+      ]
+    },
+    "dish": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dish_id",
+        "dish_uuid",
+        "dish_revision",
+        "dish_updated_at",
+        "cross_id",
+        "genotype",
+        "dof",
+        "fish_count",
+        "species",
+        "sex"
+      ],
+      "properties": {
+        "dish_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dish_uuid": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dish_revision": {
+          "type": "integer"
+        },
+        "dish_updated_at": {
+          "type": "string",
+          "description": "Verbatim copy of the served updated_at; never reformatted. Format is owned by MetaZebrobot (docs/api/consumer_openapi.json)."
+        },
+        "cross_id": {
+          "type": "string"
+        },
+        "genotype": {
+          "type": "string"
+        },
+        "dof": {
+          "type": "string"
+        },
+        "dpf": {
+          "type": "integer"
+        },
+        "fish_count": {
+          "type": "integer",
+          "description": "Copied as served; never used to derive subject_count or a fish reference."
+        },
+        "species": {
+          "type": "string"
+        },
+        "sex": {
+          "type": "string"
+        }
+      }
+    },
+    "cross": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cross_id",
+        "line_strain",
+        "parents"
+      ],
+      "properties": {
+        "cross_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line_strain": {
+          "type": "string"
+        },
+        "parents": {
+          "type": "array"
+        }
+      }
+    },
+    "fish_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reason",
+        "mzb_fish_id",
+        "mzb_fish_revision",
+        "mzb_fish_updated_at"
+      ],
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "reason": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "no_dish_declared",
+                "dish_group_subject",
+                "operator_did_not_select",
+                "dish_lookup_failed",
+                "fish_lookup_transport_failure",
+                "fish_lookup_invalid_body",
+                "fish_lookup_selected_fish_missing"
+              ]
+            },
+            {
+              "type": "string",
+              "pattern": "^fish_lookup_http_[0-9]{3}$"
+            }
+          ]
+        },
+        "mzb_fish_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mzb_fish_revision": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mzb_fish_updated_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "description": "mzb_fish_id is a verified MetaZebrobot reference only when status is collected with revision and updated_at present; under lookup_failed it is an operator declaration (PR 52 #6002828990).",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "collected"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              },
+              "mzb_fish_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "mzb_fish_revision": {
+                "type": "integer"
+              },
+              "mzb_fish_updated_at": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "lookup_failed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "dish_lookup_failed",
+                      "fish_lookup_transport_failure",
+                      "fish_lookup_invalid_body",
+                      "fish_lookup_selected_fish_missing"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^fish_lookup_http_[0-9]{3}$"
+                  }
+                ]
+              },
+              "mzb_fish_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "mzb_fish_revision": {
+                "type": "null"
+              },
+              "mzb_fish_updated_at": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "not_collected"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "no_dish_declared",
+                  "dish_group_subject",
+                  "operator_did_not_select"
+                ]
+              },
+              "mzb_fish_id": {
+                "type": "null"
+              },
+              "mzb_fish_revision": {
+                "type": "null"
+              },
+              "mzb_fish_updated_at": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "endpoint",
+        "kind",
+        "http_status",
+        "detail_error",
+        "message"
+      ],
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "description": "Request path, e.g. /dishes/{dish_id}/citrus-snapshot or /dishes/{dish_id}/fish."
+        },
+        "kind": {
+          "enum": [
+            "transport",
+            "http",
+            "body"
+          ]
+        },
+        "http_status": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "detail_error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "MetaZebrobot detail.error when served; values are owned by MetaZebrobot (docs/api/consumer_openapi.json)."
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "transport"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "http_status": {
+                "type": "null"
+              },
+              "detail_error": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "http",
+                  "body"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "http_status": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "zebrobot_service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "service_commit",
+        "service_commit_dirty",
+        "consumer_schema_sha256"
+      ],
+      "description": "Copied as served from MetaZebrobot GET /version, read once per arena session at experiment start; all null when the read failed (errors[] then carries an entry for endpoint /version).",
+      "properties": {
+        "service_commit": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{7,40}$"
+            }
+          ]
+        },
+        "service_commit_dirty": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "consumer_schema_sha256": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subject_id",
+        "subject_type",
+        "subject_count"
+      ],
+      "description": "Citrus-local subject identity, equal to the /metadata/subject attrs of the same names; all null exactly when no dish is declared (no attrs).",
+      "properties": {
+        "subject_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "subject_type": {
+          "enum": [
+            "individual",
+            "dish_group",
+            null
+          ]
+        },
+        "subject_count": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "subject_id": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "subject_type": {
+                "type": "null"
+              },
+              "subject_count": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "subject_type": {
+                "type": "string"
+              },
+              "subject_count": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "subject_count": {
+                "const": 1
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "subject_type": {
+                "const": "individual"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "subject_count": {
+                "type": "integer",
+                "minimum": 2
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "subject_type": {
+                "const": "dish_group"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

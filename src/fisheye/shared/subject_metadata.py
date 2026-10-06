@@ -52,7 +52,24 @@ class ResolvedSubjectMetadata:
     legacy: bool
 
 
-def _explicit_subject_ids(metadata: Mapping[str, Any]) -> tuple[list[str], str]:
+def _explicit_subject_ids(
+    metadata: Mapping[str, Any], *, legacy_rule: bool = False
+) -> tuple[list[str], str]:
+    """Citrus-local subject ids, never MetaZebrobot fish ids.
+
+    ``subject_id`` is the identity field going forward; ``fish_id`` is the
+    legacy Citrus spelling of the same local id (agent-contracts PR 52), and a
+    source carrying both is refused. ``legacy_rule`` reproduces the earlier
+    derivation, which ignored a singular ``subject_id``, so records published
+    before this rule and legacy singleton reads stay byte-for-byte unchanged.
+    """
+
+    if not legacy_rule and _present(metadata.get("subject_id")) and _present(
+        metadata.get("fish_id")
+    ):
+        raise SubjectMetadataError(
+            "Subject metadata carries both subject_id and legacy fish_id"
+        )
     raw_ids = metadata.get("subject_ids") or metadata.get("fish_ids")
     if isinstance(raw_ids, (list, tuple)):
         ids = list(
@@ -60,8 +77,15 @@ def _explicit_subject_ids(metadata: Mapping[str, Any]) -> tuple[list[str], str]:
         )
         source_field = "subject_ids" if metadata.get("subject_ids") is not None else "fish_ids"
         return ids, source_field
+    subject_id = "" if legacy_rule else str(metadata.get("subject_id") or "").strip()
+    if subject_id:
+        return [subject_id], "subject_id"
     fish_id = str(metadata.get("fish_id") or "").strip()
     return ([fish_id] if fish_id else []), ("fish_id" if fish_id else "none")
+
+
+def _present(value: Any) -> bool:
+    return value is not None and str(value).strip() != ""
 
 
 def _identity_kind(subject_ids: list[str]) -> str:
@@ -102,9 +126,11 @@ def read_h5_subject_metadata(h5_path: str | Path) -> dict[str, Any]:
     return normalize_subject_metadata(metadata)
 
 
-def build_subject_metadata_record(metadata: Mapping[str, Any]) -> dict[str, Any]:
+def build_subject_metadata_record(
+    metadata: Mapping[str, Any], *, legacy_rule: bool = False
+) -> dict[str, Any]:
     canonical = normalize_subject_metadata(metadata)
-    subject_ids, source_field = _explicit_subject_ids(canonical)
+    subject_ids, source_field = _explicit_subject_ids(canonical, legacy_rule=legacy_rule)
     record = {
         "schema_id": SUBJECT_METADATA_SCHEMA_ID,
         "schema_version": SUBJECT_METADATA_SCHEMA_VERSION,
@@ -116,6 +142,17 @@ def build_subject_metadata_record(metadata: Mapping[str, Any]) -> dict[str, Any]
     return record
 
 
+def _stored_identity(
+    record: Mapping[str, Any], metadata: Mapping[str, Any]
+) -> tuple[list[str], str]:
+    """Current identity rule, or the earlier one for an already-published record."""
+
+    legacy = _explicit_subject_ids(metadata, legacy_rule=True)
+    if (record.get("subject_ids"), record.get("subject_identity_source_field")) == legacy:
+        return legacy
+    return _explicit_subject_ids(metadata)
+
+
 def _validate_record(record: Mapping[str, Any], digest: str | None = None) -> dict[str, Any]:
     canonical = json_attr_safe_mapping(record)
     if canonical.get("schema_id") != SUBJECT_METADATA_SCHEMA_ID:
@@ -125,7 +162,7 @@ def _validate_record(record: Mapping[str, Any], digest: str | None = None) -> di
     metadata = canonical.get("subject_metadata")
     if not isinstance(metadata, dict):
         raise SubjectMetadataError("Subject metadata record has no metadata mapping")
-    expected_ids, expected_source = _explicit_subject_ids(metadata)
+    expected_ids, expected_source = _stored_identity(canonical, metadata)
     if canonical.get("subject_ids") != expected_ids:
         raise SubjectMetadataError("Normalized subject_ids disagree with source metadata")
     if canonical.get("subject_identity_source_field") != expected_source:
@@ -300,7 +337,7 @@ def resolve_subject_metadata(
             raw_metadata = None
     if not isinstance(raw_metadata, Mapping):
         raise MissingSubjectMetadataError("Missing subject metadata")
-    record = build_subject_metadata_record(raw_metadata)
+    record = build_subject_metadata_record(raw_metadata, legacy_rule=True)
     digest = subject_metadata_sha256(record)
     return _resolved(
         record,
