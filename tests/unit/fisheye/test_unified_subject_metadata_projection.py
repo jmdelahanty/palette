@@ -56,11 +56,13 @@ PRODUCTION_SUBJECT = {
 }
 
 
-def _native_candidate(tmp_path: Path, subject: dict[str, str] | None) -> mod.RecordingAnalysisPlan:
+def _native_candidate(
+    tmp_path: Path, subject: dict[str, str] | None, fixture: str = "base"
+) -> mod.RecordingAnalysisPlan:
     """Import a fixture (optionally with replaced subject attrs) as a native candidate."""
 
-    h5_path = emit_fixture(tmp_path / "source", "base")
-    receipt = write_receipt(tmp_path / "source", "base")
+    h5_path = emit_fixture(tmp_path / "source", fixture)
+    receipt = write_receipt(tmp_path / "source", fixture)
     if subject is not None:
         with h5py.File(h5_path, "r+") as h5:
             attrs = h5["/metadata/subject"].attrs
@@ -69,7 +71,7 @@ def _native_candidate(tmp_path: Path, subject: dict[str, str] | None) -> mod.Rec
             for key, value in subject.items():
                 attrs[key] = value
         receipt = tmp_path / "source" / "resealed.receipt.json"
-        receipt.write_text(json.dumps(synthetic_receipt_for_mutated_test_file(h5_path, "base")))
+        receipt.write_text(json.dumps(synthetic_receipt_for_mutated_test_file(h5_path, fixture)))
     zarr_path = tmp_path / "analysis.zarr"
     import_stimulus_to_zarr(
         h5_path, zarr_path, run_name="candidate", overwrite=False, verbose=False,
@@ -125,11 +127,23 @@ def test_setup_records_its_verified_native_source(tmp_path: Path) -> None:
     root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
     source = dict(resolve_experiment_setup(root, allow_legacy=False).source)
     assert source["kind"] == "unified_native_subject_metadata"
+    assert source["citrus_snapshot_status"] == "absent"
     assert source["group_path"] == "/metadata/subject"
     assert source["native_run_path"] == "analysis/stimulus_runs/candidate"
     assert source["unified_reference_sha256"] == root[
         "analysis/stimulus_runs/candidate"
     ].attrs[REFERENCE_DIGEST_ATTR]
+
+
+def test_pre_contract_citrus_snapshot_is_recorded_not_paired(tmp_path: Path) -> None:
+    # e1bbc75 writes a pre-contract snapshot_json that also says schema_version 2.
+    plan = _native_candidate(tmp_path, None, fixture="admission_v2_roundtrip")
+
+    mod.project_unified_subject_metadata(plan, "candidate")
+
+    root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+    source = dict(resolve_experiment_setup(root, allow_legacy=False).source)
+    assert source["citrus_snapshot_status"] == "pre_contract"
 
 
 def test_missing_subject_count_refuses_rather_than_inventing(tmp_path: Path) -> None:

@@ -67,6 +67,8 @@ MZB_PIN = {
     "repo": "jmdelahanty/metazebrobot",
     "commit": "509a3eb88d6ff44fe07e7ea20d212be5eafe46b7",
     "consumer_openapi_sha256": "f5280e430d4b5f10c3643cb89a6187eacc45fdac7af55b2e81f5e315b7b754dc",
+    # agent-contracts metazebrobot-consumers/consumers.json (PR 54, merge 5fc735fe).
+    "consumers_json_sha256": "8d2b38780ad08c7111cb6f5bd81723169e5ce96cad44f489e6cf442ee071bda3",
 }
 
 
