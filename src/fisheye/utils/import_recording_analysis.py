@@ -72,7 +72,8 @@ from fisheye.shared.recording_import_receipt import (
 from fisheye.shared.run_provenance import git_identity
 from fisheye.shared.unified_h5 import PROFILE as UNIFIED_H5_PROFILE
 from fisheye.shared.unified_h5 import UnifiedH5ContractError, declared_unified_profile
-from fisheye.shared.unified_h5.metadata import string_attributes
+from fisheye.shared.unified_h5.citrus_subject_snapshot import SNAPSHOT_PATH as CITRUS_SNAPSHOT_PATH
+from fisheye.shared.unified_h5.citrus_subject_snapshot import admit_subject_snapshot, subject_attributes
 from fisheye.shared.unified_h5.reference import new_native_run_name, open_unified_source
 from fisheye.shared.source_recording_identity import (
     SOURCE_ANALYSIS_CLASSIFICATION,
@@ -85,10 +86,13 @@ from fisheye.shared.source_recording_identity import (
     load_strict_json_object,
 )
 from fisheye.shared.subject_metadata import (
+    MissingSubjectMetadataError,
     normalize_subject_metadata,
     publish_subject_metadata,
     read_h5_subject_metadata,
+    resolve_subject_metadata,
 )
+from fisheye.shared.zebrobot_subject_reference import resolve_subject_reference
 from fisheye.shared.zarr_run_completion import (
     PALETTE_STORE_EPOCH_ATTR,
     PALETTE_STORE_EPOCH_FAIL_CLOSED_COMPLETION,
@@ -637,6 +641,61 @@ def import_experiment_setup(plan: RecordingAnalysisPlan) -> Optional[dict[str, A
     )
 
 
+def import_zebrobot_subject_reference(
+    plan: RecordingAnalysisPlan, *, fetch=None
+) -> Optional[dict[str, Any]]:
+    """Resolve Orange's sealed Zebrobot reference for this parent at intake.
+
+    A declared absence is recorded on the archive root; a collected reference
+    is fetched, verified and published as subject metadata only when no H5
+    subject metadata exists (recording-only). With H5 metadata present it is a
+    cross-check: a differing ``dish_uuid`` refuses. ``ZebrobotUnavailable``
+    propagates so the import fails and can be retried, never finalized empty.
+    """
+
+    manifest = _load_recording_manifest(plan.recording_dir)
+    reference = manifest.get("zebrobot_subject_reference")
+    if reference is None:
+        return None
+    resolved = resolve_subject_reference(
+        reference,
+        camera=str(manifest.get("camera_id")),
+        **({"fetch": fetch} if fetch is not None else {}),
+    )
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    # Orange's declared reference status, distinct from whether subject metadata
+    # exists: a stimulus session's subject record comes from the Citrus H5.
+    root.attrs["orange_subject_reference_status"] = resolved.status
+    root.attrs["orange_subject_reference_reason"] = resolved.reason
+    if resolved.status != "collected":
+        return {"status": resolved.status, "reason": resolved.reason}
+    try:
+        existing = resolve_subject_metadata(root, allow_legacy=False)
+    except MissingSubjectMetadataError:
+        existing = None
+    if existing is not None:
+        h5_uuid = existing.metadata.get("dish_uuid")
+        if h5_uuid is not None and h5_uuid != resolved.metadata["dish_uuid"]:
+            raise ValueError(
+                "zebrobot_dish_mismatch: Orange declared dish_uuid "
+                f"{resolved.metadata['dish_uuid']!r} but the H5 records {h5_uuid!r}"
+            )
+        return {"status": "collected", "published": False, "cross_checked": h5_uuid is not None,
+                **resolved.source}
+    if "subject_count" in resolved.metadata:
+        setup = _publish_subject_and_setup(
+            root, resolved.metadata, source_artifact=resolved.source
+        )
+        return {"status": "collected", "published": True,
+                "experiment_setup": True, **setup, **resolved.source}
+    authority = publish_subject_metadata(
+        root, resolved.metadata, source_artifact=resolved.source
+    )
+    root.attrs["experiment_setup_status"] = "subject_count_not_declared"
+    return {"status": "collected", "published": True, "experiment_setup": False,
+            "subject_metadata_run": authority.run_name, **resolved.source}
+
+
 def require_unified_source_matches_recording(
     plan: RecordingAnalysisPlan, run_name: str
 ) -> None:
@@ -669,7 +728,8 @@ def project_unified_subject_metadata(
     Reads ``/metadata/subject`` through the sealed reference's verified
     attribute snapshot (not by reopening the raw H5 unchecked) and publishes it through the same subject/setup owners as legacy import,
     to the same locations. Missing fields such as ``subject_count`` refuse;
-    nothing is inferred (``subject_id`` is not ``fish_id``).
+    nothing is inferred. ``subject_id`` is the Citrus-local identity and
+    legacy ``fish_id`` its alias; a source carrying both refuses.
     """
 
     read_root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=True)
@@ -680,10 +740,19 @@ def project_unified_subject_metadata(
     except UnifiedH5ContractError:
         # No /metadata/subject node was admitted: absent, as in legacy.
         descriptors = {}
-    subject_metadata = normalize_subject_metadata(string_attributes(descriptors))
+    attributes = subject_attributes(descriptors)
+    try:
+        snapshot = source_reader.read_json(CITRUS_SNAPSHOT_PATH)
+    except UnifiedH5ContractError as exc:
+        if "unified_dataset_not_admitted" not in str(exc):
+            raise
+        snapshot = None
+    snapshot_admission = admit_subject_snapshot(snapshot, attributes)
+    subject_metadata = normalize_subject_metadata(attributes)
     if not subject_metadata:
         return None
     source = {
+        **snapshot_admission,
         "kind": "unified_native_subject_metadata",
         "group_path": "/metadata/subject",
         "count_field": "subject_count",
@@ -1170,6 +1239,21 @@ def process_recording_import(
                     native_run=str(stim_opts.stimulus_run_name),
                     **(setup or {}),
                 )
+
+    try:
+        subject_reference = import_zebrobot_subject_reference(plan)
+    except Exception as exc:
+        return RecordingImportResult(
+            ok=False, failed_step="zebrobot_subject_reference", error=str(exc)
+        )
+    if subject_reference is not None:
+        _log(
+            logger,
+            "zebrobot_subject_reference_imported",
+            recording_dir=str(plan.recording_dir),
+            zarr_path=str(plan.zarr_path),
+            **subject_reference,
+        )
 
     crop_ledger = (
         stream_inventory.get("streams", {}).get("crop", {}).get("canonical_ledger", {})
