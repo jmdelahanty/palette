@@ -275,3 +275,19 @@ def test_versions_do_not_accept_each_others_shapes(reference):
 def test_a_session_cannot_mix_reference_versions():
     with pytest.raises(zsr.SubjectReferenceError, match="mixes schema versions"):
         zsr.validate_subject_references({"CAM-1": COLLECTED, "CAM-2": _v2()}, ["CAM-1", "CAM-2"])
+
+
+@pytest.mark.parametrize("h5_dish, ok", [("19220_1", True), ("other_dish", False)])
+def test_cross_check_falls_back_to_dish_id_without_h5_uuid(tmp_path, h5_dish, ok):
+    # A Citrus lookup that failed records the declared dish_id but no dish_uuid.
+    importer, plan = _recording(tmp_path, COLLECTED)
+    root = zarr.open_group(str(plan.zarr_path), mode="r+")
+    publish_subject_metadata(
+        root, {"dish_id": h5_dish, "subject_count": 1}, source_artifact={"kind": "test_h5"}
+    )
+    if ok:
+        result = importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+        assert result["cross_checked"] == "dish_id" and result["published"] is False
+    else:
+        with pytest.raises(ValueError, match="zebrobot_dish_mismatch: Orange declared dish_id"):
+            importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
