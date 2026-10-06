@@ -113,6 +113,7 @@ from .web_auth import (
 )
 from .web_app import create_labeling_app
 from .web_static import register_static_routes
+from .web_subject_mask_edit_operations import validated_edit_operations
 from .web_admin_inspect import register_admin_inspect_routes
 from .web_admin_api import register_admin_api_routes
 from .web_admin_pages import _admin_page_response_payload, register_admin_page_routes
@@ -2470,6 +2471,7 @@ def _make_handler(state: ServerState):
                         edited_mask = edited_mask[:, :, 0]
                     if tuple(edited_mask.shape) != tuple(canonical_mask.shape):
                         raise ValueError(f"mask shape mismatch: expected {tuple(canonical_mask.shape)}, got {tuple(edited_mask.shape)}")
+                    edit_operations = validated_edit_operations(body.get("edit_operations"))
                     tail_border_action = tail_border.save_action(state.store, runtime, roi_idx=roi_idx, edited_mask=edited_mask, requested=body.get("tail_crop_border_action"))
                     frame_idx: int | None = None
                     if runtime.source.frame_indices is not None:
@@ -2503,6 +2505,7 @@ def _make_handler(state: ServerState):
                             # The component row this edit was made against; lets Apply
                             # accept it after another component's Apply bumps the revision.
                             "base_component_sha256": component_row_sha256(canonical_mask),
+                            **({"edit_operations": edit_operations} if edit_operations else {}),
                             "target_run_path": _subject_mask_target_run_path(runtime),
                             "source_rowset_path": _subject_mask_source_rowset_path(runtime),
                         },

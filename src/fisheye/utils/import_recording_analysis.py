@@ -674,13 +674,22 @@ def import_zebrobot_subject_reference(
     except MissingSubjectMetadataError:
         existing = None
     if existing is not None:
+        # dish_uuid when both sides have one; else the operator-declared dish_id
+        # (a Citrus lookup can fail and still record dish_id).
         h5_uuid = existing.metadata.get("dish_uuid")
-        if h5_uuid is not None and h5_uuid != resolved.metadata["dish_uuid"]:
+        h5_dish = existing.metadata.get("dish_id")
+        if h5_uuid is not None:
+            field, h5_value = "dish_uuid", h5_uuid
+        elif h5_dish is not None:
+            field, h5_value = "dish_id", h5_dish
+        else:
+            field, h5_value = None, None
+        if field is not None and str(h5_value) != str(resolved.metadata[field]):
             raise ValueError(
-                "zebrobot_dish_mismatch: Orange declared dish_uuid "
-                f"{resolved.metadata['dish_uuid']!r} but the H5 records {h5_uuid!r}"
+                f"zebrobot_dish_mismatch: Orange declared {field} "
+                f"{resolved.metadata[field]!r} but the H5 records {h5_value!r}"
             )
-        return {"status": "collected", "published": False, "cross_checked": h5_uuid is not None,
+        return {"status": "collected", "published": False, "cross_checked": field,
                 **resolved.source}
     if "subject_count" in resolved.metadata:
         setup = _publish_subject_and_setup(
@@ -748,6 +757,16 @@ def project_unified_subject_metadata(
             raise
         snapshot = None
     snapshot_admission = admit_subject_snapshot(snapshot, attributes)
+    if snapshot_admission["citrus_snapshot_status"] == "admitted" and "subject_id" not in attributes:
+        # v3 writes /metadata/subject in every session; with no dish declared it
+        # holds only lookup statuses (declared absence). Record them, publish no
+        # subject record, so an Orange reference for the camera can still publish.
+        root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+        for name in ("subject_lookup_status", "subject_lookup_reason",
+                     "fish_reference_status", "fish_reference_reason"):
+            if name in attributes:
+                root.attrs[f"citrus_{name}"] = attributes[name]
+        return None
     subject_metadata = normalize_subject_metadata(attributes)
     if not subject_metadata:
         return None
