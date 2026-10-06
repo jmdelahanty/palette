@@ -57,7 +57,9 @@ PRODUCTION_SUBJECT = {
 
 
 def _native_candidate(
-    tmp_path: Path, subject: dict[str, str] | None, fixture: str = "base"
+    tmp_path: Path,
+    subject: dict[str, str] | None,
+    fixture: str = "base",
 ) -> mod.RecordingAnalysisPlan:
     """Import a fixture (optionally with replaced subject attrs) as a native candidate."""
 
@@ -144,6 +146,48 @@ def test_pre_contract_citrus_snapshot_is_recorded_not_paired(tmp_path: Path) -> 
     root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
     source = dict(resolve_experiment_setup(root, allow_legacy=False).source)
     assert source["citrus_snapshot_status"] == "pre_contract"
+
+
+def test_v3_session_without_a_dish_records_absence_and_publishes_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Citrus v3 writes /metadata/subject in every session; with no dish it holds
+    # only the lookup statuses, which must not demand a subject_count. (A real
+    # v3 file needs Citrus's resealed dependency manifest, so the source reader
+    # is stubbed here; the first real v3 recording exercises the full path.)
+    from tests.unit.fisheye.test_citrus_subject_snapshot import V3
+
+    statuses = {
+        "subject_lookup_status": "not_collected", "subject_lookup_reason": "no_dish_declared",
+        "fish_reference_status": "not_collected", "fish_reference_reason": "no_dish_declared",
+    }
+    snapshot = json.loads(json.dumps(V3))
+    snapshot.update(
+        dish_id=None, subject_lookup_status="not_collected",
+        subject_lookup_reason="no_dish_declared", dish=None,
+        subject={"subject_id": None, "subject_type": None, "subject_count": None},
+    )
+    snapshot["fish_reference"]["reason"] = "no_dish_declared"
+
+    class Source:
+        reference_sha256 = "0" * 64
+
+        def typed_attributes(self, path):
+            return {}
+
+        def read_json(self, path):
+            return snapshot
+
+    plan = _native_candidate(tmp_path, None)
+    monkeypatch.setattr(mod, "open_unified_source", lambda root, run_name: Source())
+    monkeypatch.setattr(mod, "subject_attributes", lambda descriptors: dict(statuses))
+
+    assert mod.project_unified_subject_metadata(plan, "candidate") is None
+
+    root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+    assert "subject_metadata_runs" not in root.get("analysis", {})
+    assert root.attrs["citrus_subject_lookup_status"] == "not_collected"
+    assert root.attrs["citrus_fish_reference_reason"] == "no_dish_declared"
 
 
 def test_missing_subject_count_refuses_rather_than_inventing(tmp_path: Path) -> None:

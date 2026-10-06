@@ -43,6 +43,14 @@
     // pixels pushed past the crop edge come back if the mask is moved back.
     let moveSession = null;
     let moveDragging = false;
+    // Rotate tool: one rotation session per contiguous drag/arrow sequence,
+    // always resampled once from the mask as it was when the session began
+    // (smoothed: bilinear, threshold 0.5, about the mask centroid). Finished
+    // rotations are recorded with the next Save as edit_operations.
+    let rotateSession = null;
+    let rotateDragging = false;
+    let pendingEditOperations = [];
+    const ROTATE_METHOD = "bilinear_threshold_0.5";
 
     function hasUnsavedEdits() {
       return Boolean(mask && loadedMask && mask.some((value, index) => value !== loadedMask[index]));
@@ -249,6 +257,8 @@
       for (let i = 0; i < mask.length; i++) mask[i] = bytes[i] > 0 ? 1 : 0;
       loadedMask = mask.slice();
       endMoveSession();
+      endRotateSession(false);
+      pendingEditOperations = [];
       forgetUndo();
       markMaskOverlayDirty();
     }
@@ -321,6 +331,10 @@
     function undoBulkEdit() {
       if (!bulkUndoMask || !mask || bulkUndoMask.length !== mask.length) return;
       endMoveSession();
+      if (bulkUndoLabel === "rotation") {
+        if (rotateSession) endRotateSession(false);
+        else pendingEditOperations.pop();
+      }
       mask.set(bulkUndoMask);
       const label = bulkUndoLabel;
       forgetUndo();
@@ -373,6 +387,106 @@
         }
       }
       return {mask: out, lost};
+    }
+
+    // Rotate a binary mask by `degrees` (clockwise on screen) about (cx, cy):
+    // each output pixel samples the source bilinearly, kept at >= 0.5.
+    function rotateMask(source, width, height, degrees, cx, cy) {
+      const out = new Uint8Array(width * height);
+      const rad = degrees * Math.PI / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      const sample = (x, y) => (x < 0 || y < 0 || x >= width || y >= height) ? 0 : source[y * width + x];
+      // Only output pixels whose sample can touch the mask: the rotated bounding box (with a 1 px bilinear margin).
+      let minX = width, minY = height, maxX = -1, maxY = -1;
+      for (let i = 0; i < source.length; i++) {
+        if (!source[i]) continue;
+        const x = i % width, y = (i - x) / width;
+        if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+      if (maxX < 0) return out;
+      let x0Box = width, y0Box = height, x1Box = -1, y1Box = -1;
+      for (const [px, py] of [[minX - 1, minY - 1], [maxX + 1, minY - 1], [minX - 1, maxY + 1], [maxX + 1, maxY + 1]]) {
+        const ox = cos * (px - cx) - sin * (py - cy) + cx;
+        const oy = sin * (px - cx) + cos * (py - cy) + cy;
+        x0Box = Math.min(x0Box, ox); x1Box = Math.max(x1Box, ox); y0Box = Math.min(y0Box, oy); y1Box = Math.max(y1Box, oy);
+      }
+      const xStart = Math.max(0, Math.floor(x0Box)), xEnd = Math.min(width - 1, Math.ceil(x1Box));
+      const yStart = Math.max(0, Math.floor(y0Box)), yEnd = Math.min(height - 1, Math.ceil(y1Box));
+      for (let y = yStart; y <= yEnd; y++) {
+        for (let x = xStart; x <= xEnd; x++) {
+          const dx = x - cx;
+          const dy = y - cy;
+          const sx = cos * dx + sin * dy + cx;
+          const sy = -sin * dx + cos * dy + cy;
+          const x0 = Math.floor(sx);
+          const y0 = Math.floor(sy);
+          const fx = sx - x0;
+          const fy = sy - y0;
+          const value = sample(x0, y0) * (1 - fx) * (1 - fy) + sample(x0 + 1, y0) * fx * (1 - fy)
+            + sample(x0, y0 + 1) * (1 - fx) * fy + sample(x0 + 1, y0 + 1) * fx * fy;
+          if (value >= 0.5) out[y * width + x] = 1;
+        }
+      }
+      return out;
+    }
+
+    function maskCentroid(values, width, height) {
+      let sx = 0, sy = 0, n = 0;
+      for (let i = 0; i < values.length; i++) {
+        if (!values[i]) continue;
+        sx += i % width; sy += Math.floor(i / width); n++;
+      }
+      return n ? [sx / n, sy / n, n] : null;
+    }
+
+    function beginRotateSession() {
+      if (rotateSession || !mask) return false;
+      const centroid = maskCentroid(mask, maskWidth, maskHeight);
+      if (!centroid) { setStatus("Nothing to rotate: the mask is empty.", true); return false; }
+      rememberForUndo("rotation");
+      rotateSession = {
+        origin: mask.slice(), angle: 0, cx: centroid[0], cy: centroid[1], area: centroid[2],
+        pieces: maskPieces(mask, maskWidth, maskHeight).count, dragAngle: null, dragBase: 0,
+      };
+      return true;
+    }
+
+    function endRotateSession(record=true) {
+      if (rotateSession && record && rotateSession.angle !== 0) {
+        pendingEditOperations.push({op: "rotate", angle_deg: rotateSession.angle, method: ROTATE_METHOD, pivot: "mask_centroid"});
+      }
+      rotateSession = null;
+      rotateDragging = false;
+    }
+
+    function setRotation(degrees) {
+      if (!rotateSession || !mask) return;
+      const angle = Math.round(degrees * 10) / 10;
+      rotateSession.angle = angle;
+      mask.set(rotateMask(rotateSession.origin, maskWidth, maskHeight, angle, rotateSession.cx, rotateSession.cy));
+      markMaskOverlayDirty();
+      scheduleDraw();
+      let area = 0;
+      for (let i = 0; i < mask.length; i++) area += mask[i];
+      const pieces = maskPieces(mask, maskWidth, maskHeight).count;
+      const change = rotateSession.area ? (100 * (area - rotateSession.area) / rotateSession.area) : 0;
+      let text = "Rotated " + Math.abs(angle) + "° " + (angle >= 0 ? "clockwise" : "counterclockwise")
+        + " locally (area " + (change >= 0 ? "+" : "") + change.toFixed(1) + "%, " + pieces + " piece" + (pieces === 1 ? "" : "s") + ").";
+      if (pieces > rotateSession.pieces) {
+        text += " The rotation split the mask: press R to remove stray pieces.";
+      }
+      setStatus(text + " Save to persist.", pieces > rotateSession.pieces);
+    }
+
+    function nudgeRotation(degrees) {
+      if (!mask || busyAction) return;
+      if (!rotateSession && !beginRotateSession()) return;
+      setRotation(rotateSession.angle + degrees);
+    }
+
+    function pointerAngle(point) {
+      return Math.atan2(point[1] - rotateSession.cy, point[0] - rotateSession.cx) * 180 / Math.PI;
     }
 
     function beginMoveSession() {
@@ -579,7 +693,7 @@
 
     function drawCursorOverlay() {
       if (!cursorMaskPoint || !maskWidth || !maskHeight) return;
-      if (tool === "move" && !lassoMode) return;  // the system "grab" cursor shows instead
+      if ((tool === "move" || tool === "rotate") && !lassoMode) return;  // the system "grab" cursor shows instead
       const [x, y] = maskToCanvasPoint(cursorMaskPoint[0], cursorMaskPoint[1]);
       ctx.save();
       ctx.lineWidth = 2;
@@ -826,10 +940,12 @@
       if (busyAction) return;
       setBusy(true, advance ? "Checkpointing mask and advancing..." : "Checkpointing mask...");
       try {
+        endRotateSession();  // a rotation in progress is recorded with this save
         const result = await api("/save", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({mask: encodeMaskPayload(), advance, target_token: payload?.state?.target_token,
+            ...(pendingEditOperations.length ? {edit_operations: pendingEditOperations} : {}),
             ...(tailBorderAction ? {tail_crop_border_action: tailBorderAction} : {})})
         });
         // What was just saved is this row's baseline; Save + Next hands it to
@@ -1060,15 +1176,18 @@
 
     function setTool(nextTool) {
       if (nextTool !== "move") endMoveSession();
+      if (nextTool !== "rotate") endRotateSession();
       tool = nextTool;
-      if (tool === "move" && lassoMode) setLassoMode(false);
+      if ((tool === "move" || tool === "rotate") && lassoMode) setLassoMode(false);
       document.getElementById("paint-button").classList.toggle("active", tool === "paint");
       document.getElementById("erase-button").classList.toggle("active", tool === "erase");
       document.getElementById("fill-holes-button")?.classList.toggle("active", tool === "fill");
       document.getElementById("move-button")?.classList.toggle("active", tool === "move");
-      canvas.style.cursor = tool === "move" ? "grab" : "none";
+      document.getElementById("rotate-button")?.classList.toggle("active", tool === "rotate");
+      canvas.style.cursor = tool === "move" || tool === "rotate" ? "grab" : "none";
       if (tool === "fill") setStatus("Fill holes: click a mask piece to fill the holes inside it.");
       if (tool === "move") setStatus("Move: drag the mask, or use the arrow keys (Shift for 10 px). One Undo reverts the whole move.");
+      if (tool === "rotate") setStatus("Rotate: drag around the mask, or use Left/Right (Shift for 5°). Smoothed, about the mask centre; one Undo reverts the whole rotation.");
       scheduleDraw();
     }
 
@@ -1236,6 +1355,15 @@
         fillHolesAt(event);
         return;
       }
+      if (tool === "rotate") {
+        if (!mask || busyAction) return;
+        if (!rotateSession && !beginRotateSession()) return;
+        rotateDragging = true;
+        rotateSession.dragAngle = pointerAngle(cursorMaskPoint);
+        rotateSession.dragBase = rotateSession.angle;
+        canvas.style.cursor = "grabbing";
+        return;
+      }
       if (tool === "move") {
         if (!mask || busyAction) return;
         beginMoveSession();
@@ -1261,6 +1389,14 @@
         scheduleDraw();
         return;
       }
+      if (rotateDragging && rotateSession && rotateSession.dragAngle !== null) {
+        event.preventDefault();
+        let delta = pointerAngle(cursorMaskPoint) - rotateSession.dragAngle;
+        if (delta > 180) delta -= 360;
+        if (delta < -180) delta += 360;
+        setRotation(rotateSession.dragBase + delta);
+        return;
+      }
       if (moveDragging && moveSession && moveSession.dragStart) {
         event.preventDefault();
         const [bx, by] = moveSession.dragBase;
@@ -1275,9 +1411,10 @@
     function endCanvasEdit() {
       drawing = false;
       lassoDrawing = false;
-      if (moveDragging) {
+      if (moveDragging || rotateDragging) {
         moveDragging = false;
-        if (tool === "move") canvas.style.cursor = "grab";
+        rotateDragging = false;
+        if (tool === "move" || tool === "rotate") canvas.style.cursor = "grab";
       }
       viewport.endPan();
     }
@@ -1327,6 +1464,13 @@
       if (event.key === "r" || event.key === "R") { event.preventDefault(); removeStrayPiecesAction(); return; }
       if (event.key === "c" || event.key === "C") { event.preventDefault(); copyPreviousMask(); return; }
       if (event.key === "m" || event.key === "M") { event.preventDefault(); setTool("move"); return; }
+      if (event.key === "t" || event.key === "T") { event.preventDefault(); setTool("rotate"); return; }
+      if (tool === "rotate" && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+        event.preventDefault();
+        const step = event.shiftKey ? 5 : 1;
+        nudgeRotation(event.key === "ArrowRight" ? step : -step);
+        return;
+      }
       if (tool === "move" && event.key.startsWith("Arrow")) {
         event.preventDefault();
         const step = event.shiftKey ? 10 : 1;
