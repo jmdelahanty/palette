@@ -221,3 +221,57 @@ def test_organizer_carries_each_cameras_reference(tmp_path):
     _resign(source)
     with pytest.raises(ValueError, match="every camera"):
         organizer.build_transfer_organization_plan(source, destination_root=tmp_path / "out2")
+
+
+def _v2(**build):
+    reference = copy.deepcopy(COLLECTED)
+    reference["schema_version"] = 2
+    reference["zebrobot"].update(
+        {
+            "service_commit": "509a3eb8", "service_commit_dirty": False,
+            "consumer_schema_sha256": zsr.MZB_PIN["consumer_openapi_sha256"], **build,
+        }
+    )
+    return reference
+
+
+def test_v2_records_the_serving_build_against_the_pin():
+    source = zsr.resolve_subject_reference(_v2(), camera="CAM-1", fetch=_fetch()).source
+    assert source["reference_schema_version"] == 2
+    assert source["zebrobot_service_commit"] == "509a3eb8"
+    assert source["zebrobot_consumer_schema_matches_pin"] is True
+
+    drifted = zsr.resolve_subject_reference(
+        _v2(consumer_schema_sha256="0" * 64), camera="CAM-1", fetch=_fetch()
+    ).source
+    assert drifted["zebrobot_consumer_schema_matches_pin"] is False
+
+    unread = zsr.resolve_subject_reference(
+        _v2(service_commit=None, service_commit_dirty=None, consumer_schema_sha256=None),
+        camera="CAM-1", fetch=_fetch(),
+    ).source
+    assert unread["zebrobot_consumer_schema_matches_pin"] is None
+
+
+def test_v1_reference_carries_no_build_fields():
+    source = zsr.resolve_subject_reference(COLLECTED, camera="CAM-1", fetch=_fetch()).source
+    assert source["reference_schema_version"] == 1
+    assert "zebrobot_consumer_schema_matches_pin" not in source
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        {**copy.deepcopy(COLLECTED), "schema_version": 2},  # v2 without build fields
+        _v2() | {"schema_version": 1},  # v1 with build fields
+        {**copy.deepcopy(COLLECTED), "schema_version": 3},
+    ],
+)
+def test_versions_do_not_accept_each_others_shapes(reference):
+    with pytest.raises(zsr.SubjectReferenceError):
+        zsr.validate_subject_reference(reference, "CAM-1")
+
+
+def test_a_session_cannot_mix_reference_versions():
+    with pytest.raises(zsr.SubjectReferenceError, match="mixes schema versions"):
+        zsr.validate_subject_references({"CAM-1": COLLECTED, "CAM-2": _v2()}, ["CAM-1", "CAM-2"])

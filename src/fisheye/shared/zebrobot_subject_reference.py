@@ -9,6 +9,14 @@ from ``dof`` (the server's ``dpf`` changes daily) and keeps cross fields
 labelled as resolved at intake (``cross.cache_updated_at`` is a cache refresh
 time, not a content revision). A declared absence is recorded, never filled.
 Zebrobot being unreachable at intake is an error so intake can retry later.
+
+Version 2 references also seal the MetaZebrobot build that served them
+(``GET /version``: ``service_commit``, ``service_commit_dirty``,
+``consumer_schema_sha256``). Palette records it and whether the served
+consumer schema matches the MetaZebrobot pin it relies on; it never refuses on
+that alone, because the fields Palette reads are re-fetched and checked here.
+MetaZebrobot response shapes and meaning are owned by MetaZebrobot (see
+``MZB_PIN``); this module keeps no copy of them.
 """
 
 from __future__ import annotations
@@ -26,7 +34,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 REFERENCE_SCHEMA_ID = "orange.recording_subject_reference"
-REFERENCE_SCHEMA_VERSION = 1
+REFERENCE_SCHEMA_VERSIONS = (1, 2)
 API_SCHEMA_VERSION = 2
 STATUSES = ("collected", "not_collected", "lookup_failed")
 SOURCE_KIND = "zebrobot_api_resolved_at_intake"
@@ -42,8 +50,24 @@ class ZebrobotUnavailable(RuntimeError):
     """Zebrobot could not be read at intake; retry later rather than finalize."""
 
 
-SCHEMA_FILE = "orange_recording_subject_reference_v1.schema.json"
-SCHEMA_SHA256 = "3c4ba74f0f95f76dbb8b3d65aa8bd39fd409383388ee8debec3845ef26c1a930"
+# agent-contracts PR 53: v1 at 6098ca47, v2 at 879ae3f6.
+SCHEMA_FILES = {
+    1: (
+        "orange_recording_subject_reference_v1.schema.json",
+        "3c4ba74f0f95f76dbb8b3d65aa8bd39fd409383388ee8debec3845ef26c1a930",
+    ),
+    2: (
+        "orange_recording_subject_reference_v2.schema.json",
+        "d0f300fdbd71747f44219baf7bb5aea262ebbd275f85f877df9f1a00aa92e935",
+    ),
+}
+# Shapes: metazebrobot docs/api/consumer_openapi.json; meaning:
+# docs/zebrobot_snapshot.md; Palette's reliance: agent-contracts PR 54.
+MZB_PIN = {
+    "repo": "jmdelahanty/metazebrobot",
+    "commit": "509a3eb88d6ff44fe07e7ea20d212be5eafe46b7",
+    "consumer_openapi_sha256": "f5280e430d4b5f10c3643cb89a6187eacc45fdac7af55b2e81f5e315b7b754dc",
+}
 
 
 def _require(condition: bool, message: str) -> None:
@@ -51,19 +75,29 @@ def _require(condition: bool, message: str) -> None:
         raise SubjectReferenceError(message)
 
 
-@lru_cache(maxsize=1)
-def _schema() -> dict[str, Any]:
-    data = files("fisheye.shared").joinpath("contracts").joinpath(SCHEMA_FILE).read_bytes()
-    _require(hashlib.sha256(data).hexdigest() == SCHEMA_SHA256, "packaged_contract_drift:" + SCHEMA_FILE)
+@lru_cache(maxsize=None)
+def _schema(version: int) -> dict[str, Any]:
+    name, digest = SCHEMA_FILES[version]
+    data = files("fisheye.shared").joinpath("contracts").joinpath(name).read_bytes()
+    _require(hashlib.sha256(data).hexdigest() == digest, "packaged_contract_drift:" + name)
     return json.loads(data)
 
 
-def _schema_errors(references: Mapping[str, Any]) -> list[str]:
+def _schema_version(reference: Any, label: str) -> int:
+    version = reference.get("schema_version") if isinstance(reference, Mapping) else None
+    _require(
+        type(version) is int and version in SCHEMA_FILES,
+        f"{label} schema_version {version!r} is not a pinned version",
+    )
+    return version
+
+
+def _schema_errors(references: Mapping[str, Any], version: int) -> list[str]:
     from jsonschema import Draft202012Validator
 
     return [
         "/".join(str(part) for part in error.absolute_path) + ": " + error.message
-        for error in Draft202012Validator(_schema()).iter_errors(references)
+        for error in Draft202012Validator(_schema(version)).iter_errors(references)
     ]
 
 
@@ -73,10 +107,10 @@ def _revision(value: Any, label: str) -> int:
 
 
 def validate_subject_reference(reference: Mapping[str, Any], camera: str) -> dict[str, Any]:
-    """Pinned Orange v1 schema plus Palette's semantic checks for one camera."""
+    """Pinned Orange schema (by its version) plus Palette's semantic checks."""
 
     label = f"subject_references[{camera}]"
-    errors = _schema_errors({camera: reference})
+    errors = _schema_errors({camera: reference}, _schema_version(reference, label))
     _require(not errors, f"{label} schema: {errors[0] if errors else ''}")
     if reference["zebrobot"] is not None:
         _recorded_at(reference["zebrobot"]["queried_at_utc"], label)
@@ -112,7 +146,14 @@ def validate_subject_references(
         set(references) == set(cameras),
         "subject_references must declare exactly every camera parent",
     )
-    return {camera: validate_subject_reference(references[camera], camera) for camera in cameras}
+    validated = {
+        camera: validate_subject_reference(references[camera], camera) for camera in cameras
+    }
+    _require(
+        len({ref["schema_version"] for ref in validated.values()}) <= 1,
+        "subject_references mixes schema versions across cameras",
+    )
+    return validated
 
 
 def _recorded_at(value: Any, label: str) -> datetime:
@@ -159,6 +200,23 @@ class ResolvedSubjectReference:
     source: dict[str, Any]
 
 
+def _served_build(zebrobot: Mapping[str, Any]) -> dict[str, Any]:
+    """The MetaZebrobot build sealed at record start (v2), against Palette's pin."""
+
+    if "consumer_schema_sha256" not in zebrobot:
+        return {}
+    served = zebrobot["consumer_schema_sha256"]
+    return {
+        "zebrobot_service_commit": zebrobot["service_commit"],
+        "zebrobot_service_commit_dirty": zebrobot["service_commit_dirty"],
+        "zebrobot_consumer_schema_sha256": served,
+        "zebrobot_consumer_schema_matches_pin": (
+            None if served is None else served == MZB_PIN["consumer_openapi_sha256"]
+        ),
+        "zebrobot_consumer_pin": dict(MZB_PIN),
+    }
+
+
 def resolve_subject_reference(
     reference: Mapping[str, Any], *, camera: str, fetch: Fetch = http_fetch
 ) -> ResolvedSubjectReference:
@@ -169,7 +227,9 @@ def resolve_subject_reference(
         return ResolvedSubjectReference(
             ref["status"], ref["reason"], None,
             {"kind": SOURCE_KIND, "status": ref["status"], "reason": ref["reason"],
-             "subject_count": ref["subject_count"]},
+             "subject_count": ref["subject_count"],
+             "reference_schema_version": ref["schema_version"],
+             **(_served_build(ref["zebrobot"]) if ref["zebrobot"] else {})},
         )
     zebrobot, dish = ref["zebrobot"], ref["dish"]
     base = zebrobot["base_url"].rstrip("/")
@@ -228,6 +288,8 @@ def resolve_subject_reference(
     source = {
         "kind": SOURCE_KIND,
         "status": "collected",
+        "reference_schema_version": ref["schema_version"],
+        **_served_build(zebrobot),
         # subject_count is operator-declared in Orange's reference, not Zebrobot's.
         "count_field": "subject_count",
         "zebrobot_base_url": base,
@@ -242,6 +304,7 @@ def resolve_subject_reference(
 
 
 __all__ = [
+    "MZB_PIN",
     "REFERENCE_SCHEMA_ID",
     "ResolvedSubjectReference",
     "SubjectReferenceError",
