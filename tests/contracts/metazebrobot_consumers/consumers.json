@@ -1,0 +1,91 @@
+{
+  "format_version": 1,
+  "producer": {
+    "name": "metazebrobot",
+    "repo": "jmdelahanty/metazebrobot",
+    "commit": "509a3eb88d6ff44fe07e7ea20d212be5eafe46b7",
+    "consumer_openapi": "docs/api/consumer_openapi.json",
+    "consumer_openapi_sha256": "f5280e430d4b5f10c3643cb89a6187eacc45fdac7af55b2e81f5e315b7b754dc",
+    "meaning": "docs/zebrobot_snapshot.md",
+    "api_schema_version": 2
+  },
+  "consumers": {
+    "orange": {
+      "status": "confirmed",
+      "source": "Orange acquisition agent, 2026-10-05; agent-contracts PR 53",
+      "relies_on": [
+        {
+          "operation": "GET /dishes/{dish_id}/citrus-snapshot",
+          "schema_version": 2,
+          "fields": ["schema_version", "dish_id", "dish_uuid", "revision", "updated_at"],
+          "errors": ["404", "503"]
+        },
+        {
+          "operation": "GET /dishes/{dish_id}/fish",
+          "fields": ["items[].fish_id", "items[].revision", "items[].updated_at"],
+          "errors": ["404", "503"]
+        },
+        {
+          "operation": "GET /version",
+          "fields": ["service_commit", "service_commit_dirty", "consumer_schema_sha256"]
+        }
+      ]
+    },
+    "citrus": {
+      "status": "confirmed",
+      "source": "citrus agent/citrus/subject-identity-v2-20261005: src/api/dish_api_client.cpp, src/api/zebrobot_subject_reference.cpp",
+      "relies_on": [
+        {
+          "operation": "GET /acquisition/dishes",
+          "fields": [
+            "items[].dish_id", "items[].cross_id", "items[].genotype",
+            "items[].dof", "items[].status", "items[].fish_count"
+          ],
+          "errors": []
+        },
+        {
+          "operation": "GET /dishes/{dish_id}/citrus-snapshot",
+          "schema_version": 2,
+          "fields": [
+            "schema_version", "dish_id", "dish_uuid", "revision", "updated_at",
+            "cross_id", "genotype", "dof", "dpf", "fish_count", "species", "sex",
+            "line_strain", "parents[].identifier", "parents[].sex"
+          ],
+          "errors": ["404", "503"]
+        },
+        {
+          "operation": "GET /dishes/{dish_id}/fish",
+          "fields": [
+            "items[].fish_id", "items[].subject_label", "items[].current_unit_id",
+            "items[].revision", "items[].updated_at"
+          ],
+          "errors": ["404", "503"]
+        },
+        {
+          "operation": "GET /version",
+          "fields": ["service_commit", "service_commit_dirty", "consumer_schema_sha256"]
+        }
+      ]
+    },
+    "palette": {
+      "status": "confirmed",
+      "source": "palette PR #255 (fisheye.shared.zebrobot_subject_reference), 2026-10-05",
+      "relies_on": [
+        {
+          "operation": "GET /dishes/{dish_id}/citrus-snapshot",
+          "schema_version": 2,
+          "fields": [
+            "schema_version", "dish_uuid", "revision", "dof", "cross_id",
+            "genotype", "species", "sex", "line_strain", "parents", "fish_count"
+          ],
+          "errors": ["404", "503"]
+        },
+        {
+          "operation": "GET /dishes/{dish_id}/fish",
+          "fields": ["items[].fish_id", "items[].revision"],
+          "errors": ["404", "503"]
+        }
+      ]
+    }
+  }
+}
