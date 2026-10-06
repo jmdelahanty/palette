@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Refuse a push whose checked-in Zarr census is stale (CI's "generated
+# artifacts" gate), so it is caught in ~25 s locally instead of a CI round trip.
+#
+# Enable once per clone (applies to every worktree):
+#   git config core.hooksPath scripts/git-hooks
+# Bypass for one push: PALETTE_SKIP_PRE_PUSH=1 git push ...
+#
+# The census is checked on the pushed commit itself (via git archive), not on
+# the working tree, and only when the push changes src/, scripts/ or
+# docs/diagnostics/ relative to origin/main.
+set -uo pipefail
+[ "${PALETTE_SKIP_PRE_PUSH:-}" = 1 ] && exit 0
+root=$(git rev-parse --show-toplevel)
+zero=0000000000000000000000000000000000000000
+status=0
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue  # branch deletion
+  base=$(git merge-base "$local_sha" origin/main 2>/dev/null || true)
+  if [ -n "$base" ] && git diff --quiet "$base" "$local_sha" -- src scripts docs/diagnostics; then
+    continue
+  fi
+  tree=$(mktemp -d)
+  git archive "$local_sha" src scripts docs/diagnostics | tar -x -C "$tree"
+  if ! PYTHONPATH="$tree/src" "$root/scripts/py" -m fisheye.diagnostics.zarr_storage_census \
+      --repo-root "$tree" --check </dev/null; then
+    echo "pre-push: Zarr census is stale for $local_ref. Run" >&2
+    echo "  scripts/py -m fisheye.diagnostics.zarr_storage_census --write" >&2
+    echo "then commit docs/diagnostics/zarr_* and push again." >&2
+    status=1
+  fi
+  rm -rf "$tree"
+done
+exit $status
