@@ -16,7 +16,7 @@ from typing import Optional, Sequence
 from rich.console import Console
 
 from fisheye.detection.detect_keypoints_yolo import detect_keypoints_yolo
-from fisheye.refinement.finalize_subject_masks import finalize_subject_masks
+from fisheye.refinement.finalize_subject_masks import EDITABLE_REVIEW_METRIC_LEVEL, finalize_subject_masks
 from fisheye.refinement.refine_keypoints import (
     create_refined_keypoint_run,
     require_future_normal_refined_keypoint_publication,
@@ -176,7 +176,7 @@ def bootstrap_training_review_surfaces(
         subject_run=subject_masks_run,
         refined_run=refined_subject_masks_run,
         components=("subject_body", "swim_bladder", "eyes_union"),
-        metric_level="full",
+        metric_level=EDITABLE_REVIEW_METRIC_LEVEL,
         write_eye_geometry=True,
         write_component_contours=True,
         mask_storage="dense_uint8",
