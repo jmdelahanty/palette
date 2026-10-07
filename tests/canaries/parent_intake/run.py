@@ -311,12 +311,6 @@ def main() -> None:
             "fisheye.utils.run_citrus_session_import",
             delivery,
             "--apply",
-            "--recording-type",
-            "behavior",
-            "--recording-subtype",
-            "free",
-            "--behavior-mode",
-            "free",
             "--dest-root",
             work / "recordings",
             "--run-dir",
@@ -325,8 +319,8 @@ def main() -> None:
             "--registry",
             registry_path,
         ]
-        if not args.full_stimulus:
-            argv.append("--recording-only")
+        # Recording context and intent come from the producer snapshot; the
+        # runner no longer takes --recording-type/--recording-only.
         command(
             argv,
             expected=1 if args.negative_corruption or args.negative_stimulus else 0,

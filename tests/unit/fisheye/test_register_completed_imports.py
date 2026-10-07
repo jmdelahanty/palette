@@ -39,7 +39,8 @@ def _status(tmp_path: Path, job_id: str = "777", **payload) -> None:
             "zarr_paths": ["/rec/a.zarr", "/rec/b.zarr"],
             "plan": {"parents": [{"context": {"data_origin": "acquired"}}]}}
     body.update(payload)
-    (run_dir / f"session.{job_id}.status.json").write_text(json.dumps(body))
+    (run_dir / f"workflow-{job_id}").mkdir()
+    (run_dir / f"workflow-{job_id}" / "citrus_session_import.status.json").write_text(json.dumps(body))
 
 
 class Register:
@@ -135,3 +136,18 @@ def test_poller_dispatches_jobs_without_registering_in_workstation_mode(tmp_path
     config = _config(tmp_path)
     command = poller.build_command(config, tmp_path / "session", KEY)
     assert "--no-register" in command[-1] and "--writer-host" not in command[-1]
+
+
+def test_job_that_ended_without_status_is_a_failed_import_not_pending(tmp_path):
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    run_dir = tmp_path / "logs" / "bsub_submissions" / f"citrus_import_20261007T000000Z_session_{KEY}"
+    run_dir.mkdir(parents=True)
+    (run_dir / "777.out").write_text("payload output\n")  # still running: no LSF report yet
+    registrar.register_completed(config, dry_run=False, register=Register())
+    assert not (tmp_path / "state" / f"{KEY}.import_failed").exists()
+
+    (run_dir / "777.out").write_text("payload output\n\nResource usage summary:\n CPU time : 1 sec.\n")
+    registrar.register_completed(config, dry_run=False, register=Register())
+    failed = json.loads((tmp_path / "state" / f"{KEY}.import_failed").read_text())
+    assert failed["error"] == "LSF job ended without writing its status JSON"
