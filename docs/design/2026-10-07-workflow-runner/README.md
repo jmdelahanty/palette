@@ -291,6 +291,12 @@ for each snapshot_sha:
 ### 6.3 Migration of existing state
 
 - A one-time `palette-flow reconcile intake --adopt` writes sentinels for deliveries whose `.registered` state and receipts verify. It records each delivery's `admission_contract` mode in the sentinel, so an adopted job-mode delivery is never retried in workstation mode.
+- **The runner never reads v1 state.** The v1 poller's `staging/.processing_state` holds 68 legacy v1 submissions. A v2 registrar dry run against that shared directory would have marked all 68 as `import_failed`. So:
+  - v2 poller state lives only in `staging/.processing_state_v2` and `.processing_logs_v2` (from #286);
+  - runner state lives only under `<flow_root>`;
+  - `--adopt` reads only the v2 state directory, plus Palette evidence;
+  - discovery ignores v1 markers, as `check_marker` already does;
+  - a test fails if any runner or v2 path resolves into the v1 state directory.
 - The old `state_dir` files stay read-only as historical evidence.
 - After that, the poller's `.claimed`/`.submitted` mechanism is retired. Snakemake's job claims and sentinels replace it, keyed on the same `snapshot_sha`.
 
@@ -381,6 +387,7 @@ Still open:
 
 ## Decision log
 
+- 2026-10-07: #286 merged (8e96c399). §6.3 now requires runner and v2 state to stay separate from the v1 `.processing_state`.
 - 2026-10-07: recorded PR #290's exit-code table and its NFS flock lease behaviour in §5.3.
 - 2026-10-07: aligned with the intake single-writer design (PR #290). Discovery uses `probe_register`, not runner sentinels. Stages that own a lock replace runner claims. Intake attempts get fresh run dirs.
 - 2026-10-07: Jeremy decided §10: Snakemake, a separate env, at most one login-node check-in per 5-10 minutes, intake only. §5.1 gains an explicit login-node contact budget.
