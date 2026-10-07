@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shutil
 
 import pytest
 
+from fisheye.intake import importing
+from fisheye.intake.outcomes import EXIT_HELD, EXIT_REFUSED
 from fisheye.utils import run_citrus_session_import as runner
 
 
@@ -42,6 +45,28 @@ def _arguments(tmp_path, name="rolling"):
     return source, arguments
 
 
+def _failed_import(calls):
+    """Stand-in for the in-process import owner: every parent fails."""
+
+    def failed(plan, *, recording_only, lease_fd):
+        assert os.fstat(lease_fd)  # the workflow lock, lent to the stimulus child
+        calls.append(plan["snapshot_id"])
+        return [
+            importing.ParentImportResult(
+                recording_id=parent["identity"]["recording_id"],
+                camera_id=parent["identity"]["camera_id"],
+                recording_dir=parent["destination_dir"],
+                zarr_path="unused",
+                outcome="failed",
+                failed_step="ensure_analysis_archive",
+                error="fixture failure",
+            )
+            for parent in plan["parents"]
+        ]
+
+    return failed
+
+
 def test_transfer_v2_dry_run_writes_nothing_and_never_calls_legacy_organizer(
     tmp_path, monkeypatch, capsys
 ):
@@ -50,9 +75,7 @@ def test_transfer_v2_dry_run_writes_nothing_and_never_calls_legacy_organizer(
         p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()
     }
     monkeypatch.setattr(
-        runner,
-        "_run_command",
-        lambda *a, **k: pytest.fail("dry-run executed a command"),
+        importing, "import_parents", lambda *a, **k: pytest.fail("dry-run imported")
     )
     assert runner.main([*arguments, "--dry-run"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -74,9 +97,7 @@ def test_transfer_v2_single_video_dry_run_is_planned_not_refused(
     (source / "fixture.h5").unlink()  # placeholder bytes, not an H5 container
     _resign(source)
     monkeypatch.setattr(
-        runner,
-        "_run_command",
-        lambda *a, **k: pytest.fail("dry-run executed a command"),
+        importing, "import_parents", lambda *a, **k: pytest.fail("dry-run imported")
     )
     assert runner.main([*arguments, "--dry-run"]) == 0
     plan = json.loads(capsys.readouterr().out)["plan"]
@@ -102,55 +123,42 @@ def test_operator_context_flags_are_gone(tmp_path, flag):
 
 
 def test_stimulus_import_follows_the_declared_intent():
-    from fisheye.utils.citrus_transfer_parent_workflow import _plan_recording_only
+    from fisheye.intake.delivery import plan_recording_only
 
     def plan(*intents):
         return {"parents": [{"context": {"recording_intent": i}} for i in intents]}
 
-    assert _plan_recording_only(plan("recording_only", "recording_only"))
-    assert not _plan_recording_only(plan("stimulus_experiment"))
+    assert plan_recording_only(plan("recording_only", "recording_only"))
+    assert not plan_recording_only(plan("stimulus_experiment"))
     with pytest.raises(ValueError, match="one recording intent"):
-        _plan_recording_only(plan("recording_only", "stimulus_experiment"))
+        plan_recording_only(plan("recording_only", "stimulus_experiment"))
 
 
-def test_synthetic_transfer_never_registers_into_the_canonical_registry(tmp_path):
-    from argparse import Namespace
-
-    from fisheye.utils import citrus_transfer_parent_workflow as workflow
+def test_synthetic_transfer_never_registers_by_default_nor_into_the_canonical_registry(tmp_path):
+    from fisheye.intake.delivery import CANONICAL_REGISTRY, refuse_synthetic_registration
+    from fisheye.intake.outcomes import IntakeRefused
 
     plan = {"parents": [{"context": {"data_origin": "synthetic"}}]}
-    canonical = Namespace(register=True, registry=workflow.CANONICAL_REGISTRY)
-    with pytest.raises(ValueError, match="canonical registry"):
-        workflow._refuse_synthetic_canonical_registration(plan, canonical)
-    isolated = Namespace(register=True, registry=tmp_path / "isolated.sqlite")
-    workflow._refuse_synthetic_canonical_registration(plan, isolated)
+    with pytest.raises(IntakeRefused, match="never registered"):
+        refuse_synthetic_registration(plan, registry=tmp_path / "isolated.sqlite")
+    with pytest.raises(IntakeRefused, match="canonical registry"):
+        refuse_synthetic_registration(plan, registry=CANONICAL_REGISTRY, allow_synthetic=True)
+    refuse_synthetic_registration(plan, registry=tmp_path / "isolated.sqlite", allow_synthetic=True)
     acquired = {"parents": [{"context": {"data_origin": "acquired"}}]}
-    workflow._refuse_synthetic_canonical_registration(acquired, canonical)
+    refuse_synthetic_registration(acquired, registry=CANONICAL_REGISTRY)
 
 
 def test_transfer_v2_failed_import_keeps_every_source_and_reports_incomplete(
     tmp_path, monkeypatch
 ):
     source, arguments = _arguments(tmp_path)
-    from fisheye.utils import citrus_transfer_parent_workflow as workflow
-
     before = {
         p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()
     }
     calls = []
-
-    def failed(command, *, name, run_dir, pass_fds, env):
-        assert len(pass_fds) == 1
-        assert env["PALETTE_RECORDING_IMPORT_LEASE_FD"] == str(pass_fds[0])
-        calls.append(command)
-        return runner.CommandRecord(
-            name, command, 7, str(run_dir / "stdout"), str(run_dir / "stderr")
-        )
-
-    monkeypatch.setattr(workflow, "_run_command", failed)
+    monkeypatch.setattr(importing, "import_parents", _failed_import(calls))
     assert runner.main([*arguments, "--apply"]) == 1
     assert len(calls) == 1
-    assert "fisheye.utils.import_organized_recordings_analysis" in calls[0]
     assert {
         p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()
     } == before
@@ -160,6 +168,9 @@ def test_transfer_v2_failed_import_keeps_every_source_and_reports_incomplete(
     assert status["status"] == "failed"
     assert status["staging_finalized"] is False
     assert status["import_complete"] is False
+    assert status["registry"] is None
+    assert [parent["outcome"] for parent in status["parents"]] == ["failed", "failed"]
+    assert "fixture failure" in status["error"]
     assert (tmp_path / "run/organization_plan.json").is_file()
     assert not (source / "_palette_batch_disposition.json").exists()
 
@@ -184,37 +195,23 @@ def test_transfer_v2_logs_cannot_modify_source_or_parent_recording(tmp_path, loc
         )
         output = Path(plan["parents"][0]["destination_dir"]) / "logs"
     arguments[arguments.index("--run-dir") + 1] = str(output)
-    assert runner.main([*arguments, "--apply"]) == 1
+    assert runner.main([*arguments, "--apply"]) == EXIT_REFUSED
     assert not (tmp_path / "recordings").exists()
 
 
-@pytest.mark.parametrize(
-    "target", ["registry", "source_dotdot", "existing_report", "coordinator_lock"]
-)
+@pytest.mark.parametrize("target", ["source_dotdot", "existing_report", "coordinator_lock"])
 def test_status_destination_never_overwrites_existing_or_reserved_evidence(
     tmp_path, monkeypatch, target
 ):
     source, arguments = _arguments(tmp_path)
-    from fisheye.utils import citrus_transfer_parent_workflow as workflow
     from fisheye.utils.organize_transfer_recordings import (
         build_transfer_organization_plan,
         _state_directory,
     )
 
-    monkeypatch.setattr(
-        workflow,
-        "_run_command",
-        lambda command, name, run_dir, **kwargs: runner.CommandRecord(
-            name, command, 7, "unused", "unused"
-        ),
-    )
+    monkeypatch.setattr(importing, "import_parents", _failed_import([]))
     protected = None
-    if target == "registry":
-        protected = tmp_path / "registry.sqlite"
-        protected.write_bytes(b"SQLite format 3\x00preserve this database")
-        status = protected
-        arguments.extend(["--register", "--registry", str(protected)])
-    elif target == "source_dotdot":
+    if target == "source_dotdot":
         (tmp_path / "external").mkdir()
         status = tmp_path / "external/../staging/recording_session.json"
         protected = source / "recording_session.json"
@@ -229,29 +226,28 @@ def test_status_destination_never_overwrites_existing_or_reserved_evidence(
         )
         status = _state_directory(plan).with_suffix(".lock")
     before = protected.read_bytes() if protected is not None else None
-    assert runner.main([*arguments, "--apply", "--status-json", str(status)]) == 1
+    assert runner.main([*arguments, "--apply", "--status-json", str(status)]) == EXIT_REFUSED
     if protected is not None:
         assert protected.read_bytes() == before
     assert not (tmp_path / "recordings").exists()
+    assert not (tmp_path / "run").exists()
 
 
 def test_whole_workflow_lock_prevents_second_importer_invocation(tmp_path, monkeypatch):
     _source, arguments = _arguments(tmp_path)
-    from fisheye.utils import citrus_transfer_parent_workflow as workflow
-
     calls = []
+    failed = _failed_import(calls)
 
-    def competing(command, *, name, run_dir, pass_fds, env):
-        assert len(pass_fds) == 1
-        assert env["PALETTE_RECORDING_IMPORT_LEASE_FD"] == str(pass_fds[0])
-        calls.append(command)
-        if len(calls) == 1:
+    def competing(plan, *, recording_only, lease_fd):
+        if not calls:
             second = list(arguments)
             second[second.index("--run-dir") + 1] = str(tmp_path / "second-run")
-            assert runner.main([*second, "--apply"]) == 1
-        return runner.CommandRecord(name, command, 7, "unused", "unused")
+            # Held: exit 75, and the lock is taken before any side effect.
+            assert runner.main([*second, "--apply"]) == EXIT_HELD
+            assert not (tmp_path / "second-run").exists()
+        return failed(plan, recording_only=recording_only, lease_fd=lease_fd)
 
-    monkeypatch.setattr(workflow, "_run_command", competing)
+    monkeypatch.setattr(importing, "import_parents", competing)
     assert runner.main([*arguments, "--apply"]) == 1
     assert len(calls) == 1
 
@@ -260,18 +256,11 @@ def test_retirement_replay_reports_the_zarr_paths_the_registrar_needs(tmp_path, 
     # A replay from the durable "retiring" journal goes straight to finalization.
     # It must report the same zarr_paths as a fresh import, or the workstation
     # registrar refuses the completed status and the delivery is never registered.
-    from fisheye.utils import citrus_transfer_parent_workflow as workflow
     from fisheye.utils import organize_transfer_recordings as organizer
     from fisheye.utils import register_completed_imports as registrar
 
     _source, arguments = _arguments(tmp_path)
-    monkeypatch.setattr(
-        workflow,
-        "_run_command",
-        lambda command, *, name, run_dir, pass_fds, env: runner.CommandRecord(
-            name, command, 7, "unused", "unused"
-        ),
-    )
+    monkeypatch.setattr(importing, "import_parents", _failed_import([]))
     assert runner.main([*arguments, "--apply"]) == 1  # organizes, then the import fails
     plan_path = tmp_path / "run/organization_plan.json"
     plan = json.loads(plan_path.read_bytes())
@@ -280,12 +269,17 @@ def test_retirement_replay_reports_the_zarr_paths_the_registrar_needs(tmp_path, 
     state["status"] = "retiring"
     state_path.write_text(json.dumps(state))
     finalized = []
+    receipts = {parent["identity"]["recording_id"]: "f" * 64 for parent in plan["parents"]}
 
     def finalize(replayed, *, registry_path, require_stimulus):
+        assert registry_path is None  # the LSF side never names a registry
         finalized.append(replayed["snapshot_id"])
-        return {"import_receipts": {"r": "receipt"}, "retired_files": []}
+        return {**state, "status": "complete", "import_receipts": receipts, "retired_files": []}
 
-    monkeypatch.setattr(workflow, "finalize_transfer_staging", finalize)
+    monkeypatch.setattr(organizer, "finalize_transfer_staging", finalize)
+    monkeypatch.setattr(
+        "fisheye.intake.probes.receipt_producer_git_sha", lambda zarr, receipt: "1" * 40
+    )
     replay = list(arguments)
     replay[replay.index("--run-dir") + 1] = str(tmp_path / "workflow-778")
     assert runner.main([*replay, "--apply", "--resume-transfer-plan", str(plan_path)]) == 0
@@ -300,6 +294,7 @@ def test_retirement_replay_reports_the_zarr_paths_the_registrar_needs(tmp_path, 
     assert [str(p) for p in organizer.parent_zarr_paths(plan)] == expected
     assert len(expected) == len(plan["parents"]) == 2
     assert status["zarr_paths"] == expected
+    assert status["probe_import"]["zarr_paths"] == expected
 
     # The registrar accepts the replayed status exactly as it would a fresh one.
     key = "c" * 64
@@ -316,8 +311,15 @@ def test_retirement_replay_reports_the_zarr_paths_the_registrar_needs(tmp_path, 
     run_dir.mkdir(parents=True)
     shutil.move(str(tmp_path / "workflow-778"), str(run_dir / "workflow-778"))
     registered = []
-    assert registrar.register_completed(
-        config, dry_run=False, register=lambda registry, zarr: registered.append(str(zarr)) or "d"
-    ) == 0
-    assert registered == expected
+
+    def register(config, snapshot_sha, destination_root):
+        registered.append((snapshot_sha, destination_root))
+        return {path: f"dataset-{index}" for index, path in enumerate(expected)}
+
+    monkeypatch.setattr(
+        "fisheye.intake.delivery.refuse_synthetic_registration", lambda *a, **k: None
+    )
+    monkeypatch.setattr(registrar, "refuse_synthetic_registration", lambda *a, **k: None)
+    assert registrar.register_completed(config, dry_run=False, register=register) == 0
+    assert registered == [(plan["snapshot_id"], Path(plan["destination_root"]))]
     assert (tmp_path / "state" / f"{key}.registered").is_file()

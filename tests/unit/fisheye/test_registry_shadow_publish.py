@@ -17,6 +17,7 @@ from fisheye.registry.shadow_publish import (
     RegistryShadowPublishError,
     publish_registry_shadow,
     shadow_synchronize_recording_import,
+    shadow_synchronize_recording_imports,
     validate_registry_sqlite,
 )
 
@@ -344,3 +345,93 @@ def test_shadow_synchronize_candidate_failure_preserves_canonical_hash(
     assert _sha256(canonical) == source_hash
     assert _read_value(canonical) == "before"
     assert observed["registry_path"] != canonical
+
+
+class _RecordingBatchRegistry:
+    """Writes one row per artifact into the candidate; may fail on one target."""
+
+    fail_on: str | None = None
+    opened: list[Path] = []
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        type(self).opened.append(self.path)
+
+    def synchronize_recording_import(self, *, zarr_path, receipt, decided_by) -> str:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "INSERT INTO records (value) VALUES (?);", (f"{zarr_path.name}:{receipt}",)
+            )
+            connection.commit()
+        if zarr_path.name == type(self).fail_on:
+            raise RegistryShadowPublishError(f"synchronization failed for {zarr_path.name}")
+        return f"dataset-{zarr_path.name}"
+
+    def close(self) -> None:
+        pass
+
+
+def test_batch_synchronization_publishes_a_whole_delivery_once(monkeypatch, tmp_path: Path) -> None:
+    canonical = tmp_path / "registry.sqlite"
+    _create_registry(canonical)
+    _RecordingBatchRegistry.fail_on, _RecordingBatchRegistry.opened = None, []
+    monkeypatch.setattr(registry_db, "Registry", _RecordingBatchRegistry)
+    calls = []
+    real_publish = shadow_publish.publish_registry_shadow
+    monkeypatch.setattr(
+        shadow_publish,
+        "publish_registry_shadow",
+        lambda **kwargs: calls.append(kwargs) or real_publish(**kwargs),
+    )
+
+    publication = shadow_synchronize_recording_imports(
+        canonical_registry=canonical,
+        imports=[(tmp_path / "cam_a.zarr", "ra"), (tmp_path / "cam_b.zarr", "rb")],
+        decided_by="pytest",
+    )
+
+    assert len(calls) == 1 and len(_RecordingBatchRegistry.opened) == 1
+    assert publication.mutation_result == {
+        "operation": "synchronize_recording_imports",
+        "datasets": [
+            {"zarr_path": str((tmp_path / "cam_a.zarr").resolve()), "dataset_id": "dataset-cam_a.zarr"},
+            {"zarr_path": str((tmp_path / "cam_b.zarr").resolve()), "dataset_id": "dataset-cam_b.zarr"},
+        ],
+        "decided_by": "pytest",
+    }
+    with sqlite3.connect(canonical) as connection:
+        values = [row[0] for row in connection.execute("SELECT value FROM records ORDER BY id")]
+    assert values == ["before", "cam_a.zarr:ra", "cam_b.zarr:rb"]
+    assert _read_value(Path(publication.backup_path)) == "before"
+    assert ".before-recording-imports-" in Path(publication.backup_path).name
+
+
+def test_batch_failure_on_a_later_artifact_publishes_nothing(monkeypatch, tmp_path: Path) -> None:
+    canonical = tmp_path / "registry.sqlite"
+    _create_registry(canonical)
+    source_hash = _sha256(canonical)
+    _RecordingBatchRegistry.fail_on, _RecordingBatchRegistry.opened = "cam_b.zarr", []
+    monkeypatch.setattr(registry_db, "Registry", _RecordingBatchRegistry)
+
+    with pytest.raises(RegistryShadowPublishError, match="failed for cam_b.zarr"):
+        shadow_synchronize_recording_imports(
+            canonical_registry=canonical,
+            imports=[(tmp_path / "cam_a.zarr", "ra"), (tmp_path / "cam_b.zarr", "rb")],
+            decided_by="pytest",
+        )
+
+    assert _sha256(canonical) == source_hash  # cam_a's row never reached the registry
+
+
+@pytest.mark.parametrize("imports", [[], "duplicate"])
+def test_batch_refuses_empty_or_repeated_artifacts(monkeypatch, tmp_path: Path, imports) -> None:
+    canonical = tmp_path / "registry.sqlite"
+    _create_registry(canonical)
+    if imports == "duplicate":
+        imports = [(tmp_path / "a.zarr", None), (tmp_path / "x/../a.zarr", None)]
+    monkeypatch.setattr(registry_db, "Registry", _RecordingBatchRegistry)
+    with pytest.raises(RegistryShadowPublishError, match="at least one|twice"):
+        shadow_synchronize_recording_imports(
+            canonical_registry=canonical, imports=imports, decided_by="pytest"
+        )
+    assert not (tmp_path / ".palette-registry-backups").exists()

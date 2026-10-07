@@ -1,307 +1,134 @@
-"""Opt-in transfer-v2 branch of the maintained Citrus session import workflow.
+"""Compatibility: the transfer-v2 import behind ``run_citrus_session_import``.
 
-Organization is explicit and inventory-complete. The maintained batch importer,
-actual receipt resolver and optional registry owner provide admission; this
-orchestrator cannot replace those claims with a log or a transport marker.
+The import itself is :func:`fisheye.intake.import_delivery`, which takes the
+delivery's workflow lock before any side effect, imports the parents
+in-process through the recording import owner, and never writes the
+registry. This module only translates the historical command line (session
+directory, ``--resume-transfer-plan``, ``--status-json``) into that call and
+keeps the dry-run plan report. Registration happens on the writer host
+(``fisheye.intake register-delivery``); job-mode registration is retired.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict
-from contextlib import ExitStack
 import json
-import os
 from pathlib import Path
-import stat
 import sys
 import uuid
 
-from fisheye.shared.batch_logging import JsonLogger, make_run_id
-from fisheye.shared.json_safety import write_json_atomic
+from fisheye.intake.delivery import CANONICAL_REGISTRY, plan_recording_only
+from fisheye.intake.importing import STATUS_SCHEMA, import_delivery
+from fisheye.intake.outcomes import EXIT_DONE, IntakeRefused, exit_code_for
 from fisheye.shared.recording_transfer_snapshot import (
+    MARKER_NAME,
     TRANSFER_PARENT_LAYOUTS,
     require,
     strict_json,
 )
-from fisheye.utils.organize_transfer_recordings import (
-    _separate_destination,
-    _state_directory,
-    _validate_plan,
-    build_transfer_organization_plan,
-    finalize_transfer_staging,
-    parent_zarr_paths,
-    prepare_transfer_parent_recordings,
-    transfer_parent_workflow_lock,
-)
-from fisheye.utils.run_citrus_session_import import (
-    _newest_jsonl,
-    _read_zarr_paths_from_import_log,
-    _run_command,
-    _utc_timestamp_for_path,
-    _verify_import_acknowledgments,
-    build_import_command,
-)
 
 
-CANONICAL_REGISTRY = Path(
-    "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite"
-)
+def _utc_timestamp_for_path() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _refuse_synthetic_canonical_registration(plan: dict, args) -> None:
-    """Producer-declared synthetic data only registers into an isolated registry."""
+def _plan_for_report(args) -> dict:
+    """The plan a dry run reports, built or validated without any write."""
 
-    synthetic = any(
-        parent["context"]["data_origin"] == "synthetic" for parent in plan["parents"]
+    from fisheye.utils.organize_transfer_recordings import (
+        _validate_plan,
+        build_transfer_organization_plan,
     )
+
+    source = args.session_dir.absolute()
+    if args.resume_transfer_plan is None:
+        plan = build_transfer_organization_plan(source, destination_root=args.dest_root)
+    else:
+        plan = strict_json(args.resume_transfer_plan)
+        _validate_plan(plan, live_source=False)
+        require(plan["source_dir"] == str(source.resolve()), "resume plan names another staging source")
+        require(
+            plan["destination_root"] == str(args.dest_root.resolve()),
+            "resume plan names another destination root",
+        )
     require(
-        not (
-            synthetic
-            and args.register
-            and Path(args.registry).resolve() == CANONICAL_REGISTRY.resolve()
-        ),
-        "synthetic transfer cannot register into the canonical registry",
+        plan["recording_layout"] in TRANSFER_PARENT_LAYOUTS,
+        "parent workflow supports rolling_clips or single_video only",
     )
+    plan_recording_only(plan)
+    return plan
 
 
-def _plan_recording_only(plan: dict) -> bool:
-    """Stimulus import follows the producer's declared intent, never H5 presence."""
+def _snapshot_sha(args) -> str:
+    """The delivery's identity: the saved plan, the live marker, or durable state.
 
-    intents = {parent["context"]["recording_intent"] for parent in plan["parents"]}
-    require(
-        len(intents) == 1,
-        f"one transfer must declare one recording intent, got {sorted(intents)}",
-    )
-    return intents == {"recording_only"}
+    Retirement removes the marker, so a retry of a retiring/complete delivery
+    without ``--resume-transfer-plan`` finds its sha from the intake state
+    whose plan names this staging source.
+    """
+
+    from fisheye.intake.delivery import find_delivery_by_source
+    from fisheye.intake.discovery import MarkerRefusal, check_marker
+
+    if args.resume_transfer_plan is not None:
+        return str(strict_json(args.resume_transfer_plan)["snapshot_id"])
+    marker_path = args.session_dir.absolute() / MARKER_NAME
+    if not marker_path.exists():
+        sha, skipped = find_delivery_by_source(args.dest_root, args.session_dir)
+        for item in skipped:
+            print(f"skipped unreadable intake state {item['path']}: {item['reason']}", file=sys.stderr)
+        if sha is None:
+            raise IntakeRefused(
+                f"no transfer marker at {marker_path} and no intake state names this "
+                "staging source; pass --resume-transfer-plan <run_dir>/organization_plan.json"
+                + (f" ({len(skipped)} intake state(s) could not be read)" if skipped else "")
+            )
+        return f"sha256:{sha}"
+    try:
+        marker = check_marker(marker_path)
+    except MarkerRefusal as exc:
+        raise IntakeRefused(f"not a sealed transfer-v2 delivery: {exc}") from exc
+    if marker is None:
+        raise IntakeRefused("legacy v1 transfer marker; transfer-v2 intake only")
+    return str(marker["snapshot_id"])
 
 
 def run_transfer_parent_workflow(args) -> int:
     """Invoke only through run_citrus_session_import's explicit v2 dispatch."""
-    payload = {
-        "schema_id": "palette.citrus_transfer_parent_intake.status.v1",
-        "status": "failed",
-        "import_complete": False,
-        "staging_finalized": False,
-    }
-    status_path = None
-    status_identity = None
-    resources = ExitStack()
-
-    def publish_status():
-        nonlocal status_identity
-        require(status_path is not None, "no reserved status destination")
-        require(
-            not any(p.is_symlink() for p in (status_path, *status_path.parents)),
-            "status destination contains a symlink",
-        )
-        current = status_path.lstat()
-        require(
-            stat.S_ISREG(current.st_mode)
-            and (current.st_dev, current.st_ino) == status_identity,
-            "status destination ownership lost",
-        )
-        write_json_atomic(status_path, payload)
-        current = status_path.lstat()
-        status_identity = (current.st_dev, current.st_ino)
 
     try:
-        source = args.session_dir.absolute()
-        if args.resume_transfer_plan is None:
-            plan = build_transfer_organization_plan(
-                source, destination_root=args.dest_root
-            )
-        else:
-            plan = strict_json(args.resume_transfer_plan)
-            _validate_plan(plan, live_source=False)
-            require(
-                plan["source_dir"] == str(source.resolve()),
-                "resume plan names another staging source",
-            )
-            require(
-                plan["destination_root"] == str(args.dest_root.resolve()),
-                "resume plan names another destination root",
-            )
-        require(
-            plan["recording_layout"] in TRANSFER_PARENT_LAYOUTS,
-            "parent workflow supports rolling_clips or single_video only",
-        )
-        recording_only = _plan_recording_only(plan)
-        _refuse_synthetic_canonical_registration(plan, args)
-        source = Path(plan["source_dir"])
-        payload.update(
-            plan=plan,
-            apply=bool(args.apply),
-            registry=str(args.registry) if args.register else None,
-        )
         if not args.apply:
-            payload["status"] = "planned"
+            payload = {
+                "schema_id": STATUS_SCHEMA,
+                "status": "planned",
+                "import_complete": False,
+                "staging_finalized": False,
+                "plan": _plan_for_report(args),
+                "apply": False,
+                "registry": None,
+            }
             print(json.dumps(payload, indent=2, sort_keys=True))
-            return 0
-
+            return EXIT_DONE
+        source = args.session_dir.absolute()
         run_dir = args.run_dir or (
             source.parent
             / ".processing_logs"
             / f"citrus_transfer_v2_{_utc_timestamp_for_path()}_{uuid.uuid4().hex[:8]}"
         )
-        run_dir = _separate_destination(source.resolve(), run_dir)
-        for parent in plan["parents"]:
-            _separate_destination(Path(parent["destination_dir"]), run_dir)
-        state_directory = _state_directory(plan)
-        _separate_destination(state_directory.parent, run_dir)
-        selected_status = (
-            args.status_json or run_dir / "citrus_session_import.status.json"
-        ).absolute()
-        require(
-            not any(
-                path.is_symlink()
-                for path in (selected_status, *selected_status.parents)
-            ),
-            "status path contains a symlink",
+        result = import_delivery(
+            _snapshot_sha(args),
+            run_dir,
+            args.resume_transfer_plan,
+            destination_root=args.dest_root,
+            session_dir=source,
+            status_path=args.status_json,
         )
-        selected_status = selected_status.resolve()
-        for protected in (
-            source,
-            state_directory.parent,
-            *(Path(p["destination_dir"]) for p in plan["parents"]),
-        ):
-            require(
-                not selected_status.is_relative_to(protected),
-                "status path would mutate protected intake evidence",
-            )
-        require(not selected_status.exists(), "status destination already exists")
-        if selected_status.is_relative_to(run_dir):
-            require(
-                selected_status == run_dir / "citrus_session_import.status.json",
-                "custom status path overlaps workflow outputs",
-            )
-        registry = args.registry.resolve() if args.register else None
-        if registry is not None:
-            require(selected_status != registry, "status destination overlaps registry")
-            for protected in (
-                source,
-                state_directory.parent,
-                *(Path(p["destination_dir"]) for p in plan["parents"]),
-            ):
-                require(
-                    not registry.is_relative_to(protected),
-                    "registry must not be inside staging or a source recording",
-                )
-        run_dir.mkdir(parents=True, exist_ok=False)
-        selected_status.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(
-            selected_status, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
-        )
-        try:
-            reserved = os.fstat(descriptor)
-            status_identity = (reserved.st_dev, reserved.st_ino)
-        finally:
-            os.close(descriptor)
-        status_path = selected_status
-        plan_path = run_dir / "organization_plan.json"
-        write_json_atomic(plan_path, plan, overwrite=False)
-        payload.update(run_dir=str(run_dir), organization_plan_path=str(plan_path))
-        verify_workflow_lock, workflow_lock_fd = resources.enter_context(
-            transfer_parent_workflow_lock(plan)
-        )
-
-        state_path = state_directory / "organization_state.json"
-        prior_state = strict_json(state_path) if state_path.is_file() else None
-        if prior_state is not None and prior_state.get("status") in {
-            "retiring",
-            "complete",
-        }:
-            # Source control files may already be gone: use exact journal replay,
-            # never reconstruct or silently re-import an immutable publication.
-            require(
-                args.resume_transfer_plan is not None,
-                "retirement replay requires --resume-transfer-plan",
-            )
-            final = finalize_transfer_staging(
-                plan, registry_path=registry, require_stimulus=not recording_only
-            )
-            # Finalization verified each parent's receipt at these paths, so a
-            # replay reports what a fresh import reports; the registrar needs them.
-            payload["zarr_paths"] = [str(p) for p in parent_zarr_paths(plan)]
-        else:
-            prepare_transfer_parent_recordings(
-                plan, registry_path=registry, require_stimulus=not recording_only
-            )
-            organize_log = run_dir / "organized_parents.jsonl"
-            logger = JsonLogger(organize_log, make_run_id())
-            try:
-                for parent in plan["parents"]:
-                    logger.log(
-                        "recording_applied",
-                        dest_dir=parent["destination_dir"],
-                        recording_id=parent["identity"]["recording_id"],
-                        camera_id=parent["identity"]["camera_id"],
-                        source_snapshot_id=plan["snapshot_id"],
-                    )
-            finally:
-                logger.close()
-            import_log_dir = run_dir / "imports"
-            import_log_dir.mkdir()
-            command = build_import_command(
-                organize_log=organize_log,
-                log_dir=import_log_dir,
-                apply=True,
-                recording_only=recording_only,
-                registry=registry,
-            )
-            result = _run_command(
-                command,
-                name="import_parents",
-                run_dir=run_dir,
-                pass_fds=(workflow_lock_fd,),
-                env={
-                    **os.environ,
-                    "PALETTE_RECORDING_IMPORT_LEASE_FD": str(workflow_lock_fd),
-                },
-            )
-            payload["commands"] = [asdict(result)]
-            require(
-                result.returncode == 0,
-                f"parent importer exited with return code {result.returncode}",
-            )
-            import_log = _newest_jsonl(
-                import_log_dir,
-                "import_organized_recordings_analysis_*.jsonl",
-                before=set(),
-            )
-            zarr_paths = _read_zarr_paths_from_import_log(import_log)
-            _verify_import_acknowledgments(
-                import_log=import_log,
-                recording_dirs=[Path(p["destination_dir"]) for p in plan["parents"]],
-                zarr_paths=zarr_paths,
-                recording_only=recording_only,
-            )
-            payload.update(
-                import_log=str(import_log),
-                zarr_paths=[str(p) for p in zarr_paths],
-                import_complete=True,
-            )
-            verify_workflow_lock()
-            final = finalize_transfer_staging(
-                plan, registry_path=registry, require_stimulus=not recording_only
-            )
-        payload.update(
-            status="complete",
-            import_complete=True,
-            staging_finalized=True,
-            import_receipts=final["import_receipts"],
-            retired_file_count=len(final["retired_files"]),
-        )
-        publish_status()
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
+        print(json.dumps(result.to_json(), indent=2, sort_keys=True))
+        return EXIT_DONE
     except Exception as exc:
-        payload["error"] = str(exc)
-        if status_path is not None:
-            try:
-                publish_status()
-            except Exception as status_exc:
-                print(f"Status not written: {status_exc}", file=sys.stderr)
         print(f"Transfer parent intake failed: {exc}", file=sys.stderr)
-        return 1
-    finally:
-        resources.close()
+        return exit_code_for(exc)
+
+
+__all__ = ["CANONICAL_REGISTRY", "run_transfer_parent_workflow"]

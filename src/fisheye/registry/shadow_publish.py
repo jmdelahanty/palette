@@ -20,12 +20,36 @@ import socket
 import sqlite3
 import sys
 import tempfile
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, Sequence
 import uuid
 
 
 class RegistryShadowPublishError(RuntimeError):
     """Raised when a registry shadow mutation cannot be published safely."""
+
+
+class RegistryProducerCommitMismatch(RegistryShadowPublishError):
+    """A receipt was produced by another commit than this registering checkout.
+
+    The identity authority binds a receipt only from its producing checkout,
+    so this can never succeed from this deployment; it is detected before any
+    backup or candidate copy is made.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        zarr_path: str,
+        receipt_producer_git_sha: str,
+        registrar_git_sha: str | None,
+        registrar_git_dirty: bool | None,
+    ):
+        super().__init__(message)
+        self.zarr_path = zarr_path
+        self.receipt_producer_git_sha = receipt_producer_git_sha
+        self.registrar_git_sha = registrar_git_sha
+        self.registrar_git_dirty = registrar_git_dirty
 
 
 REGISTRY_WRITER_HOST_ENV = "PALETTE_REGISTRY_WRITER_HOST"
@@ -257,6 +281,87 @@ def _configured_shadow_paths(
     )
 
 
+def _publish_through_configured_writer(
+    canonical: Path,
+    *,
+    backup_label: str,
+    mutate: Callable[[Path], Mapping[str, Any]],
+) -> RegistryShadowPublication:
+    """One shadow publication under the designated writer's host-local mutex."""
+
+    host_lock, local_temp_root, backup_dir = _configured_shadow_paths(canonical)
+    local_temp_root.mkdir(parents=True, exist_ok=True)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / (f"{canonical.name}.before-{backup_label}-{uuid.uuid4().hex}.sqlite")
+    with _host_writer_lock(host_lock):
+        return publish_registry_shadow(
+            canonical_registry=canonical,
+            backup_path=backup,
+            mutate=mutate,
+            local_temp_root=local_temp_root,
+        )
+
+
+def preflight_recording_import_receipts(imports: Sequence[tuple[Path, object | None]]) -> None:
+    """Refuse, before any backup, a receipt this checkout can never bind.
+
+    Runs the identity authority's own live receipt verification with its
+    producing-commit requirement (``_verify_live_import_receipt(...,
+    require_current_producer_code=True)``), the same check the mutation would
+    hit only after the full registry backup had been copied. Only actual
+    :class:`RecordingImportReceipt` objects are checked; ``None`` (refresh of
+    an already-bound import) needs no producing commit.
+    """
+
+    from fisheye.registry.recording_identity_authority import (
+        RecordingIdentityProjectionConflict,
+        _verify_live_import_receipt,
+        collect_regular_source_recording_identity,
+    )
+    from fisheye.shared.recording_import_receipt import RecordingImportReceipt
+
+    for zarr_path, receipt in imports:
+        if not isinstance(receipt, RecordingImportReceipt):
+            continue
+        target = Path(zarr_path).expanduser().resolve()
+        try:
+            _verify_live_import_receipt(
+                resolved_path=target,
+                evidence=collect_regular_source_recording_identity(target),
+                receipt=receipt,
+                require_current_producer_code=True,
+            )
+        except RecordingIdentityProjectionConflict as exc:
+            if "producer commit" not in str(exc):
+                raise
+            import fisheye.registry.recording_identity_authority as authority
+            from fisheye.shared.run_provenance import git_identity
+
+            # Reported for the operator only; the decision is the authority's.
+            code = git_identity(cwd=Path(authority.__file__).resolve().parents[3])
+            if code.get("git_sha") is None or code.get("git_dirty") is None:
+                # git itself failed: not evidence of another commit. Retryable.
+                raise RegistryShadowPublishError(
+                    "the registering checkout's git identity is unavailable "
+                    f"({code.get('git_unavailable_reason') or code.get('git_dirty_unavailable_reason')}); retry"
+                ) from exc
+            raise RegistryProducerCommitMismatch(
+                f"receipt for {target} was produced by commit "
+                f"{receipt.producer_git_sha}; this registering checkout is "
+                f"{code.get('git_sha')} (dirty={code.get('git_dirty')}). Register it "
+                "from a deployment at the receipt's producer commit.",
+                zarr_path=str(target),
+                receipt_producer_git_sha=receipt.producer_git_sha,
+                registrar_git_sha=code.get("git_sha"),
+                registrar_git_dirty=code.get("git_dirty"),
+            ) from exc
+
+
+def _require_decided_by(decided_by: object) -> None:
+    if type(decided_by) is not str or not decided_by.strip():
+        raise RegistryShadowPublishError("decided_by must be non-empty text")
+
+
 def shadow_synchronize_recording_import(
     *,
     canonical_registry: str | Path,
@@ -274,14 +379,8 @@ def shadow_synchronize_recording_import(
 
     canonical = Path(canonical_registry).expanduser().resolve()
     target = Path(zarr_path).expanduser().resolve()
-    if type(decided_by) is not str or not decided_by.strip():
-        raise RegistryShadowPublishError("decided_by must be non-empty text")
-    host_lock, local_temp_root, backup_dir = _configured_shadow_paths(canonical)
-    local_temp_root.mkdir(parents=True, exist_ok=True)
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup = backup_dir / (
-        f"{canonical.name}.before-recording-import-{uuid.uuid4().hex}.sqlite"
-    )
+    _require_decided_by(decided_by)
+    preflight_recording_import_receipts([(target, receipt)])
 
     def mutate(candidate: Path) -> Mapping[str, Any]:
         from fisheye.registry.db import Registry
@@ -302,13 +401,66 @@ def shadow_synchronize_recording_import(
             "decided_by": decided_by,
         }
 
-    with _host_writer_lock(host_lock):
-        return publish_registry_shadow(
-            canonical_registry=canonical,
-            backup_path=backup,
-            mutate=mutate,
-            local_temp_root=local_temp_root,
-        )
+    return _publish_through_configured_writer(
+        canonical, backup_label="recording-import", mutate=mutate
+    )
+
+
+def shadow_synchronize_recording_imports(
+    *,
+    canonical_registry: str | Path,
+    imports: Sequence[tuple[Path, object | None]],
+    decided_by: str,
+) -> RegistryShadowPublication:
+    """Synchronize every import of one delivery in ONE shadow publication.
+
+    Each ``(zarr_path, receipt)`` pair goes through the same per-artifact
+    owner as :func:`shadow_synchronize_recording_import`
+    (``Registry.synchronize_recording_import``), in order, against one local
+    candidate. Any failure discards the whole candidate, so the canonical
+    registry receives either every artifact of the delivery or none of them:
+    one backup, one validation, one atomic replace. Each per-artifact step is
+    an idempotent upsert keyed by the artifact, so a retry is safe.
+    """
+
+    canonical = Path(canonical_registry).expanduser().resolve()
+    _require_decided_by(decided_by)
+    targets = [
+        (Path(zarr_path).expanduser().resolve(), receipt) for zarr_path, receipt in imports
+    ]
+    if not targets:
+        raise RegistryShadowPublishError("a batch synchronization needs at least one import")
+    if len({target for target, _receipt in targets}) != len(targets):
+        raise RegistryShadowPublishError("a batch synchronization names one artifact twice")
+    preflight_recording_import_receipts(targets)
+
+    def mutate(candidate: Path) -> Mapping[str, Any]:
+        from fisheye.registry.db import Registry
+
+        registry = Registry(candidate)
+        try:
+            datasets = [
+                {
+                    "zarr_path": str(target),
+                    "dataset_id": registry.synchronize_recording_import(
+                        zarr_path=target,
+                        receipt=receipt,
+                        decided_by=decided_by,
+                    ),
+                }
+                for target, receipt in targets
+            ]
+        finally:
+            registry.close()
+        return {
+            "operation": "synchronize_recording_imports",
+            "datasets": datasets,
+            "decided_by": decided_by,
+        }
+
+    return _publish_through_configured_writer(
+        canonical, backup_label="recording-imports", mutate=mutate
+    )
 
 
 def publish_registry_shadow(
@@ -423,10 +575,13 @@ __all__ = [
     "REGISTRY_SHADOW_TEMP_ROOT_ENV",
     "REGISTRY_WRITER_HOST_ENV",
     "REGISTRY_WRITER_LOCK_PATH_ENV",
+    "RegistryProducerCommitMismatch",
     "RegistryShadowPublication",
     "RegistryShadowPublishError",
     "RegistryValidation",
+    "preflight_recording_import_receipts",
     "publish_registry_shadow",
     "shadow_synchronize_recording_import",
+    "shadow_synchronize_recording_imports",
     "validate_registry_sqlite",
 ]
