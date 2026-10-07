@@ -371,3 +371,20 @@ def test_transfer_projection_refuses_a_changed_original_manifest(tmp_path: Path,
     monkeypatch.setattr(ledger, "_sha256_file", lambda path: "0" * 64)
     with pytest.raises(ValueError, match="original clip manifest bytes changed"):
         _publish(tmp_path, [{"declared_size": (384, 384), "projected": True}] * 2)
+
+
+@pytest.mark.parametrize("projection", [{}, {"original_clip_manifest": None}])
+def test_transfer_projection_without_an_original_keeps_the_descriptor(projection) -> None:
+    # build_transfer_parent_frame_index writes ``"original_clip_manifest": null``
+    # when the producer shipped no clip manifest (pinned Citrus 859a7972): that
+    # is "no binding", exactly like an absent key, never a broken binding.
+    import fisheye.shared.acquisition_crop_stream_ledger as ledger
+
+    crop = {"output_kind": "crop", "frame_count": 2}
+    manifest = {"schema_id": ledger.TRANSFER_CLIP_PROJECTION_SCHEMA_ID, **projection}
+    assert (
+        ledger._producer_crop_descriptor(
+            manifest, crop, recording_dir=Path("/unused"), camera_id="123", clip_index=0
+        )
+        is crop
+    )
