@@ -224,6 +224,7 @@ Consequences:
 - If the claim exists and its LSF job is still alive (judged from its runtime-status heartbeat on NFS, falling back to the cached batched `bjobs`), the new job exits with a distinct code. The executor's status check treats that code as "attached to the existing job" and polls the original job ID.
 - If the claim's job is dead, the attempt counts as failed. The next attempt runs under a new run name.
 - This is the same O_EXCL-claim pattern the intake poller already uses (`.claimed`), moved to the job level.
+- **If a stage already owns an exclusive lock, the runner defers to it and adds no claim of its own.** Two claim mechanisms for one fact would be the duplication the intake single-writer design (PR #290) removes. Intake already holds a per-snapshot workflow lock, and `import_delivery` reports "held by another live job" with its distinct exit code. The runner maps that code to "attached" and takes no claim. Runner claims are only for stages that lack their own lock.
 
 ### 5.4 Deployment pinning
 
@@ -250,7 +251,7 @@ discover (DAG-build time, on ws1)
   targets = sealed v2 markers under staging_dir                     (check_marker, unchanged)
           ∪ <dest_root>/.transfer_intake/<snapshot_sha>/organization_state.json
               at reserved | materialized | retiring                    (incomplete: resume)
-              or complete without a register sentinel                  (register only)
+              or complete with probe_register(sha) false               (register only)
 for each snapshot_sha:
   import_delivery     [LSF short, 1 core, 4 GB, 1h]
       fresh:  run_citrus_session_import --run-dir <flow run dir> --apply   (no --register)
@@ -266,6 +267,8 @@ for each snapshot_sha:
 ```
 
 - **The target set must include durable intake states, not only markers.** Staging, including the marker and snapshot, is deleted during finalization, and a failed retirement leaves the state at `retiring` with the marker possibly already gone. `finalize_transfer_staging` tolerates missing files once retirement has begun. A marker-only scan would orphan half-retired deliveries and imported-but-unregistered ones. (Correction from `palette-a0`, 2026-10-07.)
+- **Discovery never reads runner sentinels.** "Complete but not registered" is decided by `probe_register`, which reads Palette evidence. If it read the sentinel, the runner's cache would become an authority.
+- **Each attempt gets a fresh run dir:** `<flow_root>/intake/<sha>/attempt-<n>/`. The workflow requires a run dir that does not exist yet. Intake retries resume from durable state rather than minting new runs, so the attempt-suffixed run names in §4 don't apply to intake.
 - **Resume from the stored plan, not from staging.** For an incomplete state, the exact plan is `state["plan"]` (also in `<run_dir>/organization_plan.json`). There may be no marker left to rebuild it from, so the import rule passes `--resume-transfer-plan`.
 - **The registration mode is fixed per delivery.** On its first attempt, finalize records an `admission_contract` (`registry_path`, `require_stimulus`) and refuses a retry that changes it. Runner imports always use workstation mode (`registry_path=None`). A delivery first attempted in the old "job registers" mode cannot be resumed by the runner. Discovery reports it as `legacy_mode` and leaves it for manual handling, rather than attempting a retry that would be refused.
 - **One registry publication per delivery.** Today each `shadow_synchronize_recording_import` call is its own `publish_registry_shadow`: a full backup (about 70 MB), a copy and a publish per zarr. A 4-camera delivery is therefore 4 publications and is not atomic. Slice 1 adds a small gateway function that synchronizes all of a delivery's zarrs inside one mutation: one backup, all-or-nothing. It is still an idempotent upsert keyed by zarr, so a re-run after failure is safe.
@@ -372,6 +375,7 @@ Still open:
 
 ## Decision log
 
+- 2026-10-07: aligned with the intake single-writer design (PR #290). Discovery uses `probe_register`, not runner sentinels. Stages that own a lock replace runner claims. Intake attempts get fresh run dirs.
 - 2026-10-07: Jeremy decided §10: Snakemake, a separate env, at most one login-node check-in per 5-10 minutes, intake only. §5.1 gains an explicit login-node contact budget.
 - 2026-10-07: §6 corrected after `palette-a0` review. Discovery now includes `reserved`/`materialized`/`retiring` states, resumes from `state["plan"]` and keeps the `admission_contract` mode fixed. Registration is one `publish_registry_shadow` per delivery, and receipt-verification cost is to be measured before setting the tick.
 - 2026-10-07: draft opened. Recommends Snakemake as a supervisor with Palette-owned "done" sentinels, with intake as slice 1 and the plan executor as slice 2. Not accepted yet.
