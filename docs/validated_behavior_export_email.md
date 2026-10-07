@@ -30,6 +30,16 @@ manifest. Older exports without one remain readable; the notifier can still
 preview them, but delivery requires either a selected companion or an explicit
 `--handoff` guide.
 
+**Sidecar rule (decided 2026-10-07).** A sealed publication may gain
+`handoffs/` companions after it is published; this is not a violation of
+publication immutability. The rule is append-only: the export's own files and
+every existing `versions/vNNN.md` are never rewritten, and only `handoff.json`
+(the selection pointer) is atomically replaced when a new version is selected.
+This is safe because the closed-inventory checks (`analytics_exports/validation.py`
+and `validated_behavior_cohort.py`) scan only the generation tree, not the
+publication root. Any new validator that inventories the whole publication root
+must exempt `handoffs/` rather than reject it.
+
 The notifier automatically validates and links the selected companion. Preview
 the current sleepyfish message with a real recipient:
 
