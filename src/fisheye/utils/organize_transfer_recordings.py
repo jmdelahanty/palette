@@ -544,14 +544,25 @@ def _device(path: Path) -> int:
     return os.stat(path).st_dev
 
 
-def _sync_directory_chain(directory: Path) -> None:
-    # mkdir(parents=True) may have introduced any of these entries. It cannot
-    # create a mount point, so stop at the filesystem boundary: fsync of an
-    # automount root such as /groups returns EINVAL.
+def _same_filesystem_ancestors(directory: Path) -> list[Path]:
+    """``directory`` and its parents up to the filesystem boundary.
+
+    Intake cannot create a mount point, and fsync of an automount root such
+    as /groups returns EINVAL, so durability barriers stop at the boundary.
+    """
+
     device = _device(directory)
+    chain = []
     for path in (directory, *directory.parents):
         if _device(path) != device:
             break
+        chain.append(path)
+    return chain
+
+
+def _sync_directory_chain(directory: Path) -> None:
+    # mkdir(parents=True) may have introduced any of these entries.
+    for path in _same_filesystem_ancestors(directory):
         _fsync_directory(path)
 
 
@@ -713,7 +724,7 @@ def _flush_parent_publications(plan: dict, state: dict) -> None:
                 _directory_identity(current / name)
             for name in filenames:
                 _fsync_regular_file(current / name)
-        directories.update(root.parents)
+        directories.update(_same_filesystem_ancestors(root))
     for directory in sorted(directories, key=lambda p: len(p.parts), reverse=True):
         _fsync_directory(directory)
 
