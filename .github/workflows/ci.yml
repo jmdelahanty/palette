@@ -4,8 +4,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# One group per pull request: a new push cancels the run for the superseded
+# head instead of finishing a full run nobody can merge. Manual runs stay
+# keyed by commit.
 concurrency:
-  group: ci-${{ github.event.pull_request.head.sha || github.sha }}
+  group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
