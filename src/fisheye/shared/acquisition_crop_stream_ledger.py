@@ -14,6 +14,8 @@ import json
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
+from importlib.resources import files as resource_files
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -519,19 +521,100 @@ def _collection_media_identity(
     }
 
 
+# Orange's output-descriptor and sealed crop-configuration grammars, byte-
+# identical to Orange e11e841 docs/schemas/ (see contracts/README.md).
+_ORANGE_SCHEMAS = {
+    "recording_output": (
+        "orange_recording_output_v1.schema.json",
+        "4db5c324cb041a2e31f3c9f96189c5d630fa94a7c352f447b5d9a62a7655d147",
+    ),
+    "recording_crop_output": (
+        "orange_recording_crop_output_v1.schema.json",
+        "6a67811e9162116bb318694275eeca1e9d82ab09ff3b424dca957f67236c8894",
+    ),
+}
+
+
+@lru_cache(maxsize=None)
+def _orange_validator(name: str):
+    from jsonschema import Draft202012Validator
+
+    file_name, digest = _ORANGE_SCHEMAS[name]
+    data = (
+        resource_files("fisheye.shared").joinpath("contracts").joinpath(file_name).read_bytes()
+    )
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise ValueError("packaged_contract_drift:" + file_name)
+    return Draft202012Validator(json.loads(data))
+
+
+def _require_orange_schema(name: str, document: Any, *, label: str) -> None:
+    from jsonschema.exceptions import best_match
+
+    error = best_match(_orange_validator(name).iter_errors(document))
+    if error is not None:
+        raise ValueError(f"{label} violates orange.{name}.v1: {error.message}")
+
+
 def _declared_crop_video_size(
     crop: Mapping[str, Any], *, clip_index: int
 ) -> tuple[int, int] | None:
-    """The encoded crop video's (width, height) if the clip manifest declares it."""
+    """The encoded crop video's (width, height) if the clip manifest declares it.
 
-    width, height = crop.get("width"), crop.get("height")
-    if width is None and height is None:
+    A descriptor that declares a size must be a valid Orange output descriptor
+    (orange.recording_output.v1). One without a size predates the declaration.
+    """
+
+    if crop.get("width") is None and crop.get("height") is None:
         return None
-    if type(width) is not int or type(height) is not int or width <= 0 or height <= 0:
+    _require_orange_schema(
+        "recording_output", dict(crop), label=f"Clip {clip_index} crop output"
+    )
+    return crop["width"], crop["height"]
+
+
+def _sealed_crop_video_size(
+    recording_dir: Path, manifest: Mapping[str, Any], camera_id: str
+) -> tuple[int, int] | None:
+    """The crop size Orange sealed at record start, when the parent carries it.
+
+    The transfer-v2 parent manifest names where the organizer placed the start
+    snapshot; its crop_outputs.<camera> (orange.recording_crop_output.v1) is the
+    configuration the produced crop video must agree with.
+    """
+
+    transfer = manifest.get("source_transfer")
+    files = transfer.get("source_to_parent_files") if isinstance(transfer, Mapping) else None
+    if not isinstance(files, list):
+        return None
+    placed = [
+        item.get("relative_path")
+        for item in files
+        if isinstance(item, Mapping)
+        and isinstance(item.get("source"), Mapping)
+        and item["source"].get("path") == "recording_snapshot_start.json"
+    ]
+    if not placed:
+        return None
+    snapshot = _read_json_object(
+        _resolve_relative(recording_dir, placed[0], label="recording start snapshot"),
+        label="recording start snapshot",
+    )
+    crop_outputs = snapshot.get("crop_outputs")
+    declaration = crop_outputs.get(camera_id) if isinstance(crop_outputs, Mapping) else None
+    if declaration is None:
+        return None
+    _require_orange_schema(
+        "recording_crop_output", declaration, label=f"Sealed crop_outputs.{camera_id}"
+    )
+    runtime = declaration["runtime"]
+    side = runtime["crop_size_px"]
+    if (runtime["width"], runtime["height"]) != (side, side):
         raise ValueError(
-            f"Clip {clip_index} crop output declares an invalid size {(width, height)}."
+            f"Sealed crop_outputs.{camera_id} crop_size_px {side} disagrees with "
+            f"its runtime size {(runtime['width'], runtime['height'])}."
         )
-    return width, height
+    return side, side
 
 
 def _infer_collection_crop_shape(metadata_paths: list[Path]) -> tuple[int, int]:
@@ -771,6 +854,12 @@ def _validated_collection_contract(
                 f"Rolling crop clips declare inconsistent crop video sizes: {declared_sizes}."
             )
         crop_width, crop_height = declared_sizes[0]
+        sealed = _sealed_crop_video_size(recording_dir, manifest, camera_id)
+        if sealed is not None and sealed != (crop_width, crop_height):
+            raise ValueError(
+                f"Produced crop video size {(crop_width, crop_height)} disagrees with "
+                f"the size sealed at record start {sealed}."
+            )
     else:
         # Clip manifests that predate the declaration: infer from detected rows.
         crop_width, crop_height = _infer_collection_crop_shape(
