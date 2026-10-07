@@ -540,9 +540,18 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _device(path: Path) -> int:
+    return os.stat(path).st_dev
+
+
 def _sync_directory_chain(directory: Path) -> None:
-    # mkdir(parents=True) may have introduced any of these entries.
+    # mkdir(parents=True) may have introduced any of these entries. It cannot
+    # create a mount point, so stop at the filesystem boundary: fsync of an
+    # automount root such as /groups returns EINVAL.
+    device = _device(directory)
     for path in (directory, *directory.parents):
+        if _device(path) != device:
+            break
         _fsync_directory(path)
 
 
