@@ -591,7 +591,12 @@ def _producer_crop_descriptor(
     path and sha256; read the descriptor there, after checking those bytes.
     """
 
-    if clip_manifest.get("schema_id") != TRANSFER_CLIP_PROJECTION_SCHEMA_ID:
+    if (
+        clip_manifest.get("schema_id") != TRANSFER_CLIP_PROJECTION_SCHEMA_ID
+        or "original_clip_manifest" not in clip_manifest
+    ):
+        # An Orange clip manifest, or a projection with no original to read:
+        # use the descriptor as given (no size means the row inference).
         return crop
     original = clip_manifest.get("original_clip_manifest")
     transfer = clip_manifest.get("source_transfer")
