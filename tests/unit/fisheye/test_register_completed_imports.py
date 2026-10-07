@@ -37,22 +37,25 @@ def _status(tmp_path: Path, job_id: str = "777", **payload) -> None:
     run_dir.mkdir(parents=True)
     body = {"status": "complete", "import_complete": True,
             "zarr_paths": ["/rec/a.zarr", "/rec/b.zarr"],
-            "plan": {"parents": [{"context": {"data_origin": "acquired"}}]}}
+            "plan": {"snapshot_id": "sha256:" + "d" * 64, "destination_root": "/rec",
+                     "parents": [{"context": {"data_origin": "acquired"}}]}}
     body.update(payload)
     (run_dir / f"workflow-{job_id}").mkdir()
     (run_dir / f"workflow-{job_id}" / "citrus_session_import.status.json").write_text(json.dumps(body))
 
 
 class Register:
+    """Stands in for fisheye.intake.register_delivery: one call per delivery."""
+
     def __init__(self, fail: bool = False):
-        self.calls: list[tuple[Path, Path]] = []
+        self.calls: list[tuple[str, Path]] = []
         self.fail = fail
 
-    def __call__(self, registry, zarr):
-        self.calls.append((registry, zarr))
+    def __call__(self, config, snapshot_sha, destination_root):
+        self.calls.append((snapshot_sha, destination_root))
         if self.fail:
             raise RuntimeError("registry busy")
-        return f"dataset-{zarr.name}"
+        return {zarr: f"dataset-{Path(zarr).name}" for zarr in ("/rec/a.zarr", "/rec/b.zarr")}
 
 
 def test_pending_job_is_left_for_the_next_run(tmp_path):
@@ -69,11 +72,12 @@ def test_completed_import_is_registered_once(tmp_path):
     _status(tmp_path)
     register = Register()
     assert registrar.register_completed(config, dry_run=False, register=register) == 0
-    assert [str(z) for _r, z in register.calls] == ["/rec/a.zarr", "/rec/b.zarr"]
+    # The whole delivery is one registration (one registry publication).
+    assert register.calls == [("sha256:" + "d" * 64, Path("/rec"))]
     done = json.loads((tmp_path / "state" / f"{KEY}.registered").read_text())
     assert done["datasets"] == {"/rec/a.zarr": "dataset-a.zarr", "/rec/b.zarr": "dataset-b.zarr"}
     registrar.register_completed(config, dry_run=False, register=register)
-    assert len(register.calls) == 2  # not registered again
+    assert len(register.calls) == 1  # not registered again
 
 
 def test_failed_import_is_recorded_for_review_not_retried(tmp_path):
@@ -98,15 +102,35 @@ def test_registration_error_is_retried_next_run(tmp_path):
     assert not (tmp_path / "state" / f"{KEY}.registration_failed").exists()
 
 
-def test_synthetic_transfer_never_reaches_the_canonical_registry(tmp_path, monkeypatch):
+@pytest.mark.parametrize("canonical", [True, False])
+def test_synthetic_transfer_is_never_registered(tmp_path, monkeypatch, canonical):
+    from fisheye.intake.delivery import CANONICAL_REGISTRY
+
     config = _config(tmp_path)
-    monkeypatch.setitem(config, "registry", str(
-        __import__("fisheye.utils.citrus_transfer_parent_workflow", fromlist=["x"]).CANONICAL_REGISTRY))
+    if canonical:
+        monkeypatch.setitem(config, "registry", str(CANONICAL_REGISTRY))
     _submitted(tmp_path)
-    _status(tmp_path, plan={"parents": [{"context": {"data_origin": "synthetic"}}]})
+    _status(tmp_path, plan={"snapshot_id": "sha256:" + "d" * 64, "destination_root": "/rec",
+                            "parents": [{"context": {"data_origin": "synthetic"}}]})
     register = Register()
     assert registrar.register_completed(config, dry_run=False, register=register) == 1
     assert register.calls == []
+    assert "synthetic" in json.loads(
+        (tmp_path / "state" / f"{KEY}.registration_failed").read_text())["error"]
+
+
+def test_a_registration_held_by_another_run_is_left_for_the_next_run(tmp_path):
+    from fisheye.intake.outcomes import IntakeHeld
+
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    _status(tmp_path)
+
+    def held(config, snapshot_sha, destination_root):
+        raise IntakeHeld("held", lock_path="x.register.lock", holder=None)
+
+    assert registrar.register_completed(config, dry_run=False, register=held) == 0
+    assert sorted(p.name for p in (tmp_path / "state").iterdir()) == [f"{KEY}.submitted"]
 
 
 def test_dry_run_writes_nothing(tmp_path):
@@ -123,12 +147,28 @@ def test_config_requires_workstation_registration_and_writer_settings(tmp_path):
     path.write_text(json.dumps({"state_dir": "s", "log_dir": "l"}))
     with pytest.raises(registrar.RegistrarRefusal, match="missing required keys"):
         registrar.load_config(path)
+    _config(tmp_path)
+    config = json.loads((tmp_path / "config.json").read_text())
+    path.write_text(json.dumps({**config, "registration": "job"}))
+    with pytest.raises(registrar.RegistrarRefusal, match="job mode is retired"):
+        registrar.load_config(path)
+
+
+def test_the_writer_host_may_be_named_short_or_fully_qualified(tmp_path, monkeypatch):
+    from fisheye.intake import registration
+
+    config = _config(tmp_path)
+    monkeypatch.setattr(registration.socket, "gethostname", lambda: "delahantyj-ws1.hhmi.org")
+    for name in ("delahantyj-ws1", "delahantyj-ws1.hhmi.org", "DELAHANTYJ-WS1.hhmi.org"):
+        registrar._require_writer_host({**config, "writer_host": name})
+    with pytest.raises(registrar.RegistrarRefusal, match="not the registry writer"):
+        registrar._require_writer_host({**config, "writer_host": "delahantyj-ws2"})
 
 
 def test_main_refuses_on_a_host_that_is_not_the_writer(tmp_path, capsys):
     _config(tmp_path)
     assert registrar.main(["--config", str(tmp_path / "config.json")]) == 2
-    assert "is not the writer" in capsys.readouterr().out
+    assert "is not the registry writer" in capsys.readouterr().out
 
 
 def test_poller_dispatches_jobs_without_registering_in_workstation_mode(tmp_path):

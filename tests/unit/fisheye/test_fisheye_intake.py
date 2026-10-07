@@ -222,6 +222,8 @@ def test_resume_from_retiring_with_the_marker_already_gone(tmp_path, monkeypatch
 
 
 def test_second_concurrent_attempt_exits_75_and_leaves_no_new_files(tmp_path, monkeypatch) -> None:
+    from fisheye.utils import run_citrus_session_import as compatibility
+
     session, sha = _delivery(tmp_path, "rolling")
     destination = _destination(tmp_path)
     plan = organizer.build_transfer_organization_plan(session, destination_root=destination)
@@ -235,6 +237,11 @@ def test_second_concurrent_attempt_exits_75_and_leaves_no_new_files(tmp_path, mo
         assert held["schema"] == "palette.intake.held.v1"
         assert held["holder"]["pid"] == os.getpid() and held["holder"]["host"] == HOST
         assert held["lock_path"].endswith(f"{sha}{IMPORT_LOCK_KIND}")
+        # The compatibility command the LSF job script runs answers the same.
+        assert compatibility.main(
+            [str(session), "--apply", "--dest-root", str(destination),
+             "--run-dir", str(tmp_path / "runs" / "third")]
+        ) == EXIT_HELD
         assert _tree(tmp_path) == before  # no run dir, no status, no state
 
 
