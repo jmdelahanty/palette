@@ -6,6 +6,15 @@ delivery's Zarrs are synchronized in ONE shadow publication
 whole delivery or none of it. Idempotent: a delivery whose register probe is
 already true is not published again (no new backup, registry bytes
 unchanged).
+
+Operator note: the identity authority binds an import receipt only from a
+checkout at the receipt's producer commit. A delivery imported by another
+commit than this registrar's deployment is refused (65,
+``registrar_commit_mismatch``) before any backup is made; the refusal JSON
+names ``receipt_producer_git_sha``. Register that stranded delivery from a
+deployment at that commit (``~/.palette/deployments/ops-<sha>``), e.g.
+``scripts/py -m fisheye.intake register-delivery <snapshot_sha> --config ...``
+run inside it. Retrying from the current deployment can never succeed.
 """
 
 from __future__ import annotations
@@ -27,7 +36,7 @@ from fisheye.intake.delivery import (
     require_workstation_admission,
     validate_snapshot_sha,
 )
-from fisheye.intake.outcomes import IntakeRefused
+from fisheye.intake.outcomes import IntakeRefused, RegistrarCommitMismatch
 from fisheye.intake.probes import ProbeResult, probe_import, probe_register
 
 DECIDED_BY = "fisheye.intake.register_delivery"
@@ -140,7 +149,10 @@ def register_delivery(
     live. Returns the true register probe.
     """
 
-    from fisheye.registry.shadow_publish import shadow_synchronize_recording_imports
+    from fisheye.registry.shadow_publish import (
+        RegistryProducerCommitMismatch,
+        shadow_synchronize_recording_imports,
+    )
     from fisheye.shared.recording_import_receipt import (
         RecordingImportReceipt,
         recording_import_receipt_path,
@@ -176,10 +188,24 @@ def register_delivery(
             )
             for zarr_path, receipt_sha256 in zip(imported.zarr_paths, imported.receipt_sha256s)
         ]
-        with _gateway_environment(writer):
-            shadow_synchronize_recording_imports(
-                canonical_registry=writer.registry, imports=imports, decided_by=DECIDED_BY
-            )
+        try:
+            with _gateway_environment(writer):
+                # The gateway's preflight checks every receipt's producing
+                # commit against this checkout before any backup is copied.
+                shadow_synchronize_recording_imports(
+                    canonical_registry=writer.registry, imports=imports, decided_by=DECIDED_BY
+                )
+        except RegistryProducerCommitMismatch as exc:
+            raise RegistrarCommitMismatch(
+                str(exc),
+                code="registrar_commit_mismatch",
+                details={
+                    "receipt_producer_git_sha": exc.receipt_producer_git_sha,
+                    "registrar_git_sha": exc.registrar_git_sha,
+                    "registrar_git_dirty": exc.registrar_git_dirty,
+                    "zarr_path": exc.zarr_path,
+                },
+            ) from exc
         registered = probe_register(sha, destination_root=destination, registry=writer.registry)
         if not registered.verdict:
             raise RuntimeError(f"published, but the register probe is false: {registered.reason}")

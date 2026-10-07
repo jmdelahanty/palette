@@ -74,17 +74,17 @@ def _stub_checkout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(run_provenance, "git_identity", identity)
 
 
-def _stub_environment(tmp_path: Path) -> dict[str, str]:
+def _stub_environment(tmp_path: Path, sha: str = GIT_SHA) -> dict[str, str]:
     """Subprocess environment whose importer sees a clean producing commit."""
 
-    stub = tmp_path / "checkout_identity_stub"
+    stub = tmp_path / f"checkout_identity_stub_{sha[:8]}"
     stub.mkdir(exist_ok=True)
     (stub / "sitecustomize.py").write_text(
         "identity = lambda **_: {'git_sha': %r, 'git_dirty': False}\n"
         "from fisheye.shared import run_provenance\n"
         "run_provenance.git_identity = identity\n"
         "import fisheye.utils.import_recording_analysis as importer\n"
-        "importer.git_identity = identity\n" % GIT_SHA
+        "importer.git_identity = identity\n" % sha
     )
     return dict(os.environ, PYTHONPATH=f"{REPO / 'src'}:{stub}")
 
@@ -211,11 +211,10 @@ def test_end_to_end_gate_job_script_register_probes_and_replay(tmp_path: Path, m
         ["bash", str(job_script)], check=False, text=True, capture_output=True,
         env=dict(env, LSB_JOBID="777"), timeout=600,
     )
-    payload_err = next(job_script.parent.glob("*.777.payload.err")).read_text()
+    payload_err = next(job_script.parent.glob("*.777.*.payload.err")).read_text()
     assert job.returncode == 0, job.stdout + payload_err
-    status = json.loads(
-        (job_script.parent / "workflow-777" / "citrus_session_import.status.json").read_text()
-    )
+    [workflow_dir] = job_script.parent.glob("workflow-777-*")
+    status = json.loads((workflow_dir / "citrus_session_import.status.json").read_text())
     assert status["status"] == "complete" and status["staging_finalized"] is True
     assert status["registry"] is None
     assert [parent["outcome"] for parent in status["parents"]] == ["imported", "imported"]
@@ -233,6 +232,8 @@ def test_end_to_end_gate_job_script_register_probes_and_replay(tmp_path: Path, m
     imported = probe_import(sha, destination_root=destination)
     assert imported.verdict
     assert imported.evidence_digest == status["probe_import"]["evidence_digest"]
+    assert imported.producer_git_sha == status["probe_import"]["producer_git_sha"] == GIT_SHA
+    assert target["producer_git_sha"] == GIT_SHA  # read cheaply from the receipt files
     assert sorted(imported.zarr_paths) == sorted(status["zarr_paths"])
     rows_before = _rows(registry)
     registered = register_delivery(
@@ -260,6 +261,7 @@ def test_end_to_end_gate_job_script_register_probes_and_replay(tmp_path: Path, m
     assert replayed["schema"] == "palette.intake.probe_import.v1"
     assert replayed["verdict"] is True
     assert replayed["evidence_digest"] == imported.evidence_digest
+    assert replayed["producer_git_sha"] == GIT_SHA
 
     again = _cli(
         "register-delivery", sha, "--destination-root", str(destination),
@@ -291,7 +293,7 @@ def test_end_to_end_gate_job_script_register_probes_and_replay(tmp_path: Path, m
     assert _tree(tmp_path / "registry") == backups  # no new backup: nothing published
 
     # The register claim is honoured: a held delivery is attached, not re-run.
-    plan = json.loads((job_script.parent / "workflow-777" / "organization_plan.json").read_text())
+    plan = json.loads((workflow_dir / "organization_plan.json").read_text())
     with claim(plan, kind=REGISTER_LOCK_KIND):
         with pytest.raises(IntakeHeld) as held:
             register_delivery(sha, writer=_writer(tmp_path, registry), destination_root=destination,
@@ -370,7 +372,11 @@ def test_in_flight_job_mode_delivery_is_reported_not_resumed(
     attempt = _cli("import-delivery", sha, "--run-dir", str(tmp_path / "runs" / "resume"),
                    "--destination-root", str(destination), "--json")
     assert attempt.returncode == EXIT_REFUSED, attempt.stderr
-    assert "retired job-mode registration" in json.loads(attempt.stdout)["error"]
+    refusal = json.loads(attempt.stdout)
+    assert refusal["error"] == "legacy_job_mode_delivery"
+    assert "retired job-mode registration" in refusal["message"]
+    assert "operator path" in refusal["message"]
+    assert refusal["admission_contract"]["registry_path"] == str((tmp_path / "old.sqlite").resolve())
     with pytest.raises(IntakeRefused, match="retired job-mode"):
         register_delivery(sha, writer=_writer(tmp_path, _registry(tmp_path)),
                           destination_root=destination, allow_synthetic=True)
@@ -498,9 +504,9 @@ def test_cli_probe_shapes_and_false_verdicts(tmp_path) -> None:
         assert document["verdict"] is False and document["evidence_digest"] is None
         assert document["zarr_paths"] == [] and document["receipt_sha256s"] == []
         assert ("bindings" in document) == (name == "probe-register")
+    # A malformed sha is a usage error (2), so probes only ever exit 0/1/2.
     bad = _cli("probe-import", "not-a-sha", "--destination-root", str(destination))
-    assert bad.returncode == EXIT_REFUSED
-    assert json.loads(bad.stdout)["schema"] == "palette.intake.error.v1"
+    assert bad.returncode == 2 and bad.stdout == ""
 
 
 def test_cli_register_off_the_writer_host_is_refused(tmp_path) -> None:
@@ -534,8 +540,11 @@ def test_cli_discover_reports_markers_states_and_refusals(tmp_path) -> None:
     assert target == {
         "snapshot_sha": sha, "state": "marker", "admission_mode": "unset", "legacy_mode": False,
         "has_plan": False, "session_dir": str(session), "marker_path": str(session / MARKER_NAME),
-        "import_recorded": False, "register_recorded": None, "zarr_paths": [],
+        "import_recorded": False, "register_recorded": False, "zarr_paths": [],
+        "producer_git_sha": None,
     }
+    assert document["registry"] == str(CANONICAL_REGISTRY)  # the default
+    assert document["registry_error"] is None
     assert document["legacy_markers"] == [str(legacy / MARKER_NAME)]
     assert [item["path"] for item in document["refused_markers"]] == [str(broken / MARKER_NAME)]
     assert _tree(tmp_path) == before  # discovery writes nothing
@@ -583,3 +592,290 @@ def test_python_entry_points_match_the_runner_contract() -> None:
     assert list(inspect.signature(probe_import).parameters)[0] == "snapshot_sha"
     assert list(inspect.signature(probe_register).parameters)[0] == "snapshot_sha"
     assert sys.modules["fisheye.intake"].__all__  # importable without side effects
+
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+OTHER_SHA = "f" * 40
+
+
+@needs_media_tools
+def test_registrar_at_another_commit_is_refused_before_any_backup(tmp_path, monkeypatch) -> None:
+    """B1: a doomed registration is refused (65) and copies no backup, ever."""
+
+    from fisheye.intake.outcomes import RegistrarCommitMismatch, exit_code_for
+    from fisheye.shared import run_provenance
+
+    _session, sha, destination, imported = _import(tmp_path, monkeypatch)
+    registry = _registry(tmp_path)
+    before = _sha(registry)
+    monkeypatch.setattr(
+        run_provenance, "git_identity", lambda **_: {"git_sha": OTHER_SHA, "git_dirty": False}
+    )
+    for _ in range(3):
+        with pytest.raises(RegistrarCommitMismatch) as refused:
+            register_delivery(sha, writer=_writer(tmp_path, registry),
+                              destination_root=destination, allow_synthetic=True)
+        assert exit_code_for(refused.value) == EXIT_REFUSED
+        assert refused.value.code == "registrar_commit_mismatch"
+        assert refused.value.details["receipt_producer_git_sha"] == GIT_SHA
+        assert refused.value.details["registrar_git_sha"] == OTHER_SHA
+    assert not (registry.parent / ".palette-registry-backups").exists()
+    assert _sha(registry) == before
+
+    # The CLI carries the needed commit as machine-readable fields.
+    result = _cli(
+        "register-delivery", sha, "--destination-root", str(destination),
+        "--registry", str(registry), "--writer-host", HOST,
+        "--writer-lock-path", str(tmp_path / "writer.lock"),
+        "--shadow-temp-root", str(tmp_path / "shadows"),
+        "--shadow-backup-dir", str(tmp_path / "backups"),
+        "--allow-synthetic-isolated-registry",
+        env=_stub_environment(tmp_path, OTHER_SHA),
+    )
+    assert result.returncode == EXIT_REFUSED, result.stderr
+    error = json.loads(result.stdout)
+    assert error["error"] == "registrar_commit_mismatch"
+    assert error["receipt_producer_git_sha"] == GIT_SHA
+    assert error["registrar_git_sha"] == OTHER_SHA
+    assert "producer commit" in error["message"]
+    assert not (registry.parent / ".palette-registry-backups").exists()
+
+    # Defence in depth: the gateway itself refuses before copying a backup.
+    from fisheye.registry.shadow_publish import (
+        RegistryProducerCommitMismatch,
+        shadow_synchronize_recording_imports,
+    )
+    from fisheye.shared.recording_import_receipt import (
+        RecordingImportReceipt,
+        recording_import_receipt_path,
+    )
+
+    imports = [
+        (Path(z), RecordingImportReceipt.from_path(recording_import_receipt_path(Path(z), r)))
+        for z, r in zip(imported.zarr_paths, imported.receipt_sha256s)
+    ]
+    with pytest.raises(RegistryProducerCommitMismatch):
+        shadow_synchronize_recording_imports(
+            canonical_registry=registry, imports=imports, decided_by="pytest"
+        )
+    assert not (registry.parent / ".palette-registry-backups").exists()
+
+
+@needs_media_tools
+def test_receipts_that_disagree_on_their_producer_are_refused(tmp_path, monkeypatch) -> None:
+    from fisheye.intake import probes
+
+    _session, sha, destination, imported = _import(tmp_path, monkeypatch)
+    first = imported.zarr_paths[0]
+    monkeypatch.setattr(
+        probes, "receipt_producer_git_sha",
+        lambda zarr, receipt: GIT_SHA if str(zarr) == first else OTHER_SHA,
+    )
+    probe = probe_import(sha, destination_root=destination)
+    assert not probe.verdict and "disagree" in probe.reason
+    with pytest.raises(IntakeRefused) as refused:
+        import_delivery(sha, tmp_path / "runs" / "replay", destination_root=destination)
+    assert refused.value.code == "receipt_producer_commits_disagree"
+
+
+@needs_media_tools
+def test_deterministic_organizer_violations_are_refused_and_lock_loss_retried(
+    tmp_path, monkeypatch
+) -> None:
+    """S2b: a tampered parent manifest under the lock is 65; lock loss stays 1."""
+
+    from fisheye.intake.outcomes import exit_code_for
+    from fisheye.shared.recording_transfer_snapshot import TransferSnapshotError
+
+    _stub_checkout(monkeypatch)
+    session, sha = _delivery(tmp_path)
+    destination = _destination(tmp_path)
+    original = organizer._retire_source_file
+
+    def dies_after_the_marker(source, expected, signature):
+        original(source, expected, signature)
+        if source.name == MARKER_NAME:
+            raise OSError("node lost")
+
+    monkeypatch.setattr(organizer, "_retire_source_file", dies_after_the_marker)
+    with pytest.raises(OSError):
+        import_delivery(sha, tmp_path / "runs" / "a1", destination_root=destination, session_dir=session)
+    monkeypatch.setattr(organizer, "_retire_source_file", original)
+
+    real_finalize = organizer.finalize_transfer_staging
+
+    def lock_lost(*args, **kwargs):
+        raise TransferSnapshotError("coordinator lock ownership lost")
+
+    monkeypatch.setattr(organizer, "finalize_transfer_staging", lock_lost)
+    with pytest.raises(TransferSnapshotError) as transient:
+        import_delivery(sha, tmp_path / "runs" / "a2", destination_root=destination)
+    assert exit_code_for(transient.value) == 1
+    monkeypatch.setattr(organizer, "finalize_transfer_staging", real_finalize)
+
+    [manifest] = list(destination.glob("*/recording_manifest.json"))[:1]
+    manifest.write_text(manifest.read_text().replace("{", '{"tampered": true, ', 1))
+    with pytest.raises(IntakeRefused) as refused:
+        import_delivery(sha, tmp_path / "runs" / "a3", destination_root=destination)
+    assert refused.value.code == "intake_invariant_violation"
+    assert "parent manifest changed before retirement" in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "step,returncode,expected",
+    [
+        ("recording_import_preflight", None, EXIT_REFUSED),
+        ("preflight_gate", None, EXIT_REFUSED),
+        ("import_stimulus_to_zarr", 2, EXIT_REFUSED),
+        ("import_stimulus_to_zarr", 1, 1),  # a dead child: cannot tell from I/O
+        ("ensure_analysis_archive", None, 1),
+    ],
+)
+def test_parent_import_refusals_are_classified(
+    tmp_path, monkeypatch, placeholder_media, step, returncode, expected
+) -> None:
+    from fisheye.intake import importing
+    from fisheye.intake.outcomes import exit_code_for
+
+    session, sha = _delivery(tmp_path, "rolling")
+
+    def failed(plan, *, recording_only, lease_fd):
+        return [
+            importing.ParentImportResult(
+                recording_id=p["identity"]["recording_id"], camera_id=p["identity"]["camera_id"],
+                recording_dir=p["destination_dir"], zarr_path="z", outcome="failed",
+                failed_step=step, error="fixture", returncode=returncode,
+            )
+            for p in plan["parents"]
+        ]
+
+    monkeypatch.setattr(importing, "import_parents", failed)
+    with pytest.raises(Exception) as exc:
+        import_delivery(sha, tmp_path / "run", destination_root=_destination(tmp_path),
+                        session_dir=session)
+    assert exit_code_for(exc.value) == expected
+
+
+def test_probes_answer_only_true_or_false(tmp_path, monkeypatch) -> None:
+    """S2a: malformed state is a false verdict; an I/O error propagates (1)."""
+
+    from fisheye.intake import delivery
+
+    sha = "a" * 64
+    destination = _destination(tmp_path)
+    state_dir = destination / ".transfer_intake" / sha
+    state_dir.mkdir(parents=True)
+    (state_dir / "organization_state.json").write_text("{not json")
+    probe = probe_import(sha, destination_root=destination)
+    assert not probe.verdict and "malformed" in probe.reason
+    result = _cli("probe-import", sha, "--destination-root", str(destination))
+    assert result.returncode == 1 and json.loads(result.stdout)["verdict"] is False
+
+    def eio(path):
+        raise OSError(5, "Input/output error", str(path))
+
+    monkeypatch.setattr(delivery, "strict_json", eio)
+    with pytest.raises(OSError):
+        probe_import(sha, destination_root=destination)
+
+
+@needs_media_tools
+def test_discover_reports_an_unreadable_registry_as_unknown_not_unregistered(
+    tmp_path, monkeypatch
+) -> None:
+    """S4 / runner 4: registry_error, and register_recorded null, never false."""
+
+    _session, sha, destination, _imported = _import(tmp_path, monkeypatch)
+    for registry in (tmp_path / "absent.sqlite", tmp_path / "garbage.sqlite"):
+        if registry.name == "garbage.sqlite":
+            registry.write_bytes(b"not a database")
+        found = discover(tmp_path / "staging", destination, registry=registry)
+        assert found.registry_error
+        [target] = found.targets
+        assert target.state == "complete" and target.register_recorded is None
+        assert target.producer_git_sha == GIT_SHA
+        assert found.to_json()["registry_error"] == found.registry_error
+
+
+def test_compatibility_entry_finds_a_retired_delivery_without_its_marker(
+    tmp_path, placeholder_media
+) -> None:
+    """S5: a missing marker resolves through durable state, else refuses (65)."""
+
+    from argparse import Namespace
+
+    from fisheye.utils import citrus_transfer_parent_workflow as workflow
+
+    session, sha = _delivery(tmp_path, "rolling")
+    destination = _destination(tmp_path)
+    args = Namespace(session_dir=session, dest_root=destination, resume_transfer_plan=None)
+    plan = organizer.build_transfer_organization_plan(session, destination_root=destination)
+    (session / MARKER_NAME).unlink()
+    with pytest.raises(IntakeRefused, match="--resume-transfer-plan"):
+        workflow._snapshot_sha(args)
+    with organizer._organization_state(plan):
+        pass  # the organizer reserves the delivery's durable state
+    assert workflow._snapshot_sha(args) == f"sha256:{sha}"
+
+
+def _cli_code(tmp_path: Path, body: str) -> subprocess.CompletedProcess[str]:
+    code = "import os, signal, sys, fisheye.intake.__main__ as m\n" + body + (
+        "sys.exit(m.main(['discover', '--staging-dir', %r, '--registry', %r]))\n"
+        % (str(tmp_path), str(tmp_path / "r.sqlite"))
+    )
+    return subprocess.run([str(REPO / "scripts/py"), "-c", code], capture_output=True,
+                          text=True, timeout=120)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "def work(args):\n    raise SystemExit(0)\nm._run = work\n",
+        "def work(args):\n    raise KeyboardInterrupt()\nm._run = work\n",
+        "def work(args):\n    os.kill(os.getpid(), signal.SIGTERM)\nm._run = work\n",
+    ],
+    ids=["systemexit", "keyboardinterrupt", "sigterm"],
+)
+def test_cli_interrupted_work_still_emits_json_and_retries(tmp_path, body) -> None:
+    """N2."""
+
+    result = _cli_code(tmp_path, body)
+    assert result.returncode == 1, result.stderr
+    document = json.loads(result.stdout)
+    assert document["schema"] == "palette.intake.error.v1"
+    assert document["error"].startswith("interrupted")
+
+
+def test_cli_buffered_original_stdout_never_follows_the_json(tmp_path) -> None:
+    """N1."""
+
+    result = _cli_code(
+        tmp_path,
+        "def work(args):\n"
+        "    sys.__stdout__.write('library chatter\\n')\n"
+        "    return 0, {'ok': True}\n"
+        "m._run = work\n",
+    )
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {"ok": True}
+    assert "library chatter" in result.stderr
+
+
+def test_canonical_registry_identity_is_by_inode(tmp_path) -> None:
+    """N4: another path to the same file is the same registry."""
+
+    from fisheye.intake.delivery import same_file
+
+    original = tmp_path / "registry.sqlite"
+    original.write_bytes(b"x")
+    linked = tmp_path / "elsewhere" / "alias.sqlite"
+    linked.parent.mkdir()
+    os.link(original, linked)
+    assert same_file(linked, original)
+    assert not same_file(tmp_path / "missing.sqlite", original)
+    other = tmp_path / "copy.sqlite"
+    other.write_bytes(b"x")
+    assert not same_file(other, original)

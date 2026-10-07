@@ -14,11 +14,16 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import signal
 import sys
 import traceback
 from typing import Any, Callable, Iterator
 
-from fisheye.intake.delivery import CANONICAL_REGISTRY, default_destination_root
+from fisheye.intake.delivery import (
+    CANONICAL_REGISTRY,
+    default_destination_root,
+    validate_snapshot_sha,
+)
 from fisheye.intake.outcomes import (
     EXIT_DONE,
     EXIT_FAILED,
@@ -47,7 +52,13 @@ def _stdout_reserved_for_json() -> Iterator[Callable[[dict], None]]:
 
         yield emit
     finally:
-        sys.stderr.flush()
+        # Flush anything buffered for the original stdout while fd 1 still
+        # points at stderr, so it can never land after the JSON document.
+        for stream in {id(s): s for s in (previous, sys.__stdout__, sys.stderr) if s is not None}.values():
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                pass
         os.dup2(saved, 1)
         os.close(saved)
         sys.stdout = previous
@@ -71,6 +82,21 @@ def _writer(args: argparse.Namespace):
     return RegistryWriter.from_config(config)
 
 
+def _sha_argument(value: str) -> str:
+    try:
+        return validate_snapshot_sha(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+class _Terminated(BaseException):
+    """SIGTERM (LSF bkill, runner cancel) inside the work: report and retry."""
+
+
+def _terminate(signum, _frame):
+    raise _Terminated(f"terminated by signal {signum}")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m fisheye.intake", description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -84,12 +110,13 @@ def _parser() -> argparse.ArgumentParser:
     sub = commands.add_parser("discover", help="List deliveries with intake work left.")
     sub.add_argument("--staging-dir", type=Path, required=True)
     destination(sub)
-    sub.add_argument("--registry", type=Path, default=None,
-                     help="Registry read (mode=ro) to drop retired deliveries whose receipts are bound.")
+    sub.add_argument("--registry", type=Path, default=CANONICAL_REGISTRY,
+                     help="Registry read (mode=ro) to drop retired deliveries whose receipts are bound "
+                          "(default: the canonical registry).")
     sub.add_argument("--json", action="store_true", help="Accepted for symmetry; output is always JSON.")
 
     sub = commands.add_parser("import-delivery", help="Organize, import and retire one delivery (LSF).")
-    sub.add_argument("snapshot_sha")
+    sub.add_argument("snapshot_sha", type=_sha_argument)
     sub.add_argument("--run-dir", type=Path, required=True)
     sub.add_argument("--resume-plan", type=Path, default=None)
     sub.add_argument("--session-dir", type=Path, default=None)
@@ -98,7 +125,7 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_argument("--json", action="store_true")
 
     sub = commands.add_parser("register-delivery", help="Register one delivery (writer host only).")
-    sub.add_argument("snapshot_sha")
+    sub.add_argument("snapshot_sha", type=_sha_argument)
     destination(sub)
     sub.add_argument("--config", type=Path, default=None,
                      help="Poller/registrar JSON config holding the registry writer settings.")
@@ -111,7 +138,7 @@ def _parser() -> argparse.ArgumentParser:
 
     for name in ("probe-import", "probe-register"):
         sub = commands.add_parser(name, help="Read-only verdict from durable evidence.")
-        sub.add_argument("snapshot_sha")
+        sub.add_argument("snapshot_sha", type=_sha_argument)
         destination(sub)
         if name == "probe-register":
             sub.add_argument("--registry", type=Path, default=CANONICAL_REGISTRY)
@@ -157,8 +184,32 @@ def _run(args: argparse.Namespace) -> tuple[int, dict]:
     return EXIT_DONE, result.to_json()
 
 
+def _error_document(args: argparse.Namespace, exc: BaseException, code: int) -> dict:
+    document = {
+        "schema": ERROR_SCHEMA,
+        "command": args.command,
+        "snapshot_sha": getattr(args, "snapshot_sha", None),
+        "exit_code": code,
+        "error": str(exc),
+        "error_type": type(exc).__name__,
+    }
+    reason = getattr(exc, "code", None)
+    if isinstance(exc, IntakeRefused) and reason:
+        document.update(error=reason, message=str(exc))
+    document.update(getattr(exc, "details", None) or {})
+    return document
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)  # usage errors exit 2 here
+    previous_handler = signal.signal(signal.SIGTERM, _terminate)
+    try:
+        return _main(args)
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
+
+
+def _main(args: argparse.Namespace) -> int:
     with _stdout_reserved_for_json() as emit:
         try:
             code, document = _run(args)
@@ -178,14 +229,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{label}: {exc}", file=sys.stderr)
             if code != EXIT_REFUSED:
                 traceback.print_exc(file=sys.stderr)
-            document = {
-                "schema": ERROR_SCHEMA,
-                "command": args.command,
-                "snapshot_sha": getattr(args, "snapshot_sha", None),
-                "exit_code": code,
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-            }
+            document = _error_document(args, exc, code)
+        except (SystemExit, KeyboardInterrupt, _Terminated) as exc:
+            # Interrupted or exited from inside the work: still one JSON
+            # document, and a retryable exit code.
+            print(f"interrupted: {exc!r}", file=sys.stderr)
+            code = EXIT_FAILED
+            document = _error_document(args, exc, code)
+            document["error"] = f"interrupted: {type(exc).__name__}: {exc}"
         emit(document)
     return code
 

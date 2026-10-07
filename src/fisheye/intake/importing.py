@@ -44,7 +44,11 @@ from fisheye.intake.delivery import (
     require_workstation_admission,
     validate_snapshot_sha,
 )
-from fisheye.intake.outcomes import IntakeHeld, IntakeRefused
+from fisheye.intake.outcomes import (
+    DETERMINISTIC_IMPORT_STEPS,
+    IntakeRefused,
+    classify_organizer_failure,
+)
 from fisheye.intake.probes import ProbeResult, import_probe_result
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.recording_transfer_snapshot import (
@@ -73,6 +77,7 @@ class ParentImportResult:
     outcome: str  # "imported", "already_imported" or "failed"
     failed_step: str | None = None
     error: str | None = None
+    returncode: int | None = None
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -159,7 +164,12 @@ def import_parents(
                     ),
                     options,
                 )
-            except Exception as exc:
+            except OSError as exc:  # transient: retried
+                results.append(
+                    ParentImportResult(**base, outcome="failed", failed_step="plan_io", error=str(exc))
+                )
+                continue
+            except Exception as exc:  # the import owner refused this parent
                 results.append(
                     ParentImportResult(**base, outcome="failed", failed_step="plan", error=str(exc))
                 )
@@ -172,11 +182,26 @@ def import_parents(
                         **base,
                         outcome="failed",
                         failed_step=result.failed_step,
+                        returncode=result.returncode,
                         error=result.error
                         or (f"returncode={result.returncode}" if result.returncode is not None else None),
                     )
                 )
     return results
+
+
+def _deterministic(parent: ParentImportResult) -> bool:
+    """A refusal the import owner will repeat on every retry of this input.
+
+    The owner's own preflight and contract steps, and its stimulus refusals
+    (exit 2 from ``run_stimulus_import``: no H5, unsupported unified profile,
+    missing finalization receipt). A stimulus *child* that dies (exit 1)
+    cannot be told apart from I/O and is retried.
+    """
+
+    if parent.failed_step in DETERMINISTIC_IMPORT_STEPS:
+        return True
+    return parent.failed_step == "import_stimulus_to_zarr" and parent.returncode == 2
 
 
 def _find_session(staging_dir: Path, snapshot_sha: str) -> Path | None:
@@ -353,10 +378,16 @@ def import_delivery(
             plan_path = run_dir / PLAN_NAME
             write_json_atomic(plan_path, plan, overwrite=False)
             payload.update(run_dir=str(run_dir), organization_plan_path=str(plan_path))
-            result = _import_under_lock(
-                sha, plan, recording_only=recording_only, verify_lock=verify_lock,
-                lock_fd=lock_fd, payload=payload,
-            )
+            try:
+                result = _import_under_lock(
+                    sha, plan, recording_only=recording_only, verify_lock=verify_lock,
+                    lock_fd=lock_fd, payload=payload,
+                )
+            except Exception as exc:
+                classified = classify_organizer_failure(exc)
+                if classified is exc:
+                    raise
+                raise classified from exc
             payload.update(status="complete", probe_import=result.to_json())
             status.publish()
             return result
@@ -404,10 +435,12 @@ def _import_under_lock(
         payload["parents"] = [parent.to_json() for parent in parents]
         failed = [parent for parent in parents if parent.outcome == "failed"]
         if failed:
-            raise _ImportFailed(
-                "parent import failed: "
-                + "; ".join(f"{p.recording_dir}: {p.failed_step}: {p.error}" for p in failed)
+            message = "parent import failed: " + "; ".join(
+                f"{p.recording_dir}: {p.failed_step}: {p.error}" for p in failed
             )
+            if all(_deterministic(parent) for parent in failed):
+                raise IntakeRefused(message, code="parent_import_refused")
+            raise _ImportFailed(message)
         payload["import_complete"] = True
         verify_lock()
         final = finalize_transfer_staging(

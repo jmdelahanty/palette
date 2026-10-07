@@ -22,6 +22,7 @@ from fisheye.intake.delivery import (
     load_durable_state,
     validate_snapshot_sha,
 )
+from fisheye.intake.outcomes import IntakeRefused
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 PROBE_IMPORT_SCHEMA = "palette.intake.probe_import.v1"
@@ -39,6 +40,7 @@ class ProbeResult:
     bindings: tuple[Mapping[str, str], ...] | None = None
     admission_mode: str = "unset"
     state: str | None = None
+    producer_git_sha: str | None = None
     reason: str | None = None
     extra: Mapping[str, Any] = field(default_factory=dict)
 
@@ -52,6 +54,7 @@ class ProbeResult:
             "receipt_sha256s": list(self.receipt_sha256s),
             "admission_mode": self.admission_mode,
             "state": self.state,
+            "producer_git_sha": self.producer_git_sha,
             "reason": self.reason,
         }
         if self.bindings is not None:
@@ -79,6 +82,37 @@ def register_evidence_digest(rows: Sequence[Mapping[str, str]]) -> str:
     )
 
 
+def receipt_producer_git_sha(zarr_path: str | Path, receipt_sha256: str) -> str:
+    """The producing commit an import receipt declares (one small JSON read)."""
+
+    from fisheye.shared.recording_import_receipt import (
+        RecordingImportReceipt,
+        recording_import_receipt_path,
+    )
+
+    return RecordingImportReceipt.from_path(
+        recording_import_receipt_path(Path(zarr_path), receipt_sha256)
+    ).producer_git_sha
+
+
+def delivery_producer_git_sha(pairs: Sequence[tuple[str, str]]) -> str:
+    """The one commit that produced every receipt of a delivery.
+
+    Registration must run from a deployment at exactly this commit (the
+    identity authority binds a receipt only from its producing checkout), so
+    receipts that disagree make the delivery unregistrable: refused.
+    """
+
+    shas = {receipt_producer_git_sha(path, receipt) for path, receipt in pairs}
+    if len(shas) != 1:
+        raise IntakeRefused(
+            f"the delivery's receipts disagree on their producer commit: {sorted(shas)}",
+            code="receipt_producer_commits_disagree",
+            details={"receipt_producer_git_shas": sorted(shas)},
+        )
+    return shas.pop()
+
+
 def _plan_receipt_pairs(plan: Mapping[str, Any], receipts: Mapping[str, str]) -> list[tuple[str, str]]:
     from fisheye.utils.organize_transfer_recordings import parent_zarr_paths
 
@@ -98,6 +132,7 @@ def import_probe_result(
     """A true import verdict from receipts the organizer just verified."""
 
     pairs = _plan_receipt_pairs(plan, receipts)
+    producer = delivery_producer_git_sha(pairs)
     return ProbeResult(
         schema=PROBE_IMPORT_SCHEMA,
         snapshot_sha=snapshot_sha,
@@ -107,6 +142,7 @@ def import_probe_result(
         receipt_sha256s=tuple(receipt for _, receipt in pairs),
         admission_mode=admission_mode(state),
         state=state.get("status"),
+        producer_git_sha=producer,
     )
 
 
@@ -135,7 +171,10 @@ def probe_import(snapshot_sha: str, *, destination_root: Path) -> ProbeResult:
     from fisheye.utils.organize_transfer_recordings import _verify_parent_imports
 
     sha = validate_snapshot_sha(snapshot_sha)
-    state = load_durable_state(destination_root, sha)
+    try:
+        state = load_durable_state(destination_root, sha)
+    except IntakeRefused as exc:  # a probe answers only true or false
+        return _false(PROBE_IMPORT_SCHEMA, sha, str(exc), None)
     if state is None:
         return _false(PROBE_IMPORT_SCHEMA, sha, "no durable intake state", None)
     if state.get("status") != "complete":
@@ -152,7 +191,10 @@ def probe_import(snapshot_sha: str, *, destination_root: Path) -> ProbeResult:
         return _false(PROBE_IMPORT_SCHEMA, sha, f"import evidence does not verify: {exc}", state)
     if receipts != state.get("import_receipts"):
         return _false(PROBE_IMPORT_SCHEMA, sha, "verified receipts differ from the retired ones", state)
-    return import_probe_result(sha, plan=plan, receipts=receipts, state=state)
+    try:
+        return import_probe_result(sha, plan=plan, receipts=receipts, state=state)
+    except IntakeRefused as exc:
+        return _false(PROBE_IMPORT_SCHEMA, sha, str(exc), state)
 
 
 def probe_register(
@@ -170,9 +212,18 @@ def probe_register(
     )
 
     imported = probe_import(snapshot_sha, destination_root=destination_root)
-    state = load_durable_state(destination_root, imported.snapshot_sha)
     if not imported.verdict:
-        return _false(PROBE_REGISTER_SCHEMA, imported.snapshot_sha, f"import: {imported.reason}", state)
+        return ProbeResult(
+            schema=PROBE_REGISTER_SCHEMA,
+            snapshot_sha=imported.snapshot_sha,
+            verdict=False,
+            evidence_digest=None,
+            bindings=(),
+            admission_mode=imported.admission_mode,
+            state=imported.state,
+            reason=f"import: {imported.reason}",
+        )
+    state = load_durable_state(destination_root, imported.snapshot_sha)
     rows = []
     try:
         for zarr_path, receipt_sha256 in zip(imported.zarr_paths, imported.receipt_sha256s):
@@ -202,6 +253,7 @@ def probe_register(
         bindings=tuple(rows),
         admission_mode=imported.admission_mode,
         state=imported.state,
+        producer_git_sha=imported.producer_git_sha,
     )
 
 
@@ -209,6 +261,8 @@ __all__ = [
     "PROBE_IMPORT_SCHEMA",
     "PROBE_REGISTER_SCHEMA",
     "ProbeResult",
+    "delivery_producer_git_sha",
+    "receipt_producer_git_sha",
     "import_evidence_digest",
     "probe_import",
     "probe_register",

@@ -5,6 +5,39 @@ marker's ``snapshot_id``). Its durable record is the organizer's
 ``<destination_root>/.transfer_intake/<sha>/organization_state.json``; this
 module only reads it. The organizer stays the owner of that state, of the
 plan, and of the lock primitive (``_coordinator_lock``) both claims use.
+
+Job-mode deliveries (operator path)
+-----------------------------------
+A delivery whose first attempt recorded ``admission_contract.registry_path``
+(the retired "the LSF job registers" mode) is reported by ``discover``
+(``legacy_mode``) and refused (65) by ``import_delivery`` and
+``register_delivery``: intake never resumes it in another mode. Finish it in
+its recorded mode by hand, on the registry writer host, with the
+single-writer environment set (``PALETTE_REGISTRY_WRITER_HOST``,
+``PALETTE_REGISTRY_WRITER_LOCK_PATH``, ``PALETTE_REGISTRY_SHADOW_TEMP_ROOT``,
+``PALETTE_REGISTRY_SHADOW_BACKUP_DIR``) and from a deployment at the commit
+that will produce the receipts:
+
+1. read ``plan = state["plan"]`` and ``contract = state["admission_contract"]``
+   from ``<destination_root>/.transfer_intake/<sha>/organization_state.json``;
+2. for each ``parent["destination_dir"]`` of the plan, run the organizer's
+   import owner in the recorded mode::
+
+       scripts/py -m fisheye.utils.import_organized_recordings_analysis \
+           <destination_dir> --apply --registry <contract registry_path> \
+           [--recording-only   # only when contract require_stimulus is false]
+
+3. retire with the exact recorded contract::
+
+       scripts/py -c 'import json, sys; from pathlib import Path
+       from fisheye.utils.organize_transfer_recordings import finalize_transfer_staging
+       state = json.loads(Path(sys.argv[1]).read_text()); c = state["admission_contract"]
+       finalize_transfer_staging(state["plan"], registry_path=Path(c["registry_path"]),
+                                 require_stimulus=c["require_stimulus"])' <organization_state.json>
+
+``finalize_transfer_staging`` re-verifies every receipt and the registry
+admission before retiring; a delivery it refuses needs investigation, not a
+mode change.
 """
 
 from __future__ import annotations
@@ -58,8 +91,10 @@ def load_durable_state(destination_root: Path, snapshot_sha: str) -> dict | None
         return None
     try:
         state = strict_json(path)
+    except OSError:
+        raise  # transient I/O: retryable (1), never a refusal
     except Exception as exc:
-        raise IntakeRefused(f"unreadable intake state {path}: {exc}") from exc
+        raise IntakeRefused(f"malformed intake state {path}: {exc}") from exc
     plan = state.get("plan")
     if not isinstance(plan, dict) or plan.get("snapshot_id") != f"sha256:{validate_snapshot_sha(snapshot_sha)}":
         raise IntakeRefused(f"intake state {path} does not hold this delivery's plan")
@@ -91,13 +126,17 @@ def require_workstation_admission(state: Mapping[str, Any] | None, *, require_st
         raise IntakeRefused(
             "delivery was started under the retired job-mode registration "
             f"(admission_contract={state['admission_contract']!r}); it is reported, "
-            "not resumed: resolve it manually"
+            "not resumed: finish it in its recorded mode by hand, see "
+            "'Job-mode deliveries (operator path)' in fisheye.intake.delivery",
+            code="legacy_job_mode_delivery",
+            details={"admission_contract": state["admission_contract"]},
         )
     contract = (state or {}).get("admission_contract")
     if contract is not None and contract != {"registry_path": None, "require_stimulus": require_stimulus}:
         raise IntakeRefused(
             f"delivery admission contract {contract!r} conflicts with this attempt "
-            f"(require_stimulus={require_stimulus})"
+            f"(require_stimulus={require_stimulus})",
+            code="admission_contract_conflict",
         )
 
 
@@ -129,8 +168,45 @@ def refuse_synthetic_registration(
         return
     if not allow_synthetic:
         raise IntakeRefused("producer-declared synthetic transfer is never registered")
-    if Path(registry).resolve() == CANONICAL_REGISTRY.resolve():
+    if same_file(Path(registry), CANONICAL_REGISTRY):
         raise IntakeRefused("synthetic transfer cannot register into the canonical registry")
+
+
+def same_file(left: Path, right: Path) -> bool:
+    """File identity by (st_dev, st_ino); by resolved path when either is absent.
+
+    A bind mount, hard link or second automount path to the canonical
+    registry is still the canonical registry.
+    """
+
+    try:
+        a, b = os.stat(left), os.stat(right)
+    except FileNotFoundError:
+        return Path(left).resolve() == Path(right).resolve()
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def find_delivery_by_source(destination_root: Path, source_dir: Path) -> str | None:
+    """The snapshot sha whose durable plan names ``source_dir``, if any.
+
+    Lets a caller holding only a (possibly already retired) staging directory
+    find its delivery without the marker. Two plans for one source refuse.
+    """
+
+    root = Path(destination_root) / STATE_DIRECTORY
+    if not root.is_dir():
+        return None
+    wanted = str(Path(source_dir).absolute().resolve())
+    found = []
+    for state_file in sorted(root.glob(f"*/{STATE_FILE}")):
+        if not _SHA.fullmatch(state_file.parent.name):
+            continue
+        state = load_durable_state(destination_root, state_file.parent.name)
+        if state is not None and state["plan"].get("source_dir") == wanted:
+            found.append(state_file.parent.name)
+    if len(found) > 1:
+        raise IntakeRefused(f"several intake deliveries name staging source {wanted}: {found}")
+    return found[0] if found else None
 
 
 def _holder_record() -> dict[str, Any]:
@@ -200,11 +276,13 @@ __all__ = [
     "admission_mode",
     "claim",
     "default_destination_root",
+    "find_delivery_by_source",
     "load_durable_state",
     "plan_is_synthetic",
     "plan_recording_only",
     "refuse_synthetic_registration",
     "require_workstation_admission",
+    "same_file",
     "state_directory",
     "validate_snapshot_sha",
 ]

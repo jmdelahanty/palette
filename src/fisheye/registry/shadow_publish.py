@@ -28,6 +28,30 @@ class RegistryShadowPublishError(RuntimeError):
     """Raised when a registry shadow mutation cannot be published safely."""
 
 
+class RegistryProducerCommitMismatch(RegistryShadowPublishError):
+    """A receipt was produced by another commit than this registering checkout.
+
+    The identity authority binds a receipt only from its producing checkout,
+    so this can never succeed from this deployment; it is detected before any
+    backup or candidate copy is made.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        zarr_path: str,
+        receipt_producer_git_sha: str,
+        registrar_git_sha: str | None,
+        registrar_git_dirty: bool | None,
+    ):
+        super().__init__(message)
+        self.zarr_path = zarr_path
+        self.receipt_producer_git_sha = receipt_producer_git_sha
+        self.registrar_git_sha = registrar_git_sha
+        self.registrar_git_dirty = registrar_git_dirty
+
+
 REGISTRY_WRITER_HOST_ENV = "PALETTE_REGISTRY_WRITER_HOST"
 REGISTRY_WRITER_LOCK_PATH_ENV = "PALETTE_REGISTRY_WRITER_LOCK_PATH"
 REGISTRY_SHADOW_TEMP_ROOT_ENV = "PALETTE_REGISTRY_SHADOW_TEMP_ROOT"
@@ -278,6 +302,55 @@ def _publish_through_configured_writer(
         )
 
 
+def preflight_recording_import_receipts(imports: Sequence[tuple[Path, object | None]]) -> None:
+    """Refuse, before any backup, a receipt this checkout can never bind.
+
+    Runs the identity authority's own live receipt verification with its
+    producing-commit requirement (``_verify_live_import_receipt(...,
+    require_current_producer_code=True)``), the same check the mutation would
+    hit only after the full registry backup had been copied. Only actual
+    :class:`RecordingImportReceipt` objects are checked; ``None`` (refresh of
+    an already-bound import) needs no producing commit.
+    """
+
+    from fisheye.registry.recording_identity_authority import (
+        RecordingIdentityProjectionConflict,
+        _verify_live_import_receipt,
+        collect_regular_source_recording_identity,
+    )
+    from fisheye.shared.recording_import_receipt import RecordingImportReceipt
+
+    for zarr_path, receipt in imports:
+        if not isinstance(receipt, RecordingImportReceipt):
+            continue
+        target = Path(zarr_path).expanduser().resolve()
+        try:
+            _verify_live_import_receipt(
+                resolved_path=target,
+                evidence=collect_regular_source_recording_identity(target),
+                receipt=receipt,
+                require_current_producer_code=True,
+            )
+        except RecordingIdentityProjectionConflict as exc:
+            if "producer commit" not in str(exc):
+                raise
+            import fisheye.registry.recording_identity_authority as authority
+            from fisheye.shared.run_provenance import git_identity
+
+            # Reported for the operator only; the decision is the authority's.
+            code = git_identity(cwd=Path(authority.__file__).resolve().parents[3])
+            raise RegistryProducerCommitMismatch(
+                f"receipt for {target} was produced by commit "
+                f"{receipt.producer_git_sha}; this registering checkout is "
+                f"{code.get('git_sha')} (dirty={code.get('git_dirty')}). Register it "
+                "from a deployment at the receipt's producer commit.",
+                zarr_path=str(target),
+                receipt_producer_git_sha=receipt.producer_git_sha,
+                registrar_git_sha=code.get("git_sha"),
+                registrar_git_dirty=code.get("git_dirty"),
+            ) from exc
+
+
 def _require_decided_by(decided_by: object) -> None:
     if type(decided_by) is not str or not decided_by.strip():
         raise RegistryShadowPublishError("decided_by must be non-empty text")
@@ -301,6 +374,7 @@ def shadow_synchronize_recording_import(
     canonical = Path(canonical_registry).expanduser().resolve()
     target = Path(zarr_path).expanduser().resolve()
     _require_decided_by(decided_by)
+    preflight_recording_import_receipts([(target, receipt)])
 
     def mutate(candidate: Path) -> Mapping[str, Any]:
         from fisheye.registry.db import Registry
@@ -352,6 +426,7 @@ def shadow_synchronize_recording_imports(
         raise RegistryShadowPublishError("a batch synchronization needs at least one import")
     if len({target for target, _receipt in targets}) != len(targets):
         raise RegistryShadowPublishError("a batch synchronization names one artifact twice")
+    preflight_recording_import_receipts(targets)
 
     def mutate(candidate: Path) -> Mapping[str, Any]:
         from fisheye.registry.db import Registry
@@ -494,9 +569,11 @@ __all__ = [
     "REGISTRY_SHADOW_TEMP_ROOT_ENV",
     "REGISTRY_WRITER_HOST_ENV",
     "REGISTRY_WRITER_LOCK_PATH_ENV",
+    "RegistryProducerCommitMismatch",
     "RegistryShadowPublication",
     "RegistryShadowPublishError",
     "RegistryValidation",
+    "preflight_recording_import_receipts",
     "publish_registry_shadow",
     "shadow_synchronize_recording_import",
     "shadow_synchronize_recording_imports",

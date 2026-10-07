@@ -93,6 +93,7 @@ class Target:
     import_recorded: bool
     register_recorded: bool | None
     zarr_paths: tuple[str, ...]
+    producer_git_sha: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -106,6 +107,7 @@ class Target:
             "import_recorded": self.import_recorded,
             "register_recorded": self.register_recorded,
             "zarr_paths": list(self.zarr_paths),
+            "producer_git_sha": self.producer_git_sha,
         }
 
 
@@ -117,6 +119,7 @@ class Discovery:
     targets: tuple[Target, ...]
     refused_markers: tuple[dict, ...]
     legacy_markers: tuple[str, ...]
+    registry_error: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -124,6 +127,7 @@ class Discovery:
             "staging_dir": self.staging_dir,
             "destination_root": self.destination_root,
             "registry": self.registry,
+            "registry_error": self.registry_error,
             "probe_depth": "recorded",
             "targets": [target.to_json() for target in self.targets],
             "refused_markers": list(self.refused_markers),
@@ -131,16 +135,22 @@ class Discovery:
         }
 
 
-def _recorded_bindings(registry: Path, receipts: Iterable[str]) -> set[str] | None:
-    """Receipt digests the registry binds, read-only; None if unreadable."""
+def _recorded_bindings(registry: Path, receipts: Iterable[str]) -> tuple[set[str] | None, str | None]:
+    """Receipt digests the registry binds, read-only, or (None, why) if unreadable.
+
+    No receipts to look up means no registry access at all.
+    """
 
     wanted = sorted(set(receipts))
-    if not wanted or not Path(registry).is_file():
-        return set() if wanted else None
+    if not wanted:
+        return set(), None
+    path = Path(registry)
+    if not path.is_file():
+        return None, f"registry not found: {path}"
     try:
-        connection = sqlite3.connect(f"{Path(registry).resolve().as_uri()}?mode=ro", uri=True)
-    except sqlite3.Error:
-        return None
+        connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        return None, f"registry unreadable: {exc}"
     try:
         connection.execute("PRAGMA query_only=ON")
         rows = connection.execute(
@@ -148,14 +158,28 @@ def _recorded_bindings(registry: Path, receipts: Iterable[str]) -> set[str] | No
             f"WHERE receipt_sha256 IN ({','.join('?' * len(wanted))})",
             wanted,
         ).fetchall()
-    except sqlite3.Error:
-        return None
+    except sqlite3.Error as exc:
+        return None, f"registry unreadable: {exc}"
     finally:
         connection.close()
-    return {str(row[0]) for row in rows}
+    return {str(row[0]) for row in rows}, None
 
 
-def _durable_target(sha: str, state: dict, registry: Path | None, bound: set[str] | None) -> Target | None:
+def _recorded_producer(pairs: list[tuple[str, str]]) -> str | None:
+    """Producer commit from the receipt files (no verification), if one."""
+
+    from fisheye.intake.probes import receipt_producer_git_sha
+
+    try:
+        shas = {receipt_producer_git_sha(zarr, receipt) for zarr, receipt in pairs}
+    except Exception:
+        return None
+    return shas.pop() if len(shas) == 1 else None
+
+
+def _durable_target(
+    sha: str, state: dict, registry: Path | None, bound: set[str] | None
+) -> Target | None:
     from fisheye.shared.recording_import_receipt import recording_import_receipt_path
     from fisheye.utils.organize_transfer_recordings import parent_zarr_paths
 
@@ -163,20 +187,23 @@ def _durable_target(sha: str, state: dict, registry: Path | None, bound: set[str
     status = state.get("status")
     zarr_paths = tuple(str(path) for path in parent_zarr_paths(plan))
     receipts = state.get("import_receipts") or {}
-    import_recorded = False
-    if status == "complete":
-        try:
-            import_recorded = all(
-                recording_import_receipt_path(Path(zarr), receipts[parent["identity"]["recording_id"]]).is_file()
-                for parent, zarr in zip(plan["parents"], zarr_paths)
-            )
-        except (KeyError, ValueError):
-            import_recorded = False
-    register_recorded = None
-    if registry is not None:
-        register_recorded = bool(
-            import_recorded and bound is not None and set(receipts.values()) <= bound
+    pairs: list[tuple[str, str]] = []
+    try:
+        pairs = [
+            (zarr, receipts[parent["identity"]["recording_id"]])
+            for parent, zarr in zip(plan["parents"], zarr_paths)
+        ]
+        receipt_files = all(
+            recording_import_receipt_path(Path(zarr), receipt).is_file() for zarr, receipt in pairs
         )
+    except (KeyError, ValueError):
+        pairs, receipt_files = [], False
+    import_recorded = status == "complete" and receipt_files
+    # None (unknown) without a registry or when it could not be read: a
+    # transient read failure never makes a delivery look unregistered.
+    register_recorded = None
+    if registry is not None and bound is not None:
+        register_recorded = bool(import_recorded and set(receipts.values()) <= bound)
     if status == "complete" and register_recorded:
         return None  # retired and registered: nothing left to do
     mode = admission_mode(state)
@@ -191,6 +218,7 @@ def _durable_target(sha: str, state: dict, registry: Path | None, bound: set[str
         import_recorded=import_recorded,
         register_recorded=register_recorded,
         zarr_paths=zarr_paths,
+        producer_git_sha=_recorded_producer(pairs) if receipt_files and pairs else None,
     )
 
 
@@ -202,7 +230,9 @@ def discover(
     Live sealed markers give fresh deliveries (state ``marker``). Durable
     states ``reserved``/``materialized``/``retiring`` are resumable; a
     ``complete`` delivery is listed only while its receipts are not all bound
-    in ``registry`` (always listed when no registry is given). Each target
+    in ``registry`` (always listed when no registry is given or it cannot be
+    read; then ``registry_error`` says why and ``register_recorded`` is
+    null, unknown, never false). Each target
     carries its stored admission mode; a ``job`` mode delivery is flagged
     ``legacy_mode`` so the caller reports it rather than resuming it.
     """
@@ -227,9 +257,9 @@ def discover(
                 continue
             if state is not None and state.get("status") in DURABLE_STATES:
                 states[sha] = state
-    bound = None
+    bound, registry_error = None, None
     if registry is not None:
-        bound = _recorded_bindings(
+        bound, registry_error = _recorded_bindings(
             Path(registry),
             (receipt for state in states.values() for receipt in (state.get("import_receipts") or {}).values()),
         )
@@ -262,7 +292,7 @@ def discover(
             session_dir=str(marker_path.parent),
             marker_path=str(marker_path),
             import_recorded=False,
-            register_recorded=False if registry is not None else None,
+            register_recorded=False if registry is not None and registry_error is None else None,
             zarr_paths=(),
         )
     return Discovery(
@@ -272,6 +302,7 @@ def discover(
         targets=tuple(targets[sha] for sha in sorted(targets)),
         refused_markers=tuple(refused),
         legacy_markers=tuple(legacy),
+        registry_error=registry_error,
     )
 
 
