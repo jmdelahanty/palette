@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -21,11 +24,14 @@ from fisheye.shared.refined_subject_component_contours import (
 )
 from fisheye.shared.refined_subject_mask_mutation import resolve_mutable_refined_subject_mask_run
 from fisheye.shared import refined_subject_eye_geometry as eye_geometry
+from fisheye.shared.zarr.local_group_staging import stage_group, sync_group_back
 
 
 QC_POLICY_ID = "palette.browser_subject_mask_apply_full_qc_v1"
 QC_POLICY_VERSION = 1
 QC_ROW_CHUNK = 32
+LOCAL_STAGING_ENV = "PALETTE_MASK_QC_LOCAL_STAGING"
+STAGING_DIR_ENV = "PALETTE_MASK_QC_STAGING_DIR"
 _BODY_CONTOUR_COMPONENTS = frozenset({"subject_body", "swim_bladder"})
 _EYE_COMPONENTS = frozenset(eye_geometry.EYE_COMPONENTS)
 _CONTOUR_COMPONENTS = _BODY_CONTOUR_COMPONENTS | _EYE_COMPONENTS
@@ -285,13 +291,71 @@ def _validate_eye_geometry_rows(run: zarr.Group, names: tuple[str, ...]) -> None
             raise RuntimeError(f"Browser Apply QC eye separation validity rows {start}:{stop} differ.")
 
 
+def _archive_path(root: zarr.Group) -> Path | None:
+    """The archive directory of a root opened on a local/NFS filesystem store."""
+
+    store_root = getattr(root.store, "root", None)
+    if store_root is None or str(getattr(root, "path", "") or "").strip("/"):
+        return None
+    path = Path(str(store_root))
+    return path if path.is_dir() else None
+
+
+def _staging_scratch() -> Path | None:
+    if os.environ.get(LOCAL_STAGING_ENV, "1").strip() == "0":
+        return None
+    scratch = Path(os.environ.get(STAGING_DIR_ENV) or tempfile.gettempdir())
+    return scratch if scratch.is_dir() else None
+
+
 def refresh_subject_mask_apply_qc_locked(
     *,
     root: zarr.Group,
     refined_run: str,
     expected_edit_revision: int,
 ) -> dict[str, Any]:
-    """Refresh and verify full mask-local QC; caller holds the refined-run lock."""
+    """Refresh and verify full mask-local QC; caller holds the refined-run lock.
+
+    The refresh and its verification run on a node-local copy of the run
+    (many small reads and read-modify-writes are slow on NFS), and only the
+    changed derived files are synced back: dense ``masks_roi`` must be
+    byte-identical, the run's attributes are written last, and every written
+    file is checked by digest. The archive is marked stale before the sync,
+    so an interrupted sync fails closed exactly as an interrupted in-place
+    refresh does. ``PALETTE_MASK_QC_LOCAL_STAGING=0`` refreshes in place.
+    """
+
+    archive = _archive_path(root)
+    scratch = _staging_scratch()
+    if archive is None or scratch is None:
+        return {**_refresh_and_verify(root, refined_run, expected_edit_revision), "qc_execution": "in_place"}
+    group_path = f"refined_subject_masks_runs/{refined_run}"
+    with tempfile.TemporaryDirectory(prefix="palette-mask-qc-", dir=scratch) as tmp:
+        staged = stage_group(archive, group_path, Path(tmp))
+        local_root = zarr.open_group(str(staged.local_root), mode="a", use_consolidated=False)
+        try:
+            result = _refresh_and_verify(local_root, refined_run, expected_edit_revision)
+        except BaseException:
+            # Mirror the in-place path: once the refresh has marked the run
+            # stale it stays stale on the archive; an earlier refusal leaves
+            # the archive untouched.
+            local_run = zarr.open_group(str(staged.local_group), mode="r", use_consolidated=False)
+            if bool(local_run.attrs.get("metrics_stale")):
+                _mark_archive_stale(root, refined_run)
+            raise
+        _mark_archive_stale(root, refined_run)
+        sync = sync_group_back(staged, protected=("masks_roi",))
+    return {**result, "qc_execution": "local_staging", "qc_files_written": sync["files_written"],
+            "qc_files_removed": sync["files_removed"]}
+
+
+def _mark_archive_stale(root: zarr.Group, refined_run: str) -> None:
+    run = resolve_mutable_refined_subject_mask_run(root, str(refined_run))
+    run.attrs.update({"metrics_stale": True, "contours_stale": True})
+    run.attrs.pop("browser_apply_qc_policy", None)
+
+
+def _refresh_and_verify(root: zarr.Group, refined_run: str, expected_edit_revision: int) -> dict[str, Any]:
     run = resolve_mutable_refined_subject_mask_run(root, str(refined_run))
     actual_revision = run.attrs.get("edit_revision")
     if type(actual_revision) is not int or actual_revision != int(expected_edit_revision):
