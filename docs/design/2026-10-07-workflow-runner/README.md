@@ -225,6 +225,12 @@ Consequences:
 - If the claim's job is dead, the attempt counts as failed. The next attempt runs under a new run name.
 - This is the same O_EXCL-claim pattern the intake poller already uses (`.claimed`), moved to the job level.
 - **If a stage already owns an exclusive lock, the runner defers to it and adds no claim of its own.** Two claim mechanisms for one fact would be the duplication the intake single-writer design (PR #290) removes. Intake already holds a per-snapshot workflow lock, and `import_delivery` reports "held by another live job" with its distinct exit code. The runner maps that code to "attached" and takes no claim. Runner claims are only for stages that lack their own lock.
+- **Exit codes (from PR #290):**
+  - 0: published, and the probe is true; the runner writes the sentinel.
+  - 65: refused. The runner does not retry; it reports an operator incident.
+  - 75: held by a live holder. The runner records "attached" and does not retry within this invocation.
+  - 1: failed. The runner retries up to its retry limit.
+- **The intake lock is an NFSv4 `fcntl.flock`.** It is released when its holder exits, or about 90 s after a holder host dies, when the NFS lease expires. A delivery that answers 75 therefore needs no special recovery: the next cron tick, 10 minutes later, re-runs discovery and either finds the original job's evidence or takes the lock itself.
 
 ### 5.4 Deployment pinning
 
@@ -375,6 +381,7 @@ Still open:
 
 ## Decision log
 
+- 2026-10-07: recorded PR #290's exit-code table and its NFS flock lease behaviour in §5.3.
 - 2026-10-07: aligned with the intake single-writer design (PR #290). Discovery uses `probe_register`, not runner sentinels. Stages that own a lock replace runner claims. Intake attempts get fresh run dirs.
 - 2026-10-07: Jeremy decided §10: Snakemake, a separate env, at most one login-node check-in per 5-10 minutes, intake only. §5.1 gains an explicit login-node contact budget.
 - 2026-10-07: §6 corrected after `palette-a0` review. Discovery now includes `reserved`/`materialized`/`retiring` states, resumes from `state["plan"]` and keeps the `admission_contract` mode fixed. Registration is one `publish_registry_shadow` per delivery, and receipt-verification cost is to be measured before setting the tick.
