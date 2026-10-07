@@ -257,6 +257,28 @@ def test_real_current_clipped_import_to_receipt_registry_and_pixel_resolver(
             (str(plan.zarr_path),),
         ).fetchone()
         assert schema == "palette.recording_frame_index.v1"
+        # Video facts intake verified reach the registry (B5): rolling stream
+        # contracts carry none, so they come from source_video_metadata and,
+        # for the crop stream, the validated crop ledger.
+        dataset_id = registry.conn.execute(
+            "SELECT dataset_id FROM datasets WHERE zarr_path = ?", (str(plan.zarr_path),)
+        ).fetchone()[0]
+        fps, codec, pix_fmt = registry.conn.execute(
+            "SELECT fps, video_codec, video_pix_fmt FROM provenance WHERE dataset_id = ?",
+            (dataset_id,),
+        ).fetchone()
+        assert fps == 2.0 and codec and pix_fmt
+        streams = {
+            row[0]: row[1:]
+            for row in registry.conn.execute(
+                "SELECT stream_key, width, height, frame_rate, codec "
+                "FROM acquisition_video_streams WHERE dataset_id = ?",
+                (dataset_id,),
+            )
+        }
+        assert streams["full"] == (64, 48, 2.0, codec)
+        if crop:
+            assert streams["crop"][:2] == (16, 16)
     finally:
         registry.close()
     before = {
