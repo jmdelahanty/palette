@@ -176,7 +176,7 @@ def bootstrap_training_review_surfaces(
         subject_run=subject_masks_run,
         refined_run=refined_subject_masks_run,
         components=("subject_body", "swim_bladder", "eyes_union"),
-        metric_level="cheap",
+        metric_level="full",
         write_eye_geometry=True,
         write_component_contours=True,
         mask_storage="dense_uint8",

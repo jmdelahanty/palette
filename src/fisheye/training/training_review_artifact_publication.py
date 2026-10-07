@@ -1046,7 +1046,7 @@ def publish_training_review_artifact(
             target_crop_run=run_ids["crop"],
             refined_run=run_ids["editable_refined_subject_masks"],
             components=("subject_body", "eyes_union", "swim_bladder"),
-            metric_level="cheap",
+            metric_level="full",
             write_eye_geometry=False,
             write_component_contours=False,
             write_sampled_component_contours=False,
