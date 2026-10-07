@@ -20,7 +20,7 @@ import socket
 import sqlite3
 import sys
 import tempfile
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, Sequence
 import uuid
 
 
@@ -257,6 +257,32 @@ def _configured_shadow_paths(
     )
 
 
+def _publish_through_configured_writer(
+    canonical: Path,
+    *,
+    backup_label: str,
+    mutate: Callable[[Path], Mapping[str, Any]],
+) -> RegistryShadowPublication:
+    """One shadow publication under the designated writer's host-local mutex."""
+
+    host_lock, local_temp_root, backup_dir = _configured_shadow_paths(canonical)
+    local_temp_root.mkdir(parents=True, exist_ok=True)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / (f"{canonical.name}.before-{backup_label}-{uuid.uuid4().hex}.sqlite")
+    with _host_writer_lock(host_lock):
+        return publish_registry_shadow(
+            canonical_registry=canonical,
+            backup_path=backup,
+            mutate=mutate,
+            local_temp_root=local_temp_root,
+        )
+
+
+def _require_decided_by(decided_by: object) -> None:
+    if type(decided_by) is not str or not decided_by.strip():
+        raise RegistryShadowPublishError("decided_by must be non-empty text")
+
+
 def shadow_synchronize_recording_import(
     *,
     canonical_registry: str | Path,
@@ -274,14 +300,7 @@ def shadow_synchronize_recording_import(
 
     canonical = Path(canonical_registry).expanduser().resolve()
     target = Path(zarr_path).expanduser().resolve()
-    if type(decided_by) is not str or not decided_by.strip():
-        raise RegistryShadowPublishError("decided_by must be non-empty text")
-    host_lock, local_temp_root, backup_dir = _configured_shadow_paths(canonical)
-    local_temp_root.mkdir(parents=True, exist_ok=True)
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup = backup_dir / (
-        f"{canonical.name}.before-recording-import-{uuid.uuid4().hex}.sqlite"
-    )
+    _require_decided_by(decided_by)
 
     def mutate(candidate: Path) -> Mapping[str, Any]:
         from fisheye.registry.db import Registry
@@ -302,13 +321,65 @@ def shadow_synchronize_recording_import(
             "decided_by": decided_by,
         }
 
-    with _host_writer_lock(host_lock):
-        return publish_registry_shadow(
-            canonical_registry=canonical,
-            backup_path=backup,
-            mutate=mutate,
-            local_temp_root=local_temp_root,
-        )
+    return _publish_through_configured_writer(
+        canonical, backup_label="recording-import", mutate=mutate
+    )
+
+
+def shadow_synchronize_recording_imports(
+    *,
+    canonical_registry: str | Path,
+    imports: Sequence[tuple[Path, object | None]],
+    decided_by: str,
+) -> RegistryShadowPublication:
+    """Synchronize every import of one delivery in ONE shadow publication.
+
+    Each ``(zarr_path, receipt)`` pair goes through the same per-artifact
+    owner as :func:`shadow_synchronize_recording_import`
+    (``Registry.synchronize_recording_import``), in order, against one local
+    candidate. Any failure discards the whole candidate, so the canonical
+    registry receives either every artifact of the delivery or none of them:
+    one backup, one validation, one atomic replace. Each per-artifact step is
+    an idempotent upsert keyed by the artifact, so a retry is safe.
+    """
+
+    canonical = Path(canonical_registry).expanduser().resolve()
+    _require_decided_by(decided_by)
+    targets = [
+        (Path(zarr_path).expanduser().resolve(), receipt) for zarr_path, receipt in imports
+    ]
+    if not targets:
+        raise RegistryShadowPublishError("a batch synchronization needs at least one import")
+    if len({target for target, _receipt in targets}) != len(targets):
+        raise RegistryShadowPublishError("a batch synchronization names one artifact twice")
+
+    def mutate(candidate: Path) -> Mapping[str, Any]:
+        from fisheye.registry.db import Registry
+
+        registry = Registry(candidate)
+        try:
+            datasets = [
+                {
+                    "zarr_path": str(target),
+                    "dataset_id": registry.synchronize_recording_import(
+                        zarr_path=target,
+                        receipt=receipt,
+                        decided_by=decided_by,
+                    ),
+                }
+                for target, receipt in targets
+            ]
+        finally:
+            registry.close()
+        return {
+            "operation": "synchronize_recording_imports",
+            "datasets": datasets,
+            "decided_by": decided_by,
+        }
+
+    return _publish_through_configured_writer(
+        canonical, backup_label="recording-imports", mutate=mutate
+    )
 
 
 def publish_registry_shadow(
@@ -428,5 +499,6 @@ __all__ = [
     "RegistryValidation",
     "publish_registry_shadow",
     "shadow_synchronize_recording_import",
+    "shadow_synchronize_recording_imports",
     "validate_registry_sqlite",
 ]
