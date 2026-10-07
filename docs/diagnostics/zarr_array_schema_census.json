@@ -3010,8 +3010,8 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-writer-3af785b34d9b7558",
-            "schema-writer-6a18038720113d2c",
-            "schema-writer-a9aefec59ed403c8"
+            "schema-writer-a9aefec59ed403c8",
+            "schema-writer-f0f467509c6e73cc"
           ],
           "shape": "shape(ellipse_params[:, eye_idx, :])"
         },
@@ -3055,7 +3055,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-3e074875c211d408",
+            "schema-writer-112d90e8625d042d",
             "schema-writer-49ad7afa2bdd4583",
             "schema-writer-7b569382f22294b6"
           ],
@@ -4874,14 +4874,14 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-79b1ccb9d7259f15"
+            "schema-writer-a78cb42074d351c9"
           ],
           "shape": "(int(roi_count),)"
         },
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-07435fbd97696052"
+            "schema-writer-193904609db92e13"
           ],
           "shape": "(total_rois,)"
         },
@@ -6033,7 +6033,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-9c16ae751790a798"
+            "schema-writer-4e8b40d48ebd2114"
           ],
           "shape": "shape(np.concatenate(point_chunks, axis=0).astype(np.float32, copy=False) if point_chunks else np.zeros((1, 2), dtype=np.float32))"
         },
@@ -6047,7 +6047,7 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-61d8e5e330a20f67"
+            "schema-writer-201e98a2bebeab18"
           ],
           "shape": "(1, 2)"
         },
@@ -6211,14 +6211,14 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-f48408c767410982"
+            "schema-writer-07aa87164886a15e"
           ],
           "shape": "(int(roi_count),)"
         },
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-7fb70597292f6d5d"
+            "schema-writer-5d746271ae7d5811"
           ],
           "shape": "(total_rois,)"
         },
@@ -6997,7 +6997,7 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-256a7c39dcc2e9c1"
+            "schema-writer-17bfc3a462b1319c"
           ],
           "shape": "(int(roi_count),)"
         },
@@ -7103,9 +7103,9 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
+            "schema-writer-3057589abf1729a4",
             "schema-writer-343db7f6dd3c8985",
-            "schema-writer-8ee51509892d5eee",
-            "schema-writer-ec7b6ce94cdee3b6"
+            "schema-writer-8ee51509892d5eee"
           ],
           "shape": "(total_rois,)"
         },
@@ -7137,8 +7137,8 @@
           "dtype": "bool",
           "occurrence_ids": [
             "schema-writer-0c6a4b1296057844",
-            "schema-writer-c60b2090af619b51",
-            "schema-writer-e6541d35dbc48115"
+            "schema-writer-54ca2d0d3995e40f",
+            "schema-writer-c60b2090af619b51"
           ],
           "shape": "(total_rois,)"
         },
@@ -44023,8 +44023,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/refined_subject_component_contours.py",
-      "line": 483,
-      "occurrence_id": "schema-writer-7fb70597292f6d5d",
+      "line": 505,
+      "occurrence_id": "schema-writer-5d746271ae7d5811",
       "path_pattern": "<component_group>/contours/ptr",
       "required": null,
       "shape_expression": "(total_rois,)",
@@ -44036,7 +44036,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-d7ec00ddde3c8b19"
+      "writer_site_id": "writer-bcf91d6a91b4532c"
     },
     {
       "access_pattern": "indexed",
@@ -44057,8 +44057,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/refined_subject_component_contours.py",
-      "line": 486,
-      "occurrence_id": "schema-writer-07435fbd97696052",
+      "line": 508,
+      "occurrence_id": "schema-writer-193904609db92e13",
       "path_pattern": "<component_group>/contours/len",
       "required": null,
       "shape_expression": "(total_rois,)",
@@ -44070,7 +44070,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-5116509c42b9925d"
+      "writer_site_id": "writer-eca021b2217bc5e4"
     },
     {
       "access_pattern": "indexed",
@@ -44091,8 +44091,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/refined_subject_component_contours.py",
-      "line": 489,
-      "occurrence_id": "schema-writer-9c16ae751790a798",
+      "line": 511,
+      "occurrence_id": "schema-writer-4e8b40d48ebd2114",
       "path_pattern": "<component_group>/contours/points_xy",
       "required": null,
       "shape_expression": "shape(np.concatenate(point_chunks, axis=0).astype(np.float32, copy=False) if point_chunks else np.zeros((1, 2), dtype=np.float32))",
@@ -44104,7 +44104,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-3819b15a27dd1418"
+      "writer_site_id": "writer-1fedd0962ddf8e11"
     },
     {
       "access_pattern": "unclassified",
@@ -44125,8 +44125,8 @@
       "dtype_expression": "np.int64",
       "dynamic_name": false,
       "file": "src/fisheye/shared/refined_subject_component_contours.py",
-      "line": 575,
-      "occurrence_id": "schema-writer-256a7c39dcc2e9c1",
+      "line": 597,
+      "occurrence_id": "schema-writer-17bfc3a462b1319c",
       "path_pattern": "<component_group>/row_revision",
       "required": null,
       "shape_expression": "(int(roi_count),)",
@@ -44138,7 +44138,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-8c95b9284f937c8f"
+      "writer_site_id": "writer-77f7501e1c398192"
     },
     {
       "access_pattern": "unclassified",
@@ -44159,8 +44159,8 @@
       "dtype_expression": "np.uint8",
       "dynamic_name": false,
       "file": "src/fisheye/shared/refined_subject_component_contours.py",
-      "line": 583,
-      "occurrence_id": "schema-writer-1c217cb0b87cee94",
+      "line": 605,
+      "occurrence_id": "schema-writer-ec1d0c254e999255",
       "path_pattern": "<component_group>/row_updated_at_utc_bytes",
       "required": null,
       "shape_expression": "(int(roi_count), ROW_UPDATE_TIMESTAMP_WIDTH)",
@@ -44172,7 +44172,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-53589a684fa35e9f"
+      "writer_site_id": "writer-bfd208435996aa06"
     },
     {
       "access_pattern": "unclassified",
@@ -44193,8 +44193,8 @@
       "dtype_expression": "np.uint8",
       "dynamic_name": false,
       "file": "src/fisheye/shared/refined_subject_component_contours.py",
-      "line": 591,
-      "occurrence_id": "schema-writer-d046ffeb449c90e1",
+      "line": 613,
+      "occurrence_id": "schema-writer-b8b04e06e5549e64",
       "path_pattern": "<component_group>/row_update_reason_bytes",
       "required": null,
       "shape_expression": "(int(roi_count), int(reason_width))",
@@ -44206,7 +44206,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-d3dbddab7836eb99"
+      "writer_site_id": "writer-bdac1779dd12abd7"
     },
     {
       "access_pattern": "indexed",
@@ -44227,8 +44227,8 @@
       "dtype_expression": "np.int64",
       "dynamic_name": false,
       "file": "src/fisheye/shared/refined_subject_component_contours.py",
-      "line": 699,
-      "occurrence_id": "schema-writer-f48408c767410982",
+      "line": 721,
+      "occurrence_id": "schema-writer-07aa87164886a15e",
       "path_pattern": "<component_group>/contours/ptr",
       "required": null,
       "shape_expression": "(int(roi_count),)",
@@ -44240,7 +44240,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-5e5d542569c3f1e1"
+      "writer_site_id": "writer-c182d9d3cfefbc9a"
     },
     {
       "access_pattern": "indexed",
@@ -44261,8 +44261,8 @@
       "dtype_expression": "np.int32",
       "dynamic_name": false,
       "file": "src/fisheye/shared/refined_subject_component_contours.py",
-      "line": 707,
-      "occurrence_id": "schema-writer-79b1ccb9d7259f15",
+      "line": 729,
+      "occurrence_id": "schema-writer-a78cb42074d351c9",
       "path_pattern": "<component_group>/contours/len",
       "required": null,
       "shape_expression": "(int(roi_count),)",
@@ -44274,7 +44274,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-f284aca4d13dd529"
+      "writer_site_id": "writer-83157fdc51dcca7c"
     },
     {
       "access_pattern": "indexed",
@@ -44295,8 +44295,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/refined_subject_component_contours.py",
-      "line": 717,
-      "occurrence_id": "schema-writer-61d8e5e330a20f67",
+      "line": 739,
+      "occurrence_id": "schema-writer-201e98a2bebeab18",
       "path_pattern": "<component_group>/contours/points_xy",
       "required": null,
       "shape_expression": "(1, 2)",
@@ -44308,7 +44308,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-82e8c5476f2c3d27"
+      "writer_site_id": "writer-e605826f9b1c20c4"
     },
     {
       "access_pattern": "unclassified",
@@ -44329,8 +44329,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/refined_subject_eye_geometry.py",
-      "line": 144,
-      "occurrence_id": "schema-writer-6a18038720113d2c",
+      "line": 200,
+      "occurrence_id": "schema-writer-f0f467509c6e73cc",
       "path_pattern": "<refined_group>/components/<component_name>/geometry/ellipse_params",
       "required": null,
       "shape_expression": "shape(ellipse_params[:, eye_idx, :])",
@@ -44342,7 +44342,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-c265c1716476ce98"
+      "writer_site_id": "writer-df09dbb8777564af"
     },
     {
       "access_pattern": "unclassified",
@@ -44363,8 +44363,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/refined_subject_eye_geometry.py",
-      "line": 150,
-      "occurrence_id": "schema-writer-3e074875c211d408",
+      "line": 206,
+      "occurrence_id": "schema-writer-112d90e8625d042d",
       "path_pattern": "<refined_group>/components/<component_name>/geometry/ellipse_success",
       "required": null,
       "shape_expression": "shape(ellipse_success[:, eye_idx])",
@@ -44376,7 +44376,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-35da6f0b096be256"
+      "writer_site_id": "writer-b64dc24c8a65a880"
     },
     {
       "access_pattern": "unclassified",
@@ -44397,8 +44397,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/refined_subject_eye_geometry.py",
-      "line": 171,
-      "occurrence_id": "schema-writer-ec7b6ce94cdee3b6",
+      "line": 227,
+      "occurrence_id": "schema-writer-3057589abf1729a4",
       "path_pattern": "<refined_group>/relations/eye_pair/metrics/separation_px",
       "required": null,
       "shape_expression": "(total_rois,)",
@@ -44410,7 +44410,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-5743b2ff919a49cb"
+      "writer_site_id": "writer-ea398a63c3a9e525"
     },
     {
       "access_pattern": "unclassified",
@@ -44431,8 +44431,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/shared/refined_subject_eye_geometry.py",
-      "line": 172,
-      "occurrence_id": "schema-writer-e6541d35dbc48115",
+      "line": 228,
+      "occurrence_id": "schema-writer-54ca2d0d3995e40f",
       "path_pattern": "<refined_group>/relations/eye_pair/metrics/separation_valid",
       "required": null,
       "shape_expression": "(total_rois,)",
@@ -44444,7 +44444,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-5757b8843b60c9ec"
+      "writer_site_id": "writer-cd8e323a90709678"
     },
     {
       "access_pattern": "per_row",

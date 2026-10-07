@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 from pathlib import Path
@@ -21,6 +22,7 @@ from fisheye.shared.refined_subject_component_contours import (
     DEFAULT_CONTOUR_METHOD,
     DEFAULT_CONTOUR_METHOD_VERSION,
     extract_largest_external_contour,
+    read_component_contours,
 )
 from fisheye.shared.refined_subject_mask_mutation import resolve_mutable_refined_subject_mask_run
 from fisheye.shared import refined_subject_eye_geometry as eye_geometry
@@ -30,6 +32,8 @@ from fisheye.shared.zarr.local_group_staging import stage_group, sync_group_back
 QC_POLICY_ID = "palette.browser_subject_mask_apply_full_qc_v1"
 QC_POLICY_VERSION = 1
 QC_ROW_CHUNK = 32
+CHUNK_DIGESTS_KEY = "row_chunk_mask_sha256"
+DERIVED_DIGESTS_KEY = "row_chunk_derived_sha256"
 LOCAL_STAGING_ENV = "PALETTE_MASK_QC_LOCAL_STAGING"
 STAGING_DIR_ENV = "PALETTE_MASK_QC_STAGING_DIR"
 _BODY_CONTOUR_COMPONENTS = frozenset({"subject_body", "swim_bladder"})
@@ -162,7 +166,9 @@ def _validate_metric_and_contour_rows(
     run: zarr.Group,
     names: tuple[str, ...],
     original_reasons: dict[str, np.ndarray],
+    chunk_starts: frozenset[int] | None = None,
 ) -> None:
+    """Recompute and compare every QC chunk, or only ``chunk_starts``."""
     masks = run["masks_roi"]
     metrics = run["metrics"]
     row_count = int(masks.shape[0])
@@ -173,6 +179,8 @@ def _validate_metric_and_contour_rows(
             raise RuntimeError(f"Browser Apply QC lost {name} reason rows.")
         refreshed_reasons[name] = labels
     for start in range(0, row_count, QC_ROW_CHUNK):
+        if chunk_starts is not None and start not in chunk_starts:
+            continue
         stop = min(start + QC_ROW_CHUNK, row_count)
         mask_chunk = np.asarray(masks[start:stop], dtype=np.uint8)
         for comp_idx, name in enumerate(names):
@@ -211,6 +219,8 @@ def _validate_metric_and_contour_rows(
             raise RuntimeError(f"Browser Apply QC {name} contour row shape differs.")
         comp_idx = names.index(name)
         for start in range(0, row_count, QC_ROW_CHUNK):
+            if chunk_starts is not None and start not in chunk_starts:
+                continue
             stop = min(start + QC_ROW_CHUNK, row_count)
             mask_chunk = np.asarray(masks[start:stop, comp_idx], dtype=np.uint8)
             ptr = np.asarray(ptr_array[start:stop], dtype=np.int64)
@@ -229,10 +239,12 @@ def _validate_metric_and_contour_rows(
                     ):
                         raise RuntimeError(f"Browser Apply QC {name} contour row {row} differs.")
     if _EYE_COMPONENTS.issubset(names):
-        _validate_eye_geometry_rows(run, names)
+        _validate_eye_geometry_rows(run, names, chunk_starts)
 
 
-def _validate_eye_geometry_rows(run: zarr.Group, names: tuple[str, ...]) -> None:
+def _validate_eye_geometry_rows(
+    run: zarr.Group, names: tuple[str, ...], chunk_starts: frozenset[int] | None = None,
+) -> None:
     masks = run["masks_roi"]
     row_count = int(masks.shape[0])
     available_array = run.get("available_channels")
@@ -242,6 +254,8 @@ def _validate_eye_geometry_rows(run: zarr.Group, names: tuple[str, ...]) -> None
     )
     pair = run["relations/eye_pair/metrics"]
     for start in range(0, row_count, QC_ROW_CHUNK):
+        if chunk_starts is not None and start not in chunk_starts:
+            continue
         stop = min(start + QC_ROW_CHUNK, row_count)
         n_rows = stop - start
         success = np.zeros((n_rows, 2), dtype=bool)
@@ -372,10 +386,59 @@ def _refresh_and_verify(root: zarr.Group, refined_run: str, expected_edit_revisi
         if labels is None or len(labels) != int(run["masks_roi"].shape[0]):
             raise RuntimeError(f"Browser Apply QC requires valid {name} reason rows.")
         original_reasons[name] = labels
+    row_count = int(run["masks_roi"].shape[0])
+    chunk_digests = _chunk_mask_digests(run["masks_roi"])
+    before = _derived_row_snapshot(run, row_count)
+    changed = _changed_chunk_starts(
+        run.attrs.get("browser_apply_qc_policy"), chunk_digests, _chunk_derived_digests(before, row_count),
+        int(expected_edit_revision),
+    )
     # A retry may start from a previously refreshed surface whose registry or
     # audit effect failed. Any failure during the new refresh must fail closed.
     run.attrs.update({"metrics_stale": True, "contours_stale": True})
     run.attrs.pop("browser_apply_qc_policy", None)
+    scope = "full"
+    fallback_reason = None
+    if changed is not None:
+        rows = [row for start in sorted(changed) for row in range(start, min(start + QC_ROW_CHUNK, row_count))]
+        run = _refresh_rows(root, refined_run, names, expected_edit_revision, rows)
+        _validate_metric_and_contour_rows(run, names, original_reasons, frozenset(changed))
+        fallback_reason = _first_unchanged_row_difference(before, _derived_row_snapshot(run, row_count), set(rows))
+        scope = "chunks" if fallback_reason is None else "full"
+    if scope == "full":
+        # No usable earlier verification, or (fallback) the stored values of
+        # unchanged rows did not match their pixels: refresh every row.
+        run = _refresh_rows(root, refined_run, names, expected_edit_revision, None)
+        _validate_metric_and_contour_rows(run, names, original_reasons)
+    run.attrs["browser_apply_qc_policy"] = {
+        "id": QC_POLICY_ID,
+        "version": QC_POLICY_VERSION,
+        "metric_level": "full",
+        "row_chunk": QC_ROW_CHUNK,
+        "contours": "full_applicable_components",
+        "edit_revision": int(expected_edit_revision),
+        # Optional (version 1 readers ignore them): digests of each verified
+        # QC chunk's pixels and derived values, so the next Apply recomputes
+        # only chunks where either has changed since this verification.
+        CHUNK_DIGESTS_KEY: chunk_digests,
+        DERIVED_DIGESTS_KEY: _chunk_derived_digests(_derived_row_snapshot(run, row_count), row_count),
+    }
+    run.attrs["metrics_stale"] = False
+    run.attrs["contours_stale"] = False
+    return {
+        "qc_status": "complete",
+        "qc_policy_id": QC_POLICY_ID,
+        "qc_edit_revision": int(expected_edit_revision),
+        "qc_component_count": len(names),
+        "qc_row_count": row_count,
+        "qc_scope": scope,
+        "qc_chunks_refreshed": len(changed) if scope == "chunks" else len(chunk_digests),
+        "qc_chunk_count": len(chunk_digests),
+        **({"qc_scope_fallback_reason": fallback_reason} if fallback_reason else {}),
+    }
+
+
+def _refresh_rows(root, refined_run, names, expected_edit_revision, rows):
     summary = finalizer.refresh_refined_subject_mask_metrics_run(
         root,
         refined_run=str(refined_run),
@@ -385,27 +448,134 @@ def _refresh_and_verify(root: zarr.Group, refined_run: str, expected_edit_revisi
         refresh_reason_tags=True,
         write_eye_geometry=_EYE_COMPONENTS.issubset(names),
         write_component_contours=True,
+        rows=rows,
     )
     run = resolve_mutable_refined_subject_mask_run(root, str(refined_run))
     if type(run.attrs.get("edit_revision")) is not int or run.attrs["edit_revision"] != int(expected_edit_revision):
         raise RuntimeError("Refined mask edit revision changed during QC refresh.")
     if tuple(summary.get("components") or ()) != names:
         raise RuntimeError("Browser Apply QC did not refresh every component.")
-    _validate_metric_and_contour_rows(run, names, original_reasons)
-    run.attrs["browser_apply_qc_policy"] = {
-        "id": QC_POLICY_ID,
-        "version": QC_POLICY_VERSION,
-        "metric_level": "full",
-        "row_chunk": QC_ROW_CHUNK,
-        "contours": "full_applicable_components",
-        "edit_revision": int(expected_edit_revision),
-    }
-    run.attrs["metrics_stale"] = False
-    run.attrs["contours_stale"] = False
+    return run
+
+
+def _chunk_mask_digests(masks) -> list[str]:
+    """SHA-256 of each QC chunk's dense pixels (shape, dtype and bytes)."""
+
+    digests = []
+    for start in range(0, int(masks.shape[0]), QC_ROW_CHUNK):
+        chunk = np.ascontiguousarray(masks[start:start + QC_ROW_CHUNK])
+        digest = hashlib.sha256(f"{chunk.shape}|{chunk.dtype}".encode())
+        digest.update(chunk.tobytes())
+        digests.append(digest.hexdigest())
+    return digests
+
+
+def _changed_chunk_starts(prior, digests: list[str], derived: list[str], revision: int) -> set[int] | None:
+    """QC chunks whose pixels or derived values differ from the previous revision's verified QC.
+
+    Every other chunk is byte-identical, pixels and derived values, to a
+    state that a full-equivalent QC verified. None means refresh every row:
+    no usable earlier verification, or a rerun at the same revision (which
+    keeps its full refresh).
+    """
+
+    if not (
+        isinstance(prior, dict)
+        and prior.get("id") == QC_POLICY_ID
+        and prior.get("version") == QC_POLICY_VERSION
+        and prior.get("row_chunk") == QC_ROW_CHUNK
+        and prior.get("metric_level") == "full"
+        and prior.get("contours") == "full_applicable_components"
+        and type(prior.get("edit_revision")) is int
+        and prior["edit_revision"] < int(revision)
+        and isinstance(prior.get(CHUNK_DIGESTS_KEY), list)
+        and len(prior[CHUNK_DIGESTS_KEY]) == len(digests)
+        and isinstance(prior.get(DERIVED_DIGESTS_KEY), list)
+        and len(prior[DERIVED_DIGESTS_KEY]) == len(derived)
+    ):
+        return None
     return {
-        "qc_status": "complete",
-        "qc_policy_id": QC_POLICY_ID,
-        "qc_edit_revision": int(expected_edit_revision),
-        "qc_component_count": len(names),
-        "qc_row_count": int(run["masks_roi"].shape[0]),
+        index * QC_ROW_CHUNK
+        for index in range(len(digests))
+        if prior[CHUNK_DIGESTS_KEY][index] != digests[index] or prior[DERIVED_DIGESTS_KEY][index] != derived[index]
     }
+
+
+def _chunk_derived_digests(snapshot: dict[str, object], row_count: int) -> list[str]:
+    """SHA-256 of each QC chunk's derived values (every path of the snapshot)."""
+
+    digests = []
+    for start in range(0, row_count, QC_ROW_CHUNK):
+        stop = min(start + QC_ROW_CHUNK, row_count)
+        digest = hashlib.sha256()
+        for path in sorted(snapshot):
+            value = snapshot[path]
+            digest.update(path.encode() + b"\0")
+            if value is None:
+                digest.update(b"<unreadable>")
+            elif isinstance(value, list):
+                for row in value[start:stop]:
+                    digest.update(b"-" if row is None else _array_bytes(np.asarray(row)))
+            else:
+                digest.update(_array_bytes(np.asarray(value)[start:stop]))
+        digests.append(digest.hexdigest())
+    return digests
+
+
+def _array_bytes(array: np.ndarray) -> bytes:
+    header = f"{array.shape}|{array.dtype}|".encode()
+    if array.dtype.kind in "OU":
+        return header + "\0".join(str(item) for item in array.reshape(-1).tolist()).encode()
+    return header + np.ascontiguousarray(array).tobytes()
+
+
+def _derived_row_snapshot(run: zarr.Group, row_count: int) -> dict[str, object]:
+    """Every row-indexed derived value of the run (contours and reasons decoded)."""
+
+    snapshot: dict[str, object] = {}
+
+    def visit(group: zarr.Group, prefix: str) -> None:
+        for name, child in group.members():
+            path = f"{prefix}/{name}" if prefix else name
+            if isinstance(child, zarr.Group):
+                if name == "contours":
+                    snapshot[path] = read_component_contours(group, row_count)
+                elif name != "sampled_contours":
+                    visit(child, path)
+            elif name == "reason_bytes":
+                snapshot[path] = read_reason_labels(group)
+            elif path != "masks_roi" and child.shape and int(child.shape[0]) == row_count:
+                snapshot[path] = np.asarray(child[...])
+
+    visit(run, "")
+    return snapshot
+
+
+def _first_unchanged_row_difference(before, after, rows: set[int]) -> str | None:
+    """Where a row outside ``rows`` changed (None when every such row is identical)."""
+
+    if before.keys() != after.keys():
+        return "the run's derived arrays changed"
+    keep = np.asarray([row for row in range(_row_count(before)) if row not in rows], dtype=np.int64)
+    for path in sorted(before):
+        old, new = before[path], after[path]
+        if old is None or new is None:
+            if old is not new:
+                return f"{path} could not be read"
+        elif isinstance(old, list):
+            for row in keep.tolist():
+                a, b = old[row], new[row]
+                if (a is None) != (b is None) or (a is not None and not np.array_equal(a, b)):
+                    return f"{path} row {row}"
+        else:
+            a, b = np.asarray(old)[keep], np.asarray(new)[keep]
+            if a.shape != b.shape or not np.array_equal(a, b, equal_nan=a.dtype.kind == "f"):
+                return f"{path} (unchanged rows)"
+    return None
+
+
+def _row_count(snapshot) -> int:
+    for value in snapshot.values():
+        if value is not None:
+            return len(value)
+    return 0

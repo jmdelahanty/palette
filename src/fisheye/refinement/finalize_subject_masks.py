@@ -5275,8 +5275,15 @@ def refresh_refined_subject_mask_metrics_run(
     refresh_reason_tags: bool = True,
     write_eye_geometry: bool = False,
     write_component_contours: bool = False,
+    rows: Optional[Sequence[int]] = None,
 ) -> dict[str, object]:
-    """Refresh mask-local metrics/QC for an existing refined-subject run."""
+    """Refresh mask-local metrics/QC for an existing refined-subject run.
+
+    ``rows`` limits the recomputation to those rows (metrics in the row
+    chunks that contain them; contours and eye geometry for exactly those
+    rows); every other row keeps its stored values. The caller must know the
+    other rows' stored values match their pixels.
+    """
 
     metric_level = str(metric_level)
     if metric_level not in _METRIC_LEVELS:
@@ -5347,6 +5354,14 @@ def refresh_refined_subject_mask_metrics_run(
         run_group, total_rows=total_rows, component_count=component_count
     )
     chunk_ranges = _row_chunks(total_rows, worker_chunk_size)
+    row_scope = None if rows is None else sorted({int(row) for row in rows})
+    if row_scope is not None:
+        if any(row < 0 or row >= total_rows for row in row_scope):
+            raise ValueError(f"rows must lie in [0, {total_rows}).")
+        chunk_ranges = [
+            (start, stop) for start, stop in chunk_ranges
+            if any(start <= row < stop for row in row_scope)
+        ]
     review_counts: dict[str, dict[str, int]] = {}
     refreshed_components: list[str] = []
     reason_labels_by_component: dict[str, np.ndarray] = {}
@@ -5410,6 +5425,10 @@ def refresh_refined_subject_mask_metrics_run(
 
     for component_name, _component_idx in component_indices:
         component_group = run_group["components"][component_name]
+        if row_scope is not None:
+            rows_with_component_by_component[component_name] = int(
+                np.count_nonzero(np.asarray(component_group["mask_present"][:]))
+            )
         _set_component_metric_attrs(component_group, metric_level=metric_level)
         component_group.attrs["metric_qc_refreshed_at_utc"] = _utc_now()
         component_group.attrs["metric_qc_rows_with_component"] = int(
@@ -5438,7 +5457,7 @@ def refresh_refined_subject_mask_metrics_run(
     if write_eye_geometry and set(_EYE_COMPONENTS).issubset(
         {name for name, _idx in component_indices}
     ):
-        write_refined_subject_eye_geometry(run_group)
+        write_refined_subject_eye_geometry(run_group, rows=row_scope)
         run_group.attrs["eye_geometry_status"] = "computed"
 
     if write_component_contours:
@@ -5454,6 +5473,7 @@ def refresh_refined_subject_mask_metrics_run(
                         source_mask_run=run_name,
                         chunk_rois=max(1, min(256, total_rows)),
                         overwrite=True,
+                        rows=row_scope,
                     )
                 )
             run_group.attrs["component_contours_status"] = "computed"
@@ -5502,6 +5522,7 @@ def refresh_refined_subject_mask_metrics_run(
         "chunk_size": requested_chunk_size,
         "worker_chunk_size": worker_chunk_size,
         "chunk_count": len(chunk_ranges),
+        "row_scope": row_scope,
         "refresh_reason_tags": bool(refresh_reason_tags),
         "write_eye_geometry": bool(write_eye_geometry),
         "write_component_contours": bool(write_component_contours),
