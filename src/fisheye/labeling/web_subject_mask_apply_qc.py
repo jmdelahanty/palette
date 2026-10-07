@@ -47,7 +47,7 @@ def _require_compatible_contract(run: zarr.Group) -> tuple[str, ...]:
     ):
         raise RuntimeError("Browser Apply QC cannot replace a different declared browser QC policy.")
     metric_level = run.attrs.get("component_metric_level")
-    if metric_level not in (None, "full"):
+    if metric_level not in (None, finalizer.EDITABLE_REVIEW_METRIC_LEVEL):
         raise RuntimeError(
             f"Browser Apply QC requires full component metrics; this run declares {metric_level!r}."
         )
@@ -77,7 +77,7 @@ def _require_compatible_contract(run: zarr.Group) -> tuple[str, ...]:
             if not isinstance(component, zarr.Group):
                 continue
             for key, expected in (
-                ("component_metric_level", "full"),
+                ("component_metric_level", finalizer.EDITABLE_REVIEW_METRIC_LEVEL),
                 ("component_metrics_schema_id", finalizer._COMPONENT_METRICS_SCHEMA_ID),
                 ("metric_qc_schema_id", finalizer._COMPONENT_METRIC_QC_SCHEMA_ID),
             ):
@@ -89,7 +89,7 @@ def _require_compatible_contract(run: zarr.Group) -> tuple[str, ...]:
                 for key, expected in (
                     ("schema_id", finalizer._COMPONENT_METRICS_SCHEMA_ID),
                     ("qc_schema_id", finalizer._COMPONENT_METRIC_QC_SCHEMA_ID),
-                    ("metric_level", "full"),
+                    ("metric_level", finalizer.EDITABLE_REVIEW_METRIC_LEVEL),
                     ("qc_policy", finalizer._component_metric_qc_policy_payload(name)),
                 ):
                     actual = component_metrics.attrs.get(key)
@@ -171,7 +171,7 @@ def _validate_metric_and_contour_rows(
         mask_chunk = np.asarray(masks[start:stop], dtype=np.uint8)
         for comp_idx, name in enumerate(names):
             computed = finalizer._compute_mask_local_metric_payload(
-                component_name=name, masks=mask_chunk[:, comp_idx], metric_level="full",
+                component_name=name, masks=mask_chunk[:, comp_idx], metric_level=finalizer.EDITABLE_REVIEW_METRIC_LEVEL,
             )
             component = run["components"][name]
             for key, expected in computed.spatial_metrics.items():
@@ -316,7 +316,7 @@ def refresh_subject_mask_apply_qc_locked(
         root,
         refined_run=str(refined_run),
         components=None,
-        metric_level="full",
+        metric_level=finalizer.EDITABLE_REVIEW_METRIC_LEVEL,
         chunk_size=QC_ROW_CHUNK,
         refresh_reason_tags=True,
         write_eye_geometry=_EYE_COMPONENTS.issubset(names),
@@ -331,7 +331,7 @@ def refresh_subject_mask_apply_qc_locked(
     run.attrs["browser_apply_qc_policy"] = {
         "id": QC_POLICY_ID,
         "version": QC_POLICY_VERSION,
-        "metric_level": "full",
+        "metric_level": finalizer.EDITABLE_REVIEW_METRIC_LEVEL,
         "row_chunk": QC_ROW_CHUNK,
         "contours": "full_applicable_components",
         "edit_revision": int(expected_edit_revision),

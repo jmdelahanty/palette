@@ -9,6 +9,9 @@
     },
     {
       "$ref": "#/$defs/marker"
+    },
+    {
+      "$ref": "#/$defs/marker_v3"
     }
   ],
   "$defs": {
@@ -429,6 +432,147 @@
         "schema_version": {
           "type": "integer",
           "const": 2
+        },
+        "status": {
+          "const": "transfer_complete"
+        },
+        "required_consumer_profile": {
+          "const": "parent_recording_intake_v2"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "size_bytes",
+            "sha256",
+            "schema_id",
+            "schema_version"
+          ],
+          "properties": {
+            "path": {
+              "const": "_citrus_transfer/snapshot.json"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "schema_id": {
+              "const": "citrus.recording_transfer_snapshot"
+            },
+            "schema_version": {
+              "type": "integer",
+              "const": 2
+            }
+          }
+        },
+        "recording_layout": {
+          "enum": [
+            "single_video",
+            "rolling_clips"
+          ]
+        },
+        "recording_payload_kind": {
+          "enum": [
+            "citrus_h5",
+            "video_only"
+          ]
+        },
+        "acquisition_session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "parent_recording_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "semantic_receipt_acceptance": {
+          "const": "not_evaluated_by_transfer"
+        },
+        "delivery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "attempt_id",
+            "created_utc",
+            "source_dir",
+            "destination_dir",
+            "verification",
+            "source_retention"
+          ],
+          "properties": {
+            "attempt_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "created_utc": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "source_dir": {
+              "type": "string",
+              "minLength": 1
+            },
+            "destination_dir": {
+              "type": "string",
+              "minLength": 1
+            },
+            "verification": {
+              "const": "sha256_all_inventory_bytes"
+            },
+            "source_retention": {
+              "const": "retained_pending_consumer_receipt"
+            }
+          }
+        }
+      }
+    },
+    "marker_v3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "schema_version",
+        "status",
+        "required_consumer_profile",
+        "snapshot_id",
+        "snapshot",
+        "recording_layout",
+        "recording_payload_kind",
+        "acquisition_session_id",
+        "parent_recording_count",
+        "semantic_receipt_acceptance",
+        "delivery",
+        "sealer"
+      ],
+      "properties": {
+        "sealer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["package", "version"],
+          "description": "Provenance: the sealer release that wrote this marker. Not an admission input.",
+          "properties": {
+            "package": {"const": "citrus-recording-transfer"},
+            "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"}
+          }
+        },
+        "schema_id": {
+          "const": "citrus.transfer_completion_marker.v3"
+        },
+        "schema_version": {
+          "type": "integer",
+          "const": 3
         },
         "status": {
           "const": "transfer_complete"
