@@ -184,3 +184,18 @@ def test_claim_left_by_a_dead_poll_is_retried_not_skipped(tmp_path, capsys):
     # Once submitted, later polls leave it alone.
     assert poller.poll(config, dry_run=False, runner=runner) == 0
     assert len(runner.calls) == 1
+
+
+def test_job_mode_registration_config_is_refused_not_reinterpreted(tmp_path):
+    with pytest.raises(poller.PollerRefusal, match="job-mode registration is retired"):
+        _config(tmp_path, registration="job")
+    assert _config(tmp_path, registration="workstation")["registration"] == "workstation"
+
+
+def test_every_submission_tells_the_job_not_to_register(tmp_path):
+    # --no-register also keeps an older launcher checkout (default: register)
+    # at submit.repo from registering inside the LSF job.
+    for overrides in ({}, {"registration": "workstation"}, {"writer_host": "ws1"}):
+        command = poller.build_command(_config(tmp_path, **overrides), Path("/s"), "k")
+        assert "--no-register" in command[-1]
+        assert "--writer-host" not in command[-1] and "--register " not in command[-1]

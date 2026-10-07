@@ -315,15 +315,15 @@ def main() -> None:
             work / "recordings",
             "--run-dir",
             work / "first-run",
-            "--register",
-            "--registry",
-            registry_path,
         ]
         # Recording context and intent come from the producer snapshot; the
-        # runner no longer takes --recording-type/--recording-only.
+        # runner no longer takes --recording-type/--recording-only. The LSF
+        # side never registers: the writer host runs register-delivery below.
+        # A corrupted delivery is invalid input (65); a failed stimulus import
+        # is an ordinary, retryable failure (1).
         command(
             argv,
-            expected=1 if args.negative_corruption or args.negative_stimulus else 0,
+            expected=65 if args.negative_corruption else 1 if args.negative_stimulus else 0,
         )
         if args.negative_corruption or args.negative_stimulus:
             assert inventory(delivery) == before_delivery
@@ -358,12 +358,10 @@ def main() -> None:
                             }
                         )
                 assert len(failed_runs) == 2
+                # The import owner runs in-process; its output is the command's.
                 importer_logs = {
-                    name: (work / "first-run" / name).read_text()
-                    for name in (
-                        "import_parents.stdout.txt",
-                        "import_parents.stderr.txt",
-                    )
+                    "stdout": report["commands"][-1]["stdout"],
+                    "stderr": report["commands"][-1]["stderr"],
                 }
                 assert (
                     "Stimulus H5 missing /video_metadata/frame_metadata dataset"
@@ -399,8 +397,34 @@ def main() -> None:
                 status["status"] == "complete" and status["staging_finalized"] is True
             )
             assert status["import_complete"] is True and not list(delivery.iterdir())
+            assert status["registry"] is None
+            assert digest(registry_path) == before_registry  # the import never registers
             assert inventory(source) == original_source
             plan = status["plan"]
+            import socket
+
+            register = [
+                repo / "scripts/py",
+                "-m",
+                "fisheye.intake",
+                "register-delivery",
+                plan["snapshot_id"].removeprefix("sha256:"),
+                "--destination-root",
+                work / "recordings",
+                "--registry",
+                registry_path,
+                "--writer-host",
+                socket.gethostname(),
+                "--writer-lock-path",
+                work / "registry-writer.lock",
+                "--shadow-temp-root",
+                work / "registry-shadows",
+                "--shadow-backup-dir",
+                work / "registry-backups",
+                "--allow-synthetic-isolated-registry",
+            ]
+            registered = json.loads(command(register).stdout)
+            assert registered["verdict"] is True and len(registered["bindings"]) == 2
             assert len(plan["parents"]) == 2 and len(plan["files"]) == len(
                 before_delivery
             )
@@ -586,8 +610,10 @@ def main() -> None:
                 and replay_status["import_receipts"] == status["import_receipts"]
             )
             assert not replay_status.get(
-                "commands"
+                "parents"
             )  # Retirement replay does not re-import sealed parents.
+            again = json.loads(command(register).stdout)
+            assert again["evidence_digest"] == registered["evidence_digest"]
             assert digest(registry_path) == admitted_registry
             assert {
                 p["destination_dir"]: inventory(Path(p["destination_dir"]))

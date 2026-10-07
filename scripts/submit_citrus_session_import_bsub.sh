@@ -12,12 +12,6 @@ RUN_ID=""
 DRY_RUN=0
 DEST_ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
 JOB_DRY_RUN=0
-REGISTER=1
-REGISTRY="${PALETTE_REGISTRY:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
-WRITER_HOST="${PALETTE_REGISTRY_WRITER_HOST:-}"
-WRITER_LOCK_PATH="${PALETTE_REGISTRY_WRITER_LOCK_PATH:-/tmp/palette-registry-writer.lock}"
-SHADOW_TEMP_ROOT="${PALETTE_REGISTRY_SHADOW_TEMP_ROOT:-/tmp/palette-registry-shadows}"
-SHADOW_BACKUP_DIR="${PALETTE_REGISTRY_SHADOW_BACKUP_DIR:-}"
 RESUME_TRANSFER_PLAN=""
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -27,7 +21,9 @@ Usage: submit_citrus_session_import_bsub.sh --session-dir PATH [options]
 
 Submit one LSF job that ingests a completed Citrus transfer through
 transfer-v2 parent intake (the only ingest path; see
-fisheye.utils.run_citrus_session_import).
+fisheye.utils.run_citrus_session_import and fisheye.intake.import_delivery).
+The job never writes the registry: job-mode registration is retired, and the
+writer host registers with `python -m fisheye.intake register-delivery`.
 
 Options:
   --session-dir PATH             Completed Citrus session directory
@@ -45,11 +41,7 @@ Options:
                                 (default: /groups/johnson/johnsonlab/jeremy/recordings)
   --job-dry-run                  Submit a cluster job that plans but does not
                                 modify recordings/Zarrs
-  --register                     Scan imported/skipped analysis Zarrs into registry (default)
-  --no-register                  Do not scan imported/skipped analysis Zarrs
-  --registry PATH                Registry SQLite path used with --register
-                                (default: $PALETTE_REGISTRY or /groups/.../palette_registry.sqlite)
-  --writer-host HOST             Designated registry writer host; required with --register
+  --no-register                  Accepted for compatibility; the job never registers
   --resume-transfer-plan PATH    Exact saved organization plan for a retry
   --dry-run                      Print files and submit command; do not submit
   -h, --help                     Show this message
@@ -68,10 +60,11 @@ while [[ $# -gt 0 ]]; do
     --run-id) RUN_ID="$2"; shift 2;;
     --dest-root) DEST_ROOT="$2"; shift 2;;
     --job-dry-run) JOB_DRY_RUN=1; shift;;
-    --register) REGISTER=1; shift;;
-    --no-register) REGISTER=0; shift;;
-    --registry) REGISTRY="$2"; shift 2;;
-    --writer-host) WRITER_HOST="$2"; shift 2;;
+    --no-register) shift;;
+    --register|--registry|--writer-host)
+      echo "$1: job-mode registration is retired; the job never writes the registry." >&2
+      echo "Register on the writer host: python -m fisheye.intake register-delivery." >&2
+      exit 2;;
     --resume-transfer-plan) RESUME_TRANSFER_PLAN="$2"; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage; exit 0;;
@@ -92,22 +85,6 @@ done
 if [[ -z "$SESSION_DIR" ]]; then
   echo "Missing required --session-dir PATH" >&2
   usage
-  exit 2
-fi
-
-if [[ "$REGISTER" == "1" && -z "$REGISTRY" ]]; then
-  echo "--register requires --registry PATH" >&2
-  exit 2
-fi
-if [[ -z "$SHADOW_BACKUP_DIR" ]]; then
-  SHADOW_BACKUP_DIR="$(dirname -- "$REGISTRY")/backups"
-fi
-if [[ "$REGISTER" == "1" && -z "$WRITER_HOST" ]]; then
-  echo "--register requires --writer-host or PALETTE_REGISTRY_WRITER_HOST" >&2
-  exit 2
-fi
-if [[ -n "$WRITER_HOST" && ! "$WRITER_HOST" =~ ^[A-Za-z0-9._-]+$ ]]; then
-  echo "Unsafe --writer-host value: $WRITER_HOST" >&2
   exit 2
 fi
 
@@ -183,11 +160,6 @@ quoted_session_name="$(printf '%q' "$SESSION_NAME")"
 quoted_run_dir="$(printf '%q' "$RUN_DIR")"
 quoted_dest_root="$(printf '%q' "$DEST_ROOT")"
 quoted_repo_root="$(printf '%q' "$REPO_ROOT")"
-quoted_registry="$(printf '%q' "$REGISTRY")"
-quoted_writer_host="$(printf '%q' "$WRITER_HOST")"
-quoted_writer_lock_path="$(printf '%q' "$WRITER_LOCK_PATH")"
-quoted_shadow_temp_root="$(printf '%q' "$SHADOW_TEMP_ROOT")"
-quoted_shadow_backup_dir="$(printf '%q' "$SHADOW_BACKUP_DIR")"
 quoted_resume_plan="$(printf '%q' "$RESUME_TRANSFER_PLAN")"
 
 cat >"$JOB_SCRIPT" <<JOBSCRIPT
@@ -199,18 +171,13 @@ SESSION_NAME=${quoted_session_name}
 RUN_DIR=${quoted_run_dir}
 DEST_ROOT=${quoted_dest_root}
 REPO_ROOT=${quoted_repo_root}
-REGISTRY=${quoted_registry}
-export PALETTE_REGISTRY_WRITER_HOST=${quoted_writer_host}
-export PALETTE_REGISTRY_WRITER_LOCK_PATH=${quoted_writer_lock_path}
-export PALETTE_REGISTRY_SHADOW_TEMP_ROOT=${quoted_shadow_temp_root}
-export PALETTE_REGISTRY_SHADOW_BACKUP_DIR=${quoted_shadow_backup_dir}
 JOB_DRY_RUN=${JOB_DRY_RUN}
-REGISTER=${REGISTER}
 RESUME_TRANSFER_PLAN=${quoted_resume_plan}
 JOB_ID="\${LSB_JOBID:-manual}"
 STATUS_FILE="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.status.txt"
-# The workflow creates and owns its run directory (it refuses an existing one)
-# and writes its status at the standard name inside it.
+# The workflow creates and owns its run directory (it refuses an existing one),
+# only after taking the delivery's lock, and writes its status at the standard
+# name inside it. A job that finds the delivery held exits 75 and creates none.
 WORKFLOW_DIR="\${RUN_DIR}/workflow-\${JOB_ID}"
 STATUS_JSON="\${WORKFLOW_DIR}/citrus_session_import.status.json"
 PAYLOAD_STDOUT="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.payload.out"
@@ -230,9 +197,6 @@ if [[ "\${JOB_DRY_RUN}" == "1" ]]; then
   cmd+=(--dry-run)
 else
   cmd+=(--apply)
-fi
-if [[ "\${REGISTER}" == "1" ]]; then
-  cmd+=(--register --registry "\${REGISTRY}")
 fi
 if [[ -n "\${RESUME_TRANSFER_PLAN}" ]]; then
   cmd+=(--resume-transfer-plan "\${RESUME_TRANSFER_PLAN}")
@@ -278,9 +242,6 @@ BSUB_ARGS=(
   -oo "${RUN_DIR}/%J.out"
   -eo "${RUN_DIR}/%J.err"
 )
-if [[ "$REGISTER" == "1" ]]; then
-  BSUB_ARGS+=(-R "select[hname==${WRITER_HOST}] span[hosts=1]")
-fi
 if [[ -n "$QUEUE" ]]; then
   BSUB_ARGS+=(-q "$QUEUE")
 fi
@@ -295,13 +256,7 @@ echo "job_script=$JOB_SCRIPT"
 echo "expected_status=$JOB_STATUS_TEMPLATE"
 echo "dest_root=$DEST_ROOT"
 echo "job_dry_run=$JOB_DRY_RUN"
-echo "register=$REGISTER"
-if [[ -n "$REGISTRY" ]]; then
-  echo "registry=$REGISTRY"
-fi
-if [[ -n "$WRITER_HOST" ]]; then
-  echo "registry_writer_host=$WRITER_HOST"
-fi
+echo "registration=writer_host_only"
 echo "submit_command=$BSUB_CMD"
 
 if [[ "$DRY_RUN" == "1" ]]; then
