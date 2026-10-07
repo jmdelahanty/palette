@@ -573,6 +573,46 @@ def _declared_crop_video_size(
     return crop["width"], crop["height"]
 
 
+TRANSFER_CLIP_PROJECTION_SCHEMA_ID = "palette.transfer_organized_clip_projection.v1"
+
+
+def _producer_crop_descriptor(
+    clip_manifest: Mapping[str, Any],
+    crop: Mapping[str, Any],
+    *,
+    recording_dir: Path,
+    camera_id: str,
+    clip_index: int,
+) -> Mapping[str, Any]:
+    """Orange's own crop output descriptor for this clip.
+
+    Transfer-v2 intake indexes Palette projections, which keep only the paths
+    and frame range. The projection binds Orange's original clip manifest by
+    path and sha256; read the descriptor there, after checking those bytes.
+    """
+
+    if clip_manifest.get("schema_id") != TRANSFER_CLIP_PROJECTION_SCHEMA_ID:
+        return crop
+    original = clip_manifest.get("original_clip_manifest")
+    transfer = clip_manifest.get("source_transfer")
+    organized = (
+        transfer.get("source_to_organized_paths") if isinstance(transfer, Mapping) else None
+    )
+    if not isinstance(original, Mapping) or not isinstance(organized, Mapping):
+        raise ValueError(f"Clip {clip_index} projection does not bind its original clip manifest.")
+    path = _resolve_relative(
+        recording_dir, organized.get(original.get("path")), label="original clip manifest"
+    )
+    if _sha256_file(path) != original.get("sha256"):
+        raise ValueError(f"Clip {clip_index} original clip manifest bytes changed.")
+    outputs = _read_json_object(path, label="original clip manifest").get("recording_outputs")
+    camera_outputs = outputs.get(camera_id) if isinstance(outputs, Mapping) else None
+    producer = camera_outputs.get("crop") if isinstance(camera_outputs, Mapping) else None
+    if not isinstance(producer, Mapping):
+        raise ValueError(f"Clip {clip_index} original clip manifest has no crop output.")
+    return producer
+
+
 def _sealed_crop_video_size(
     recording_dir: Path, manifest: Mapping[str, Any], camera_id: str
 ) -> tuple[int, int] | None:
@@ -797,7 +837,15 @@ def _validated_collection_contract(
         full = camera_outputs.get("full")
         if not isinstance(crop, Mapping) or not isinstance(full, Mapping):
             raise ValueError(f"Clip {clip_index} lacks crop or full video output.")
-        declared_sizes.append(_declared_crop_video_size(crop, clip_index=clip_index))
+        declared_sizes.append(
+            _declared_crop_video_size(
+                _producer_crop_descriptor(
+                    clip_manifest, crop, recording_dir=recording_dir,
+                    camera_id=camera_id, clip_index=clip_index,
+                ),
+                clip_index=clip_index,
+            )
+        )
         for role, output in (("crop", crop), ("full", full)):
             if int(output.get("first_recording_frame_id", -1)) != first_frame_id:
                 raise ValueError(

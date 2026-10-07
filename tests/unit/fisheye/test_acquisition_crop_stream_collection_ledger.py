@@ -43,6 +43,7 @@ def _write_clip(
     first_frame_id: int,
     declared_size: tuple[int, int] | None = None,
     all_blank: bool = False,
+    projected: bool = False,
 ) -> dict[str, object]:
     clip_id = f"clip_{clip_index:06d}"
     clip_dir = recording_dir / "clips" / clip_id
@@ -105,6 +106,41 @@ def _write_clip(
         ),
         encoding="utf-8",
     )
+    if projected:
+        # Transfer-v2 intake indexes Palette's projection, which keeps only the
+        # paths and frame range and binds Orange's manifest by path and sha256.
+        import hashlib
+
+        original = json.loads(manifest_path.read_text(encoding="utf-8"))
+        crop_only = {
+            key: value
+            for key, value in original["recording_outputs"]["123"]["crop"].items()
+            if key in ("output_kind", "video", "metadata", "first_recording_frame_id",
+                       "last_recording_frame_id", "frame_count")
+        }
+        source_path = f"external_recorder/clips/{clip_id}/clip_manifest.json"
+        projection = clip_dir / "projection.json"
+        projection.write_text(
+            json.dumps(
+                {
+                    "schema_id": "palette.transfer_organized_clip_projection.v1",
+                    "clip_id": clip_id,
+                    "clip_index": clip_index,
+                    "original_clip_manifest": {
+                        "path": source_path,
+                        "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                    },
+                    "source_transfer": {
+                        "source_to_organized_paths": {source_path: relative(manifest_path)}
+                    },
+                    "recording_outputs": {
+                        "123": {"crop": crop_only, "full": original["recording_outputs"]["123"]["full"]}
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        manifest_path = projection
     return {
         "camera_serial": "123",
         "clip_id": clip_id,
@@ -319,3 +355,19 @@ def test_pinned_orange_schemas_detect_drift(monkeypatch) -> None:
             ledger._orange_validator("recording_output")
     finally:
         ledger._orange_validator.cache_clear()
+
+
+def test_transfer_projection_reads_the_size_from_orange_s_original_manifest(tmp_path: Path) -> None:
+    clips = [{"declared_size": (384, 384), "all_blank": True, "projected": True}] * 2
+    root, publication = _publish(tmp_path, clips, sealed=_sealed_crop_output(384))
+    run = root["analysis/acquisition_video_streams/streams/crop/ledger_runs/" + publication.run_name]
+    contract = run.attrs["source_stream_contract"]
+    assert (contract["width"], contract["height"]) == (384, 384)
+
+
+def test_transfer_projection_refuses_a_changed_original_manifest(tmp_path: Path, monkeypatch) -> None:
+    import fisheye.shared.acquisition_crop_stream_ledger as ledger
+
+    monkeypatch.setattr(ledger, "_sha256_file", lambda path: "0" * 64)
+    with pytest.raises(ValueError, match="original clip manifest bytes changed"):
+        _publish(tmp_path, [{"declared_size": (384, 384), "projected": True}] * 2)
