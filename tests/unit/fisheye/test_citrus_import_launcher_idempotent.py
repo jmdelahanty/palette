@@ -76,3 +76,14 @@ def test_a_genuinely_failed_submission_is_retried(tmp_path: Path) -> None:
     assert _launch(tmp_path, fakes, "attempt-1").returncode != 0
     assert _launch(tmp_path, fakes, "attempt-2").returncode != 0
     assert len(_bsub_calls(fakes)) == 2  # nothing was accepted, so retrying is correct
+
+
+def test_default_resources_fit_a_full_multicamera_delivery(tmp_path: Path) -> None:
+    # 1 h / 4 GB on the short queue was too tight for a real 12 GB four-camera
+    # delivery (2026-10-07); the default is the cluster queue with 4 h / 16 GB.
+    fakes = _setup(tmp_path, bsub_output="Job <4243> is submitted to default queue <local>.")
+    result = _launch(tmp_path, fakes, "attempt-1")
+    assert result.returncode == 0, result.stderr
+    [call] = _bsub_calls(fakes)
+    assert "-W 4:00" in call and "rusage[mem=16G]" in call
+    assert " -q " not in call
