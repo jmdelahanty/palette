@@ -3110,6 +3110,7 @@ def _import_stimulus_from_open_h5(
             root,
             subject_meta,
             source_h5_path=resolved_h5,
+            translator="h5_attributes",
         )
         publish_experiment_setup(
             root,
