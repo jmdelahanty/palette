@@ -142,6 +142,7 @@ It then replays every step and requires no change and no duplicate. It also cove
 - a resume from `retiring` with the marker gone;
 - an H5-plus-Orange subject precedence case (B1);
 - a retried unified intake (B2).
+- a **second concurrent attempt** on the same delivery, which must exit 75 and leave no new files (the lock is taken before any side effect).
 
 ## Rollout
 
