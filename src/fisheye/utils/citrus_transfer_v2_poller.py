@@ -36,7 +36,7 @@ from typing import Callable
 from fisheye.shared.recording_transfer_snapshot import (
     CONSUMER_PROFILE,
     MARKER_NAME,
-    MARKER_SCHEMA,
+    MARKER_SCHEMAS,
     SNAPSHOT_PATH,
 )
 
@@ -88,7 +88,7 @@ def load_config(path: Path) -> dict:
 
 
 def check_marker(marker_path: Path) -> dict | None:
-    """Return the v2 marker, None for a legacy v1 marker; raise if malformed."""
+    """Return a v2/v3 marker, None for a legacy v1 marker; raise if malformed."""
 
     marker_bytes = marker_path.read_bytes()
     try:
@@ -101,8 +101,8 @@ def check_marker(marker_path: Path) -> dict | None:
         return None
     snapshot = marker.get("snapshot")
     if (
-        marker.get("schema_id") != MARKER_SCHEMA
-        or marker.get("schema_version") != 2
+        marker.get("schema_id") not in MARKER_SCHEMAS
+        or marker.get("schema_version") != MARKER_SCHEMAS[marker["schema_id"]][0]
         or marker.get("status") != "transfer_complete"
         or marker.get("required_consumer_profile") != CONSUMER_PROFILE
         or not isinstance(snapshot, dict)
