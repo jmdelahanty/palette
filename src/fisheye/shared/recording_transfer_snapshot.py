@@ -1054,7 +1054,13 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
         )
     delivery = marker["delivery"]
     for key in ("source_dir", "destination_dir"):
-        identifier(delivery[key], f"delivery {key}")  # no control characters, <= 1024
+        identifier(delivery[key], f"delivery {key}")  # <= 1024, no C0 controls
+        # The sealer's own rule (citrus-recording-transfer >= 1.0.1): no C0 or
+        # C1 controls, DEL included (U+0000-U+001F, U+007F-U+009F).
+        require(
+            not any(0x7F <= ord(c) <= 0x9F for c in delivery[key]),
+            f"invalid delivery {key}: control character",
+        )
     require(
         dt.datetime.fromisoformat(delivery["created_utc"].upper()).utcoffset()
         == dt.timedelta(0),
