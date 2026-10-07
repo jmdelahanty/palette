@@ -297,6 +297,7 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
         "recording_producer_context",
         "_migration_074_recording_producer_context",
     ),
+    (75, "recording_run_views", "_migration_075_recording_run_views"),
 )
 
 

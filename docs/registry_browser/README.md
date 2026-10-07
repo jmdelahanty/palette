@@ -69,6 +69,9 @@ command at whatever copy you want to browse (e.g. `$PALETTE_REGISTRY_PATH`).
 | Quality (detect + keypoint) for a dataset | `/palette_registry/dataset_quality` |
 | Training sets containing a dataset | `/palette_registry/training_sets_for_dataset` |
 | Runs + exported models for a set | `/palette_registry/training_lineage_for_set` |
+| Acquisition runs (cameras recorded together) | `/palette_registry/recording_runs` |
+| Recordings in a run | `/palette_registry/recordings_in_run` |
+| Compare two runs camera by camera | `/palette_registry/compare_two_runs` |
 | Arbitrary read-only SQL | `/palette_registry?sql=...` |
 
 Append `.json` or `.csv` to any table/query URL for machine-readable output.
@@ -167,10 +170,87 @@ Tests: `scripts/py -m pytest docs/registry_browser/tests/test_download_bundle.py
 
 ### Canned queries
 
-The four parameterized queries in `datasette-metadata.yaml` reproduce the TUI's
-relationships pane as web forms (lineage parents/children, per-dataset quality,
-training-set membership, set → runs → ONNX/TensorRT). They're plain SQL with
-`:dataset_id` / `:set_id` placeholders — add more by copying the pattern.
+The first four parameterized queries in `datasette-metadata.yaml` reproduce the
+TUI's relationships pane as web forms (lineage parents/children, per-dataset
+quality, training-set membership, set → runs → ONNX/TensorRT). Two more,
+"Recordings in a run" (`:session_uuid`) and "Compare two runs camera by camera"
+(`:run_a`, `:run_b`), browse acquisition runs; see
+[Comparing runs](#comparing-runs). They're plain SQL with named placeholders —
+add more by copying the pattern.
+
+### Comparing runs
+
+One Orange run records several cameras together, and every camera's recording
+carries the run's session id as `recordings.session_uuid`. Two views (registry
+migration 75) group recordings by that exact `session_uuid`:
+
+- `recording_runs` — one row per `session_uuid` with at least one recording:
+  `camera_count`, `camera_ids`, `recording_count`, `first_started_utc` /
+  `last_started_utc`, the distinct `recording_intents`, `recording_types` and
+  `data_origins` (sorted, comma-joined, NULLs omitted), and
+  `analysis_dataset_count`.
+- `recording_run_members` — one row per recording in a run: `session_uuid`,
+  `camera_id`, `recording_id`, `recording_name`, `started_utc`,
+  `recording_type`, `recording_intent`, `data_origin`, and the recording's
+  current analysis dataset (`dataset_id`, `zarr_path`, NULL when none) plus its
+  `analysis_dataset_count`.
+
+Definitions:
+
+- A recording's **active analysis datasets** are its `datasets` rows with
+  `zarr_use = 'analysis'` and `status` NULL or not `'missing'` — the same
+  missing-Zarr filter the registry query CLI applies by default. Datasets whose
+  Zarr is gone are neither shown nor counted.
+- Its **current analysis dataset** is the active analysis dataset with the
+  newest `last_seen_utc` (ties: newest `created_utc`, then highest
+  `dataset_id`). `analysis_dataset_count > 1` on a member flags a recording
+  with more than one live analysis Zarr.
+- Recordings with a NULL or blank `session_uuid` belong to no run and appear in
+  neither view. Historical recordings whose `session_uuid` was per-arena show up
+  as one-camera runs.
+- `first_started_utc` / `last_started_utc` are the text MIN/MAX of
+  `started_utc`, so they assume the usual ISO-8601 UTC form.
+- A run here is descriptive grouping only. It is not the explicit
+  `acquisition_batch_id` (see `docs/acquisition_batch_registry_contract.md`),
+  which must never be inferred from `session_uuid`.
+
+Views carry no order. Use `ORDER BY first_started_utc, session_uuid` for
+`recording_runs` and `ORDER BY session_uuid, camera_id, recording_id` for
+`recording_run_members`.
+
+```sql
+-- Runs, newest first; spot runs that are missing a camera or analysis Zarrs.
+SELECT session_uuid, camera_count, camera_ids, recording_count,
+       analysis_dataset_count, first_started_utc, recording_intents
+FROM recording_runs
+ORDER BY first_started_utc DESC, session_uuid;
+
+-- All cameras of one run with their analysis Zarrs.
+SELECT camera_id, recording_id, started_utc, dataset_id, zarr_path
+FROM recording_run_members
+WHERE session_uuid = :session_uuid
+ORDER BY camera_id, recording_id;
+
+-- Two runs side by side, one row per camera (NULL where a run lacks it).
+WITH cams AS (
+  SELECT camera_id FROM recording_run_members WHERE session_uuid = :run_a
+  UNION
+  SELECT camera_id FROM recording_run_members WHERE session_uuid = :run_b
+)
+SELECT c.camera_id,
+       a.recording_id AS run_a_recording_id, a.zarr_path AS run_a_zarr_path,
+       b.recording_id AS run_b_recording_id, b.zarr_path AS run_b_zarr_path
+FROM cams c
+LEFT JOIN recording_run_members a
+  ON a.session_uuid = :run_a AND a.camera_id IS c.camera_id
+LEFT JOIN recording_run_members b
+  ON b.session_uuid = :run_b AND b.camera_id IS c.camera_id
+ORDER BY c.camera_id;
+```
+
+From Python, open the registry read-only through the Palette runtime
+(`scripts/py`), never a system `sqlite3` binary, and pass the run ids as
+parameters.
 
 ### Status-cell coloring
 

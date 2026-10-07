@@ -9138,3 +9138,97 @@ class RegistryMigrationMixin:
             END;
             """
         )
+
+    def _migration_075_recording_run_views(self) -> None:
+        """Group recordings into acquisition runs by their exact ``session_uuid``.
+
+        One Orange run records several cameras together, and each camera
+        recording carries the run's session id as ``recordings.session_uuid``.
+        Recordings without a session id belong to no run. A recording's current
+        analysis dataset is its newest-seen ``zarr_use='analysis'`` dataset
+        whose status is not ``'missing'`` (the registry query default hides
+        missing Zarrs). This is descriptive grouping only; it never infers an
+        ``acquisition_batch_id``.
+        """
+
+        if not self._table_exists("recordings") or not self._table_exists("datasets"):
+            return
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS recording_runs;")
+        cur.execute("DROP VIEW IF EXISTS recording_run_members;")
+        cur.execute(
+            """
+            CREATE VIEW recording_run_members AS
+            WITH active_analysis_datasets AS (
+                SELECT
+                    d.dataset_id,
+                    d.recording_id,
+                    d.zarr_path,
+                    COUNT(*) OVER (PARTITION BY d.recording_id) AS analysis_dataset_count,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY d.recording_id
+                        ORDER BY
+                            COALESCE(d.last_seen_utc, '') DESC,
+                            COALESCE(d.created_utc, '') DESC,
+                            d.dataset_id DESC
+                    ) AS _rn
+                FROM datasets d
+                WHERE d.recording_id IS NOT NULL
+                  AND d.zarr_use = 'analysis'
+                  AND (d.status IS NULL OR d.status != 'missing')
+            )
+            SELECT
+                r.session_uuid AS session_uuid,
+                NULLIF(TRIM(r.camera_id), '') AS camera_id,
+                r.recording_id AS recording_id,
+                r.recording_name AS recording_name,
+                r.started_utc AS started_utc,
+                r.recording_type AS recording_type,
+                r.recording_intent AS recording_intent,
+                r.data_origin AS data_origin,
+                aad.dataset_id AS dataset_id,
+                aad.zarr_path AS zarr_path,
+                COALESCE(aad.analysis_dataset_count, 0) AS analysis_dataset_count
+            FROM recordings r
+            LEFT JOIN active_analysis_datasets aad
+              ON aad.recording_id = r.recording_id
+             AND aad._rn = 1
+            WHERE r.session_uuid IS NOT NULL
+              AND TRIM(r.session_uuid) <> '';
+            """
+        )
+
+        def _sorted_distinct(column: str) -> str:
+            # GROUP_CONCAT over an ordered subquery keeps the list sorted on
+            # every SQLite release (aggregate ORDER BY needs SQLite >= 3.44).
+            # It reads ``recordings`` directly so the per-run lists do not
+            # re-evaluate the members view's dataset window functions.
+            return f"""(
+                    SELECT GROUP_CONCAT(v.value, ',')
+                    FROM (
+                        SELECT DISTINCT NULLIF(TRIM(x.{column}), '') AS value
+                        FROM recordings x
+                        WHERE x.session_uuid = m.session_uuid
+                          AND NULLIF(TRIM(x.{column}), '') IS NOT NULL
+                        ORDER BY value
+                    ) v
+                )"""
+
+        cur.execute(
+            f"""
+            CREATE VIEW recording_runs AS
+            SELECT
+                m.session_uuid AS session_uuid,
+                COUNT(DISTINCT m.camera_id) AS camera_count,
+                {_sorted_distinct("camera_id")} AS camera_ids,
+                COUNT(*) AS recording_count,
+                MIN(NULLIF(TRIM(m.started_utc), '')) AS first_started_utc,
+                MAX(NULLIF(TRIM(m.started_utc), '')) AS last_started_utc,
+                {_sorted_distinct("recording_intent")} AS recording_intents,
+                {_sorted_distinct("recording_type")} AS recording_types,
+                {_sorted_distinct("data_origin")} AS data_origins,
+                SUM(m.analysis_dataset_count) AS analysis_dataset_count
+            FROM recording_run_members m
+            GROUP BY m.session_uuid;
+            """
+        )
