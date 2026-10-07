@@ -136,6 +136,37 @@ SAFE_SESSION_NAME="$(printf '%s' "$SESSION_NAME" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_RUN_ID="$(printf '%s' "$RUN_ID" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_MARKER_KEY="$(printf '%s' "$MARKER_KEY" | tr -c 'A-Za-z0-9_.-' '_')"
 RUN_DIR="${LOG_DIR}/citrus_import_${SAFE_RUN_ID}_${SAFE_SESSION_NAME}_${SAFE_MARKER_KEY}"
+# One delivery (marker key) is submitted at most once, however often the
+# caller retries: a retry after an ambiguous failure (ssh dropped, bsub output
+# unparseable after LSF accepted the job) finds the earlier job instead of
+# submitting a duplicate import. To resubmit deliberately, remove the record.
+JOB_NAME="citrus_import_${SAFE_MARKER_KEY}"
+SUBMITTED_RECORD="${LOG_DIR}/by_marker/${SAFE_MARKER_KEY}.job"
+
+record_submission() {
+  mkdir -p "$(dirname -- "$SUBMITTED_RECORD")"
+  local tmp="${SUBMITTED_RECORD}.$$"
+  printf 'job_id=%s\njob_name=%s\nsession_dir=%s\nrecorded_utc=%s\n' \
+    "$1" "$JOB_NAME" "$SESSION_DIR" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$tmp"
+  mv -f -- "$tmp" "$SUBMITTED_RECORD"
+}
+
+if [[ -s "$SUBMITTED_RECORD" ]]; then
+  echo "already_submitted=1"
+  echo "submitted_record=$SUBMITTED_RECORD"
+  cat -- "$SUBMITTED_RECORD"
+  exit 0
+fi
+if [[ "$DRY_RUN" != "1" ]] && command -v bjobs >/dev/null 2>&1; then
+  existing_job="$(bjobs -a -J "$JOB_NAME" -o jobid -noheader 2>/dev/null | head -n 1 | tr -d '[:space:]')"
+  if [[ "$existing_job" =~ ^[0-9]+$ ]]; then
+    record_submission "$existing_job"
+    echo "already_submitted=1"
+    echo "submitted_record=$SUBMITTED_RECORD"
+    echo "job_id=$existing_job"
+    exit 0
+  fi
+fi
 
 if [[ -e "$RUN_DIR" ]]; then
   echo "Run directory already exists: $RUN_DIR" >&2
@@ -238,7 +269,7 @@ JOBSCRIPT
 chmod +x "$JOB_SCRIPT"
 
 BSUB_ARGS=(
-  -J "citrus_import_${SAFE_SESSION_NAME}"
+  -J "$JOB_NAME"
   -n "$NCORES"
   -W "$WALLTIME"
   -R "rusage[mem=${MEM_GB}G]"
@@ -288,6 +319,7 @@ if [[ -z "$job_id" ]]; then
   echo "Could not parse job id from bsub output." >&2
   exit 1
 fi
+record_submission "$job_id"
 echo "job_id=$job_id"
 echo "lsf_stdout=${RUN_DIR}/${job_id}.out"
 echo "lsf_stderr=${RUN_DIR}/${job_id}.err"
