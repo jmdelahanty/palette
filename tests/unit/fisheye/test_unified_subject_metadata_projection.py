@@ -148,7 +148,7 @@ def test_pre_contract_citrus_snapshot_is_recorded_not_paired(tmp_path: Path) -> 
     assert source["citrus_snapshot_status"] == "pre_contract"
 
 
-def test_v3_session_without_a_dish_records_absence_and_publishes_nothing(
+def test_v3_session_without_a_dish_records_its_declared_absence(
     tmp_path: Path, monkeypatch
 ) -> None:
     # Citrus v3 writes /metadata/subject in every session; with no dish it holds
@@ -185,9 +185,12 @@ def test_v3_session_without_a_dish_records_absence_and_publishes_nothing(
     assert mod.project_unified_subject_metadata(plan, "candidate") is None
 
     root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
-    assert "subject_metadata_runs" not in root.get("analysis", {})
-    assert root.attrs["citrus_subject_lookup_status"] == "not_collected"
-    assert root.attrs["citrus_fish_reference_reason"] == "no_dish_declared"
+    # The declared absence is itself a (v2) subject record: statuses, no dish.
+    assert resolve_subject_metadata(root, allow_legacy=False).subject == {
+        "fish_reference": {"status": "not_collected", "reason": "no_dish_declared"},
+        "subject_lookup": {"status": "not_collected", "reason": "no_dish_declared"},
+    }
+    assert not any(name.startswith("citrus_") for name in root.attrs)  # statuses live in the record
 
 
 def test_missing_subject_count_refuses_rather_than_inventing(tmp_path: Path) -> None:

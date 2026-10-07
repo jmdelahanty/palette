@@ -245,6 +245,15 @@ def from_manual_assertion(metadata: Mapping[str, Any], subject_ids: Sequence[str
     return out.finish(subject_ids)
 
 
+def from_declared_absence(metadata: Mapping[str, Any], subject_ids: Sequence[str] = ()) -> dict[str, Any]:
+    """A session that declares no subject: only the lookup statuses (no dish)."""
+
+    out = _Builder()
+    out.status("subject_lookup", metadata.get("subject_lookup_status"), metadata.get("subject_lookup_reason"))
+    out.status("fish_reference", metadata.get("fish_reference_status"), metadata.get("fish_reference_reason"))
+    return out.finish(subject_ids)
+
+
 def source_kind(metadata: Mapping[str, Any]) -> str:
     """Which translator a stored v1 mapping needs (v1 records carry no source tag)."""
 
@@ -259,6 +268,7 @@ TRANSLATORS: dict[str, Callable[..., dict[str, Any]]] = {
     "h5_attributes": from_h5_attributes,
     "orange_reference": from_orange_reference,
     "manual_assertion": from_manual_assertion,
+    "declared_absence": from_declared_absence,
 }
 
 
@@ -271,6 +281,7 @@ __all__ = [
     "SUBJECT_TYPES",
     "TRANSLATORS",
     "canonical_subject_fields",
+    "from_declared_absence",
     "from_h5_attributes",
     "from_manual_assertion",
     "from_orange_reference",
