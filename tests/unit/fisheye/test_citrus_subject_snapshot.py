@@ -43,8 +43,12 @@ ATTRS = {
     "dish_id": "19220_1", "subject_lookup_status": "collected", "dish_uuid": UUID,
     "dish_revision": 1, "dish_updated_at": "2026-10-02 16:28:20",
     "fish_reference_status": "not_collected", "fish_reference_reason": "operator_did_not_select",
-    # Display copies are not paired.
-    "fish_count": "32", "days_post_fertilization": "invalid_format", "cross_id": "",
+    # Sealed biology, paired with the snapshot dish (B9).
+    "genotype": "g", "species": "Danio rerio", "sex": "unknown", "cross_id": "19220",
+    "date_of_fertilization": "20260928",
+    # Display copies are not paired; line_strain is unsealed while cross is null.
+    "fish_count": "32", "days_post_fertilization": "invalid_format",
+    "parents": "p [F]", "line_strain": "unsealed",
 }
 PRE_CONTRACT = {
     "data_origin": "synthetic", "dish": {"cross_id": "c", "fish_count": 1, "species": "Danio rerio"},
@@ -67,6 +71,14 @@ def test_v3_is_admitted_with_the_serving_build():
         (lambda a: a.update(dish_revision=2), "attr_mismatch:dish_revision"),
         (lambda a: a.pop("dish_uuid"), "snapshot_value_without_attr:dish_uuid"),
         (lambda a: a.update(mzb_fish_id="f1"), "attr_without_snapshot_value:mzb_fish_id"),
+        (lambda a: a.update(genotype="other"), "attr_mismatch:genotype"),
+        (lambda a: a.update(species="Danionella cerebrum"), "attr_mismatch:species"),
+        (lambda a: a.update(sex="F"), "attr_mismatch:sex"),
+        (lambda a: a.update(cross_id=""), "attr_mismatch:cross_id"),
+        (lambda a: a.update(date_of_fertilization="20260929"), "attr_mismatch:date_of_fertilization"),
+        (lambda a: a.pop("genotype"), "snapshot_value_without_attr:genotype"),
+        (lambda a: a.pop("species"), "snapshot_value_without_attr:species"),
+        (lambda a: a.pop("sex"), "snapshot_value_without_attr:sex"),
     ],
 )
 def test_attrs_must_pair_with_the_snapshot(mutate, reason):
@@ -74,6 +86,39 @@ def test_attrs_must_pair_with_the_snapshot(mutate, reason):
     mutate(attrs)
     with pytest.raises(UnifiedH5ContractError, match=reason):
         admit_subject_snapshot(V3, attrs)
+
+
+CROSS = {"cross_id": "19220", "line_strain": "AB", "parents": [{"identifier": "p", "sex": "F"}]}
+
+
+def test_sealed_cross_pairs_line_strain():
+    snapshot = copy.deepcopy(V3)
+    snapshot["cross"] = CROSS
+    attrs = {**ATTRS, "line_strain": "AB"}
+    assert admit_subject_snapshot(snapshot, attrs)["citrus_snapshot_status"] == "admitted"
+    with pytest.raises(UnifiedH5ContractError, match="attr_mismatch:line_strain"):
+        admit_subject_snapshot(snapshot, {**attrs, "line_strain": "other"})
+    without = dict(attrs)
+    without.pop("line_strain")
+    with pytest.raises(UnifiedH5ContractError, match="snapshot_value_without_attr:line_strain"):
+        admit_subject_snapshot(snapshot, without)
+
+
+def test_no_dish_means_no_biology_attrs():
+    snapshot = copy.deepcopy(V3)
+    snapshot.update(
+        subject_lookup_status="lookup_failed", subject_lookup_reason="dish_lookup_http_404",
+        dish=None, errors=[{"endpoint": "/dishes/19220_1/citrus-snapshot", "kind": "http",
+                             "http_status": 404, "detail_error": None, "message": "not found"}],
+    )
+    attrs = {k: v for k, v in ATTRS.items() if k not in {
+        "dish_uuid", "dish_revision", "dish_updated_at", "genotype", "species", "sex",
+        "cross_id", "date_of_fertilization", "line_strain"}}
+    attrs["subject_lookup_reason"] = "dish_lookup_http_404"
+    attrs["subject_lookup_status"] = "lookup_failed"
+    assert admit_subject_snapshot(snapshot, attrs)["citrus_snapshot_status"] == "admitted"
+    with pytest.raises(UnifiedH5ContractError, match="attr_without_snapshot_value:genotype"):
+        admit_subject_snapshot(snapshot, {**attrs, "genotype": "g"})
 
 
 def test_no_dish_means_no_subject_attrs():

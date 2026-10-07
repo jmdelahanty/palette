@@ -12,8 +12,10 @@ writers emit; contract v2 reused that number and is never emitted (Jeremy,
 2026-10-05, PR 52). A v2 document is recorded as pre-contract with no identity
 rules, unless it carries a contract-only key, which is refused as the
 never-emitted contract v2. Any version other than 2 or 3 is refused.
-Only fields Citrus pairs 1:1 with attrs are compared; display copies such as
-``fish_count`` or ``days_post_fertilization`` are not. MetaZebrobot shapes and meaning are owned by MetaZebrobot; see
+Only fields Citrus pairs 1:1 with attrs are compared, including the sealed dish
+biology (genotype, species, sex, cross, date of fertilization) and, when a cross
+is sealed, its line strain; display copies such as ``fish_count``,
+``days_post_fertilization`` or the rendered ``parents`` string are not. MetaZebrobot shapes and meaning are owned by MetaZebrobot; see
 ``fisheye.shared.zebrobot_subject_reference.MZB_PIN``.
 """
 
@@ -64,6 +66,17 @@ PAIRED_FIELDS = {
     "mzb_fish_id": lambda s: s["fish_reference"]["mzb_fish_id"],
     "mzb_fish_revision": lambda s: s["fish_reference"]["mzb_fish_revision"],
     "mzb_fish_updated_at": lambda s: s["fish_reference"]["mzb_fish_updated_at"],
+    # Sealed dish biology; Citrus writes each attr verbatim from the same value.
+    "cross_id": lambda s: _dish(s).get("cross_id"),
+    "genotype": lambda s: _dish(s).get("genotype"),
+    "species": lambda s: _dish(s).get("species"),
+    "sex": lambda s: _dish(s).get("sex"),
+    "date_of_fertilization": lambda s: _dish(s).get("dof"),
+}
+# Paired only when the snapshot seals a cross: Citrus writes ``line_strain``
+# for every collected dish, falling back to the genotype when no cross is served.
+CROSS_PAIRED_FIELDS = {
+    "line_strain": lambda s: s["cross"]["line_strain"],
 }
 
 
@@ -124,7 +137,10 @@ def admit_subject_snapshot(
 
     errors = sorted(e.message for e in Draft202012Validator(_schema()).iter_errors(snapshot))
     require(not errors, f"citrus_snapshot_schema:{errors[0] if errors else ''}")
-    for name, field in PAIRED_FIELDS.items():
+    paired = dict(PAIRED_FIELDS)
+    if snapshot["cross"] is not None:
+        paired.update(CROSS_PAIRED_FIELDS)
+    for name, field in paired.items():
         value = field(snapshot)
         if value is None:
             require(name not in attributes, f"citrus_subject_attr_without_snapshot_value:{name}")

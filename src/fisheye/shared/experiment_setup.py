@@ -17,7 +17,7 @@ from typing import Any, Mapping, Optional, Sequence
 from .import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from .json_safety import json_attr_safe_mapping, strict_json_dumps
 from .run_provenance import build_writer_run_provenance
-from .subject_metadata import resolve_subject_metadata
+from .subject_metadata import explicit_subject_ids, resolve_subject_metadata
 from .type_conversions import normalize_attr as _normalize_attr
 from .zarr_run_completion import (
     is_run_complete_in_parent,
@@ -151,16 +151,9 @@ def build_experiment_setup_record(
     ):
         raise ExperimentSetupError("A canonical subject-metadata SHA-256 is required")
 
-    raw_subject_ids = metadata.get("subject_ids") or metadata.get("fish_ids")
-    if isinstance(raw_subject_ids, (list, tuple)):
-        subject_ids = list(
-            dict.fromkeys(
-                str(value).strip() for value in raw_subject_ids if str(value).strip()
-            )
-        )
-    else:
-        fish_id = str(metadata.get("fish_id") or "").strip() or None
-        subject_ids = [fish_id] if fish_id is not None else []
+    # The subject-metadata publish rule, so the setup counts the same ids the
+    # subject record holds (including a singular Citrus v3 ``subject_id``).
+    subject_ids = explicit_subject_ids(metadata)
     assigned = len(subject_ids) or None
     if assigned is not None and assigned > expected:
         raise ExperimentSetupError(
