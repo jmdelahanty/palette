@@ -7,6 +7,8 @@ from pathlib import Path
 import stat
 import subprocess
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[3]
 SCRIPT = REPO / "scripts" / "submit_citrus_session_import_bsub.sh"
 KEY = "a" * 64
@@ -61,7 +63,7 @@ def test_ambiguous_failure_then_retry_finds_the_accepted_job(tmp_path: Path) -> 
     fakes = _setup(tmp_path, bsub_output="garbled", bjobs_output="")
     first = _launch(tmp_path, fakes, "attempt-1")
     assert first.returncode != 0
-    fakes["bjobs"].write_text("5151\n")  # LSF had in fact accepted it
+    fakes["bjobs"].write_text("5151 PEND\n")  # LSF had in fact accepted it
 
     second = _launch(tmp_path, fakes, "attempt-2")
     assert second.returncode == 0, second.stderr
@@ -76,3 +78,26 @@ def test_a_genuinely_failed_submission_is_retried(tmp_path: Path) -> None:
     assert _launch(tmp_path, fakes, "attempt-1").returncode != 0
     assert _launch(tmp_path, fakes, "attempt-2").returncode != 0
     assert len(_bsub_calls(fakes)) == 2  # nothing was accepted, so retrying is correct
+
+
+def test_a_finished_job_with_the_name_does_not_block_a_resubmission(tmp_path: Path) -> None:
+    # bjobs -a still lists EXIT/DONE jobs for LSF's clean period. After an
+    # operator clears the poller state and the by_marker record to retry a
+    # failed import, a finished job must not count as "already submitted".
+    for finished in ("EXIT", "DONE"):
+        case = tmp_path / finished
+        case.mkdir()
+        fakes = _setup(case, bsub_output="Job <6262> is submitted to default queue <normal>.",
+                       bjobs_output=f"5151 {finished}\n")
+        result = _launch(case, fakes, "retry")
+        assert result.returncode == 0, result.stderr
+        assert len(_bsub_calls(fakes)) == 1
+        assert "already_submitted=1" not in result.stdout and "job_id=6262" in result.stdout
+
+
+@pytest.mark.parametrize("live", ["PEND", "RUN", "PSUSP", "USUSP", "SSUSP"])
+def test_a_live_job_with_the_name_is_the_existing_submission(tmp_path: Path, live: str) -> None:
+    fakes = _setup(tmp_path, bsub_output="garbled", bjobs_output=f"5151 EXIT\n7373 {live}\n")
+    result = _launch(tmp_path, fakes, "retry")
+    assert result.returncode == 0, result.stderr
+    assert _bsub_calls(fakes) == [] and "job_id=7373" in result.stdout

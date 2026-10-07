@@ -135,7 +135,13 @@ if [[ -s "$SUBMITTED_RECORD" ]]; then
   exit 0
 fi
 if [[ "$DRY_RUN" != "1" ]] && command -v bjobs >/dev/null 2>&1; then
-  existing_job="$(bjobs -a -J "$JOB_NAME" -o jobid -noheader 2>/dev/null | head -n 1 | tr -d '[:space:]')"
+  # Only a live job (pending, running or suspended) is the existing submission.
+  # bjobs -a also lists finished EXIT/DONE jobs for LSF's clean period; those
+  # are no reason to skip, and resubmitting is safe because import_delivery is
+  # idempotent and resumes from durable state. The by_marker record above
+  # stays the authoritative "already submitted" record.
+  existing_job="$(bjobs -a -J "$JOB_NAME" -o "jobid stat" -noheader 2>/dev/null \
+    | awk '$2 ~ /^(PEND|RUN|PSUSP|USUSP|SSUSP)$/ {print $1; exit}' | tr -d '[:space:]')"
   if [[ "$existing_job" =~ ^[0-9]+$ ]]; then
     record_submission "$existing_job"
     echo "already_submitted=1"
