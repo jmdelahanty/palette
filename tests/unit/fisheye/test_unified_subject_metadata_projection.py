@@ -152,16 +152,16 @@ def test_pre_contract_citrus_snapshot_is_recorded_not_paired(tmp_path: Path) -> 
 # Citrus 288f14d sealed full_bound_pair fixtures, subject identity v3
 # (agent-contracts PR 52 #6026862148): admitted and projected unmodified.
 V3_EXPECTED = {
-    "v3_dish_collected": {"count": 1, "subject_type": "individual", "uuid": True,
+    "v3_dish_collected": {"count": 1, "assigned": (1, "explicit"), "subject_type": "individual", "uuid": True,
                           "lookup": "collected", "fish": ("not_collected", "operator_did_not_select"),
                           "pin": True},
-    "v3_dish_group": {"count": 3, "subject_type": "dish_group", "uuid": True,
+    "v3_dish_group": {"count": 3, "assigned": (None, "count_only"), "subject_type": "dish_group", "uuid": True,
                       "lookup": "collected", "fish": ("not_collected", "dish_group_subject"),
                       "pin": True},
-    "v3_lookup_failed": {"count": 1, "subject_type": "individual", "uuid": False,
+    "v3_lookup_failed": {"count": 1, "assigned": (1, "explicit"), "subject_type": "individual", "uuid": False,
                          "lookup": "lookup_failed", "fish": ("lookup_failed", "dish_lookup_failed"),
                          "pin": True},
-    "v3_version_read_failed": {"count": 1, "subject_type": "individual", "uuid": True,
+    "v3_version_read_failed": {"count": 1, "assigned": (1, "explicit"), "subject_type": "individual", "uuid": True,
                                "lookup": "collected", "fish": ("not_collected", "operator_did_not_select"),
                                "pin": None},
 }
@@ -176,8 +176,12 @@ def test_citrus_v3_fixtures_project_their_declared_subject(tmp_path: Path, fixtu
 
     root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
     subject = resolve_subject_metadata(root, allow_legacy=False).metadata
-    source = dict(resolve_experiment_setup(root, allow_legacy=False).source)
+    setup = resolve_experiment_setup(root, allow_legacy=False)
+    source = dict(setup.source)
     assert published["expected_subject_count"] == expected["count"]
+    # The Citrus v3 singular subject_id is counted like the subject record (B3);
+    # a dish_group id names the group and assigns no individual.
+    assert (setup.assigned_subject_count, setup.subject_assignment_status) == expected["assigned"]
     assert subject["subject_type"] == expected["subject_type"]
     assert ("dish_uuid" in subject) is expected["uuid"]
     assert subject["subject_lookup_status"] == expected["lookup"]
