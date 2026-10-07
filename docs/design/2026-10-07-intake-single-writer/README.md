@@ -165,7 +165,7 @@ Each step is a small PR. Bugs ship first because they affect new recordings toda
 
 ## Decision log
 
-2026-10-07: Jeremy's answers to the five questions above, relayed by the cluster-runner agent. Recorded here as relayed; implementation of each item starts after Jeremy confirms them directly.
+2026-10-07: Jeremy's answers to the five questions above, relayed by the cluster-runner agent and confirmed by Jeremy directly the same day.
 
 1. **Legacy H5:** approved. New transfer-v2 deliveries carrying a non-unified H5 are refused; reading legacy archives stays supported.
 2. **Job-mode registration:** approved for retirement. Registration happens only on the workstation writer host (ws1).
