@@ -25,10 +25,13 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 GROUP_METADATA = "zarr.json"
+# NFS reads/writes of many small chunk files are latency-bound; overlap them.
+IO_THREADS = 16
 
 
 class StagedSyncRefused(RuntimeError):
@@ -81,7 +84,13 @@ def stage_group(archive: Path, group_path: str, scratch_dir: Path) -> StagedGrou
         target = local_root.joinpath(*parts[:depth])
         target.mkdir(parents=True, exist_ok=True)
         shutil.copy2(parent / GROUP_METADATA, target / GROUP_METADATA)
-    shutil.copytree(archive / group_path, local_root / group_path)
+    source = archive / group_path
+    target = local_root / group_path
+    files = [path for path in source.rglob("*") if path.is_file()]
+    for directory in {target / path.parent.relative_to(source) for path in files} | {target}:
+        directory.mkdir(parents=True, exist_ok=True)
+    with ThreadPoolExecutor(IO_THREADS) as pool:
+        list(pool.map(lambda path: shutil.copy2(path, target / path.relative_to(source)), files))
     return StagedGroup(
         archive=archive, group_path=group_path, local_root=local_root, initial=_files(local_root / group_path),
     )
@@ -99,17 +108,18 @@ def sync_group_back(staged: StagedGroup, *, protected: tuple[str, ...] = ()) -> 
             raise StagedSyncRefused(f"Protected subtree {prefix!r} changed in the staged copy; not syncing.")
     changed = sorted(k for k, v in after.items() if before.get(k) != v and k != GROUP_METADATA)
     removed = sorted(k for k in before if k not in after)
-    for rel in changed:
-        _write_file(staged.local_group / rel, staged.archive_group / rel)
-    for rel in removed:
-        (staged.archive_group / rel).unlink()
+    with ThreadPoolExecutor(IO_THREADS) as pool:
+        list(pool.map(lambda rel: _write_file(staged.local_group / rel, staged.archive_group / rel), changed))
+        list(pool.map(lambda rel: (staged.archive_group / rel).unlink(), removed))
     _write_file(staged.local_group / GROUP_METADATA, staged.archive_group / GROUP_METADATA)
     changed.append(GROUP_METADATA)
     for directory in sorted({p for p in staged.archive_group.rglob("*") if p.is_dir()}, reverse=True):
         if not any(directory.iterdir()):
             directory.rmdir()
+    with ThreadPoolExecutor(IO_THREADS) as pool:
+        written = dict(zip(changed, pool.map(lambda rel: _digest(staged.archive_group / rel), changed)))
     for rel in changed:
-        if _digest(staged.archive_group / rel) != after[rel]:
+        if written[rel] != after[rel]:
             raise RuntimeError(f"Synced file differs on the archive after writing: {rel}")
     if any((staged.archive_group / rel).exists() for rel in removed):
         raise RuntimeError("A file removed in the staged copy still exists on the archive.")

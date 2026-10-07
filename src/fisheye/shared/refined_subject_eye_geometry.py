@@ -70,11 +70,48 @@ def _write_component_contours(*args, **kwargs):
     return write_component_contours(*args, **kwargs)
 
 
+def _set_row(values: list, row_idx: int, value, *, scoped: bool) -> None:
+    if scoped:
+        values[row_idx] = value
+    else:
+        values.append(value)
+
+
+def _stored_eye_geometry(refined_group: zarr.Group, total_rois: int, need_contours: bool):
+    """The run's stored eye geometry as full-pass working arrays, or None."""
+
+    from .refined_subject_component_contours import read_component_contours
+
+    components = refined_group.get("components")
+    relations = refined_group.get("relations")
+    try:
+        pair = relations["eye_pair/metrics"]
+        separation_px = np.asarray(pair["separation_px"][:], dtype=np.float32)
+        separation_valid = np.asarray(pair["separation_valid"][:], dtype=bool)
+        ellipse_params = np.full((total_rois, 2, 5), np.nan, dtype=np.float32)
+        ellipse_success = np.zeros((total_rois, 2), dtype=bool)
+        contours: dict[str, list] = {}
+        for eye_idx, name in enumerate(EYE_COMPONENTS):
+            geometry = components[name]["geometry"]
+            ellipse_params[:, eye_idx] = np.asarray(geometry["ellipse_params"][:], dtype=np.float32)
+            ellipse_success[:, eye_idx] = np.asarray(geometry["ellipse_success"][:], dtype=bool)
+            decoded = read_component_contours(components[name], total_rois) if need_contours else [None] * total_rois
+            if decoded is None:
+                return None
+            contours[name] = decoded
+    except (KeyError, TypeError, ValueError):
+        return None
+    if separation_px.shape != (total_rois,) or separation_valid.shape != (total_rois,):
+        return None
+    return ellipse_params, ellipse_success, separation_px, separation_valid, contours
+
+
 def write_refined_subject_eye_geometry(
     refined_group: zarr.Group,
     *,
     updated_components: Optional[Sequence[str]] = None,
     write_component_contours: bool = True,
+    rows: Optional[Sequence[int]] = None,
 ) -> dict[str, Any]:
     """Write canonical LR eye geometry/relation arrays into a refined subject run.
 
@@ -82,6 +119,11 @@ def write_refined_subject_eye_geometry(
     and ``eye_right``. This makes the refined subject-mask run the canonical
     geometry surface; legacy refined-eye runs can still be materialized from it
     as compatibility artifacts.
+
+    ``rows`` remeasures only those rows and keeps every other row's stored
+    geometry, separation and contour (all rows are measured when any stored
+    surface is missing or misshapen); arrays are rewritten as a full pass
+    writes them.
     """
 
     if not _eye_geometry_should_update(updated_components):
@@ -109,8 +151,15 @@ def write_refined_subject_eye_geometry(
         name: _component_available(refined_group, int(label_map[name]))
         for name in EYE_COMPONENTS
     }
+    stored = _stored_eye_geometry(refined_group, total_rois, write_component_contours) if rows is not None else None
+    wanted = None
+    if stored is not None:
+        wanted = {int(row) for row in rows}
+        ellipse_params, ellipse_success, separation_px, separation_valid, contours = stored
     for start in range(0, total_rois, min(32, chunk_rois)):
         stop = min(start + min(32, chunk_rois), total_rois)
+        if wanted is not None and not any(start <= row < stop for row in wanted):
+            continue
         eye_masks = {
             name: mask_store.read_dense(
                 rows=slice(start, stop), channels=int(label_map[name]),
@@ -118,16 +167,23 @@ def write_refined_subject_eye_geometry(
             for name in EYE_COMPONENTS if eye_available[name]
         }
         for row_idx in range(start, stop):
+            if wanted is not None:
+                if row_idx not in wanted:
+                    continue
+                ellipse_params[row_idx] = np.nan
+                ellipse_success[row_idx] = False
+                separation_px[row_idx] = np.nan
+                separation_valid[row_idx] = False
             for eye_idx, component_name in enumerate(EYE_COMPONENTS):
                 if not eye_available[component_name]:
-                    contours[component_name].append(None)
+                    _set_row(contours[component_name], row_idx, None, scoped=wanted is not None)
                     continue
                 mask = eye_masks[component_name][row_idx - start]
                 success, ellipse, centroid, contour, _failure = _measure_eye_mask(mask)
                 ellipse_params[row_idx, eye_idx] = np.asarray(ellipse, dtype=np.float32)
                 ellipse_success[row_idx, eye_idx] = bool(success)
                 centroids[row_idx, eye_idx] = np.asarray(centroid, dtype=np.float32)
-                contours[component_name].append(contour)
+                _set_row(contours[component_name], row_idx, contour, scoped=wanted is not None)
 
             if bool(np.all(ellipse_success[row_idx])) and bool(np.all(np.isfinite(centroids[row_idx]))):
                 separation_px[row_idx] = np.float32(np.linalg.norm(centroids[row_idx, 0] - centroids[row_idx, 1]))
