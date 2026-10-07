@@ -191,6 +191,116 @@ def placeholder_media(monkeypatch):
 
 
 @needs_media_tools
+def test_end_to_end_gate_job_script_register_probes_and_replay(tmp_path: Path, monkeypatch) -> None:
+    _stub_checkout(monkeypatch)  # registration binds the receipt's producing commit
+    session, sha = _delivery(tmp_path)
+    destination = _destination(tmp_path)
+    registry = _registry(tmp_path)
+    env = _stub_environment(tmp_path)
+
+    # 1. import_delivery through the generated LSF job script.
+    launch = subprocess.run(
+        ["bash", str(LAUNCHER), "--session-dir", str(session), "--marker-key", "e" * 64,
+         "--log-dir", str(tmp_path / "logs"), "--run-id", "gate", "--dest-root", str(destination),
+         "--dry-run"],
+        check=False, text=True, capture_output=True,
+    )
+    assert launch.returncode == 0, launch.stderr
+    [job_script] = (tmp_path / "logs").glob("citrus_import_*/run_citrus_session_import.sh")
+    job = subprocess.run(
+        ["bash", str(job_script)], check=False, text=True, capture_output=True,
+        env=dict(env, LSB_JOBID="777"), timeout=600,
+    )
+    payload_err = next(job_script.parent.glob("*.777.payload.err")).read_text()
+    assert job.returncode == 0, job.stdout + payload_err
+    status = json.loads(
+        (job_script.parent / "workflow-777" / "citrus_session_import.status.json").read_text()
+    )
+    assert status["status"] == "complete" and status["staging_finalized"] is True
+    assert status["registry"] is None
+    assert [parent["outcome"] for parent in status["parents"]] == ["imported", "imported"]
+    assert not list(session.iterdir())  # staging retired
+
+    # Imported but not registered: discovery still lists it, for registration.
+    found = discover(tmp_path / "staging", destination, registry=registry).to_json()
+    [target] = found["targets"]
+    assert (target["snapshot_sha"], target["state"], target["admission_mode"]) == (
+        sha, "complete", "workstation",
+    )
+    assert target["import_recorded"] is True and target["register_recorded"] is False
+
+    # 2. register_delivery into the temporary registry; 3. both probes true.
+    imported = probe_import(sha, destination_root=destination)
+    assert imported.verdict
+    assert imported.evidence_digest == status["probe_import"]["evidence_digest"]
+    assert sorted(imported.zarr_paths) == sorted(status["zarr_paths"])
+    rows_before = _rows(registry)
+    registered = register_delivery(
+        sha, writer=_writer(tmp_path, registry), destination_root=destination, allow_synthetic=True
+    )
+    assert registered.verdict and len(registered.bindings) == 2
+    assert _rows(registry)["recording_import_receipt_bindings"] == (
+        rows_before["recording_import_receipt_bindings"] + 2
+    )
+    [backup] = (tmp_path / "registry" / ".palette-registry-backups").iterdir()  # one publication
+    assert ".before-recording-imports-" in backup.name
+    assert probe_register(sha, destination_root=destination, registry=registry) == registered
+    assert discover(tmp_path / "staging", destination, registry=registry).targets == ()
+
+    # 4. Replay every step: no change, no duplicate rows, identical digests.
+    recordings = _tree(destination)
+    registry_bytes = _sha(registry)
+    rows = _rows(registry)
+    backups = _tree(tmp_path / "registry")
+
+    replay = _cli("import-delivery", sha, "--run-dir", str(tmp_path / "runs" / "replay"),
+                  "--destination-root", str(destination), "--json", env=env)
+    assert replay.returncode == 0, replay.stderr
+    replayed = json.loads(replay.stdout)  # stdout is exactly one JSON document
+    assert replayed["schema"] == "palette.intake.probe_import.v1"
+    assert replayed["verdict"] is True
+    assert replayed["evidence_digest"] == imported.evidence_digest
+
+    again = _cli(
+        "register-delivery", sha, "--destination-root", str(destination),
+        "--registry", str(registry), "--writer-host", HOST,
+        "--writer-lock-path", str(tmp_path / "writer.lock"),
+        "--shadow-temp-root", str(tmp_path / "shadows"),
+        "--shadow-backup-dir", str(tmp_path / "backups"),
+        "--allow-synthetic-isolated-registry", "--json", env=env,
+    )
+    assert again.returncode == 0, again.stderr
+    reregistered = json.loads(again.stdout)
+    assert reregistered["schema"] == "palette.intake.probe_register.v1"
+    assert reregistered["evidence_digest"] == registered.evidence_digest
+    assert reregistered["bindings"] == [dict(row) for row in registered.bindings]
+
+    for name in ("probe-import", "probe-register"):
+        extra = ["--registry", str(registry)] if name == "probe-register" else []
+        probe = _cli(name, sha, "--destination-root", str(destination), *extra, "--json")
+        assert probe.returncode == 0, probe.stderr
+        document = json.loads(probe.stdout)
+        expected = imported if name == "probe-import" else registered
+        assert document["verdict"] is True
+        assert document["evidence_digest"] == expected.evidence_digest
+        assert document["receipt_sha256s"] == list(expected.receipt_sha256s)
+
+    assert _tree(destination) == recordings
+    assert _sha(registry) == registry_bytes
+    assert _rows(registry) == rows
+    assert _tree(tmp_path / "registry") == backups  # no new backup: nothing published
+
+    # The register claim is honoured: a held delivery is attached, not re-run.
+    plan = json.loads((job_script.parent / "workflow-777" / "organization_plan.json").read_text())
+    with claim(plan, kind=REGISTER_LOCK_KIND):
+        with pytest.raises(IntakeHeld) as held:
+            register_delivery(sha, writer=_writer(tmp_path, registry), destination_root=destination,
+                              allow_synthetic=True)
+    assert held.value.holder["pid"] == os.getpid()
+    assert _sha(registry) == registry_bytes
+
+
+@needs_media_tools
 def test_resume_from_retiring_with_the_marker_already_gone(tmp_path, monkeypatch) -> None:
     _stub_checkout(monkeypatch)
     session, sha = _delivery(tmp_path)
