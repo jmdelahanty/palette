@@ -14,7 +14,9 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 import datetime as dt
+from functools import lru_cache
 import hashlib
+from importlib.resources import files as resource_files
 import json
 import os
 import re
@@ -49,6 +51,43 @@ TRANSFER_PARENT_LAYOUTS = ("rolling_clips", "single_video")
 
 class TransferSnapshotError(ValueError):
     pass
+
+
+# Citrus's transfer-v2 envelope grammar, byte-identical to
+# citrus-recording-transfer 1.0.0 (tag recording-transfer-v1.0.0, citrus 7528b2c)
+# python/citrus_recording_transfer/src/citrus_recording_transfer/schemas/;
+# Palette's reliance is in agent-contracts citrus-recording-transfer-consumers.
+ENVELOPE_SCHEMA_FILE = "recording_transfer_v2.schema.json"
+ENVELOPE_SCHEMA_SHA256 = "4cf611312e911e165e2a9bbfeb0eb8ce0efb62b68cf3672239055e1c58ab22f1"
+
+
+@lru_cache(maxsize=None)
+def envelope_validator(definition: str | None = None):
+    """The whole envelope schema, or (``"marker"``/``"snapshot"``) one of its definitions."""
+
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    data = resource_files("fisheye.shared").joinpath("contracts").joinpath(ENVELOPE_SCHEMA_FILE).read_bytes()
+    if hashlib.sha256(data).hexdigest() != ENVELOPE_SCHEMA_SHA256:
+        raise TransferSnapshotError("packaged_contract_drift:" + ENVELOPE_SCHEMA_FILE)
+    schema = json.loads(data)
+    if definition is not None:
+        schema = {key: value for key, value in schema.items() if key != "oneOf"}
+        schema["$ref"] = f"#/$defs/{definition}"
+    return Draft202012Validator(schema, format_checker=FormatChecker())
+
+
+def require_envelope_schema(document: Any, definition: str) -> None:
+    """The producer's own grammar (closed objects, constants, formats)."""
+
+    from jsonschema.exceptions import best_match
+
+    error = best_match(envelope_validator(definition).iter_errors(document))
+    if error is not None:
+        where = "/".join(str(part) for part in error.absolute_path) or "(root)"
+        raise TransferSnapshotError(
+            f"{definition} violates the transfer-v2 envelope schema at {where}: {error.message}"
+        )
 
 
 def require(condition: bool, message: str) -> None:
@@ -967,6 +1006,8 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
     )
     marker = strict_json(marker_path)
     snapshot = strict_json(snapshot_path)
+    require_envelope_schema(marker, "marker")
+    require_envelope_schema(snapshot, "snapshot")
     marker_bytes = marker_path.read_bytes()
     snapshot_bytes = snapshot_path.read_bytes()
     rebuilt = build_snapshot(root, MARKER_NAME, destination=True)
@@ -995,51 +1036,20 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
         "parent_recording_count": len(snapshot["parents"]),
         "semantic_receipt_acceptance": "not_evaluated_by_transfer",
     }
-    require(set(marker) == set(expected) | {"delivery"}, "unsupported marker fields")
+    # Field sets, constants and delivery formats are the envelope schema's;
+    # what remains is binding the marker to this snapshot and Palette's UTC rule.
     for key, value in expected.items():
         require(
             canonical_bytes(marker[key]) == canonical_bytes(value),
             f"marker binding mismatch: {key}",
         )
     delivery = marker["delivery"]
-    require(
-        type(delivery) is dict
-        and set(delivery)
-        == {
-            "attempt_id",
-            "created_utc",
-            "source_dir",
-            "destination_dir",
-            "verification",
-            "source_retention",
-        },
-        "unsupported delivery fields",
-    )
-    require(
-        type(delivery["attempt_id"]) is str
-        and re.fullmatch(r"[0-9a-f]{32}", delivery["attempt_id"]) is not None,
-        "invalid delivery attempt identity",
-    )
-    for key in ("source_dir", "destination_dir", "created_utc"):
-        identifier(delivery[key], f"delivery {key}")
-    require(
-        re.fullmatch(
-            r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}"
-            r"(?:\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})",
-            delivery["created_utc"],
-        )
-        is not None,
-        "delivery timestamp must use RFC3339 syntax",
-    )
+    for key in ("source_dir", "destination_dir"):
+        identifier(delivery[key], f"delivery {key}")  # no control characters, <= 1024
     require(
         dt.datetime.fromisoformat(delivery["created_utc"].upper()).utcoffset()
         == dt.timedelta(0),
         "delivery timestamp must be UTC",
-    )
-    require(
-        delivery["verification"] == "sha256_all_inventory_bytes"
-        and delivery["source_retention"] == "retained_pending_consumer_receipt",
-        "unsupported verification or retention policy",
     )
     # Close the parse/hash observation window. The storage contract still
     # requires immutable deliveries throughout subsequent execution.

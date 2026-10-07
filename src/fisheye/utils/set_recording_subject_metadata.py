@@ -99,7 +99,7 @@ def _setup_source() -> dict[str, str]:
 
 
 def _desired(metadata: Mapping[str, Any]) -> dict[str, Any]:
-    subject_record = build_subject_metadata_record(metadata)
+    subject_record = build_subject_metadata_record(metadata, translator="manual_assertion")
     subject_digest = subject_metadata_sha256(subject_record)
     subject_run = f"subject_metadata_{subject_digest[:16]}"
     subject_ref = f"analysis/subject_metadata_runs/{subject_run}"
@@ -314,6 +314,7 @@ def apply_plan(
         metadata,
         source_artifact=artifact,
         provenance_command=TOOL_NAME,
+        translator="manual_assertion",
     )
     setup_record = build_experiment_setup_record(
         metadata,

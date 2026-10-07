@@ -16,8 +16,18 @@ from fisheye.shared.recording_transfer_snapshot import (
 )
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
-SCHEMA = json.loads((FIXTURES / "recording_transfer_v2.schema.json").read_bytes())
+SCHEMA_PATH = Path(__file__).resolve().parents[3] / "src/fisheye/shared/contracts/recording_transfer_v2.schema.json"
+SCHEMA = json.loads(SCHEMA_PATH.read_bytes())
 VALIDATOR = Draft202012Validator(SCHEMA, format_checker=FormatChecker())
+
+
+def test_packaged_schema_is_the_pinned_producer_bytes() -> None:
+    import hashlib
+
+    from fisheye.shared import recording_transfer_snapshot as rts
+
+    assert hashlib.sha256(SCHEMA_PATH.read_bytes()).hexdigest() == rts.ENVELOPE_SCHEMA_SHA256
+    assert rts.envelope_validator().schema == SCHEMA
 
 
 def test_shared_schema_is_valid_draft_2020_12() -> None:
