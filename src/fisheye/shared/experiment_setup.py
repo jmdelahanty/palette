@@ -154,6 +154,10 @@ def build_experiment_setup_record(
     # The subject-metadata publish rule, so the setup counts the same ids the
     # subject record holds (including a singular Citrus v3 ``subject_id``).
     subject_ids = explicit_subject_ids(metadata)
+    if str(metadata.get("subject_type") or "").strip() == "dish_group":
+        # A Citrus v3 dish_group subject_id names the group, not a fish: no
+        # individual is assigned. The group id stays in the subject record.
+        subject_ids = []
     assigned = len(subject_ids) or None
     if assigned is not None and assigned > expected:
         raise ExperimentSetupError(

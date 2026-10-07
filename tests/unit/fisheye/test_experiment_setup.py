@@ -107,13 +107,21 @@ def test_setup_counts_a_singular_subject_id_like_the_subject_record() -> None:
     assert record["subject_assignment_status"] == "explicit"
 
 
-def test_setup_counts_a_singular_subject_id_under_a_group_count_as_partial() -> None:
+def test_setup_does_not_count_a_dish_group_id_as_an_individual() -> None:
+    # A Citrus v3 dish_group subject_id names the group, not a fish.
     record = _build_setup_record(
         {"subject_count": "3", "subject_type": "dish_group", "subject_id": "g-1"}
     )
 
+    assert record["assigned_subject_count"] is None
+    assert record["subject_assignment_status"] == "count_only"
+
+
+def test_setup_counts_an_untyped_single_id_for_one_subject() -> None:
+    record = _build_setup_record({"subject_count": "1", "subject_id": "s-1"})
+
     assert record["assigned_subject_count"] == 1
-    assert record["subject_assignment_status"] == "partial"
+    assert record["subject_assignment_status"] == "explicit"
 
 
 @pytest.mark.parametrize("field", ["subject_ids", "fish_ids"])

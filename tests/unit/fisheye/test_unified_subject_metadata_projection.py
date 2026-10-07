@@ -154,7 +154,7 @@ V3_EXPECTED = {
     "v3_dish_collected": {"count": 1, "assigned": (1, "explicit"), "subject_type": "individual", "uuid": True,
                           "lookup": "collected", "fish": ("not_collected", "operator_did_not_select"),
                           "pin": True},
-    "v3_dish_group": {"count": 3, "assigned": (1, "partial"), "subject_type": "dish_group", "uuid": True,
+    "v3_dish_group": {"count": 3, "assigned": (None, "count_only"), "subject_type": "dish_group", "uuid": True,
                       "lookup": "collected", "fish": ("not_collected", "dish_group_subject"),
                       "pin": True},
     "v3_lookup_failed": {"count": 1, "assigned": (1, "explicit"), "subject_type": "individual", "uuid": False,
@@ -178,7 +178,8 @@ def test_citrus_v3_fixtures_project_their_declared_subject(tmp_path: Path, fixtu
     setup = resolve_experiment_setup(root, allow_legacy=False)
     source = dict(setup.source)
     assert published["expected_subject_count"] == expected["count"]
-    # The Citrus v3 singular subject_id is counted like the subject record (B3).
+    # The Citrus v3 singular subject_id is counted like the subject record (B3);
+    # a dish_group id names the group and assigns no individual.
     assert (setup.assigned_subject_count, setup.subject_assignment_status) == expected["assigned"]
     assert subject["subject_type"] == expected["subject_type"]
     assert ("dish_uuid" in subject) is expected["uuid"]
