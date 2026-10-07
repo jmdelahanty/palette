@@ -338,3 +338,52 @@ def test_h5_and_zebrobot_must_agree_on_sex_unless_the_dish_was_edited(tmp_path, 
     else:
         result = importer.import_zebrobot_subject_reference(plan, fetch=fetch)
         assert result["biology_differs_after_dish_edit"] == ["sex"]
+
+
+@pytest.mark.parametrize("orange_count", [None, 1])
+def test_h5_ids_without_a_dish_stay_authoritative_over_orange(tmp_path, orange_count):
+    # A legacy / pre-contract H5 declares subject_count and ids but no dish.
+    # The H5 record wins: its ids are kept and the setup still resolves.
+    from fisheye.shared.experiment_setup import resolve_experiment_setup
+
+    importer, plan = _recording(tmp_path, {**COLLECTED, "subject_count": orange_count})
+    root = zarr.open_group(str(plan.zarr_path), mode="r+")
+    h5 = importer._publish_subject_and_setup(
+        root, {"subject_ids": ["fish-a", "fish-b"], "subject_count": 2},
+        source_artifact={"kind": "test_h5", "count_field": "subject_count"},
+        translator="h5_attributes",
+    )
+    result = importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+    assert result["published"] is False
+    root = zarr.open_group(str(plan.zarr_path), mode="r")
+    subject = resolve_subject_metadata(root, allow_legacy=False)
+    assert subject.run_name == h5["subject_metadata_run"]
+    assert subject.subject_ids == ("fish-a", "fish-b")
+    assert len(list(root["analysis/subject_metadata_runs"].group_keys())) == 1
+    setup = resolve_experiment_setup(root, allow_legacy=False)
+    assert setup.run_name == h5["run_name"] and setup.expected_subject_count == 2
+
+
+def test_orange_fills_in_when_the_h5_declared_no_subject_record(tmp_path):
+    from fisheye.shared.experiment_setup import resolve_experiment_setup
+
+    importer, plan = _recording(tmp_path, {**COLLECTED, "subject_count": 1})
+    result = importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+    assert result["published"] is True
+    root = zarr.open_group(str(plan.zarr_path), mode="r")
+    assert resolve_subject_metadata(root, allow_legacy=False).subject["dish_uuid"] == UUID
+    assert resolve_experiment_setup(root, allow_legacy=False).expected_subject_count == 1
+
+
+def test_h5_dish_record_is_kept_over_orange(tmp_path):
+    importer, plan = _recording(tmp_path, {**COLLECTED, "subject_count": 1})
+    root = zarr.open_group(str(plan.zarr_path), mode="r+")
+    h5 = importer._publish_subject_and_setup(
+        root, {"dish_id": "19220_1", "dish_uuid": UUID, "subject_id": "fish-a", "subject_count": 1},
+        source_artifact={"kind": "test_h5", "count_field": "subject_count"},
+        translator="h5_attributes",
+    )
+    result = importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+    assert result["published"] is False and result["cross_checked"] == "dish_uuid"
+    root = zarr.open_group(str(plan.zarr_path), mode="r")
+    assert resolve_subject_metadata(root, allow_legacy=False).run_name == h5["subject_metadata_run"]

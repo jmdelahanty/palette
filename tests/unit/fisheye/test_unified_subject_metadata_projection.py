@@ -8,6 +8,7 @@ the same subject record and the same expected subject count.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -337,3 +338,57 @@ def test_unified_source_must_match_the_recording_identity(
     else:
         with pytest.raises(ValueError, match="unified_h5_recording_mismatch"):
             mod.require_unified_source_matches_recording(plan, "candidate")
+
+
+def test_retried_unified_intake_projects_the_subject_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A sealed native run already exists (an earlier attempt failed after the
+    # stimulus import), so the stimulus step is skipped. The retry must still
+    # project the subject exactly as a first run would, and a second retry
+    # must publish nothing new.
+    plan = replace(
+        _native_candidate(tmp_path, PRODUCTION_SUBJECT), cam_video=tmp_path / "cams" / "cam.mp4"
+    )
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    root.attrs.update(session_uuid="synthetic-paired-recording", camera_id="CAM-42")
+    zarr.consolidate_metadata(str(plan.zarr_path))
+    _write_current_manifest(plan.recording_dir)
+    opts = mod.RecordingImportOptions(
+        import_video_metadata=True, video_metadata_overwrite=False, import_stimulus=True,
+        stimulus_always=False, stimulus_run_name=None, stimulus_overwrite=False, stimulus_quiet=True,
+    )
+    monkeypatch.setattr(mod, "git_identity", lambda **_kwargs: {"git_sha": "1" * 40, "git_dirty": False})
+    monkeypatch.setattr(
+        mod, "load_source_recording_identity_profile",
+        lambda _path: mod.SOURCE_RECORDING_IDENTITY_PROFILE,
+    )
+    monkeypatch.setattr(mod, "recording_import_receipt_paths", lambda _path: [])
+    monkeypatch.setattr(mod, "apply_video_metadata", lambda _plan, **_kwargs: _acquisition_authority_updates())
+    monkeypatch.setattr(mod, "ensure_analysis_archive", lambda _plan: None)
+    monkeypatch.setattr(mod, "apply_acquisition_frame_clock", lambda _plan: {})
+    monkeypatch.setattr(
+        mod, "run_stimulus_import",
+        lambda *_args: pytest.fail("a sealed native run must not be re-imported"),
+    )
+    assert mod.stimulus_runs_present(plan.zarr_path)
+
+    def _state() -> tuple:
+        root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+        subject = resolve_subject_metadata(root, allow_legacy=False)
+        setup = resolve_experiment_setup(root, allow_legacy=False)
+        return (
+            subject.run_name, subject.subject_ids, setup.run_name, setup.expected_subject_count,
+            sorted(root["analysis/subject_metadata_runs"].group_keys()),
+            sorted(root["analysis/experiment_setup_runs"].group_keys()),
+        )
+
+    events: list[str] = []
+    mod.process_recording_import(plan, opts, logger=lambda event, **_fields: events.append(event))
+    assert "stimulus_skipped" in events
+    first = _state()
+    assert first[1] == (PRODUCTION_SUBJECT["fish_id"],) and first[3] == 1
+    assert len(first[4]) == len(first[5]) == 1
+
+    mod.process_recording_import(plan, opts, logger=None)
+    assert _state() == first
