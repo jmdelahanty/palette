@@ -1113,25 +1113,104 @@ def verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
         raise TransferSnapshotError(f"invalid transfer-v2 delivery: {error}") from error
 
 
-def _require_optional_proofs(root: Path, output: dict) -> None:
+# Orange's frame-identity proof grammar, byte-identical to Orange 8b359de
+# docs/schemas/orange_external_recorder_frame_identity_proof_v2.schema.json
+# (producer: tools/external_recorder_ipc_probe.cpp frame_identity_proof_json).
+FRAME_IDENTITY_PROOF_SCHEMA_FILE = "orange_external_recorder_frame_identity_proof_v2.schema.json"
+FRAME_IDENTITY_PROOF_SCHEMA_SHA256 = "c9c2544526044bc1a934ab90a0dbe3fca24f34230a27ec280e58b6afc2ffed8d"
+FRAME_IDENTITY_PROOF_SCHEMA_ID = "orange.external_recorder.frame_identity_proof"
+FRAME_IDENTITY_PROOF_VERSION = 2
+# Counters that must all equal the stream's encoded frame count (Orange's
+# "verified" condition plus the packet submission counters).
+_PROOF_EQUAL_COUNTERS = (
+    "submitted_frame_identities",
+    "returned_identity_matches",
+    "encoded_video_frames",
+    "packets_written",
+    "metadata_rows",
+    "packet_submissions_accepted",
+    "packet_write_attempts",
+)
+
+
+@lru_cache(maxsize=None)
+def _frame_identity_proof_validator():
+    from jsonschema import Draft202012Validator
+
+    data = (
+        resource_files("fisheye.shared")
+        .joinpath("contracts")
+        .joinpath(FRAME_IDENTITY_PROOF_SCHEMA_FILE)
+        .read_bytes()
+    )
+    if hashlib.sha256(data).hexdigest() != FRAME_IDENTITY_PROOF_SCHEMA_SHA256:
+        raise TransferSnapshotError("packaged_contract_drift:" + FRAME_IDENTITY_PROOF_SCHEMA_FILE)
+    return Draft202012Validator(json.loads(data))
+
+
+def _stream_proofs(root: Path, output: dict) -> list[tuple[str, dict]]:
+    """The output's summary sidecars that carry a frame_identity_proof.
+
+    A failed proof refuses here, before its grammar is checked, so a failed
+    proof of any version is reported as failed.
+    """
+
+    proofs = []
     for sidecar in output["sidecars"]:
         if sidecar["role"] != "summary":
             continue
-        summary = strict_json(root / sidecar["artifact"]["path"])
+        path = sidecar["artifact"]["path"]
+        summary = strict_json(root / path)
         if "frame_identity_proof" not in summary:
             continue
         proof = summary["frame_identity_proof"]
         status = proof.get("status") if type(proof) is dict else None
         require(
             status not in ("failed", "fail", "error", "rejected"),
-            f"frame_identity_proof is failed: {sidecar['artifact']['path']}",
+            f"frame_identity_proof is failed: {path}",
         )
-        # The transfer contract defines a negative-proof fixture, not a
-        # positive semantic proof schema. Do not invent one from a status word.
-        raise TransferSnapshotError(
-            "present frame_identity_proof needs a supported semantic proof validator: "
-            + sidecar["artifact"]["path"]
-        )
+        proofs.append((path, proof))
+    return proofs
+
+
+def _require_frame_identity_proof(
+    path: str, proof: Any, *, output_kind: str, frame_count: int
+) -> None:
+    """Accept only Orange's v2 proof, passed, binding exactly this stream's frames.
+
+    The proof covers one recording session and camera stream (all of its
+    clips), so ``frame_count`` is the stream's total over the parent's clips.
+    Any other schema or version has no validator and is refused.
+    """
+
+    from jsonschema.exceptions import best_match
+
+    require(
+        type(proof) is dict
+        and proof.get("schema_id") == FRAME_IDENTITY_PROOF_SCHEMA_ID
+        and proof.get("schema_version") == FRAME_IDENTITY_PROOF_VERSION,
+        "present frame_identity_proof needs a supported semantic proof validator: " + path,
+    )
+    error = best_match(_frame_identity_proof_validator().iter_errors(proof))
+    require(error is None, f"frame_identity_proof grammar: {path}: {error and error.message}")
+    binding = proof["video_binding"]
+    require(
+        proof["status"] == "passed" and binding["verified"] is True,
+        f"frame_identity_proof is not passed: {path}",
+    )
+    counts = {name: binding[name] for name in _PROOF_EQUAL_COUNTERS}
+    require(
+        set(counts.values()) == {frame_count},
+        f"frame_identity_proof does not bind the stream's {frame_count} frames: {path}: {counts}",
+    )
+    require(
+        proof["source_frames_dropped"] == 0,
+        f"frame_identity_proof reports dropped source frames: {path}",
+    )
+    require(
+        output_kind != "full" or proof["source_frames_skipped_by_policy"] == 0,
+        f"full-frame stream skipped source frames by policy: {path}",
+    )
 
 
 def plan_parent_recordings(
@@ -1156,12 +1235,20 @@ def plan_parent_recordings(
         camera = parent["parent_key"]["camera_serial"]
         total_frames = 0
         clips = []
+        # summary path -> (proof, output kinds, frames over the parent's clips)
+        stream_proofs: dict[str, tuple[Any, set[str], int]] = {}
         for clip in parent["clips"]:
             outputs = []
             full = None
             for output in clip["outputs"]:
-                _require_optional_proofs(current.root, output)
                 mapping = output["frame_map"]
+                for path, proof in _stream_proofs(current.root, output):
+                    _, kinds, frames = stream_proofs.get(path, (proof, set(), 0))
+                    stream_proofs[path] = (
+                        proof,
+                        kinds | {output["output_kind"]},
+                        frames + mapping["frame_count"],
+                    )
                 if output["output_kind"] == "full":
                     full = mapping
                 outputs.append(
@@ -1197,6 +1284,14 @@ def plan_parent_recordings(
                     clip["directory"],
                     tuple(outputs),
                 )
+            )
+        for path, (proof, kinds, frames) in sorted(stream_proofs.items()):
+            require(
+                len(kinds) == 1,
+                f"one frame_identity_proof shared by different output kinds: {path}",
+            )
+            _require_frame_identity_proof(
+                path, proof, output_kind=next(iter(kinds)), frame_count=frames
             )
         plans.append(
             ParentRecordingIntakePlan(
