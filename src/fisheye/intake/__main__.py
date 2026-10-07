@@ -237,6 +237,9 @@ def _main(args: argparse.Namespace) -> int:
             code = EXIT_FAILED
             document = _error_document(args, exc, code)
             document["error"] = f"interrupted: {type(exc).__name__}: {exc}"
+        # A SIGTERM now would truncate the one document the runner parses:
+        # ignore it while emitting (main restores the previous handler).
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         emit(document)
     return code
 

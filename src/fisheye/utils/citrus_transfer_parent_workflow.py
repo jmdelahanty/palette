@@ -75,11 +75,14 @@ def _snapshot_sha(args) -> str:
         return str(strict_json(args.resume_transfer_plan)["snapshot_id"])
     marker_path = args.session_dir.absolute() / MARKER_NAME
     if not marker_path.exists():
-        sha = find_delivery_by_source(args.dest_root, args.session_dir)
+        sha, skipped = find_delivery_by_source(args.dest_root, args.session_dir)
+        for item in skipped:
+            print(f"skipped unreadable intake state {item['path']}: {item['reason']}", file=sys.stderr)
         if sha is None:
             raise IntakeRefused(
                 f"no transfer marker at {marker_path} and no intake state names this "
                 "staging source; pass --resume-transfer-plan <run_dir>/organization_plan.json"
+                + (f" ({len(skipped)} intake state(s) could not be read)" if skipped else "")
             )
         return f"sha256:{sha}"
     try:

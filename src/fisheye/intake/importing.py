@@ -68,6 +68,10 @@ class _ImportFailed(RuntimeError):
     """One or more parents did not import; retried (exit 1)."""
 
 
+class _PlanRefusal(ValueError):
+    """Intake's own explicit refusal of one organized parent (deterministic)."""
+
+
 @dataclass(frozen=True)
 class ParentImportResult:
     recording_id: str
@@ -146,11 +150,11 @@ def import_parents(
                     check_stimulus=import_stimulus,
                 )
                 if resolved.zarr_path.resolve() != planned_zarr.resolve():
-                    raise ValueError(
+                    raise _PlanRefusal(
                         f"import owner resolved {resolved.zarr_path}, planned {planned_zarr}"
                     )
                 if resolved.status == "missing":
-                    raise ValueError(f"organized parent is not importable: {resolved.reason}")
+                    raise _PlanRefusal(f"organized parent is not importable: {resolved.reason}")
                 if resolved.status == "skipped":
                     results.append(ParentImportResult(**base, outcome="already_imported"))
                     continue
@@ -164,14 +168,17 @@ def import_parents(
                     ),
                     options,
                 )
-            except OSError as exc:  # transient: retried
+            except _PlanRefusal as exc:  # deterministic: refused
                 results.append(
-                    ParentImportResult(**base, outcome="failed", failed_step="plan_io", error=str(exc))
+                    ParentImportResult(**base, outcome="failed", failed_step="plan_refused", error=str(exc))
                 )
                 continue
-            except Exception as exc:  # the import owner refused this parent
+            except Exception as exc:  # I/O, zarr/h5py, a code bug: retried
                 results.append(
-                    ParentImportResult(**base, outcome="failed", failed_step="plan", error=str(exc))
+                    ParentImportResult(
+                        **base, outcome="failed", failed_step="plan_error",
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
                 )
                 continue
             if result.ok:
@@ -199,9 +206,75 @@ def _deterministic(parent: ParentImportResult) -> bool:
     cannot be told apart from I/O and is retried.
     """
 
+    if parent.failed_step in ("recording_import_preflight", "recording_import_sealed"):
+        # These steps also wrap read failures of the existing archive and the
+        # checkout identity; only a failure that names neither is a refusal.
+        if "[Errno" in (parent.error or ""):
+            return False
+        if CLEAN_CHECKOUT_REFUSAL in (parent.error or ""):
+            return _checkout_identity_is_readable()
     if parent.failed_step in DETERMINISTIC_IMPORT_STEPS:
         return True
     return parent.failed_step == "import_stimulus_to_zarr" and parent.returncode == 2
+
+
+# import_recording_analysis._clean_importer_code_identity's refusal. It is
+# raised both for a dirty checkout (deterministic for this deployment) and
+# when git itself failed (transient); intake tells them apart by asking git.
+CLEAN_CHECKOUT_REFUSAL = "current recording imports require a clean commit-pinned Palette checkout"
+
+
+def _importer_checkout() -> Mapping[str, Any]:
+    from fisheye.shared import run_provenance
+    import fisheye.utils.import_recording_analysis as importer
+
+    return run_provenance.git_identity(cwd=Path(importer.__file__).resolve().parents[3])
+
+
+def _checkout_identity_is_readable() -> bool:
+    code = _importer_checkout()
+    return code.get("git_sha") is not None and code.get("git_dirty") is not None
+
+
+def _require_one_producer_commit(plan: Mapping[str, Any]) -> None:
+    """Refuse to mix producer commits within one delivery (before importing).
+
+    Registration binds a receipt only from its producing checkout, so a
+    delivery whose parents were imported by different commits can never be
+    registered by any one deployment. If a parent already carries a receipt
+    from another commit than this checkout, refuse before importing anything
+    else or retiring staging: a retry from the original deployment finishes.
+    """
+
+    from fisheye.intake.probes import receipt_producer_git_sha
+    from fisheye.shared.recording_import_receipt import recording_import_receipt_paths
+    from fisheye.utils.organize_transfer_recordings import parent_zarr_paths
+
+    existing = {}
+    for zarr_path in parent_zarr_paths(plan):
+        if not zarr_path.exists():
+            continue
+        for receipt_path in recording_import_receipt_paths(zarr_path):
+            existing[str(zarr_path)] = receipt_producer_git_sha(zarr_path, receipt_path.stem)
+    if not existing:
+        return
+    code = _importer_checkout()
+    current, dirty = code.get("git_sha"), code.get("git_dirty")
+    if current is None or dirty is None:
+        raise RuntimeError("the importer checkout's git identity is unavailable; retry")
+    foreign = {path: sha for path, sha in existing.items() if sha != current}
+    if foreign:
+        raise IntakeRefused(
+            "parents of this delivery were already imported by another commit "
+            f"({sorted(set(foreign.values()))}) than this checkout ({current}); finish the "
+            "delivery from a deployment at that commit",
+            code="delivery_producer_commit_mismatch",
+            details={
+                "receipt_producer_git_shas": sorted(set(foreign.values())),
+                "importer_git_sha": current,
+                "zarr_paths": sorted(foreign),
+            },
+        )
 
 
 def _find_session(staging_dir: Path, snapshot_sha: str) -> Path | None:
@@ -431,6 +504,7 @@ def _import_under_lock(
         prepare_transfer_parent_recordings(
             plan, registry_path=None, require_stimulus=not recording_only
         )
+        _require_one_producer_commit(plan)
         parents = import_parents(plan, recording_only=recording_only, lease_fd=lock_fd)
         payload["parents"] = [parent.to_json() for parent in parents]
         failed = [parent for parent in parents if parent.outcome == "failed"]

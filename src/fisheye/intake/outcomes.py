@@ -73,13 +73,42 @@ DETERMINISTIC_ORGANIZER_VIOLATIONS = (
     "retirement parent receipts changed",
     "parent admission changed during retirement",
     "organization plan differs from live source",
+    "organized/source artifact differs",
+    "parent index payload digest differs",
+    "parent index projection inventory differs",
+    "organization plan digest differs",
+    "organization state has another plan",
+    "unplanned source artifact",
+    "staging did not become empty",
+    "registry admission differs from parent receipt",
+    # H5 binding refusals, which the live-source plan rebuild before
+    # retirement can raise under the lock.
+    "unsupported unified H5 profile",
+    "H5 camera has no producer recording context",
+    "H5 association claims and acquisition binding disagree",
+    "finalized observation collection missing from transfer",
+    "finalized observation collection is not finalized",
+    "H5 is not listed exactly once in the finalized collection",
+    "collection and H5 observation context disagree",
+    "unified H5 finalization receipt missing from transfer",
+    "receipt does not name this H5",
+    "H5 lacks a readable exact camera binding",
+    "H5 session identity differs from its transfer",
+    "multiple H5 sources for one parent camera",
+    "H5 overlaps a declared camera media artifact",
 )
 
 # Per-parent import failures the import owner reports for its own
-# deterministic preflight/contract refusals. Anything else (a child's
-# traceback, an archive write failure) cannot be told apart from I/O and is
-# retried.
-DETERMINISTIC_IMPORT_STEPS = ("preflight_gate", "recording_import_preflight", "recording_import_sealed", "plan")
+# deterministic preflight/contract refusals, plus intake's own explicit
+# planning refusals ("plan_refused"). Anything else (a child's traceback, an
+# archive write failure, an unexpected exception: "plan_error") cannot be
+# told apart from I/O or a code bug and is retried.
+DETERMINISTIC_IMPORT_STEPS = (
+    "preflight_gate",
+    "recording_import_preflight",
+    "recording_import_sealed",
+    "plan_refused",
+)
 
 
 def classify_organizer_failure(exc: BaseException) -> BaseException:

@@ -15,6 +15,18 @@ names ``receipt_producer_git_sha``. Register that stranded delivery from a
 deployment at that commit (``~/.palette/deployments/ops-<sha>``), e.g.
 ``scripts/py -m fisheye.intake register-delivery <snapshot_sha> --config ...``
 run inside it. Retrying from the current deployment can never succeed.
+
+A delivery whose parents were imported by *different* commits cannot be
+registered by any one deployment (``import_delivery`` now refuses to start
+importing the remaining parents from another commit,
+``delivery_producer_commit_mismatch``, so this only arises from older code).
+The probe reports ``receipt_producer_commits_disagree``. Recovery needs
+explicit operator authorization because it moves an immutable publication:
+while the delivery is not yet retired, set the minority-commit parent's
+analysis Zarr aside (rename it, never delete it), re-run ``import-delivery``
+from the deployment at the majority commit so that parent is imported again,
+then register from that deployment. A retired (``complete``) mixed delivery
+is not resumable by intake at all and must be escalated.
 """
 
 from __future__ import annotations

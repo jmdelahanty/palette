@@ -120,6 +120,7 @@ class Discovery:
     refused_markers: tuple[dict, ...]
     legacy_markers: tuple[str, ...]
     registry_error: str | None = None
+    unreadable_states: tuple[dict, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -132,6 +133,7 @@ class Discovery:
             "targets": [target.to_json() for target in self.targets],
             "refused_markers": list(self.refused_markers),
             "legacy_markers": list(self.legacy_markers),
+            "unreadable_states": list(self.unreadable_states),
         }
 
 
@@ -244,6 +246,7 @@ def discover(
     targets: dict[str, Target] = {}
     refused: list[dict] = []
     legacy: list[str] = []
+    unreadable: list[dict] = []
 
     states: dict[str, dict] = {}
     intake_root = destination / STATE_DIRECTORY
@@ -253,7 +256,10 @@ def discover(
             try:
                 state = load_durable_state(destination, sha)
             except IntakeRefused as exc:
-                refused.append({"path": str(state_file), "reason": str(exc)})
+                unreadable.append({"path": str(state_file), "kind": "malformed", "reason": str(exc)})
+                continue
+            except OSError as exc:  # one bad state never aborts discovery
+                unreadable.append({"path": str(state_file), "kind": "unreadable", "reason": str(exc)})
                 continue
             if state is not None and state.get("status") in DURABLE_STATES:
                 states[sha] = state
@@ -303,6 +309,7 @@ def discover(
         refused_markers=tuple(refused),
         legacy_markers=tuple(legacy),
         registry_error=registry_error,
+        unreadable_states=tuple(unreadable),
     )
 
 

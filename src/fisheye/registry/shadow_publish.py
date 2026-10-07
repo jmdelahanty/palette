@@ -339,6 +339,12 @@ def preflight_recording_import_receipts(imports: Sequence[tuple[Path, object | N
 
             # Reported for the operator only; the decision is the authority's.
             code = git_identity(cwd=Path(authority.__file__).resolve().parents[3])
+            if code.get("git_sha") is None or code.get("git_dirty") is None:
+                # git itself failed: not evidence of another commit. Retryable.
+                raise RegistryShadowPublishError(
+                    "the registering checkout's git identity is unavailable "
+                    f"({code.get('git_unavailable_reason') or code.get('git_dirty_unavailable_reason')}); retry"
+                ) from exc
             raise RegistryProducerCommitMismatch(
                 f"receipt for {target} was produced by commit "
                 f"{receipt.producer_git_sha}; this registering checkout is "

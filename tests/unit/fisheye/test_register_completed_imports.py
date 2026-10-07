@@ -256,3 +256,50 @@ def test_a_registrar_commit_mismatch_is_terminal_with_the_needed_commit(tmp_path
     assert refused["error"] == "registrar_commit_mismatch"
     assert refused["receipt_producer_git_sha"] == "a" * 40
     assert refused["registrar_git_sha"] == "b" * 40
+
+
+def test_a_running_jobs_reserved_empty_status_is_pending_and_never_blocks_others(tmp_path):
+    # P-1: the workflow reserves its status file empty and fills it at the end.
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    run_dir = tmp_path / "logs" / "bsub_submissions" / f"citrus_import_20261006T000000Z_session_{KEY}"
+    attempt = run_dir / "workflow-777-0-20261007T000000000000000Z-1"
+    attempt.mkdir(parents=True)
+    (attempt / "citrus_session_import.status.json").write_bytes(b"")
+    other = "c" * 64
+    (tmp_path / "state" / f"{other}.submitted").write_text("job_id=888\n")
+    other_run = tmp_path / "logs" / "bsub_submissions" / f"citrus_import_20261006T000000Z_s_{other}"
+    (other_run / "workflow-888").mkdir(parents=True)
+    body = {"status": "complete", "import_complete": True, "zarr_paths": ["/rec/a.zarr"],
+            "plan": {"snapshot_id": "sha256:" + "d" * 64, "destination_root": "/rec",
+                     "parents": [{"context": {"data_origin": "acquired"}}]}}
+    (other_run / "workflow-888" / "citrus_session_import.status.json").write_text(json.dumps(body))
+
+    register = Register()
+    assert registrar.register_completed(config, dry_run=False, register=register) == 0
+    assert not (tmp_path / "state" / f"{KEY}.import_failed").exists()  # still running
+    assert (tmp_path / "state" / f"{other}.registered").exists()
+
+    # Once the job has ended, an empty status is a failed import.
+    (run_dir / "777.out").write_text("Resource usage summary:\n")
+    registrar.register_completed(config, dry_run=False, register=register)
+    assert "empty or undecodable" in json.loads(
+        (tmp_path / "state" / f"{KEY}.import_failed").read_text())["error"]
+
+
+def test_one_broken_key_never_aborts_the_run(tmp_path):
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    # Two run directories for one key: the lookup raises for this key only.
+    for stamp in ("20261006T000000Z", "20261006T010000Z"):
+        (tmp_path / "logs" / "bsub_submissions" / f"citrus_import_{stamp}_s_{KEY}" / "workflow-777").mkdir(parents=True)
+    other = "c" * 64
+    (tmp_path / "state" / f"{other}.submitted").write_text("job_id=888\n")
+    other_run = tmp_path / "logs" / "bsub_submissions" / f"citrus_import_20261006T000000Z_s_{other}"
+    (other_run / "workflow-888").mkdir(parents=True)
+    body = {"status": "complete", "import_complete": True, "zarr_paths": ["/rec/a.zarr"],
+            "plan": {"snapshot_id": "sha256:" + "d" * 64, "destination_root": "/rec",
+                     "parents": [{"context": {"data_origin": "acquired"}}]}}
+    (other_run / "workflow-888" / "citrus_session_import.status.json").write_text(json.dumps(body))
+    assert registrar.register_completed(config, dry_run=False, register=Register()) == 1
+    assert (tmp_path / "state" / f"{other}.registered").exists()

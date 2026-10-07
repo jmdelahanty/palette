@@ -177,6 +177,93 @@ def _default_register(config: dict, snapshot_sha: str, destination_root: Path) -
     return {binding["zarr_path"]: binding["dataset_id"] for binding in result.bindings or ()}
 
 
+def _register_key(config: dict, state: Path, registry: Path, submitted: Path, *,
+                  dry_run: bool, register: Register) -> int:
+    """One submitted delivery; returns 1 when it counts as a failure this run."""
+
+    key = submitted.name[: -len(".submitted")]
+    done = state / f"{key}.registered"
+    import_failed = state / f"{key}.import_failed"
+    refused = state / f"{key}.registration_refused"
+    if done.exists() or import_failed.exists() or refused.exists():
+        return 0
+    job_id = _job_id(submitted)
+    if job_id is None:
+        log(f"no job_id recorded for key={key}; skipping")
+        return 0
+    status_path = _status_json(config, key, job_id)
+    if status_path is None:
+        if not _job_ended(config, key, job_id):
+            log(f"pending: key={key} job={job_id} has no status yet")
+            return 0
+        if _payload_returncode(config, key, job_id) == EXIT_HELD:
+            # Another live job held the delivery: this one attached and
+            # created nothing. Not a failed import.
+            log(f"attached: key={key} job={job_id} found the delivery held by another job")
+            return 0
+        log(f"import failed: key={key} job={job_id} ended without a status JSON")
+        if not dry_run:
+            _write(import_failed, {"job_id": job_id, "status_json": None, "status": "failed",
+                                   "error": "LSF job ended without writing its status JSON"})
+        return 0
+    try:
+        status: dict[str, Any] = json.loads(status_path.read_text())
+        if not isinstance(status, dict):
+            raise ValueError("status JSON is not an object")
+    except ValueError:
+        # The workflow reserves its status file empty and fills it at the end:
+        # an empty or partial status belongs to a job still running.
+        if not _job_ended(config, key, job_id):
+            log(f"pending: key={key} job={job_id} status is not written yet")
+            return 0
+        log(f"import failed: key={key} job={job_id} ended with an unreadable status JSON")
+        if not dry_run:
+            _write(import_failed, {"job_id": job_id, "status_json": str(status_path), "status": "failed",
+                                   "error": "LSF job ended with an empty or undecodable status JSON"})
+        return 0
+    if status.get("status") != "complete" or not status.get("import_complete"):
+        log(f"import failed: key={key} job={job_id}; recorded for operator review")
+        if not dry_run:
+            _write(import_failed, {"job_id": job_id, "status_json": str(status_path),
+                                   "status": status.get("status"), "error": status.get("error")})
+        return 0
+    zarr_paths = [Path(path) for path in status.get("zarr_paths") or []]
+    if dry_run:
+        log(f"dry-run: would register key={key} job={job_id} zarrs={[str(p) for p in zarr_paths]}")
+        return 0
+    try:
+        plan = status["plan"]
+        refuse_synthetic_registration(plan, registry=registry)
+        if not zarr_paths:
+            raise RegistrarRefusal("complete import lists no zarr_paths")
+        datasets = dict(
+            register(config, str(plan["snapshot_id"]), Path(plan["destination_root"]))
+        )
+    except IntakeHeld as exc:
+        log(f"pending: key={key} job={job_id}: {exc}")
+        return 0
+    except IntakeRefused as exc:
+        # Deterministic (synthetic origin, job-mode delivery, registrar at
+        # another commit than the receipts): terminal, never retried.
+        log(f"registration refused: key={key} job={job_id}: {exc}")
+        _write(refused, {"job_id": job_id, "error": getattr(exc, "code", None) or str(exc),
+                         "message": str(exc), **getattr(exc, "details", {}),
+                         "refused_utc": datetime.now(timezone.utc).isoformat()})
+        (state / f"{key}.registration_failed").unlink(missing_ok=True)
+        return 1
+    except Exception as exc:  # retried on the next run
+        log(f"registration failed: key={key} job={job_id}: {exc}")
+        _write(state / f"{key}.registration_failed",
+               {"job_id": job_id, "error": str(exc),
+                "failed_utc": datetime.now(timezone.utc).isoformat()})
+        return 1
+    _write(done, {"job_id": job_id, "status_json": str(status_path), "registry": str(registry),
+                  "datasets": datasets, "registered_utc": datetime.now(timezone.utc).isoformat()})
+    (state / f"{key}.registration_failed").unlink(missing_ok=True)
+    log(f"registered key={key} job={job_id} datasets={sorted(datasets.values())}")
+    return 0
+
+
 def register_completed(
     config: dict,
     *,
@@ -187,74 +274,13 @@ def register_completed(
     registry = Path(config["registry"])
     failures = 0
     for submitted in sorted(state.glob("*.submitted")):
-        key = submitted.name[: -len(".submitted")]
-        done = state / f"{key}.registered"
-        import_failed = state / f"{key}.import_failed"
-        refused = state / f"{key}.registration_refused"
-        if done.exists() or import_failed.exists() or refused.exists():
-            continue
-        job_id = _job_id(submitted)
-        if job_id is None:
-            log(f"no job_id recorded for key={key}; skipping")
-            continue
-        status_path = _status_json(config, key, job_id)
-        if status_path is None:
-            if not _job_ended(config, key, job_id):
-                log(f"pending: key={key} job={job_id} has no status yet")
-                continue
-            if _payload_returncode(config, key, job_id) == EXIT_HELD:
-                # Another live job held the delivery: this one attached and
-                # created nothing. Not a failed import.
-                log(f"attached: key={key} job={job_id} found the delivery held by another job")
-                continue
-            log(f"import failed: key={key} job={job_id} ended without a status JSON")
-            if not dry_run:
-                _write(import_failed, {"job_id": job_id, "status_json": None, "status": "failed",
-                                       "error": "LSF job ended without writing its status JSON"})
-            continue
-        status: dict[str, Any] = json.loads(status_path.read_text())
-        if status.get("status") != "complete" or not status.get("import_complete"):
-            log(f"import failed: key={key} job={job_id}; recorded for operator review")
-            if not dry_run:
-                _write(import_failed, {"job_id": job_id, "status_json": str(status_path),
-                                       "status": status.get("status"), "error": status.get("error")})
-            continue
-        zarr_paths = [Path(path) for path in status.get("zarr_paths") or []]
-        if dry_run:
-            log(f"dry-run: would register key={key} job={job_id} zarrs={[str(p) for p in zarr_paths]}")
-            continue
         try:
-            plan = status["plan"]
-            refuse_synthetic_registration(plan, registry=registry)
-            if not zarr_paths:
-                raise RegistrarRefusal("complete import lists no zarr_paths")
-            datasets = dict(
-                register(config, str(plan["snapshot_id"]), Path(plan["destination_root"]))
+            failures += _register_key(
+                config, state, registry, submitted, dry_run=dry_run, register=register
             )
-        except IntakeHeld as exc:
-            log(f"pending: key={key} job={job_id}: {exc}")
-            continue
-        except IntakeRefused as exc:
-            # Deterministic (synthetic origin, job-mode delivery, registrar at
-            # another commit than the receipts): terminal, never retried.
+        except Exception as exc:  # one bad key never stops the others
             failures += 1
-            log(f"registration refused: key={key} job={job_id}: {exc}")
-            _write(refused, {"job_id": job_id, "error": getattr(exc, "code", None) or str(exc),
-                             "message": str(exc), **getattr(exc, "details", {}),
-                             "refused_utc": datetime.now(timezone.utc).isoformat()})
-            (state / f"{key}.registration_failed").unlink(missing_ok=True)
-            continue
-        except Exception as exc:  # retried on the next run
-            failures += 1
-            log(f"registration failed: key={key} job={job_id}: {exc}")
-            _write(state / f"{key}.registration_failed",
-                   {"job_id": job_id, "error": str(exc),
-                    "failed_utc": datetime.now(timezone.utc).isoformat()})
-            continue
-        _write(done, {"job_id": job_id, "status_json": str(status_path), "registry": str(registry),
-                      "datasets": datasets, "registered_utc": datetime.now(timezone.utc).isoformat()})
-        (state / f"{key}.registration_failed").unlink(missing_ok=True)
-        log(f"registered key={key} job={job_id} datasets={sorted(datasets.values())}")
+            log(f"error: key={submitted.name[: -len('.submitted')]}: {type(exc).__name__}: {exc}")
     return 1 if failures else 0
 
 

@@ -879,3 +879,258 @@ def test_canonical_registry_identity_is_by_inode(tmp_path) -> None:
     other = tmp_path / "copy.sqlite"
     other.write_bytes(b"x")
     assert not same_file(other, original)
+
+
+# ---------------------------------------------------------------- second review
+
+
+NEW_DETERMINISTIC = [
+    "organized/source artifact differs: /x",
+    "parent index payload digest differs",
+    "parent index projection inventory differs",
+    "organization plan digest differs",
+    "organization state has another plan",
+    "unplanned source artifact",
+    "staging did not become empty",
+    "registry admission differs from parent receipt",
+    "unsupported unified H5 profile: a.h5",
+    "H5 lacks a readable exact camera binding: a.h5",
+    "receipt does not name this H5: r.json",
+]
+
+
+@pytest.mark.parametrize("message", NEW_DETERMINISTIC)
+def test_more_organizer_invariants_are_refusals(message) -> None:
+    """S2b(a)."""
+
+    from fisheye.intake.outcomes import classify_organizer_failure, exit_code_for
+    from fisheye.shared.recording_transfer_snapshot import TransferSnapshotError
+
+    assert exit_code_for(classify_organizer_failure(TransferSnapshotError(message))) == EXIT_REFUSED
+    lost = TransferSnapshotError("directory ownership lost: /x")
+    assert classify_organizer_failure(lost) is lost
+
+
+def test_every_deterministic_prefix_is_a_literal_message_in_src() -> None:
+    """S2b(b): a reworded organizer message must fail here, not silently become 1."""
+
+    import ast
+
+    from fisheye.intake.outcomes import DETERMINISTIC_ORGANIZER_VIOLATIONS
+
+    literals: list[str] = []
+    for path in (REPO / "src").rglob("*.py"):
+        if path.parts[-2] == "intake":
+            continue  # the classifier's own tuple is not evidence
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                literals.append(node.value)
+            elif isinstance(node, ast.JoinedStr) and node.values:
+                first = node.values[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    literals.append(first.value)
+    missing = [
+        prefix for prefix in DETERMINISTIC_ORGANIZER_VIOLATIONS
+        if not any(literal.startswith(prefix) for literal in literals)
+    ]
+    assert missing == []
+
+
+@pytest.mark.parametrize(
+    "build,expected",
+    [
+        ("transient", 1),  # e.g. a zarr/h5py read error or a code bug: retried
+        ("mismatch", EXIT_REFUSED),  # intake's explicit refusal
+    ],
+)
+def test_planning_errors_are_retried_and_explicit_refusals_refused(
+    tmp_path, monkeypatch, placeholder_media, build, expected
+) -> None:
+    """S2b(c)."""
+
+    from types import SimpleNamespace
+
+    from fisheye.intake.outcomes import exit_code_for
+    from fisheye.utils import import_organized_recordings_analysis as batch
+
+    session, sha = _delivery(tmp_path, "rolling")
+
+    def plans(dirs, **_):
+        if build == "transient":
+            raise RuntimeError("zarr store hiccup")
+        return [SimpleNamespace(zarr_path=tmp_path / "elsewhere.zarr", status="ok")]
+
+    monkeypatch.setattr(batch, "build_plans", plans)
+    with pytest.raises(Exception) as exc:
+        import_delivery(sha, tmp_path / "run", destination_root=_destination(tmp_path),
+                        session_dir=session)
+    assert exit_code_for(exc.value) == expected
+    status = json.loads((tmp_path / "run" / "citrus_session_import.status.json").read_text())
+    assert {p["failed_step"] for p in status["parents"]} == (
+        {"plan_error"} if build == "transient" else {"plan_refused"}
+    )
+
+
+@pytest.mark.parametrize(
+    "error,git,expected",
+    [
+        ("current recording imports require a clean commit-pinned Palette checkout",
+         {"git_sha": GIT_SHA, "git_dirty": True}, EXIT_REFUSED),  # dirty: deterministic
+        ("current recording imports require a clean commit-pinned Palette checkout",
+         {"git_sha": None, "git_dirty": None}, 1),  # git failed: retry
+        ("could not read source-recording identity document x: [Errno 5] Input/output error",
+         {"git_sha": GIT_SHA, "git_dirty": False}, 1),
+        ("legacy intake is forbidden", {"git_sha": GIT_SHA, "git_dirty": False}, EXIT_REFUSED),
+    ],
+)
+def test_preflight_read_and_git_failures_are_retried(tmp_path, monkeypatch, error, git, expected) -> None:
+    """S2b(d)."""
+
+    from fisheye.intake import importing
+
+    monkeypatch.setattr(importing, "_importer_checkout", lambda: git)
+    parent = importing.ParentImportResult(
+        recording_id="r", camera_id="c", recording_dir="d", zarr_path="z", outcome="failed",
+        failed_step="recording_import_preflight", error=error,
+    )
+    assert importing._deterministic(parent) is (expected == EXIT_REFUSED)
+
+
+def test_lookup_by_source_skips_unrelated_unreadable_states(tmp_path, placeholder_media) -> None:
+    """S5 / N-C."""
+
+    from fisheye.intake.delivery import find_delivery_by_source
+
+    session, sha = _delivery(tmp_path, "rolling")
+    destination = _destination(tmp_path)
+    plan = organizer.build_transfer_organization_plan(session, destination_root=destination)
+    with organizer._organization_state(plan):
+        pass
+    for name, body in (("b" * 64, "{not json"), ("c" * 64, "{}")):
+        (destination / ".transfer_intake" / name).mkdir()
+        (destination / ".transfer_intake" / name / "organization_state.json").write_text(body)
+    found, skipped = find_delivery_by_source(destination, session)
+    assert found == sha
+    assert len(skipped) == 2
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads unreadable files")
+def test_discover_lists_an_unreadable_state_instead_of_aborting(tmp_path, placeholder_media) -> None:
+    """N-B."""
+
+    session, sha = _delivery(tmp_path, "rolling")
+    destination = _destination(tmp_path)
+    plan = organizer.build_transfer_organization_plan(session, destination_root=destination)
+    with organizer._organization_state(plan):
+        pass
+    broken = destination / ".transfer_intake" / ("b" * 64)
+    broken.mkdir()
+    (broken / "organization_state.json").write_text("{}")
+    (broken / "organization_state.json").chmod(0)
+    try:
+        found = discover(tmp_path / "staging", destination, registry=None)
+    finally:
+        (broken / "organization_state.json").chmod(0o600)
+    assert [t.snapshot_sha for t in found.targets] == [sha]
+    assert [item["kind"] for item in found.unreadable_states] == ["unreadable"]
+
+
+@needs_media_tools
+def test_a_retry_from_another_commit_never_mixes_producers(tmp_path, monkeypatch) -> None:
+    """N-D: refused before importing the remaining parents or retiring."""
+
+    from fisheye.shared import run_provenance
+    from fisheye.utils import import_recording_analysis as importer
+
+    _stub_checkout(monkeypatch)
+    session, sha = _delivery(tmp_path)
+    destination = _destination(tmp_path)
+    real = importer.process_recording_import
+    calls = []
+
+    def second_parent_fails(plan, options, **kwargs):
+        calls.append(plan.zarr_path)
+        if len(calls) == 2:
+            return importer.RecordingImportResult(ok=False, failed_step="ensure_analysis_archive",
+                                                  error="node lost")
+        return real(plan, options, **kwargs)
+
+    monkeypatch.setattr(importer, "process_recording_import", second_parent_fails)
+    with pytest.raises(Exception):
+        import_delivery(sha, tmp_path / "runs" / "a1", destination_root=destination, session_dir=session)
+    other = lambda **_: {"git_sha": OTHER_SHA, "git_dirty": False}  # noqa: E731
+    monkeypatch.setattr(run_provenance, "git_identity", other)
+    monkeypatch.setattr(importer, "git_identity", other)
+    calls.clear()
+    with pytest.raises(IntakeRefused) as refused:
+        import_delivery(sha, tmp_path / "runs" / "a2", destination_root=destination, session_dir=session)
+    assert refused.value.code == "delivery_producer_commit_mismatch"
+    assert refused.value.details["receipt_producer_git_shas"] == [GIT_SHA]
+    assert calls == []  # nothing further imported
+    assert (session / MARKER_NAME).exists()  # nothing retired
+
+    _stub_checkout(monkeypatch)
+    monkeypatch.setattr(importer, "process_recording_import", real)
+    finished = import_delivery(sha, tmp_path / "runs" / "a3", destination_root=destination,
+                               session_dir=session)
+    assert finished.verdict and finished.producer_git_sha == GIT_SHA
+
+
+@needs_media_tools
+def test_an_unreadable_registrar_git_identity_is_retried_not_refused(tmp_path, monkeypatch) -> None:
+    """N-E."""
+
+    from fisheye.intake.outcomes import exit_code_for
+    from fisheye.shared import run_provenance
+
+    _session, sha, destination, _imported = _import(tmp_path, monkeypatch)
+    registry = _registry(tmp_path)
+    monkeypatch.setattr(
+        run_provenance, "git_identity",
+        lambda **_: {"git_sha": None, "git_dirty": None, "git_unavailable_reason": "git missing"},
+    )
+    with pytest.raises(Exception) as exc:
+        register_delivery(sha, writer=_writer(tmp_path, registry), destination_root=destination,
+                          allow_synthetic=True)
+    assert exit_code_for(exc.value) == 1 and "git identity is unavailable" in str(exc.value)
+    assert not (registry.parent / ".palette-registry-backups").exists()
+
+
+def test_cli_sigterm_during_the_json_cannot_truncate_it(tmp_path) -> None:
+    """N-F."""
+
+    result = _cli_code(
+        tmp_path,
+        "big = {'k%d' % i: 'v' * 200 for i in range(2000)}\n"
+        "def work(args):\n"
+        "    return 0, big\n"
+        "m._run = work\n"
+        "real_write = os.write\n"
+        "def write(fd, data):\n"
+        "    if data[:1] == b'{':\n"
+        "        os.kill(os.getpid(), signal.SIGTERM)\n"
+        "    return real_write(fd, data)\n"
+        "m.os.write = write\n",
+    )
+    assert result.returncode == 0, result.stderr
+    assert len(json.loads(result.stdout)) == 2000
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads unreadable files")
+def test_a_permission_error_reading_state_is_io_not_malformed(tmp_path) -> None:
+    """S2a: the strict loader wraps read errors; intake unwraps them (exit 1)."""
+
+    sha = "a" * 64
+    destination = _destination(tmp_path)
+    state_dir = destination / ".transfer_intake" / sha
+    state_dir.mkdir(parents=True)
+    (state_dir / "organization_state.json").write_text("{}")
+    (state_dir / "organization_state.json").chmod(0)
+    try:
+        with pytest.raises(OSError):
+            probe_import(sha, destination_root=destination)
+        result = _cli("probe-import", sha, "--destination-root", str(destination))
+    finally:
+        (state_dir / "organization_state.json").chmod(0o600)
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["error_type"] == "PermissionError"

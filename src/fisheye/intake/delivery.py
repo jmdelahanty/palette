@@ -94,6 +94,13 @@ def load_durable_state(destination_root: Path, snapshot_sha: str) -> dict | None
     except OSError:
         raise  # transient I/O: retryable (1), never a refusal
     except Exception as exc:
+        # The shared strict loader wraps a read failure in its own ValueError;
+        # an I/O cause is still I/O, not a malformed state.
+        cause = exc.__cause__
+        while cause is not None and not isinstance(cause, OSError):
+            cause = cause.__cause__
+        if isinstance(cause, OSError):
+            raise cause from exc
         raise IntakeRefused(f"malformed intake state {path}: {exc}") from exc
     plan = state.get("plan")
     if not isinstance(plan, dict) or plan.get("snapshot_id") != f"sha256:{validate_snapshot_sha(snapshot_sha)}":
@@ -186,27 +193,37 @@ def same_file(left: Path, right: Path) -> bool:
     return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
 
 
-def find_delivery_by_source(destination_root: Path, source_dir: Path) -> str | None:
+def find_delivery_by_source(
+    destination_root: Path, source_dir: Path
+) -> tuple[str | None, list[dict[str, str]]]:
     """The snapshot sha whose durable plan names ``source_dir``, if any.
 
     Lets a caller holding only a (possibly already retired) staging directory
-    find its delivery without the marker. Two plans for one source refuse.
+    find its delivery without the marker. Unrelated states that cannot be
+    read or are malformed are skipped and returned for reporting; they never
+    fail the lookup. Only an ambiguous match (two plans name this source)
+    refuses.
     """
 
     root = Path(destination_root) / STATE_DIRECTORY
+    skipped: list[dict[str, str]] = []
     if not root.is_dir():
-        return None
+        return None, skipped
     wanted = str(Path(source_dir).absolute().resolve())
     found = []
     for state_file in sorted(root.glob(f"*/{STATE_FILE}")):
         if not _SHA.fullmatch(state_file.parent.name):
             continue
-        state = load_durable_state(destination_root, state_file.parent.name)
+        try:
+            state = load_durable_state(destination_root, state_file.parent.name)
+        except (OSError, IntakeRefused) as exc:
+            skipped.append({"path": str(state_file), "reason": str(exc)})
+            continue
         if state is not None and state["plan"].get("source_dir") == wanted:
             found.append(state_file.parent.name)
     if len(found) > 1:
         raise IntakeRefused(f"several intake deliveries name staging source {wanted}: {found}")
-    return found[0] if found else None
+    return (found[0] if found else None), skipped
 
 
 def _holder_record() -> dict[str, Any]:
