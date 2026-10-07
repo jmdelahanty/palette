@@ -413,6 +413,8 @@ def _is_analysis_row(row: Mapping[str, Any]) -> bool:
 def _is_training_row(row: Mapping[str, Any]) -> bool:
     zarr_use = str(row.get("zarr_use") or "").lower()
     path = str(row.get("zarr_path") or "")
+    if zarr_use == "recovered_training":  # selector-ineligible recovered derivative
+        return False
     return zarr_use == "training" or path.endswith("_training.zarr")
 
 

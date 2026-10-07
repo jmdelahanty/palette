@@ -40,6 +40,10 @@ CONTEXT_FIELDS = (
 OBSERVATION_BINDING_DIR = "recording_observation_bindings"
 OBSERVATION_FINALIZATION_PATH = f"{OBSERVATION_BINDING_DIR}/finalized_collection.json"
 MARKER_SCHEMA = "citrus.transfer_completion_marker.v2"
+# Sealer >= 2.0.0 writes v3: v2 plus a provenance-only "sealer" record.
+MARKER_SCHEMA_V3 = "citrus.transfer_completion_marker.v3"
+# schema_id -> (schema_version, envelope schema definition)
+MARKER_SCHEMAS = {MARKER_SCHEMA: (2, "marker"), MARKER_SCHEMA_V3: (3, "marker_v3")}
 CONTROL_DIR = "_citrus_transfer"
 SNAPSHOT_PATH = f"{CONTROL_DIR}/snapshot.json"
 MAX_JSON_BYTES = 64 * 1024 * 1024
@@ -54,11 +58,11 @@ class TransferSnapshotError(ValueError):
 
 
 # Citrus's transfer-v2 envelope grammar, byte-identical to
-# citrus-recording-transfer 1.0.0 (tag recording-transfer-v1.0.0, citrus 7528b2c)
+# citrus-recording-transfer 2.0.0 (citrus cfd4774; adds marker v3, v2 unchanged)
 # python/citrus_recording_transfer/src/citrus_recording_transfer/schemas/;
 # Palette's reliance is in agent-contracts citrus-recording-transfer-consumers.
 ENVELOPE_SCHEMA_FILE = "recording_transfer_v2.schema.json"
-ENVELOPE_SCHEMA_SHA256 = "4cf611312e911e165e2a9bbfeb0eb8ce0efb62b68cf3672239055e1c58ab22f1"
+ENVELOPE_SCHEMA_SHA256 = "c12832b35657f21514392215d838f401be670e76ac22ae6dab28bf304391503c"
 
 
 @lru_cache(maxsize=None)
@@ -959,6 +963,8 @@ class VerifiedTransferSnapshot:
     recording_layout: str
     recording_payload_kind: str
     snapshot: dict
+    # Marker v3 provenance ({"package", "version"}); None for a v2 marker.
+    sealer: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -1006,7 +1012,10 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
     )
     marker = strict_json(marker_path)
     snapshot = strict_json(snapshot_path)
-    require_envelope_schema(marker, "marker")
+    marker_schema = marker.get("schema_id") if isinstance(marker, dict) else None
+    require(marker_schema in MARKER_SCHEMAS, f"unsupported completion marker {marker_schema!r}")
+    marker_version, marker_definition = MARKER_SCHEMAS[marker_schema]
+    require_envelope_schema(marker, marker_definition)
     require_envelope_schema(snapshot, "snapshot")
     marker_bytes = marker_path.read_bytes()
     snapshot_bytes = snapshot_path.read_bytes()
@@ -1018,8 +1027,8 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
     data, identity = snapshot_bytes_and_id(snapshot)
     require(snapshot_bytes == data, "noncanonical snapshot bytes")
     expected = {
-        "schema_id": MARKER_SCHEMA,
-        "schema_version": 2,
+        "schema_id": marker_schema,
+        "schema_version": marker_version,
         "status": "transfer_complete",
         "required_consumer_profile": CONSUMER_PROFILE,
         "snapshot_id": identity,
@@ -1045,7 +1054,13 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
         )
     delivery = marker["delivery"]
     for key in ("source_dir", "destination_dir"):
-        identifier(delivery[key], f"delivery {key}")  # no control characters, <= 1024
+        identifier(delivery[key], f"delivery {key}")  # <= 1024, no C0 controls
+        # The sealer's own rule (citrus-recording-transfer >= 1.0.1): no C0 or
+        # C1 controls, DEL included (U+0000-U+001F, U+007F-U+009F).
+        require(
+            not any(0x7F <= ord(c) <= 0x9F for c in delivery[key]),
+            f"invalid delivery {key}: control character",
+        )
     require(
         dt.datetime.fromisoformat(delivery["created_utc"].upper()).utcoffset()
         == dt.timedelta(0),
@@ -1069,6 +1084,7 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
         snapshot["recording_layout"],
         snapshot["recording_payload_kind"],
         snapshot,
+        marker.get("sealer"),
     )
 
 
