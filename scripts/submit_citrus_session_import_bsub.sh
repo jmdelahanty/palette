@@ -209,7 +209,10 @@ REGISTER=${REGISTER}
 RESUME_TRANSFER_PLAN=${quoted_resume_plan}
 JOB_ID="\${LSB_JOBID:-manual}"
 STATUS_FILE="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.status.txt"
-STATUS_JSON="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.status.json"
+# The workflow creates and owns its run directory (it refuses an existing one)
+# and writes its status at the standard name inside it.
+WORKFLOW_DIR="\${RUN_DIR}/workflow-\${JOB_ID}"
+STATUS_JSON="\${WORKFLOW_DIR}/citrus_session_import.status.json"
 PAYLOAD_STDOUT="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.payload.out"
 PAYLOAD_STDERR="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.payload.err"
 
@@ -221,8 +224,7 @@ cmd=(
   fisheye.utils.run_citrus_session_import
   "\${SESSION_DIR}"
   --dest-root "\${DEST_ROOT}"
-  --run-dir "\${RUN_DIR}"
-  --status-json "\${STATUS_JSON}"
+  --run-dir "\${WORKFLOW_DIR}"
 )
 if [[ "\${JOB_DRY_RUN}" == "1" ]]; then
   cmd+=(--dry-run)

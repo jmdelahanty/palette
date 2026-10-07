@@ -1024,7 +1024,9 @@ def _normalize_zarr_use(value: Any) -> Optional[str]:
     if text is None:
         return None
     norm = text.lower()
-    if norm in {"training", "analysis", "inference", "export", "archive"}:
+    # recovered_training: selector-ineligible recovered derivatives
+    # (register_recovered_training_archives); never selected as training.
+    if norm in {"training", "analysis", "inference", "export", "archive", "recovered_training"}:
         return norm
     if norm in {"production"}:
         return "analysis"
