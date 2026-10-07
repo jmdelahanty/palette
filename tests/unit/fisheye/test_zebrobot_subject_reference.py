@@ -291,3 +291,50 @@ def test_cross_check_falls_back_to_dish_id_without_h5_uuid(tmp_path, h5_dish, ok
     else:
         with pytest.raises(ValueError, match="zebrobot_dish_mismatch: Orange declared dish_id"):
             importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+
+
+def test_orange_absence_is_recorded_only_when_nothing_else_is(tmp_path):
+    importer, plan = _recording(tmp_path, NOT_COLLECTED)
+    importer.import_zebrobot_subject_reference(plan)
+    root = zarr.open_group(str(plan.zarr_path), mode="r")
+    assert resolve_subject_metadata(root).subject == {
+        "subject_lookup": {"status": "not_collected", "reason": "no_dish_declared"}}
+
+    (tmp_path / "bound").mkdir()
+    importer, plan = _recording(tmp_path / "bound", NOT_COLLECTED)
+    root = zarr.open_group(str(plan.zarr_path), mode="r+")
+    h5 = publish_subject_metadata(root, {"dish_id": "19220_1", "subject_count": 1},
+                                  source_artifact={"kind": "test_h5"}, translator="h5_attributes")
+    importer.import_zebrobot_subject_reference(plan)
+    assert resolve_subject_metadata(root).run_name == h5.run_name  # the H5 record stays
+
+
+def test_orange_supplies_the_dish_when_the_h5_declared_none(tmp_path):
+    importer, plan = _recording(tmp_path, {**COLLECTED, "subject_count": 1})
+    root = zarr.open_group(str(plan.zarr_path), mode="r+")
+    publish_subject_metadata(
+        root, {"subject_lookup_status": "not_collected", "subject_lookup_reason": "no_dish_declared"},
+        source_artifact={"kind": "test_h5"}, translator="declared_absence",
+    )
+    result = importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+    assert result["published"] is True
+    subject = resolve_subject_metadata(root).subject
+    assert subject["dish_uuid"] == UUID and subject["dpf_at_acquisition"] == 7
+    assert subject["subject_lookup"] == {"status": "collected", "reason": ""}
+
+
+@pytest.mark.parametrize("revision, refused", [(1, True), (2, False)])
+def test_h5_and_zebrobot_must_agree_on_sex_unless_the_dish_was_edited(tmp_path, revision, refused):
+    importer, plan = _recording(tmp_path, COLLECTED)
+    root = zarr.open_group(str(plan.zarr_path), mode="r+")
+    publish_subject_metadata(
+        root, {"dish_id": "19220_1", "dish_uuid": UUID, "sex": "M", "subject_count": 1},
+        source_artifact={"kind": "test_h5"}, translator="h5_attributes",
+    )
+    fetch = _fetch(snapshot={**SNAPSHOT, "revision": revision})  # served sex "unknown"
+    if refused:
+        with pytest.raises(ValueError, match="zebrobot_subject_mismatch: sex H5='M'"):
+            importer.import_zebrobot_subject_reference(plan, fetch=fetch)
+    else:
+        result = importer.import_zebrobot_subject_reference(plan, fetch=fetch)
+        assert result["biology_differs_after_dish_edit"] == ["sex"]

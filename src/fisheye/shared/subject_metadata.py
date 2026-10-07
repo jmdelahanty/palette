@@ -13,7 +13,7 @@ import h5py
 from .import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from .json_safety import json_attr_safe_mapping, strict_json_dumps
 from .run_provenance import build_writer_run_provenance
-from .subject_fields import canonical_subject_fields
+from .subject_fields import TRANSLATORS, canonical_subject_fields
 from .zarr_run_completion import (
     is_run_complete_in_parent,
     is_run_selector_eligible,
@@ -27,6 +27,15 @@ from .zarr_run_completion import (
 
 SUBJECT_METADATA_SCHEMA_ID = "palette.subject_metadata.v1"
 SUBJECT_METADATA_SCHEMA_VERSION = 1
+# v2 (docs/design/2026-10-06-canonical-subject-fields): v1's fields plus the
+# canonical ``subject`` fields, translated once at publish by the named
+# ``subject_translator``; ``subject_metadata`` keeps the raw source values.
+SUBJECT_METADATA_V2_SCHEMA_ID = "palette.subject_metadata.v2"
+SUBJECT_METADATA_V2_SCHEMA_VERSION = 2
+_SCHEMAS = {
+    SUBJECT_METADATA_SCHEMA_ID: SUBJECT_METADATA_SCHEMA_VERSION,
+    SUBJECT_METADATA_V2_SCHEMA_ID: SUBJECT_METADATA_V2_SCHEMA_VERSION,
+}
 SUBJECT_METADATA_RUNS_PATH = "analysis/subject_metadata_runs"
 SUBJECT_METADATA_RECORD_ATTR = "subject_metadata_record"
 SUBJECT_METADATA_SHA256_ATTR = "subject_metadata_sha256"
@@ -92,6 +101,12 @@ def _present(value: Any) -> bool:
     return value is not None and str(value).strip() != ""
 
 
+def explicit_subject_ids(metadata: Mapping[str, Any]) -> list[str]:
+    """Citrus-local subject ids from a raw subject mapping (the publish rule)."""
+
+    return _explicit_subject_ids(metadata)[0]
+
+
 def _identity_kind(subject_ids: list[str]) -> str:
     if not subject_ids:
         return "none"
@@ -131,8 +146,13 @@ def read_h5_subject_metadata(h5_path: str | Path) -> dict[str, Any]:
 
 
 def build_subject_metadata_record(
-    metadata: Mapping[str, Any], *, legacy_rule: bool = False
+    metadata: Mapping[str, Any],
+    *,
+    legacy_rule: bool = False,
+    translator: str | None = None,
 ) -> dict[str, Any]:
+    """A v1 record, or with ``translator`` a v2 record carrying canonical fields."""
+
     canonical = normalize_subject_metadata(metadata)
     subject_ids, source_field = _explicit_subject_ids(canonical, legacy_rule=legacy_rule)
     record = {
@@ -143,6 +163,15 @@ def build_subject_metadata_record(
         "subject_identity_kind": _identity_kind(subject_ids),
         "subject_identity_source_field": source_field,
     }
+    if translator is not None:
+        if translator not in TRANSLATORS:
+            raise SubjectMetadataError(f"Unknown subject translator {translator!r}")
+        record.update(
+            schema_id=SUBJECT_METADATA_V2_SCHEMA_ID,
+            schema_version=SUBJECT_METADATA_V2_SCHEMA_VERSION,
+            subject_translator=translator,
+            subject=json_attr_safe_mapping(TRANSLATORS[translator](canonical, subject_ids)),
+        )
     return record
 
 
@@ -159,10 +188,19 @@ def _stored_identity(
 
 def _validate_record(record: Mapping[str, Any], digest: str | None = None) -> dict[str, Any]:
     canonical = json_attr_safe_mapping(record)
-    if canonical.get("schema_id") != SUBJECT_METADATA_SCHEMA_ID:
+    schema_id = canonical.get("schema_id")
+    if schema_id not in _SCHEMAS:
         raise SubjectMetadataError("Subject metadata has an unsupported schema_id")
-    if canonical.get("schema_version") != SUBJECT_METADATA_SCHEMA_VERSION:
+    if canonical.get("schema_version") != _SCHEMAS[schema_id]:
         raise SubjectMetadataError("Subject metadata has an unsupported schema_version")
+    if schema_id == SUBJECT_METADATA_V2_SCHEMA_ID:
+        # The canonical fields are fixed at publish and covered by the record
+        # digest; they are not recomputed, so later translator changes never
+        # invalidate a stored record.
+        if not isinstance(canonical.get("subject"), dict):
+            raise SubjectMetadataError("Subject metadata v2 record has no subject fields")
+        if not isinstance(canonical.get("subject_translator"), str):
+            raise SubjectMetadataError("Subject metadata v2 record names no translator")
     metadata = canonical.get("subject_metadata")
     if not isinstance(metadata, dict):
         raise SubjectMetadataError("Subject metadata record has no metadata mapping")
@@ -193,7 +231,11 @@ def _resolved(
     return ResolvedSubjectMetadata(
         metadata=dict(record["subject_metadata"]),
         subject_ids=subject_ids,
-        subject=canonical_subject_fields(record["subject_metadata"], subject_ids),
+        subject=(
+            dict(record["subject"])
+            if record.get("schema_id") == SUBJECT_METADATA_V2_SCHEMA_ID
+            else canonical_subject_fields(record["subject_metadata"], subject_ids)
+        ),
         subject_identity_kind=str(record["subject_identity_kind"]),
         subject_identity_source_field=str(record["subject_identity_source_field"]),
         record=dict(record),
@@ -213,15 +255,20 @@ def publish_subject_metadata(
     provenance_command: str | None = None,
     provenance_params: Mapping[str, Any] | None = None,
     provenance_input_artifacts: Sequence[Mapping[str, Any]] | None = None,
+    translator: str | None = None,
 ) -> ResolvedSubjectMetadata:
-    """Idempotently publish and select an immutable subject snapshot."""
+    """Idempotently publish and select an immutable subject snapshot.
+
+    With ``translator`` (a ``fisheye.shared.subject_fields.TRANSLATORS`` name)
+    the record is v2 and stores the canonical fields; without it, v1.
+    """
 
     if source_h5_path is not None and source_artifact is not None:
         raise SubjectMetadataError(
             "Provide source_h5_path or source_artifact, not both"
         )
 
-    record = _validate_record(build_subject_metadata_record(metadata))
+    record = _validate_record(build_subject_metadata_record(metadata, translator=translator))
     digest = subject_metadata_sha256(record)
     run_name = f"subject_metadata_{digest[:16]}"
     analysis = root.require_group("analysis")
@@ -247,8 +294,8 @@ def publish_subject_metadata(
     mark_run_started(run, run_name=run_name, stage="subject_metadata")
     note_pending_latest(parent, run_name)
     run.attrs["stage_selector_eligible"] = False
-    run.attrs["schema_id"] = SUBJECT_METADATA_SCHEMA_ID
-    run.attrs["schema_version"] = SUBJECT_METADATA_SCHEMA_VERSION
+    run.attrs["schema_id"] = record["schema_id"]
+    run.attrs["schema_version"] = record["schema_version"]
     run.attrs[SUBJECT_METADATA_RECORD_ATTR] = record
     run.attrs[SUBJECT_METADATA_SHA256_ATTR] = digest
     run.attrs["subject_ids"] = record["subject_ids"]
@@ -278,7 +325,7 @@ def publish_subject_metadata(
     if source_artifact is not None:
         input_artifacts.append(json_attr_safe_mapping(source_artifact))
     params = {
-        "schema_id": SUBJECT_METADATA_SCHEMA_ID,
+        "schema_id": record["schema_id"],
         "record_sha256": digest,
         **dict(provenance_params or {}),
     }
@@ -362,8 +409,11 @@ __all__ = [
     "SUBJECT_METADATA_SCHEMA_ID",
     "SUBJECT_METADATA_SCHEMA_VERSION",
     "SUBJECT_METADATA_SHA256_ATTR",
+    "SUBJECT_METADATA_V2_SCHEMA_ID",
+    "SUBJECT_METADATA_V2_SCHEMA_VERSION",
     "SubjectMetadataError",
     "build_subject_metadata_record",
+    "explicit_subject_ids",
     "normalize_subject_metadata",
     "publish_subject_metadata",
     "read_h5_subject_metadata",
