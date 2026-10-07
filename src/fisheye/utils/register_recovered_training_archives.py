@@ -53,7 +53,7 @@ class Planned:
 def _read_attrs(path: Path) -> dict[str, Any]:
     import zarr
 
-    return dict(zarr.open_group(str(path), mode="r").attrs)
+    return dict(zarr.open_group(str(path), mode="r", use_consolidated=False).attrs)
 
 
 def plan(registry: Path, recordings_root: Path) -> tuple[list[Planned], list[dict]]:
