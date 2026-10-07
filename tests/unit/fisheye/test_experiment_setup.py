@@ -117,6 +117,16 @@ def test_setup_does_not_count_a_dish_group_id_as_an_individual() -> None:
     assert record["subject_assignment_status"] == "count_only"
 
 
+def test_setup_counts_a_dish_group_id_list_as_individuals() -> None:
+    # An explicit list names individual fish, even in a dish_group (as on main).
+    record = _build_setup_record(
+        {"subject_count": "3", "subject_type": "dish_group", "subject_ids": ["f-1", "f-2"]}
+    )
+
+    assert record["assigned_subject_count"] == 2
+    assert record["subject_assignment_status"] == "partial"
+
+
 def test_setup_counts_an_untyped_single_id_for_one_subject() -> None:
     record = _build_setup_record({"subject_count": "1", "subject_id": "s-1"})
 
