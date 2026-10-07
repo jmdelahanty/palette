@@ -265,6 +265,7 @@ def resolve_subject_reference(
         "dish_id": dish_id,
         "dish_uuid": dish["dish_uuid"],
         "dish_revision_at_recording": dish["revision"],
+        "dish_updated_at": dish["updated_at"],
         "dish_revision_at_intake": revision,
         "dish_changed_since_recording": dish_changed,
         "cross_id": snapshot.get("cross_id"),

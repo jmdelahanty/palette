@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -13,6 +13,7 @@ import h5py
 from .import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from .json_safety import json_attr_safe_mapping, strict_json_dumps
 from .run_provenance import build_writer_run_provenance
+from .subject_fields import canonical_subject_fields
 from .zarr_run_completion import (
     is_run_complete_in_parent,
     is_run_selector_eligible,
@@ -50,6 +51,9 @@ class ResolvedSubjectMetadata:
     group_path: str
     run_name: str | None
     legacy: bool
+    # Canonical fields (fisheye.shared.subject_fields), translated from
+    # ``metadata`` on read; consumers should read these, not ``metadata``.
+    subject: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _explicit_subject_ids(
@@ -185,9 +189,11 @@ def _resolved(
     run_name: str | None,
     legacy: bool,
 ) -> ResolvedSubjectMetadata:
+    subject_ids = tuple(str(value) for value in record["subject_ids"])
     return ResolvedSubjectMetadata(
         metadata=dict(record["subject_metadata"]),
-        subject_ids=tuple(str(value) for value in record["subject_ids"]),
+        subject_ids=subject_ids,
+        subject=canonical_subject_fields(record["subject_metadata"], subject_ids),
         subject_identity_kind=str(record["subject_identity_kind"]),
         subject_identity_source_field=str(record["subject_identity_source_field"]),
         record=dict(record),
