@@ -239,6 +239,8 @@ def from_manual_assertion(metadata: Mapping[str, Any], subject_ids: Sequence[str
     out.subject_type(metadata.get("subject_type"))
     for name in ("species", "sex", "genotype", "line_strain", "cross_id", "dish_id"):
         out.text(name, metadata.get(name))
+    # e.g. "recording_local_placeholder": ids that name no real animal.
+    out.text("identity_scope", metadata.get("identity_scope"))
     out.integer("subject_count", metadata.get("subject_count"))
     out.age(metadata.get("date_of_fertilization"), None,
             metadata.get("dpf_at_acquisition"), metadata.get("days_post_fertilization"))
@@ -252,6 +254,30 @@ def from_declared_absence(metadata: Mapping[str, Any], subject_ids: Sequence[str
     out.status("subject_lookup", metadata.get("subject_lookup_status"), metadata.get("subject_lookup_reason"))
     out.status("fish_reference", metadata.get("fish_reference_status"), metadata.get("fish_reference_reason"))
     return out.finish(subject_ids)
+
+
+def from_legacy_zebrobot_snapshot(
+    snapshot: Mapping[str, Any], subject_ids: Sequence[str] = ()
+) -> dict[str, Any]:
+    """The pre-``subject_metadata`` ``analysis_metadata`` ``zebrobot_snapshot`` attr.
+
+    Dish and cross fields are nested (``dish``/``cross``); the dish's
+    ``cross_id`` wins, the cross's ``line_strain`` and ``parents`` win.
+    """
+
+    dish = snapshot.get("dish") if isinstance(snapshot.get("dish"), Mapping) else {}
+    cross = snapshot.get("cross") if isinstance(snapshot.get("cross"), Mapping) else {}
+    flat = {
+        key: value for key, value in snapshot.items() if not isinstance(value, Mapping)
+    }
+    flat.update(cross)
+    flat.update(dish)
+    for name in ("line_strain", "parents"):
+        if cross.get(name) is not None:
+            flat[name] = cross[name]
+    if dish.get("cross_id") is None and cross.get("cross_id") is not None:
+        flat["cross_id"] = cross["cross_id"]
+    return from_h5_attributes(flat, subject_ids)
 
 
 def source_kind(metadata: Mapping[str, Any]) -> str:
@@ -269,6 +295,7 @@ TRANSLATORS: dict[str, Callable[..., dict[str, Any]]] = {
     "orange_reference": from_orange_reference,
     "manual_assertion": from_manual_assertion,
     "declared_absence": from_declared_absence,
+    "legacy_zebrobot_snapshot": from_legacy_zebrobot_snapshot,
 }
 
 
@@ -283,6 +310,7 @@ __all__ = [
     "canonical_subject_fields",
     "from_declared_absence",
     "from_h5_attributes",
+    "from_legacy_zebrobot_snapshot",
     "from_manual_assertion",
     "from_orange_reference",
     "parse_parents",

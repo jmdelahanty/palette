@@ -101,6 +101,12 @@ def _present(value: Any) -> bool:
     return value is not None and str(value).strip() != ""
 
 
+def explicit_subject_ids(metadata: Mapping[str, Any]) -> list[str]:
+    """Citrus-local subject ids from a raw subject mapping (the publish rule)."""
+
+    return _explicit_subject_ids(metadata)[0]
+
+
 def _identity_kind(subject_ids: list[str]) -> str:
     if not subject_ids:
         return "none"
@@ -407,6 +413,7 @@ __all__ = [
     "SUBJECT_METADATA_V2_SCHEMA_VERSION",
     "SubjectMetadataError",
     "build_subject_metadata_record",
+    "explicit_subject_ids",
     "normalize_subject_metadata",
     "publish_subject_metadata",
     "read_h5_subject_metadata",
