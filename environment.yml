@@ -44,6 +44,8 @@ dependencies:
   - tqdm
   - click
   - "pydantic>=2,<3"
+  # Intake validates every pinned producer contract with it (imported lazily).
+  - "jsonschema>=4.23,<5"
   - hsluv
   - networkx
   - bokeh
