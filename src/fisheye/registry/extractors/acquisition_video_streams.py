@@ -9,7 +9,10 @@ from typing import Any, Dict, List, Mapping, Optional
 import zarr
 
 from fisheye.shared.batch_logging import utc_now
-from fisheye.shared.clipped_video_collection import SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID
+from fisheye.shared.clipped_video_collection import (
+    COLLECTION_COLORIMETRY_FIELDS,
+    SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID,
+)
 from fisheye.shared.type_conversions import normalize_attr as _decode_attr
 
 
@@ -114,12 +117,26 @@ def collection_video_facts(root: zarr.Group) -> Dict[str, Any]:
     metadata = _coerce_mapping(root.attrs.get("source_video_metadata"))
     if metadata.get("schema_id") != SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID:
         return {}
+    collection = _coerce_mapping(metadata.get("collection"))
+    members = collection.get("members") if collection.get("schema_version") == 2 else None
+    colorimetry: Dict[str, Any] = {}
+    if isinstance(members, list) and members:
+        # Version-2 collections record each clip's probed colorimetry; intake
+        # requires one color range per recording. Report a value only when
+        # every clip carries the same one.
+        for name in COLLECTION_COLORIMETRY_FIELDS:
+            values = {
+                member.get(name) if isinstance(member, Mapping) else None
+                for member in members
+            }
+            colorimetry[name] = values.pop() if len(values) == 1 else None
     return {
         "width": _as_int(metadata.get("width")),
         "height": _as_int(metadata.get("height")),
         "fps": _as_float(metadata.get("fps")),
         "codec": _decode_attr(metadata.get("codec")),
         "pix_fmt": _decode_attr(metadata.get("pix_fmt")),
+        **colorimetry,
     }
 
 
@@ -185,6 +202,7 @@ def _extract_acquisition_video_stream_rows(
             facts = {
                 "width": collection["width"], "height": collection["height"],
                 "frame_rate": collection["fps"], "codec": collection["codec"],
+                **{name: collection.get(name) for name in COLLECTION_COLORIMETRY_FIELDS},
             }
         elif output_kind == "crop":
             facts = _crop_ledger_size(
@@ -219,10 +237,10 @@ def _extract_acquisition_video_stream_rows(
                 "container": _decode_attr(contract.get("container")),
                 "encoded_format": _decode_attr(contract.get("encoded_format")),
                 "pixel_source_format": _decode_attr(contract.get("pixel_source_format")),
-                "color_range": _decode_attr(contract.get("color_range")),
-                "color_space": _decode_attr(contract.get("color_space")),
-                "color_transfer": _decode_attr(contract.get("color_transfer")),
-                "color_primaries": _decode_attr(contract.get("color_primaries")),
+                "color_range": _first_present(_decode_attr(contract.get("color_range")), facts.get("color_range")),
+                "color_space": _first_present(_decode_attr(contract.get("color_space")), facts.get("color_space")),
+                "color_transfer": _first_present(_decode_attr(contract.get("color_transfer")), facts.get("color_transfer")),
+                "color_primaries": _first_present(_decode_attr(contract.get("color_primaries")), facts.get("color_primaries")),
                 "video_pixel_coordinate_space": _decode_attr(contract.get("video_pixel_coordinate_space")),
                 "source_geometry_coordinate_space": _decode_attr(contract.get("source_geometry_coordinate_space")),
                 "blank_frame_policy": _decode_attr(contract.get("blank_frame_policy")),
