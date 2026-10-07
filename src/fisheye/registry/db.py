@@ -2521,6 +2521,15 @@ class Registry(
             "last_seen_utc": now,
             "status": "active",
         }
+        # B7: receipt-bound rows are owned by the recording identity authority.
+        explicit = dict(session_uuid=session_uuid, recording_id=recording_id, artifact_kind=artifact_kind)
+        explicit.update(zarr_origin=_normalize_zarr_origin(zarr_origin), zarr_use=_normalize_zarr_use(zarr_use))
+        explicit.update({key: payload[key] for key in payload if key.startswith("source_")})
+        if self.refuse_or_touch_verified_source_dataset(dataset_id, zarr_path=zarr_path, explicit=explicit):
+            return
+        self.refuse_conflicting_verified_source_identity(
+            recording_id=resolved_recording_id, session_uuid=session_uuid, writer="upsert_dataset"
+        )
         self.conn.execute(
             """
             INSERT INTO datasets (
@@ -2607,6 +2616,8 @@ class Registry(
             "created_utc": now,
             "updated_utc": now,
         }
+        if self.refuse_verified_source_recording_change(payload):
+            return
         self.conn.execute(
             """
             INSERT INTO recordings (
@@ -6590,7 +6601,15 @@ class Registry(
             raise RecordingIdentityAuthorityError(
                 "current source root is missing required recording context"
             )
-        if recording_context:
+        # B7: a derived artifact sharing a verified-source recording_id gets its
+        # own dataset row; recording-level rows stay owned by the authority.
+        derived_of_verified_source = not authoritative_current_source and (
+            self.refuse_conflicting_verified_source_identity(
+                recording_id=recording_id, session_uuid=metadata.session_uuid, writer="register_from_root"
+            )
+            is not None
+        )
+        if recording_context and not derived_of_verified_source:
             if authoritative_current_source:
                 if (
                     recording_id is None
@@ -6621,13 +6640,14 @@ class Registry(
             acquisition=acquisition,
             zarr_purpose=metadata.zarr_purpose,
         )
-        self.upsert_subject_snapshot_entities(
-            dataset_id,
-            recording_id=recording_id,
-            snapshot=snapshot,
-            snapshot_source=snapshot_source,
-            require_existing_recording=authoritative_current_source,
-        )
+        if not derived_of_verified_source:
+            self.upsert_subject_snapshot_entities(
+                dataset_id,
+                recording_id=recording_id,
+                snapshot=snapshot,
+                snapshot_source=snapshot_source,
+                require_existing_recording=authoritative_current_source,
+            )
         self.replace_detection_sources(dataset_id, _build_detection_source_records(root))
         acquisition_rows = _extract_acquisition_video_stream_rows(
             root, zarr_path=zarr_path, recording_id=recording_id, zarr_use=zarr_use

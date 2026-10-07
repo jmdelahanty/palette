@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from hashlib import sha256
+import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from uuid import UUID
@@ -12,6 +13,7 @@ import h5py
 
 from .import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from .json_safety import json_attr_safe_mapping, strict_json_dumps
+from .type_conversions import normalize_attr
 from .run_provenance import build_writer_run_provenance
 from .subject_fields import TRANSLATORS, canonical_subject_fields
 from .zarr_run_completion import (
@@ -382,8 +384,6 @@ def resolve_subject_metadata(
         raw_metadata = legacy.attrs.get("subject_metadata") if legacy is not None else None
         group_path = "analysis_metadata@subject_metadata"
     if isinstance(raw_metadata, str):
-        import json
-
         try:
             raw_metadata = json.loads(raw_metadata)
         except json.JSONDecodeError:
@@ -401,8 +401,148 @@ def resolve_subject_metadata(
     )
 
 
+# Dataset-profile composition (B4, docs/design/2026-10-07-intake-single-writer).
+# The detection, keypoint and subject-mask profiles store this block; its
+# field names, order and value types are part of their stored summaries.
+PROFILE_COMPOSITION_FIELDS = (
+    "rig_id",
+    "camera_id",
+    "arena_id",
+    "dish_design",
+    "canvas_name",
+    "protocol_name",
+    "genotype",
+    "dpf_at_acquisition",
+)
+
+
+def _profile_attr_mapping(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, (bytes, bytearray)):
+        raw = value.decode("utf-8", "ignore")
+    elif isinstance(value, str):
+        raw = value
+    else:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None
+    return dict(payload) if isinstance(payload, Mapping) else None
+
+
+def _profile_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _canonical_profile_subject_fields(root: Any) -> dict[str, Any]:
+    """Genotype and age from the published subject record, or ``{}`` without one.
+
+    Only the canonical ``subject_metadata_runs`` record counts here; archives
+    without one keep their historical profile values (see
+    :func:`_legacy_profile_composition`). A record that exists but does not
+    resolve contributes nothing, so the profile keeps its historical values
+    rather than failing; the record's own validators report that defect.
+    """
+
+    try:
+        resolved = resolve_subject_metadata(root, allow_legacy=False)
+    except SubjectMetadataError:
+        return {}
+    fields: dict[str, Any] = {}
+    genotype = normalize_attr(resolved.subject.get("genotype"))
+    if genotype is not None:
+        fields["genotype"] = genotype
+    dpf = resolved.subject.get("dpf_at_acquisition")
+    if isinstance(dpf, int) and not isinstance(dpf, bool):
+        fields["dpf_at_acquisition"] = dpf
+    return fields
+
+
+def _legacy_profile_composition(root: Any) -> dict[str, Any]:
+    """Historical profile composition from root attrs and ``analysis_metadata``.
+
+    This is the pre-B4 rule, kept value-for-value for archives that have no
+    canonical subject record: root attrs win over ``session_context``, which
+    wins over the ``subject_metadata``/``zebrobot_snapshot`` snapshot. It is not
+    the owner's legacy path (``resolve_subject_metadata(allow_legacy=True)``),
+    which derives age from dates and ignores root attrs, ``session_context``
+    and ``zebrobot_snapshot``, so it would change historical profile values.
+    """
+
+    session_context: dict[str, Any] = {}
+    snapshot: dict[str, Any] = {}
+    analysis_meta = root.get("analysis_metadata")
+    if analysis_meta is not None:
+        session_context = _profile_attr_mapping(analysis_meta.attrs.get("session_context")) or {}
+        for key in ("subject_metadata", "zebrobot_snapshot"):
+            payload = _profile_attr_mapping(analysis_meta.attrs.get(key))
+            if payload:
+                snapshot = payload
+                break
+    dish = (_profile_attr_mapping(snapshot.get("dish")) if snapshot else None) or {}
+
+    composition: dict[str, Any] = {}
+    for key in PROFILE_COMPOSITION_FIELDS:
+        if key == "protocol_name":
+            value = normalize_attr(root.attrs.get("protocol_name")) or normalize_attr(
+                session_context.get("protocol_name")
+                or session_context.get("protocol_name_from_definition")
+            )
+        elif key == "genotype":
+            value = (
+                normalize_attr(root.attrs.get("genotype"))
+                or normalize_attr(session_context.get("genotype"))
+                or normalize_attr(dish.get("genotype") or snapshot.get("genotype"))
+            )
+        elif key == "dpf_at_acquisition":
+            value = None
+            for candidate in (
+                root.attrs.get("dpf_at_acquisition"),
+                session_context.get("dpf_at_acquisition"),
+                session_context.get("days_post_fertilization"),
+                snapshot.get("dpf_at_acquisition") or snapshot.get("days_post_fertilization"),
+            ):
+                value = _profile_int(candidate)
+                if value is not None:
+                    break
+        else:
+            value = normalize_attr(root.attrs.get(key)) or normalize_attr(session_context.get(key))
+        if value is not None:
+            composition[key] = value
+    return composition
+
+
+def read_profile_composition(root: Any) -> dict[str, Any]:
+    """The ``composition`` block shared by the dataset-profile builders.
+
+    ``genotype`` and ``dpf_at_acquisition`` come from the canonical subject
+    record when one is published (the subject authority); a field the record
+    does not carry, and every field of an archive without a record, keeps its
+    historical value. Keys follow :data:`PROFILE_COMPOSITION_FIELDS` order and
+    absent values are omitted.
+    """
+
+    composition = _legacy_profile_composition(root)
+    canonical = _canonical_profile_subject_fields(root)
+    if not canonical:
+        return composition
+    merged = {**composition, **canonical}
+    return {key: merged[key] for key in PROFILE_COMPOSITION_FIELDS if key in merged}
+
+
 __all__ = [
     "MissingSubjectMetadataError",
+    "PROFILE_COMPOSITION_FIELDS",
     "ResolvedSubjectMetadata",
     "SUBJECT_METADATA_RECORD_ATTR",
     "SUBJECT_METADATA_RUNS_PATH",
@@ -417,6 +557,7 @@ __all__ = [
     "normalize_subject_metadata",
     "publish_subject_metadata",
     "read_h5_subject_metadata",
+    "read_profile_composition",
     "resolve_subject_metadata",
     "subject_metadata_sha256",
 ]

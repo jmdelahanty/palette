@@ -57,6 +57,7 @@ from fisheye.shared.clipped_video_collection import (
     SOURCE_VIDEO_COLLECTION_LAYOUT,
     build_clipped_video_collection_metadata,
 )
+from fisheye.shared.recording_manifest_seal import is_sealed_recording_manifest
 from fisheye.shared.recording_preflight import preflight_gate_reason
 from fisheye.shared.recording_manifest_context import (
     manifest_context_attrs,
@@ -363,6 +364,7 @@ def validate_recording_import_plan(
         if plan.cam_video is None:
             raise ValueError("single-video recording plan requires its source video")
         _producer_video_metadata(plan)
+    require_transfer_v2_h5_is_unified(plan, manifest)
     try:
         plan.zarr_path.resolve().relative_to(plan.recording_dir.resolve())
     except ValueError as exc:
@@ -376,6 +378,40 @@ def validate_recording_import_plan(
         ):
             raise SourceRecordingIdentityError("legacy intake is forbidden")
     return manifest, identity
+
+
+def require_transfer_v2_h5_is_unified(
+    plan: RecordingAnalysisPlan, manifest: Mapping[str, Any]
+) -> None:
+    """Refuse a sealed transfer-v2 parent whose H5 would take the legacy route.
+
+    New transfer-v2 deliveries carry a sealed unified H5 or no H5 (intake
+    single-writer decision 1, 2026-10-07). The organizer already refuses a
+    legacy H5 while planning; this re-checks the organized parent before any
+    analysis-Zarr write, so a legacy H5 can never reach the legacy stimulus or
+    subject import through new intake. Full unified admission (receipt and
+    byte digest) stays with the native importer. Parents without the
+    transfer-v2 seal, and legacy H5 imports outside intake, are unaffected.
+    """
+
+    if plan.h5_path is None or not is_sealed_recording_manifest(manifest):
+        return
+    profile = stimulus_h5_unified_profile(plan.h5_path)
+    if profile is None:
+        raise ValueError(
+            "legacy_h5_refused_for_transfer_v2: a new transfer-v2 recording needs "
+            f"a sealed unified H5 or no H5; {plan.h5_path} declares no unified profile"
+        )
+    if profile != UNIFIED_H5_PROFILE:
+        raise ValueError(f"unsupported_unified_h5_profile:{profile}")
+    if (
+        plan.finalization_receipt_path is None
+        and _manifest_finalization_receipt(plan.recording_dir) is None
+    ):
+        raise ValueError(
+            "unified_h5_requires_finalization_receipt: the transfer-v2 parent "
+            "manifest declares no H5 finalization receipt"
+        )
 
 
 def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, object]]:
