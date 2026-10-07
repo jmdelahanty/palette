@@ -11,11 +11,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from fisheye.shared.recording_manifest_seal import require_unsealed_recording_manifest
 from fisheye.utils.organize_recordings import (
     PlannedFile,
     _build_video_only_plan,
     _load_video_only_rows,
 )
+
+TOOL_NAME = "fisheye.utils.backfill_video_only_sidecars"
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,7 @@ def _patch_manifest(
 
     if dry_run:
         return "manifest_patch_planned"
+    require_unsealed_recording_manifest(manifest_path, tool=TOOL_NAME)
     manifest_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return "manifest_patched"
 
@@ -108,6 +112,11 @@ def _patch_manifest(
 def _apply_operation(op: SidecarOperation, *, dry_run: bool, overwrite: bool, patch_manifest: bool) -> tuple[str, str]:
     status = _operation_status(op, overwrite=overwrite)
     rel_path = _relative_manifest_path(op.dest.parent.parent, op.dest)
+    if patch_manifest and not dry_run:
+        # Refuse before moving sidecars into a sealed transfer-v2 recording.
+        require_unsealed_recording_manifest(
+            op.dest.parent.parent / "recording_manifest.json", tool=TOOL_NAME
+        )
     if status == "exists_skip" or status == "destination_exists_source_missing":
         manifest_status = "manifest_not_requested"
         if patch_manifest:
