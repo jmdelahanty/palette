@@ -83,28 +83,45 @@ One row per fact. "Authority" is where readers must read the fact. "Derived" cop
 
 ## Intake module and the runner contract
 
-All intake facts are written through one module, proposed as `fisheye.intake`. Its public entry points are what the workflow runner calls (PR #288 §4 and §6). Nothing else in `src/` may call the owner functions for new recordings.
+All intake facts are written through one module, proposed as `fisheye.intake`. Its public entry points are what the workflow runner calls (PR #288 §4, §5.3 and §6). Nothing else in `src/` may call the owner functions for new recordings. This section was reconciled with cluster-runner (#288 commit `a39c04ac`).
 
-1. `discover(staging_dir, destination_root)`
-   - Lists targets from both live sealed markers and durable `.transfer_intake/<sha>/organization_state.json` states: `reserved`, `materialized`, `retiring`, and `complete` without a register sentinel.
-   - For each target, reports the state and its `admission_contract` mode.
-2. `import_delivery(snapshot_sha, run_dir, resume_plan=None)`
-   - Runs in an LSF job.
-   - Is idempotent and resumable from durable state, including `retiring` with the marker already gone.
-   - Writes nothing to the registry.
-3. `register_delivery(snapshot_sha)`
-   - Runs on the writer host (ws1) only.
+1. **`discover(staging_dir, destination_root)`**
+   - Lists targets from both live sealed markers and durable `.transfer_intake/<sha>/organization_state.json` states: `reserved`, `materialized`, `retiring`, and `complete` **where `probe_register(sha)` is false**.
+   - Runner sentinels are caches and are never read for discovery.
+   - Each target carries its state and its `admission_contract` mode. The mode is kept even after job-mode registration is retired, so an in-flight delivery that started under the old mode is reported rather than resumed in the wrong mode.
+2. **`import_delivery(snapshot_sha, run_dir, resume_plan=None)`**
+   - Runs in an LSF job and writes nothing to the registry.
+   - `run_dir` must not already exist. The runner passes a fresh `<flow_root>/intake/<sha>/attempt-<n>/` for each attempt.
+   - When durable state exists, the module loads `state["plan"]` itself. The explicit `resume_plan` is kept only as an operator override.
+   - It is idempotent and resumable from any durable state, including `retiring` with the marker already gone.
+3. **`register_delivery(snapshot_sha)`**
+   - Runs on the writer host only. Host identity (short name vs FQDN) is normalized in one place.
    - Writes **all** of the delivery's zarrs in **one** `publish_registry_shadow` mutation (new batch gateway function), so it is atomic per delivery.
    - Is idempotent.
-   - Refuses a synthetic `data_origin`, reading it from the stored plan.
-4. `probe_import(snapshot_sha)` and `probe_register(snapshot_sha)`
-   - Read durable NFS evidence only: receipts, bindings, state. They make no LSF calls.
-   - Return a verdict plus an evidence digest. These are the only definition of "done".
-5. Exit codes:
-   - non-zero whenever a step refused or didn't publish;
-   - a distinct code for "held by another live job".
+   - Refuses a synthetic `data_origin`, read from the stored plan.
+4. **`probe_import(snapshot_sha)` and `probe_register(snapshot_sha)`**
+   - Read durable NFS evidence only: receipts, bindings and intake state.
+   - Registry reads are read-only (`mode=ro`).
+   - They make no LSF calls.
+   - They return a verdict plus an evidence digest, and are the only definition of "done". Each digest is stable across replays:
+     - import: sha256 over the sorted (zarr path, receipt sha256) pairs;
+     - register: the same pairs plus the registry binding ids.
+5. **One claim mechanism.** Intake's own locks are the only claims; the runner takes none.
+   - **Import:** the existing transfer workflow lock, `fcntl.flock(LOCK_EX | LOCK_NB)` on `<destination_root>/.transfer_intake/<sha>` plus a lock suffix (`organize_transfer_recordings._coordinator_lock`).
+   - **Register:** a new per-delivery lock of the same kind.
+   - **How the locks behave across hosts:** on the NFSv4 store this is a server-side byte-range lock. It is released when the holding process exits, or after the NFS lease (about 90 s) if a client host dies. A file left behind does not hold the lock.
+   - **Ordering change:** the lock must be taken **before any side effect**. Today the workflow creates its run dir and status file before taking the lock (`citrus_transfer_parent_workflow.py:188-202`), so that order has to change.
+   - When the lock is held, the step exits 75 and the runner records "attached".
+6. **Exit codes:**
 
-Job-mode registration (the LSF job writing the registry) is retired. The writer host is ws1 (see open question 2).
+   | Code | Meaning | Runner action |
+   |---|---|---|
+   | 0 | published, and the matching probe is true | done |
+   | 65 | refused: the input is invalid (synthetic origin, mode conflict, contract violation) | not retried; it is an operator incident |
+   | 75 | held by another live job | attached, no retry |
+   | 1 | any other failure | retried |
+
+Job-mode registration (the LSF job writing the registry) is retired, and the writer host is ws1 (open question 2).
 
 ## Enforcement
 
