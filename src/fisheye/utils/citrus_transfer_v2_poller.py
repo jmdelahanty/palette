@@ -169,15 +169,17 @@ def poll(config: dict, *, dry_run: bool, runner: Runner = _run) -> int:
         key = claim_key(marker_path, marker["_marker_sha256"])
         command = build_command(config, session_dir, key)
         claimed, submitted = state / f"{key}.claimed", state / f"{key}.submitted"
-        if claimed.exists() or submitted.exists():
+        if submitted.exists():
             continue
+        if claimed.exists():
+            # Polls run one at a time under poller.lock, so a claim without a
+            # submission belongs to an earlier poll that died before recording
+            # it. Retry: the launcher returns the earlier job if LSF has one.
+            log(f"retrying unfinished claim key={key}")
         if dry_run:
             log(f"dry-run: would submit {shlex.join(command)}")
             continue
-        try:
-            fd = os.open(claimed, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-        except FileExistsError:
-            continue
+        fd = os.open(claimed, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
         with os.fdopen(fd, "w") as handle:
             json.dump({"marker": str(marker_path), "marker_sha256": marker["_marker_sha256"],
                        "snapshot_id": marker["snapshot_id"], "command": command}, handle)

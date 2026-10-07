@@ -201,6 +201,7 @@ def test_real_current_clipped_import_to_receipt_registry_and_pixel_resolver(
     root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=True)
     assert root.attrs["camera_id"] == CAMERA
     assert root.attrs["source_layout"] == "rolling_clips"
+    assert root.attrs["source_frame_index_schema"] == "palette.recording_frame_index.v1"
     assert root.attrs.get("source_video_path") is None
     assert root.attrs.get("source_video") is None
     assert "images_full" not in root["raw_video"]
@@ -250,6 +251,12 @@ def test_real_current_clipped_import_to_receipt_registry_and_pixel_resolver(
         assert (
             registry.read_verified_recording_import_by_path(plan.zarr_path) == verified
         )
+        # The registry projects the frame-index schema intake recorded.
+        (schema,) = registry.conn.execute(
+            "SELECT source_frame_index_schema FROM datasets WHERE zarr_path = ?",
+            (str(plan.zarr_path),),
+        ).fetchone()
+        assert schema == "palette.recording_frame_index.v1"
     finally:
         registry.close()
     before = {

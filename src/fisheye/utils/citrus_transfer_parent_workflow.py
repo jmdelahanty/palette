@@ -29,6 +29,7 @@ from fisheye.utils.organize_transfer_recordings import (
     _validate_plan,
     build_transfer_organization_plan,
     finalize_transfer_staging,
+    parent_zarr_paths,
     prepare_transfer_parent_recordings,
     transfer_parent_workflow_lock,
 )
@@ -218,6 +219,9 @@ def run_transfer_parent_workflow(args) -> int:
             final = finalize_transfer_staging(
                 plan, registry_path=registry, require_stimulus=not recording_only
             )
+            # Finalization verified each parent's receipt at these paths, so a
+            # replay reports what a fresh import reports; the registrar needs them.
+            payload["zarr_paths"] = [str(p) for p in parent_zarr_paths(plan)]
         else:
             prepare_transfer_parent_recordings(
                 plan, registry_path=registry, require_stimulus=not recording_only

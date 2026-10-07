@@ -44806,7 +44806,7 @@
       "enclosing_symbol": "fisheye.shared.acquisition_crop_stream_ledger:publish_acquisition_crop_stream_ledger",
       "file": "src/fisheye/shared/acquisition_crop_stream_ledger.py",
       "filters_expression": null,
-      "line": 1018,
+      "line": 1189,
       "parent_path_pattern": "<zarr-root:stream_group.store_path.store>/ledger_runs/<run_name>",
       "path_pattern": "<zarr-root:stream_group.store_path.store>/ledger_runs/<run_name>/<name>",
       "receiver_expression": null,
@@ -44814,7 +44814,7 @@
       "shape_expression": "shape(values)",
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-4995e5a7739f8c03",
+      "site_id": "writer-2d5f749ec2edcd4f",
       "status": "current",
       "status_basis": "packaged Palette module without a maintenance marker",
       "surface_class": "production",
@@ -44848,7 +44848,7 @@
       "enclosing_symbol": "fisheye.shared.acquisition_crop_stream_ledger:publish_acquisition_crop_stream_collection_ledger",
       "file": "src/fisheye/shared/acquisition_crop_stream_ledger.py",
       "filters_expression": null,
-      "line": 1171,
+      "line": 1342,
       "parent_path_pattern": "<zarr-root:stream_group.store_path.store>/ledger_runs/<run_name>",
       "path_pattern": "<zarr-root:stream_group.store_path.store>/ledger_runs/<run_name>/<name>",
       "receiver_expression": null,
@@ -44856,7 +44856,7 @@
       "shape_expression": "shape(values)",
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-a611739083a50396",
+      "site_id": "writer-49f4a9f490592bd2",
       "status": "current",
       "status_basis": "packaged Palette module without a maintenance marker",
       "surface_class": "production",
@@ -70383,7 +70383,7 @@
     "parsed_writer_candidate_module_count": 411,
     "reader_required_array_declaration_count": 117,
     "resolved_writer_leaf_name_count": 636,
-    "scanned_python_module_count": 1751,
+    "scanned_python_module_count": 1752,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
@@ -70419,7 +70419,7 @@
     "writer_wrapper_call_site_count": 998
   },
   "wrapper_analysis": {
-    "function_definition_count": 10662,
+    "function_definition_count": 10667,
     "writer_function_count": 246,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",
