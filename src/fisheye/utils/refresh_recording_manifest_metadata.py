@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
+from fisheye.shared.recording_manifest_seal import require_unsealed_recording_manifest
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 from fisheye.utils.organize_recordings import (
     _external_ipc_output_for_camera,
@@ -452,6 +453,9 @@ def build_refresh_plan(
 def apply_refresh_plan(plan: ManifestRefreshPlan) -> bool:
     if plan.error or not plan.has_updates:
         return False
+    require_unsealed_recording_manifest(
+        plan.manifest_path, tool="fisheye.utils.refresh_recording_manifest_metadata"
+    )
     for copy_plan in plan.artifact_copies:
         if copy_plan.dest.exists():
             continue
