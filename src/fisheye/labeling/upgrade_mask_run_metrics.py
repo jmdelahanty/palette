@@ -27,7 +27,7 @@ import json
 import shutil
 import sqlite3
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +35,7 @@ import numpy as np
 import zarr
 
 DEFAULT_BACKUP_DIR = Path("/groups/johnson/johnsonlab/jeremy/palette_backups/mask_run_metric_upgrades")
+ALREADY_FULL_REFUSAL = "the run already declares full (or no) component metrics"
 
 
 class MetricUpgradeRefused(RuntimeError):
@@ -103,7 +104,7 @@ def upgrade_plan(store_path: Path, zarr_path: Path, refined_run: str) -> dict[st
     tasks = _run_tasks(Path(store_path).expanduser().resolve(), zarr_path, refined_run)
     refusals = []
     if run_level in (None, "full") and all(level in (None, "full") for level in component_levels.values()):
-        refusals.append("the run already declares full (or no) component metrics")
+        refusals.append(ALREADY_FULL_REFUSAL)
     if "masks_roi" not in run:
         refusals.append("the run has no dense masks_roi")
     if not labels:
@@ -198,6 +199,67 @@ def upgrade_to_full(
         "review_counts": summary.get("review_counts"),
         "duration_seconds": summary.get("duration_seconds"),
     }
+
+
+def ensure_full_metrics_for_tasks(
+    store_path: Path,
+    tasks: Sequence[Mapping[str, object] | None],
+    *,
+    backup_dir: Path | None = None,
+) -> list[dict[str, object]]:
+    """Give the runs behind newly created subject-mask tasks full metrics.
+
+    Mask Apply requires full component metrics, so task creation upgrades
+    each distinct target run that declares cheap ones (with this module's
+    checks and backup). A run that cannot be upgraded now (for instance, a
+    labeler has a sibling task on it open) is reported, not failed, so the
+    caller can warn; the operator command upgrades it later.
+    """
+
+    runs: dict[tuple[str, str], list[str]] = {}
+    for task in tasks:
+        if not task or task.get("workflow_kind") != "subject_mask_component" or task.get("state") == "complete":
+            continue
+        scope = task.get("scope") if isinstance(task.get("scope"), Mapping) else {}
+        zarr_path, refined_run = scope.get("zarr_path"), scope.get("refined_run") or task.get("run_name")
+        if zarr_path and refined_run:
+            runs.setdefault((str(zarr_path), str(refined_run)), []).append(str(task.get("task_id")))
+    results = []
+    for (zarr_path, refined_run), task_ids in runs.items():
+        result: dict[str, object] = {"zarr_path": zarr_path, "refined_run": refined_run, "task_ids": task_ids}
+        try:
+            plan = upgrade_plan(store_path, Path(zarr_path), refined_run)
+            if ALREADY_FULL_REFUSAL in plan["refusals"]:
+                result["status"] = "already_full"
+            elif not plan["ok"]:
+                result.update(status="not_upgraded", refusals=plan["refusals"])
+            else:
+                done = upgrade_to_full(store_path, Path(zarr_path), refined_run, backup_dir=backup_dir or DEFAULT_BACKUP_DIR)
+                result.update(status="upgraded", backup_path=done["backup_path"])
+        except Exception as exc:  # noqa: BLE001 - reported to the caller as a warning
+            result.update(status="not_upgraded", refusals=[f"{type(exc).__name__}: {exc}"])
+        results.append(result)
+    return results
+
+
+def metric_upgrade_warnings(results: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """Warnings for task-creation reports: runs left without full metrics."""
+
+    return [
+        {
+            "code": "subject_mask_task_run_metrics_not_full",
+            "zarr_path": r["zarr_path"],
+            "refined_run": r["refined_run"],
+            "task_ids": r["task_ids"],
+            "refusals": r.get("refusals"),
+            "details": (
+                "Mask Apply on these tasks will refuse until the run has full metrics: run "
+                "scripts/py -m fisheye.labeling.upgrade_mask_run_metrics --execute once no one has it open."
+            ),
+        }
+        for r in results
+        if r.get("status") == "not_upgraded"
+    ]
 
 
 def _parser() -> argparse.ArgumentParser:

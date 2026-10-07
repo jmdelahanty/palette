@@ -319,8 +319,21 @@ def _find_default_h5_for_zarr_path(zarr_path: Path) -> Optional[Path]:
         return candidates[0]
 
 
+def _h5_items(mapping: Any) -> list[tuple[str, Any]]:
+    """Read an h5py group or attribute mapping into a list before writing Zarr.
+
+    h5py's ``items()`` iterator holds h5py's global lock (``phil``) for as long
+    as the loop runs. A Zarr call inside that loop blocks this thread on Zarr's
+    event-loop thread; if a garbage collection there frees an h5py object, the
+    object's dealloc waits for ``phil`` and both threads deadlock (CI shard
+    hangs, 2026-10-07). Materializing first releases ``phil`` before any Zarr I/O.
+    """
+
+    return list(mapping.items())
+
+
 def _copy_h5_attrs_to_zarr_attrs(src: h5py.Group | h5py.Dataset, dst: zarr.Group) -> None:
-    for attr_name, attr_value in src.attrs.items():
+    for attr_name, attr_value in _h5_items(src.attrs):
         dst.attrs[attr_name] = _normalize_attr_value(attr_value)
 
 
@@ -364,7 +377,7 @@ def _copy_h5_group_to_zarr_mirror(src: h5py.Group, dst: zarr.Group) -> None:
     for leftover in existing_children - source_children:
         del dst[leftover]
 
-    for child_name, child in src.items():
+    for child_name, child in _h5_items(src):
         if isinstance(child, h5py.Group):
             if child_name in dst and not isinstance(dst[child_name], zarr.Group):
                 del dst[child_name]
@@ -1588,10 +1601,10 @@ def _infer_camera_fps(metadata: np.ndarray) -> Optional[float]:
 def _copy_h5_tree(src: h5py.Group, dst: zarr.Group) -> None:
     """Copy an H5 group tree into Zarr, preserving attrs and simple datasets."""
 
-    for attr_name, attr_value in src.attrs.items():
+    for attr_name, attr_value in _h5_items(src.attrs):
         dst.attrs[attr_name] = _json_safe_value(_normalize_attr_value(attr_value))
 
-    for name, node in src.items():
+    for name, node in _h5_items(src):
         if isinstance(node, h5py.Group):
             child = dst.require_group(name)
             _copy_h5_tree(node, child)

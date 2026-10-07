@@ -1647,7 +1647,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-8ec988ece17e91ed"
+            "schema-writer-a1b00b385c92c4c6"
           ],
           "shape": "<unresolved>"
         },
@@ -3851,7 +3851,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-949a99e5081a626c"
+            "schema-writer-7a77d8f95ed30711"
           ],
           "shape": "shape(h5['/video_metadata/frame_metadata'][:])"
         },
@@ -4552,7 +4552,7 @@
         {
           "dtype": "bool",
           "occurrence_ids": [
-            "schema-writer-aeffb4c5ad882f05"
+            "schema-writer-1d1b68d8b0630734"
           ],
           "shape": "frame_metadata.shape[0]"
         },
@@ -5691,7 +5691,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-630bd5bd09905edc"
+            "schema-writer-0d7c6bb0e307abc6"
           ],
           "shape": "shape(name_values)"
         }
@@ -27181,8 +27181,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 819,
-      "occurrence_id": "schema-writer-632fa959702a293c",
+      "line": 832,
+      "occurrence_id": "schema-writer-7b7cd3b341e49f8d",
       "path_pattern": "<analysis_group>/enums/<name>/id",
       "required": null,
       "shape_expression": "shape(data['id'])",
@@ -27194,7 +27194,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-39562ff730c76990"
+      "writer_site_id": "writer-2e04e705609116c9"
     },
     {
       "access_pattern": "unclassified",
@@ -27215,8 +27215,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 820,
-      "occurrence_id": "schema-writer-630bd5bd09905edc",
+      "line": 833,
+      "occurrence_id": "schema-writer-0d7c6bb0e307abc6",
       "path_pattern": "<analysis_group>/enums/<name>/name",
       "required": null,
       "shape_expression": "shape(name_values)",
@@ -27228,7 +27228,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-8702c683cd27a900"
+      "writer_site_id": "writer-f74af89818b11365"
     },
     {
       "access_pattern": "unclassified",
@@ -27249,8 +27249,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 977,
-      "occurrence_id": "schema-writer-a07a369e48dc7882",
+      "line": 990,
+      "occurrence_id": "schema-writer-c902d63ea8e740a1",
       "path_pattern": "<run_group>/<child_name>/execution_index_json_utf8",
       "required": null,
       "shape_expression": "shape(np.frombuffer(execution.execution_json.encode('utf-8'), dtype=np.uint8).copy())",
@@ -27262,7 +27262,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-7242d430d3fc27c2"
+      "writer_site_id": "writer-38b0a76ef6373107"
     },
     {
       "access_pattern": "windowed",
@@ -27283,8 +27283,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 3292,
-      "occurrence_id": "schema-writer-949a99e5081a626c",
+      "line": 3305,
+      "occurrence_id": "schema-writer-7a77d8f95ed30711",
       "path_pattern": "<run_group>/video_metadata/frame_metadata",
       "required": null,
       "shape_expression": "shape(h5['/video_metadata/frame_metadata'][:])",
@@ -27296,7 +27296,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-edb529a94df693bd"
+      "writer_site_id": "writer-859720ae0e07c7c6"
     },
     {
       "access_pattern": "windowed",
@@ -27317,8 +27317,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 3318,
-      "occurrence_id": "schema-writer-dcf2657f050db0ac",
+      "line": 3331,
+      "occurrence_id": "schema-writer-cb9f38aa5264a067",
       "path_pattern": "<run_group>/video_metadata/camera_aligned_frame_metadata",
       "required": null,
       "shape_expression": "shape(camera_aligned_metadata)",
@@ -27330,7 +27330,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-0e99974ad9cf4357"
+      "writer_site_id": "writer-6ee72f8b122407ff"
     },
     {
       "access_pattern": "unclassified",
@@ -27351,8 +27351,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 3326,
-      "occurrence_id": "schema-writer-aeffb4c5ad882f05",
+      "line": 3339,
+      "occurrence_id": "schema-writer-1d1b68d8b0630734",
       "path_pattern": "<run_group>/interpolation_mask",
       "required": null,
       "shape_expression": "frame_metadata.shape[0]",
@@ -27364,7 +27364,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-dc64c670e38163af"
+      "writer_site_id": "writer-0ffa726a823ef108"
     },
     {
       "access_pattern": "unclassified",
@@ -27385,8 +27385,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 3334,
-      "occurrence_id": "schema-writer-6cfc65f7d527e53c",
+      "line": 3347,
+      "occurrence_id": "schema-writer-bb6acbcb9b1330eb",
       "path_pattern": "<run_group>/camera_aligned_interpolation_mask",
       "required": null,
       "shape_expression": "shape(interpolation_mask[camera_aligned_indices])",
@@ -27398,7 +27398,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-9a3408f6a90d0e0c"
+      "writer_site_id": "writer-eda113643dc53d71"
     },
     {
       "access_pattern": "unclassified",
@@ -27419,8 +27419,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 3359,
-      "occurrence_id": "schema-writer-8ec988ece17e91ed",
+      "line": 3372,
+      "occurrence_id": "schema-writer-a1b00b385c92c4c6",
       "path_pattern": "<unresolved-parent>/chaser_states",
       "required": null,
       "shape_expression": null,
@@ -27432,7 +27432,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-9c1ca5aa3eeb215f"
+      "writer_site_id": "writer-69b46844a0044ac2"
     },
     {
       "access_pattern": "unclassified",
@@ -27453,8 +27453,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 3360,
-      "occurrence_id": "schema-writer-a44e4ed9257b6e16",
+      "line": 3373,
+      "occurrence_id": "schema-writer-3f6f5b0fa2a3305b",
       "path_pattern": "<unresolved-parent>/bounding_boxes",
       "required": null,
       "shape_expression": null,
@@ -27466,7 +27466,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-1c8bb3620bc4fb47"
+      "writer_site_id": "writer-d466a6a16a5dc992"
     },
     {
       "access_pattern": "indexed",
@@ -27487,8 +27487,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/import_stimulus_to_zarr.py",
-      "line": 3387,
-      "occurrence_id": "schema-writer-ca8e55f996822fc2",
+      "line": 3400,
+      "occurrence_id": "schema-writer-07bc6eecfe0a98e3",
       "path_pattern": "<run_group>/events/values",
       "required": null,
       "shape_expression": "shape(_ensure_utf8_column(values))",
@@ -27500,7 +27500,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-55b832c784bc364c"
+      "writer_site_id": "writer-b42f41c5ffb2b7ea"
     },
     {
       "access_pattern": "unclassified",
