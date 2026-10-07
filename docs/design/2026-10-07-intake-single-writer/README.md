@@ -1,6 +1,6 @@
 # Intake: one source of truth and one writer per fact
 
-- **Status:** draft for review. No code changes yet.
+- **Status:** approved 2026-10-07 (decision log below); rollout step 1 in progress (see "Implementation status").
 - **Owner:** Jeremy Delahanty.
 - **Last reviewed:** 2026-10-07.
 - **Census basis:** three read-only census passes over `origin/main` @ `98f458e9` (2026-10-07). They covered recording identity and context; subject, setup and stimulus; and video, crops, completion and the registry. File and line references below are to that commit and are relative to `src/fisheye/`.
@@ -172,3 +172,37 @@ Each step is a small PR. Bugs ship first because they affect new recordings toda
 3. **Subject precedence:** approved as written. The H5 subject record is authoritative whenever the H5 declares one; Orange fills in only when the H5 declares none or a declared absence.
 4. **Exact registry mirror:** approved, scoped to current-source (receipt-bound transfer-v2) rows: those mirror the authority exactly, NULL included. Historical rows keep COALESCE.
 5. **Deletion list:** approved. Each removal is its own PR, with callers checked again at that commit.
+
+## Corrections from the 2026-10-07 intake review
+
+An independent read-only review of `main` @ `b8009267` checked this census. Its corrections are accepted:
+
+- **B6 overcounted.** `set_recording_subject_metadata` already refuses current-source edits through the source-identity profile, and its test asserts the files are unchanged. The other six writers were unguarded. #297 adds a shared guard to all seven; for this tool the guard is redundant but harmless.
+- **B10 overclaimed.** Different `artifact_schema_id` values name different artifacts: the parent manifest and the analysis Zarr. That is not a bug, and any unification needs its own schema decision. The `source_layout` single-video vs `rolling_clips` overload is a naming cleanup (rollout step 6), not a defect.
+- **B4 depends on the entry path.** Registry reconciliation passes genotype/age fallbacks to the profile extractors, so not every profile row is null. Direct profile extraction can still miss the canonical subject record.
+- **Legacy H5 subject publish twice:** the publisher's idempotence can reuse the record, so this is duplicated ownership rather than duplicate stored runs.
+- **The geometry "gap" was wrong.** A bare `recording_snapshot.json` is not a geometry bundle. The open question is which readers need a provenance snapshot and which need validated geometry; moving the file would not help.
+
+The review also found bugs this census missed:
+
+- **F2a:** a poll that died between claiming and submitting stranded the delivery forever. Fixed in #299.
+- **F2b:** a replay from `retiring`/`complete` published `status=complete` without `zarr_paths`, so the registrar never registered it. Fixed in #299.
+- **F1:** the workflow passes the parent list through a synthetic JSONL log and parses Zarr paths back out of the importer's log. `fisheye.intake` must replace this subprocess/log chain, not wrap it.
+- **F9:** each camera's frame-index build re-verifies the whole delivery several times. Address this after correctness with an operation-scoped verified snapshot, keeping independent validation at custody transitions, and measure before and after.
+
+## Implementation status
+
+The first real Orange bundle (4 cameras, rolling clips with crops) completed end to end in an isolated trial root and registry copy on 2026-10-07, using the PRs below. It also exposed failures the census had not predicted, fixed in #294, #298, #302 and #300.
+
+| Item | PR | State on 2026-10-07 |
+|---|---|---|
+| Orange frame-identity proof v2 validator | #294 | merged |
+| fsync chain stops at the `/groups` automount (organize) | #298 | merged |
+| fsync barrier stops at the automount (pre-retirement flush) | #302 | queued |
+| Crop ledger sized from Orange's declared crop video (pinned Orange schemas) | #300 | queued |
+| B1 + B2 subject precedence; retried unified intake projects the subject | #295 | queued |
+| B6 sealed manifests immutable after organize | #297 | queued |
+| B3 + B9 setup counts ids from the record (dish-group id not counted); H5 biology checked against the seal | #296 | queued (batch) |
+| F2a + F2b recovery | #299 | queued (batch) |
+| `source_frame_index_schema` recorded for transfer-v2 (part of B5/F10) | #301 | queued (batch) |
+| Rest of B5 (fps/codec/size/color range), B4, B7, B8, and steps 3-6 | — | not started |
