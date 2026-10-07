@@ -1,0 +1,10 @@
+SYNTHETIC TEST FIXTURE — NEVER SUBMIT TO PRODUCTION STAGING.
+MP4 payloads are real tiny FFmpeg/libx264-generated videos.
+recording_session.json and every *.finalization.json are SYNTHETIC
+Orange-shaped test envelopes, NOT evidence emitted by an Orange encoder.
+Frame/packet counts and file sizes were measured from these synthetic
+videos; submission/write-operation success fields are synthetic test
+declarations, not captured Orange lifecycle telemetry. Timestamps are
+fabricated exact integers at 2 fps, NOT measured clocks or PTP proof.
+The Citrus transfer CLI is real and pinned; its success proves only
+the limited transport claim, not Palette/scientific/registry admission.

@@ -117,7 +117,7 @@ containers = ["fisheye"]
 # Every present first-level package is mandatory here.  Keep only genuinely
 # absent extension namespaces optional; exhaustive mode rejects silent drift.
 layers = [
-  "__main__ : analysis : analysis_workflows : analytics_exports : api : (apps) : baseline_strategy : cli : cluster : cohorts : core : detection : detection_quality_test : diagnostics : (docs) : (group_analytics) : group_analytics_viewer : group_statistics : inference : labeling : montage : pose : preprocessing : refinement : registry : reporting : segmentation : status_page : test_decord_minimal : test_standalone : test_system_utils : test_video_end_frames : tracking : training : training_response : tune : utils : visualization",
+  "__main__ : analysis : analysis_workflows : analytics_exports : api : (apps) : baseline_strategy : cli : cluster : cohorts : core : detection : detection_quality_test : diagnostics : (docs) : (group_analytics) : group_analytics_viewer : group_statistics : inference : intake : labeling : montage : pose : preprocessing : refinement : registry : reporting : segmentation : status_page : test_decord_minimal : test_standalone : test_system_utils : test_video_end_frames : tracking : training : training_response : tune : utils : visualization",
   "shared",
 ]
 exhaustive = true
