@@ -81,7 +81,7 @@ def test_marker_refuses_non_rfc3339_datetime_spellings(
     marker = json.loads((root / MARKER_NAME).read_bytes())
     marker["delivery"]["created_utc"] = timestamp
     write_json(root / MARKER_NAME, marker)
-    with pytest.raises(TransferSnapshotError, match="RFC3339"):
+    with pytest.raises(TransferSnapshotError, match="marker violates the transfer-v2 envelope schema at delivery/created_utc: .* is not a .date-time."):
         verify_transfer_snapshot(root)
 
 
