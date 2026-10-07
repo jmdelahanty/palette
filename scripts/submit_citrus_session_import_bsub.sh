@@ -4,10 +4,10 @@ set -euo pipefail
 SESSION_DIR=""
 MARKER_KEY=""
 LOG_DIR=""
-QUEUE="short"
+QUEUE=""
 NCORES=1
-MEM_GB=4
-WALLTIME="1:00"
+MEM_GB=16
+WALLTIME="4:00"
 RUN_ID=""
 DRY_RUN=0
 DEST_ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
@@ -32,10 +32,10 @@ Options:
   --marker-key HASH              Stable marker key from the poller
   --log-dir PATH                 Submission logs/job scripts
                                 (default: <session-parent>/.processing_logs/bsub_submissions)
-  --queue NAME                   LSF queue (default: short)
+  --queue NAME                   LSF queue (default: the cluster default queue)
   --ncores N                     CPU slots (default: 1)
-  --mem-gb N                     Memory request in GB (default: 4)
-  --walltime H:MM                LSF wall time (default: 1:00)
+  --mem-gb N                     Memory request in GB (default: 16)
+  --walltime H:MM                LSF wall time (default: 4:00)
   --run-id ID                    Stable run id (default: UTC timestamp)
   --dest-root PATH               Organized recordings root
                                 (default: /groups/johnson/johnsonlab/jeremy/recordings)

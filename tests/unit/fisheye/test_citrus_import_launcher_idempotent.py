@@ -136,3 +136,14 @@ def test_an_unknown_bjobs_answer_never_submits(tmp_path: Path, body: str) -> Non
     assert result.returncode == 1
     assert _bsub_calls(fakes) == []
     assert not (tmp_path / "logs" / "by_marker").exists()
+
+
+def test_default_resources_fit_a_full_multicamera_delivery(tmp_path: Path) -> None:
+    # 1 h / 4 GB on the short queue was too tight for a real 12 GB four-camera
+    # delivery (2026-10-07); the default is the cluster queue with 4 h / 16 GB.
+    fakes = _setup(tmp_path, bsub_output="Job <4243> is submitted to default queue <local>.")
+    result = _launch(tmp_path, fakes, "attempt-1")
+    assert result.returncode == 0, result.stderr
+    [call] = _bsub_calls(fakes)
+    assert "-W 4:00" in call and "rusage[mem=16G]" in call
+    assert " -q " not in call
