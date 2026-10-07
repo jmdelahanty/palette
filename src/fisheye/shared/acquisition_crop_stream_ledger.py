@@ -519,6 +519,21 @@ def _collection_media_identity(
     }
 
 
+def _declared_crop_video_size(
+    crop: Mapping[str, Any], *, clip_index: int
+) -> tuple[int, int] | None:
+    """The encoded crop video's (width, height) if the clip manifest declares it."""
+
+    width, height = crop.get("width"), crop.get("height")
+    if width is None and height is None:
+        return None
+    if type(width) is not int or type(height) is not int or width <= 0 or height <= 0:
+        raise ValueError(
+            f"Clip {clip_index} crop output declares an invalid size {(width, height)}."
+        )
+    return width, height
+
+
 def _infer_collection_crop_shape(metadata_paths: list[Path]) -> tuple[int, int]:
     for path in metadata_paths:
         with path.open("r", encoding="utf-8", newline="") as handle:
@@ -661,6 +676,7 @@ def _validated_collection_contract(
         raise ValueError(f"Recording clip index has no rows for camera {camera_id}.")
 
     unresolved_members: list[dict[str, Any]] = []
+    declared_sizes: list[tuple[int, int] | None] = []
     expected_first = 1
     for expected_member_index, row in enumerate(camera_rows):
         clip_index = int(row.get("clip_index", -1))
@@ -698,6 +714,7 @@ def _validated_collection_contract(
         full = camera_outputs.get("full")
         if not isinstance(crop, Mapping) or not isinstance(full, Mapping):
             raise ValueError(f"Clip {clip_index} lacks crop or full video output.")
+        declared_sizes.append(_declared_crop_video_size(crop, clip_index=clip_index))
         for role, output in (("crop", crop), ("full", full)):
             if int(output.get("first_recording_frame_id", -1)) != first_frame_id:
                 raise ValueError(
@@ -744,9 +761,21 @@ def _validated_collection_contract(
             }
         )
 
-    crop_width, crop_height = _infer_collection_crop_shape(
-        [member["crop_metadata_path"] for member in unresolved_members]
-    )
+    if any(size is not None for size in declared_sizes):
+        # The encoded crop video's size as the clip manifests declare it. Rows
+        # are checked against it below, so a stream with no detection all
+        # session (every row blank) is admitted rather than left with no row
+        # to infer a size from.
+        if None in declared_sizes or len(set(declared_sizes)) != 1:
+            raise ValueError(
+                f"Rolling crop clips declare inconsistent crop video sizes: {declared_sizes}."
+            )
+        crop_width, crop_height = declared_sizes[0]
+    else:
+        # Clip manifests that predate the declaration: infer from detected rows.
+        crop_width, crop_height = _infer_collection_crop_shape(
+            [member["crop_metadata_path"] for member in unresolved_members]
+        )
     parsed_members: list[_ParsedLedger] = []
     members: list[dict[str, Any]] = []
     for member in unresolved_members:
