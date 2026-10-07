@@ -593,10 +593,12 @@ def _producer_crop_descriptor(
 
     if (
         clip_manifest.get("schema_id") != TRANSFER_CLIP_PROJECTION_SCHEMA_ID
-        or "original_clip_manifest" not in clip_manifest
+        or clip_manifest.get("original_clip_manifest") is None
     ):
-        # An Orange clip manifest, or a projection with no original to read:
-        # use the descriptor as given (no size means the row inference).
+        # An Orange clip manifest, or a projection with no original to read
+        # (build_transfer_parent_frame_index writes null when the producer
+        # shipped no clip manifest): use the descriptor as given (no size
+        # means the row inference).
         return crop
     original = clip_manifest.get("original_clip_manifest")
     transfer = clip_manifest.get("source_transfer")
