@@ -22,6 +22,9 @@ from zoneinfo import ZoneInfo
 SUBJECT_TYPES = ("individual", "dish_group")
 # Fertilization dates are lab calendar days, so the recording day must be too:
 # an evening recording is already "tomorrow" in UTC (Citrus counts locally).
+# Owner's statement: metazebrobot docs/zebrobot_snapshot.md "Dates and times"
+# (commit 49cc930): calendar days are America/New_York; updated_at/created_at
+# are UTC without an offset; *_utc fields carry an explicit Z.
 LAB_TIMEZONE = ZoneInfo("America/New_York")
 LOOKUP_STATUSES = ("collected", "not_collected", "lookup_failed")
 # The manual CLI's "group" means a dish group (decided 2026-10-06).
