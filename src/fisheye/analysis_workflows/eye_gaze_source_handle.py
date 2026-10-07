@@ -21,6 +21,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from fisheye.analysis.eye_angle_io import EyeAngleIOError, read_compact_axis_columns
 from fisheye.analysis.gaze_convention_validation import (
     EXPECTED_GAZE_SIGN_CONVENTION,
     SCHEMA_ID as NUMERIC_VALIDATION_SCHEMA_ID,
@@ -30,7 +31,6 @@ from fisheye.analysis_workflows.eye_angle_candidate_execution import (
     eye_angle_logical_manifest_sha256,
 )
 from fisheye.shared.eye_angle_schema import validate_eye_angle_compact_run
-from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
@@ -111,16 +111,6 @@ def _readonly(value: Any) -> np.ndarray:
     result = np.array(value, copy=True, order="C")
     result.setflags(write=False)
     return result
-
-
-def _decode_names(index_group: Any, expected_count: int) -> tuple[str, ...]:
-    raw = np.asarray(index_group["name"][:], dtype=np.uint8)
-    if raw.ndim != 2 or raw.shape[0] != expected_count:
-        _fail("Eye channel-name index shape differs from its packed array.")
-    names = tuple(decode_null_terminated_text(row) for row in raw)
-    if any(not name for name in names) or len(set(names)) != len(names):
-        _fail("Eye channel-name index is empty or duplicated.")
-    return names
 
 
 def _reviewed_at(value: object) -> str:
@@ -370,28 +360,27 @@ def _load_snapshot(
         expected_run_path=run_path,
         expected_logical_sha256=logical_digest,
     )
-    frame_angles = np.asarray(run["frame_angles"][:])
-    frame_qa = np.asarray(run["frame_qa"][:])
-    angle_names = _decode_names(run["angle_channel_index"], frame_angles.shape[1])
-    qa_names = _decode_names(run["qa_channel_index"], frame_qa.shape[1])
     suffix = "" if channel_variant == "raw" else "_smoothed"
     required_angles = (
         f"left_gaze_signed_deg{suffix}",
         f"right_gaze_signed_deg{suffix}",
         f"vergence_eye_angle_deg{suffix}",
     )
-    missing = [name for name in required_angles if name not in angle_names]
-    if missing or "valid_frame" not in qa_names:
-        _fail(f"Eye frame tables lack required semantic channels: {missing!r}.")
+    try:
+        angle_columns = read_compact_axis_columns(
+            run, family="angle", axis="frame", names=required_angles
+        )
+        qa_columns = read_compact_axis_columns(
+            run, family="qa", axis="frame", names=("valid_frame",)
+        )
+    except EyeAngleIOError as exc:
+        _fail(f"Eye frame tables lack required semantic channels: {exc}")
+    n_frames = int(run["frame_angles"].shape[0])
     gaze = np.column_stack(
-        [frame_angles[:, angle_names.index(name)] for name in required_angles[:2]]
+        [angle_columns[name] for name in required_angles[:2]]
     ).astype(np.float64, copy=False)
-    vergence = np.asarray(
-        frame_angles[:, angle_names.index(required_angles[2])], dtype=np.float64
-    )
-    frame_valid = np.asarray(
-        frame_qa[:, qa_names.index("valid_frame")], dtype=bool
-    )
+    vergence = np.asarray(angle_columns[required_angles[2]], dtype=np.float64)
+    frame_valid = np.asarray(qa_columns["valid_frame"], dtype=bool)
     gaze_valid = frame_valid[:, None] & np.isfinite(gaze)
     vergence_valid = frame_valid & np.isfinite(vergence)
     recording_id = _text(root.attrs.get("recording_id"), field_name="recording_id")
@@ -412,14 +401,14 @@ def _load_snapshot(
     return {
         "recording_id": recording_id,
         "selector_eligible": selector_eligible,
-        "n_frames": int(frame_angles.shape[0]),
+        "n_frames": n_frames,
         "channel_variant": channel_variant,
         "gaze_channel_names": tuple(required_angles[:2]),
         "vergence_channel_name": required_angles[2],
         "logical_manifest_sha256": logical_digest,
         "convention_receipt": receipt,
         "convention_receipt_sha256": str(receipt["receipt_sha256"]),
-        "frame_acquisition_id": np.arange(frame_angles.shape[0], dtype=np.int64),
+        "frame_acquisition_id": np.arange(n_frames, dtype=np.int64),
         "gaze_signed_deg": gaze,
         "gaze_valid": gaze_valid,
         "vergence_deg": vergence,
