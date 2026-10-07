@@ -162,3 +162,13 @@ Each step is a small PR. Bugs ship first because they affect new recordings toda
 3. **Subject precedence:** the H5 is authoritative whenever it declares a subject record; Orange fills in only when the H5 declares none or a declared absence. Agree?
 4. **Exact registry mirror:** current-source registry rows mirror the authority exactly, NULL included, instead of COALESCE. Agree?
 5. **Deletion list:** approve deleting the unused legacy writers listed under "Removed", after their callers are checked again at the time of each PR.
+
+## Decision log
+
+2026-10-07: Jeremy's answers to the five questions above, relayed by the cluster-runner agent. Recorded here as relayed; implementation of each item starts after Jeremy confirms them directly.
+
+1. **Legacy H5:** approved. New transfer-v2 deliveries carrying a non-unified H5 are refused; reading legacy archives stays supported.
+2. **Job-mode registration:** approved for retirement. Registration happens only on the workstation writer host (ws1).
+3. **Subject precedence:** approved as written. The H5 subject record is authoritative whenever the H5 declares one; Orange fills in only when the H5 declares none or a declared absence.
+4. **Exact registry mirror:** approved, scoped to current-source (receipt-bound transfer-v2) rows: those mirror the authority exactly, NULL included. Historical rows keep COALESCE.
+5. **Deletion list:** approved. Each removal is its own PR, with callers checked again at that commit.
