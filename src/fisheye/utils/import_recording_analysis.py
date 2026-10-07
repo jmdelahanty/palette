@@ -85,6 +85,7 @@ from fisheye.shared.source_recording_identity import (
     load_source_recording_identity_profile,
     load_strict_json_object,
 )
+from fisheye.shared.subject_fields import from_orange_reference
 from fisheye.shared.subject_metadata import (
     MissingSubjectMetadataError,
     normalize_subject_metadata,
@@ -637,7 +638,7 @@ def import_experiment_setup(plan: RecordingAnalysisPlan) -> Optional[dict[str, A
         return None
     root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
     return _publish_subject_and_setup(
-        root, subject_metadata, source_h5_path=plan.h5_path
+        root, subject_metadata, source_h5_path=plan.h5_path, translator="h5_attributes"
     )
 
 
@@ -667,42 +668,72 @@ def import_zebrobot_subject_reference(
     # exists: a stimulus session's subject record comes from the Citrus H5.
     root.attrs["orange_subject_reference_status"] = resolved.status
     root.attrs["orange_subject_reference_reason"] = resolved.reason
-    if resolved.status != "collected":
-        return {"status": resolved.status, "reason": resolved.reason}
     try:
         existing = resolve_subject_metadata(root, allow_legacy=False)
     except MissingSubjectMetadataError:
         existing = None
-    if existing is not None:
-        # dish_uuid when both sides have one; else the operator-declared dish_id
-        # (a Citrus lookup can fail and still record dish_id).
-        h5_uuid = existing.metadata.get("dish_uuid")
-        h5_dish = existing.metadata.get("dish_id")
-        if h5_uuid is not None:
-            field, h5_value = "dish_uuid", h5_uuid
-        elif h5_dish is not None:
-            field, h5_value = "dish_id", h5_dish
-        else:
-            field, h5_value = None, None
-        if field is not None and str(h5_value) != str(resolved.metadata[field]):
-            raise ValueError(
-                f"zebrobot_dish_mismatch: Orange declared {field} "
-                f"{resolved.metadata[field]!r} but the H5 records {h5_value!r}"
+    if resolved.status != "collected":
+        if existing is None:  # a declared absence is recorded, never filled in
+            publish_subject_metadata(
+                root,
+                {"subject_lookup_status": resolved.status, "subject_lookup_reason": resolved.reason},
+                source_artifact=resolved.source,
+                translator="declared_absence",
             )
-        return {"status": "collected", "published": False, "cross_checked": field,
+        return {"status": resolved.status, "reason": resolved.reason}
+    if existing is not None and (
+        existing.subject.get("dish_uuid") or existing.subject.get("dish_id")
+    ):
+        return {"status": "collected", "published": False,
+                **_cross_check_h5_subject(existing.subject, resolved.metadata),
                 **resolved.source}
+    # No subject record, or one declaring no dish (a Citrus v3 session without
+    # a dish): Orange's reference supplies the subject.
     if "subject_count" in resolved.metadata:
         setup = _publish_subject_and_setup(
-            root, resolved.metadata, source_artifact=resolved.source
+            root, resolved.metadata, source_artifact=resolved.source,
+            translator="orange_reference",
         )
         return {"status": "collected", "published": True,
                 "experiment_setup": True, **setup, **resolved.source}
     authority = publish_subject_metadata(
-        root, resolved.metadata, source_artifact=resolved.source
+        root, resolved.metadata, source_artifact=resolved.source, translator="orange_reference",
     )
     root.attrs["experiment_setup_status"] = "subject_count_not_declared"
     return {"status": "collected", "published": True, "experiment_setup": False,
             "subject_metadata_run": authority.run_name, **resolved.source}
+
+
+def _cross_check_h5_subject(h5: Mapping[str, Any], orange: Mapping[str, Any]) -> dict[str, Any]:
+    """Orange's reference against the H5 subject (authoritative for bound sessions).
+
+    The dish must match: ``dish_uuid`` when the H5 has one, else the declared
+    ``dish_id`` (a Citrus lookup can fail and still record it). Sex and
+    genotype must match too, unless MetaZebrobot shows the dish was edited
+    since recording (then Orange's intake copy may legitimately differ).
+    """
+
+    if h5.get("dish_uuid"):
+        field = "dish_uuid"
+    else:
+        field = "dish_id"
+    if str(h5[field]) != str(orange.get(field)):
+        raise ValueError(
+            f"zebrobot_dish_mismatch: Orange declared {field} "
+            f"{orange.get(field)!r} but the H5 records {h5[field]!r}"
+        )
+    canonical = from_orange_reference(orange)
+    differing = [
+        name for name in ("sex", "genotype")
+        if h5.get(name) and canonical.get(name) and h5[name] != canonical[name]
+    ]
+    if differing and not orange.get("dish_changed_since_recording"):
+        raise ValueError(
+            "zebrobot_subject_mismatch: "
+            + ", ".join(f"{name} H5={h5[name]!r} Zebrobot={canonical[name]!r}" for name in differing)
+            + " for an unchanged dish"
+        )
+    return {"cross_checked": field, "biology_differs_after_dish_edit": differing}
 
 
 def require_unified_source_matches_recording(
@@ -759,13 +790,17 @@ def project_unified_subject_metadata(
     snapshot_admission = admit_subject_snapshot(snapshot, attributes)
     if snapshot_admission["citrus_snapshot_status"] == "admitted" and "subject_id" not in attributes:
         # v3 writes /metadata/subject in every session; with no dish declared it
-        # holds only lookup statuses (declared absence). Record them, publish no
-        # subject record, so an Orange reference for the camera can still publish.
+        # holds only lookup statuses (declared absence). Publish them as a
+        # statuses-only record with no experiment setup; an Orange reference for
+        # the camera can still supply the dish (import_zebrobot_subject_reference).
         root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
-        for name in ("subject_lookup_status", "subject_lookup_reason",
-                     "fish_reference_status", "fish_reference_reason"):
-            if name in attributes:
-                root.attrs[f"citrus_{name}"] = attributes[name]
+        publish_subject_metadata(
+            root, attributes, translator="declared_absence",
+            source_artifact={**snapshot_admission, "kind": "unified_native_subject_metadata",
+                             "group_path": "/metadata/subject", "native_run_path": run_path,
+                             "unified_reference_sha256": str(source_reader.reference_sha256),
+                             "source_profile": UNIFIED_H5_PROFILE},
+        )
         return None
     subject_metadata = normalize_subject_metadata(attributes)
     if not subject_metadata:
@@ -780,7 +815,9 @@ def project_unified_subject_metadata(
         "source_profile": UNIFIED_H5_PROFILE,
     }
     root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
-    return _publish_subject_and_setup(root, subject_metadata, source_artifact=source)
+    return _publish_subject_and_setup(
+        root, subject_metadata, source_artifact=source, translator="h5_attributes"
+    )
 
 
 def _publish_subject_and_setup(
@@ -789,12 +826,14 @@ def _publish_subject_and_setup(
     *,
     source_h5_path: Path | None = None,
     source_artifact: Mapping[str, Any] | None = None,
+    translator: str | None = None,
 ) -> dict[str, Any]:
     subject_authority = publish_subject_metadata(
         root,
         subject_metadata,
         source_h5_path=source_h5_path,
         source_artifact=source_artifact,
+        translator=translator,
     )
     record = build_experiment_setup_record(
         subject_metadata,

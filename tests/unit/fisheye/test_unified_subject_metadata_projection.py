@@ -188,17 +188,21 @@ def test_citrus_v3_fixtures_project_their_declared_subject(tmp_path: Path, fixtu
         assert subject["mzb_fish_id"] == "F-1" and "mzb_fish_revision" not in subject
 
 
-def test_citrus_v3_no_dish_fixture_records_absence_and_publishes_nothing(tmp_path: Path) -> None:
+def test_citrus_v3_no_dish_fixture_records_its_declared_absence(tmp_path: Path) -> None:
     # v3 writes /metadata/subject in every session; with no dish it holds only
-    # the lookup statuses, which must not demand a subject_count.
+    # the lookup statuses, which must not demand a subject_count. The declared
+    # absence is itself a (v2) subject record: statuses, no dish, no setup.
     plan = _native_candidate(tmp_path, None, fixture="v3_no_dish")
 
     assert mod.project_unified_subject_metadata(plan, "candidate") is None
 
     root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
-    assert "subject_metadata_runs" not in root.get("analysis", {})
-    assert root.attrs["citrus_subject_lookup_status"] == "not_collected"
-    assert root.attrs["citrus_fish_reference_reason"] == "no_dish_declared"
+    assert resolve_subject_metadata(root, allow_legacy=False).subject == {
+        "fish_reference": {"status": "not_collected", "reason": "no_dish_declared"},
+        "subject_lookup": {"status": "not_collected", "reason": "no_dish_declared"},
+    }
+    assert "experiment_setup_runs" not in root["analysis"]
+    assert not any(name.startswith("citrus_") for name in root.attrs)
 
 
 def test_missing_subject_count_refuses_rather_than_inventing(tmp_path: Path) -> None:

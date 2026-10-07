@@ -139,3 +139,28 @@ def test_unknown_lookup_status_is_unresolved():
     subject = sf.from_h5_attributes({"subject_lookup_status": "maybe"})
     assert "subject_lookup" not in subject
     assert subject["unresolved"]["subject_lookup"] == "unknown status: 'maybe'"
+
+
+def test_v2_records_keep_the_fields_fixed_at_publish(tmp_path, monkeypatch):
+    root = zarr.open_group(str(tmp_path / "v2.zarr"), mode="w")
+    published = publish_subject_metadata(root, CITRUS_V3, source_artifact={"kind": "test"},
+                                         translator="h5_attributes")
+    assert published.record["schema_id"] == "palette.subject_metadata.v2"
+    assert published.record["subject_translator"] == "h5_attributes"
+    stored = dict(published.subject)
+    # A later translator change must not alter (or invalidate) a stored record.
+    monkeypatch.setitem(sf.TRANSLATORS, "h5_attributes", lambda *_args: {"changed": True})
+    assert resolve_subject_metadata(root, allow_legacy=False).subject == stored
+
+
+def test_v1_records_still_translate_on_read(tmp_path):
+    root = zarr.open_group(str(tmp_path / "v1.zarr"), mode="w")
+    published = publish_subject_metadata(root, LEGACY_H5, source_artifact={"kind": "test"})
+    assert published.record["schema_id"] == "palette.subject_metadata.v1"
+    assert published.subject["dpf_at_acquisition"] == 8
+
+
+def test_unknown_translator_is_refused(tmp_path):
+    root = zarr.open_group(str(tmp_path / "x.zarr"), mode="w")
+    with pytest.raises(ValueError, match="Unknown subject translator"):
+        publish_subject_metadata(root, LEGACY_H5, source_artifact={"kind": "test"}, translator="guess")
