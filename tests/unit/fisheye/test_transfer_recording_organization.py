@@ -843,3 +843,25 @@ def test_directory_sync_stops_at_the_filesystem_boundary(tmp_path: Path, monkeyp
     monkeypatch.setattr(organizer, "_device", device)
     organizer._sync_directory_chain(deep)
     assert synced == [deep, deep.parent, deep.parent.parent]
+
+
+def test_publication_flush_stops_at_the_filesystem_boundary(tmp_path: Path, monkeypatch) -> None:
+    # The pre-retirement durability barrier also walked every parent to "/",
+    # and fsync of the /groups automount root returns EINVAL (2026-10-07).
+    mount = tmp_path / "groups"
+    root = mount / "lab" / "recording"
+    (root / "zarr").mkdir(parents=True)
+    (root / "zarr" / "payload.bin").write_bytes(b"x")
+    plan = {"parents": [{"destination_dir": str(root), "identity": {"recording_id": "r"}}]}
+    state = {"parent_directory_identities": {"r": organizer._directory_identity(root)}}
+    synced = []
+
+    def fsync_directory(path: Path) -> None:
+        if path in (mount, *mount.parents):
+            raise OSError(22, "Invalid argument")
+        synced.append(path)
+
+    monkeypatch.setattr(organizer, "_fsync_directory", fsync_directory)
+    monkeypatch.setattr(organizer, "_device", lambda path: 2 if path in (mount, *mount.parents) else 1)
+    organizer._flush_parent_publications(plan, state)
+    assert set(synced) == {root / "zarr", root, root.parent}
