@@ -61,14 +61,29 @@ def _plan_for_report(args) -> dict:
 
 
 def _snapshot_sha(args) -> str:
-    """The delivery's identity: from the saved plan, else the live marker."""
+    """The delivery's identity: the saved plan, the live marker, or durable state.
 
+    Retirement removes the marker, so a retry of a retiring/complete delivery
+    without ``--resume-transfer-plan`` finds its sha from the intake state
+    whose plan names this staging source.
+    """
+
+    from fisheye.intake.delivery import find_delivery_by_source
     from fisheye.intake.discovery import MarkerRefusal, check_marker
 
     if args.resume_transfer_plan is not None:
         return str(strict_json(args.resume_transfer_plan)["snapshot_id"])
+    marker_path = args.session_dir.absolute() / MARKER_NAME
+    if not marker_path.exists():
+        sha = find_delivery_by_source(args.dest_root, args.session_dir)
+        if sha is None:
+            raise IntakeRefused(
+                f"no transfer marker at {marker_path} and no intake state names this "
+                "staging source; pass --resume-transfer-plan <run_dir>/organization_plan.json"
+            )
+        return f"sha256:{sha}"
     try:
-        marker = check_marker(args.session_dir.absolute() / MARKER_NAME)
+        marker = check_marker(marker_path)
     except MarkerRefusal as exc:
         raise IntakeRefused(f"not a sealed transfer-v2 delivery: {exc}") from exc
     if marker is None:

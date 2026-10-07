@@ -174,14 +174,17 @@ REPO_ROOT=${quoted_repo_root}
 JOB_DRY_RUN=${JOB_DRY_RUN}
 RESUME_TRANSFER_PLAN=${quoted_resume_plan}
 JOB_ID="\${LSB_JOBID:-manual}"
+# An LSF requeue reuses LSB_JOBID, and the workflow refuses an existing run
+# directory: every attempt gets its own workflow directory and payload logs.
+ATTEMPT="\${LSB_JOBINDEX:-0}-\$(date -u +%Y%m%dT%H%M%S%NZ)-\$\$"
 STATUS_FILE="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.status.txt"
 # The workflow creates and owns its run directory (it refuses an existing one),
 # only after taking the delivery's lock, and writes its status at the standard
 # name inside it. A job that finds the delivery held exits 75 and creates none.
-WORKFLOW_DIR="\${RUN_DIR}/workflow-\${JOB_ID}"
+WORKFLOW_DIR="\${RUN_DIR}/workflow-\${JOB_ID}-\${ATTEMPT}"
 STATUS_JSON="\${WORKFLOW_DIR}/citrus_session_import.status.json"
-PAYLOAD_STDOUT="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.payload.out"
-PAYLOAD_STDERR="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.payload.err"
+PAYLOAD_STDOUT="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.\${ATTEMPT}.payload.out"
+PAYLOAD_STDERR="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.\${ATTEMPT}.payload.err"
 
 mkdir -p "\${RUN_DIR}"
 
@@ -215,6 +218,7 @@ set -e
   printf 'started_at=%s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'host=%s\n' "\$(hostname)"
   printf 'job_id=%s\n' "\${JOB_ID}"
+  printf 'attempt=%s\n' "\${ATTEMPT}"
   printf 'session_name=%s\n' "\${SESSION_NAME}"
   printf 'session_dir=%s\n' "\${SESSION_DIR}"
   printf 'dest_root=%s\n' "\${DEST_ROOT}"

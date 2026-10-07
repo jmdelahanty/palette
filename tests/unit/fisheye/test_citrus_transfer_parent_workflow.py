@@ -277,6 +277,9 @@ def test_retirement_replay_reports_the_zarr_paths_the_registrar_needs(tmp_path, 
         return {**state, "status": "complete", "import_receipts": receipts, "retired_files": []}
 
     monkeypatch.setattr(organizer, "finalize_transfer_staging", finalize)
+    monkeypatch.setattr(
+        "fisheye.intake.probes.receipt_producer_git_sha", lambda zarr, receipt: "1" * 40
+    )
     replay = list(arguments)
     replay[replay.index("--run-dir") + 1] = str(tmp_path / "workflow-778")
     assert runner.main([*replay, "--apply", "--resume-transfer-plan", str(plan_path)]) == 0

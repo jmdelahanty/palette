@@ -31,7 +31,9 @@ def test_job_script_writes_the_workflow_status_json(tmp_path: Path) -> None:
         env=dict(os.environ, LSB_JOBID="777"), timeout=600,
     )
     run_dir = job_script.parent
-    status_json = run_dir / "workflow-777" / "citrus_session_import.status.json"
+    # Each attempt has its own workflow dir: an LSF requeue reuses the job id.
+    [workflow_dir] = run_dir.glob("workflow-777-*")
+    status_json = workflow_dir / "citrus_session_import.status.json"
     # The fixture's media are placeholders, so the import may fail; what must
     # hold is that the workflow ran (not refused its run dir) and wrote status.
     assert status_json.is_file(), job.stdout + job.stderr
@@ -40,3 +42,13 @@ def test_job_script_writes_the_workflow_status_json(tmp_path: Path) -> None:
     assert "overlaps workflow outputs" not in str(status.get("error"))
     status_txt = next(run_dir.glob("*.777.status.txt")).read_text()
     assert f"status_json={status_json}" in status_txt
+
+    # A requeue (same LSB_JOBID) runs again in a fresh workflow directory
+    # instead of being refused by the first attempt's leftovers.
+    requeue = subprocess.run(
+        ["bash", str(job_script)], check=False, text=True, capture_output=True,
+        env=dict(os.environ, LSB_JOBID="777"), timeout=600,
+    )
+    attempts = sorted(run_dir.glob("workflow-777-*"))
+    assert len(attempts) == 2, requeue.stdout + requeue.stderr
+    assert "run directory already exists" not in (attempts[1] / "citrus_session_import.status.json").read_text()

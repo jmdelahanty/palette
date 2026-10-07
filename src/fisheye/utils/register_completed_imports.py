@@ -20,8 +20,12 @@ and not yet registered, it reads the job's status JSON
   ALL of its Zarrs are synchronized in one registry publication, so a delivery
   is registered whole or not at all; ``<key>.registered`` records the result.
   A registration error is written to ``<key>.registration_failed`` and retried
-  on the next run (registration is idempotent). A registration held by another
-  live run is left for the next run.
+  on the next run (registration is idempotent). A refusal (synthetic origin,
+  job-mode delivery, registrar at another commit than the receipts) is written
+  once to the terminal ``<key>.registration_refused`` and never retried. A
+  registration held by another live run is left for the next run.
+- a job whose payload exited 75 found the delivery held by another live job:
+  it is attached, never recorded as a failed import.
 
 Producer-declared synthetic transfers are never registered. Config (the
 poller's JSON plus): ``registry``, ``writer_host`` (this host, short name or
@@ -43,7 +47,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from fisheye.intake.delivery import refuse_synthetic_registration
-from fisheye.intake.outcomes import IntakeHeld, IntakeRefused
+from fisheye.intake.outcomes import EXIT_HELD, IntakeHeld, IntakeRefused
 from fisheye.intake.registration import RegistryWriter
 
 REQUIRED = ("state_dir", "log_dir", "registry", "writer_host", "writer_lock_path",
@@ -95,7 +99,7 @@ def _run_dir(config: dict, key: str, job_id: str) -> Path | None:
 
     candidates = [
         path for path in (Path(config["log_dir"]) / "bsub_submissions").glob(f"citrus_import_*_{key}")
-        if (path / f"workflow-{job_id}").exists() or (path / f"{job_id}.out").exists()
+        if _workflow_dirs(path, job_id) or (path / f"{job_id}.out").exists()
         or any(path.glob(f"*.{job_id}.status.txt"))
     ]
     if len(candidates) > 1:
@@ -103,12 +107,42 @@ def _run_dir(config: dict, key: str, job_id: str) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def _workflow_dirs(run_dir: Path, job_id: str) -> list[Path]:
+    """This job's workflow directories, oldest attempt first.
+
+    The job script names each attempt ``workflow-<job>-<index>-<attempt>``
+    (an LSF requeue reuses the job id); ``workflow-<job>`` is the older name.
+    """
+
+    attempts = [p for p in run_dir.glob(f"workflow-{job_id}-*") if p.is_dir()]
+    legacy = run_dir / f"workflow-{job_id}"
+    return ([legacy] if legacy.is_dir() else []) + sorted(attempts, key=lambda p: p.name)
+
+
 def _status_json(config: dict, key: str, job_id: str) -> Path | None:
+    """The status of the job's newest attempt (an older one is superseded)."""
+
     run_dir = _run_dir(config, key, job_id)
     if run_dir is None:
         return None
-    path = run_dir / f"workflow-{job_id}" / "citrus_session_import.status.json"
+    attempts = _workflow_dirs(run_dir, job_id)
+    if not attempts:
+        return None
+    path = attempts[-1] / "citrus_session_import.status.json"
     return path if path.is_file() else None
+
+
+def _payload_returncode(config: dict, key: str, job_id: str) -> int | None:
+    """The intake exit code the job script recorded in its status.txt."""
+
+    run_dir = _run_dir(config, key, job_id)
+    if run_dir is None:
+        return None
+    for path in sorted(run_dir.glob(f"*.{job_id}.status.txt")):
+        found = re.findall(r"^payload_returncode=(-?\d+)\s*$", path.read_text(), flags=re.MULTILINE)
+        if found:
+            return int(found[-1])
+    return None
 
 
 def _job_ended(config: dict, key: str, job_id: str) -> bool:
@@ -156,7 +190,8 @@ def register_completed(
         key = submitted.name[: -len(".submitted")]
         done = state / f"{key}.registered"
         import_failed = state / f"{key}.import_failed"
-        if done.exists() or import_failed.exists():
+        refused = state / f"{key}.registration_refused"
+        if done.exists() or import_failed.exists() or refused.exists():
             continue
         job_id = _job_id(submitted)
         if job_id is None:
@@ -166,6 +201,11 @@ def register_completed(
         if status_path is None:
             if not _job_ended(config, key, job_id):
                 log(f"pending: key={key} job={job_id} has no status yet")
+                continue
+            if _payload_returncode(config, key, job_id) == EXIT_HELD:
+                # Another live job held the delivery: this one attached and
+                # created nothing. Not a failed import.
+                log(f"attached: key={key} job={job_id} found the delivery held by another job")
                 continue
             log(f"import failed: key={key} job={job_id} ended without a status JSON")
             if not dry_run:
@@ -193,6 +233,16 @@ def register_completed(
             )
         except IntakeHeld as exc:
             log(f"pending: key={key} job={job_id}: {exc}")
+            continue
+        except IntakeRefused as exc:
+            # Deterministic (synthetic origin, job-mode delivery, registrar at
+            # another commit than the receipts): terminal, never retried.
+            failures += 1
+            log(f"registration refused: key={key} job={job_id}: {exc}")
+            _write(refused, {"job_id": job_id, "error": getattr(exc, "code", None) or str(exc),
+                             "message": str(exc), **getattr(exc, "details", {}),
+                             "refused_utc": datetime.now(timezone.utc).isoformat()})
+            (state / f"{key}.registration_failed").unlink(missing_ok=True)
             continue
         except Exception as exc:  # retried on the next run
             failures += 1

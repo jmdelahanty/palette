@@ -115,8 +115,11 @@ def test_synthetic_transfer_is_never_registered(tmp_path, monkeypatch, canonical
     register = Register()
     assert registrar.register_completed(config, dry_run=False, register=register) == 1
     assert register.calls == []
-    assert "synthetic" in json.loads(
-        (tmp_path / "state" / f"{KEY}.registration_failed").read_text())["error"]
+    refused = json.loads((tmp_path / "state" / f"{KEY}.registration_refused").read_text())
+    assert "synthetic" in refused["error"]
+    assert not (tmp_path / "state" / f"{KEY}.registration_failed").exists()
+    # Terminal: a refusal is never retried.
+    assert registrar.register_completed(config, dry_run=False, register=register) == 0
 
 
 def test_a_registration_held_by_another_run_is_left_for_the_next_run(tmp_path):
@@ -191,3 +194,65 @@ def test_job_that_ended_without_status_is_a_failed_import_not_pending(tmp_path):
     registrar.register_completed(config, dry_run=False, register=Register())
     failed = json.loads((tmp_path / "state" / f"{KEY}.import_failed").read_text())
     assert failed["error"] == "LSF job ended without writing its status JSON"
+
+
+def test_a_job_that_found_the_delivery_held_is_attached_not_failed(tmp_path):
+    # S3: the job script records payload_returncode=75 and the workflow made
+    # no directory (the lock is taken before any side effect).
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    run_dir = tmp_path / "logs" / "bsub_submissions" / f"citrus_import_20261006T000000Z_session_{KEY}"
+    run_dir.mkdir(parents=True)
+    (run_dir / "session.777.status.txt").write_text("job_id=777\npayload_returncode=75\n")
+    register = Register()
+    assert registrar.register_completed(config, dry_run=False, register=register) == 0
+    assert not (tmp_path / "state" / f"{KEY}.import_failed").exists()
+    assert register.calls == []
+    # Any other ended-without-status exit is still a failed import.
+    (run_dir / "session.777.status.txt").write_text("job_id=777\npayload_returncode=1\n")
+    registrar.register_completed(config, dry_run=False, register=register)
+    assert (tmp_path / "state" / f"{KEY}.import_failed").exists()
+
+
+def test_the_newest_requeued_attempt_decides(tmp_path):
+    # N6: an LSF requeue reuses the job id; each attempt has its own directory.
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    _status(tmp_path, status="failed", import_complete=False, error="first attempt died")
+    run_dir = next((tmp_path / "logs" / "bsub_submissions").iterdir())
+    (run_dir / "workflow-777").rename(run_dir / "workflow-777-0-20261007T010000000000000Z-11")
+    newer = run_dir / "workflow-777-0-20261007T020000000000000Z-12"
+    newer.mkdir()
+    body = {"status": "complete", "import_complete": True, "zarr_paths": ["/rec/a.zarr"],
+            "plan": {"snapshot_id": "sha256:" + "d" * 64, "destination_root": "/rec",
+                     "parents": [{"context": {"data_origin": "acquired"}}]}}
+    (newer / "citrus_session_import.status.json").write_text(json.dumps(body))
+    register = Register()
+    assert registrar.register_completed(config, dry_run=False, register=register) == 0
+    assert register.calls == [("sha256:" + "d" * 64, Path("/rec"))]
+    assert not (tmp_path / "state" / f"{KEY}.import_failed").exists()
+
+
+def test_a_registrar_commit_mismatch_is_terminal_with_the_needed_commit(tmp_path):
+    # B1 + S1: never retried every 5 minutes; the record names the commit.
+    from fisheye.intake.outcomes import RegistrarCommitMismatch
+
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    _status(tmp_path)
+    calls = []
+
+    def mismatch(config, snapshot_sha, destination_root):
+        calls.append(snapshot_sha)
+        raise RegistrarCommitMismatch(
+            "produced by another commit", code="registrar_commit_mismatch",
+            details={"receipt_producer_git_sha": "a" * 40, "registrar_git_sha": "b" * 40},
+        )
+
+    assert registrar.register_completed(config, dry_run=False, register=mismatch) == 1
+    assert registrar.register_completed(config, dry_run=False, register=mismatch) == 0
+    assert len(calls) == 1
+    refused = json.loads((tmp_path / "state" / f"{KEY}.registration_refused").read_text())
+    assert refused["error"] == "registrar_commit_mismatch"
+    assert refused["receipt_producer_git_sha"] == "a" * 40
+    assert refused["registrar_git_sha"] == "b" * 40
