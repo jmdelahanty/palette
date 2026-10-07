@@ -173,6 +173,31 @@ variants:
   `body_frame/left_axis_xy`, `body_frame/heading_deg`, `body_frame/valid`,
   `body_frame/failure_reason_bytes`
 
+### Axis-Unavailable Columns
+
+`roi_*` and `frame_*` arrays share one channel index, so both carry the union
+of ROI and frame channel names. A channel that does not exist on an axis is
+still physically present as a column on that axis, filled with `NaN` (angles,
+vectors) or `0` (QA). The fill is not data: the index's `frame_available` or
+`roi_available` flag is the only signal that the column is a placeholder.
+
+In compact v7 runs the frame axis carries 100 of 141 angle channels and 3 of 7
+QA channels (`valid_frame`, `major_axis_marginal`, `reason_codes`). In
+particular `frame_qa` columns `valid_left`, `valid_right`,
+`left_major_axis_marginal` and `right_major_axis_marginal` are always `0`, and
+`frame_angles` column `heading_deg` is always `NaN`. A `0` in a bool QA column
+is indistinguishable from "false", so a reader that indexes `frame_qa` by name
+alone concludes "never valid".
+
+Read through `fisheye.analysis.eye_angle_io` (`load_eye_angle_run_tables`,
+`catalog_eye_angle_series`, `load_eye_angle_series_rows`), which drops
+unavailable channels. Code that reads the dense arrays directly must check the
+matching `*_available` flag and refuse a column marked `False`. Per-eye frame
+validity is recoverable from `frame_qa` `reason_codes` bits (`4` left ellipse
+invalid, `8` right ellipse invalid) or from `roi_qa` through
+`support/source_acquisition_frame_index`; heading lives in
+`support/body_frame/heading_deg`.
+
 ## Canonical Input Boundary
 
 Compact-dense-v2 changes physical output layout, not source eligibility.
