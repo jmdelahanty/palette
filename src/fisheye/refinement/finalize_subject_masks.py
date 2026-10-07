@@ -262,6 +262,9 @@ _CANONICAL_REFINED_SOURCE_ARRAYS = (
     "source_crop_xywh",
 )
 _COMPONENT_METRICS_SCHEMA_ID = "refined_subject_component_mask_metrics_v1"
+# The component metric level browser mask Apply QC requires (it refuses any
+# other declared level). Runs produced for labeling are finalized at it.
+EDITABLE_REVIEW_METRIC_LEVEL = "full"
 _COMPONENT_METRIC_QC_SCHEMA_ID = "refined_subject_component_metric_qc_reasons_v1"
 _SOURCE_SEED_MASKS_SCHEMA_ID = "refined_subject_component_source_seed_masks_v1"
 _COMPONENT_QC_REASON_PREFIX = "needs_review_metric_"
