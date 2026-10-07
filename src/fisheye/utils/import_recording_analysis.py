@@ -273,25 +273,28 @@ def _producer_video_metadata(plan: RecordingAnalysisPlan) -> dict[str, Any]:
     return {key: value for key, value in producer.items() if value is not None}
 
 
-def stimulus_runs_present(zarr_path: Path) -> bool:
+def _stimulus_runs(zarr_path: Path) -> tuple[Any, Any] | None:
     try:
         root = zarr.open(str(zarr_path), mode="r")
     except Exception:
-        return False
+        return None
     analysis = root.get("analysis")
     if analysis is None:
-        return False
+        return None
     stim = analysis.get("stimulus_runs")
     if stim is None:
-        return False
-    # Only the maintained completion contract can justify reuse. Historical
-    # group presence is not an ingestion completion signal.
-    if resolve_latest_complete_run_name(stim, legacy_default=False) is not None:
-        return True
-    # A sealed unified reference run is complete but deliberately not selector
-    # eligible (no adapter yet), so it never becomes "latest". Its completion
-    # and an openable reference still satisfy the intake contract.
-    for name in stim.group_keys():
+        return None
+    return root, stim
+
+
+def admitted_unified_native_run(zarr_path: Path) -> str | None:
+    """Newest sealed unified reference run that is complete and openable."""
+
+    found = _stimulus_runs(zarr_path)
+    if found is None:
+        return None
+    root, stim = found
+    for name in sorted(stim.group_keys(), reverse=True):
         run = stim.get(name)
         if run is not None and run.attrs.get("source_profile") == UNIFIED_H5_PROFILE and is_run_complete_in_parent(
             stim, run, legacy_default=False
@@ -300,8 +303,23 @@ def stimulus_runs_present(zarr_path: Path) -> bool:
                 open_unified_source(root, run_name=name)
             except (UnifiedH5ContractError, KeyError, ValueError):
                 continue
-            return True
-    return False
+            return name
+    return None
+
+
+def stimulus_runs_present(zarr_path: Path) -> bool:
+    found = _stimulus_runs(zarr_path)
+    if found is None:
+        return False
+    _root, stim = found
+    # Only the maintained completion contract can justify reuse. Historical
+    # group presence is not an ingestion completion signal.
+    if resolve_latest_complete_run_name(stim, legacy_default=False) is not None:
+        return True
+    # A sealed unified reference run is complete but deliberately not selector
+    # eligible (no adapter yet), so it never becomes "latest". Its completion
+    # and an openable reference still satisfy the intake contract.
+    return admitted_unified_native_run(zarr_path) is not None
 
 
 def validate_recording_import_plan(
@@ -648,8 +666,9 @@ def import_zebrobot_subject_reference(
     """Resolve Orange's sealed Zebrobot reference for this parent at intake.
 
     A declared absence is recorded on the archive root; a collected reference
-    is fetched, verified and published as subject metadata only when no H5
-    subject metadata exists (recording-only). With H5 metadata present it is a
+    is fetched, verified and published as subject metadata only when no subject
+    record exists or the existing one is a declared absence. Any other record
+    (an H5 one, with or without a dish) stays authoritative; Orange is then a
     cross-check: a differing ``dish_uuid`` refuses. ``ZebrobotUnavailable``
     propagates so the import fails and can be retried, never finalized empty.
     """
@@ -681,14 +700,18 @@ def import_zebrobot_subject_reference(
                 translator="declared_absence",
             )
         return {"status": resolved.status, "reason": resolved.reason}
-    if existing is not None and (
-        existing.subject.get("dish_uuid") or existing.subject.get("dish_id")
-    ):
-        return {"status": "collected", "published": False,
-                **_cross_check_h5_subject(existing.subject, resolved.metadata),
+    if existing is not None and existing.record.get("subject_translator") != "declared_absence":
+        # A declared subject record is authoritative, with or without a dish
+        # (a legacy or pre-contract H5 can carry ids and subject_count only).
+        # Orange is a cross-check when there is a dish to compare.
+        if existing.subject.get("dish_uuid") or existing.subject.get("dish_id"):
+            return {"status": "collected", "published": False,
+                    **_cross_check_h5_subject(existing.subject, resolved.metadata),
+                    **resolved.source}
+        return {"status": "collected", "published": False, "cross_checked": None,
                 **resolved.source}
-    # No subject record, or one declaring no dish (a Citrus v3 session without
-    # a dish): Orange's reference supplies the subject.
+    # No subject record, or a declared absence (a Citrus v3 session without a
+    # dish): Orange's reference supplies the subject.
     if "subject_count" in resolved.metadata:
         setup = _publish_subject_and_setup(
             root, resolved.metadata, source_artifact=resolved.source,
@@ -1244,6 +1267,14 @@ def process_recording_import(
                 zarr_path=str(plan.zarr_path),
                 reason="stimulus_runs already present",
             )
+            # A retry after a sealed native import still projects the subject
+            # from that run, exactly as the first attempt would have.
+            native_run = admitted_unified_native_run(plan.zarr_path) if unified_h5 else None
+            if unified_h5 and native_run is None:
+                return RecordingImportResult(
+                    ok=False, failed_step="import_experiment_setup",
+                    error="unified H5 intake found no admitted native run to project the subject from",
+                )
         else:
             stim_opts = opts
             if unified_h5:
@@ -1271,32 +1302,29 @@ def process_recording_import(
                         else "stimulus import failed"
                     ),
                 )
-            if unified_h5:
-                try:
-                    require_unified_source_matches_recording(
-                        plan, str(stim_opts.stimulus_run_name)
-                    )
-                except Exception as exc:
-                    return RecordingImportResult(
-                        ok=False, failed_step="unified_h5_recording_identity", error=str(exc)
-                    )
-                try:
-                    setup = project_unified_subject_metadata(
-                        plan, str(stim_opts.stimulus_run_name)
-                    )
-                except Exception as exc:
-                    return RecordingImportResult(
-                        ok=False, failed_step="import_experiment_setup", error=str(exc)
-                    )
-                _log(
-                    logger,
-                    "experiment_setup_imported" if setup else "subject_metadata_absent",
-                    recording_dir=str(plan.recording_dir),
-                    zarr_path=str(plan.zarr_path),
-                    source="unified_native_candidate",
-                    native_run=str(stim_opts.stimulus_run_name),
-                    **(setup or {}),
+            native_run = str(stim_opts.stimulus_run_name) if unified_h5 else None
+        if native_run is not None:
+            try:
+                require_unified_source_matches_recording(plan, native_run)
+            except Exception as exc:
+                return RecordingImportResult(
+                    ok=False, failed_step="unified_h5_recording_identity", error=str(exc)
                 )
+            try:
+                setup = project_unified_subject_metadata(plan, native_run)
+            except Exception as exc:
+                return RecordingImportResult(
+                    ok=False, failed_step="import_experiment_setup", error=str(exc)
+                )
+            _log(
+                logger,
+                "experiment_setup_imported" if setup else "subject_metadata_absent",
+                recording_dir=str(plan.recording_dir),
+                zarr_path=str(plan.zarr_path),
+                source="unified_native_candidate",
+                native_run=native_run,
+                **(setup or {}),
+            )
 
     try:
         subject_reference = import_zebrobot_subject_reference(plan)

@@ -821,3 +821,25 @@ def test_unverifiable_or_contradicted_keyframes_refuse_before_manifest(
         organizer.prepare_transfer_parent_recordings(plan, batch_rows=1)
     for parent in plan["parents"]:
         assert not (Path(parent["destination_dir"]) / "recording_manifest.json").exists()
+
+
+def test_directory_sync_stops_at_the_filesystem_boundary(tmp_path: Path, monkeypatch) -> None:
+    # /groups is an automount root on its own device; fsync on it returns
+    # EINVAL, which failed every real intake into /groups (2026-10-07).
+    deep = tmp_path / "groups" / "lab" / "recordings" / ".transfer_intake"
+    deep.mkdir(parents=True)
+    mount = tmp_path / "groups"
+    synced = []
+
+    def fsync_directory(path: Path) -> None:
+        if path in (mount, *mount.parents):
+            raise OSError(22, "Invalid argument")
+        synced.append(path)
+
+    def device(path: Path) -> int:
+        return 2 if path in (mount, *mount.parents) else 1
+
+    monkeypatch.setattr(organizer, "_fsync_directory", fsync_directory)
+    monkeypatch.setattr(organizer, "_device", device)
+    organizer._sync_directory_chain(deep)
+    assert synced == [deep, deep.parent, deep.parent.parent]
