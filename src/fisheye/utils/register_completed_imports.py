@@ -8,9 +8,11 @@ step runs on the writer host, normally from the same cron entry right after
 
 For each delivery the poller marked submitted (``<state_dir>/<key>.submitted``)
 and not yet registered, it reads the job's status JSON
-(``<log_dir>/bsub_submissions/citrus_import_*_<key>/*.<job_id>.status.json``):
+(``<log_dir>/bsub_submissions/citrus_import_*_<key>/workflow-<job_id>/citrus_session_import.status.json``):
 
-- no status yet: the job is still queued or running; try again next run;
+- no status and the job has not ended: still queued or running; next run;
+- no status but the job ended (the launcher's ``*.<job_id>.status.txt`` or
+  LSF's report in ``<job_id>.out`` exists): recorded as a failed import;
 - status not ``complete``: the import failed; recorded once in
   ``<key>.import_failed`` for operator review, never retried here;
 - complete: every imported Zarr's immutable import receipt is verified
@@ -85,15 +87,37 @@ def _job_id(submitted: Path) -> str | None:
     return ids[-1] if ids else None
 
 
+def _run_dir(config: dict, key: str, job_id: str) -> Path | None:
+    """The launcher run directory that holds this job's outputs."""
+
+    candidates = [
+        path for path in (Path(config["log_dir"]) / "bsub_submissions").glob(f"citrus_import_*_{key}")
+        if (path / f"workflow-{job_id}").exists() or (path / f"{job_id}.out").exists()
+        or any(path.glob(f"*.{job_id}.status.txt"))
+    ]
+    if len(candidates) > 1:
+        raise RegistrarRefusal(f"ambiguous run directory for key={key} job={job_id}: {candidates}")
+    return candidates[0] if candidates else None
+
+
 def _status_json(config: dict, key: str, job_id: str) -> Path | None:
-    found = sorted(
-        (Path(config["log_dir"]) / "bsub_submissions").glob(
-            f"citrus_import_*_{key}/*.{job_id}.status.json"
-        )
-    )
-    if len(found) > 1:
-        raise RegistrarRefusal(f"ambiguous status for key={key} job={job_id}: {found}")
-    return found[0] if found else None
+    run_dir = _run_dir(config, key, job_id)
+    if run_dir is None:
+        return None
+    path = run_dir / f"workflow-{job_id}" / "citrus_session_import.status.json"
+    return path if path.is_file() else None
+
+
+def _job_ended(config: dict, key: str, job_id: str) -> bool:
+    """LSF appends its job report to -oo <job_id>.out; the job script writes status.txt last."""
+
+    run_dir = _run_dir(config, key, job_id)
+    if run_dir is None:
+        return False
+    if any(run_dir.glob(f"*.{job_id}.status.txt")):
+        return True
+    out = run_dir / f"{job_id}.out"
+    return out.is_file() and "Resource usage summary" in out.read_text(errors="replace")
 
 
 def _write(path: Path, payload: dict) -> None:
@@ -138,7 +162,13 @@ def register_completed(
             continue
         status_path = _status_json(config, key, job_id)
         if status_path is None:
-            log(f"pending: key={key} job={job_id} has no status yet")
+            if not _job_ended(config, key, job_id):
+                log(f"pending: key={key} job={job_id} has no status yet")
+                continue
+            log(f"import failed: key={key} job={job_id} ended without a status JSON")
+            if not dry_run:
+                _write(import_failed, {"job_id": job_id, "status_json": None, "status": "failed",
+                                       "error": "LSF job ended without writing its status JSON"})
             continue
         status: dict[str, Any] = json.loads(status_path.read_text())
         if status.get("status") != "complete" or not status.get("import_complete"):
