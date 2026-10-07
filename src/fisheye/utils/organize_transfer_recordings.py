@@ -57,10 +57,7 @@ from fisheye.shared.unified_h5.common import MAX_JSON_BYTES
 from fisheye.shared.unified_h5.correspondence import read_acquisition_binding
 from fisheye.shared.unified_h5.schema import read_json
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
-from fisheye.utils.organize_recordings import (
-    _read_camera_context,
-    _recording_geometry_bundle_source,
-)
+from fisheye.utils.organize_recordings import _recording_geometry_bundle_source
 
 PLAN_SCHEMA_ID = "palette.transfer_parent_organization_plan.v2"
 ARTIFACT_SCHEMA_ID = "orange_transfer_parent_v1"
@@ -194,6 +191,28 @@ def _unified_h5_context(
     return binding.camera_serial, context, receipt
 
 
+def _camera_h5_context(
+    source: Path, relative: str, inventory: dict, contexts: dict
+) -> tuple[str, dict, str]:
+    """Camera, context and receipt for one H5 in a new transfer-v2 delivery.
+
+    New transfer-v2 deliveries carry a sealed unified H5 or no H5 at all
+    (intake single-writer decision 1, 2026-10-07). A legacy (non-unified)
+    stimulus H5 is refused here, while planning and before any write, so it
+    can never reach the legacy stimulus/subject import. Reading, validating
+    and migrating legacy archives that already exist is unaffected.
+    """
+
+    with h5py.File(source / relative, "r") as h5:
+        unified = declared_unified_profile(h5) is not None
+    require(
+        unified,
+        "legacy (non-unified) H5 is refused for new transfer-v2 intake; a new "
+        f"recording needs a sealed unified H5 or no H5: {relative}",
+    )
+    return _unified_h5_context(source, relative, inventory, contexts)
+
+
 def _separate_destination(source: Path, destination: Path) -> Path:
     candidate = Path(destination).absolute()
     require(
@@ -308,13 +327,9 @@ def build_transfer_organization_plan(
     for relative in inventory:
         if Path(relative).suffix.lower() not in (".h5", ".hdf5"):
             continue
-        with h5py.File(source / relative, "r") as h5:
-            unified = declared_unified_profile(h5) is not None
-        receipt = None
-        if unified:
-            camera, metadata, receipt = _unified_h5_context(source, relative, inventory, contexts)
-        else:
-            camera, metadata = _read_camera_context(source / relative)
+        camera, metadata, receipt = _camera_h5_context(
+            source, relative, inventory, contexts
+        )
         require(
             camera in by_camera and "error" not in metadata,
             f"H5 lacks a readable exact camera binding: {relative}",
@@ -335,8 +350,7 @@ def build_transfer_organization_plan(
         )
         camera_owners[relative] = (camera, "camera_h5")
         h5_by_camera[camera] = relative
-        if receipt is not None:
-            receipt_by_camera[camera] = receipt
+        receipt_by_camera[camera] = receipt
         producer_context[camera] = dict(metadata)
 
     geometry_source = _recording_geometry_bundle_source(source)

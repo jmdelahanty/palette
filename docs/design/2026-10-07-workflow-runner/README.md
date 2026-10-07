@@ -237,6 +237,12 @@ Consequences:
 - `palette-flow run` requires `--palette-repo` to be a dedicated commit-pinned deployment (AGENTS.md).
 - The Snakefile and every job run from that deployment's `scripts/py`. The commit is recorded in each sentinel.
 - `resume` refuses if the deployment's HEAD differs from the commit recorded at `run`. Moving to a newer commit means a new invocation, and existing sentinels still count because they are Palette verdicts rather than code hashes.
+- **Steps bound to the producer commit.** Some steps must run at the same commit that produced their input, not at the current pin. Intake registration is the first case: `recording_identity_authority` refuses registration unless the registering commit equals the import receipt's `producer_git_sha`, exiting 65 with `registrar_commit_mismatch` and naming the commit it needs. Pinning one commit for both sides and moving it only when no delivery sits between import and registration would work. With deliveries arriving continuously, though, that turns every deployment into a drain-and-wait. Instead:
+  - `probe-import` output, and therefore the import sentinel, carries `producer_git_sha`;
+  - `register_delivery` runs from the ws1 deployment at that commit (`~/.palette/deployments/ops-<sha>`), not from the current pin;
+  - discovery and new imports always use the current pin;
+  - moving the pin is safe at any time. An older deployment is retired only when discovery shows no delivery whose `producer_git_sha` needs it;
+  - if that deployment is missing, the rule fails as an operator incident. The runner never creates or moves deployments on its own.
 
 ## 6. First slice: the intake DAG
 
@@ -387,6 +393,7 @@ Still open:
 
 ## Decision log
 
+- 2026-10-07: §5.4 adds producer-commit-bound steps. Intake registration runs at the import receipt's `producer_git_sha`, because the identity authority requires an exact commit match. This came from palette-33's `fisheye.intake` review.
 - 2026-10-07: #286 merged (8e96c399). §6.3 now requires runner and v2 state to stay separate from the v1 `.processing_state`.
 - 2026-10-07: recorded PR #290's exit-code table and its NFS flock lease behaviour in §5.3.
 - 2026-10-07: aligned with the intake single-writer design (PR #290). Discovery uses `probe_register`, not runner sentinels. Stages that own a lock replace runner claims. Intake attempts get fresh run dirs.
