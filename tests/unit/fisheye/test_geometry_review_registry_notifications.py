@@ -265,6 +265,7 @@ def test_outbox_digest_is_batched_and_durable_across_scans(tmp_path: Path) -> No
     message = BytesParser(policy=policy.default).parsebytes(
         next(outbox.glob("*.eml")).read_bytes()
     )
+    assert not message.is_multipart()
     body = message.get_content()
     assert "recording-1" in body
     assert "recording-2" in body
