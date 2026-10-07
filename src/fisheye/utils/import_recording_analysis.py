@@ -434,6 +434,13 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
         attrs.setdefault("source_layout", "rolling_clips")
         attrs.setdefault("source_frame_index_path", str(indexes["recording_frame_index"]))
         attrs.setdefault("source_recording_frame_index_path", str(indexes["recording_frame_index"]))
+        # The registry projects datasets.source_frame_index_schema from this
+        # attribute; take it from the manifest the index builder wrote.
+        index_manifest = load_strict_json_object(indexes["recording_frame_index_manifest"])
+        index_schema = index_manifest.get("frame_index_schema_version")
+        if not isinstance(index_schema, str) or not index_schema.strip():
+            raise ValueError("recording frame index manifest declares no frame_index_schema_version")
+        attrs.setdefault("source_frame_index_schema", index_schema)
     else:
         assert plan.cam_video is not None
         attrs.setdefault("source_video", plan.cam_video.name)
