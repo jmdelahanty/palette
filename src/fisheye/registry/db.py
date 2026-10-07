@@ -31,8 +31,10 @@ if TYPE_CHECKING:
     import zarr
 
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.subject_fields import from_legacy_zebrobot_snapshot
 from fisheye.shared.subject_metadata import (
     MissingSubjectMetadataError,
+    explicit_subject_ids,
     resolve_subject_metadata,
 )
 from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
@@ -546,43 +548,6 @@ def _first_value(payload: Dict[str, Any], keys: Iterable[str]) -> Optional[Any]:
     return None
 
 
-def _normalize_parents(value: Any) -> List[Dict[str, Optional[str]]]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        parents: List[Dict[str, Optional[str]]] = []
-        for item in value:
-            if isinstance(item, dict):
-                parents.append(
-                    {
-                        "identifier": item.get("identifier"),
-                        "sex": item.get("sex"),
-                    }
-                )
-            elif isinstance(item, str):
-                parents.append({"identifier": item, "sex": None})
-        return parents
-    if isinstance(value, (bytes, bytearray)):
-        try:
-            value = value.decode("utf-8")
-        except Exception:
-            return []
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return []
-        parsed = _json_loads(value)
-        if isinstance(parsed, list):
-            return _normalize_parents(parsed)
-        parents = []
-        for part in value.split(";"):
-            ident = part.strip()
-            if ident:
-                parents.append({"identifier": ident, "sex": None})
-        return parents
-    return []
-
-
 def _compute_path_hash(path: Path) -> str:
     return canonical_dataset_path_hash(path)
 
@@ -683,21 +648,24 @@ def _extract_protocol(root: zarr.Group) -> Tuple[Optional[str], Optional[str]]:
 
 def _extract_snapshot(
     root: zarr.Group,
-) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], Optional[Dict[str, Any]]]:
+    """Canonical subject fields (fisheye.shared.subject_fields), source, raw mapping."""
+
     try:
         canonical = resolve_subject_metadata(root, allow_legacy=True)
     except MissingSubjectMetadataError:
         canonical = None
     if canonical is not None:
-        return dict(canonical.metadata), canonical.group_path
+        return dict(canonical.subject), canonical.group_path, dict(canonical.metadata)
     analysis = root.get("analysis_metadata")
     if analysis is not None:
         for key in ("zebrobot_snapshot",):
             raw = analysis.attrs.get(key)
             payload = _json_loads(raw)
             if payload:
-                return payload, key
-    return None, None
+                subject = from_legacy_zebrobot_snapshot(payload, explicit_subject_ids(payload))
+                return subject, key, payload
+    return None, None, None
 
 
 def _extract_session_context(root: zarr.Group) -> Dict[str, Any]:
@@ -1009,28 +977,35 @@ def _extract_acquisition(root: zarr.Group) -> Dict[str, Any]:
     }
 
 
-def _extract_provenance(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    if not snapshot:
+def _single_subject_id(subject: Mapping[str, Any]) -> Optional[str]:
+    if subject.get("identity_scope") == "recording_local_placeholder":
+        return None
+    ids = subject.get("subject_ids") or []
+    return str(ids[0]) if len(ids) == 1 else None
+
+
+def _extract_provenance(
+    subject: Optional[Mapping[str, Any]], raw: Optional[Mapping[str, Any]] = None
+) -> Dict[str, Any]:
+    """Provenance columns from canonical subject fields (one name per fact)."""
+
+    if not subject:
         return {}
-    dish = snapshot.get("dish") or snapshot
-    cross = snapshot.get("cross") or {}
-    identity_is_placeholder = (
-        str(snapshot.get("identity_scope") or "").strip().casefold() == "recording_local_placeholder"
-    )
+    raw = raw or {}
     return {
-        "fish_id": None if identity_is_placeholder else snapshot.get("fish_id"),
-        "subject_count": snapshot.get("subject_count"),
-        "dish_id": snapshot.get("dish_id") or dish.get("dish_id"),
-        "cross_id": dish.get("cross_id") or cross.get("cross_id"),
-        "line_strain": cross.get("line_strain") or dish.get("line_strain"),
-        "genotype": dish.get("genotype"),
-        "parents": _normalize_parents(cross.get("parents") or dish.get("parents")),
-        "species": dish.get("species"),
-        "sex": dish.get("sex"),
-        # Canonical source field in current subject metadata payloads.
-        "dpf_at_acquisition": _as_int(snapshot.get("days_post_fertilization")),
-        "snapshot_status": snapshot.get("status"),
-        "snapshot_missing": snapshot.get("missing"),
+        "fish_id": _single_subject_id(subject),  # column name predates subject_id
+        "subject_count": subject.get("subject_count"),
+        "dish_id": subject.get("dish_id"),
+        "cross_id": subject.get("cross_id"),
+        "line_strain": subject.get("line_strain"),
+        "genotype": subject.get("genotype"),
+        "parents": subject.get("parents") or [],
+        "species": subject.get("species"),
+        "sex": subject.get("sex"),
+        "dpf_at_acquisition": subject.get("dpf_at_acquisition"),
+        # Lookup status of the legacy zebrobot snapshot form, not a subject fact.
+        "snapshot_status": raw.get("status"),
+        "snapshot_missing": raw.get("missing"),
     }
 
 
@@ -3062,15 +3037,10 @@ class Registry(
 
         if not recording_id or not snapshot:
             return
-        if str(snapshot.get("identity_scope") or "").strip().casefold() == "recording_local_placeholder":
+        # ``snapshot`` is canonical subject fields (fisheye.shared.subject_fields).
+        if snapshot.get("identity_scope") == "recording_local_placeholder":
             return
-        raw_ids = snapshot.get("subject_ids") or snapshot.get("fish_ids")
-        if isinstance(raw_ids, (list, tuple)):
-            subject_ids = [str(value).strip() for value in raw_ids if str(value).strip()]
-        else:
-            single = _as_text(snapshot.get("fish_id") or snapshot.get("subject_id"))
-            subject_ids = [single] if single else []
-        subject_ids = list(dict.fromkeys(subject_ids))
+        subject_ids = list(dict.fromkeys(str(value) for value in snapshot.get("subject_ids") or ()))
         if not subject_ids:
             return
         recording_row = self.conn.execute(
@@ -3091,14 +3061,14 @@ class Registry(
                 f"ids={len(subject_ids)}, subject_count={subject_count}"
             )
 
-        provenance = _extract_provenance(dict(snapshot))
+        provenance = _extract_provenance(snapshot)
         dish_id = _as_text(provenance.get("dish_id"))
         cross_id = _as_text(provenance.get("cross_id"))
         species = _as_text(provenance.get("species"))
         sex = _as_text(provenance.get("sex"))
         genotype = _as_text(provenance.get("genotype"))
         line_strain = _as_text(provenance.get("line_strain"))
-        dpf = _as_int(provenance.get("dpf_at_acquisition") or snapshot.get("dpf_at_acquisition") or snapshot.get("dpf"))
+        dpf = _as_int(provenance.get("dpf_at_acquisition"))
         parents = provenance.get("parents")
         now = _utc_now()
         source_payload = _json_dumps(
@@ -6592,8 +6562,8 @@ class Registry(
         """Project registry metadata after identity has been decided elsewhere."""
 
         protocol_name, protocol_hash = _extract_protocol(root)
-        snapshot, snapshot_source = _extract_snapshot(root)
-        provenance = _extract_provenance(snapshot)
+        snapshot, snapshot_source, raw_snapshot = _extract_snapshot(root)
+        provenance = _extract_provenance(snapshot, raw_snapshot)
         context = _extract_session_context(root)
         acquisition = _extract_acquisition(root)
         recording_context = _extract_recording_context(
