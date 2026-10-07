@@ -254,3 +254,70 @@ def test_whole_workflow_lock_prevents_second_importer_invocation(tmp_path, monke
     monkeypatch.setattr(workflow, "_run_command", competing)
     assert runner.main([*arguments, "--apply"]) == 1
     assert len(calls) == 1
+
+
+def test_retirement_replay_reports_the_zarr_paths_the_registrar_needs(tmp_path, monkeypatch):
+    # A replay from the durable "retiring" journal goes straight to finalization.
+    # It must report the same zarr_paths as a fresh import, or the workstation
+    # registrar refuses the completed status and the delivery is never registered.
+    from fisheye.utils import citrus_transfer_parent_workflow as workflow
+    from fisheye.utils import organize_transfer_recordings as organizer
+    from fisheye.utils import register_completed_imports as registrar
+
+    _source, arguments = _arguments(tmp_path)
+    monkeypatch.setattr(
+        workflow,
+        "_run_command",
+        lambda command, *, name, run_dir, pass_fds, env: runner.CommandRecord(
+            name, command, 7, "unused", "unused"
+        ),
+    )
+    assert runner.main([*arguments, "--apply"]) == 1  # organizes, then the import fails
+    plan_path = tmp_path / "run/organization_plan.json"
+    plan = json.loads(plan_path.read_bytes())
+    [state_path] = (tmp_path / "recordings/.transfer_intake").glob("*/organization_state.json")
+    state = json.loads(state_path.read_bytes())
+    state["status"] = "retiring"
+    state_path.write_text(json.dumps(state))
+    finalized = []
+
+    def finalize(replayed, *, registry_path, require_stimulus):
+        finalized.append(replayed["snapshot_id"])
+        return {"import_receipts": {"r": "receipt"}, "retired_files": []}
+
+    monkeypatch.setattr(workflow, "finalize_transfer_staging", finalize)
+    replay = list(arguments)
+    replay[replay.index("--run-dir") + 1] = str(tmp_path / "workflow-778")
+    assert runner.main([*replay, "--apply", "--resume-transfer-plan", str(plan_path)]) == 0
+    assert finalized == [plan["snapshot_id"]]
+    status = json.loads((tmp_path / "workflow-778/citrus_session_import.status.json").read_bytes())
+    assert status["status"] == "complete"
+    assert "zarr_paths" in status, "replay omitted zarr_paths"
+    expected = [
+        str(Path(p["destination_dir"]) / "zarr" / f"{Path(p['destination_dir']).name}_analysis.zarr")
+        for p in plan["parents"]
+    ]
+    assert [str(p) for p in organizer.parent_zarr_paths(plan)] == expected
+    assert len(expected) == len(plan["parents"]) == 2
+    assert status["zarr_paths"] == expected
+
+    # The registrar accepts the replayed status exactly as it would a fresh one.
+    key = "c" * 64
+    config = {
+        "staging_dir": str(tmp_path / "staging"), "state_dir": str(tmp_path / "state"),
+        "log_dir": str(tmp_path / "logs"), "submit": {"transport": "local", "repo": "/r"},
+        "registration": "workstation", "registry": str(tmp_path / "registry.sqlite"),
+        "writer_host": "writer", "writer_lock_path": str(tmp_path / "writer.lock"),
+        "shadow_temp_root": str(tmp_path / "shadows"), "shadow_backup_dir": str(tmp_path / "backups"),
+    }
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / f"{key}.submitted").write_text("job_id=778\n")
+    run_dir = tmp_path / "logs/bsub_submissions" / f"citrus_import_x_staging_{key}"
+    run_dir.mkdir(parents=True)
+    shutil.move(str(tmp_path / "workflow-778"), str(run_dir / "workflow-778"))
+    registered = []
+    assert registrar.register_completed(
+        config, dry_run=False, register=lambda registry, zarr: registered.append(str(zarr)) or "d"
+    ) == 0
+    assert registered == expected
+    assert (tmp_path / "state" / f"{key}.registered").is_file()

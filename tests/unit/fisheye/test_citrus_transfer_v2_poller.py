@@ -154,3 +154,33 @@ def test_local_transport_builds_bash_command(tmp_path):
     config = _config(tmp_path, submit={"transport": "local", "repo": "/r"})
     command = poller.build_command(config, Path("/s"), "k")
     assert command[:2] == ["bash", "-c"] and command[2].startswith("cd /r && scripts/")
+
+
+def test_claim_left_by_a_dead_poll_is_retried_not_skipped(tmp_path, capsys):
+    # A poll that died between claiming and recording the submission leaves only
+    # .claimed. Polls run one at a time, so that claim is stale: the next poll
+    # retries, and the launcher returns the earlier LSF job if there is one.
+    _session(tmp_path)
+    config = _config(tmp_path)
+
+    class Crash(RuntimeError):
+        pass
+
+    def crash(command):
+        raise Crash("killed mid-submit")
+
+    with pytest.raises(Crash):
+        poller.poll(config, dry_run=False, runner=crash)
+    [claimed] = (tmp_path / "state").glob("*.claimed")
+    assert not list((tmp_path / "state").glob("*.submitted"))
+
+    runner = FakeRunner()
+    assert poller.poll(config, dry_run=False, runner=runner) == 0
+    assert len(runner.calls) == 1
+    assert "retrying unfinished claim" in capsys.readouterr().out
+    [submitted] = (tmp_path / "state").glob("*.submitted")
+    assert submitted.read_text() == "job_id=42\n"
+    assert json.loads(claimed.read_text())["marker_sha256"]
+    # Once submitted, later polls leave it alone.
+    assert poller.poll(config, dry_run=False, runner=runner) == 0
+    assert len(runner.calls) == 1

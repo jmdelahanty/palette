@@ -1017,6 +1017,15 @@ def prepare_transfer_parent_recordings(
         return state
 
 
+def parent_zarr_paths(plan: dict) -> list[Path]:
+    """The analysis Zarr of each planned parent, in plan order."""
+
+    return [
+        Path(parent["destination_dir"]) / "zarr" / f"{Path(parent['destination_dir']).name}_analysis.zarr"
+        for parent in plan["parents"]
+    ]
+
+
 def _verify_parent_imports(
     plan: dict, *, registry_path: Path | None, require_stimulus: bool
 ) -> dict:
@@ -1027,7 +1036,7 @@ def _verify_parent_imports(
     from fisheye.utils.import_recording_analysis import stimulus_runs_present
 
     receipts = {}
-    for parent in plan["parents"]:
+    for parent, zarr_path in zip(plan["parents"], parent_zarr_paths(plan)):
         directory = Path(parent["destination_dir"])
         require(
             strict_json(directory / "recording_manifest.json")
@@ -1035,7 +1044,6 @@ def _verify_parent_imports(
             "parent manifest changed before retirement",
         )
         _verify_parent_index(plan, parent)
-        zarr_path = directory / "zarr" / f"{directory.name}_analysis.zarr"
         receipt = load_verified_recording_import_receipt(zarr_path)
         require(
             receipt.identity_claim.identity.manifest_fields() == parent["identity"],
