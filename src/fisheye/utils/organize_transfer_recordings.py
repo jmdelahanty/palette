@@ -455,6 +455,7 @@ def build_transfer_organization_plan(
         "destination_root": str(destination),
         "snapshot_id": current.snapshot_id,
         "transfer_attempt_id": current.attempt_id,
+        **({"transfer_sealer": current.sealer} if current.sealer is not None else {}),
         "recording_layout": current.recording_layout,
         "recording_payload_kind": current.recording_payload_kind,
         "acquisition_session_id": current.snapshot["acquisition_session_id"],
@@ -539,9 +540,18 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _device(path: Path) -> int:
+    return os.stat(path).st_dev
+
+
 def _sync_directory_chain(directory: Path) -> None:
-    # mkdir(parents=True) may have introduced any of these entries.
+    # mkdir(parents=True) may have introduced any of these entries. It cannot
+    # create a mount point, so stop at the filesystem boundary: fsync of an
+    # automount root such as /groups returns EINVAL.
+    device = _device(directory)
     for path in (directory, *directory.parents):
+        if _device(path) != device:
+            break
         _fsync_directory(path)
 
 
@@ -921,6 +931,7 @@ def _parent_manifest(plan: dict, parent: dict) -> dict:
             "schema_id": "palette.organized_recording_transfer.v1",
             "snapshot_id": plan["snapshot_id"],
             "transfer_attempt_id": plan["transfer_attempt_id"],
+            **({"sealer": plan["transfer_sealer"]} if plan.get("transfer_sealer") else {}),
             "organization_plan_sha256": plan["plan_sha256"],
             "snapshot_path": f"raw/acquisition/{SNAPSHOT_PATH}",
             "marker_path": f"raw/acquisition/{MARKER_NAME}",

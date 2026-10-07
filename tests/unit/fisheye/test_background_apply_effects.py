@@ -427,3 +427,64 @@ def test_failed_deferred_review_write_keeps_effects_owed(mask_store, monkeypatch
         worker.run_once()
     assert store.count_pending_session_checkpoint_apply_effects(task_id="task-a") == 0
     assert _component_review_state(zarr_path) == "needs_review"
+
+
+def _pending_apply(store, lease, apply_id):
+    with _server(store) as (base, _state):  # background on, no worker of its own
+        token = _save_row(base, lease, 0, _edited())
+        assert _apply(base, lease, apply_id, token)[0] == 200
+    assert store.count_pending_session_checkpoint_apply_effects(task_id="task-a") == 1
+
+
+def test_fixed_user_worker_drains_only_its_users_applies(mask_store):
+    store, lease, _zarr_path = mask_store
+    _pending_apply(store, lease, "scoped")
+    other = worker_mod.ApplyEffectsWorker(store, refresh_registry=lambda **kwargs: True, assignee_user="bob")
+    other.run_once()
+    assert store.count_pending_session_checkpoint_apply_effects(task_id="task-a") == 1
+    assert store.list_events(task_id="task-a", event_type=effects_mod.ATTEMPT_EVENT) == []
+    own = worker_mod.ApplyEffectsWorker(store, refresh_registry=lambda **kwargs: True, assignee_user="alice")
+    own.run_once()
+    assert store.count_pending_session_checkpoint_apply_effects(task_id="task-a") == 0
+
+
+def test_two_workers_on_one_store_run_effects_once(mask_store, monkeypatch):
+    store, lease, _zarr_path = mask_store
+    _pending_apply(store, lease, "two-workers")
+    calls = []
+    original = worker_mod.run_apply_effects_locked
+
+    def slow(**kwargs):
+        calls.append(threading.current_thread().name)
+        time.sleep(0.3)
+        return original(**kwargs)
+
+    monkeypatch.setattr(worker_mod, "run_apply_effects_locked", slow)
+    stores = [LabelingStore(store.path) for _ in range(2)]
+    try:
+        workers = [worker_mod.ApplyEffectsWorker(s, refresh_registry=lambda **kwargs: True) for s in stores]
+        threads = [threading.Thread(target=w.run_once, name=f"w{i}") for i, w in enumerate(workers)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+    finally:
+        for s in stores:
+            s.close()
+    assert len(calls) == 1
+    assert store.count_pending_session_checkpoint_apply_effects(task_id="task-a") == 0
+    statuses = sorted(e["after"]["status"] for e in store.list_events(task_id="task-a", event_type=effects_mod.ATTEMPT_EVENT))
+    assert statuses.count("complete") == 1 and "failed" not in statuses and "refused" not in statuses
+
+
+def test_launcher_rejects_an_unknown_background_effects_value(tmp_path):
+    import subprocess
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[3] / "scripts" / "start_labeling_web.sh"
+    done = subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, timeout=30,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "PALETTE_LABELING_BACKGROUND_APPLY_EFFECTS": "yes",
+             "PALETTE_LABELING_PID": str(tmp_path / "x.pid")},
+    )
+    assert done.returncode == 2 and "PALETTE_LABELING_BACKGROUND_APPLY_EFFECTS" in done.stderr
