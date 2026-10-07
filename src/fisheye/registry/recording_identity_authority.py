@@ -1023,11 +1023,17 @@ class RegistryRecordingIdentityMixin:
         is_source_recording = bool(session_uuid) and "/recordings/" in str(
             zarr_path
         ).replace("\\", "/").lower()
-        if not is_source_recording:
+        # B7: a different locator never takes over a receipt-bound dataset
+        # row; it resolves to its own path-scoped dataset id instead.
+        base_is_bound = (
+            row is not None
+            and self.verified_source_dataset_binding(base_dataset_id) is not None
+        )
+        if not is_source_recording and not base_is_bound:
             return base_dataset_id
 
-        assert session_uuid is not None
-        candidate = f"{session_uuid}:z{current_hash[:12]}"
+        prefix = session_uuid or base_dataset_id
+        candidate = f"{prefix}:z{current_hash[:12]}"
         for extra in (
             "",
             current_hash[12:16],
@@ -1041,7 +1047,7 @@ class RegistryRecordingIdentityMixin:
             ).fetchone()
             if existing is None or str(existing["path_hash"] or "") == current_hash:
                 return resolved
-        return f"{session_uuid}:z{current_hash}"
+        return f"{prefix}:z{current_hash}"
 
     def resolve_effective_dataset_id(
         self,
@@ -1057,6 +1063,234 @@ class RegistryRecordingIdentityMixin:
             session_uuid=session_uuid,
             zarr_path=zarr_path,
         )
+
+    # -- B7 boundary: rows owned by a verified current-source import --------
+    #
+    # A recording or dataset is "current-source" when the authority bound it to
+    # a verified import receipt (``recording_import_receipt_bindings``).  Those
+    # bindings are immutable and are written only by
+    # ``project_regular_source_recording_identity``.  Generic writers consult
+    # these predicates so they never change identity or context on such rows.
+
+    def verified_source_recording_binding(
+        self,
+        recording_id: str | None,
+    ) -> sqlite3.Row | None:
+        """Return the bound ``(recording_id, session_uuid)`` or ``None``."""
+
+        if not recording_id:
+            return None
+        return self.conn.execute(
+            """
+            SELECT c.recording_id, c.session_uuid
+            FROM recording_identity_current c
+            WHERE c.recording_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM recording_import_receipt_bindings b
+                  WHERE b.identity_scope_id = c.identity_scope_id
+              )
+            LIMIT 1;
+            """,
+            (str(recording_id),),
+        ).fetchone()
+
+    def verified_source_recording_at_directory(
+        self,
+        recording_dir: Path,
+    ) -> sqlite3.Row | None:
+        """Return the bound recording whose canonical directory is ``recording_dir``."""
+
+        resolved_dir = Path(recording_dir).expanduser().resolve()
+        return self.conn.execute(
+            """
+            SELECT c.recording_id, c.session_uuid
+            FROM recording_identity_current c
+            INNER JOIN recordings r ON r.recording_id = c.recording_id
+            WHERE r.recording_path = ?
+              AND EXISTS (
+                  SELECT 1 FROM recording_import_receipt_bindings b
+                  WHERE b.identity_scope_id = c.identity_scope_id
+              )
+            ORDER BY c.recording_id
+            LIMIT 1;
+            """,
+            (str(resolved_dir),),
+        ).fetchone()
+
+    def verified_source_dataset_binding(
+        self,
+        dataset_id: str | None,
+    ) -> sqlite3.Row | None:
+        """Return the receipt-bound dataset row for ``dataset_id`` or ``None``."""
+
+        if not dataset_id:
+            return None
+        return self.conn.execute(
+            """
+            SELECT d.*
+            FROM datasets d
+            WHERE d.dataset_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM recording_import_receipt_bindings b
+                  WHERE b.dataset_id = d.dataset_id
+              )
+            LIMIT 1;
+            """,
+            (str(dataset_id),),
+        ).fetchone()
+
+    def verified_source_dataset_at_path(
+        self,
+        zarr_path: Path,
+    ) -> sqlite3.Row | None:
+        """Return the receipt-bound dataset at one canonical locator, if any.
+
+        This is a registry-only lookup (no live receipt re-verification); it
+        decides which writer owns the row, not whether the import is valid.
+        """
+
+        resolved_path = Path(zarr_path).expanduser().resolve()
+        rows = self.conn.execute(
+            """
+            SELECT d.*
+            FROM datasets d
+            WHERE (d.zarr_path = ? OR d.path_hash = ?)
+              AND EXISTS (
+                  SELECT 1 FROM recording_import_receipt_bindings b
+                  WHERE b.dataset_id = d.dataset_id
+              )
+            ORDER BY d.dataset_id;
+            """,
+            (str(resolved_path), canonical_dataset_path_hash(resolved_path)),
+        ).fetchall()
+        if len(rows) > 1:
+            raise RecordingIdentityAuthorityError(
+                "multiple receipt-bound datasets share one canonical locator: "
+                + ", ".join(str(row["dataset_id"]) for row in rows)
+            )
+        return rows[0] if rows else None
+
+    def refuse_conflicting_verified_source_identity(
+        self,
+        *,
+        recording_id: str | None,
+        session_uuid: str | None,
+        writer: str,
+    ) -> sqlite3.Row | None:
+        """Refuse a non-authority claim that contradicts a bound recording.
+
+        Returns the bound recording row, or ``None`` when ``recording_id`` is
+        not bound to a verified source.
+        """
+
+        bound = self.verified_source_recording_binding(recording_id)
+        if bound is None:
+            return None
+        if session_uuid and str(session_uuid) != str(bound["session_uuid"]):
+            raise RecordingIdentityAuthorityError(
+                f"{writer}: recording_id {recording_id!r} is bound to a verified "
+                f"source import with session_uuid {bound['session_uuid']!r}; "
+                f"refusing a claim with session_uuid {session_uuid!r}"
+            )
+        return bound
+
+    def mark_dataset_seen(self, dataset_id: str) -> None:
+        """Touch ``datasets.last_seen_utc`` without writing identity or context."""
+
+        self.conn.execute(
+            "UPDATE datasets SET last_seen_utc = ? WHERE dataset_id = ?;",
+            (utc_now(), str(dataset_id)),
+        )
+        self._commit_if_standalone()
+
+    def refuse_or_touch_verified_source_dataset(
+        self,
+        dataset_id: str,
+        *,
+        zarr_path: Path,
+        explicit: Mapping[str, Any],
+    ) -> bool:
+        """B7 guard: generic dataset upserts never write a receipt-bound row.
+
+        Returns ``True`` when ``dataset_id`` is bound to a verified current-source
+        import and every explicitly requested value already agrees; only
+        ``last_seen_utc`` is touched.  Any disagreement is refused.  Returns
+        ``False`` for rows the identity authority does not own.
+        """
+
+        resolved_path = Path(zarr_path).expanduser().resolve()
+        bound = self.verified_source_dataset_binding(dataset_id)
+        if bound is None:
+            at_path = self.verified_source_dataset_at_path(resolved_path)
+            if at_path is not None:
+                raise RecordingIdentityAuthorityError(
+                    f"upsert_dataset: locator {str(resolved_path)!r} is bound to "
+                    f"verified source dataset {at_path['dataset_id']!r}; refusing "
+                    f"to register it as dataset {dataset_id!r}"
+                )
+            return False
+        requested = {"zarr_path": str(resolved_path), **explicit}
+        self._refuse_bound_row_changes(
+            bound,
+            requested,
+            what=f"upsert_dataset: dataset {dataset_id!r}",
+        )
+        self.mark_dataset_seen(dataset_id)
+        return True
+
+    def refuse_verified_source_recording_change(
+        self,
+        payload: Mapping[str, Any],
+    ) -> bool:
+        """B7 guard: generic recording upserts never write a bound recording.
+
+        Returns ``True`` (and writes nothing) when the recording is bound to a
+        verified current-source import and every supplied value already agrees.
+        Any supplied value that would change the row is refused.  Returns
+        ``False`` for recordings the authority does not own (historical path).
+        """
+
+        recording_id = str(payload["recording_id"])
+        if self.verified_source_recording_binding(recording_id) is None:
+            return False
+        row = self.conn.execute(
+            "SELECT * FROM recordings WHERE recording_id = ?;",
+            (recording_id,),
+        ).fetchone()
+        requested = {
+            field: value
+            for field, value in payload.items()
+            if field not in {"recording_id", "created_utc", "updated_utc"}
+        }
+        self._refuse_bound_row_changes(
+            row,
+            requested,
+            what=f"upsert_recording: recording {recording_id!r}",
+        )
+        return True
+
+    @staticmethod
+    def _refuse_bound_row_changes(
+        row: sqlite3.Row | None,
+        requested: Mapping[str, Any],
+        *,
+        what: str,
+    ) -> None:
+        conflicts = []
+        for field, value in requested.items():
+            if value is None:
+                continue
+            stored = row[field] if row is not None else None
+            if stored is None or str(stored) != str(value):
+                conflicts.append(
+                    f"{field} (registry={stored!r}, requested={value!r})"
+                )
+        if conflicts:
+            raise RecordingIdentityAuthorityError(
+                f"{what} is bound to a verified source import; only the "
+                "recording identity authority may change its identity or "
+                "context: " + "; ".join(conflicts)
+            )
 
     def _update_current_source_dataset_metadata(
         self,
@@ -1162,11 +1396,11 @@ class RegistryRecordingIdentityMixin:
             "recording_intent",
             "data_origin",
         )
-        updates = {
-            field: context[field]
-            for field in optional_fields
-            if context.get(field) is not None
-        }
+        # Decision 4 (2026-10-07 intake single-writer design): a receipt-bound
+        # current-source row mirrors the authority exactly, NULL included, so a
+        # value the authority no longer declares cannot survive as stale
+        # registry state.  Historical rows keep COALESCE in ``upsert_recording``.
+        updates = {field: context.get(field) for field in optional_fields}
         updates.update(
             recording_path=canonical_recording_path,
             camera_id=camera_id,

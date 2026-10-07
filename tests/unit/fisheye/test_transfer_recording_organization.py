@@ -254,6 +254,31 @@ def test_failed_optional_proof_is_refused_not_discarded(tmp_path):
         _plan(source, tmp_path / "recordings")
 
 
+def _unified_declaring_h5(path: Path) -> None:
+    """An H5 that declares the unified profile; admission is stubbed by callers.
+
+    New transfer-v2 deliveries refuse legacy H5s (test_transfer_v2_legacy_h5_refusal),
+    so the plan's camera/session mapping guards are exercised through the
+    unified route. Real unified admission is covered in test_unified_transfer_receipts.
+    """
+    from fisheye.shared.unified_h5 import PROFILE
+
+    with h5py.File(path, "w") as h5:
+        h5.create_group("metadata/session").attrs["recording_artifact_profile"] = PROFILE
+
+
+def _stub_unified_context(monkeypatch, camera, session, **extra) -> None:
+    monkeypatch.setattr(
+        organizer,
+        "_unified_h5_context",
+        lambda _source, relative, _inventory, _contexts: (
+            camera,
+            {"session_uuid": session, **extra},
+            f"receipts/{Path(relative).stem}.json",
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     "camera,session",
     [
@@ -263,14 +288,13 @@ def test_failed_optional_proof_is_refused_not_discarded(tmp_path):
         (None, "fixture-session"),
     ],
 )
-def test_h5_mapping_uses_exact_context_not_filename(tmp_path, camera, session):
+def test_h5_mapping_uses_exact_context_not_filename(
+    tmp_path, monkeypatch, camera, session
+):
     source = _source(tmp_path)
     h5_path = source / "unhelpful_filename.h5"
-    with h5py.File(h5_path, "w") as h5:
-        h5.attrs["session_uuid"] = session
-        if camera is not None:
-            h5.attrs["camera_id"] = camera
-        h5.attrs["rig_id"] = "synthetic-rig"
+    _unified_declaring_h5(h5_path)
+    _stub_unified_context(monkeypatch, camera, session, rig_id="synthetic-rig")
     _resign(source)
     if camera != "02010093" or session != "fixture-session":
         with pytest.raises(ValueError, match="H5"):
@@ -289,12 +313,11 @@ def test_h5_mapping_uses_exact_context_not_filename(tmp_path, camera, session):
         assert parent["producer_context"]["rig_id"] == "synthetic-rig"
 
 
-def test_duplicate_h5_for_one_parent_refuses_ambiguity(tmp_path):
+def test_duplicate_h5_for_one_parent_refuses_ambiguity(tmp_path, monkeypatch):
     source = _source(tmp_path)
     for name in ("one.h5", "two.hdf5"):
-        with h5py.File(source / name, "w") as h5:
-            h5.attrs["camera_id"] = "02010093"
-            h5.attrs["session_uuid"] = "fixture-session"
+        _unified_declaring_h5(source / name)
+    _stub_unified_context(monkeypatch, "02010093", "fixture-session")
     _resign(source)
     with pytest.raises(ValueError, match="multiple H5"):
         _plan(source, tmp_path / "recordings")
