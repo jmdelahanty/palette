@@ -1229,7 +1229,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-82990989bd4eb122"
+            "schema-writer-d0dbc2d7d1049e0a"
           ],
           "shape": "shape(_bytes_array(result.chaser_behavior_class, width=32))"
         },
@@ -1590,7 +1590,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-ba839eee271dcbdc"
+            "schema-writer-68f3ca1af013b5a2"
           ],
           "shape": "shape(result.chaser_index)"
         },
@@ -3099,7 +3099,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-2da7642f9394644c"
+            "schema-writer-0579e62be07d6c40"
           ],
           "shape": "shape(result.epoch_end_frame)"
         },
@@ -4830,7 +4830,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-6629041427d7843c"
+            "schema-writer-69e7b8c15d3725e4"
           ],
           "shape": "shape(_bytes_array(result.epoch_label, width=64))"
         },
@@ -5827,7 +5827,7 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-14ed8be53cfdbddc"
+            "schema-writer-57dba7840958f3d1"
           ],
           "shape": "shape([ref.parent_chaser_index for ref in result.virtual_references])"
         }
@@ -6620,7 +6620,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-51d513e8e0a72969"
+            "schema-writer-9774642cb1ef1b92"
           ],
           "shape": "shape(_bytes_array([ref.label for ref in result.virtual_references], width=64))"
         },
@@ -6982,7 +6982,7 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-72080f08b4a97df0"
+            "schema-writer-f455474478e3c3df"
           ],
           "shape": "shape([ref.rotation_deg for ref in result.virtual_references])"
         }
@@ -8436,7 +8436,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-aa1308ba90a6ff94"
+            "schema-writer-0c879dd35c330612"
           ],
           "shape": "shape(result.epoch_start_frame)"
         },
@@ -9411,7 +9411,7 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-f065a1597639be39"
+            "schema-writer-c34102d6af8e6c1c"
           ],
           "shape": "shape(result.epoch_window_id)"
         },
@@ -16985,8 +16985,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1315,
-      "occurrence_id": "schema-writer-ba839eee271dcbdc",
+      "line": 1281,
+      "occurrence_id": "schema-writer-68f3ca1af013b5a2",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/objects/chaser_index",
       "required": null,
       "shape_expression": "shape(result.chaser_index)",
@@ -16998,7 +16998,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-f60a02639b002483"
+      "writer_site_id": "writer-39252f6b0ca265de"
     },
     {
       "access_pattern": "unclassified",
@@ -17019,8 +17019,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1316,
-      "occurrence_id": "schema-writer-82990989bd4eb122",
+      "line": 1282,
+      "occurrence_id": "schema-writer-d0dbc2d7d1049e0a",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/objects/behavior_class_label_bytes",
       "required": null,
       "shape_expression": "shape(_bytes_array(result.chaser_behavior_class, width=32))",
@@ -17032,7 +17032,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-6b55b628525b5af3"
+      "writer_site_id": "writer-355bbb89f0b0e77e"
     },
     {
       "access_pattern": "unclassified",
@@ -17053,8 +17053,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1317,
-      "occurrence_id": "schema-writer-b9a05467309f2d15",
+      "line": 1283,
+      "occurrence_id": "schema-writer-13da2f01e3d7c724",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/objects/eye_range_deg",
       "required": null,
       "shape_expression": "shape(result.eye_range_deg)",
@@ -17066,7 +17066,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-ce5c8e22d08eff7a"
+      "writer_site_id": "writer-40d8675766d4ea96"
     },
     {
       "access_pattern": "unclassified",
@@ -17087,8 +17087,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1318,
-      "occurrence_id": "schema-writer-380cfcdeeed33eed",
+      "line": 1284,
+      "occurrence_id": "schema-writer-77c314740f6436f2",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/objects/distance_mm",
       "required": null,
       "shape_expression": "shape(result.distance_mm)",
@@ -17100,7 +17100,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-82a82c7e9c34e876"
+      "writer_site_id": "writer-0f5a1e381be3a47f"
     },
     {
       "access_pattern": "unclassified",
@@ -17121,8 +17121,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1319,
-      "occurrence_id": "schema-writer-d717669000c1fad2",
+      "line": 1285,
+      "occurrence_id": "schema-writer-f20752da4cf79fa7",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/objects/bearing_deg",
       "required": null,
       "shape_expression": "shape(result.bearing_deg)",
@@ -17134,7 +17134,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-dc0f0dcd9b1e88a5"
+      "writer_site_id": "writer-7fc3b64f5532668a"
     },
     {
       "access_pattern": "unclassified",
@@ -17155,8 +17155,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1320,
-      "occurrence_id": "schema-writer-382d32579effb019",
+      "line": 1286,
+      "occurrence_id": "schema-writer-6600ebda18468e1f",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/objects/gaze_error_deg",
       "required": null,
       "shape_expression": "shape(result.gaze_error_deg)",
@@ -17168,7 +17168,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-06e6b77994c4c00b"
+      "writer_site_id": "writer-25e702e50078c6be"
     },
     {
       "access_pattern": "unclassified",
@@ -17189,8 +17189,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1321,
-      "occurrence_id": "schema-writer-876895744e61c43c",
+      "line": 1287,
+      "occurrence_id": "schema-writer-f2e227d6f72b7bbf",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/objects/accessible",
       "required": null,
       "shape_expression": "shape(result.accessible)",
@@ -17202,7 +17202,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-b47bb95414763966"
+      "writer_site_id": "writer-992d9a13f5e5f812"
     },
     {
       "access_pattern": "unclassified",
@@ -17223,8 +17223,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1322,
-      "occurrence_id": "schema-writer-8d637d84cb9fb917",
+      "line": 1288,
+      "occurrence_id": "schema-writer-b580620d4395767b",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/objects/lock_on",
       "required": null,
       "shape_expression": "shape(result.lock_on)",
@@ -17236,7 +17236,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-9af266c5a999b512"
+      "writer_site_id": "writer-af72ed9995fa0475"
     },
     {
       "access_pattern": "unclassified",
@@ -17257,8 +17257,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1333,
-      "occurrence_id": "schema-writer-f065a1597639be39",
+      "line": 1299,
+      "occurrence_id": "schema-writer-c34102d6af8e6c1c",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/epochs/window_id",
       "required": null,
       "shape_expression": "shape(result.epoch_window_id)",
@@ -17270,7 +17270,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-df848f9eccf21356"
+      "writer_site_id": "writer-c45dadccd551c1c8"
     },
     {
       "access_pattern": "unclassified",
@@ -17291,8 +17291,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1334,
-      "occurrence_id": "schema-writer-6629041427d7843c",
+      "line": 1300,
+      "occurrence_id": "schema-writer-69e7b8c15d3725e4",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/epochs/label_bytes",
       "required": null,
       "shape_expression": "shape(_bytes_array(result.epoch_label, width=64))",
@@ -17304,7 +17304,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-a28c62c63834ea6a"
+      "writer_site_id": "writer-45838a14b9e61f29"
     },
     {
       "access_pattern": "unclassified",
@@ -17325,8 +17325,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1335,
-      "occurrence_id": "schema-writer-aa1308ba90a6ff94",
+      "line": 1301,
+      "occurrence_id": "schema-writer-0c879dd35c330612",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/epochs/start_frame",
       "required": null,
       "shape_expression": "shape(result.epoch_start_frame)",
@@ -17338,7 +17338,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-5f3387cc42164102"
+      "writer_site_id": "writer-97327413ed50c142"
     },
     {
       "access_pattern": "unclassified",
@@ -17359,8 +17359,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1336,
-      "occurrence_id": "schema-writer-2da7642f9394644c",
+      "line": 1302,
+      "occurrence_id": "schema-writer-0579e62be07d6c40",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/epochs/end_frame",
       "required": null,
       "shape_expression": "shape(result.epoch_end_frame)",
@@ -17372,7 +17372,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-92ffb8bb925f8a8e"
+      "writer_site_id": "writer-b1f2f3d600d559ba"
     },
     {
       "access_pattern": "unclassified",
@@ -17393,8 +17393,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1357,
-      "occurrence_id": "schema-writer-51d513e8e0a72969",
+      "line": 1323,
+      "occurrence_id": "schema-writer-9774642cb1ef1b92",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/virtual_controls/reference_label_bytes",
       "required": null,
       "shape_expression": "shape(_bytes_array([ref.label for ref in result.virtual_references], width=64))",
@@ -17406,7 +17406,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-071f9f25855e681b"
+      "writer_site_id": "writer-6f3cdb7d9c449f78"
     },
     {
       "access_pattern": "unclassified",
@@ -17427,8 +17427,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1358,
-      "occurrence_id": "schema-writer-14ed8be53cfdbddc",
+      "line": 1324,
+      "occurrence_id": "schema-writer-57dba7840958f3d1",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/virtual_controls/parent_chaser_index",
       "required": null,
       "shape_expression": "shape([ref.parent_chaser_index for ref in result.virtual_references])",
@@ -17440,7 +17440,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-453b8ddeb505c87d"
+      "writer_site_id": "writer-e2a3e48bd958107d"
     },
     {
       "access_pattern": "unclassified",
@@ -17461,8 +17461,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/analysis/chaser_gaze_tracking.py",
-      "line": 1359,
-      "occurrence_id": "schema-writer-72080f08b4a97df0",
+      "line": 1325,
+      "occurrence_id": "schema-writer-f455474478e3c3df",
       "path_pattern": "<open_zarr_root(zarr_path, mode='a')>/<result.chaser_distance_run_path>/gaze_tracking/<result.component_name>/virtual_controls/rotation_deg",
       "required": null,
       "shape_expression": "shape([ref.rotation_deg for ref in result.virtual_references])",
@@ -17474,7 +17474,7 @@
       "subgroup": null,
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_site_id": "writer-f25a62a213ae2c34"
+      "writer_site_id": "writer-7e55fb494924ba0a"
     },
     {
       "access_pattern": "unclassified",

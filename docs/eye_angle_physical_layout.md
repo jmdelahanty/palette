@@ -4,7 +4,11 @@ Palette's compact eye-angle contract remains one comprehensive two-dimensional
 `roi_angles` and `frame_angles` matrix plus the authoritative
 `angle_channel_index`. Consumers must resolve columns by
 `angle_channel_index/name`; a numeric column index has no scientific meaning and
-must not be persisted as an analysis contract.
+must not be persisted as an analysis contract. Both matrices carry every
+channel name, including channels that do not exist on that axis; those columns
+are `NaN`/`0` placeholders marked `frame_available=False` or
+`roi_available=False`. See "Axis-Unavailable Columns" in
+`eye_angle_compact_v2_design.md` before reading the arrays directly.
 
 The matrix is intentionally comprehensive. It preserves raw, smoothed,
 delta, derivative, compatibility, and alternative-representation channels in

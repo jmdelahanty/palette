@@ -28,7 +28,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
-from fisheye.analysis.eye_angle_io import resolve_eye_angle_run  # noqa: E402
+from fisheye.analysis.eye_angle_io import (  # noqa: E402
+    read_compact_axis_columns,
+    resolve_eye_angle_run,
+)
 from fisheye.analysis.eye_angle_schema import (  # noqa: E402
     eye_angle_dimensions_from_run_attrs,
     validate_eye_angle_compact_run,
@@ -388,30 +391,6 @@ def _sample_slices(row_count: int, *, windows: int, rows_per_window: int) -> tup
     return tuple(slice(start, min(row_count, start + width)) for start in unique_starts)
 
 
-def _read_packed_columns(
-    data: zarr.Array,
-    names: Sequence[str],
-    requested: Sequence[str],
-    slices: Sequence[slice],
-) -> dict[str, np.ndarray]:
-    missing = [name for name in requested if name not in names]
-    if missing:
-        raise ValueError(f"Packed array {data.path!r} is missing required channels: {missing}.")
-    indices = [names.index(name) for name in requested]
-    pieces: dict[str, list[np.ndarray]] = {name: [] for name in requested}
-    for row_slice in slices:
-        # Packed scalar arrays use a single all-channel physical chunk.  Reading
-        # one bounded row window and then selecting columns minimizes network
-        # round trips without pretending the column table is independently chunked.
-        block = np.asarray(data[row_slice, :])
-        for name, channel_index in zip(requested, indices):
-            pieces[name].append(np.asarray(block[:, channel_index]))
-    return {
-        name: np.concatenate(values, axis=0) if values else np.asarray([], dtype=data.dtype)
-        for name, values in pieces.items()
-    }
-
-
 def _read_row_windows(data: Any, slices: Sequence[slice]) -> np.ndarray:
     values = [np.asarray(data[row_slice]) for row_slice in slices]
     if not values:
@@ -529,9 +508,7 @@ def _load_compact_sample(
     if int(vector_data.shape[0]) != row_count or int(qa_data.shape[0]) != row_count:
         raise ValueError("Eye-angle packed ROI arrays have inconsistent row counts.")
     slices = _sample_slices(row_count, windows=windows, rows_per_window=rows_per_window)
-    angle_names = _decode_channel_names(run_group["angle_channel_index"], int(angle_data.shape[1]))
     vector_names = _decode_channel_names(run_group["vector_channel_index"], int(vector_data.shape[1]))
-    qa_names = _decode_channel_names(run_group["qa_channel_index"], int(qa_data.shape[1]))
 
     angle_fields = (
         "left_major_signed_deg",
@@ -542,7 +519,9 @@ def _load_compact_sample(
         "left_gaze_signed_deg",
         "right_gaze_signed_deg",
     )
-    output = _read_packed_columns(angle_data, angle_names, angle_fields, slices)
+    output = read_compact_axis_columns(
+        run_group, family="angle", axis="roi", names=angle_fields, row_windows=slices
+    )
     missing_vectors = [name for name in ("left_gaze_xy", "right_gaze_xy") if name not in vector_names]
     if missing_vectors:
         raise ValueError(f"Packed vector array is missing required channels: {missing_vectors}.")
@@ -555,7 +534,11 @@ def _load_compact_sample(
     output["right_gaze_xy"] = vectors[:, 1, :]
 
     qa_fields = ("valid_frame", "major_axis_marginal")
-    output.update(_read_packed_columns(qa_data, qa_names, qa_fields, slices))
+    output.update(
+        read_compact_axis_columns(
+            run_group, family="qa", axis="roi", names=qa_fields, row_windows=slices
+        )
+    )
     for name in ("forward_axis_xy", "left_axis_xy", "heading_deg", "origin_xy", "valid"):
         output[name] = _read_row_windows(run_group[f"support/body_frame/{name}"], slices)
     output["frame_indices"] = _read_row_windows(run_group["support/frame_indices"], slices).astype(np.int64)

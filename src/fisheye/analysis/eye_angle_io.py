@@ -412,6 +412,98 @@ def _dense_vector_mapping(
     return arrays
 
 
+_COMPACT_COLUMN_FAMILIES: dict[str, tuple[str, str]] = {
+    "angle": ("angles", "angle_channel_index"),
+    "qa": ("qa", "qa_channel_index"),
+}
+
+
+def read_compact_axis_columns(
+    run_group: Any,
+    *,
+    family: str,
+    axis: str,
+    names: Sequence[str],
+    row_windows: Sequence[slice] | None = None,
+) -> dict[str, np.ndarray]:
+    """Read named scalar columns from one compact eye-angle axis.
+
+    ``family`` is ``"angle"`` or ``"qa"`` and ``axis`` is ``"roi"`` or
+    ``"frame"``. The dense arrays carry the union of both axes' channels, so a
+    channel absent on ``axis`` is a NaN/0 placeholder column; it is refused
+    here rather than returned. ``row_windows`` reads each window full-width and
+    concatenates them; ``None`` reads every row.
+    """
+
+    if family not in _COMPACT_COLUMN_FAMILIES:
+        raise EyeAngleIOError(f"Unknown compact eye-angle column family {family!r}.")
+    if axis not in {"roi", "frame"}:
+        raise EyeAngleIOError(f"Unknown compact eye-angle row axis {axis!r}.")
+    suffix, index_name = _COMPACT_COLUMN_FAMILIES[family]
+    data_name = f"{axis}_{suffix}"
+    if data_name not in run_group or index_name not in run_group:
+        raise EyeAngleIOError(f"Eye-angle run lacks compact {data_name}/{index_name}.")
+    data = run_group[data_name]
+    if len(data.shape) != 2:
+        raise EyeAngleIOError(f"Compact {data_name} must be a 2D dense channel array.")
+    channel_count = int(data.shape[1])
+    index_group = run_group[index_name]
+    if "name" not in index_group:
+        raise EyeAngleIOError(f"Channel index {index_name!r} is missing its name array.")
+    channel_names = [
+        str(decode_null_terminated_text(value)) for value in np.asarray(index_group["name"][:])
+    ]
+    if len(channel_names) != channel_count:
+        raise EyeAngleIOError(
+            f"{index_name} names {len(channel_names)} channels for "
+            f"{channel_count} {data_name} columns."
+        )
+    if any(not name for name in channel_names) or len(set(channel_names)) != len(channel_names):
+        raise EyeAngleIOError(f"{index_name} names are empty or duplicated.")
+    available_name = f"{axis}_available"
+    if available_name not in index_group:
+        raise EyeAngleIOError(f"{index_name} is missing {available_name}.")
+    available = np.asarray(index_group[available_name][:], dtype=bool).reshape(-1)
+    if int(available.shape[0]) != channel_count:
+        raise EyeAngleIOError(
+            f"{index_name}/{available_name} has {available.shape[0]} rows; "
+            f"expected {channel_count}."
+        )
+
+    requested = list(names)
+    missing = [name for name in requested if name not in channel_names]
+    if missing:
+        raise EyeAngleIOError(f"{data_name} is missing required channels: {missing}.")
+    indexes = [channel_names.index(name) for name in requested]
+    placeholders = [name for name, index in zip(requested, indexes) if not bool(available[index])]
+    if placeholders:
+        raise EyeAngleIOError(
+            f"{data_name} columns {placeholders} are placeholders: "
+            f"{index_name}/{available_name} is False for them."
+        )
+
+    if row_windows is None:
+        try:
+            packed = np.asarray(data.get_orthogonal_selection((slice(None), indexes)))
+        except (AttributeError, TypeError, IndexError):
+            packed = np.column_stack([np.asarray(data[:, index]) for index in indexes])
+        if packed.ndim == 1:
+            packed = packed.reshape(-1, 1)
+        return {name: np.asarray(packed[:, position]) for position, name in enumerate(requested)}
+
+    pieces: dict[str, list[np.ndarray]] = {name: [] for name in requested}
+    for row_window in row_windows:
+        # One bounded full-width row read per sampled window keeps network
+        # round trips low; column selection happens in memory.
+        block = np.asarray(data[row_window, :])
+        for name, index in zip(requested, indexes):
+            pieces[name].append(np.asarray(block[:, index]))
+    return {
+        name: np.concatenate(values, axis=0) if values else np.asarray([], dtype=data.dtype)
+        for name, values in pieces.items()
+    }
+
+
 def _compact_dense_tables(
     run_group: zarr.Group,
     *,
