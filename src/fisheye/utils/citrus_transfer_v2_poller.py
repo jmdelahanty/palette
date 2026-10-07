@@ -10,8 +10,11 @@ never submitted. Full inventory verification stays in the LSF job
 Recording context is the producer's per-camera declaration in the snapshot,
 so the operator JSON config (``--config`` or ``CITRUS_V2_POLLER_CONFIG``) holds
 only operations: ``staging_dir``, ``state_dir``, ``log_dir``, optional
-``writer_host``, and ``submit`` = ``{"transport": "local"|"ssh", "host": ...,
-"repo": ...}``. A config that still declares recording context is refused.
+``writer_host``, ``submit`` = ``{"transport": "local"|"ssh", "host": ...,
+"repo": ...}`` and ``registration``: ``"job"`` (default; the LSF job registers
+on the writer host) or ``"workstation"`` (jobs run ``--no-register`` and
+``register_completed_imports`` registers from this host). A config that still
+declares recording context is refused.
 
 Installation (cron entry, config file, retiring the v1 poller) is a separate,
 user-authorized step. This module installs nothing and edits no crontab; run
@@ -79,6 +82,8 @@ def load_config(path: Path) -> dict:
         raise PollerRefusal("submit needs transport local|ssh and repo")
     if submit["transport"] == "ssh" and not submit.get("host"):
         raise PollerRefusal("ssh transport needs submit.host")
+    if config.get("registration", "job") not in ("job", "workstation"):
+        raise PollerRefusal('registration must be "job" or "workstation"')
     return config
 
 
@@ -128,7 +133,11 @@ def build_command(config: dict, session_dir: Path, key: str) -> list[str]:
         "--marker-key", key,
         "--log-dir", str(Path(config["log_dir"]) / "bsub_submissions"),
     ]
-    if config.get("writer_host"):
+    if config.get("registration") == "workstation":
+        # The job imports only; register_completed_imports registers from the
+        # designated writer host (this poller's host) after the job completes.
+        launcher.append("--no-register")
+    elif config.get("writer_host"):
         launcher += ["--writer-host", config["writer_host"]]
     submit = config["submit"]
     remote = f"cd {shlex.quote(submit['repo'])} && {shlex.join(launcher)}"
