@@ -164,3 +164,20 @@ def test_unknown_translator_is_refused(tmp_path):
     root = zarr.open_group(str(tmp_path / "x.zarr"), mode="w")
     with pytest.raises(ValueError, match="Unknown subject translator"):
         publish_subject_metadata(root, LEGACY_H5, source_artifact={"kind": "test"}, translator="guess")
+
+
+@pytest.mark.parametrize(
+    "queried, expected",
+    [
+        ("2026-07-22T00:06:17Z", 7),  # 20:06 EDT on 2026-07-21: still day 7 in the lab
+        ("2026-07-22T12:00:00Z", 8),
+        ("2026-07-21T20:06:17-04:00", 7),
+    ],
+)
+def test_age_counts_lab_calendar_days_not_utc(queried, expected):
+    # Real case: fertilized 20260714, recorded the evening of 2026-07-21 (EDT);
+    # Citrus stored days_post_fertilization "7".
+    subject = sf.from_h5_attributes(
+        {"date_of_fertilization": "20260714", "days_post_fertilization": "7", "queried_at_utc": queried}
+    )
+    assert subject["dpf_at_acquisition"] == expected

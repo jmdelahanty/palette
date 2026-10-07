@@ -13,12 +13,16 @@ cannot be translated is left out and its reason is recorded under
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 import json
 import re
 from typing import Any, Callable, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 SUBJECT_TYPES = ("individual", "dish_group")
+# Fertilization dates are lab calendar days, so the recording day must be too:
+# an evening recording is already "tomorrow" in UTC (Citrus counts locally).
+LAB_TIMEZONE = ZoneInfo("America/New_York")
 LOOKUP_STATUSES = ("collected", "not_collected", "lookup_failed")
 # The manual CLI's "group" means a dish group (decided 2026-10-06).
 _SUBJECT_TYPE_ALIASES = {"individual": "individual", "dish_group": "dish_group", "group": "dish_group"}
@@ -100,6 +104,12 @@ def _fertilization_date(value: Any) -> date | None:
         return None
 
 
+def lab_recording_date(moment: datetime) -> date:
+    """The lab calendar day of an instant (naive instants are taken as lab-local)."""
+
+    return moment.astimezone(LAB_TIMEZONE).date() if moment.tzinfo is not None else moment.date()
+
+
 def _recording_date(value: Any) -> date | None:
     text = _text(value)
     if text is None:
@@ -108,9 +118,7 @@ def _recording_date(value: Any) -> date | None:
         moment = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
     except ValueError:
         return None
-    if moment.tzinfo is not None:
-        moment = moment.astimezone(timezone.utc)
-    return moment.date()
+    return lab_recording_date(moment)
 
 
 class _Builder:
@@ -310,6 +318,7 @@ __all__ = [
     "canonical_subject_fields",
     "from_declared_absence",
     "from_h5_attributes",
+    "lab_recording_date",
     "from_legacy_zebrobot_snapshot",
     "from_manual_assertion",
     "from_orange_reference",

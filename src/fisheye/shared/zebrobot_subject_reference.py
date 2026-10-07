@@ -33,6 +33,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from fisheye.shared.subject_fields import lab_recording_date
+
 REFERENCE_SCHEMA_ID = "orange.recording_subject_reference"
 REFERENCE_SCHEMA_VERSIONS = (1, 2)
 API_SCHEMA_VERSION = 2
@@ -275,7 +277,7 @@ def resolve_subject_reference(
         "line_strain": snapshot.get("line_strain"),
         "parents": snapshot.get("parents"),
         "dof": snapshot["dof"],
-        "dpf_at_recording": (recorded_at.date() - dof).days,
+        "dpf_at_recording": (lab_recording_date(recorded_at) - dof).days,
         "source_dish_population_count": snapshot.get("fish_count"),
         # Registered to the dish at record start; NOT the recorded subjects.
         "dish_fish_ids": [item["fish_id"] for item in fish_items],
