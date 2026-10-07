@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Mapping, Optional
 import zarr
 
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.clipped_video_collection import SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID
 from fisheye.shared.type_conversions import normalize_attr as _decode_attr
 
 
@@ -102,6 +103,46 @@ def _file_row_count(files: Mapping[str, Any], key: str) -> Optional[int]:
     return _as_int(_file_entry(files, key).get("data_row_count"))
 
 
+def collection_video_facts(root: zarr.Group) -> Dict[str, Any]:
+    """Full-frame video facts a clipped (rolling) import probed for every clip.
+
+    ``source_video_metadata`` holds the collection-level values: width, height
+    and fps are required to agree across clips at intake, and codec/pix_fmt are
+    None when clips differ. Anything else returns an empty mapping.
+    """
+
+    metadata = _coerce_mapping(root.attrs.get("source_video_metadata"))
+    if metadata.get("schema_id") != SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID:
+        return {}
+    return {
+        "width": _as_int(metadata.get("width")),
+        "height": _as_int(metadata.get("height")),
+        "fps": _as_float(metadata.get("fps")),
+        "codec": _decode_attr(metadata.get("codec")),
+        "pix_fmt": _decode_attr(metadata.get("pix_fmt")),
+    }
+
+
+def _crop_ledger_size(stream_group: Any, run_name: Optional[str]) -> Dict[str, Optional[int]]:
+    """The crop video size the stream's current ledger run was validated against."""
+
+    if not run_name:
+        return {}
+    runs = stream_group.get("ledger_runs") if stream_group is not None else None
+    run = runs.get(str(run_name)) if runs is not None else None
+    if run is None:
+        return {}
+    run_contract = _coerce_mapping(run.attrs.get("source_stream_contract"))
+    return {
+        "width": _as_int(run_contract.get("width")),
+        "height": _as_int(run_contract.get("height")),
+    }
+
+
+def _first_present(*values: Any) -> Any:
+    return next((value for value in values if value is not None), None)
+
+
 def _extract_stream_attrs(streams_group: zarr.Group, stream_key: str) -> Dict[str, Any]:
     if stream_key not in streams_group:
         return {}
@@ -127,6 +168,7 @@ def _extract_acquisition_video_stream_rows(
 
     parent_attrs = dict(parent.attrs)
     inventory_status = _decode_attr(parent_attrs.get("inventory_status"))
+    collection = collection_video_facts(root)
     updated_utc = utc_now()
     rows: List[Dict[str, Any]] = []
     for stream_key in _group_keys(streams_group):
@@ -136,6 +178,21 @@ def _extract_acquisition_video_stream_rows(
         contract = _coerce_mapping(stream_attrs.get("contract"))
         files = _coerce_mapping(stream_attrs.get("files"))
         summary = _coerce_mapping(stream_attrs.get("summary"))
+        # Rolling stream contracts carry no video facts; take them from what
+        # intake verified (the stream contract still wins when it has a value).
+        output_kind = _decode_attr(contract.get("output_kind"))
+        if output_kind == "full" and collection:
+            facts = {
+                "width": collection["width"], "height": collection["height"],
+                "frame_rate": collection["fps"], "codec": collection["codec"],
+            }
+        elif output_kind == "crop":
+            facts = _crop_ledger_size(
+                streams_group.get(stream_key),
+                _decode_attr(stream_attrs.get("canonical_ledger_run")),
+            )
+        else:
+            facts = {}
 
         rows.append(
             {
@@ -154,11 +211,11 @@ def _extract_acquisition_video_stream_rows(
                 "keyframes_path": _file_path(files, "keyframes"),
                 "summary_path": _file_path(files, "summary"),
                 "status_path": _file_path(files, "status"),
-                "width": _as_int(contract.get("width")),
-                "height": _as_int(contract.get("height")),
+                "width": _first_present(_as_int(contract.get("width")), facts.get("width")),
+                "height": _first_present(_as_int(contract.get("height")), facts.get("height")),
                 "frame_count": _as_int(contract.get("frame_count")),
-                "frame_rate": _as_float(contract.get("frame_rate")),
-                "codec": _decode_attr(contract.get("codec")),
+                "frame_rate": _first_present(_as_float(contract.get("frame_rate")), facts.get("frame_rate")),
+                "codec": _first_present(_decode_attr(contract.get("codec")), facts.get("codec")),
                 "container": _decode_attr(contract.get("container")),
                 "encoded_format": _decode_attr(contract.get("encoded_format")),
                 "pixel_source_format": _decode_attr(contract.get("pixel_source_format")),
@@ -217,4 +274,4 @@ def _extract_acquisition_video_stream_rows(
     return rows
 
 
-__all__ = ["_extract_acquisition_video_stream_rows"]
+__all__ = ["_extract_acquisition_video_stream_rows", "collection_video_facts"]

@@ -40,7 +40,10 @@ from fisheye.shared.subject_metadata import (
 from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
 from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from .analytics_reports import RegistryAnalyticsReportMixin
-from .extractors.acquisition_video_streams import _extract_acquisition_video_stream_rows
+from .extractors.acquisition_video_streams import (
+    _extract_acquisition_video_stream_rows,
+    collection_video_facts,
+)
 from .extractors.chaser_metadata import extract_recording_chaser_metadata
 from .extractors.stimulus_metadata import extract_stimulus_metadata
 from .extractors.crop import _extract_crop_quality_rows
@@ -890,6 +893,13 @@ def _extract_acquisition(root: zarr.Group) -> Dict[str, Any]:
         if isinstance(compressor, dict):
             compression_name = compressor.get("name")
             compression_level = _as_int(compressor.get("clevel"))
+    collection = collection_video_facts(root)
+    if fps is None:
+        fps = collection.get("fps")
+    if video_codec is None:
+        video_codec = collection.get("codec")
+    if video_pix_fmt is None:
+        video_pix_fmt = collection.get("pix_fmt")
     if has_images_ds and "gray" not in downsample_formats:
         downsample_formats.append("gray")
     if has_images_ds_rgb and "rgb" not in downsample_formats:
