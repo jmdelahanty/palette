@@ -192,11 +192,17 @@ alone concludes "never valid".
 Read through `fisheye.analysis.eye_angle_io` (`load_eye_angle_run_tables`,
 `catalog_eye_angle_series`, `load_eye_angle_series_rows`), which drops
 unavailable channels. Code that reads the dense arrays directly must check the
-matching `*_available` flag and refuse a column marked `False`. Per-eye frame
-validity is recoverable from `frame_qa` `reason_codes` bits (`4` left ellipse
-invalid, `8` right ellipse invalid) or from `roi_qa` through
-`support/source_acquisition_frame_index`; heading lives in
-`support/body_frame/heading_deg`.
+matching `*_available` flag and refuse a column marked `False`. Heading lives
+in `support/body_frame/heading_deg`.
+
+Per-eye frame validity is `isfinite` of that eye's angle, e.g.
+`left_eye_angle_deg`. In `reason_codes` it is `(reason_codes & (4 | 32)) == 0`
+for the left eye and `(reason_codes & (8 | 32)) == 0` for the right. Bit `4`/`8`
+alone is not enough: a frame with no detection carries only bit `32`
+(`no_detection`) and has `NaN` angles for both eyes. `valid_frame` equals
+`reason_codes == 0` and equals both eyes being finite. These equivalences
+were measured on goodbatbadbat v3 run `2026-08-10T17-20-55Z_arena_1`
+(152,035 frames, zero mismatches); the writer does not yet test them.
 
 ## Canonical Input Boundary
 

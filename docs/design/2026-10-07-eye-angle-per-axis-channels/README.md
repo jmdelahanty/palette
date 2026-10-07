@@ -64,6 +64,11 @@ Classification: **schema change**, versioned. Values are unchanged; layout and d
   - malformed, tampered and wrong-version v8 runs are refused.
 - `read_compact_axis_columns` and `load_eye_angle_run_tables` read both v7 and v8. v7 stays readable and is not rewritten in place.
 - Also fix here: `eye_angle_io._channel_availability` defaults to "all available" when the flag array is missing. That is fail-open, and only v7 still needs a flag. Some existing `test_eye_angle_io.py` fixtures omit the flags and must be updated.
+- Give QA channels the same written meaning angle channels already have. Today the angle index stores `representation`, `eye`, `value_kind`, `units`, `source_channel`, `formula` and `compatibility_alias_of` for each channel. The run attrs add `*_definition` strings and `reason_code_map`. The QA index stores only `name`, `value_kind` and `dtype`. Nothing in a run records either rule:
+  - `valid_frame = valid_left & valid_right & detection_success`;
+  - per-eye angles are `NaN` wherever that eye's ellipse is invalid.
+
+  Add a `formula` column to the per-axis QA indexes, built by `eye_qa_channel_metadata` in `shared/eye_angle_schema.py` like the angle formulas, plus a run-level `per_eye_validity_definition` attr. The attr says per-eye frame validity is `isfinite` of that eye's angle, equivalently `(reason_codes & (eye_bit | 32)) == 0` with `eye_bit` 4 (left) or 8 (right). Bit 32 (`no_detection`) is required: no-detection frames carry no per-eye bit. This was measured with zero mismatches on one real run; a writer-side test must prove it for every run.
 
 ### Stage 3: migrate remaining physical readers (proposed)
 
@@ -84,8 +89,11 @@ Add a scoped AST/import check that only `eye_angle_io` and `shared/eye_angle_sch
 - Then run the gaze convention review against the v8 logical digests.
 - v7 runs stay readable. Historical runs are not rewritten.
 
+## Decided
+
+- **No per-eye validity channels on the frame axis** (Jeremy, 2026-10-07). Per-eye frame validity already exists twice: `reason_codes` (eye bit 4/8 plus `no_detection` bit 32), and `NaN` in that eye's angles. A third copy could drift from both. It would also need its own detection → frame reduction rule, and no consumer needs it. Stage 2 documents the existing encoding (QA `formula` column and the `per_eye_validity_definition` attr) instead of adding a column. Revisit only if a monocular analysis needs it, and then derive the column from the bits under a test that it matches the `NaN` pattern.
+
 ## Open decisions
 
 1. **Separate per-axis index groups (proposed) or one index with per-axis column positions.** Separate groups make a placeholder impossible to express. One index with positions keeps a single name table but leaves room for the same misread.
-2. **Real per-eye frame validity.** `valid_left`/`valid_right` could become real frame channels, derived from the frame's `reason_codes` bits 4/8. That is a scientific/schema addition, separate from removing placeholders, and is not proposed here.
-3. **Rematerialization timing.** Should the 84-run cohort be re-materialized as v8 before the pending convention review starts, so the receipts bind once?
+2. **Rematerialization timing.** Should the 84-run cohort be re-materialized as v8 before the pending convention review starts, so the receipts bind once?
