@@ -303,3 +303,64 @@ def test_one_broken_key_never_aborts_the_run(tmp_path):
     (other_run / "workflow-888" / "citrus_session_import.status.json").write_text(json.dumps(body))
     assert registrar.register_completed(config, dry_run=False, register=Register()) == 1
     assert (tmp_path / "state" / f"{other}.registered").exists()
+
+
+
+def _attached(tmp_path):
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    (tmp_path / "state" / f"{KEY}.claimed").write_text(json.dumps({"snapshot_id": "sha256:" + "d" * 64}))
+    run_dir = tmp_path / "logs" / "bsub_submissions" / f"citrus_import_20261006T000000Z_session_{KEY}"
+    run_dir.mkdir(parents=True)
+    (run_dir / "session.777.status.txt").write_text("job_id=777\npayload_returncode=75\n")
+    return {**config, "destination_root": "/rec"}
+
+
+def test_an_attached_key_registers_once_the_holder_imported_it(tmp_path):
+    # SF-2(b): resolved from the claimed snapshot, through the import probe.
+    config = _attached(tmp_path)
+    probes = []
+    register = Register()
+    assert registrar.register_completed(
+        config, dry_run=False, register=register,
+        probe=lambda sha, root: probes.append((sha, root)) or True,
+    ) == 0
+    assert probes == [("sha256:" + "d" * 64, Path("/rec"))]
+    assert register.calls == [("sha256:" + "d" * 64, Path("/rec"))]
+    assert (tmp_path / "state" / f"{KEY}.registered").exists()
+
+
+def test_an_attached_key_never_stalls_silently(tmp_path):
+    config = {**_attached(tmp_path), "attached_max_ticks": 3}
+    register = Register()
+    for tick in range(2):
+        assert registrar.register_completed(config, dry_run=False, register=register,
+                                            probe=lambda sha, root: False) == 0
+        pending = json.loads((tmp_path / "state" / f"{KEY}.attached_pending").read_text())
+        assert pending["ticks"] == tick + 1
+    assert registrar.register_completed(config, dry_run=False, register=register,
+                                        probe=lambda sha, root: False) == 1
+    unresolved = json.loads((tmp_path / "state" / f"{KEY}.attached_unresolved").read_text())
+    assert unresolved["snapshot_id"] == "sha256:" + "d" * 64 and unresolved["ticks"] == 3
+    assert not (tmp_path / "state" / f"{KEY}.attached_pending").exists()
+    assert register.calls == []
+    # Terminal: later runs leave it for the operator.
+    assert registrar.register_completed(config, dry_run=False, register=register,
+                                        probe=lambda sha, root: True) == 0
+    assert register.calls == []
+
+
+def test_a_transient_state_read_in_registration_is_retried_not_refused(tmp_path):
+    # SF-1 at the registrar: a retryable error never writes the terminal refusal.
+    from fisheye.intake.outcomes import IntakeTransient
+
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    _status(tmp_path)
+
+    def racing(config, snapshot_sha, destination_root):
+        raise IntakeTransient("intake state kept changing while read")
+
+    assert registrar.register_completed(config, dry_run=False, register=racing) == 1
+    assert (tmp_path / "state" / f"{KEY}.registration_failed").exists()
+    assert not (tmp_path / "state" / f"{KEY}.registration_refused").exists()

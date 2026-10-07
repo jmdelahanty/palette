@@ -41,6 +41,10 @@ class RegistrarCommitMismatch(IntakeRefused):
     """
 
 
+class IntakeTransient(RuntimeError):
+    """A transient condition (e.g. a concurrent atomic save); retried (exit 1)."""
+
+
 class IntakeHeld(RuntimeError):
     """Another live holder owns this delivery's intake lock (exit 75)."""
 
@@ -96,6 +100,7 @@ DETERMINISTIC_ORGANIZER_VIOLATIONS = (
     "H5 session identity differs from its transfer",
     "multiple H5 sources for one parent camera",
     "H5 overlaps a declared camera media artifact",
+    "legacy (non-unified) H5 is refused for new transfer-v2 intake",
 )
 
 # Per-parent import failures the import owner reports for its own
@@ -140,6 +145,7 @@ __all__ = [
     "EXIT_REFUSED",
     "IntakeHeld",
     "IntakeRefused",
+    "IntakeTransient",
     "RegistrarCommitMismatch",
     "classify_organizer_failure",
     "exit_code_for",

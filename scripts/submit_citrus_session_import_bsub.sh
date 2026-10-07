@@ -135,13 +135,43 @@ if [[ -s "$SUBMITTED_RECORD" ]]; then
   exit 0
 fi
 if [[ "$DRY_RUN" != "1" ]] && command -v bjobs >/dev/null 2>&1; then
-  # Only a live job (pending, running or suspended) is the existing submission.
-  # bjobs -a also lists finished EXIT/DONE jobs for LSF's clean period; those
-  # are no reason to skip, and resubmitting is safe because import_delivery is
-  # idempotent and resumes from durable state. The by_marker record above
-  # stays the authoritative "already submitted" record.
-  existing_job="$(bjobs -a -J "$JOB_NAME" -o "jobid stat" -noheader 2>/dev/null \
-    | awk '$2 ~ /^(PEND|RUN|PSUSP|USUSP|SSUSP)$/ {print $1; exit}' | tr -d '[:space:]')"
+  # Every job LSF still holds is the existing submission EXCEPT a finished one:
+  # PEND, RUN, the SUSP states, UNKWN, PROV, WAIT, ZOMBI and any state this
+  # script does not know all count as live. bjobs -a also lists finished
+  # DONE/EXIT jobs for LSF's clean period; those are no reason to skip, and
+  # resubmitting is safe because import_delivery is idempotent and resumes
+  # from durable state. The by_marker record above stays the authoritative
+  # "already submitted" record. If bjobs fails or its output cannot be
+  # parsed, exit 1 (the poller retries) rather than risk a duplicate import.
+  bjobs_stderr="$(mktemp)"
+  set +e
+  bjobs_output="$(bjobs -a -J "$JOB_NAME" -o "jobid stat" -noheader 2>"$bjobs_stderr")"
+  bjobs_rc=$?
+  set -e
+  bjobs_errors="$(cat -- "$bjobs_stderr")"
+  rm -f -- "$bjobs_stderr"
+  existing_job=""
+  bjobs_none=0
+  if grep -qiE 'is not found|no (unfinished )?job found' <<<"$bjobs_output"$'\n'"$bjobs_errors"; then
+    bjobs_none=1  # LSF's "no such job" answer (exit 0 or 255 by version)
+  elif [[ "$bjobs_rc" -ne 0 ]]; then
+    echo "bjobs failed (rc=$bjobs_rc); not submitting: $bjobs_output $bjobs_errors" >&2
+    exit 1
+  fi
+  if [[ "$bjobs_none" -eq 0 ]]; then
+    while IFS= read -r line; do
+      [[ -z "${line// /}" ]] && continue
+      if [[ ! "$line" =~ ^[[:space:]]*([0-9]+)[[:space:]]+([A-Z]+)[[:space:]]*$ ]]; then
+        echo "unparseable bjobs output; not submitting: $line" >&2
+        exit 1
+      fi
+      job="${BASH_REMATCH[1]}"
+      state="${BASH_REMATCH[2]}"
+      if [[ "$state" != "DONE" && "$state" != "EXIT" && -z "$existing_job" ]]; then
+        existing_job="$job"
+      fi
+    done <<<"$bjobs_output"
+  fi
   if [[ "$existing_job" =~ ^[0-9]+$ ]]; then
     record_submission "$existing_job"
     echo "already_submitted=1"

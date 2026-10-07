@@ -95,9 +95,44 @@ def test_a_finished_job_with_the_name_does_not_block_a_resubmission(tmp_path: Pa
         assert "already_submitted=1" not in result.stdout and "job_id=6262" in result.stdout
 
 
-@pytest.mark.parametrize("live", ["PEND", "RUN", "PSUSP", "USUSP", "SSUSP"])
+@pytest.mark.parametrize(
+    "live", ["PEND", "RUN", "PSUSP", "USUSP", "SSUSP", "UNKWN", "PROV", "WAIT", "ZOMBI", "NEWSTATE"]
+)
 def test_a_live_job_with_the_name_is_the_existing_submission(tmp_path: Path, live: str) -> None:
     fakes = _setup(tmp_path, bsub_output="garbled", bjobs_output=f"5151 EXIT\n7373 {live}\n")
     result = _launch(tmp_path, fakes, "retry")
     assert result.returncode == 0, result.stderr
     assert _bsub_calls(fakes) == [] and "job_id=7373" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "body,rc",
+    [
+        ('echo "Job <citrus_import_x> is not found" >&2\nexit 255\n', 255),
+        ('echo "No unfinished job found"\n', 0),
+    ],
+)
+def test_lsf_no_such_job_answer_submits(tmp_path: Path, body: str, rc: int) -> None:
+    fakes = _setup(tmp_path, bsub_output="Job <6262> is submitted to default queue <normal>.")
+    _fake(fakes["bin"], "bjobs", body)
+    result = _launch(tmp_path, fakes, "attempt-1")
+    assert result.returncode == 0, result.stderr
+    assert len(_bsub_calls(fakes)) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'echo "LSF is down; batch system daemon not responding" >&2\nexit 255\n',
+        'echo "garbled output from a newer bjobs"\n',
+    ],
+    ids=["bjobs_failed", "unparseable"],
+)
+def test_an_unknown_bjobs_answer_never_submits(tmp_path: Path, body: str) -> None:
+    # Exit 1 so the poller retries; never risk a duplicate import.
+    fakes = _setup(tmp_path, bsub_output="Job <6262> is submitted to default queue <normal>.")
+    _fake(fakes["bin"], "bjobs", body)
+    result = _launch(tmp_path, fakes, "attempt-1")
+    assert result.returncode == 1
+    assert _bsub_calls(fakes) == []
+    assert not (tmp_path / "logs" / "by_marker").exists()

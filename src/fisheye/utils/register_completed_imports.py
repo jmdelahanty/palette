@@ -25,7 +25,12 @@ and not yet registered, it reads the job's status JSON
   once to the terminal ``<key>.registration_refused`` and never retried. A
   registration held by another live run is left for the next run.
 - a job whose payload exited 75 found the delivery held by another live job:
-  it is attached, never recorded as a failed import.
+  it is attached, never recorded as a failed import. Its delivery (the claimed
+  snapshot_id) is registered once its import probe is true; otherwise it stays
+  pending and after ``attached_max_ticks`` (12) runs or ``attached_max_hours``
+  (6) becomes the terminal ``<key>.attached_unresolved`` for the operator.
+  Optional config ``destination_root`` (default: $PALETTE_RECORDINGS_ROOT or
+  the /groups store) locates the delivery.
 
 Producer-declared synthetic transfers are never registered. Config (the
 poller's JSON plus): ``registry``, ``writer_host`` (this host, short name or
@@ -177,15 +182,91 @@ def _default_register(config: dict, snapshot_sha: str, destination_root: Path) -
     return {binding["zarr_path"]: binding["dataset_id"] for binding in result.bindings or ()}
 
 
+ATTACHED_MAX_TICKS = 12  # about an hour of 5-minute ticks
+ATTACHED_MAX_HOURS = 6.0
+
+
+def _default_probe(snapshot_sha: str, destination_root: Path) -> bool:
+    from fisheye.intake.probes import probe_import
+
+    return probe_import(snapshot_sha, destination_root=destination_root).verdict
+
+
+Probe = Callable[[str, Path], bool]
+
+
+def _resolve_attached(
+    config: dict, state: Path, key: str, job_id: str, *, dry_run: bool,
+    register: Register, probe: Probe,
+) -> int:
+    """A job that found its delivery held: register it once the holder imported it.
+
+    The delivery is the snapshot the poller claimed (``<key>.claimed``). When
+    its import probe is true it is registered like any completed import.
+    Otherwise it stays pending; after ``attached_max_ticks`` runs or
+    ``attached_max_hours`` it becomes a terminal ``<key>.attached_unresolved``
+    for the operator, instead of stalling silently.
+    """
+
+    from fisheye.intake.delivery import default_destination_root
+
+    claimed = state / f"{key}.claimed"
+    try:
+        snapshot_sha = str(json.loads(claimed.read_text())["snapshot_id"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        snapshot_sha, why = None, f"no readable claim with a snapshot_id: {exc}"
+    destination_root = Path(config.get("destination_root") or default_destination_root())
+    if snapshot_sha is not None:
+        try:
+            imported = probe(snapshot_sha, destination_root)
+            why = "the delivery's import probe is false"
+        except Exception as exc:
+            imported, why = False, f"import probe failed: {type(exc).__name__}: {exc}"
+        if imported:
+            log(f"attached: key={key} job={job_id}; the holder imported {snapshot_sha}")
+            if dry_run:
+                return 0
+            return _register_delivery_key(
+                config, state, key, job_id, register=register, plan=None,
+                snapshot_sha=snapshot_sha, destination_root=destination_root,
+                status_json=None, zarr_paths=None,
+            )
+    log(f"attached: key={key} job={job_id} pending: {why}")
+    if dry_run:
+        return 0
+    tracker = state / f"{key}.attached_pending"
+    now = datetime.now(timezone.utc)
+    try:
+        record = json.loads(tracker.read_text())
+    except (OSError, ValueError):
+        record = {"first_seen_utc": now.isoformat(), "ticks": 0}
+    record["ticks"] = int(record.get("ticks", 0)) + 1
+    record.update(job_id=job_id, snapshot_id=snapshot_sha, last_reason=why, last_seen_utc=now.isoformat())
+    age_h = (now - datetime.fromisoformat(record["first_seen_utc"])).total_seconds() / 3600
+    if record["ticks"] >= int(config.get("attached_max_ticks", ATTACHED_MAX_TICKS)) or age_h >= float(
+        config.get("attached_max_hours", ATTACHED_MAX_HOURS)
+    ):
+        _write(state / f"{key}.attached_unresolved", {
+            **record, "destination_root": str(destination_root),
+            "error": "job attached to a delivery held by another job, which never became importable",
+        })
+        tracker.unlink(missing_ok=True)
+        log(f"attached_unresolved: key={key} job={job_id}; recorded for operator review")
+        return 1
+    _write(tracker, record)
+    return 0
+
+
 def _register_key(config: dict, state: Path, registry: Path, submitted: Path, *,
-                  dry_run: bool, register: Register) -> int:
+                  dry_run: bool, register: Register, probe: Probe = _default_probe) -> int:
     """One submitted delivery; returns 1 when it counts as a failure this run."""
 
     key = submitted.name[: -len(".submitted")]
     done = state / f"{key}.registered"
     import_failed = state / f"{key}.import_failed"
     refused = state / f"{key}.registration_refused"
-    if done.exists() or import_failed.exists() or refused.exists():
+    unresolved = state / f"{key}.attached_unresolved"
+    if done.exists() or import_failed.exists() or refused.exists() or unresolved.exists():
         return 0
     job_id = _job_id(submitted)
     if job_id is None:
@@ -198,9 +279,10 @@ def _register_key(config: dict, state: Path, registry: Path, submitted: Path, *,
             return 0
         if _payload_returncode(config, key, job_id) == EXIT_HELD:
             # Another live job held the delivery: this one attached and
-            # created nothing. Not a failed import.
-            log(f"attached: key={key} job={job_id} found the delivery held by another job")
-            return 0
+            # created nothing. Not a failed import: resolve it from evidence.
+            return _resolve_attached(
+                config, state, key, job_id, dry_run=dry_run, register=register, probe=probe
+            )
         log(f"import failed: key={key} job={job_id} ended without a status JSON")
         if not dry_run:
             _write(import_failed, {"job_id": job_id, "status_json": None, "status": "failed",
@@ -231,14 +313,32 @@ def _register_key(config: dict, state: Path, registry: Path, submitted: Path, *,
     if dry_run:
         log(f"dry-run: would register key={key} job={job_id} zarrs={[str(p) for p in zarr_paths]}")
         return 0
+    plan = status.get("plan") or {}
+    return _register_delivery_key(
+        config, state, key, job_id, register=register, plan=plan,
+        snapshot_sha=str(plan.get("snapshot_id")), destination_root=plan.get("destination_root"),
+        status_json=str(status_path), zarr_paths=zarr_paths,
+    )
+
+
+def _register_delivery_key(
+    config: dict, state: Path, key: str, job_id: str, *, register: Register,
+    plan: Mapping[str, Any] | None, snapshot_sha: str, destination_root: str | Path | None,
+    status_json: str | None, zarr_paths: list[Path] | None,
+) -> int:
+    """Register one delivery and record the outcome; 1 when it failed this run."""
+
+    registry = Path(config["registry"])
+    done = state / f"{key}.registered"
+    refused = state / f"{key}.registration_refused"
     try:
-        plan = status["plan"]
-        refuse_synthetic_registration(plan, registry=registry)
-        if not zarr_paths:
+        if plan:
+            refuse_synthetic_registration(plan, registry=registry)
+        if zarr_paths is not None and not zarr_paths:
             raise RegistrarRefusal("complete import lists no zarr_paths")
-        datasets = dict(
-            register(config, str(plan["snapshot_id"]), Path(plan["destination_root"]))
-        )
+        if destination_root is None:
+            raise RegistrarRefusal("the delivery's destination root is unknown")
+        datasets = dict(register(config, snapshot_sha, Path(destination_root)))
     except IntakeHeld as exc:
         log(f"pending: key={key} job={job_id}: {exc}")
         return 0
@@ -257,9 +357,10 @@ def _register_key(config: dict, state: Path, registry: Path, submitted: Path, *,
                {"job_id": job_id, "error": str(exc),
                 "failed_utc": datetime.now(timezone.utc).isoformat()})
         return 1
-    _write(done, {"job_id": job_id, "status_json": str(status_path), "registry": str(registry),
+    _write(done, {"job_id": job_id, "status_json": status_json, "registry": str(registry),
                   "datasets": datasets, "registered_utc": datetime.now(timezone.utc).isoformat()})
     (state / f"{key}.registration_failed").unlink(missing_ok=True)
+    (state / f"{key}.attached_pending").unlink(missing_ok=True)
     log(f"registered key={key} job={job_id} datasets={sorted(datasets.values())}")
     return 0
 
@@ -269,6 +370,7 @@ def register_completed(
     *,
     dry_run: bool,
     register: Register = _default_register,
+    probe: Probe = _default_probe,
 ) -> int:
     state = Path(config["state_dir"])
     registry = Path(config["registry"])
@@ -276,7 +378,7 @@ def register_completed(
     for submitted in sorted(state.glob("*.submitted")):
         try:
             failures += _register_key(
-                config, state, registry, submitted, dry_run=dry_run, register=register
+                config, state, registry, submitted, dry_run=dry_run, register=register, probe=probe
             )
         except Exception as exc:  # one bad key never stops the others
             failures += 1

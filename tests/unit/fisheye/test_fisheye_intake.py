@@ -896,6 +896,7 @@ NEW_DETERMINISTIC = [
     "unsupported unified H5 profile: a.h5",
     "H5 lacks a readable exact camera binding: a.h5",
     "receipt does not name this H5: r.json",
+    "legacy (non-unified) H5 is refused for new transfer-v2 intake; a new recording needs x",
 ]
 
 
@@ -1134,3 +1135,59 @@ def test_a_permission_error_reading_state_is_io_not_malformed(tmp_path) -> None:
         (state_dir / "organization_state.json").chmod(0o600)
     assert result.returncode == 1
     assert json.loads(result.stdout)["error_type"] == "PermissionError"
+
+
+
+# ---------------------------------------------------------------- third review
+
+
+def _write_state(destination: Path, sha: str) -> Path:
+    state_dir = destination / ".transfer_intake" / sha
+    state_dir.mkdir(parents=True)
+    path = state_dir / "organization_state.json"
+    path.write_text(json.dumps({"plan": {"snapshot_id": f"sha256:{sha}", "parents": []},
+                                "status": "reserved"}))
+    return path
+
+
+def test_a_state_read_racing_a_concurrent_save_is_retried(tmp_path, monkeypatch) -> None:
+    """SF-1: "changed while read" is a concurrent atomic save, never malformed."""
+
+    from fisheye.intake import delivery
+    from fisheye.intake.outcomes import IntakeTransient, exit_code_for
+    from fisheye.shared.source_recording_identity import SourceRecordingIdentityError
+
+    sha = "a" * 64
+    destination = _destination(tmp_path)
+    _write_state(destination, sha)
+    real = delivery.strict_json
+    races = []
+
+    def racing(path, budget):
+        def read(p):
+            if len(races) < budget:
+                races.append(p)
+                raise SourceRecordingIdentityError(
+                    f"source-recording identity document changed while read: {p}"
+                )
+            return real(p)
+        return read
+
+    monkeypatch.setattr(delivery, "STATE_READ_BACKOFF_S", 0.0)
+    monkeypatch.setattr(delivery, "strict_json", racing(None, 2))
+    assert delivery.load_durable_state(destination, sha)["status"] == "reserved"
+    assert len(races) == 2
+
+    races.clear()
+    monkeypatch.setattr(delivery, "strict_json", racing(None, 99))
+    with pytest.raises(IntakeTransient) as transient:
+        delivery.load_durable_state(destination, sha)
+    assert exit_code_for(transient.value) == 1
+    assert len(races) == delivery.STATE_READ_ATTEMPTS
+    # register_delivery's pre-claim read: retryable, never a refusal.
+    with pytest.raises(IntakeTransient):
+        register_delivery(sha, writer=_writer(tmp_path, tmp_path / "r.sqlite"),
+                          destination_root=destination, allow_synthetic=True)
+    # And a probe stays a probe: it raises (1), it does not answer false-as-refused.
+    with pytest.raises(IntakeTransient):
+        probe_import(sha, destination_root=destination)

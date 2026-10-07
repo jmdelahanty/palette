@@ -49,9 +49,10 @@ import os
 from pathlib import Path
 import re
 import socket
+import time
 from typing import Any, Callable, Iterator, Mapping
 
-from fisheye.intake.outcomes import IntakeHeld, IntakeRefused
+from fisheye.intake.outcomes import IntakeHeld, IntakeRefused, IntakeTransient
 from fisheye.shared.recording_transfer_snapshot import strict_json
 
 CANONICAL_REGISTRY = Path(
@@ -83,25 +84,51 @@ def state_directory(destination_root: Path, snapshot_sha: str) -> Path:
     return Path(destination_root) / STATE_DIRECTORY / validate_snapshot_sha(snapshot_sha)
 
 
+STATE_READ_ATTEMPTS = 5
+STATE_READ_BACKOFF_S = 0.2
+CHANGED_WHILE_READ = "changed while read"  # source_recording_identity.load_strict_json_object
+
+
+def _read_state(path: Path) -> dict:
+    """Read the organizer's state, riding out a concurrent atomic save.
+
+    Another attempt holding the delivery's lock may save the state while it
+    is read; the strict loader then reports the document "changed while
+    read". That is retried a few times and, if it persists, raised as a
+    retryable :class:`IntakeTransient` (1), never as a malformed-state
+    refusal (65). A read failure with an OSError cause is I/O (1).
+    """
+
+    for attempt in range(STATE_READ_ATTEMPTS):
+        try:
+            return strict_json(path)
+        except OSError:
+            raise  # transient I/O: retryable (1), never a refusal
+        except Exception as exc:
+            # The shared strict loader wraps a read failure in its own
+            # ValueError; an I/O cause is still I/O, not a malformed state.
+            cause = exc.__cause__
+            while cause is not None and not isinstance(cause, OSError):
+                cause = cause.__cause__
+            if isinstance(cause, OSError):
+                raise cause from exc
+            if CHANGED_WHILE_READ not in str(exc):
+                raise IntakeRefused(f"malformed intake state {path}: {exc}") from exc
+            if attempt + 1 == STATE_READ_ATTEMPTS:
+                raise IntakeTransient(
+                    f"intake state {path} kept changing while read (a concurrent save); retry"
+                ) from exc
+            time.sleep(STATE_READ_BACKOFF_S * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
 def load_durable_state(destination_root: Path, snapshot_sha: str) -> dict | None:
     """The organizer's recovery state, or None before the first reservation."""
 
     path = state_directory(destination_root, snapshot_sha) / STATE_FILE
     if not path.exists() and not path.is_symlink():
         return None
-    try:
-        state = strict_json(path)
-    except OSError:
-        raise  # transient I/O: retryable (1), never a refusal
-    except Exception as exc:
-        # The shared strict loader wraps a read failure in its own ValueError;
-        # an I/O cause is still I/O, not a malformed state.
-        cause = exc.__cause__
-        while cause is not None and not isinstance(cause, OSError):
-            cause = cause.__cause__
-        if isinstance(cause, OSError):
-            raise cause from exc
-        raise IntakeRefused(f"malformed intake state {path}: {exc}") from exc
+    state = _read_state(path)
     plan = state.get("plan")
     if not isinstance(plan, dict) or plan.get("snapshot_id") != f"sha256:{validate_snapshot_sha(snapshot_sha)}":
         raise IntakeRefused(f"intake state {path} does not hold this delivery's plan")
@@ -216,7 +243,7 @@ def find_delivery_by_source(
             continue
         try:
             state = load_durable_state(destination_root, state_file.parent.name)
-        except (OSError, IntakeRefused) as exc:
+        except (OSError, IntakeRefused, IntakeTransient) as exc:
             skipped.append({"path": str(state_file), "reason": str(exc)})
             continue
         if state is not None and state["plan"].get("source_dir") == wanted:

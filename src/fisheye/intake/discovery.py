@@ -30,7 +30,7 @@ from fisheye.intake.delivery import (
     admission_mode,
     load_durable_state,
 )
-from fisheye.intake.outcomes import IntakeRefused
+from fisheye.intake.outcomes import IntakeRefused, IntakeTransient
 from fisheye.shared.recording_transfer_snapshot import (
     CONSUMER_PROFILE,
     MARKER_NAME,
@@ -258,7 +258,7 @@ def discover(
             except IntakeRefused as exc:
                 unreadable.append({"path": str(state_file), "kind": "malformed", "reason": str(exc)})
                 continue
-            except OSError as exc:  # one bad state never aborts discovery
+            except (OSError, IntakeTransient) as exc:  # one bad state never aborts discovery
                 unreadable.append({"path": str(state_file), "kind": "unreadable", "reason": str(exc)})
                 continue
             if state is not None and state.get("status") in DURABLE_STATES:
