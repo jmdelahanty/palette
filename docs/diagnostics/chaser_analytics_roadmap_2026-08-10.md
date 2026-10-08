@@ -297,6 +297,8 @@ Positioning IS visible: the aggressive chaser is continuously rendered and
 wanders between episodes, so the pre-chase cue is a CHANGE IN MOVEMENT
 POLICY (wander → directed approach to 30 mm stand-off), not an appearance.
 The paradigm is therefore partially signaled with a ~10 s ambiguous CS.
+(Correction 2026-10-06: measured positioning is ~0.6 s median; see
+"Measured semantics and escape-table defects" below.)
 
 Event/onset semantics (authoritative for all palette analyses):
 - `planned_onset_s_training` / `CHASER_SCHEDULED_ONSET_DUE` = planned
@@ -332,6 +334,153 @@ accepted, the full protocol step changes from 1380 to 1500 s (+8.7% recording
 duration). New protocol identity/hash is required under the schedule-mode
 contract. Palette stimulus epochs must always obtain the observed step duration
 from imported metadata; neither duration is an analysis constant.
+
+### Measured semantics and escape-table defects (added 2026-10-06)
+
+Measured on the 80 admitted goodbatbadbat recordings (20 sessions × 4 arenas,
+all `fixed_n_min_gap_v1`, 319 episodes) from the raw Citrus H5 events and the
+phase C validated export
+(`goodbatbadbat-validated-behavior-phase-c-20260902-19a006cc`). Exploratory,
+recording-level evidence; scripts and tables are outside the repo at
+`~/palette_figures/stage_decode_anticipation_2026-10-06/`.
+
+**The positioning cue is about 0.6 s, not ~10 s.** `max_positioning_s = 10` is
+a cap. Measured `POSITIONING_START` → `CHASE_MOTION_START`: median 0.57 s,
+p90 1.3 s, max 3.8 s. 26% of episodes start with the chaser already within
+~31 mm, so they contain almost no approach. Positioning is a 30 mm/s directed
+approach; wander is 20 mm/s random jumps of 10-40 mm with pauses; chase is
+50 mm/s. The "~10 s ambiguous CS" wording above and in B7 is superseded.
+
+**Anticipation probe result: null, and underpowered by design.** Fish speed
+change in the cue window (0-0.5 s, episodes with cue ≥ 0.5 s, n = 164) was
+−0.15 mm/s [−0.74, +0.46] (session-cluster bootstrap), indistinguishable
+from distance-matched wander approaches (−0.18) and non-approach wander
+(−0.06), with no growth across trials 1→4. Alignment was validated: speed
+roughly doubles about 1 s after `CHASE_MOTION_START`, once the chaser is
+within ~6 mm, so the observed response is proximity-driven. A trial-1
+bout-onset excess (0.33 vs 0.25) was one of about 20 contrasts and is not
+treated as a finding. With 4 episodes per fish and a ~0.6 s cue, this design
+cannot detect anticipation smaller than about a 20% speed change. A real
+signaled-avoidance probe needs a protocol change: a fixed standoff hold of
+several seconds (or a distinct cue) before every chase, plus catch trials
+with positioning and no chase.
+
+**Export escape tables use the wrong onset (defect in Palette).**
+`analysis_workflows/escape_freeze_successor.py` times every trial from
+`controller_trials.trigger_acquisition_frame_id`. That frame is the first
+logged active member (`controller_trial_successor.py`, trigger selection
+`first_logged_active_member`), which equals `POSITIONING_START` in 319/319
+episodes and `CHASE_MOTION_START` in only 4.7%. This violates the binding
+above (threat onset = realized `CHASER_CHASE_MOTION_START`). Consequences:
+- `latency_from_trigger_s` / `first_escape_latency_s` include 0.57 s median
+  (max 3.8 s) of positioning;
+- `trigger_distance_mm` is the distance at positioning start (median 46 mm),
+  not at chase start (~30 mm);
+- the 1 s freeze window is on average 56% pre-chase, and entirely pre-chase
+  in 23% of episodes.
+
+**The 20 mm/s escape threshold does not isolate escapes (definition defect).**
+The successor's default `escape_speed_threshold_mm_s = 20.0` admits ordinary
+swim bouts. Canonical-bout rates per minute:
+
+| Phase | ≥ 20 mm/s | ≥ 30 mm/s | ≥ 50 mm/s |
+|---|---|---|---|
+| Positioning | 21.0 | 13.8 | 3.6 |
+| Chase (5 s) | 23.4 | 18.0 | **9.6** |
+| Retreat (4 s) | 22.5 | 15.8 | 5.3 |
+| Cooldown hold (10 s) | 24.1 | 14.6 | 1.8 |
+| Training wander, between episodes | 25.2 | 17.6 | 5.3 |
+| Pre epoch | 47.6 | 30.9 | 4.2 |
+
+53% of exported escape events fall in the 10 s cooldown hold, with the
+chaser stationary ~40 mm away; only 24% fall in the chase itself. A chase
+response is visible only at ≥ 50 mm/s. Therefore every goodbatbadbat
+"escape rate" result built on these tables is a general swim-bout-rate
+result. This includes the strategy-state finding that converters had
+~zero training escape rate: the converter result stands as a locomotor
+finding, not an escape-failure finding. The GoodCopBadCop escape result
+came from a different pipeline and protocol and is not affected by this
+audit.
+
+**Citrus logging caveats (confirmed by the Citrus agent, Citrus main
+@ 288f14d; no Citrus change yet).** Palette readers must not rely on:
+- `chaser_states.behavior_*` when `behavior_program_active` is false.
+  Legacy chasers write `behavior_motion_type_id = 0` (HOLD) as a default.
+  Use `chase_sequence_active` / `loom_phase` instead.
+- `LOG_MESSAGE` `chaser_frames_rendered` / `chaser_logic_updates`. These
+  are per-diagnostic-window performance counters, not session totals.
+- `CHASER_TARGET_OUTSIDE/RETURNED_TO_EXPERIMENTAL_AREA` as excursions.
+  There is no hysteresis; 82% are < 1 px.
+- `chase_probability_per_second` in `CHASER_TRAINING_START` under
+  fixed-n scheduling. It is always the Bernoulli parameter.
+- `in_danger_zone` when the zone is disabled. `true` then means "no zone
+  configured".
+- Event `camera_frame_id`. It is Palette `acquisition_frame_id` + 1 in all
+  80 recordings, likely Orange's 1-based counter. Map via the trial-start
+  offset, or via the correspondence tables for unified-H5 files.
+
+Citrus follow-up status (2026-10-06, from the Citrus agent):
+- Outside/returned chatter: fixed (branch
+  `agent/citrus/chaser-area-event-debounce-20261006`, cb45958). As of
+  2026-10-06 this and the counter/event-detail fixes below are on local
+  Citrus main at 46794a7, not yet pushed; recordings from builds at or
+  after that commit carry them. Events require ≥ 0.5 mm outside (2 px uncalibrated) for
+  100 ms, and 100 ms inside to return. Event details gain
+  `outside_onset_time_s` / `return_onset_time_s`,
+  `max_distance_outside_px`, `debounce_enter_distance_px` and
+  `debounce_dwell_s`. Per-frame `target_area_state` and
+  `target_distance_outside_px` stay raw. Older recordings keep the chatter;
+  filter them on `target_distance_outside_px`.
+- `behavior_motion_type_id`: a NOT_APPLICABLE value (planned 255) for
+  chasers with `behavior_program_active = false` was proposed and is now
+  deferred (2026-10-06); until it lands, read
+  `behavior_program_active = false` as "behavior_* not applicable". It changes
+  the chaser-table enum, so it lands only through a Citrus chaser-table
+  contract revision agreed with Palette. Palette's importer must accept the
+  new value, and must keep treating `behavior_program_active = false` as
+  "not applicable" for older recordings.
+- Summary counters, stale `chase_probability_per_second` and
+  `in_danger_zone` ambiguity: fixed on the same Citrus branch (46794a7),
+  additive keys only. Counters are session totals marked
+  `chaser_counters_scope = "session_total"` (absent = old per-window
+  values; ignore). `CHASER_TRAINING_START` gains `schedule_mode`;
+  `chase_probability_per_second` is null outside `bernoulli_tonic_v1`;
+  fixed-n adds `planned_chase_count`. `CHASER_CHASE_SEQUENCE_START` gains
+  `danger_zone_enabled`.
+- `camera_frame_id` base: confirmed by Orange. SHAMAN v1 `frame_id` is
+  Orange's 1-based `recording_frame_id`, assigned on arrival and shared with
+  the YOLO detection, so `acquisition_frame_id = camera_frame_id - 1`
+  exactly; it is a numbering base, not a frame shift. (Without an active
+  recording, v1 falls back to the camera's absolute id; this does not apply
+  to recorded frames.) In SHAMAN v2, join on `recording_frame_id`
+  (index = id - 1) via the correspondence tables; v2 `camera_frame_id` is
+  the camera's own counter and must not be used for this join.
+
+**Palette work items** (the escape-definition items are scientific/schema
+changes: they need a new versioned successor recipe and identity, not an
+in-place patch, and historical outputs are preserved):
+1. Schedule importer: carry `POSITIONING_START/END`,
+   `CHASE_MOTION_START/END`, `RETREAT_START/END`,
+   `POST_RETREAT_COOLDOWN_START/END` and `CHASE_SEQUENCE_START/END` per
+   episode into the validated export. Validate one-per-episode
+   completeness against `trials/trial_index`, and record the
+   camera-frame mapping used.
+2. Controller trials: add `chase_motion_onset_acquisition_frame_id`
+   (and the per-phase frames) alongside the existing
+   `trigger_acquisition_frame_id`. Keep the existing column's
+   semantics; name the new one explicitly.
+3. Escape/freeze successor v2: trigger on realized
+   `CHASER_CHASE_MOTION_START`; report latency and trigger distance from
+   it; restrict escape events to the chase (+ declared retreat)
+   phase rather than the full 19.6 s envelope; place the freeze window
+   after chase onset.
+4. Escape definition: replace the 20 mm/s peak threshold with a
+   pre-registered criterion validated against non-chase baselines (the
+   ≥ 50 mm/s split above is the starting evidence; consider a kinematic
+   criterion). Rerun the threshold sweep with per-phase baselines.
+5. Re-check downstream consumers of the escape tables, including the
+   strategy-state conversion predictor and B7, under v2. Label pre-v2
+   results as swim-rate results.
 
 ## Learned-preference dynamics — movement relative to the chaser (added 2026-08-30)
 
@@ -429,6 +578,8 @@ Per trial ordinal: latency from realized `CHASER_CHASE_MOTION_START`, peak
 speed, first-turn angle, recapture time. Requires the schedule v2 importer
 (`agents_todo/brief_chaser_schedule_importer.md`, still specified-only). The
 ~10 s positioning cue is the anticipation probe: distance at onset over trials.
+(Correction 2026-10-06: the cue is ~0.6 s and the probe was null; see
+"Measured semantics and escape-table defects" above.)
 
 **B8 — Per-fish phenotype (A5 slice).**
 Once B1–B5 yield per-fish parameters (`d*`, `k`, hazard slope, freeze dwell),
@@ -488,7 +639,9 @@ evidence; see the [audit reconciliation](review_docs_rules_landing_handoff_2026-
 
 The strategy-state wave (`strategy_state_analysis_2026-09-01.md`) delivers
 the A5/B8 phenotype axis (explorer vs punctuated; conversion predicted by
-escape failure with a disposition component), a reusable LORO window decoder
+escape failure with a disposition component; 2026-10-06: the "escape" rate
+here uses the 20 mm/s threshold and so measures swim-bout rate; see
+"Measured semantics and escape-table defects"), a reusable LORO window decoder
 (A4's anticipation probe machinery, pending the schedule importer), and a
 time-resolved twin-excess tool that found the pre-epoch avoidance ramp
 (relevant to B1/B6 baselines). B5 remains blocked on gap-audit Q1.
