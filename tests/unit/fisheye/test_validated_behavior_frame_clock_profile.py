@@ -8,6 +8,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import zarr
 
 from fisheye.analysis_workflows.validated_behavior_cohort_adapters import sha256_file
 from fisheye.analytics_exports.validated_behavior_core_behavior_adapters import (
@@ -36,7 +37,12 @@ from fisheye.analytics_exports.validated_behavior_profiles import (
 from fisheye.analytics_exports.validated_behavior_contracts import (
     validate_table_specs,
 )
-from fisheye.shared.acquisition_frame_clock import AcquisitionFrameClockSource
+from fisheye.shared.acquisition_frame_clock import (
+    AcquisitionFrameClockSource,
+    load_clipped_acquisition_frame_clock_source,
+    publish_acquisition_frame_clock,
+    resolve_acquisition_frame_clock,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
@@ -80,7 +86,9 @@ def _write_raw_clock(recording_dir: Path) -> Path:
     return frame_index
 
 
-def _binding_fixture(tmp_path: Path) -> tuple[SimpleNamespace, SimpleNamespace, Path]:
+def _binding_fixture(
+    tmp_path: Path, *, publish_clock: bool = True
+) -> tuple[zarr.Group, SimpleNamespace, Path]:
     recording_dir = tmp_path / "recording-a"
     recording_dir.mkdir()
     frame_index = _write_raw_clock(recording_dir)
@@ -117,13 +125,26 @@ def _binding_fixture(tmp_path: Path) -> tuple[SimpleNamespace, SimpleNamespace, 
         record_ref="/analysis/acquisition_camera_frames/2010093@record",
         record_sha256="a" * 64,
     )
-    root = SimpleNamespace(
-        attrs={
+    archive = recording_dir / "analysis.zarr"
+    root = zarr.open_group(str(archive), mode="w", zarr_format=3)
+    root.attrs.update(
+        {
             "recording_path": str(recording_dir),
             "recording_id": "recording-a",
             "session_id": "session-a",
         }
     )
+    if publish_clock:
+        publish_acquisition_frame_clock(
+            zarr.open_group(str(archive), mode="r+", use_consolidated=False),
+            load_clipped_acquisition_frame_clock_source(
+                recording_dir,
+                camera_id="2010093",
+                frame_index_path=frame_index.name,
+                expected_frame_count=3,
+            ),
+        )
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
     return root, acquisition, frame_index
 
 
@@ -140,6 +161,9 @@ def test_clock_binding_seals_raw_digest_session_and_join_limits(
     )
 
     binding = bound.source_binding
+    published = resolve_acquisition_frame_clock(root, required=True)
+    assert binding["acquisition_frame_clock_source_sha256"] == published.record_sha256
+    assert bound.source.camera_timestamp_ns.tolist() == [1_000, 2_000, 3_000]
     assert binding["session_id"] == "session-a"
     assert binding["frame_clock_source_file_sha256"] == sha256_file(frame_index)
     assert binding["acquisition_camera_frame_sha256"] == "a" * 64
@@ -166,6 +190,23 @@ def test_clock_binding_rejects_frame_index_that_differs_from_acquisition_digest(
     with pytest.raises(
         ValidatedBehaviorFrameClockError,
         match="digest differs from acquisition metadata",
+    ):
+        bind_validated_behavior_frame_clock(
+            root,
+            analysis_zarr=tmp_path / "recording-a" / "analysis.zarr",
+            expected_recording_id="recording-a",
+            acquisition=acquisition,
+        )
+
+
+def test_clock_binding_requires_the_published_clock_not_raw_files(
+    tmp_path: Path,
+) -> None:
+    root, acquisition, _frame_index = _binding_fixture(tmp_path, publish_clock=False)
+
+    with pytest.raises(
+        ValidatedBehaviorFrameClockError,
+        match="No published acquisition frame clock",
     ):
         bind_validated_behavior_frame_clock(
             root,
