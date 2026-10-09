@@ -70419,7 +70419,7 @@
     "writer_wrapper_call_site_count": 998
   },
   "wrapper_analysis": {
-    "function_definition_count": 10633,
+    "function_definition_count": 10634,
     "writer_function_count": 246,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",
