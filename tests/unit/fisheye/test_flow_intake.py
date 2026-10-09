@@ -354,3 +354,107 @@ def test_snakefile_outputs_are_runner_sentinels_only_and_rules_are_local():
     local = set(re.search(r"^localrules: (.+)$", text, re.M).group(1).replace(" ", "").split(","))
     assert rules <= local
     assert ".processing_state" not in text
+
+
+# --- retry cap ----------------------------------------------------------------
+
+
+def test_retry_cap_holds_after_consecutive_failures_and_held_does_not_count(config):
+    for _ in range(2):
+        assert flow_intake.record_outcome(config, SHA, "import", 1, None,
+                                          deployment=Path("/d"), commit=None) == 1
+        assert flow_intake.record_outcome(config, SHA, "import", 75, {},
+                                          deployment=Path("/d"), commit=None) == 75
+    assert not flow_intake.refusal_path(config, SHA).exists()
+    assert flow_intake.record_outcome(config, SHA, "import", 1, {"error": "boom"},
+                                      deployment=Path("/d"), commit=None) == 65
+    hold = json.loads(flow_intake.refusal_path(config, SHA).read_text())
+    assert hold["retry_cap"] is True and "boom" in hold["result"]["message"]
+    assert flow_intake.import_step(config, SHA, runner=lambda a: pytest.fail("held")) == 65
+
+
+def test_success_resets_the_failure_count(config):
+    for _ in range(2):
+        flow_intake.record_outcome(config, SHA, "import", 1, None, deployment=Path("/d"), commit=None)
+    assert flow_intake.record_outcome(config, SHA, "import", 0, _probe("import"),
+                                      deployment=Path("/d"), commit=COMMIT) == 0
+    flow_intake.sentinel_path(config, SHA, "import").unlink()
+    for _ in range(2):
+        assert flow_intake.record_outcome(config, SHA, "import", 1, None,
+                                          deployment=Path("/d"), commit=None) == 1
+    assert not flow_intake.refusal_path(config, SHA).exists()
+
+
+def test_missing_producer_deployment_counts_toward_the_cap(config):
+    flow_intake.record_outcome(config, SHA, "import", 0, _probe("import"),
+                               deployment=Path("/lsf"), commit=COMMIT)
+    run, _ = _fake_exec([])
+    codes = [flow_intake.register_step(config, SHA, runner=run) for _ in range(3)]
+    assert codes[:2] == [1, 1]
+    assert codes[2] == 65 and json.loads(flow_intake.refusal_path(config, SHA).read_text())["step"] == "register"
+
+
+def test_submission_errors_count_toward_the_cap(config):
+    run, _ = _fake_exec([
+        (lambda a: a[0] == "git", _completed(stdout=COMMIT + "\n")),
+        (lambda a: "probe-import" in a, _completed(returncode=1, stdout=json.dumps(_probe("import", verdict=False)))),
+    ])
+
+    def bsub(command, cwd=None):
+        return _completed(returncode=255, stderr="ssh: Could not resolve hostname")
+
+    assert flow_intake.import_step(config, SHA, runner=run, bsub_runner=bsub) == 1
+    failures = json.loads(flow_intake.failures_path(config, SHA).read_text())
+    assert failures["steps"]["import"]["count"] == 1
+    assert "Could not resolve" in failures["steps"]["import"]["last_reason"]
+
+
+# --- isolated synthetic trials --------------------------------------------------
+
+
+def _registrar(tmp_path: Path, registry: str) -> Path:
+    path = tmp_path / "registrar.json"
+    path.write_text(json.dumps({"registry": registry}))
+    return path
+
+
+def test_synthetic_trials_refuse_the_canonical_registry(tmp_path):
+    from fisheye.intake.delivery import CANONICAL_REGISTRY
+
+    _registrar(tmp_path, str(CANONICAL_REGISTRY))
+    with pytest.raises(FlowConfigError, match="canonical registry"):
+        parse_config(_raw(tmp_path, registry=str(CANONICAL_REGISTRY),
+                          allow_synthetic_isolated_registry=True))
+    with pytest.raises(FlowConfigError, match="canonical registry"):
+        parse_config(_raw(tmp_path, allow_synthetic_isolated_registry=True))
+    _registrar(tmp_path, str(tmp_path / "other.sqlite"))
+    with pytest.raises(FlowConfigError, match="same file"):
+        parse_config(_raw(tmp_path, allow_synthetic_isolated_registry=True))
+    with pytest.raises(FlowConfigError, match="true or false"):
+        parse_config(_raw(tmp_path, allow_synthetic_isolated_registry="yes"))
+
+
+def test_isolated_trial_passes_the_synthetic_flag_to_register(tmp_path):
+    _registrar(tmp_path, str(tmp_path / "registry.sqlite"))
+    config = parse_config(_raw(tmp_path, allow_synthetic_isolated_registry=True))
+    (config.deployments_root / "ops-cccccccc").mkdir(parents=True)
+    flow_intake.record_outcome(config, SHA, "import", 0, _probe("import"),
+                               deployment=Path("/lsf"), commit=COMMIT)
+    run, calls = _fake_exec([
+        (lambda a: a[0] == "git", _completed(stdout=COMMIT + "\n")),
+        (lambda a: "register-delivery" in a, _completed(stdout=json.dumps(_probe("register")))),
+    ])
+    assert flow_intake.register_step(config, SHA, runner=run) == 0
+    assert "--allow-synthetic-isolated-registry" in next(c for c in calls if "register-delivery" in c)
+
+
+def test_production_config_never_passes_the_synthetic_flag(config):
+    (config.deployments_root / "ops-cccccccc").mkdir(parents=True)
+    flow_intake.record_outcome(config, SHA, "import", 0, _probe("import"),
+                               deployment=Path("/lsf"), commit=COMMIT)
+    run, calls = _fake_exec([
+        (lambda a: a[0] == "git", _completed(stdout=COMMIT + "\n")),
+        (lambda a: "register-delivery" in a, _completed(stdout=json.dumps(_probe("register")))),
+    ])
+    flow_intake.register_step(config, SHA, runner=run)
+    assert all("--allow-synthetic-isolated-registry" not in c for c in calls)
