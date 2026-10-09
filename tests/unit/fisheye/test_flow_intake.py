@@ -458,3 +458,28 @@ def test_production_config_never_passes_the_synthetic_flag(config):
     ])
     flow_intake.register_step(config, SHA, runner=run)
     assert all("--allow-synthetic-isolated-registry" not in c for c in calls)
+
+
+def test_import_submits_the_real_intake_command_for_a_fresh_delivery(config):
+    run, _ = _fake_exec([
+        (lambda a: a[0] == "git", _completed(stdout=COMMIT + "\n")),
+        (lambda a: "probe-import" in a, _completed(returncode=1, stdout=json.dumps(_probe("import", verdict=False)))),
+    ])
+    submitted = []
+
+    class Stop(Exception):
+        pass
+
+    def bsub(command, cwd=None):
+        submitted.append(command)
+        raise Stop
+
+    with pytest.raises(Stop):
+        flow_intake.import_step(config, SHA, runner=run, bsub_runner=bsub)
+    script = (config.delivery_dir(SHA) / "import" / "attempt-1" / "job.sh").read_text()
+    line = next(l for l in script.splitlines() if l.startswith("scripts/py "))
+    argv = line.split(">")[0].split()
+    assert argv[1:5] == ["-m", "fisheye.intake", "import-delivery", SHA]
+    assert argv[argv.index("--staging-dir") + 1] == str(config.staging_dir)
+    assert argv[argv.index("--destination-root") + 1] == str(config.destination_root)
+    assert argv[argv.index("--run-dir") + 1].endswith("/attempt-1/run")

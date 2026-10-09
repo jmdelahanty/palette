@@ -257,7 +257,10 @@ def import_step(
     step_dir = config.delivery_dir(sha) / "import"
     argv = ["-m", "fisheye.intake", "import-delivery", sha,
             "--run-dir", f"{ATTEMPT_PLACEHOLDER}/run",
-            "--destination-root", str(config.destination_root)]
+            "--destination-root", str(config.destination_root),
+            # A fresh delivery has no durable state yet: intake finds its
+            # sealed marker under staging by snapshot sha.
+            "--staging-dir", str(config.staging_dir)]
     cache = cache or BjobsCache(config.lsf_state_dir,
                                 min_interval_s=config.lsf.bjobs_min_interval_s,
                                 query=build_ssh_bjobs_runner(config.lsf.submit_host),
