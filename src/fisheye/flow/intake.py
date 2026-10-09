@@ -323,10 +323,20 @@ def await_state_visible(
 
     from fisheye.intake.delivery import STATE_FILE, state_directory
 
+    from fisheye.flow.lsf import _revalidate
+
     path = state_directory(config.destination_root, sha) / STATE_FILE
-    deadline = clock() + timeout_s
+    started = clock()
+    deadline = started + timeout_s
     while True:
+        # A plain stat can keep answering from the cached negative lookup;
+        # listing each parent makes the NFS client revalidate it.
+        for directory in (path.parent.parent, path.parent):
+            _revalidate(directory)
         if path.exists():
+            waited = clock() - started
+            if waited >= poll_s:
+                print(f"intake state for {sha} became visible after {waited:.0f}s", file=sys.stderr)
             return True
         if clock() >= deadline:
             return False
