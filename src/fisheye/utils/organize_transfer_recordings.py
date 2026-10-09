@@ -41,6 +41,7 @@ from fisheye.shared.recording_transfer_snapshot import (
     SEALER_ATTESTED_SUFFIXES,
     SNAPSHOT_PATH,
     TRANSFER_PARENT_LAYOUTS,
+    TransferSnapshotError,
     file_ref,
     plan_parent_recordings,
     require,
@@ -354,6 +355,18 @@ def build_transfer_organization_plan(
         h5_by_camera[camera] = relative
         receipt_by_camera[camera] = receipt
         producer_context[camera] = dict(metadata)
+
+    # Orange's realtime-products declaration (2026-10-08 on) names each camera's
+    # own event logs, perf and diagnostic CSVs; they go only to that camera.
+    for camera, relative in _declared_realtime_product_files(
+        session, [parent.camera_id for parent in parents]
+    ):
+        require(relative in inventory, f"declared realtime product is not delivered: {relative}")
+        owner = camera_owners.setdefault(relative, (camera, "camera_realtime_product"))
+        require(
+            owner == (camera, "camera_realtime_product"),
+            f"realtime product file has conflicting ownership: {relative}",
+        )
 
     geometry_source = _recording_geometry_bundle_source(source)
     geometry_files: set[str] = set()
@@ -962,6 +975,36 @@ def _verify_parent_index(plan: dict, parent: dict) -> dict:
             "parent clip projection digest differs",
         )
     return manifest
+
+
+def _declared_realtime_product_files(
+    session: Mapping[str, Any], cameras: list[str]
+) -> list[tuple[str, str]]:
+    """(camera, recording-relative path) of each file Orange declares per camera.
+
+    Covers the detection and pose files, crop_files and acquisition_files of
+    ``realtime_products``; empty when the session predates the declaration.
+    """
+
+    from fisheye.shared.orange_realtime_products import (
+        PRODUCTS,
+        RealtimeProductsError,
+        realtime_products_declaration,
+    )
+
+    try:
+        block = realtime_products_declaration(session, cameras=cameras)
+    except RealtimeProductsError as exc:
+        raise TransferSnapshotError(str(exc)) from exc
+    if block is None:
+        return []
+    declared = []
+    for camera, products in sorted(block["cameras"].items()):
+        groups = [products[name]["files"] for name in PRODUCTS]
+        groups += [products["crop_files"], products["acquisition_files"]]
+        for group in groups:
+            declared.extend((camera, item["path"]) for item in group)
+    return declared
 
 
 def _readable_folder_name(parent, taken: set[str]) -> str:

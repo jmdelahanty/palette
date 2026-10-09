@@ -919,3 +919,103 @@ def test_publication_flush_stops_at_the_filesystem_boundary(tmp_path: Path, monk
     monkeypatch.setattr(organizer, "_device", lambda path: 2 if path in (mount, *mount.parents) else 1)
     organizer._flush_parent_publications(plan, state)
     assert set(synced) == {root / "zarr", root, root.parent}
+
+
+def _declare_realtime_products(root: Path, *, drop_file: str | None = None) -> dict[str, list[str]]:
+    """Add per-camera realtime product files and their declaration, then reseal."""
+
+    template = json.loads(
+        (FIXTURES.parent / "orange_realtime_products_v2" / "realtime_products.json").read_text()
+    )["cameras"]["2010093"]
+    session_path = root / "recording_session.json"
+    session = json.loads(session_path.read_bytes())
+    cameras: dict[str, dict] = {}
+    owned: dict[str, list[str]] = {}
+    for camera in session["cameras"]:
+        products = json.loads(json.dumps(template))
+        names = []
+        for group in (
+            products["detections"]["files"], products["pose"]["files"],
+            products["crop_files"], products["acquisition_files"],
+        ):
+            for item in group:
+                name = item["path"].replace("Cam2010093", f"Cam{camera}")
+                data = f"{camera} {item['role']} {name}\n".encode()
+                (root / name).write_bytes(data)
+                item.update(path=name, size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+                names.append(name)
+        cameras[camera] = products
+        owned[camera] = names
+    block = json.loads(
+        (FIXTURES.parent / "orange_realtime_products_v2" / "realtime_products.json").read_text()
+    )
+    block["cameras"] = cameras
+    session["realtime_products"] = block
+    session_path.write_bytes(transfer.canonical_bytes(session))
+    if drop_file is not None:
+        (root / drop_file).unlink()
+    _resign(root)
+    return owned
+
+
+def test_declared_realtime_products_go_only_to_their_camera(tmp_path):
+    source = _source(tmp_path)
+    owned = _declare_realtime_products(source)
+    plan = _plan(source, tmp_path / "recordings")
+    by_path = {item["source"]["path"]: item for item in plan["files"]}
+    recording = {p["identity"]["camera_id"]: p["identity"]["recording_id"] for p in plan["parents"]}
+    for camera, names in owned.items():
+        for name in names:
+            item = by_path[name]
+            assert (item["role"], item["camera_id"]) == ("camera_realtime_product", camera)
+            assert [t["recording_id"] for t in item["destinations"]] == [recording[camera]]
+            assert item["destinations"][0]["relative_path"] == f"raw/acquisition/{name}"
+    # Undeclared session files still go to every camera.
+    assert len(by_path["recording_session.json"]["destinations"]) == len(owned)
+
+
+def test_a_declared_but_undelivered_file_is_refused(tmp_path):
+    source = _source(tmp_path)
+    owned = _declare_realtime_products(source, drop_file=None)
+    missing = owned["02010093"][0]
+    (source / missing).unlink()
+    _resign(source)
+    with pytest.raises(ValueError, match="declared realtime product is not delivered"):
+        _plan(source, tmp_path / "recordings")
+
+
+def test_a_declaration_for_other_cameras_is_refused(tmp_path):
+    source = _source(tmp_path)
+    _declare_realtime_products(source)
+    session_path = source / "recording_session.json"
+    session = json.loads(session_path.read_bytes())
+    cameras = session["realtime_products"]["cameras"]
+    cameras["2099999"] = cameras.pop("02010094")
+    session_path.write_bytes(transfer.canonical_bytes(session))
+    _resign(source)
+    with pytest.raises(ValueError, match="declares cameras"):
+        _plan(source, tmp_path / "recordings")
+
+
+def test_sessions_without_a_declaration_keep_session_context(tmp_path):
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    assert not any(item["role"] == "camera_realtime_product" for item in plan["files"])
+
+
+def test_realtime_products_materialize_and_retire_per_camera(tmp_path, monkeypatch):
+    source = _source(tmp_path)
+    owned = _declare_realtime_products(source)
+    plan = _plan(source, tmp_path / "recordings")
+    organizer.prepare_transfer_parent_recordings(plan)
+    monkeypatch.setattr(
+        organizer, "_verify_parent_imports",
+        lambda *args, **kwargs: {"fixture": "admission_stub_not_authority_evidence"},
+    )
+    assert organizer.finalize_transfer_staging(plan)["status"] == "complete"
+    folders = {p["identity"]["camera_id"]: Path(p["destination_dir"]) for p in plan["parents"]}
+    for camera, names in owned.items():
+        for name in names:
+            for other, folder in folders.items():
+                present = (folder / "raw/acquisition" / name).is_file()
+                assert present is (other == camera), (name, other)
