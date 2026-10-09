@@ -299,7 +299,47 @@ def deployment_for_commit(config: IntakeFlowConfig, commit: str, *, runner: Exec
     return None
 
 
-def register_step(config: IntakeFlowConfig, sha: str, *, runner: Exec = _exec) -> int:
+STATE_VISIBILITY_TIMEOUT_S = 180
+STATE_VISIBILITY_POLL_S = 5
+
+
+def await_state_visible(
+    config: IntakeFlowConfig,
+    sha: str,
+    *,
+    timeout_s: float = STATE_VISIBILITY_TIMEOUT_S,
+    poll_s: float = STATE_VISIBILITY_POLL_S,
+    clock=time.monotonic,
+    sleep=time.sleep,
+) -> bool:
+    """Wait until ws1 sees the intake state the LSF import just wrote.
+
+    The NFS client caches negative lookups (about 60 s here): a ws1 lookup of
+    the state path made before the import (the import step's probe) keeps
+    answering "missing" for a while after a cluster node creates it. Found
+    by the synthetic trial on 2026-10-09; register then failed with "no
+    durable intake state yet".
+    """
+
+    from fisheye.intake.delivery import STATE_FILE, state_directory
+
+    path = state_directory(config.destination_root, sha) / STATE_FILE
+    deadline = clock() + timeout_s
+    while True:
+        if path.exists():
+            return True
+        if clock() >= deadline:
+            return False
+        sleep(poll_s)
+
+
+def register_step(
+    config: IntakeFlowConfig,
+    sha: str,
+    *,
+    runner: Exec = _exec,
+    await_visible=await_state_visible,
+) -> int:
     if refusal_path(config, sha).exists():
         return EXIT_REFUSED
     try:
@@ -320,6 +360,9 @@ def register_step(config: IntakeFlowConfig, sha: str, *, runner: Exec = _exec) -
             file=sys.stderr,
         )
         return record_failure(config, sha, "register", f"no ws1 deployment at producer commit {commit}")
+    if not await_visible(config, sha):
+        print(f"register {sha}: intake state still not visible on this host; "
+              "trying anyway", file=sys.stderr)
     args = ["register-delivery", sha,
             "--config", str(config.registrar_config),
             "--destination-root", str(config.destination_root)]

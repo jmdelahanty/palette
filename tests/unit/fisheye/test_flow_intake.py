@@ -324,7 +324,7 @@ def test_register_runs_at_the_producer_commit_deployment(config, tmp_path):
             stdout=(COMMIT if a[2].endswith("ops-cccccccc") else "e" * 40) + "\n")),
         (lambda a: "register-delivery" in a, _completed(stdout=json.dumps(_probe("register")))),
     ])
-    assert flow_intake.register_step(config, SHA, runner=run) == 0
+    assert flow_intake.register_step(config, SHA, runner=run, await_visible=lambda *a: True) == 0
     register_call = next(c for c in calls if "register-delivery" in c)
     assert register_call[0] == str(config.deployments_root / "ops-cccccccc" / "scripts" / "py")
     assert "--config" in register_call and str(config.registrar_config) in register_call
@@ -334,7 +334,7 @@ def test_register_without_the_producer_deployment_fails_without_a_hold(config):
     flow_intake.record_outcome(config, SHA, "import", 0, _probe("import"),
                                deployment=Path("/lsf"), commit=COMMIT)
     run, _ = _fake_exec([])
-    assert flow_intake.register_step(config, SHA, runner=run) == 1
+    assert flow_intake.register_step(config, SHA, runner=run, await_visible=lambda *a: True) == 1
     assert not flow_intake.refusal_path(config, SHA).exists()
     assert not flow_intake.sentinel_path(config, SHA, "register").exists()
 
@@ -389,7 +389,7 @@ def test_missing_producer_deployment_counts_toward_the_cap(config):
     flow_intake.record_outcome(config, SHA, "import", 0, _probe("import"),
                                deployment=Path("/lsf"), commit=COMMIT)
     run, _ = _fake_exec([])
-    codes = [flow_intake.register_step(config, SHA, runner=run) for _ in range(3)]
+    codes = [flow_intake.register_step(config, SHA, runner=run, await_visible=lambda *a: True) for _ in range(3)]
     assert codes[:2] == [1, 1]
     assert codes[2] == 65 and json.loads(flow_intake.refusal_path(config, SHA).read_text())["step"] == "register"
 
@@ -444,7 +444,7 @@ def test_isolated_trial_passes_the_synthetic_flag_to_register(tmp_path):
         (lambda a: a[0] == "git", _completed(stdout=COMMIT + "\n")),
         (lambda a: "register-delivery" in a, _completed(stdout=json.dumps(_probe("register")))),
     ])
-    assert flow_intake.register_step(config, SHA, runner=run) == 0
+    assert flow_intake.register_step(config, SHA, runner=run, await_visible=lambda *a: True) == 0
     assert "--allow-synthetic-isolated-registry" in next(c for c in calls if "register-delivery" in c)
 
 
@@ -456,7 +456,7 @@ def test_production_config_never_passes_the_synthetic_flag(config):
         (lambda a: a[0] == "git", _completed(stdout=COMMIT + "\n")),
         (lambda a: "register-delivery" in a, _completed(stdout=json.dumps(_probe("register")))),
     ])
-    flow_intake.register_step(config, SHA, runner=run)
+    flow_intake.register_step(config, SHA, runner=run, await_visible=lambda *a: True)
     assert all("--allow-synthetic-isolated-registry" not in c for c in calls)
 
 
@@ -483,3 +483,26 @@ def test_import_submits_the_real_intake_command_for_a_fresh_delivery(config):
     assert argv[argv.index("--staging-dir") + 1] == str(config.staging_dir)
     assert argv[argv.index("--destination-root") + 1] == str(config.destination_root)
     assert argv[argv.index("--run-dir") + 1].endswith("/attempt-1/run")
+
+
+def test_register_waits_for_the_intake_state_to_become_visible(config):
+    from fisheye.intake.delivery import STATE_FILE, state_directory
+
+    clock = Clock()
+    path = state_directory(config.destination_root, SHA) / STATE_FILE
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+        if clock() - 1_000_000 >= 45:  # appears after the negative-lookup cache expires
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}")
+
+    assert flow_intake.await_state_visible(config, SHA, clock=clock, sleep=sleep) is True
+    assert 45 <= clock() - 1_000_000 < 60
+
+
+def test_state_visibility_wait_is_bounded(config):
+    clock = Clock()
+    assert flow_intake.await_state_visible(config, SHA, timeout_s=30, poll_s=5,
+                                           clock=clock, sleep=clock.sleep) is False
+    assert clock() - 1_000_000 == 30
