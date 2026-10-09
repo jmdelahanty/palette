@@ -576,6 +576,35 @@ def _declared_crop_video_size(
 TRANSFER_CLIP_PROJECTION_SCHEMA_ID = "palette.transfer_organized_clip_projection.v1"
 
 
+def _bound_producer_document(
+    clip_manifest: Mapping[str, Any],
+    binding_key: str,
+    *,
+    recording_dir: Path,
+    clip_index: int,
+    label: str,
+) -> Mapping[str, Any]:
+    """Read a producer document the projection binds by path and sha256."""
+
+    original = clip_manifest.get(binding_key)
+    transfer = clip_manifest.get("source_transfer")
+    organized = (
+        transfer.get("source_to_organized_paths") if isinstance(transfer, Mapping) else None
+    )
+    if not isinstance(original, Mapping) or not isinstance(organized, Mapping):
+        raise ValueError(f"Clip {clip_index} projection does not bind its {label}.")
+    path = _resolve_relative(recording_dir, organized.get(original.get("path")), label=label)
+    if _sha256_file(path) != original.get("sha256"):
+        raise ValueError(f"Clip {clip_index} {label} bytes changed.")
+    return _read_json_object(path, label=label)
+
+
+def _camera_crop(outputs: Any, camera_id: str) -> Mapping[str, Any] | None:
+    camera_outputs = outputs.get(camera_id) if isinstance(outputs, Mapping) else None
+    crop = camera_outputs.get("crop") if isinstance(camera_outputs, Mapping) else None
+    return crop if isinstance(crop, Mapping) else None
+
+
 def _producer_crop_descriptor(
     clip_manifest: Mapping[str, Any],
     crop: Mapping[str, Any],
@@ -587,37 +616,42 @@ def _producer_crop_descriptor(
     """Orange's own crop output descriptor for this clip.
 
     Transfer-v2 intake indexes Palette projections, which keep only the paths
-    and frame range. The projection binds Orange's original clip manifest by
-    path and sha256; read the descriptor there, after checking those bytes.
+    and frame range. The projection binds Orange's original clip manifest
+    (rolling clips) and recording_session.json by path and sha256; read the
+    descriptor there, after checking those bytes. A single-clip recording has
+    no clip manifest, so its descriptor comes from recording_session.json:
+    clips[<index>].recording_outputs, else the top-level recording_outputs.
     """
 
-    if (
-        clip_manifest.get("schema_id") != TRANSFER_CLIP_PROJECTION_SCHEMA_ID
-        or clip_manifest.get("original_clip_manifest") is None
-    ):
-        # An Orange clip manifest, or a projection with no original to read
-        # (build_transfer_parent_frame_index writes null when the producer
-        # shipped no clip manifest): use the descriptor as given (no size
+    if clip_manifest.get("schema_id") != TRANSFER_CLIP_PROJECTION_SCHEMA_ID:
+        return crop  # an Orange clip manifest read directly
+    if clip_manifest.get("original_clip_manifest") is not None:
+        original = _bound_producer_document(
+            clip_manifest, "original_clip_manifest",
+            recording_dir=recording_dir, clip_index=clip_index, label="original clip manifest",
+        )
+        producer = _camera_crop(original.get("recording_outputs"), camera_id)
+        if producer is None:
+            raise ValueError(f"Clip {clip_index} original clip manifest has no crop output.")
+        return producer
+    if clip_manifest.get("original_recording_session") is None:
+        # No producer document to read: use the descriptor as given (no size
         # means the row inference).
         return crop
-    original = clip_manifest.get("original_clip_manifest")
-    transfer = clip_manifest.get("source_transfer")
-    organized = (
-        transfer.get("source_to_organized_paths") if isinstance(transfer, Mapping) else None
+    session = _bound_producer_document(
+        clip_manifest, "original_recording_session",
+        recording_dir=recording_dir, clip_index=clip_index, label="original recording session",
     )
-    if not isinstance(original, Mapping) or not isinstance(organized, Mapping):
-        raise ValueError(f"Clip {clip_index} projection does not bind its original clip manifest.")
-    path = _resolve_relative(
-        recording_dir, organized.get(original.get("path")), label="original clip manifest"
+    clips = session.get("clips")
+    declared = [
+        clip for clip in clips if isinstance(clip, Mapping) and clip.get("clip_index") == clip_index
+    ] if isinstance(clips, list) else []
+    producer = (
+        _camera_crop(declared[0].get("recording_outputs"), camera_id) if len(declared) == 1 else None
     )
-    if _sha256_file(path) != original.get("sha256"):
-        raise ValueError(f"Clip {clip_index} original clip manifest bytes changed.")
-    outputs = _read_json_object(path, label="original clip manifest").get("recording_outputs")
-    camera_outputs = outputs.get(camera_id) if isinstance(outputs, Mapping) else None
-    producer = camera_outputs.get("crop") if isinstance(camera_outputs, Mapping) else None
-    if not isinstance(producer, Mapping):
-        raise ValueError(f"Clip {clip_index} original clip manifest has no crop output.")
-    return producer
+    if producer is None:
+        producer = _camera_crop(session.get("recording_outputs"), camera_id)
+    return producer if producer is not None else crop
 
 
 def _sealed_crop_video_size(
