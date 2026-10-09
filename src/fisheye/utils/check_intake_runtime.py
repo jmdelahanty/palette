@@ -24,6 +24,7 @@ INTAKE_RUNTIME_MODULES = (
     "zarr",
     "pyarrow",
     "jsonschema",
+    "jsonschema_rs",
 )
 
 

@@ -1,4 +1,4 @@
-# Acquisition frame-clock backfill and single-authority fix (2026-10-08)
+# Acquisition frame-clock backfill and single-authority fix (2026-10-08, updated 2026-10-09)
 
 ## What was wrong
 
@@ -67,7 +67,48 @@ Verification:
   instead of by file order. Already-ordered files give identical bytes and
   digests.
 
-## Still open
+## Second backfill (live store, 2026-10-09)
 
-148 legacy archives have no published clock, and most have a CSV source. They
-can be backfilled the same way; until then, the frame-clock export refuses them.
+A read-only dry run over the 148 remaining archives found 36 ready to publish
+(all `Batman`, CSV sources) and 112 blocked. All 36 were published with the
+same procedure. Before each write, the script re-checked the digest against
+the dry run. After the write, it read the clock back through direct and
+consolidated metadata.
+
+After this backfill: 148 published, 12 no source, 112 never published.
+
+## The 112 blocked archives have no acquisition authority
+
+These are GoodCopBadCop 40, RedScare 28, Blindfish_Flash_OMR_Loom 22,
+DefaultScreen 16, Blindfish_OMR 4, and Blindfish_recording_only 2. None of them
+has `analysis/acquisition_camera_frames`. Their root `source_video_metadata`
+falls into one of three states:
+
+- v1 (RedScare, DefaultScreen).
+- v2 without `camera_id` or `file_fingerprint` (GoodCopBadCop).
+- Carries an `imageio_metadata.nframes = Infinity` leak (the Blindfish
+  archives; most of these are also v1).
+
+So these archives are also refused by every authority-gated publication path,
+not only the clock: detection, crop, track, coordinate and chaser publication,
+the registry identity projection, and the core-behavior export.
+
+`migrate_external_video_acquisition_authority` is the supported repair. It
+required a root `camera_serials` attribute that none of the 112 have. It now
+corroborates the camera from the source-video filename plus at least one
+recorded source: root `camera_id`, `camera_serials`, or
+`recording_manifest.camera_id`. It also refuses a pixel-format or colour-range
+change from the probe.
+
+A dry run (plan only) on 2026-10-09 gave `would_migrate_and_seal` for all 112.
+The probed colour tags agree with the recorded ones on every archive: 96 tv
+and 16 pc.
+
+Known caveats before applying:
+
+- The 4 `2026-07-20T18-52-08Z_arena_*_Blindfish_OMR` manifests declare a
+  `Cam…_meta.csv` clock file that was never delivered and is believed lost.
+  After migration, the clock backfill fails closed on them.
+- `2026-06-23T21-45-13Z_arena_1_RedScare` has a source-video mtime that differs
+  from the stored fingerprint at sub-microsecond precision; the size is the
+  same. Migration records a fresh fingerprint for it.
