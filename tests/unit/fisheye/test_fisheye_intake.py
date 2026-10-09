@@ -309,8 +309,8 @@ def test_resume_from_retiring_with_the_marker_already_gone(tmp_path, monkeypatch
     destination = _destination(tmp_path)
     original = organizer._retire_source_file
 
-    def dies_after_the_marker(source, expected, signature):
-        original(source, expected, signature)
+    def dies_after_the_marker(source, expected, signature, **kwargs):
+        original(source, expected, signature, **kwargs)
         if source.name == MARKER_NAME:
             raise OSError("node lost after retiring the marker")
 
@@ -695,8 +695,8 @@ def test_deterministic_organizer_violations_are_refused_and_lock_loss_retried(
     destination = _destination(tmp_path)
     original = organizer._retire_source_file
 
-    def dies_after_the_marker(source, expected, signature):
-        original(source, expected, signature)
+    def dies_after_the_marker(source, expected, signature, **kwargs):
+        original(source, expected, signature, **kwargs)
         if source.name == MARKER_NAME:
             raise OSError("node lost")
 
