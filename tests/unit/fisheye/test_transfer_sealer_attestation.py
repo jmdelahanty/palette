@@ -24,18 +24,18 @@ from fisheye.shared.recording_transfer_snapshot import (
 )
 
 FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "recording_transfer_v2" / "rolling"
-SEALER = {"package": "citrus-recording-transfer", "version": "2.0.0"}
+SEALER = {"package": "citrus-recording-transfer", "version": "2.0.1"}
 VIDEO_SUFFIXES = (".mp4", ".mkv", ".avi", ".h265", ".hevc")
 
 
-def _bundle(tmp_path: Path, *, v3: bool = True) -> Path:
+def _bundle(tmp_path: Path, *, v3: bool = True, sealer: dict = SEALER) -> Path:
     root = Path(shutil.copytree(FIXTURE, tmp_path / "staging" / "session"))
     marker = json.loads((root / MARKER_NAME).read_bytes())
     if v3:
         marker.update(
             schema_id="citrus.transfer_completion_marker.v3",
             schema_version=3,
-            sealer=SEALER,
+            sealer=sealer,
         )
     (root / MARKER_NAME).write_bytes(canonical_bytes(marker))
     # The marker is written after every payload file, as the sealer does.
@@ -158,3 +158,30 @@ def test_v3_trusts_the_sealer_for_a_same_size_rewrite_with_an_old_mtime(
     root = _bundle(tmp_path)
     _rewrite_same_size(_videos(root)[0])
     assert verify_transfer_snapshot(root).content_verification == "sealer_attested_large_files"
+
+
+def test_sealer_2_0_0_gets_no_shortcut(tmp_path, attest_small_files, hashed_paths):
+    # 2.0.0 hashed the destination back through the copying host's page cache.
+    root = _bundle(tmp_path, sealer={"package": "citrus-recording-transfer", "version": "2.0.0"})
+    result = verify_transfer_snapshot(root)
+
+    assert result.content_verification == "palette_sha256_all_bytes"
+    videos = {p.relative_to(root).as_posix() for p in _videos(root)}
+    assert videos <= set(hashed_paths)
+
+
+@pytest.mark.parametrize(
+    ("sealer", "reads_storage"),
+    [
+        ({"package": "citrus-recording-transfer", "version": "2.0.1"}, True),
+        ({"package": "citrus-recording-transfer", "version": "2.1.0"}, True),
+        ({"package": "citrus-recording-transfer", "version": "10.0.0"}, True),
+        ({"package": "citrus-recording-transfer", "version": "2.0.0"}, False),
+        ({"package": "citrus-recording-transfer", "version": "1.9.9"}, False),
+        ({"package": "citrus-recording-transfer", "version": "2.0"}, False),
+        ({"package": "someone-else", "version": "3.0.0"}, False),
+        (None, False),
+    ],
+)
+def test_only_sealers_from_2_0_1_read_storage(sealer, reads_storage):
+    assert snapshot_module.sealer_reads_storage(sealer) is reads_storage
