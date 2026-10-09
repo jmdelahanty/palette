@@ -576,7 +576,8 @@ def test_prepare_manifest_failure_is_recoverable_without_source_retirement(
     assert _bytes(source) == before
 
 
-def test_prepare_refuses_an_incomplete_index_and_preserves_recovery_evidence(tmp_path):
+def test_prepare_sets_aside_an_incomplete_index_and_rebuilds_it(tmp_path):
+    # An attempt that died while building left an index without its manifest.
     source = _source(tmp_path)
     plan = _plan(source, tmp_path / "recordings")
     organizer.materialize_transfer_organization(plan)
@@ -584,12 +585,61 @@ def test_prepare_refuses_an_incomplete_index_and_preserves_recovery_evidence(tmp
     index.mkdir(parents=True)
     (index / "recording_frame_index.parquet").write_bytes(b"interrupted index")
     before = _bytes(source)
-    with pytest.raises((ValueError, FileNotFoundError), match="index"):
-        organizer.prepare_transfer_parent_recordings(plan)
+
+    state = organizer.prepare_transfer_parent_recordings(plan)
+
     assert _bytes(source) == before
-    assert (
-        index / "recording_frame_index.parquet"
-    ).read_bytes() == b"interrupted index"
+    assert (index / organizer.INDEX_MANIFEST_NAME).is_file()
+    [record] = state["incomplete_indexes_set_aside"]
+    assert record["from"] == str(index) and record["files"] == ["recording_frame_index.parquet"]
+    kept = Path(record["to"])
+    assert kept.parent == organizer._state_directory(plan) / "incomplete_indexes"
+    assert (kept / "recording_frame_index.parquet").read_bytes() == b"interrupted index"
+
+
+def test_prepare_resumes_after_a_kill_during_the_index_build(tmp_path, monkeypatch):
+    from fisheye.utils import build_transfer_parent_frame_index as builder
+
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    real = builder.build_transfer_parent_frame_index
+    calls = {"n": 0}
+
+    def killed_once(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            out = Path(kwargs["output_dir"])
+            out.mkdir(parents=True)
+            (out / "clip_000000_projection.json").write_text("{}")
+            raise KeyboardInterrupt("bkill during the index build")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(builder, "build_transfer_parent_frame_index", killed_once)
+    with pytest.raises(KeyboardInterrupt):
+        organizer.prepare_transfer_parent_recordings(plan)
+    state = organizer.prepare_transfer_parent_recordings(plan)
+    assert state["parent_manifests_prepared"] is True
+    assert len(state["incomplete_indexes_set_aside"]) == 1
+    for parent in plan["parents"]:
+        assert (Path(parent["destination_dir"]) / "recording_manifest.json").is_file()
+
+
+def test_prepare_refuses_a_complete_index_that_does_not_verify(tmp_path):
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    organizer.prepare_transfer_parent_recordings(plan)
+    index = Path(plan["parents"][0]["destination_dir"]) / organizer.INDEX_DIRECTORY
+    parquet = index / "recording_frame_index.parquet"
+    parquet.chmod(0o644)
+    parquet.write_bytes(parquet.read_bytes() + b"tampered")
+    state_file = organizer._state_directory(plan) / "organization_state.json"
+    state = json.loads(state_file.read_text())
+    state.pop("parent_manifests_prepared", None)
+    state_file.chmod(0o644)
+    state_file.write_text(json.dumps(state))
+    with pytest.raises(ValueError, match="digest differs"):
+        organizer.prepare_transfer_parent_recordings(plan)
+    assert not (organizer._state_directory(plan) / "incomplete_indexes").exists()
 
 
 def _prepared_with_admission_stub(tmp_path, monkeypatch):
