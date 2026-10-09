@@ -1217,9 +1217,9 @@ def _verify_parent_imports(
             )
         receipts[parent["identity"]["recording_id"]] = receipt.receipt_sha256
     if registry_path is not None:
-        from fisheye.registry.shadow_publish import validate_registry_sqlite
+        from fisheye.registry.shadow_publish import validate_registry_sqlite_copy
 
-        validate_registry_sqlite(registry_path)
+        validate_registry_sqlite_copy(registry_path)
     return receipts
 
 
