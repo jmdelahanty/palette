@@ -1024,18 +1024,40 @@ class SealerAttestation:
     marker_mtime_ns: int
 
 
+SEALER_PACKAGE = "citrus-recording-transfer"
+# 2.0.1 is the first sealer whose destination hash reads storage: each file is
+# fsynced, then read with O_DIRECT (on /groups NFS this bypasses the copying
+# host's page cache). 2.0.0 read the destination back through that cache.
+SEALER_STORAGE_READ_MIN_VERSION = (2, 0, 1)
+_SEALER_VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+
+
+def sealer_reads_storage(sealer: Any) -> bool:
+    """Whether a marker v3 sealer record names a sealer that hashed storage."""
+
+    if not isinstance(sealer, dict) or sealer.get("package") != SEALER_PACKAGE:
+        return False
+    match = _SEALER_VERSION.fullmatch(str(sealer.get("version", "")))
+    if match is None:
+        return False
+    return tuple(int(part) for part in match.groups()) >= SEALER_STORAGE_READ_MIN_VERSION
+
+
 def sealer_attested_inventory(
     marker: dict, snapshot: dict, marker_mtime_ns: int
 ) -> SealerAttestation | None:
-    """Trust the sealer's destination hashes only for a marker v3 delivery.
+    """Trust the sealer's destination hashes only when it read them from storage.
 
-    Citrus's sealer (citrus-recording-transfer >= 2.0.0, marker v3) rebuilds the
-    snapshot from the destination copy, hashing every file, and writes the
-    marker only when it matches. A v2 marker records no sealer, so Palette
-    hashes every byte itself.
+    Citrus's sealer (marker v3) rebuilds the snapshot from the destination copy,
+    hashing every file, and writes the marker only when it matches. From
+    citrus-recording-transfer 2.0.1 that hash reads storage rather than the
+    copying host's page cache (sealer_reads_storage). A v2 marker, or a sealer
+    before 2.0.1, gets no shortcut: Palette hashes every byte itself.
     """
 
     if marker.get("schema_id") != MARKER_SCHEMA_V3:
+        return None
+    if not sealer_reads_storage(marker.get("sealer")):
         return None
     require(
         marker["delivery"]["verification"] == SEALER_VERIFICATION,

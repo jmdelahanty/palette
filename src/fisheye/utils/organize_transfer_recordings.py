@@ -38,6 +38,7 @@ from fisheye.shared.recording_manifest_context import (
 from fisheye.shared.recording_preflight import default_preflight_payload
 from fisheye.shared.recording_transfer_snapshot import (
     MARKER_NAME,
+    SEALER_ATTESTED_SUFFIXES,
     SNAPSHOT_PATH,
     TRANSFER_PARENT_LAYOUTS,
     file_ref,
@@ -46,6 +47,7 @@ from fisheye.shared.recording_transfer_snapshot import (
     strict_json,
     verify_transfer_snapshot,
 )
+from fisheye.shared import recording_transfer_snapshot as _transfer_snapshot
 from fisheye.shared.source_recording_identity import (
     SOURCE_RECORDING_ID_MAPPING_PROFILE,
     SourceRecordingIdentity,
@@ -519,7 +521,11 @@ def _validate_plan(plan: dict, *, live_source: bool) -> None:
         and str(destination.resolve()) == str(destination),
         "organization plan paths must be canonical absolute paths",
     )
-    _directory_identity(source)
+    # A completed delivery's empty staging folder may since have been removed
+    # (register_completed_imports does so after registration); every
+    # live-source use and every not-yet-complete stage still requires it.
+    if live_source or os.path.lexists(source):
+        _directory_identity(source)
     _separate_destination(source, destination)
     if live_source:
         rebuilt = build_transfer_organization_plan(
@@ -653,12 +659,109 @@ def _organization_state(plan: dict):
         yield state, save
 
 
-def _matches_file(root: Path, relative: str, expected: dict) -> None:
+_WRITE_BITS = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+
+
+def _make_sealed_media_read_only(path: Path) -> None:
+    """Clear every write bit on an organized video/H5 copy (audit H1).
+
+    A hard-linked copy shares its inode with the staged file, so the staged
+    name becomes read-only too; retirement unlinks it, which needs only
+    directory write permission.
+    """
+
+    if Path(path).suffix.lower() not in SEALER_ATTESTED_SUFFIXES:
+        return
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode), f"not a regular artifact: {path}")
+    if info.st_mode & _WRITE_BITS:
+        os.chmod(path, stat.S_IMODE(info.st_mode) & ~_WRITE_BITS)
+
+
+class _SealedSourceIdentity:
+    """Proves a large sealed video/H5 copy is the staged file, without hashing.
+
+    For a marker v3 delivery sealed by citrus-recording-transfer >= 2.0.1
+    (``transfer_sealer`` in the plan; sealer_reads_storage) the sealer hashed
+    every staged file before writing the marker, and Palette's snapshot check
+    accepts a large video/H5 file of the sealed size modified no later than the
+    marker. A hard-linked copy is that same file. While the staged file is
+    present, a copy is proven when it has the staged file's device, inode, size
+    and mtime and the staged file passes that check against the staged marker
+    (whose bytes must still be the sealed marker's). After the staged name was
+    retired, the copy must have the inode, size and mtime that retirement
+    recorded for it. An organized copy must also have no write bits (it was
+    made read-only when organized). Anything else, including a writable or
+    cross-filesystem copy, is hashed in full.
+    """
+
+    def __init__(self, plan: dict, state: dict | None):
+        # Only a sealer that hashed storage (citrus-recording-transfer >= 2.0.1).
+        self.enabled = _transfer_snapshot.sealer_reads_storage(plan.get("transfer_sealer"))
+        self.source = Path(plan["source_dir"])
+        self.retired = ((state or {}).get("retirement_files") or {}) if self.enabled else {}
+        self.marker_mtime_ns = self._staged_marker_mtime(plan) if self.enabled else None
+
+    def _staged_marker_mtime(self, plan: dict) -> int | None:
+        sealed = next(
+            (item["source"] for item in plan["files"] if item["source"]["path"] == MARKER_NAME),
+            None,
+        )
+        marker = self.source / MARKER_NAME
+        if sealed is None or marker.is_symlink() or not marker.is_file():
+            return None
+        actual = file_ref(self.source, MARKER_NAME)
+        if (actual["sha256"], actual["size_bytes"]) != (sealed["sha256"], sealed["size_bytes"]):
+            return None
+        return marker.lstat().st_mtime_ns
+
+    def proves(self, path: Path, expected: dict) -> bool:
+        if not (
+            self.enabled
+            and expected["size_bytes"] >= _transfer_snapshot.SEALER_ATTESTED_MIN_BYTES
+            and Path(expected["path"]).suffix.lower() in SEALER_ATTESTED_SUFFIXES
+        ):
+            return False
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size != expected["size_bytes"]:
+            return False
+        staged_path = self.source / expected["path"]
+        if path != staged_path and info.st_mode & _WRITE_BITS:
+            return False
+        if self.marker_mtime_ns is not None:
+            try:
+                staged = staged_path.lstat()
+            except FileNotFoundError:
+                staged = None
+            if staged is not None:
+                return (
+                    stat.S_ISREG(staged.st_mode)
+                    and staged.st_size == expected["size_bytes"]
+                    and staged.st_mtime_ns <= self.marker_mtime_ns
+                    and (staged.st_dev, staged.st_ino, staged.st_mtime_ns)
+                    == (info.st_dev, info.st_ino, info.st_mtime_ns)
+                )
+        recorded = self.retired.get(expected["path"])
+        return recorded is not None and list(recorded[1:]) == [
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+        ]
+
+
+def _matches_file(
+    root: Path,
+    relative: str,
+    expected: dict,
+    identity: _SealedSourceIdentity | None = None,
+) -> None:
     path = root / relative
     require(
         not any(p.is_symlink() for p in (path, *path.parents)),
         "artifact path contains a symlink",
     )
+    if identity is not None and identity.proves(path, expected):
+        return
     actual = file_ref(root, relative)
     require(
         (actual["sha256"], actual["size_bytes"])
@@ -667,14 +770,20 @@ def _matches_file(root: Path, relative: str, expected: dict) -> None:
     )
 
 
-def _materialize_file(source: Path, destination: Path, expected: dict) -> None:
+def _materialize_file(
+    source: Path,
+    destination: Path,
+    expected: dict,
+    identity: _SealedSourceIdentity | None = None,
+) -> None:
     """Atomic no-clobber link, or bounded copy across filesystems."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     _directory_identity(destination.parent)
     if destination.exists() or destination.is_symlink():
-        _matches_file(destination.parent, destination.name, expected)
+        _matches_file(destination.parent, destination.name, expected, identity)
+        _make_sealed_media_read_only(destination)
         return
-    _matches_file(source.parent, source.name, expected)
+    _matches_file(source.parent, source.name, expected, identity)
     try:
         os.link(source, destination, follow_symlinks=False)
     except OSError as exc:
@@ -697,7 +806,9 @@ def _materialize_file(source: Path, destination: Path, expected: dict) -> None:
         finally:
             if temporary is not None:
                 temporary.unlink()
-    _matches_file(destination.parent, destination.name, expected)
+    # Before the final check, so a linked copy can be proven by identity.
+    _make_sealed_media_read_only(destination)
+    _matches_file(destination.parent, destination.name, expected, identity)
 
 
 def _verify_materialized_files(plan: dict, state: dict) -> None:
@@ -707,12 +818,14 @@ def _verify_materialized_files(plan: dict, state: dict) -> None:
         _require_directory(
             _parent_directory(plan, key), state["parent_directory_identities"][key]
         )
+    identity = _SealedSourceIdentity(plan, state)
     for item in plan["files"]:
         for target in item["destinations"]:
             _matches_file(
                 _parent_directory(plan, target["recording_id"]),
                 target["relative_path"],
                 item["source"],
+                identity,
             )
 
 
@@ -771,6 +884,7 @@ def materialize_transfer_organization(plan: dict) -> dict:
                 save()
             else:
                 _require_directory(directory, expected)
+        identity = _SealedSourceIdentity(plan, state)
         for item in plan["files"]:
             for target in item["destinations"]:
                 parent = _parent_directory(plan, target["recording_id"])
@@ -781,6 +895,7 @@ def materialize_transfer_organization(plan: dict) -> dict:
                     source / item["source"]["path"],
                     parent / target["relative_path"],
                     item["source"],
+                    identity,
                 )
         _validate_plan(plan, live_source=True)
         _verify_materialized_files(plan, state)
@@ -1108,8 +1223,14 @@ def _verify_parent_imports(
     return receipts
 
 
-def _retire_source_file(source: Path, expected: dict, signature: list[int]) -> None:
-    _matches_file(source.parent, source.name, expected)
+def _retire_source_file(
+    source: Path,
+    expected: dict,
+    signature: list[int],
+    *,
+    identity: _SealedSourceIdentity | None = None,
+) -> None:
+    _matches_file(source.parent, source.name, expected, identity)
     descriptor = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         current = os.stat(source.name, dir_fd=descriptor, follow_symlinks=False)
@@ -1155,7 +1276,8 @@ def finalize_transfer_staging(
     retry even after the snapshot/marker has been retired; missing files are
     tolerated only after verified retirement began. Every durable copy and
     actual parent receipt is checked again on retry, including completed runs.
-    Empty source root is retained; no recursive removal is used.
+    Empty source root is retained; no recursive removal is used. Once the
+    delivery is complete, a replay accepts that the empty root was removed.
     """
     _validate_plan(plan, live_source=False)
     registry_path = registry_path.resolve() if registry_path is not None else None
@@ -1165,7 +1287,9 @@ def finalize_transfer_staging(
     }
     with _organization_state(plan) as (state, save):
         source = Path(plan["source_dir"])
-        _require_directory(source, state["source_directory_identity"])
+        source_removed = state["status"] == "complete" and not os.path.lexists(source)
+        if not source_removed:
+            _require_directory(source, state["source_directory_identity"])
         prior_contract = state.get("admission_contract")
         require(
             prior_contract is None or prior_contract == contract,
@@ -1179,7 +1303,7 @@ def finalize_transfer_staging(
         )
         if state["status"] == "complete":
             require(
-                not list(source.iterdir()),
+                source_removed or not list(source.iterdir()),
                 "completed staging source is no longer empty",
             )
             require(
@@ -1223,6 +1347,7 @@ def finalize_transfer_staging(
             "staging contains new unplanned directories",
         )
         by_relative = {item["source"]["path"]: item for item in plan["files"]}
+        identity = _SealedSourceIdentity(plan, state)
         for relative in sorted(pending):
             item = by_relative[relative]
             _require_directory(source, state["source_directory_identity"])
@@ -1231,12 +1356,13 @@ def finalize_transfer_staging(
                 _require_directory(
                     parent, state["parent_directory_identities"][target["recording_id"]]
                 )
-                _matches_file(parent, target["relative_path"], item["source"])
+                _matches_file(parent, target["relative_path"], item["source"], identity)
             if relative in current_files:
                 _retire_source_file(
                     source / relative,
                     item["source"],
                     state["retirement_files"][relative],
+                    identity=identity,
                 )
             # Missing pending member covers unlink-success/journal-write-failure.
             # It is acknowledged only after all declared copies were rechecked.

@@ -140,8 +140,13 @@ def collection_video_facts(root: zarr.Group) -> Dict[str, Any]:
     }
 
 
-def _crop_ledger_size(stream_group: Any, run_name: Optional[str]) -> Dict[str, Optional[int]]:
-    """The crop video size the stream's current ledger run was validated against."""
+def _crop_ledger_facts(stream_group: Any, run_name: Optional[str]) -> Dict[str, Any]:
+    """The crop video facts the stream's current ledger run was validated against.
+
+    Every run records the crop size. Collection ledger runs from version 2 also
+    record the codec, frame rate and colorimetry probed from each crop clip at
+    intake; earlier runs leave those None.
+    """
 
     if not run_name:
         return {}
@@ -153,6 +158,12 @@ def _crop_ledger_size(stream_group: Any, run_name: Optional[str]) -> Dict[str, O
     return {
         "width": _as_int(run_contract.get("width")),
         "height": _as_int(run_contract.get("height")),
+        "frame_rate": _as_float(run_contract.get("frame_rate")),
+        "codec": _decode_attr(run_contract.get("codec")),
+        **{
+            name: _decode_attr(run_contract.get(name))
+            for name in COLLECTION_COLORIMETRY_FIELDS
+        },
     }
 
 
@@ -205,7 +216,7 @@ def _extract_acquisition_video_stream_rows(
                 **{name: collection.get(name) for name in COLLECTION_COLORIMETRY_FIELDS},
             }
         elif output_kind == "crop":
-            facts = _crop_ledger_size(
+            facts = _crop_ledger_facts(
                 streams_group.get(stream_key),
                 _decode_attr(stream_attrs.get("canonical_ledger_run")),
             )
