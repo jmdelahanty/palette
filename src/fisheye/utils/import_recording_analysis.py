@@ -8,6 +8,8 @@ This module intentionally excludes detect/refine orchestration. Use
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import stat
 import subprocess
@@ -322,6 +324,26 @@ def stimulus_runs_present(zarr_path: Path) -> bool:
     return admitted_unified_native_run(zarr_path) is not None
 
 
+_REALTIME_RECORDS: dict[tuple[str, str], Optional[dict]] = {}
+
+
+def realtime_products_record(recording_dir: Path, manifest: Mapping[str, Any]) -> Optional[dict]:
+    """Orange realtime products validated for this recording (memoized per process).
+
+    Preflight and archive writing both need it; the event logs are scanned once.
+    """
+
+    from fisheye.shared.acquisition_realtime_products import build_realtime_products_record
+
+    key = (
+        str(Path(recording_dir).resolve()),
+        hashlib.sha256(json.dumps(manifest, sort_keys=True, default=str).encode()).hexdigest(),
+    )
+    if key not in _REALTIME_RECORDS:
+        _REALTIME_RECORDS[key] = build_realtime_products_record(Path(recording_dir), manifest)
+    return _REALTIME_RECORDS[key]
+
+
 def validate_recording_import_plan(
     plan: RecordingAnalysisPlan,
 ) -> tuple[dict[str, Any], SourceRecordingIdentity]:
@@ -364,6 +386,8 @@ def validate_recording_import_plan(
             raise ValueError("single-video recording plan requires its source video")
         _producer_video_metadata(plan)
     require_transfer_v2_h5_is_unified(plan, manifest)
+    # Orange's realtime-products declaration and event logs (refuses on contradiction).
+    realtime_products_record(plan.recording_dir, manifest)
     try:
         plan.zarr_path.resolve().relative_to(plan.recording_dir.resolve())
     except ValueError as exc:
@@ -513,7 +537,13 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
         attrs["source_h5_path"] = str(plan.h5_path)
         attrs.pop("experiment_context_status_detail", None)
     root.attrs.put(attrs)
-    return write_acquisition_video_stream_inventory(root, plan.recording_dir, manifest)
+    inventory = write_acquisition_video_stream_inventory(root, plan.recording_dir, manifest)
+    record = realtime_products_record(plan.recording_dir, manifest)
+    if record is not None:
+        from fisheye.shared.acquisition_realtime_products import write_realtime_products_record
+
+        write_realtime_products_record(root, record)
+    return inventory
 
 
 def apply_video_metadata(
