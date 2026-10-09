@@ -24,8 +24,7 @@ from fisheye.registry.recording_identity_authority import (
 )
 from fisheye.shared.acquisition_frame_clock import (
     import_acquisition_frame_clock,
-    load_clipped_acquisition_frame_clock_source,
-    publish_acquisition_frame_clock,
+    publish_clipped_acquisition_frame_clock,
 )
 from fisheye.shared.acquisition_video_streams import (
     resolve_acquisition_manifest_file,
@@ -624,12 +623,10 @@ def apply_acquisition_frame_clock(plan: RecordingAnalysisPlan) -> dict[str, obje
         root, expected_camera_id=camera_id,
     )
     if plan.recording_layout == SOURCE_VIDEO_COLLECTION_LAYOUT:
-        source = load_clipped_acquisition_frame_clock_source(
-            plan.recording_dir, camera_id=camera_id,
-            frame_index_path=frame.record.source_video_metadata["locator"]["relative_path"],
-            expected_frame_count=frame.record.source_total_frames,
+        resolved = publish_clipped_acquisition_frame_clock(
+            root, recording_dir=plan.recording_dir, camera_id=camera_id,
+            acquisition_record=frame.record,
         )
-        resolved = publish_acquisition_frame_clock(root, source)
     else:
         resolved = import_acquisition_frame_clock(
             root, recording_dir=plan.recording_dir, camera_id=camera_id,

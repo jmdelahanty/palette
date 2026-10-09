@@ -26,8 +26,14 @@ from fisheye.shared.clipped_video_collection import (
     build_clipped_video_collection_metadata,
     clipped_video_collection_summary,
 )
+from fisheye.shared.acquisition_frame_clock import (
+    publish_clipped_acquisition_frame_clock,
+)
 from fisheye.shared.import_video_metadata import (
     publish_clipped_video_collection_acquisition_authority,
+)
+from fisheye.shared.pixel_frame_authority import (
+    load_persisted_acquisition_camera_authority,
 )
 from fisheye.shared.zarr_run_completion import require_runs_parent
 from fisheye.shared.system_metadata import (
@@ -737,6 +743,18 @@ def create_clipped_analysis_zarr(
     acquisition_publication = publish_clipped_video_collection_acquisition_authority(
         root
     )
+    # Downstream timestamp readers resolve only the published clock, so a
+    # shell without one silently lacks acquisition timing.
+    camera_id = str(acquisition_metadata["camera_id"])
+    _ownership, acquisition_frame = load_persisted_acquisition_camera_authority(
+        root, expected_camera_id=camera_id
+    )
+    frame_clock = publish_clipped_acquisition_frame_clock(
+        root,
+        recording_dir=recording_path,
+        camera_id=camera_id,
+        acquisition_record=acquisition_frame.record,
+    )
 
     shell_manifest = {
         **planned,
@@ -748,6 +766,10 @@ def create_clipped_analysis_zarr(
         "pid": int(os.getpid()),
         "clip_sources": clip_sources,
         "acquisition_authority": acquisition_publication,
+        "acquisition_frame_clock": {
+            "ref": frame_clock.group_path,
+            "sha256": frame_clock.record_sha256,
+        },
         "frame_index_summary": frame_summary,
         "duration_seconds": (datetime.now(timezone.utc) - started).total_seconds(),
     }

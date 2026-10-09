@@ -12,9 +12,9 @@ import pyarrow.parquet as pq
 
 from fisheye.analysis_workflows.validated_behavior_cohort_adapters import sha256_file
 from fisheye.shared.acquisition_frame_clock import (
+    AcquisitionFrameClockError,
     AcquisitionFrameClockSource,
-    acquisition_frame_clock_source_sha256,
-    load_acquisition_frame_clock_source,
+    load_published_acquisition_frame_clock,
 )
 from fisheye.shared.pixel_frame_authority import BoundAcquisitionCameraFrame
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
@@ -202,7 +202,7 @@ def bind_validated_behavior_frame_clock(
     expected_recording_id: str,
     acquisition: BoundAcquisitionCameraFrame,
 ) -> BoundValidatedBehaviorFrameClock:
-    """Bind raw timestamps to the exact admitted acquisition camera authority."""
+    """Bind the published acquisition clock to the admitted camera authority."""
 
     attrs = getattr(root, "attrs", None)
     if not isinstance(attrs, Mapping):
@@ -258,14 +258,14 @@ def bind_validated_behavior_frame_clock(
     declared_path, declared_sha256 = _declared_frame_index(
         recording_dir, source_metadata
     )
-    source = load_acquisition_frame_clock_source(
-        recording_dir,
-        camera_id=camera_id,
-        video_path=Path(analysis_zarr).expanduser().resolve(),
-        expected_frame_count=int(record.source_total_frames),
-    )
-    if source is None:
-        _fail("No acquisition frame-clock source is available for this recording.")
+    try:
+        published, source = load_published_acquisition_frame_clock(
+            root, recording_dir=recording_dir
+        )
+    except AcquisitionFrameClockError as exc:
+        _fail(f"No published acquisition frame clock for this recording: {exc}")
+    if source.row_count != int(record.source_total_frames):
+        _fail("Published frame clock row count differs from acquisition authority.")
     if source.camera_id != camera_id:
         _fail("Frame-clock source camera differs from acquisition authority.")
     if declared_path is not None and source.source_path != declared_path:
@@ -338,9 +338,7 @@ def bind_validated_behavior_frame_clock(
             "acquisition_camera_frame_ref": acquisition.record_ref,
             "acquisition_camera_frame_sha256": acquisition.record_sha256,
             "source_video_metadata_sha256": record.source_video_metadata_sha256,
-            "acquisition_frame_clock_source_sha256": (
-                acquisition_frame_clock_source_sha256(source)
-            ),
+            "acquisition_frame_clock_source_sha256": published.record_sha256,
             "clock_semantics": semantics,
             "clock_semantics_sha256": canonical_json_sha256(semantics),
             "within_session_alignment_status": within_session_status,

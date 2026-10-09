@@ -21,6 +21,7 @@ from fisheye.shared.pixel_frame_authority import (
 from fisheye.shared.zarr.crop_pixel_authority import bind_crop_pixel_authority
 from fisheye.cluster.native_detection_authority import load_native_archive_authority
 from fisheye.utils.build_recording_frame_index import build_recording_frame_index
+from fisheye.shared.acquisition_frame_clock import load_published_acquisition_frame_clock
 from fisheye.utils.create_clipped_analysis_zarr import create_clipped_analysis_zarr
 from fisheye.utils.repair_clipped_analysis_acquisition_authority import (
     repair_clipped_analysis_acquisition_authority,
@@ -54,12 +55,12 @@ def _write_metadata(path: Path, frame_ids: list[int]) -> None:
             handle, fieldnames=["frame_id", "timestamp", "timestamp_sys"]
         )
         writer.writeheader()
-        for idx, frame_id in enumerate(frame_ids):
+        for frame_id in frame_ids:
             writer.writerow(
                 {
                     "frame_id": frame_id,
-                    "timestamp": 1000 + idx,
-                    "timestamp_sys": 2000 + idx,
+                    "timestamp": 1000 + frame_id,
+                    "timestamp_sys": 2000 + frame_id,
                 }
             )
 
@@ -278,6 +279,13 @@ def test_shuffled_frame_map_survives_producer_and_unpatched_consumer(
         root, expected_camera_id="2010093"
     )
     assert acquisition.record.source_total_frames == 5
+    clock_root = zarr.open_group(output, mode="r", use_consolidated=False)
+    _published, clock = load_published_acquisition_frame_clock(
+        clock_root, recording_dir=recording
+    )
+    assert clock.parent_frame_index.tolist() == [0, 1, 2, 3, 4]
+    assert clock.recording_frame_id.tolist() == [1, 2, 3, 4, 5]
+    assert clock.camera_timestamp_ns.tolist() == [1001, 1002, 1003, 1004, 1005]
     native = load_native_archive_authority(
         SimpleNamespace(recording_id="rec_a", analysis_zarr=output)
     )
