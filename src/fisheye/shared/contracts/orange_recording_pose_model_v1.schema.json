@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.recording_pose_model.v1",
+  "title": "Orange recording pose model declaration (version 1)",
+  "description": "recording_snapshot_start.json models.<serial>.pose (also in recording_snapshot.json): the second-stage pose network per camera, sealed at record start. runtime.pose_crop_size_px is the side of the square inference window cut around the detection and fed to the pose network (ORANGE_POSE_CROP_SIZE_PX; 0 = the video crop size); it is never encoded as video and is unrelated to the crop video size (crop_outputs.<serial>.runtime.crop_size_px). runtime.mode real = the TensorRT engine ran (backend tensorrt); noop = the stand-in. The skeleton object embeds the Palette sidecar and is left open. Written by build_gui_pose_model_snapshot (src/gui/recording_snapshots.cpp); closed on the other fields.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "enabled",
+    "runtime",
+    "source"
+  ],
+  "properties": {
+    "enabled": {
+      "type": "boolean"
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "worker",
+        "backend",
+        "mode",
+        "pose_crop_size_px",
+        "engine_path",
+        "model_id",
+        "skeleton_id",
+        "skeleton_path",
+        "skeleton",
+        "engine_sha256",
+        "ipc_model_id_hash",
+        "gpu_id",
+        "queue_size",
+        "files"
+      ],
+      "properties": {
+        "worker": {
+          "const": "PoseWorker"
+        },
+        "backend": {
+          "enum": [
+            "tensorrt",
+            "noop",
+            "none"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "real",
+            "noop",
+            "disabled"
+          ]
+        },
+        "pose_crop_size_px": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "engine_path": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": "string"
+        },
+        "skeleton_id": {
+          "type": "string"
+        },
+        "skeleton_path": {
+          "type": "string"
+        },
+        "skeleton": {
+          "type": "object"
+        },
+        "engine_sha256": {
+          "type": "string"
+        },
+        "ipc_model_id_hash": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gpu_id": {
+          "type": "integer"
+        },
+        "queue_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "camera_config_path",
+        "ui_selected",
+        "requires_yolo",
+        "requires_crop_output"
+      ],
+      "properties": {
+        "camera_config_path": {
+          "type": "string"
+        },
+        "ui_selected": {
+          "type": "boolean"
+        },
+        "requires_yolo": {
+          "type": "boolean"
+        },
+        "requires_crop_output": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "enabled": {
+            "const": true
+          },
+          "runtime": {
+            "properties": {
+              "mode": {
+                "const": "real"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime": {
+            "properties": {
+              "backend": {
+                "const": "tensorrt"
+              },
+              "engine_path": {
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
