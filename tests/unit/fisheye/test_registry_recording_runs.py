@@ -119,10 +119,10 @@ def _view_names(conn) -> set[str]:
     }
 
 
-def test_migration_075_is_registered_last() -> None:
-    assert MIGRATION_METHODS[-1] == (
+def test_migration_075_is_registered() -> None:
+    assert (
         75, "recording_run_views", "_migration_075_recording_run_views"
-    )
+    ) in MIGRATION_METHODS
 
 
 def test_recording_runs_summarizes_each_run(tmp_path: Path) -> None:
@@ -281,7 +281,8 @@ def test_migration_075_upgrades_an_existing_v74_registry(tmp_path: Path) -> None
 
     upgraded = Registry(registry_path)
     try:
-        assert upgraded._current_schema_version() == 75
+        # 075 and every later migration apply on upgrade.
+        assert upgraded._current_schema_version() == MIGRATION_METHODS[-1][0]
         assert set(RUN_VIEWS) <= _view_names(upgraded.conn)
         assert _runs(upgraded)[RUN_A]["camera_count"] == 4
         assert upgraded.conn.execute("PRAGMA foreign_key_check;").fetchall() == []
