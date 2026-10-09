@@ -9,6 +9,7 @@ Legacy organizer/default identity and serialization contracts are unchanged.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import errno
 import fcntl
 import json
@@ -64,6 +65,7 @@ from fisheye.utils.organize_recordings import _recording_geometry_bundle_source
 PLAN_SCHEMA_ID = "palette.transfer_parent_organization_plan.v2"
 ARTIFACT_SCHEMA_ID = "orange_transfer_parent_v1"
 INDEX_DIRECTORY = "derived/recording_frame_index"
+INDEX_MANIFEST_NAME = "recording_frame_index_manifest.json"
 # Orange's finalized observation collection is the path authority for each
 # unified H5 and its external receipt (agent-contracts admission v2 delivery).
 # Per-parent sync-sample (keyframe) assessment of every materialized video.
@@ -521,7 +523,11 @@ def _validate_plan(plan: dict, *, live_source: bool) -> None:
         and str(destination.resolve()) == str(destination),
         "organization plan paths must be canonical absolute paths",
     )
-    _directory_identity(source)
+    # A completed delivery's empty staging folder may since have been removed
+    # (register_completed_imports does so after registration); every
+    # live-source use and every not-yet-complete stage still requires it.
+    if live_source or os.path.lexists(source):
+        _directory_identity(source)
     _separate_destination(source, destination)
     if live_source:
         rebuilt = build_transfer_organization_plan(
@@ -1084,6 +1090,30 @@ def _parent_manifest(plan: dict, parent: dict) -> dict:
     }
 
 
+def _set_aside_incomplete_index(plan: dict, state: dict, parent: dict, index: Path) -> None:
+    """Move a dead attempt's manifest-less index into the intake state directory."""
+
+    require(not index.is_symlink() and index.is_dir(), "incomplete index is not a directory")
+    key = parent["identity"]["recording_id"]
+    _require_directory(Path(parent["destination_dir"]), state["parent_directory_identities"][key])
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    target = _state_directory(plan) / "incomplete_indexes" / f"{parent['identity']['camera_id']}-{stamp}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    require(not target.exists(), "incomplete index destination already exists")
+    os.rename(index, target)
+    _fsync_directory(index.parent)
+    _fsync_directory(target.parent)
+    state.setdefault("incomplete_indexes_set_aside", []).append(
+        {
+            "recording_id": key,
+            "from": str(index),
+            "to": str(target),
+            "files": sorted(path.name for path in target.iterdir()),
+            "set_aside_utc": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
 def prepare_transfer_parent_recordings(
     plan: dict,
     *,
@@ -1093,8 +1123,12 @@ def prepare_transfer_parent_recordings(
 ) -> dict:
     """Materialize and describe exact parents, leaving actual admission pending.
 
-    Completed derived indexes are content-verified on retry. Incomplete index
-    directories remain recoverable and are refused, not overwritten or deleted.
+    Completed derived indexes are content-verified on retry. An index directory
+    without its manifest was left by an attempt that died while building it
+    (callers hold the transfer workflow lock, so no other builder is live): it
+    is moved, never deleted, into this delivery's intake state directory and
+    recorded in the journal, and the index is rebuilt. An index whose manifest
+    exists is never replaced; if it does not verify, preparation refuses.
     """
     from fisheye.utils.build_transfer_parent_frame_index import (
         build_transfer_parent_frame_index,
@@ -1123,6 +1157,13 @@ def prepare_transfer_parent_recordings(
         for parent in plan["parents"]:
             directory = Path(parent["destination_dir"])
             index = directory / INDEX_DIRECTORY
+            if (
+                (index.exists() or index.is_symlink())
+                and not (index / INDEX_MANIFEST_NAME).exists()
+                and not state.get("parent_manifests_prepared")
+            ):
+                _set_aside_incomplete_index(plan, state, parent, index)
+                save()
             if not index.exists():
                 build_transfer_parent_frame_index(
                     Path(plan["source_dir"]),
@@ -1213,9 +1254,9 @@ def _verify_parent_imports(
             )
         receipts[parent["identity"]["recording_id"]] = receipt.receipt_sha256
     if registry_path is not None:
-        from fisheye.registry.shadow_publish import validate_registry_sqlite
+        from fisheye.registry.shadow_publish import validate_registry_sqlite_copy
 
-        validate_registry_sqlite(registry_path)
+        validate_registry_sqlite_copy(registry_path)
     return receipts
 
 
@@ -1272,7 +1313,8 @@ def finalize_transfer_staging(
     retry even after the snapshot/marker has been retired; missing files are
     tolerated only after verified retirement began. Every durable copy and
     actual parent receipt is checked again on retry, including completed runs.
-    Empty source root is retained; no recursive removal is used.
+    Empty source root is retained; no recursive removal is used. Once the
+    delivery is complete, a replay accepts that the empty root was removed.
     """
     _validate_plan(plan, live_source=False)
     registry_path = registry_path.resolve() if registry_path is not None else None
@@ -1282,7 +1324,9 @@ def finalize_transfer_staging(
     }
     with _organization_state(plan) as (state, save):
         source = Path(plan["source_dir"])
-        _require_directory(source, state["source_directory_identity"])
+        source_removed = state["status"] == "complete" and not os.path.lexists(source)
+        if not source_removed:
+            _require_directory(source, state["source_directory_identity"])
         prior_contract = state.get("admission_contract")
         require(
             prior_contract is None or prior_contract == contract,
@@ -1296,7 +1340,7 @@ def finalize_transfer_staging(
         )
         if state["status"] == "complete":
             require(
-                not list(source.iterdir()),
+                source_removed or not list(source.iterdir()),
                 "completed staging source is no longer empty",
             )
             require(

@@ -24,6 +24,12 @@ and not yet registered, it reads the job's status JSON
   job-mode delivery, registrar at another commit than the receipts) is written
   once to the terminal ``<key>.registration_refused`` and never retried. A
   registration held by another live run is left for the next run.
+- registered: once ``<key>.registered`` exists, the delivery's staging folder
+  (``staging_dir/<delivery>``, from ``<key>.claimed``), which intake left
+  empty after moving every file into the recordings store, is removed with a
+  non-recursive ``rmdir``. A folder that is missing, not directly under
+  ``staging_dir``, or not empty is left alone and logged; this never changes
+  the delivery's registration state.
 - a job whose payload exited 75 found the delivery held by another live job:
   it is attached, never recorded as a failed import. Its delivery (the claimed
   snapshot_id) is registered once its import probe is true; otherwise it stays
@@ -257,6 +263,30 @@ def _resolve_attached(
     return 0
 
 
+def _remove_empty_staging_folder(config: dict, state: Path, key: str) -> None:
+    """Remove a registered delivery's empty staging folder, never recursively."""
+
+    try:
+        marker = Path(json.loads((state / f"{key}.claimed").read_text())["marker"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    if not config.get("staging_dir"):
+        return
+    folder = marker.parent
+    staging = Path(config["staging_dir"])
+    if folder.parent != staging or folder.name.startswith("."):
+        log(f"staging cleanup skipped: key={key} {folder} is not a delivery folder under {staging}")
+        return
+    if folder.is_symlink() or not folder.is_dir():
+        return
+    try:
+        folder.rmdir()
+    except OSError as exc:
+        log(f"staging cleanup skipped: key={key} {folder}: {exc.strerror or exc}")
+        return
+    log(f"staging folder removed: key={key} {folder}")
+
+
 def _register_key(config: dict, state: Path, registry: Path, submitted: Path, *,
                   dry_run: bool, register: Register, probe: Probe = _default_probe) -> int:
     """One submitted delivery; returns 1 when it counts as a failure this run."""
@@ -266,7 +296,11 @@ def _register_key(config: dict, state: Path, registry: Path, submitted: Path, *,
     import_failed = state / f"{key}.import_failed"
     refused = state / f"{key}.registration_refused"
     unresolved = state / f"{key}.attached_unresolved"
-    if done.exists() or import_failed.exists() or refused.exists() or unresolved.exists():
+    if done.exists():
+        if not dry_run:
+            _remove_empty_staging_folder(config, state, key)
+        return 0
+    if import_failed.exists() or refused.exists() or unresolved.exists():
         return 0
     job_id = _job_id(submitted)
     if job_id is None:
@@ -362,6 +396,7 @@ def _register_delivery_key(
     (state / f"{key}.registration_failed").unlink(missing_ok=True)
     (state / f"{key}.attached_pending").unlink(missing_ok=True)
     log(f"registered key={key} job={job_id} datasets={sorted(datasets.values())}")
+    _remove_empty_staging_folder(config, state, key)
     return 0
 
 
