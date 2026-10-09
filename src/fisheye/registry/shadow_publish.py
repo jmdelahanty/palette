@@ -10,7 +10,7 @@ candidate, then publish one fully formed database with an atomic rename.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import fcntl
 import hashlib
 import os
@@ -138,6 +138,47 @@ def validate_registry_sqlite(path: str | Path) -> RegistryValidation:
     )
 
 
+def validate_registry_sqlite_copy(
+    path: str | Path, *, temp_root: str | Path | None = None
+) -> RegistryValidation:
+    """Validate a registry by checking a byte-identical local copy of it.
+
+    ``PRAGMA integrity_check`` and ``foreign_key_check`` are a function of the
+    database file's bytes when no ``-wal``/``-journal`` sidecar exists. Run in
+    place on NFS they read the file in many small round trips (about 200 s for
+    the 71 MB canonical registry, 2026-10-09); on a local copy they take about
+    0.1 s. The copy is proven identical: the source's sha256 before the copy,
+    the copy's, and the source's after it must all agree.
+    """
+
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file() or resolved.stat().st_size <= 0:
+        raise RegistryShadowPublishError(f"Registry is missing or empty: {resolved}")
+    _require_no_sqlite_sidecars(resolved)
+    if temp_root is not None:
+        Path(temp_root).mkdir(parents=True, exist_ok=True)
+    before = _sha256_file(resolved)
+    with tempfile.TemporaryDirectory(
+        prefix="palette-registry-validate-",
+        dir=str(temp_root) if temp_root is not None else None,
+        ignore_cleanup_errors=True,
+    ) as temporary_directory:
+        local = Path(temporary_directory) / "registry.sqlite"
+        shutil.copyfile(resolved, local)
+        copied = _sha256_file(local)
+        after = _sha256_file(resolved)
+        if not before == copied == after:
+            raise RegistryShadowPublishError(
+                f"Registry changed while being copied for validation: {resolved}"
+            )
+        validation = validate_registry_sqlite(local)
+    return replace(
+        validation,
+        path=str(resolved),
+        validation_backend="python_stdlib_sqlite3_local_byte_copy",
+    )
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -174,7 +215,7 @@ def _sqlite_backup(source: Path, destination: Path) -> None:
 def _copy_without_overwrite(source: Path, destination: Path, *, mode: int) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
-        validate_registry_sqlite(destination)
+        validate_registry_sqlite_copy(destination)
         if _sha256_file(source) != _sha256_file(destination):
             raise RegistryShadowPublishError(
                 "Registry backup already exists with different content: "
@@ -492,14 +533,18 @@ def publish_registry_shadow(
 
     with _publication_lock(canonical):
         _require_no_sqlite_sidecars(canonical)
-        source_validation = validate_registry_sqlite(canonical)
+        source_validation = validate_registry_sqlite_copy(canonical, temp_root=temp_parent)
         source_stat = canonical.stat()
         source_mode = source_stat.st_mode & 0o777
         source_sha256 = _sha256_file(canonical)
 
+        # Cleanup runs after publication; on NFS it can fail on .nfs* files that
+        # an open handle left behind. That must not turn a completed, validated
+        # publication into a reported failure.
         with tempfile.TemporaryDirectory(
             prefix="palette-registry-shadow-",
             dir=str(temp_parent) if temp_parent is not None else None,
+            ignore_cleanup_errors=True,
         ) as temporary_directory:
             temporary_root = Path(temporary_directory)
             source_snapshot = temporary_root / "source.sqlite"
@@ -534,7 +579,7 @@ def publish_registry_shadow(
                 shutil.copyfile(candidate, staged)
                 os.chmod(staged, source_mode)
                 _fsync_file(staged)
-                staged_validation = validate_registry_sqlite(staged)
+                staged_validation = validate_registry_sqlite_copy(staged, temp_root=temp_parent)
                 if _sha256_file(staged) != published_sha256:
                     raise RegistryShadowPublishError(
                         "Shared-filesystem registry staging copy changed bytes."
@@ -549,7 +594,7 @@ def publish_registry_shadow(
             finally:
                 staged.unlink(missing_ok=True)
 
-        published_validation = validate_registry_sqlite(canonical)
+        published_validation = validate_registry_sqlite_copy(canonical, temp_root=temp_parent)
         if _sha256_file(canonical) != published_sha256:
             raise RegistryShadowPublishError(
                 "Published registry hash differs from the validated local candidate."
@@ -584,4 +629,5 @@ __all__ = [
     "shadow_synchronize_recording_import",
     "shadow_synchronize_recording_imports",
     "validate_registry_sqlite",
+    "validate_registry_sqlite_copy",
 ]

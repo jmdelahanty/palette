@@ -54,6 +54,8 @@ def test_every_pinned_intake_schema_is_checked() -> None:
 def test_jsonschema_is_a_declared_dependency() -> None:
     assert '"jsonschema>=4.23,<5"' in (REPO / "pyproject.toml").read_text()
     assert '"jsonschema>=4.23,<5"' in (REPO / "environment.yml").read_text()
+    assert '"jsonschema-rs>=0.58,<1"' in (REPO / "pyproject.toml").read_text()
+    assert '"jsonschema-rs>=0.58,<1"' in (REPO / "environment.yml").read_text()
 
 
 @pytest.mark.parametrize("needle", ["fisheye.utils.check_intake_runtime"])
