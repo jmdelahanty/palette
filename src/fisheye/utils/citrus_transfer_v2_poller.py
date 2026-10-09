@@ -39,6 +39,7 @@ from fisheye.intake.discovery import (
     LEGACY_MARKER_SCHEMA,
     MarkerRefusal as PollerRefusal,
     check_marker,
+    staging_marker_paths,
 )
 from fisheye.shared.recording_transfer_snapshot import MARKER_NAME, SNAPSHOT_PATH
 
@@ -122,7 +123,8 @@ def poll(config: dict, *, dry_run: bool, runner: Runner = _run) -> int:
     if not staging.is_dir():
         raise PollerRefusal(f"staging directory does not exist: {staging}")
     failures = 0
-    for marker_path in sorted(staging.rglob(MARKER_NAME)):
+    legacy = 0
+    for marker_path in staging_marker_paths(staging):
         session_dir = marker_path.parent
         try:
             marker = check_marker(marker_path)
@@ -130,7 +132,7 @@ def poll(config: dict, *, dry_run: bool, runner: Runner = _run) -> int:
             log(f"refused marker={marker_path}: {exc}")
             continue
         if marker is None:
-            log(f"legacy v1 marker ignored: {marker_path}")
+            legacy += 1
             continue
         key = claim_key(marker_path, marker["_marker_sha256"])
         command = build_command(config, session_dir, key)
@@ -159,6 +161,8 @@ def poll(config: dict, *, dry_run: bool, runner: Runner = _run) -> int:
             (state / f"{key}.failed").write_text((result.stdout or "") + (result.stderr or ""))
             log(f"submission failed rc={result.returncode}; will retry key={key}")
             failures += 1
+    if legacy:
+        log(f"legacy v1 markers ignored: {legacy}")
     return 1 if failures else 0
 
 

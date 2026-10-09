@@ -67,8 +67,22 @@ def test_v1_marker_ignored(tmp_path, capsys):
     runner = FakeRunner()
     assert poller.poll(_config(tmp_path), dry_run=False, runner=runner) == 0
     assert runner.calls == []
-    assert "legacy v1 marker ignored" in capsys.readouterr().out
+    assert "legacy v1 markers ignored: 1" in capsys.readouterr().out
     assert list((tmp_path / "state").iterdir()) == []
+
+
+def test_only_top_level_delivery_folders_are_searched(tmp_path):
+    from fisheye.intake.discovery import staging_marker_paths
+
+    staging = tmp_path / "staging"
+    for folder in ("delivery_a", "delivery_b", ".processed/old", "group/nested", ".hidden"):
+        (staging / folder).mkdir(parents=True)
+        (staging / folder / poller.MARKER_NAME).write_text("{}")
+    (staging / "delivery_c").mkdir()
+    assert staging_marker_paths(staging) == [
+        staging / "delivery_a" / poller.MARKER_NAME,
+        staging / "delivery_b" / poller.MARKER_NAME,
+    ]
 
 
 @pytest.mark.parametrize(

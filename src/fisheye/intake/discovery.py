@@ -42,6 +42,23 @@ DISCOVER_SCHEMA = "palette.intake.discover.v1"
 LEGACY_MARKER_SCHEMA = "citrus.transfer_completion_marker.v1"
 
 
+def staging_marker_paths(staging: Path) -> list[Path]:
+    """Completion markers of the deliveries directly under ``staging``.
+
+    The sealer writes each delivery to its own folder at the top of staging,
+    with the marker at that folder's root. Hidden folders (``.processed``,
+    ``.processing_logs_v2``, ...) are not deliveries and are not searched. Only
+    one level is listed because walking every directory under staging over
+    NFS took about 90 s per poll.
+    """
+
+    return sorted(
+        path
+        for path in staging.glob(f"*/{MARKER_NAME}")
+        if not path.parent.name.startswith(".")
+    )
+
+
 class MarkerRefusal(ValueError):
     """A marker that is not a complete transfer-v2 delivery."""
 
@@ -274,7 +291,7 @@ def discover(
         if target is not None:
             targets[sha] = target
 
-    for marker_path in sorted(staging.rglob(MARKER_NAME)):
+    for marker_path in staging_marker_paths(staging):
         try:
             marker = check_marker(marker_path)
         except (MarkerRefusal, OSError) as exc:
@@ -315,6 +332,7 @@ def discover(
 
 __all__ = [
     "DISCOVER_SCHEMA",
+    "staging_marker_paths",
     "Discovery",
     "MarkerRefusal",
     "Target",
