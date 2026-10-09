@@ -34,7 +34,10 @@ ACQUISITION_CROP_LEDGER_SCHEMA_VERSION = 1
 ACQUISITION_CROP_COLLECTION_LEDGER_SCHEMA_ID = (
     "palette.acquisition_crop_stream_ledger.collection.v1"
 )
-ACQUISITION_CROP_COLLECTION_LEDGER_SCHEMA_VERSION = 1
+# Version 2 adds the crop video facts probed at intake (codec, frame rate and
+# colorimetry) to the collection contract; version-1 runs remain valid.
+ACQUISITION_CROP_COLLECTION_LEDGER_SCHEMA_VERSION = 2
+CROP_VIDEO_COLORIMETRY_FIELDS = ("color_range", "color_space", "color_transfer", "color_primaries")
 ACQUISITION_CROP_LEDGER_RUNS_GROUP = "ledger_runs"
 ACQUISITION_CROP_SOURCE_PROFILE_SINGLE = "single_video_v1"
 ACQUISITION_CROP_SOURCE_PROFILE_COLLECTION = "rolling_clip_collection_v1"
@@ -698,6 +701,82 @@ def _sealed_crop_video_size(
     return side, side
 
 
+def _crop_collection_video_facts(
+    members: list[dict[str, Any]],
+    descriptors: list[Mapping[str, Any]],
+    *,
+    width: int,
+    height: int,
+) -> dict[str, Any]:
+    """Codec, frame rate and colorimetry of the crop clips, probed once at intake.
+
+    Each clip's crop video is probed with ffprobe and must have the crop size
+    and its declared frame count, and agree with the codec and frame rate
+    Orange declares for it. All clips must share one codec, frame rate and
+    color range: one recording, one color range, as for the full stream.
+    """
+
+    from fisheye.shared.import_video_metadata import probe_ffprobe_video_metadata
+
+    observed: list[dict[str, Any]] = []
+    for member, descriptor in zip(members, descriptors, strict=True):
+        clip = member["clip_index"]
+        probed = probe_ffprobe_video_metadata(member["crop_video_path"])
+        if (probed.get("width"), probed.get("height")) != (width, height):
+            raise ValueError(
+                f"Clip {clip} crop video is {probed.get('width')}x{probed.get('height')}, "
+                f"not the declared {width}x{height}."
+            )
+        total = probed.get("total_frames")
+        if total is not None and int(total) != member["frame_count"]:
+            raise ValueError(
+                f"Clip {clip} crop video has {total} frames, not its declared {member['frame_count']}."
+            )
+        codec = probed.get("codec")
+        fps = probed.get("fps")
+        if codec in (None, "") or fps is None:
+            raise ValueError(f"Clip {clip} crop video codec or frame rate could not be probed.")
+        declared_codec = descriptor.get("codec")
+        if declared_codec not in (None, "") and str(declared_codec) != str(codec):
+            raise ValueError(
+                f"Clip {clip} crop video codec {codec!r} differs from Orange's declared {declared_codec!r}."
+            )
+        declared_rate = descriptor.get("frame_rate")
+        if declared_rate is not None and not math.isclose(
+            float(declared_rate), float(fps), rel_tol=0.0, abs_tol=1e-6
+        ):
+            raise ValueError(
+                f"Clip {clip} crop video frame rate {fps} differs from Orange's declared {declared_rate}."
+            )
+        observed.append(
+            {
+                "codec": str(codec),
+                "frame_rate": float(fps),
+                **{name: probed.get(f"video_{name}") for name in CROP_VIDEO_COLORIMETRY_FIELDS},
+            }
+        )
+    facts: dict[str, Any] = {"video_facts_source": "ffprobe_each_crop_clip_at_intake"}
+    for name in ("codec", "color_range"):
+        values = {item[name] for item in observed}
+        if len(values) != 1:
+            raise ValueError(
+                f"Rolling crop clips have different {name.replace('_', ' ')}s: "
+                f"{sorted(map(str, values))}."
+            )
+        facts[name] = values.pop()
+    first_rate = observed[0]["frame_rate"]
+    if any(
+        not math.isclose(item["frame_rate"], first_rate, rel_tol=0.0, abs_tol=1e-6)
+        for item in observed
+    ):
+        raise ValueError("Rolling crop clips have different frame rates.")
+    facts["frame_rate"] = first_rate
+    for name in CROP_VIDEO_COLORIMETRY_FIELDS[1:]:
+        values = {item[name] for item in observed}
+        facts[name] = values.pop() if len(values) == 1 else None
+    return facts
+
+
 def _infer_collection_crop_shape(metadata_paths: list[Path]) -> tuple[int, int]:
     for path in metadata_paths:
         with path.open("r", encoding="utf-8", newline="") as handle:
@@ -841,6 +920,7 @@ def _validated_collection_contract(
 
     unresolved_members: list[dict[str, Any]] = []
     declared_sizes: list[tuple[int, int] | None] = []
+    producer_descriptors: list[Mapping[str, Any]] = []
     expected_first = 1
     for expected_member_index, row in enumerate(camera_rows):
         clip_index = int(row.get("clip_index", -1))
@@ -878,15 +958,12 @@ def _validated_collection_contract(
         full = camera_outputs.get("full")
         if not isinstance(crop, Mapping) or not isinstance(full, Mapping):
             raise ValueError(f"Clip {clip_index} lacks crop or full video output.")
-        declared_sizes.append(
-            _declared_crop_video_size(
-                _producer_crop_descriptor(
-                    clip_manifest, crop, recording_dir=recording_dir,
-                    camera_id=camera_id, clip_index=clip_index,
-                ),
-                clip_index=clip_index,
-            )
+        producer = _producer_crop_descriptor(
+            clip_manifest, crop, recording_dir=recording_dir,
+            camera_id=camera_id, clip_index=clip_index,
         )
+        producer_descriptors.append(producer)
+        declared_sizes.append(_declared_crop_video_size(producer, clip_index=clip_index))
         for role, output in (("crop", crop), ("full", full)):
             if int(output.get("first_recording_frame_id", -1)) != first_frame_id:
                 raise ValueError(
@@ -954,6 +1031,9 @@ def _validated_collection_contract(
         crop_width, crop_height = _infer_collection_crop_shape(
             [member["crop_metadata_path"] for member in unresolved_members]
         )
+    video_facts = _crop_collection_video_facts(
+        unresolved_members, producer_descriptors, width=crop_width, height=crop_height
+    )
     parsed_members: list[_ParsedLedger] = []
     members: list[dict[str, Any]] = []
     for member in unresolved_members:
@@ -1018,6 +1098,7 @@ def _validated_collection_contract(
         "source_geometry_coordinate_space": "full_frame_pixels",
         "width": crop_width,
         "height": crop_height,
+        **video_facts,
         "frame_count": parsed.row_count,
         "member_count": len(members),
         "recording_clip_index_path": str(index_path),

@@ -16,6 +16,26 @@ from fisheye.shared.acquisition_video_streams import (
 )
 
 
+# What ffprobe reports for each placeholder crop video (the bytes are not media).
+_CROP_PROBES: dict[Path, dict[str, object]] = {}
+
+
+@pytest.fixture(autouse=True)
+def _placeholder_crop_probes(monkeypatch):
+    from fisheye.shared import import_video_metadata
+
+    real = import_video_metadata.probe_ffprobe_video_metadata
+    _CROP_PROBES.clear()
+
+    def probe(path):
+        found = _CROP_PROBES.get(Path(path).resolve())
+        return dict(found) if found is not None else real(path)
+
+    monkeypatch.setattr(import_video_metadata, "probe_ffprobe_video_metadata", probe)
+    yield
+    _CROP_PROBES.clear()
+
+
 def _orange_crop_descriptor(size: tuple[int, int], *, frames: int) -> dict[str, object]:
     """The produced-side fields of an Orange crop output (orange.recording_output.v1)."""
 
@@ -44,6 +64,7 @@ def _write_clip(
     declared_size: tuple[int, int] | None = None,
     all_blank: bool = False,
     projected: bool | str = False,
+    probe: dict[str, object] | None = None,
 ) -> dict[str, object]:
     clip_id = f"clip_{clip_index:06d}"
     clip_dir = recording_dir / "clips" / clip_id
@@ -54,6 +75,12 @@ def _write_clip(
     crop_meta = crop_dir / "Cam123_crop_meta.csv"
     full_video.write_bytes(f"full-{clip_index}".encode())
     crop_video.write_bytes(f"crop-{clip_index}".encode())
+    width, height = declared_size or (384, 384)
+    _CROP_PROBES[crop_video.resolve()] = {
+        "width": width, "height": height, "total_frames": 2, "fps": 100.0,
+        "codec": "hevc", "pix_fmt": "yuvj420p", "video_color_range": "pc",
+        **(probe or {}),
+    }
     second_frame_id = first_frame_id + 1
     crop_meta.write_text(
         "recording_frame_id,has_detection,blank_frame,crop_x,crop_y,crop_w,crop_h,"
@@ -433,3 +460,62 @@ def test_single_clip_projection_refuses_a_changed_recording_session(tmp_path: Pa
     monkeypatch.setattr(ledger, "_sha256_file", lambda path: "0" * 64)
     with pytest.raises(ValueError, match="original recording session bytes changed"):
         _publish(tmp_path, [{"declared_size": (384, 384), "projected": "session"}])
+
+
+def test_crop_video_facts_are_probed_and_recorded(tmp_path: Path) -> None:
+    from fisheye.shared.acquisition_crop_stream_ledger import (
+        ACQUISITION_CROP_COLLECTION_LEDGER_SCHEMA_VERSION,
+    )
+
+    root, publication = _publish(tmp_path, [{"declared_size": (384, 384)}] * 2)
+    run = root["analysis/acquisition_video_streams/streams/crop/ledger_runs/" + publication.run_name]
+    contract = run.attrs["source_stream_contract"]
+    assert ACQUISITION_CROP_COLLECTION_LEDGER_SCHEMA_VERSION == 2
+    assert run.attrs["schema_version"] == 2
+    assert (contract["codec"], contract["frame_rate"], contract["color_range"]) == ("hevc", 100.0, "pc")
+    assert contract["color_space"] is None
+    assert contract["video_facts_source"] == "ffprobe_each_crop_clip_at_intake"
+
+
+def test_registry_reads_the_crop_video_facts(tmp_path: Path) -> None:
+    from fisheye.registry.extractors.acquisition_video_streams import (
+        _extract_acquisition_video_stream_rows,
+    )
+
+    root, _ = _publish(tmp_path, [{"declared_size": (384, 384)}] * 2)
+    rows = _extract_acquisition_video_stream_rows(
+        root, zarr_path=tmp_path / "analysis.zarr", recording_id="r", zarr_use="analysis"
+    )
+    crop = next(row for row in rows if row["stream_key"] == "crop")
+    assert (crop["width"], crop["height"], crop["codec"], crop["frame_rate"], crop["color_range"]) == (
+        384, 384, "hevc", 100.0, "pc",
+    )
+
+
+@pytest.mark.parametrize(
+    ("probe", "message"),
+    [
+        ({"codec": "h264"}, "codec 'h264' differs from Orange's declared 'hevc'"),
+        ({"fps": 50.0}, "frame rate 50.0 differs from Orange's declared 100"),
+        ({"total_frames": 3}, "has 3 frames, not its declared 2"),
+        ({"width": 256}, "is 256x384, not the declared 384x384"),
+    ],
+)
+def test_crop_video_must_agree_with_its_declaration(tmp_path: Path, probe, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        _publish(tmp_path, [{"declared_size": (384, 384)}, {"declared_size": (384, 384), "probe": probe}])
+
+
+def test_crop_clips_must_share_one_color_range(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="different color ranges"):
+        _publish(
+            tmp_path,
+            [{"declared_size": (384, 384)}, {"declared_size": (384, 384), "probe": {"video_color_range": "tv"}}],
+        )
+
+
+def test_untagged_crop_clips_record_no_color_range(tmp_path: Path) -> None:
+    clip = {"declared_size": (384, 384), "probe": {"video_color_range": None}}
+    root, publication = _publish(tmp_path, [clip, clip])
+    run = root["analysis/acquisition_video_streams/streams/crop/ledger_runs/" + publication.run_name]
+    assert run.attrs["source_stream_contract"]["color_range"] is None
