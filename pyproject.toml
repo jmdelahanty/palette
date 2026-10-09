@@ -35,6 +35,7 @@ dependencies = [
   "pydantic>=2,<3",
   # Intake validates every pinned producer contract with it (imported lazily).
   "jsonschema>=4.23,<5",
+  "jsonschema-rs>=0.58,<1",
   "hsluv",
   "networkx",
   "bokeh",

@@ -100,12 +100,16 @@ A declared product with `status: absent` is recorded as absent. Any
 disagreement between the declaration, the logs, the snapshot and the inventory
 refuses the delivery, because it is a producer contradiction.
 
-Every line is validated, by decision. Measured on the reference delivery,
-validating both logs of one camera (24,002 lines) takes about 9 s. A 24-hour
-camera is about 8.6 million lines per log, so roughly 1.8 h per camera; cameras
-can run in parallel. If day-long sessions become routine, a faster validator,
-such as a compiled schema check, is the place to recover time. It must not
-reduce what is checked.
+Every line is validated, by decision. The per-line check uses jsonschema-rs, a
+compiled Rust validator (a declared dependency, required by the intake
+runtime check). On the reference delivery it gives the same verdict as
+jsonschema, on every valid line and on deliberately broken ones, about 150x
+faster: both logs of one camera (24,002 lines) take 0.3-1.1 s instead of
+about 9 s. A 24-hour camera then takes a few minutes per log, mostly reading
+and parsing JSON. jsonschema remains the reference: it supplies the error
+message for a rejected line and is the fallback when jsonschema-rs is
+absent, giving the same verdict, slower. The scan records which validator
+ran.
 
 ## Placement
 
