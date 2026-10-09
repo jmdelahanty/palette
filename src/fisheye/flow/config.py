@@ -42,6 +42,8 @@ class IntakeFlowConfig:
     deployments_root: Path
     lsf_repo: Path
     lsf: LsfSettings
+    max_consecutive_failures: int = 3
+    allow_synthetic_isolated_registry: bool = False
 
     @property
     def intake_root(self) -> Path:
@@ -70,6 +72,41 @@ def _int(raw: Mapping[str, Any], key: str, default: int, minimum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise FlowConfigError(f"{key!r} must be an integer >= {minimum}")
     return value
+
+
+def _bool(raw: Mapping[str, Any], key: str) -> bool:
+    value = raw.get(key, False)
+    if not isinstance(value, bool):
+        raise FlowConfigError(f"{key!r} must be true or false")
+    return value
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve() or (a.exists() and b.exists() and a.samefile(b))
+    except OSError:
+        return a == b
+
+
+def _require_isolated_registry(config: "IntakeFlowConfig") -> None:
+    """Synthetic admission is for trials only: never with the canonical registry."""
+
+    from fisheye.intake.delivery import CANONICAL_REGISTRY
+
+    try:
+        registrar = json.loads(config.registrar_config.read_text())
+    except (OSError, ValueError) as exc:
+        raise FlowConfigError(f"unreadable registrar config {config.registrar_config}: {exc}") from exc
+    registrar_registry = registrar.get("registry") if isinstance(registrar, dict) else None
+    if not isinstance(registrar_registry, str) or not registrar_registry:
+        raise FlowConfigError("synthetic trials need the registrar config to name its registry")
+    for name, path in (("registry", config.registry), ("registrar registry", Path(registrar_registry))):
+        if _same_file(path, Path(CANONICAL_REGISTRY)):
+            raise FlowConfigError(
+                f"allow_synthetic_isolated_registry refuses the canonical registry ({name}: {path})"
+            )
+    if not _same_file(config.registry, Path(registrar_registry)):
+        raise FlowConfigError("synthetic trials need registry and the registrar's registry to be the same file")
 
 
 def _reject_v1_state(name: str, path: Path) -> None:
@@ -114,8 +151,12 @@ def parse_config(raw: Mapping[str, Any]) -> IntakeFlowConfig:
         deployments_root=_path(raw, "deployments_root"),
         lsf_repo=_path(raw, "lsf_repo"),
         lsf=lsf,
+        max_consecutive_failures=_int(raw, "max_consecutive_failures", 3, 1),
+        allow_synthetic_isolated_registry=_bool(raw, "allow_synthetic_isolated_registry"),
     )
     _reject_v1_state("flow_root", config.flow_root)
+    if config.allow_synthetic_isolated_registry:
+        _require_isolated_registry(config)
     if config.flow_root == config.staging_dir or config.staging_dir in config.flow_root.parents:
         # Discovery walks staging; runner state there would be scanned as deliveries.
         raise FlowConfigError("flow_root must not be inside staging_dir")

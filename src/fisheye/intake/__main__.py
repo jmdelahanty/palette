@@ -22,6 +22,7 @@ from typing import Any, Callable, Iterator
 from fisheye.intake.delivery import (
     CANONICAL_REGISTRY,
     default_destination_root,
+    require_live_destination_root,
     validate_snapshot_sha,
 )
 from fisheye.intake.outcomes import (
@@ -155,7 +156,9 @@ def _run(args: argparse.Namespace) -> tuple[int, dict]:
         register_delivery,
     )
 
-    destination = args.destination_root or default_destination_root()
+    destination = require_live_destination_root(
+        args.destination_root or default_destination_root()
+    )
     if args.command == "discover":
         found = discover(args.staging_dir, destination, registry=args.registry)
         return EXIT_DONE, found.to_json()

@@ -67,8 +67,29 @@ DURABLE_STATES = ("reserved", "materialized", "retiring", "complete")
 _SHA = re.compile(r"[0-9a-f]{64}")
 
 
+# The per-recording archives on /nvme1 were deliberately deleted (2026-09-03);
+# /groups is the only live recordings store.
+RETIRED_STORE_ROOT = Path("/nvme1")
+
+
+def require_live_destination_root(path: Path | str) -> Path:
+    """Refuse a destination root on the retired /nvme1 store."""
+
+    root = Path(path)
+    absolute = Path(os.path.abspath(root))
+    if absolute == RETIRED_STORE_ROOT or RETIRED_STORE_ROOT in absolute.parents:
+        raise IntakeRefused(
+            f"destination root {root} is on the retired /nvme1 store; the live "
+            f"recordings store is {DEFAULT_DESTINATION_ROOT} (check PALETTE_RECORDINGS_ROOT)",
+            code="retired_destination_root",
+        )
+    return root
+
+
 def default_destination_root() -> Path:
-    return Path(os.environ.get("PALETTE_RECORDINGS_ROOT", DEFAULT_DESTINATION_ROOT))
+    return require_live_destination_root(
+        os.environ.get("PALETTE_RECORDINGS_ROOT", DEFAULT_DESTINATION_ROOT)
+    )
 
 
 def validate_snapshot_sha(snapshot_sha: str) -> str:
@@ -320,6 +341,7 @@ __all__ = [
     "admission_mode",
     "claim",
     "default_destination_root",
+    "require_live_destination_root",
     "find_delivery_by_source",
     "load_durable_state",
     "plan_is_synthetic",

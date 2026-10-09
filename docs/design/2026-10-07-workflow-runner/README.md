@@ -398,6 +398,11 @@ Still open:
 
 ## Decision log
 
+- 2026-10-09: retry cap and isolated synthetic trials (Jeremy approved both).
+  - After `max_consecutive_failures` (default 3) consecutive retryable failures of a step, the runner writes a `retry_cap` hold (`refused.json`) instead of retrying every tick.
+  - What counts as a failure: exit 1, a lost LSF job, a submission error, or a missing producer-commit deployment. Exit 75 ("held by another job") does not count, and success resets the count.
+  - Deterministic refusals still exit 65 from `fisheye.intake`; the cap is only a backstop.
+  - `allow_synthetic_isolated_registry` passes `--allow-synthetic-isolated-registry` to `register-delivery`. The config refuses it unless both the runner's registry and the registrar config's registry are the same non-canonical file. It exists only for synthetic kill tests.
 - 2026-10-08: the slice-1 implementation drops the `cluster-generic` executor. Its job script runs a per-job Snakemake inside every LSF job, but the `palette-flow` env is on ws1's local disk. A copy on `/groups` would be cheap (the env measures 505 MB), so storage is not the reason. Jeremy chose the supervisor-only design for these reasons:
   - LSF jobs run only Palette code, exactly as today's launchers do;
   - there is one env to keep pinned;
