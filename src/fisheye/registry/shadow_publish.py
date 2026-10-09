@@ -497,9 +497,13 @@ def publish_registry_shadow(
         source_mode = source_stat.st_mode & 0o777
         source_sha256 = _sha256_file(canonical)
 
+        # Cleanup runs after publication; on NFS it can fail on .nfs* files that
+        # an open handle left behind. That must not turn a completed, validated
+        # publication into a reported failure.
         with tempfile.TemporaryDirectory(
             prefix="palette-registry-shadow-",
             dir=str(temp_parent) if temp_parent is not None else None,
+            ignore_cleanup_errors=True,
         ) as temporary_directory:
             temporary_root = Path(temporary_directory)
             source_snapshot = temporary_root / "source.sqlite"

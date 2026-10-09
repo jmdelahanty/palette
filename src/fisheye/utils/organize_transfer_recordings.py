@@ -9,6 +9,7 @@ Legacy organizer/default identity and serialization contracts are unchanged.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import errno
 import fcntl
 import json
@@ -64,6 +65,7 @@ from fisheye.utils.organize_recordings import _recording_geometry_bundle_source
 PLAN_SCHEMA_ID = "palette.transfer_parent_organization_plan.v2"
 ARTIFACT_SCHEMA_ID = "orange_transfer_parent_v1"
 INDEX_DIRECTORY = "derived/recording_frame_index"
+INDEX_MANIFEST_NAME = "recording_frame_index_manifest.json"
 # Orange's finalized observation collection is the path authority for each
 # unified H5 and its external receipt (agent-contracts admission v2 delivery).
 # Per-parent sync-sample (keyframe) assessment of every materialized video.
@@ -1088,6 +1090,30 @@ def _parent_manifest(plan: dict, parent: dict) -> dict:
     }
 
 
+def _set_aside_incomplete_index(plan: dict, state: dict, parent: dict, index: Path) -> None:
+    """Move a dead attempt's manifest-less index into the intake state directory."""
+
+    require(not index.is_symlink() and index.is_dir(), "incomplete index is not a directory")
+    key = parent["identity"]["recording_id"]
+    _require_directory(Path(parent["destination_dir"]), state["parent_directory_identities"][key])
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    target = _state_directory(plan) / "incomplete_indexes" / f"{parent['identity']['camera_id']}-{stamp}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    require(not target.exists(), "incomplete index destination already exists")
+    os.rename(index, target)
+    _fsync_directory(index.parent)
+    _fsync_directory(target.parent)
+    state.setdefault("incomplete_indexes_set_aside", []).append(
+        {
+            "recording_id": key,
+            "from": str(index),
+            "to": str(target),
+            "files": sorted(path.name for path in target.iterdir()),
+            "set_aside_utc": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
 def prepare_transfer_parent_recordings(
     plan: dict,
     *,
@@ -1097,8 +1123,12 @@ def prepare_transfer_parent_recordings(
 ) -> dict:
     """Materialize and describe exact parents, leaving actual admission pending.
 
-    Completed derived indexes are content-verified on retry. Incomplete index
-    directories remain recoverable and are refused, not overwritten or deleted.
+    Completed derived indexes are content-verified on retry. An index directory
+    without its manifest was left by an attempt that died while building it
+    (callers hold the transfer workflow lock, so no other builder is live): it
+    is moved, never deleted, into this delivery's intake state directory and
+    recorded in the journal, and the index is rebuilt. An index whose manifest
+    exists is never replaced; if it does not verify, preparation refuses.
     """
     from fisheye.utils.build_transfer_parent_frame_index import (
         build_transfer_parent_frame_index,
@@ -1127,6 +1157,13 @@ def prepare_transfer_parent_recordings(
         for parent in plan["parents"]:
             directory = Path(parent["destination_dir"])
             index = directory / INDEX_DIRECTORY
+            if (
+                (index.exists() or index.is_symlink())
+                and not (index / INDEX_MANIFEST_NAME).exists()
+                and not state.get("parent_manifests_prepared")
+            ):
+                _set_aside_incomplete_index(plan, state, parent, index)
+                save()
             if not index.exists():
                 build_transfer_parent_frame_index(
                     Path(plan["source_dir"]),
