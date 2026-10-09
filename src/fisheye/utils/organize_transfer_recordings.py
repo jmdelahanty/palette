@@ -677,7 +677,8 @@ def _make_sealed_media_read_only(path: Path) -> None:
 class _SealedSourceIdentity:
     """Proves a large sealed video/H5 copy is the staged file, without hashing.
 
-    For a marker v3 delivery (``transfer_sealer`` in the plan) the sealer hashed
+    For a marker v3 delivery sealed by citrus-recording-transfer >= 2.0.1
+    (``transfer_sealer`` in the plan; sealer_reads_storage) the sealer hashed
     every staged file before writing the marker, and Palette's snapshot check
     accepts a large video/H5 file of the sealed size modified no later than the
     marker. A hard-linked copy is that same file. While the staged file is
@@ -691,7 +692,8 @@ class _SealedSourceIdentity:
     """
 
     def __init__(self, plan: dict, state: dict | None):
-        self.enabled = bool(plan.get("transfer_sealer"))
+        # Only a sealer that hashed storage (citrus-recording-transfer >= 2.0.1).
+        self.enabled = _transfer_snapshot.sealer_reads_storage(plan.get("transfer_sealer"))
         self.source = Path(plan["source_dir"])
         self.retired = ((state or {}).get("retirement_files") or {}) if self.enabled else {}
         self.marker_mtime_ns = self._staged_marker_mtime(plan) if self.enabled else None

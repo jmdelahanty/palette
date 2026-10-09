@@ -21,7 +21,7 @@ from fisheye.shared import recording_transfer_snapshot as transfer
 from fisheye.utils import organize_transfer_recordings as organizer
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures/recording_transfer_v2"
-SEALER = {"package": "citrus-recording-transfer", "version": "2.0.0"}
+SEALER = {"package": "citrus-recording-transfer", "version": "2.0.1"}
 VIDEO_SUFFIXES = (".mp4", ".mkv", ".avi", ".h265", ".hevc")
 
 
@@ -60,12 +60,12 @@ def organizer_hashes(monkeypatch):
     return seen
 
 
-def _staging(tmp_path: Path, *, v3: bool = True) -> Path:
+def _staging(tmp_path: Path, *, v3: bool = True, sealer: dict = SEALER) -> Path:
     root = Path(shutil.copytree(FIXTURES / "rolling", tmp_path / "staging"))
     marker = json.loads((root / transfer.MARKER_NAME).read_bytes())
     if v3:
         marker.update(
-            schema_id="citrus.transfer_completion_marker.v3", schema_version=3, sealer=SEALER
+            schema_id="citrus.transfer_completion_marker.v3", schema_version=3, sealer=sealer
         )
     (root / transfer.MARKER_NAME).write_bytes(transfer.canonical_bytes(marker))
     sealed_at = (root / transfer.MARKER_NAME).stat().st_mtime_ns
@@ -81,8 +81,8 @@ def _video_names(root: Path) -> set[str]:
     return names
 
 
-def _prepared(tmp_path, monkeypatch, *, v3: bool = True):
-    source = _staging(tmp_path, v3=v3)
+def _prepared(tmp_path, monkeypatch, *, v3: bool = True, sealer: dict = SEALER):
+    source = _staging(tmp_path, v3=v3, sealer=sealer)
     plan = organizer.build_transfer_organization_plan(
         source, destination_root=tmp_path / "recordings"
     )
@@ -266,3 +266,16 @@ def test_v2_copies_are_also_made_read_only(tmp_path, monkeypatch):
     organizer.prepare_transfer_parent_recordings(plan)
     for path in _video_destinations(plan):
         assert path.stat().st_mode & 0o222 == 0
+
+
+def test_sealer_2_0_0_copies_are_hashed(tmp_path, monkeypatch, organizer_hashes):
+    # 2.0.0 hashed the destination through the copying host's page cache.
+    source, plan = _prepared(
+        tmp_path, monkeypatch,
+        sealer={"package": "citrus-recording-transfer", "version": "2.0.0"},
+    )
+    videos = _video_names(source)
+    organizer.prepare_transfer_parent_recordings(plan)
+    assert videos <= set(organizer_hashes)
+    for path in _video_destinations(plan):
+        assert path.stat().st_mode & 0o222 == 0  # still made read-only
