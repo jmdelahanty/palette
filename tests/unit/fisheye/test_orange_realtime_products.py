@@ -159,3 +159,43 @@ def test_pinned_schemas_detect_drift(monkeypatch):
             rp._validator("yolo_event_v2")
     finally:
         rp._validator.cache_clear()
+
+
+def _variants(line: dict) -> list[dict]:
+    """A valid line and three ways to break it."""
+
+    missing = json.loads(json.dumps(line)); missing.pop("schema_version", None)
+    wrong_type = json.loads(json.dumps(line)); wrong_type["camera_serial"] = 2010093
+    extra = json.loads(json.dumps(line)); extra["unexpected"] = True
+    return [line, missing, wrong_type, extra]
+
+
+@pytest.mark.parametrize("product", rp.PRODUCTS)
+def test_the_compiled_line_validator_agrees_with_the_reference(tmp_path, product):
+    pytest.importorskip("jsonschema_rs")
+    rp._line_validator.cache_clear()
+    name = rp.LINE_SCHEMA[product]
+    is_valid, which = rp._line_validator(name)
+    assert which == "jsonschema-rs"
+    reference = rp._validator(name)
+    lines = [json.loads(raw) for raw in (FIXTURE / LOGS[product]).read_text().splitlines()]
+    cases = [variant for line in lines for variant in _variants(line)]
+    assert [is_valid(case) for case in cases] == [reference.is_valid(case) for case in cases]
+    assert sum(not is_valid(case) for case in cases) == 3 * len(lines)
+
+
+def test_scans_report_their_line_validator_and_fall_back_without_jsonschema_rs(tmp_path, monkeypatch):
+    import sys
+
+    root = _copy(tmp_path)
+    rp._line_validator.cache_clear()
+    fast = rp.scan_event_log(root / LOGS["pose"], product="pose", line_schema_version=2)
+    monkeypatch.setitem(sys.modules, "jsonschema_rs", None)
+    rp._line_validator.cache_clear()
+    try:
+        slow = rp.scan_event_log(root / LOGS["pose"], product="pose", line_schema_version=2)
+    finally:
+        rp._line_validator.cache_clear()
+    assert slow.line_validator == "jsonschema"
+    assert fast.line_validator in ("jsonschema-rs", "jsonschema")
+    assert (fast.frame_rows, fast.rows_by_kind) == (slow.frame_rows, slow.rows_by_kind)
