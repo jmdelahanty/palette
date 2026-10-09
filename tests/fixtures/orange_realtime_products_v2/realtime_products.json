@@ -1,0 +1,145 @@
+{
+ "cameras": {
+  "2010093": {
+   "acquisition_files": [
+    {
+     "path": "Cam2010093_acquisition_cadence_probe.csv",
+     "role": "diagnostic",
+     "sha256": "36dd54514989e74c0c98a58522350adab28c44ec1a1fb4590491303cd4583ef6",
+     "size_bytes": 3555025
+    },
+    {
+     "path": "Cam2010093_ring_release.csv",
+     "role": "diagnostic",
+     "sha256": "b5b30cd9622dc4852bca7770f3b32a6e7cd42e934b1b1c90c658b911ee85a99e",
+     "size_bytes": 1066227
+    },
+    {
+     "path": "Cam2010093_owner_push.csv",
+     "role": "diagnostic",
+     "sha256": "5b0d751022d1c5f0c6e605d3d16f7db1c595a305b860c1c9d4d6bf2eaaeb299e",
+     "size_bytes": 548757
+    },
+    {
+     "path": "Cam2010093_pipeline_perf.csv",
+     "role": "perf",
+     "sha256": "87392525fc395e90920eff6ebe55f006beff8fc4b40f1a40d880fd965b2c0a72",
+     "size_bytes": 34056
+    }
+   ],
+   "crop_files": [
+    {
+     "path": "Cam2010093_crop_meta.csv",
+     "role": "crop_ledger_session",
+     "sha256": "64de32b9b32634ffbd657bce5500f5399d849de88e9c0c49afbdfaf3fabedaed",
+     "size_bytes": 3730269
+    },
+    {
+     "path": "Cam2010093_crop_perf.csv",
+     "role": "perf",
+     "sha256": "36483df304f140a882055c26be26c18113e90dd77b9a04e9d7f187d79e64c038",
+     "size_bytes": 2111385
+    },
+    {
+     "path": "Cam2010093_crop_sidecar_perf.csv",
+     "role": "perf",
+     "sha256": "b7098bfd90b42c8302ac686fdde21821d54ec0e5d8cd18734ce4fcf80164f1cc",
+     "size_bytes": 1852
+    }
+   ],
+   "detections": {
+    "files": [
+     {
+      "path": "Cam2010093_yolo_events.jsonl",
+      "role": "events",
+      "sha256": "f753a823513af440ea49872172eee749100b63012edb76ef1a01b71bfc58dfa1",
+      "size_bytes": 4915
+     },
+     {
+      "path": "Cam2010093_yolo_perf.csv",
+      "role": "perf",
+      "sha256": "ed524625ab4412b3f82cdc2998bcd183d0d731c619a85d51eabfa50cfc95887d",
+      "size_bytes": 7098370
+     }
+    ],
+    "first_recording_frame_id": 1,
+    "frame_identity_key": "frame.recording_frame_id",
+    "header_rows": 1,
+    "last_recording_frame_id": 3,
+    "line_schema": {
+     "schema_id": "orange.yolo_event",
+     "schema_version": 2
+    },
+    "model_ref": {
+     "enabled": true,
+     "engine_path": "/home/jeremy/orange_data/detect/detect_all_available_detect_training_v004_yolo11n_trt_20260520_a16_gpu5_trt100_int8mm_bo5_avg32.engine",
+     "engine_sha256": "479e82d2bbd127703437765b36ebcf33d6095c03224531453334128539f5d007",
+     "model_id": "detect_all_available_detect_training_v004_yolo11n_trt_20260520_a16_gpu5_trt100_int8mm_bo5_avg32",
+     "models_key": "models.2010093.detect",
+     "weights_sha256": "74458dc7a91b93d70edd7974617b8ad920d30ee78084a56161bcad57dd62ac58"
+    },
+    "parse_errors": 0,
+    "row_count": 3,
+    "rows_by_kind": {
+     "failed": 0,
+     "no_result": 0,
+     "other": 0,
+     "result": 3
+    },
+    "rows_by_status": {
+     "detections": 3
+    },
+    "status": "present"
+   },
+   "pose": {
+    "files": [
+     {
+      "path": "Cam2010093_pose_events.jsonl",
+      "role": "events",
+      "sha256": "6237d501799a8a81c7cf469883ac5de2049292e59e8b29920ef0eb68d83f2bae",
+      "size_bytes": 5357
+     },
+     {
+      "path": "Cam2010093_pose_perf.csv",
+      "role": "perf",
+      "sha256": "1533ab0db456b3f84112f643165a993cb60c7a3775b9734cff20d1ef58ce8f7e",
+      "size_bytes": 1942
+     }
+    ],
+    "first_recording_frame_id": 1,
+    "frame_identity_key": "frame.recording_frame_id",
+    "header_rows": 1,
+    "last_recording_frame_id": 3,
+    "line_schema": {
+     "schema_id": "orange.pose_event",
+     "schema_version": 2
+    },
+    "model_ref": {
+     "enabled": true,
+     "engine_path": "/home/jeremy/orange_data/pose/pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915/engines/pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915_a16_gpu5_trt100_fp16_bo5_avg32.engine",
+     "engine_sha256": "ee404b245620ccdcc4297a65513e4bf64e87d288af1a6fa9ca479a8a8ad0e944",
+     "model_id": "pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915_a16_gpu5_trt100_fp16_bo5_avg32",
+     "models_key": "models.2010093.pose",
+     "weights_sha256": "2edf67ad1fd97b5ac3835c2423a8d54775402c7d97a17c2a99a45e9e11d7b191"
+    },
+    "parse_errors": 0,
+    "pose_crop_size_px": 192,
+    "row_count": 3,
+    "rows_by_kind": {
+     "failed": 0,
+     "no_result": 0,
+     "other": 0,
+     "result": 3
+    },
+    "rows_by_status": {
+     "poses": 3
+    },
+    "status": "present"
+   }
+  }
+ },
+ "digest": "sha256 hex of the file bytes, as in the transfer inventory",
+ "paths_relative_to": "recording_folder",
+ "schema_id": "orange.recording_realtime_products",
+ "schema_version": 1
+}
