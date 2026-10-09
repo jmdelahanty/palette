@@ -521,7 +521,11 @@ def _validate_plan(plan: dict, *, live_source: bool) -> None:
         and str(destination.resolve()) == str(destination),
         "organization plan paths must be canonical absolute paths",
     )
-    _directory_identity(source)
+    # A completed delivery's empty staging folder may since have been removed
+    # (register_completed_imports does so after registration); every
+    # live-source use and every not-yet-complete stage still requires it.
+    if live_source or os.path.lexists(source):
+        _directory_identity(source)
     _separate_destination(source, destination)
     if live_source:
         rebuilt = build_transfer_organization_plan(
@@ -1272,7 +1276,8 @@ def finalize_transfer_staging(
     retry even after the snapshot/marker has been retired; missing files are
     tolerated only after verified retirement began. Every durable copy and
     actual parent receipt is checked again on retry, including completed runs.
-    Empty source root is retained; no recursive removal is used.
+    Empty source root is retained; no recursive removal is used. Once the
+    delivery is complete, a replay accepts that the empty root was removed.
     """
     _validate_plan(plan, live_source=False)
     registry_path = registry_path.resolve() if registry_path is not None else None
@@ -1282,7 +1287,9 @@ def finalize_transfer_staging(
     }
     with _organization_state(plan) as (state, save):
         source = Path(plan["source_dir"])
-        _require_directory(source, state["source_directory_identity"])
+        source_removed = state["status"] == "complete" and not os.path.lexists(source)
+        if not source_removed:
+            _require_directory(source, state["source_directory_identity"])
         prior_contract = state.get("admission_contract")
         require(
             prior_contract is None or prior_contract == contract,
@@ -1296,7 +1303,7 @@ def finalize_transfer_staging(
         )
         if state["status"] == "complete":
             require(
-                not list(source.iterdir()),
+                source_removed or not list(source.iterdir()),
                 "completed staging source is no longer empty",
             )
             require(

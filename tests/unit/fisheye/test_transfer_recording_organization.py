@@ -634,6 +634,37 @@ def test_verified_retirement_empties_only_source_and_preserves_every_destination
     assert organizer.finalize_transfer_staging(plan) == result
 
 
+def test_completed_replay_accepts_a_removed_empty_staging_folder(tmp_path, monkeypatch):
+    # The registrar removes the empty folder after registration; replaying
+    # the completed delivery must still verify every copy and receipt.
+    source, plan = _prepared_with_admission_stub(tmp_path, monkeypatch)
+    result = organizer.finalize_transfer_staging(plan)
+    source.rmdir()
+    with organizer.transfer_parent_workflow_lock(plan):
+        assert organizer.finalize_transfer_staging(plan) == result
+
+
+def test_completed_replay_refuses_a_replaced_staging_folder(tmp_path, monkeypatch):
+    source, plan = _prepared_with_admission_stub(tmp_path, monkeypatch)
+    organizer.finalize_transfer_staging(plan)
+    # Create the replacement while the original still exists, so it cannot
+    # reuse the original's inode (rmdir then mkdir can, depending on the
+    # filesystem).
+    retired = source.with_name(source.name + ".retired")
+    source.rename(retired)
+    source.mkdir()
+    retired.rmdir()
+    with pytest.raises(ValueError, match="directory ownership lost"):
+        organizer.finalize_transfer_staging(plan)
+
+
+def test_missing_staging_folder_is_refused_before_completion(tmp_path, monkeypatch):
+    source, plan = _prepared_with_admission_stub(tmp_path, monkeypatch)
+    shutil.rmtree(source)
+    with pytest.raises((ValueError, OSError)):
+        organizer.finalize_transfer_staging(plan)
+
+
 @pytest.mark.parametrize(
     "failure",
     [
