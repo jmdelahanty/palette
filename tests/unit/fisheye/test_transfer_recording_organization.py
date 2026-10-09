@@ -647,8 +647,13 @@ def test_completed_replay_accepts_a_removed_empty_staging_folder(tmp_path, monke
 def test_completed_replay_refuses_a_replaced_staging_folder(tmp_path, monkeypatch):
     source, plan = _prepared_with_admission_stub(tmp_path, monkeypatch)
     organizer.finalize_transfer_staging(plan)
-    source.rmdir()
+    # Create the replacement while the original still exists, so it cannot
+    # reuse the original's inode (rmdir then mkdir can, depending on the
+    # filesystem).
+    retired = source.with_name(source.name + ".retired")
+    source.rename(retired)
     source.mkdir()
+    retired.rmdir()
     with pytest.raises(ValueError, match="directory ownership lost"):
         organizer.finalize_transfer_staging(plan)
 
