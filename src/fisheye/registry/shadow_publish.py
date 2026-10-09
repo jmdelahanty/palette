@@ -504,6 +504,17 @@ def shadow_synchronize_recording_imports(
     )
 
 
+def _require_schema_compatible(path: Path) -> None:
+    """Refuse to write a registry migrated past this code by a non-additive migration."""
+
+    from fisheye.registry.migrations import schema_compatibility_problem
+
+    with _readonly_connection(path) as connection:
+        problem = schema_compatibility_problem(connection)
+    if problem is not None:
+        raise RegistryShadowPublishError(f"refusing to publish: {problem}")
+
+
 def publish_registry_shadow(
     *,
     canonical_registry: str | Path,
@@ -551,6 +562,7 @@ def publish_registry_shadow(
             candidate = temporary_root / "candidate.sqlite"
             _sqlite_backup(canonical, source_snapshot)
             validate_registry_sqlite(source_snapshot)
+            _require_schema_compatible(source_snapshot)
             _copy_without_overwrite(source_snapshot, backup, mode=source_mode)
             shutil.copyfile(source_snapshot, candidate)
             os.chmod(candidate, source_mode)

@@ -1349,13 +1349,9 @@ class Registry(
         return row is not None
 
     def _record_schema_version(self, *, version: int, name: str) -> None:
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO schema_version (version, name, applied_utc)
-            VALUES (?, ?, ?);
-            """,
-            (int(version), str(name), _utc_now()),
-        )
+        from .migrations import record_schema_version
+
+        record_schema_version(self.conn, version=version, name=name, applied_utc=_utc_now())
 
     def _apply_schema_migrations(self) -> None:
         migrations = sorted(self._schema_migrations(), key=lambda item: item[0])

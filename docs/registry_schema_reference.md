@@ -7,7 +7,7 @@
 
 - Tables: `64`
 - Views: `58`
-- Total columns: `3242`
+- Total columns: `3243`
 
 ## Tables
 
@@ -3260,6 +3260,7 @@ CREATE TABLE registry_identity (
 | `version` | `INTEGER` | no | yes | `` |
 | `name` | `TEXT` | no | no | `` |
 | `applied_utc` | `TEXT` | no | no | `` |
+| `additive` | `INTEGER` | yes | no | `` |
 
 #### Definition
 
@@ -3268,7 +3269,7 @@ CREATE TABLE schema_version (
                 version INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 applied_utc TEXT NOT NULL
-            )
+            , additive INTEGER)
 ```
 
 ### `stimulus_protocol_steps`
