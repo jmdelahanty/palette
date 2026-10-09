@@ -44,6 +44,7 @@ from .extractors.acquisition_video_streams import (
     _extract_acquisition_video_stream_rows,
     collection_video_facts,
 )
+from .extractors.realtime_products import extract_realtime_product_rows
 from .extractors.chaser_metadata import extract_recording_chaser_metadata
 from .extractors.stimulus_metadata import extract_stimulus_metadata
 from .extractors.crop import _extract_crop_quality_rows
@@ -5790,6 +5791,40 @@ class Registry(
                     payload,
                 )
 
+    _REALTIME_PRODUCT_COLUMNS = (
+        "dataset_id", "product", "recording_id", "camera_id", "declared", "status",
+        "line_schema_id", "line_schema_version", "row_count", "header_rows",
+        "result_rows", "no_result_rows", "failed_rows", "other_rows",
+        "first_recording_frame_id", "last_recording_frame_id", "validation",
+        "line_validator", "events_path", "events_sha256", "model_id", "model_schema",
+        "engine_sha256", "engine_bytes", "weights_sha256", "onnx_sha256",
+        "engine_manifest_sha256", "engine_manifest_run_id", "engine_manifest_status",
+        "engine_precision", "engine_build_id", "record_sha256", "updated_utc",
+    )
+
+    def replace_recording_realtime_products(
+        self, dataset_id: str, records: Iterable[Dict[str, Any]]
+    ) -> None:
+        """Mirror a dataset's realtime-products record exactly (rows replaced whole)."""
+
+        if not self._sqlite_object_exists("recording_realtime_products", object_types=("table",)):
+            self._migration_076_recording_realtime_products()
+        columns = self._REALTIME_PRODUCT_COLUMNS
+        with self._maybe_transaction():
+            self.conn.execute(
+                "DELETE FROM recording_realtime_products WHERE dataset_id = ?;",
+                (str(dataset_id),),
+            )
+            for record in records:
+                payload = {name: record.get(name) for name in columns}
+                payload["dataset_id"] = str(dataset_id)
+                payload["updated_utc"] = payload["updated_utc"] or _utc_now()
+                self.conn.execute(
+                    f"INSERT INTO recording_realtime_products ({', '.join(columns)}) "
+                    f"VALUES ({', '.join(':' + name for name in columns)});",
+                    payload,
+                )
+
     def replace_acquisition_video_streams(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
         if not self._sqlite_object_exists("acquisition_video_streams", object_types=("table",)):
             self._migration_056_acquisition_video_streams_registry()
@@ -6653,6 +6688,9 @@ class Registry(
             root, zarr_path=zarr_path, recording_id=recording_id, zarr_use=zarr_use
         )
         self.replace_acquisition_video_streams(dataset_id, acquisition_rows)
+        self.replace_recording_realtime_products(
+            dataset_id, extract_realtime_product_rows(root, recording_id=recording_id)
+        )
         chaser_metadata = extract_recording_chaser_metadata(
             root,
             zarr_path=zarr_path,
