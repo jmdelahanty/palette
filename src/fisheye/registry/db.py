@@ -40,10 +40,12 @@ from fisheye.shared.subject_metadata import (
 from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
 from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from .analytics_reports import RegistryAnalyticsReportMixin
+from .realtime_products import RegistryRealtimeProductsMixin
 from .extractors.acquisition_video_streams import (
     _extract_acquisition_video_stream_rows,
     collection_video_facts,
 )
+from .extractors.realtime_products import extract_realtime_product_rows
 from .extractors.chaser_metadata import extract_recording_chaser_metadata
 from .extractors.stimulus_metadata import extract_stimulus_metadata
 from .extractors.crop import _extract_crop_quality_rows
@@ -1230,6 +1232,7 @@ def _build_detection_source_records(root: zarr.Group) -> List[Dict[str, Any]]:
 class Registry(
     RegistryAcquisitionBatchMixin,
     RegistryAnalyticsReportMixin,
+    RegistryRealtimeProductsMixin,
     RegistryRecordingIdentityMixin,
     RegistryMigrationMixin,
 ):
@@ -6653,6 +6656,9 @@ class Registry(
             root, zarr_path=zarr_path, recording_id=recording_id, zarr_use=zarr_use
         )
         self.replace_acquisition_video_streams(dataset_id, acquisition_rows)
+        self.replace_recording_realtime_products(
+            dataset_id, extract_realtime_product_rows(root, recording_id=recording_id)
+        )
         chaser_metadata = extract_recording_chaser_metadata(
             root,
             zarr_path=zarr_path,
