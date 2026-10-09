@@ -574,6 +574,12 @@ def _load_parquet_source(
         [columns["timestamp_sys"][index] for index in indices],
         label="timestamp_sys",
     )
+    # Rows are keyed by parent_frame_index, not by their order on disk.
+    # Already-ordered files are unchanged, so published digests are stable.
+    order = np.argsort(parent, kind="stable")
+    recording_ids, parent = recording_ids[order], parent[order]
+    camera, camera_valid = camera[order], camera_valid[order]
+    system, system_valid = system[order], system_valid[order]
     clock_surfaces, semantic_evidence = _clock_semantics(
         recording_dir,
         camera_id=str(camera_id),
@@ -961,6 +967,41 @@ def resolve_acquisition_frame_clock(
     return resolved
 
 
+def load_published_acquisition_frame_clock(
+    root: Any,
+    *,
+    recording_dir: str | Path,
+) -> tuple[ResolvedAcquisitionFrameClock, AcquisitionFrameClockSource]:
+    """Return the selected published clock and its arrays; never re-reads raw files.
+
+    Consumers that need timestamp values read them here, so the import-time
+    publication stays the single clock authority for every reader.
+    """
+
+    resolved = resolve_acquisition_frame_clock(root, required=True)
+    assert resolved is not None
+    run = root[resolved.group_path]
+    arrays = {name: np.asarray(run[name][:]) for name in _ARRAY_NAMES}
+    for name, values in arrays.items():
+        if _array_values_sha256(values) != str(resolved.record["array_sha256"][name]):
+            raise AcquisitionFrameClockError(
+                f"Acquisition frame-clock array {name} differs from its bound digest."
+            )
+    evidence = resolved.record["source"]
+    source = AcquisitionFrameClockSource(
+        source_path=_resolve_recording_path(
+            Path(recording_dir).expanduser().resolve(), evidence["locator"]
+        ),
+        source_kind=str(evidence["kind"]),
+        source_locator=str(evidence["locator"]),
+        camera_id=resolved.camera_id,
+        clock_surfaces=resolved.record["clock_surfaces"],
+        clock_semantic_evidence=resolved.record["clock_semantic_evidence"],
+        **arrays,
+    )
+    return resolved, source
+
+
 def _owned_clock_run(root: Any, run_name: str, owner: str) -> Any:
     path = f"{ACQUISITION_FRAME_CLOCK_RUNS_PATH}/{run_name}"
     run = root[path]
@@ -1328,6 +1369,30 @@ def _publish_acquisition_frame_clock_locked(
         raise
 
 
+def publish_clipped_acquisition_frame_clock(
+    root: Any,
+    *,
+    recording_dir: str | Path,
+    camera_id: str,
+    acquisition_record: Any,
+) -> ResolvedAcquisitionFrameClock:
+    """Publish the clock for a clipped recording from its bound frame index.
+
+    ``acquisition_record`` is the persisted acquisition camera record; its
+    locator names the only recording-wide frame index that may back the clock.
+    """
+
+    source = load_clipped_acquisition_frame_clock_source(
+        recording_dir,
+        camera_id=camera_id,
+        frame_index_path=acquisition_record.source_video_metadata["locator"][
+            "relative_path"
+        ],
+        expected_frame_count=acquisition_record.source_total_frames,
+    )
+    return publish_acquisition_frame_clock(root, source)
+
+
 def import_acquisition_frame_clock(
     root: Any,
     *,
@@ -1371,6 +1436,8 @@ __all__ = [
     "import_acquisition_frame_clock",
     "load_acquisition_frame_clock_source",
     "load_clipped_acquisition_frame_clock_source",
+    "load_published_acquisition_frame_clock",
     "publish_acquisition_frame_clock",
+    "publish_clipped_acquisition_frame_clock",
     "resolve_acquisition_frame_clock",
 ]
