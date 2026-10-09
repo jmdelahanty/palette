@@ -43,7 +43,7 @@ def _write_clip(
     first_frame_id: int,
     declared_size: tuple[int, int] | None = None,
     all_blank: bool = False,
-    projected: bool = False,
+    projected: bool | str = False,
 ) -> dict[str, object]:
     clip_id = f"clip_{clip_index:06d}"
     clip_dir = recording_dir / "clips" / clip_id
@@ -120,19 +120,44 @@ def _write_clip(
         }
         source_path = f"external_recorder/clips/{clip_id}/clip_manifest.json"
         projection = clip_dir / "projection.json"
+        if projected == "session":
+            # A single-clip recording ships no clip manifest; the projection
+            # binds recording_session.json, whose clips[] carry the descriptor.
+            session = clip_dir / "recording_session.json"
+            session.write_text(
+                json.dumps(
+                    {
+                        "clips": [{"clip_index": clip_index,
+                                   "recording_outputs": original["recording_outputs"]}],
+                        "recording_outputs": original["recording_outputs"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            bindings = {
+                "original_clip_manifest": None,
+                "original_recording_session": {
+                    "path": "recording_session.json",
+                    "sha256": hashlib.sha256(session.read_bytes()).hexdigest(),
+                },
+            }
+            organized = {"recording_session.json": relative(session)}
+        else:
+            bindings = {
+                "original_clip_manifest": {
+                    "path": source_path,
+                    "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                },
+            }
+            organized = {source_path: relative(manifest_path)}
         projection.write_text(
             json.dumps(
                 {
                     "schema_id": "palette.transfer_organized_clip_projection.v1",
                     "clip_id": clip_id,
                     "clip_index": clip_index,
-                    "original_clip_manifest": {
-                        "path": source_path,
-                        "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-                    },
-                    "source_transfer": {
-                        "source_to_organized_paths": {source_path: relative(manifest_path)}
-                    },
+                    **bindings,
+                    "source_transfer": {"source_to_organized_paths": organized},
                     "recording_outputs": {
                         "123": {"crop": crop_only, "full": original["recording_outputs"]["123"]["full"]}
                     },
@@ -388,3 +413,23 @@ def test_transfer_projection_without_an_original_keeps_the_descriptor(projection
         )
         is crop
     )
+
+
+def test_single_clip_projection_reads_the_size_from_the_recording_session(tmp_path: Path) -> None:
+    # A single-clip recording of an empty dish (every row blank) is sized from
+    # recording_session.json, which the projection binds; it has no clip manifest.
+    root, publication = _publish(
+        tmp_path, [{"declared_size": (384, 384), "all_blank": True, "projected": "session"}],
+        sealed=_sealed_crop_output(384),
+    )
+    run = root["analysis/acquisition_video_streams/streams/crop/ledger_runs/" + publication.run_name]
+    contract = run.attrs["source_stream_contract"]
+    assert (contract["width"], contract["height"]) == (384, 384)
+
+
+def test_single_clip_projection_refuses_a_changed_recording_session(tmp_path: Path, monkeypatch) -> None:
+    import fisheye.shared.acquisition_crop_stream_ledger as ledger
+
+    monkeypatch.setattr(ledger, "_sha256_file", lambda path: "0" * 64)
+    with pytest.raises(ValueError, match="original recording session bytes changed"):
+        _publish(tmp_path, [{"declared_size": (384, 384), "projected": "session"}])
