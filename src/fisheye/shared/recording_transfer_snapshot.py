@@ -256,6 +256,41 @@ def file_ref(root: Path, relative: str) -> dict:
     return {"path": relative, "size_bytes": after.st_size, "sha256": digest.hexdigest()}
 
 
+# Video and H5 files at least this large take their sha256 from the sealed
+# snapshot when the Citrus sealer attests the destination (see
+# sealer_attested_inventory). Every other file, including each JSON, CSV and
+# JSONL document Palette parses, is always hashed here.
+SEALER_ATTESTED_MIN_BYTES = 16 * 1024 * 1024
+SEALER_ATTESTED_SUFFIXES = frozenset(
+    {".mp4", ".mkv", ".avi", ".h265", ".hevc", ".h5", ".hdf5"}
+)
+SEALER_VERIFICATION = "sha256_all_inventory_bytes"
+
+
+def _attested_file_ref(
+    root: Path, relative: str, sealed: dict, marker_mtime_ns: int
+) -> dict:
+    """Stat-only reference that reuses the sealer's digest for a large file.
+
+    The sealer hashed this exact destination file before writing the marker.
+    Here it must still be a regular file of the sealed size that was last
+    modified no later than the marker was written.
+    """
+
+    normalized_path(relative)
+    info = (root / relative).lstat()
+    require(stat.S_ISREG(info.st_mode), f"not a regular artifact: {relative}")
+    require(
+        info.st_size == sealed["size_bytes"],
+        f"artifact size differs from the sealed snapshot: {relative}",
+    )
+    require(
+        info.st_mtime_ns <= marker_mtime_ns,
+        f"artifact modified after the delivery was sealed: {relative}",
+    )
+    return {"path": relative, "size_bytes": info.st_size, "sha256": sealed["sha256"]}
+
+
 def _sha256_prefixed(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
@@ -487,7 +522,13 @@ def require_observation_binding_transfer_admission(
         )
 
 
-def inventory(root: Path, marker_name: str, *, destination: bool = False) -> list[dict]:
+def inventory(
+    root: Path,
+    marker_name: str,
+    *,
+    destination: bool = False,
+    attested: "SealerAttestation | None" = None,
+) -> list[dict]:
     result = []
     for directory, dirs, files in os.walk(root, followlinks=False):
         for name in list(dirs):
@@ -507,7 +548,17 @@ def inventory(root: Path, marker_name: str, *, destination: bool = False) -> lis
                 name != marker_name and name != "_citrus_transfer_complete.json",
                 f"nested or source completion marker: {rel}",
             )
-            result.append(file_ref(root, rel))
+            sealed = attested.items.get(rel) if attested is not None else None
+            if (
+                sealed is not None
+                and sealed["size_bytes"] >= SEALER_ATTESTED_MIN_BYTES
+                and Path(name).suffix.lower() in SEALER_ATTESTED_SUFFIXES
+            ):
+                result.append(
+                    _attested_file_ref(root, rel, sealed, attested.marker_mtime_ns)
+                )
+            else:
+                result.append(file_ref(root, rel))
     return sorted(result, key=lambda entry: entry["path"])
 
 
@@ -614,7 +665,13 @@ def frame_map(
     }
 
 
-def build_snapshot(root: Path, marker_name: str, *, destination: bool = False) -> dict:
+def build_snapshot(
+    root: Path,
+    marker_name: str,
+    *,
+    destination: bool = False,
+    attested: "SealerAttestation | None" = None,
+) -> dict:
     root = root.resolve(strict=True)
     require(root != Path("/") and root.is_dir(), "invalid recording root")
     normalized_path(marker_name)
@@ -624,7 +681,7 @@ def build_snapshot(root: Path, marker_name: str, *, destination: bool = False) -
         "marker must be a filename",
     )
     # Hash before parsing, then verify these same bytes again before publication.
-    items = inventory(root, marker_name, destination=destination)
+    items = inventory(root, marker_name, destination=destination, attested=attested)
     refs = {item["path"]: item for item in items}
     require(
         "recording_session.json" in refs, "v2 requires Orange recording_session.json"
@@ -945,11 +1002,48 @@ def snapshot_bytes_and_id(snapshot: dict) -> tuple[bytes, str]:
 
 
 def verify_inventory(
-    root: Path, snapshot: dict, marker_name: str, *, destination: bool
+    root: Path,
+    snapshot: dict,
+    marker_name: str,
+    *,
+    destination: bool,
+    attested: "SealerAttestation | None" = None,
 ) -> None:
     require(
-        inventory(root, marker_name, destination=destination) == snapshot["inventory"],
+        inventory(root, marker_name, destination=destination, attested=attested)
+        == snapshot["inventory"],
         "snapshot inventory mismatch (missing, extra, changed, or replaced artifact)",
+    )
+
+
+@dataclass(frozen=True)
+class SealerAttestation:
+    """The sealed inventory a v3 marker attests, and when the marker was written."""
+
+    items: dict
+    marker_mtime_ns: int
+
+
+def sealer_attested_inventory(
+    marker: dict, snapshot: dict, marker_mtime_ns: int
+) -> SealerAttestation | None:
+    """Trust the sealer's destination hashes only for a marker v3 delivery.
+
+    Citrus's sealer (citrus-recording-transfer >= 2.0.0, marker v3) rebuilds the
+    snapshot from the destination copy, hashing every file, and writes the
+    marker only when it matches. A v2 marker records no sealer, so Palette
+    hashes every byte itself.
+    """
+
+    if marker.get("schema_id") != MARKER_SCHEMA_V3:
+        return None
+    require(
+        marker["delivery"]["verification"] == SEALER_VERIFICATION,
+        "sealer verification policy is not sha256_all_inventory_bytes",
+    )
+    return SealerAttestation(
+        items={item["path"]: item for item in snapshot["inventory"]},
+        marker_mtime_ns=marker_mtime_ns,
     )
 
 
@@ -965,6 +1059,9 @@ class VerifiedTransferSnapshot:
     snapshot: dict
     # Marker v3 provenance ({"package", "version"}); None for a v2 marker.
     sealer: dict | None = None
+    # "palette_sha256_all_bytes", or "sealer_attested_large_files" when large
+    # video/H5 files may reuse the sealer's digests (marker v3).
+    content_verification: str = "palette_sha256_all_bytes"
 
 
 @dataclass(frozen=True)
@@ -1019,7 +1116,10 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
     require_envelope_schema(snapshot, "snapshot")
     marker_bytes = marker_path.read_bytes()
     snapshot_bytes = snapshot_path.read_bytes()
-    rebuilt = build_snapshot(root, MARKER_NAME, destination=True)
+    attested = sealer_attested_inventory(
+        marker, snapshot, marker_path.lstat().st_mtime_ns
+    )
+    rebuilt = build_snapshot(root, MARKER_NAME, destination=True, attested=attested)
     require(
         canonical_bytes(snapshot) == canonical_bytes(rebuilt),
         "snapshot schema, membership or source semantics mismatch",
@@ -1068,7 +1168,7 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
     )
     # Close the parse/hash observation window. The storage contract still
     # requires immutable deliveries throughout subsequent execution.
-    verify_inventory(root, snapshot, MARKER_NAME, destination=True)
+    verify_inventory(root, snapshot, MARKER_NAME, destination=True, attested=attested)
     require(
         marker_path.read_bytes() == marker_bytes and snapshot_path.read_bytes() == data,
         "transfer control bytes changed during validation",
@@ -1085,6 +1185,11 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
         snapshot["recording_payload_kind"],
         snapshot,
         marker.get("sealer"),
+        (
+            "palette_sha256_all_bytes"
+            if attested is None
+            else "sealer_attested_large_files"
+        ),
     )
 
 
