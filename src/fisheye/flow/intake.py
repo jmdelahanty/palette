@@ -37,6 +37,7 @@ from fisheye.flow.lsf import (
 EXIT_DONE, EXIT_FAILED, EXIT_REFUSED, EXIT_HELD = 0, 1, 65, 75
 SENTINEL_SCHEMA = "palette.flow_job_done.v1"
 REFUSAL_SCHEMA = "palette.flow_job_refused.v1"
+FAILURES_SCHEMA = "palette.flow_job_failures.v1"
 PLAN_SCHEMA = "palette.flow.intake_plan.v1"
 PROBE_SCHEMAS = {
     "import": "palette.intake.probe_import.v",
@@ -61,6 +62,56 @@ def sentinel_path(config: IntakeFlowConfig, sha: str, step: str) -> Path:
 
 def refusal_path(config: IntakeFlowConfig, sha: str) -> Path:
     return config.delivery_dir(sha) / "refused.json"
+
+
+def failures_path(config: IntakeFlowConfig, sha: str) -> Path:
+    return config.delivery_dir(sha) / "failures.json"
+
+
+def _read_failures(config: IntakeFlowConfig, sha: str) -> dict:
+    try:
+        document = json.loads(failures_path(config, sha).read_text())
+    except (OSError, ValueError):
+        return {"schema": FAILURES_SCHEMA, "steps": {}}
+    return document if isinstance(document, dict) and isinstance(document.get("steps"), dict) \
+        else {"schema": FAILURES_SCHEMA, "steps": {}}
+
+
+def _reset_failures(config: IntakeFlowConfig, sha: str, step: str) -> None:
+    failures = _read_failures(config, sha)
+    if failures["steps"].pop(step, None) is not None:
+        write_json_atomic(failures_path(config, sha), failures)
+
+
+def record_failure(config: IntakeFlowConfig, sha: str, step: str, reason: str, *, extra: dict | None = None) -> int:
+    """Count one retryable failure; at the cap, hold the delivery for the operator.
+
+    The cron tick is the retry loop, so without a cap a failure that never
+    clears would resubmit work every tick. Deterministic refusals already exit
+    65 from fisheye.intake; this is the backstop for everything else.
+    """
+
+    config.delivery_dir(sha).mkdir(parents=True, exist_ok=True)
+    failures = _read_failures(config, sha)
+    entry = failures["steps"].get(step) or {"count": 0}
+    entry = {"count": int(entry.get("count", 0)) + 1, "last_reason": reason[-1000:],
+             "last_at": time.time(), **(extra or {})}
+    failures["steps"][step] = entry
+    write_json_atomic(failures_path(config, sha), failures)
+    if entry["count"] < config.max_consecutive_failures:
+        return EXIT_FAILED
+    write_json_atomic(refusal_path(config, sha), {
+        "schema": REFUSAL_SCHEMA,
+        "step": step,
+        "snapshot_sha": sha,
+        "recorded_at": time.time(),
+        "retry_cap": True,
+        "result": {"error": "retry_cap_reached",
+                   "message": f"{entry['count']} consecutive {step} failures; last: {reason[-500:]}"},
+        "clear": f"delete this file (and failures.json) after resolving; the next tick retries {sha}",
+    })
+    print(f"{step} {sha}: held after {entry['count']} consecutive failures", file=sys.stderr)
+    return EXIT_REFUSED
 
 
 def _git_head(deployment: Path, runner: Exec) -> str | None:
@@ -96,7 +147,7 @@ def record_outcome(
     if code == EXIT_DONE:
         if not verdict_ok(document, step, sha):
             print(f"{step}: exit 0 without a true {step} probe for {sha}; not done", file=sys.stderr)
-            return EXIT_FAILED
+            return record_failure(config, sha, step, "exit 0 without a true probe")
         write_json_atomic(sentinel_path(config, sha, step), {
             "schema": SENTINEL_SCHEMA,
             "step": step,
@@ -109,6 +160,7 @@ def record_outcome(
             "probe": document,
             **(extra or {}),
         })
+        _reset_failures(config, sha, step)
         return EXIT_DONE
     if code == EXIT_REFUSED:
         write_json_atomic(refusal_path(config, sha), {
@@ -123,7 +175,11 @@ def record_outcome(
             **(extra or {}),
         })
         return EXIT_REFUSED
-    return EXIT_HELD if code == EXIT_HELD else EXIT_FAILED
+    if code == EXIT_HELD:
+        return EXIT_HELD  # another live job holds it: not a failure
+    reason = (document or {}).get("error") if isinstance(document, dict) else None
+    return record_failure(config, sha, step, f"exit {code}: {reason or 'no result document'}",
+                          extra={"last_exit_code": code})
 
 
 # --------------------------------------------------------------------------
@@ -206,17 +262,21 @@ def import_step(
                                 min_interval_s=config.lsf.bjobs_min_interval_s,
                                 query=build_ssh_bjobs_runner(config.lsf.submit_host),
                                 clock=clock)
-    result = run_attempt(
-        step_dir,
-        job_name=f"palette_flow_import_{sha[:16]}",
-        remote_repo=config.lsf_repo,
-        argv=argv,
-        settings=config.lsf,
-        cache=cache,
-        bsub_runner=bsub_runner,
-        clock=clock,
-        sleep=sleep,
-    )
+    try:
+        result = run_attempt(
+            step_dir,
+            job_name=f"palette_flow_import_{sha[:16]}",
+            remote_repo=config.lsf_repo,
+            argv=argv,
+            settings=config.lsf,
+            cache=cache,
+            bsub_runner=bsub_runner,
+            clock=clock,
+            sleep=sleep,
+        )
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"import {sha}: could not submit or wait: {exc}", file=sys.stderr)
+        return record_failure(config, sha, "import", f"submission: {exc}")
     print(f"import {sha}: exit {result.exit_code} ({result.reason})", file=sys.stderr)
     lsf_commit = _git_head(config.lsf_repo, runner)
     return record_outcome(config, sha, "import", result.exit_code, result.document,
@@ -243,11 +303,11 @@ def register_step(config: IntakeFlowConfig, sha: str, *, runner: Exec = _exec) -
         imported = json.loads(sentinel_path(config, sha, "import").read_text())
     except (OSError, ValueError):
         print(f"register {sha}: no import sentinel", file=sys.stderr)
-        return EXIT_FAILED
+        return record_failure(config, sha, "register", "no import sentinel")
     commit = imported.get("producer_git_sha")
     if not isinstance(commit, str) or len(commit) != 40:
         print(f"register {sha}: import sentinel has no producer_git_sha", file=sys.stderr)
-        return EXIT_FAILED
+        return record_failure(config, sha, "register", "import sentinel has no producer_git_sha")
     deployment = deployment_for_commit(config, commit, runner=runner)
     if deployment is None:
         # An operator incident, not a refusal: it clears once the deployment exists.
@@ -256,12 +316,13 @@ def register_step(config: IntakeFlowConfig, sha: str, *, runner: Exec = _exec) -
             f"{config.deployments_root} (create ops-{commit[:8]} with the deploy helper)",
             file=sys.stderr,
         )
-        return EXIT_FAILED
-    completed = runner(intake_cli(
-        deployment, "register-delivery", sha,
-        "--config", str(config.registrar_config),
-        "--destination-root", str(config.destination_root),
-    ))
+        return record_failure(config, sha, "register", f"no ws1 deployment at producer commit {commit}")
+    args = ["register-delivery", sha,
+            "--config", str(config.registrar_config),
+            "--destination-root", str(config.destination_root)]
+    if config.allow_synthetic_isolated_registry:
+        args.append("--allow-synthetic-isolated-registry")
+    completed = runner(intake_cli(deployment, *args))
     try:
         document = json.loads(completed.stdout)
     except ValueError:

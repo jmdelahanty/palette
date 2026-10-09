@@ -309,8 +309,8 @@ def test_resume_from_retiring_with_the_marker_already_gone(tmp_path, monkeypatch
     destination = _destination(tmp_path)
     original = organizer._retire_source_file
 
-    def dies_after_the_marker(source, expected, signature):
-        original(source, expected, signature)
+    def dies_after_the_marker(source, expected, signature, **kwargs):
+        original(source, expected, signature, **kwargs)
         if source.name == MARKER_NAME:
             raise OSError("node lost after retiring the marker")
 
@@ -695,8 +695,8 @@ def test_deterministic_organizer_violations_are_refused_and_lock_loss_retried(
     destination = _destination(tmp_path)
     original = organizer._retire_source_file
 
-    def dies_after_the_marker(source, expected, signature):
-        original(source, expected, signature)
+    def dies_after_the_marker(source, expected, signature, **kwargs):
+        original(source, expected, signature, **kwargs)
         if source.name == MARKER_NAME:
             raise OSError("node lost")
 
@@ -1191,3 +1191,38 @@ def test_a_state_read_racing_a_concurrent_save_is_retried(tmp_path, monkeypatch)
     # And a probe stays a probe: it raises (1), it does not answer false-as-refused.
     with pytest.raises(IntakeTransient):
         probe_import(sha, destination_root=destination)
+
+
+@pytest.mark.parametrize("root", ["/nvme1/recordings", "/nvme1"])
+def test_retired_nvme1_destination_root_is_refused(root, monkeypatch):
+    from fisheye.intake.delivery import default_destination_root, require_live_destination_root
+
+    with pytest.raises(IntakeRefused, match="retired /nvme1 store"):
+        require_live_destination_root(root)
+    monkeypatch.setenv("PALETTE_RECORDINGS_ROOT", root)
+    with pytest.raises(IntakeRefused, match="PALETTE_RECORDINGS_ROOT"):
+        default_destination_root()
+
+
+def test_live_and_test_destination_roots_are_accepted(tmp_path, monkeypatch):
+    from fisheye.intake.delivery import (
+        DEFAULT_DESTINATION_ROOT,
+        default_destination_root,
+        require_live_destination_root,
+    )
+
+    assert require_live_destination_root(tmp_path) == tmp_path
+    assert require_live_destination_root("/nvme1x/recordings") == Path("/nvme1x/recordings")
+    monkeypatch.delenv("PALETTE_RECORDINGS_ROOT", raising=False)
+    assert default_destination_root() == DEFAULT_DESTINATION_ROOT
+
+
+def test_cli_refuses_an_nvme1_destination_root_with_exit_65(tmp_path):
+    env = {**os.environ, "PALETTE_RECORDINGS_ROOT": "/nvme1/recordings"}
+    result = _cli("discover", "--staging-dir", str(tmp_path), env=env)
+    assert result.returncode == 65, result.stderr
+    assert "retired /nvme1 store" in result.stdout + result.stderr
+    explicit = _cli(
+        "discover", "--staging-dir", str(tmp_path), "--destination-root", "/nvme1/recordings"
+    )
+    assert explicit.returncode == 65, explicit.stderr
