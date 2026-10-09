@@ -364,3 +364,75 @@ def test_a_transient_state_read_in_registration_is_retried_not_refused(tmp_path)
     assert registrar.register_completed(config, dry_run=False, register=racing) == 1
     assert (tmp_path / "state" / f"{KEY}.registration_failed").exists()
     assert not (tmp_path / "state" / f"{KEY}.registration_refused").exists()
+
+
+def _claimed_delivery(tmp_path: Path, folder: str = "session_a") -> Path:
+    delivery = tmp_path / "staging" / folder
+    delivery.mkdir(parents=True)
+    (tmp_path / "state" / f"{KEY}.claimed").write_text(json.dumps({
+        "marker": str(delivery / poller.MARKER_NAME), "snapshot_id": "sha256:" + "d" * 64,
+    }))
+    return delivery
+
+
+def test_registered_delivery_removes_its_empty_staging_folder(tmp_path):
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    _status(tmp_path)
+    delivery = _claimed_delivery(tmp_path)
+    assert registrar.register_completed(config, dry_run=False, register=Register()) == 0
+    assert (tmp_path / "state" / f"{KEY}.registered").exists()
+    assert not delivery.exists()
+    assert (tmp_path / "staging").is_dir()
+
+
+def test_staging_folder_is_never_removed_before_registration(tmp_path):
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    _status(tmp_path)
+    delivery = _claimed_delivery(tmp_path)
+    assert registrar.register_completed(config, dry_run=False, register=Register(fail=True)) == 1
+    assert delivery.is_dir()
+
+
+def test_non_empty_staging_folder_is_left_and_logged(tmp_path, capsys):
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    _status(tmp_path)
+    delivery = _claimed_delivery(tmp_path)
+    (delivery / "left_behind.bin").write_bytes(b"x")
+    assert registrar.register_completed(config, dry_run=False, register=Register()) == 0
+    assert (delivery / "left_behind.bin").exists()
+    assert "staging cleanup skipped" in capsys.readouterr().out
+
+
+def test_already_registered_delivery_is_cleaned_on_a_later_run(tmp_path):
+    # A crash between recording .registered and the rmdir is finished later.
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    delivery = _claimed_delivery(tmp_path)
+    (tmp_path / "state" / f"{KEY}.registered").write_text("{}")
+    register = Register()
+    assert registrar.register_completed(config, dry_run=True, register=register) == 0
+    assert delivery.is_dir()  # a dry run removes nothing
+    assert registrar.register_completed(config, dry_run=False, register=register) == 0
+    assert not delivery.exists() and register.calls == []
+
+
+@pytest.mark.parametrize("folder", [".hidden", "group/nested"])
+def test_only_top_level_delivery_folders_are_removed(tmp_path, folder):
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    delivery = _claimed_delivery(tmp_path, folder)
+    (tmp_path / "state" / f"{KEY}.registered").write_text("{}")
+    registrar.register_completed(config, dry_run=False, register=Register())
+    assert delivery.is_dir()
+
+
+def test_failed_import_keeps_its_staging_folder(tmp_path):
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    _status(tmp_path, status="failed", import_complete=False, error="boom")
+    delivery = _claimed_delivery(tmp_path)
+    registrar.register_completed(config, dry_run=False, register=Register())
+    assert delivery.is_dir()
