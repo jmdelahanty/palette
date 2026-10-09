@@ -20,7 +20,7 @@
   - Snakemake owns the dependency graph, scheduling, retries, keep-going, resume and the operator's view.
   - Palette keeps sole ownership of what "done" means. A job's Snakemake output is a small sentinel file, and it is written only after Palette's own completion and receipt checks pass.
   - Snakemake never declares a Zarr path as an output.
-- **LSF interaction:** Snakemake talks to LSF through Palette's existing `fisheye.cluster.lsf.backend`, via `snakemake-executor-plugin-cluster-generic` and three small scripts (submit, status, cancel). This avoids depending on the community LSF plugin.
+- **LSF interaction:** Snakemake runs only on ws1, and every rule is local. A cluster step is a local rule that submits one job through Palette's existing `fisheye.cluster.lsf.backend` and then waits on NFS evidence (`fisheye.flow.lsf`). This avoids depending on any LSF executor plugin. (Changed at implementation, 2026-10-08: the cluster-generic plugin would run Snakemake inside every LSF job, and the `palette-flow` env lives on ws1's local disk; see the decision log.)
 - **Controller host:** the controller runs on `delahantyj-ws1`, the registry writer host. Registry writes therefore become ordinary local rules on the one host allowed to write. Cluster jobs are submitted over SSH to `login1-citrus-poller`, as today.
 - **First slice:** the intake DAG (import per delivery on LSF, then register on ws1). It replaces the cron poller/registrar pair and its hand-rolled state files.
   - **Second slice:** a generic "plan executor" that runs any `LsfWorkflow` plan emitted by an existing family planner. This is how most of the remaining launchers migrate without rewriting their domain logic.
@@ -90,7 +90,7 @@ A runner is acceptable only if it meets all of these.
   - Retries (`--retries`, with an `attempt` number available to params, which gives attempt-scoped run names), `--keep-going`, and dry run with a DAG/rulegraph print.
 - **LSF executor**
   - `snakemake-executor-plugin-lsf` exists. It is community-maintained, by one author as far as I can tell, at v0.2.x. I have not verified its array support, `-gpu` rendering or how often it polls `bjobs`.
-  - Instead, recommend `snakemake-executor-plugin-cluster-generic` with Palette-owned submit, status and cancel scripts built on `fisheye.cluster.lsf.backend`. That code already renders `bsub`, parses job IDs and routes over SSH, and it is tested. Snakemake then owns only the graph.
+  - ~~Instead, recommend `snakemake-executor-plugin-cluster-generic` …~~ Superseded at implementation (see the decision log). That plugin's job script starts a second, single-job Snakemake inside every LSF job, so the env and Snakefile must be visible on compute nodes, and `palette-flow` is on ws1's local disk. Instead, cluster steps are local rules on ws1 that submit through `fisheye.cluster.lsf.backend` and wait on NFS. Snakemake owns only the graph.
 - **Hazards that must be designed around** (none is a blocker):
   - Snakemake **removes the declared outputs of a job before rerunning it, and after a failure**. `directory()` outputs are removed wholesale. Rule: no Zarr path is ever an output. Outputs are sentinels only, enforced by a test over the Snakefile.
   - Default `--rerun-triggers` include `code`, `params` and `software-env`, so a new commit would invalidate every finished sentinel. Use `--rerun-triggers mtime` (sentinels are written once and never touched) and record the commit inside the sentinel instead.
@@ -191,7 +191,7 @@ Consequences:
             ┌──────────────── delahantyj-ws1 (registry writer host) ───────────────┐
  Jeremy ──► │ palette-flow run/status/resume  →  snakemake (controller, tmux/systemd) │
             │   localrules: register_*, registry_finalize_*  ──► shadow_publish      │
-            │   cluster-generic submit/status/cancel ──ssh──► login1-citrus-poller   │
+            │   local rule: fisheye.flow.lsf submit+wait ──ssh──► login1-citrus-poller│
             └──────────────────────────────────────────────────────────────┬─────────┘
                                                                            │ bsub/bjobs/bkill
                                               LSF compute: scripts/py -m fisheye.flow.run_job
@@ -201,7 +201,12 @@ Consequences:
 ### 5.1 Components (new code is small)
 
 - **`fisheye.flow.run_job`:** the per-job wrapper from §4. It reuses `cluster.lsf.runtime` for the status envelope, signal forwarding and scratch cleanup.
-- **`fisheye.flow.lsf_executor`:** the `submit`/`status`/`cancel` entry points for `cluster-generic`. They delegate to `cluster.lsf.backend` (render `bsub`, parse IDs, `build_ssh_bsub_runner`).
+- **`fisheye.flow.lsf`** (as built): submits one job per attempt through `cluster.lsf.backend` (`build_ssh_bsub_runner`, `parse_bsub_job_id`) and waits on NFS evidence:
+  - while a job runs, its job script touches a heartbeat file every 60 s;
+  - on exit it writes `result.json` and then `exit_code`;
+  - an LSF output footer with no `exit_code` means the job died.
+
+  Only a job with no fresh heartbeat (pending, or silent) consults the shared `bjobs` cache. If the controller restarts, it re-attaches to a submitted attempt that has no exit record.
   - **Login-node contact budget (Jeremy, 2026-10-07): no per-job polling of the login nodes; at most one check-in every 5-10 minutes.** Concretely:
     - Snakemake's frequent per-job `status` calls never leave ws1. `status` reads only NFS evidence: the runtime envelope's running/final status JSON, and as a fallback the LSF `<job_id>.out` "Resource usage summary" footer (the same "ended" signal #286 uses). "Ended with no status JSON" means **failed**, not pending.
     - Only jobs with no file evidence (still `PEND`, or killed before the envelope started) need LSF itself. These are covered by **one batched `bjobs` call for all such jobs, at most once per 5 minutes**. The result is cached on ws1 (`<flow_root>/lsf_state.json` with its timestamp), and every `status` call reads that cache.
@@ -393,6 +398,12 @@ Still open:
 
 ## Decision log
 
+- 2026-10-08: the slice-1 implementation drops the `cluster-generic` executor. Its job script runs a per-job Snakemake inside every LSF job, but the `palette-flow` env is on ws1's local disk. A copy on `/groups` would be cheap (the env measures 505 MB), so storage is not the reason. Jeremy chose the supervisor-only design for these reasons:
+  - LSF jobs run only Palette code, exactly as today's launchers do;
+  - there is one env to keep pinned;
+  - after a controller restart the runner re-attaches to running jobs (tested), where Snakemake's executors would resubmit.
+
+  The cost is about 300 lines of submit, wait and re-attach code that Palette owns. All rules are local on ws1, and cluster steps submit and then wait on NFS evidence through `fisheye.flow.lsf`. The login-node budget is unchanged: `bsub` once per attempt, and `bjobs` at most once per 5 minutes through a shared, flock-guarded cache, used only when a job has no fresh heartbeat.
 - 2026-10-07: §5.4 adds producer-commit-bound steps. Intake registration runs at the import receipt's `producer_git_sha`, because the identity authority requires an exact commit match. This came from palette-33's `fisheye.intake` review.
 - 2026-10-07: #286 merged (8e96c399). §6.3 now requires runner and v2 state to stay separate from the v1 `.processing_state`.
 - 2026-10-07: recorded PR #290's exit-code table and its NFS flock lease behaviour in §5.3.
