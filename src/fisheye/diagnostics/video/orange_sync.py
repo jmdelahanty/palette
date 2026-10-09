@@ -318,6 +318,23 @@ def _combined_text(
     return observed or declared_normalized, None
 
 
+def _encoder_gop_length(summary: dict[str, Any]) -> Optional[int]:
+    """The GOP the encoder ran, which is what decides sync samples.
+
+    Recorder summaries before Orange d06f782 put the shard routing period (25)
+    in the top-level ``resolved_gop_length`` and the encoder's GOP in
+    ``video_metadata.encoder.resolved_gop_length``. Later summaries report the
+    encoder GOP in both places. Older summaries without the encoder block fall
+    back to the top-level value.
+    """
+
+    metadata = summary.get("video_metadata")
+    encoder = metadata.get("encoder") if isinstance(metadata, dict) else None
+    if isinstance(encoder, dict) and "resolved_gop_length" in encoder:
+        return _optional_nonnegative_int(encoder["resolved_gop_length"])
+    return _optional_nonnegative_int(summary.get("resolved_gop_length"))
+
+
 def assess_orange_crop_sync_evidence(
     evidence: OrangeCropSyncEvidence,
     *,
@@ -392,9 +409,7 @@ def assess_orange_crop_sync_evidence(
             error=f"Orange crop tuning is not lossless: {profile['tuning']!r}",
         )
 
-    resolved_gop_length = _optional_nonnegative_int(
-        summary.get("resolved_gop_length")
-    )
+    resolved_gop_length = _encoder_gop_length(summary)
     frames_encoded = _optional_nonnegative_int(summary.get("frames_encoded"))
     if resolved_gop_length is None or frames_encoded is None:
         return result(
