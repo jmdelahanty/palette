@@ -230,3 +230,39 @@ def test_a_rewritten_staged_marker_disables_the_shortcut(
     identity = organizer._SealedSourceIdentity(plan, state)
     assert identity.marker_mtime_ns is None
     assert not identity.proves(_video_destinations(plan)[0], plan["files"][0]["source"])
+
+
+def test_organized_video_copies_are_read_only(tmp_path, monkeypatch):
+    source, plan = _prepared(tmp_path, monkeypatch)
+    organizer.prepare_transfer_parent_recordings(plan)
+    for path in _video_destinations(plan):
+        assert path.stat().st_mode & 0o222 == 0
+    # Small files keep their modes; retirement still unlinks read-only names.
+    assert organizer.finalize_transfer_staging(plan)["status"] == "complete"
+
+
+def test_a_writable_copy_is_hashed_not_proven(tmp_path, monkeypatch, organizer_hashes):
+    source, plan = _prepared(tmp_path, monkeypatch)
+    organizer.prepare_transfer_parent_recordings(plan)
+    state = organizer.finalize_transfer_staging(plan)
+    target = _video_destinations(plan)[0]
+    target.chmod(target.stat().st_mode | 0o200)
+    identity = organizer._SealedSourceIdentity(plan, state)
+    item = next(
+        i for i in plan["files"]
+        if any(
+            organizer._parent_directory(plan, t["recording_id"]) / t["relative_path"] == target
+            for t in i["destinations"]
+        )
+    )
+    assert not identity.proves(target, item["source"])
+    organizer_hashes.clear()
+    organizer.finalize_transfer_staging(plan)
+    assert target.name in organizer_hashes
+
+
+def test_v2_copies_are_also_made_read_only(tmp_path, monkeypatch):
+    source, plan = _prepared(tmp_path, monkeypatch, v3=False)
+    organizer.prepare_transfer_parent_recordings(plan)
+    for path in _video_destinations(plan):
+        assert path.stat().st_mode & 0o222 == 0

@@ -655,6 +655,25 @@ def _organization_state(plan: dict):
         yield state, save
 
 
+_WRITE_BITS = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+
+
+def _make_sealed_media_read_only(path: Path) -> None:
+    """Clear every write bit on an organized video/H5 copy (audit H1).
+
+    A hard-linked copy shares its inode with the staged file, so the staged
+    name becomes read-only too; retirement unlinks it, which needs only
+    directory write permission.
+    """
+
+    if Path(path).suffix.lower() not in SEALER_ATTESTED_SUFFIXES:
+        return
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode), f"not a regular artifact: {path}")
+    if info.st_mode & _WRITE_BITS:
+        os.chmod(path, stat.S_IMODE(info.st_mode) & ~_WRITE_BITS)
+
+
 class _SealedSourceIdentity:
     """Proves a large sealed video/H5 copy is the staged file, without hashing.
 
@@ -666,8 +685,9 @@ class _SealedSourceIdentity:
     and mtime and the staged file passes that check against the staged marker
     (whose bytes must still be the sealed marker's). After the staged name was
     retired, the copy must have the inode, size and mtime that retirement
-    recorded for it. Anything else, including a cross-filesystem copy, is
-    hashed in full.
+    recorded for it. An organized copy must also have no write bits (it was
+    made read-only when organized). Anything else, including a writable or
+    cross-filesystem copy, is hashed in full.
     """
 
     def __init__(self, plan: dict, state: dict | None):
@@ -699,9 +719,12 @@ class _SealedSourceIdentity:
         info = path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_size != expected["size_bytes"]:
             return False
+        staged_path = self.source / expected["path"]
+        if path != staged_path and info.st_mode & _WRITE_BITS:
+            return False
         if self.marker_mtime_ns is not None:
             try:
-                staged = (self.source / expected["path"]).lstat()
+                staged = staged_path.lstat()
             except FileNotFoundError:
                 staged = None
             if staged is not None:
@@ -752,6 +775,7 @@ def _materialize_file(
     _directory_identity(destination.parent)
     if destination.exists() or destination.is_symlink():
         _matches_file(destination.parent, destination.name, expected, identity)
+        _make_sealed_media_read_only(destination)
         return
     _matches_file(source.parent, source.name, expected, identity)
     try:
@@ -776,6 +800,8 @@ def _materialize_file(
         finally:
             if temporary is not None:
                 temporary.unlink()
+    # Before the final check, so a linked copy can be proven by identity.
+    _make_sealed_media_read_only(destination)
     _matches_file(destination.parent, destination.name, expected, identity)
 
 
