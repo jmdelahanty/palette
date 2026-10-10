@@ -85,6 +85,7 @@ import re
 from hashlib import sha256
 from dataclasses import asdict
 from datetime import datetime, timezone
+import sys
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -135,6 +136,7 @@ from fisheye.shared.protocol_semantic_contract import (
     PALETTE_PROTOCOL_RECIPE_SCHEMA_VERSION,
     PALETTE_PROTOCOL_SNAPSHOT_SCHEMA_ID,
     PALETTE_PROTOCOL_SNAPSHOT_SCHEMA_VERSION,
+    ProtocolSemanticContractError,
     ProtocolSemanticSnapshot,
     ProtocolStepIdentity,
     read_protocol_semantic_snapshot,
@@ -3723,8 +3725,24 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+# Exit status for a deterministic refusal of this input: intake
+# (fisheye.intake.importing._deterministic) treats a stimulus child's exit 2
+# as a refusal (exit 65) and any other failure as possibly transient.
+EXIT_CONTRACT_REFUSAL = 2
+
+
 def main(argv: Optional[Iterable[str]] = None) -> None:
     args = parse_args(argv)
+    try:
+        _run(args)
+    except ProtocolSemanticContractError as exc:
+        # The H5's protocol contract is incomplete, stale, or uses a stimulus
+        # mode this checkout doesn't know: retrying the same input can't pass.
+        print(f"stimulus protocol contract refused: {exc}", file=sys.stderr)
+        raise SystemExit(EXIT_CONTRACT_REFUSAL) from exc
+
+
+def _run(args: argparse.Namespace) -> None:
     import_stimulus_to_zarr(
         stimulus_h5=args.stimulus_h5,
         zarr_path=args.zarr_path,
