@@ -389,6 +389,108 @@ def register_step(
 
 
 # --------------------------------------------------------------------------
+# pin-check: may the runner move to another deployment now?
+
+PIN_CHECK_SCHEMA = "palette.flow.intake_pin_check.v1"
+_MIGRATION_PROBE = (
+    "import fisheye.registry.migrations as m\n"
+    "v = getattr(m, 'LATEST_MIGRATION_VERSION', None)\n"
+    "if v is None: v = m.MIGRATION_METHODS[-1][0]\n"
+    "print(int(v))\n"
+)
+
+
+def latest_migration(deployment: Path, *, runner: Exec = _exec) -> int:
+    """The newest registry migration a deployment's code knows."""
+
+    completed = runner([str(deployment / "scripts" / "py"), "-c", _MIGRATION_PROBE])
+    try:
+        return int(completed.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError) as exc:
+        raise RuntimeError(f"cannot read the registry migration of {deployment}") from exc
+
+
+def _waiting_deliveries(config: IntakeFlowConfig, *, runner: Exec) -> dict[str, str | None]:
+    """Deliveries imported but not yet registered -> their producer commit.
+
+    Both paths count: the runner's own sentinels, and discover's view of
+    deliveries the cron path imported.
+    """
+
+    waiting: dict[str, str | None] = {}
+    root = config.intake_root
+    for delivery in (p for p in root.glob("*") if p.is_dir()) if root.is_dir() else []:
+        imported = sentinel_path(config, delivery.name, "import")
+        if imported.is_file() and not sentinel_path(config, delivery.name, "register").is_file():
+            try:
+                waiting[delivery.name] = json.loads(imported.read_text()).get("producer_git_sha")
+            except ValueError:
+                waiting[delivery.name] = None
+    completed = runner(intake_cli(
+        config.ops_deployment, "discover",
+        "--staging-dir", str(config.staging_dir),
+        "--destination-root", str(config.destination_root),
+        "--registry", str(config.registry),
+    ))
+    found = json.loads(completed.stdout)
+    if found.get("registry_error"):
+        raise RuntimeError(f"registry unreadable, cannot tell what is waiting: {found['registry_error']}")
+    for target in found.get("targets", []):
+        if target.get("import_recorded") and target.get("register_recorded") is not True:
+            waiting.setdefault(target["snapshot_sha"], target.get("producer_git_sha"))
+    return waiting
+
+
+def pin_check(
+    config: IntakeFlowConfig,
+    target_ops: Path,
+    target_lsf: Path,
+    *,
+    runner: Exec = _exec,
+) -> tuple[int, dict]:
+    """Refuse a pin move that would register old imports after a migration.
+
+    Registration must run at each import's producer commit (§5.4). If the
+    target pin adds registry migrations, new code migrates the live registry
+    at its first registration; deliveries imported by older code would then
+    register through code that predates those migrations (refused by the
+    gateway's schema guard, or missing the new projections). So: drain first.
+    """
+
+    ops_commit = _git_head(target_ops, runner)
+    lsf_commit = _git_head(target_lsf, runner)
+    problems: list[str] = []
+    if not ops_commit or not lsf_commit or ops_commit != lsf_commit:
+        problems.append(f"target ws1 and LSF deployments are not one commit ({ops_commit} vs {lsf_commit})")
+    current = latest_migration(config.ops_deployment, runner=runner)
+    target = latest_migration(target_ops, runner=runner)
+    blocking = []
+    if target > current:
+        for sha, producer in sorted(_waiting_deliveries(config, runner=runner).items()):
+            deployment = deployment_for_commit(config, producer, runner=runner) if producer else None
+            known = latest_migration(deployment, runner=runner) if deployment else None
+            if known is None or known < target:
+                blocking.append({"snapshot_sha": sha, "producer_git_sha": producer,
+                                 "producer_migration": known})
+    if blocking:
+        problems.append(f"{len(blocking)} imported delivery(ies) must register before moving to "
+                        f"migration {target}")
+    report = {
+        "schema": PIN_CHECK_SCHEMA,
+        "target_ops": str(target_ops),
+        "target_lsf": str(target_lsf),
+        "target_commit": ops_commit,
+        "current_migration": current,
+        "target_migration": target,
+        "adds_migrations": target > current,
+        "blocking": blocking,
+        "problems": problems,
+        "safe": not problems,
+    }
+    return (EXIT_DONE if not problems else EXIT_REFUSED), report
+
+
+# --------------------------------------------------------------------------
 # status: NFS only; never contacts a login node.
 
 
@@ -443,9 +545,11 @@ def _print_status(config: IntakeFlowConfig) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m fisheye.flow.intake")
-    parser.add_argument("command", choices=("plan", "import", "register", "status"))
+    parser.add_argument("command", choices=("plan", "import", "register", "status", "pin-check"))
     parser.add_argument("snapshot_sha", nargs="?")
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--to-ops", type=Path, help="pin-check: target ws1 deployment")
+    parser.add_argument("--to-lsf", type=Path, help="pin-check: target LSF deployment")
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
@@ -458,6 +562,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         _print_status(config)
         return EXIT_DONE
+    if args.command == "pin-check":
+        if not (args.to_ops and args.to_lsf):
+            parser.error("pin-check needs --to-ops and --to-lsf")
+        code, report = pin_check(config, args.to_ops, args.to_lsf)
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return code
     if not args.snapshot_sha:
         parser.error(f"{args.command} needs a snapshot sha")
     step = import_step if args.command == "import" else register_step
