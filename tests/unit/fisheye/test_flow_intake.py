@@ -458,3 +458,71 @@ def test_production_config_never_passes_the_synthetic_flag(config):
     ])
     flow_intake.register_step(config, SHA, runner=run)
     assert all("--allow-synthetic-isolated-registry" not in c for c in calls)
+
+
+# --- pin-check ---------------------------------------------------------------------
+
+
+def _pin_exec(config, *, migrations, heads, discover_targets=(), registry_error=None):
+    """Fake: per-deployment HEAD and latest migration, plus a discover result."""
+
+    def run(argv):
+        if argv[0] == "git":
+            return _completed(stdout=heads.get(Path(argv[2]).name, "") + "\n")
+        if argv[1] == "-c":
+            return _completed(stdout=f"{migrations[Path(argv[0]).parent.parent.name]}\n")
+        if "discover" in argv:
+            return _completed(stdout=json.dumps({"targets": list(discover_targets),
+                                                 "registry_error": registry_error}))
+        raise AssertionError(argv)
+
+    return run
+
+
+def _pin_setup(config):
+    for name in ("ops-current", "ops-cccccccc", "ops-new", "intake-new"):
+        (config.deployments_root / name).mkdir(parents=True, exist_ok=True)
+    return config.deployments_root / "ops-new", config.deployments_root / "intake-new"
+
+
+def test_pin_check_allows_a_move_that_adds_no_migration(config):
+    ops, lsf = _pin_setup(config)
+    flow_intake.record_outcome(config, SHA, "import", 0, _probe("import"), deployment=Path("/l"), commit=COMMIT)
+    run = _pin_exec(config, migrations={"ops-current": 76, "ops-new": 76, "ops-cccccccc": 75},
+                    heads={"ops-new": "f" * 40, "intake-new": "f" * 40, "ops-cccccccc": COMMIT})
+    code, report = flow_intake.pin_check(config, ops, lsf, runner=run)
+    assert code == 0 and report["safe"] and not report["adds_migrations"]
+
+
+def test_pin_check_refuses_while_older_imports_wait_to_register(config):
+    ops, lsf = _pin_setup(config)
+    flow_intake.record_outcome(config, SHA, "import", 0, _probe("import"), deployment=Path("/l"), commit=COMMIT)
+    cron_import = {"snapshot_sha": "b" * 64, "import_recorded": True, "register_recorded": False,
+                   "producer_git_sha": None}
+    run = _pin_exec(config, migrations={"ops-current": 76, "ops-new": 77, "ops-cccccccc": 76},
+                    heads={"ops-new": "f" * 40, "intake-new": "f" * 40, "ops-cccccccc": COMMIT},
+                    discover_targets=[cron_import])
+    code, report = flow_intake.pin_check(config, ops, lsf, runner=run)
+    assert code == 65 and not report["safe"]
+    assert {b["snapshot_sha"] for b in report["blocking"]} == {SHA, "b" * 64}
+    assert report["current_migration"] == 76 and report["target_migration"] == 77
+
+
+def test_pin_check_allows_a_migration_once_drained(config):
+    ops, lsf = _pin_setup(config)
+    run = _pin_exec(config, migrations={"ops-current": 76, "ops-new": 77},
+                    heads={"ops-new": "f" * 40, "intake-new": "f" * 40})
+    code, report = flow_intake.pin_check(config, ops, lsf, runner=run)
+    assert code == 0 and report["adds_migrations"] and report["blocking"] == []
+
+
+def test_pin_check_refuses_mismatched_target_deployments_and_unreadable_registry(config):
+    ops, lsf = _pin_setup(config)
+    run = _pin_exec(config, migrations={"ops-current": 76, "ops-new": 76},
+                    heads={"ops-new": "f" * 40, "intake-new": "e" * 40})
+    code, report = flow_intake.pin_check(config, ops, lsf, runner=run)
+    assert code == 65 and "not one commit" in report["problems"][0]
+    run = _pin_exec(config, migrations={"ops-current": 76, "ops-new": 77},
+                    heads={"ops-new": "f" * 40, "intake-new": "f" * 40}, registry_error="locked")
+    with pytest.raises(RuntimeError, match="registry unreadable"):
+        flow_intake.pin_check(config, ops, lsf, runner=run)
