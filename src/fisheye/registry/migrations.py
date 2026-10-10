@@ -334,11 +334,12 @@ def record_schema_version(conn, *, version: int, name: str, applied_utc: str) ->
     )
 
 
-def schema_compatibility_problem(conn) -> str | None:
+def schema_compatibility(conn) -> dict | None:
     """Why code at LATEST_MIGRATION_VERSION must not write this registry, or None.
 
     Reads ``schema_version`` only. A registry newer than this code is writable
-    only when every newer applied migration is recorded additive.
+    only when every newer applied migration is recorded additive. The result
+    names the registry's and the code's versions and the blocking migrations.
     """
 
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table';")}
@@ -347,23 +348,42 @@ def schema_compatibility_problem(conn) -> str | None:
     current = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()[0]
     if current is None or int(current) <= LATEST_MIGRATION_VERSION:
         return None
+    problem = {
+        "registry_schema_version": int(current),
+        "code_schema_version": LATEST_MIGRATION_VERSION,
+    }
     columns = {row[1] for row in conn.execute("PRAGMA table_info(schema_version);")}
     if "additive" not in columns:
-        return (
-            f"registry schema {current} is newer than this code ({LATEST_MIGRATION_VERSION}) "
-            "and does not record whether its newer migrations are additive"
-        )
+        return {
+            **problem,
+            "blocking_migrations": [],
+            "message": (
+                f"registry schema {current} is newer than this code ({LATEST_MIGRATION_VERSION}) "
+                "and does not record whether its newer migrations are additive"
+            ),
+        }
     newer = conn.execute(
         "SELECT version, name, additive FROM schema_version WHERE version > ? ORDER BY version;",
         (LATEST_MIGRATION_VERSION,),
     ).fetchall()
     blocking = [f"{row[0]} {row[1]}" for row in newer if row[2] != 1]
-    if blocking:
-        return (
+    if not blocking:
+        return None
+    return {
+        **problem,
+        "blocking_migrations": blocking,
+        "message": (
             f"registry schema {current} is newer than this code ({LATEST_MIGRATION_VERSION}) "
             f"and these newer migrations are not additive: {', '.join(blocking)}"
-        )
-    return None
+        ),
+    }
+
+
+def schema_compatibility_problem(conn) -> str | None:
+    """The message of :func:`schema_compatibility`, or None."""
+
+    problem = schema_compatibility(conn)
+    return None if problem is None else problem["message"]
 
 
 def bind_migrations(
@@ -381,5 +401,6 @@ __all__ = [
     "MIGRATION_METHODS",
     "bind_migrations",
     "record_schema_version",
+    "schema_compatibility",
     "schema_compatibility_problem",
 ]

@@ -52,6 +52,28 @@ class RegistryProducerCommitMismatch(RegistryShadowPublishError):
         self.registrar_git_dirty = registrar_git_dirty
 
 
+class RegistrySchemaNewerThanCode(RegistryShadowPublishError):
+    """The registry was migrated past this code by a non-additive migration.
+
+    Deterministic for this deployment: only code at or above the registry's
+    schema (or a later additive declaration) can write it. Detected before any
+    backup or candidate copy is made.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        registry_schema_version: int,
+        code_schema_version: int,
+        blocking_migrations: list[str],
+    ):
+        super().__init__(message)
+        self.registry_schema_version = registry_schema_version
+        self.code_schema_version = code_schema_version
+        self.blocking_migrations = blocking_migrations
+
+
 REGISTRY_WRITER_HOST_ENV = "PALETTE_REGISTRY_WRITER_HOST"
 REGISTRY_WRITER_LOCK_PATH_ENV = "PALETTE_REGISTRY_WRITER_LOCK_PATH"
 REGISTRY_SHADOW_TEMP_ROOT_ENV = "PALETTE_REGISTRY_SHADOW_TEMP_ROOT"
@@ -507,12 +529,17 @@ def shadow_synchronize_recording_imports(
 def _require_schema_compatible(path: Path) -> None:
     """Refuse to write a registry migrated past this code by a non-additive migration."""
 
-    from fisheye.registry.migrations import schema_compatibility_problem
+    from fisheye.registry.migrations import schema_compatibility
 
     with _readonly_connection(path) as connection:
-        problem = schema_compatibility_problem(connection)
+        problem = schema_compatibility(connection)
     if problem is not None:
-        raise RegistryShadowPublishError(f"refusing to publish: {problem}")
+        raise RegistrySchemaNewerThanCode(
+            f"refusing to publish: {problem['message']}",
+            registry_schema_version=problem["registry_schema_version"],
+            code_schema_version=problem["code_schema_version"],
+            blocking_migrations=problem["blocking_migrations"],
+        )
 
 
 def publish_registry_shadow(
@@ -633,6 +660,7 @@ __all__ = [
     "REGISTRY_WRITER_HOST_ENV",
     "REGISTRY_WRITER_LOCK_PATH_ENV",
     "RegistryProducerCommitMismatch",
+    "RegistrySchemaNewerThanCode",
     "RegistryShadowPublication",
     "RegistryShadowPublishError",
     "RegistryValidation",
