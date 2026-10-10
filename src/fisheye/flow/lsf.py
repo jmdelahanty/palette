@@ -196,7 +196,22 @@ def latest_attempt_dir(step_dir: Path) -> Path | None:
     return max(candidates, key=lambda p: int(p.name.split("-", 1)[1]), default=None)
 
 
+def _revalidate(directory: Path) -> None:
+    """Open the directory so the NFS client revalidates it.
+
+    ws1 caches negative lookups for up to about a minute, so a file a cluster
+    node just created can look missing to a plain stat. Listing the parent
+    refreshes it (found by the synthetic intake trial, 2026-10-09).
+    """
+
+    try:
+        os.listdir(directory)
+    except OSError:
+        pass
+
+
 def read_exit(attempt_dir: Path) -> tuple[int | None, dict | None]:
+    _revalidate(attempt_dir)
     try:
         code = int((attempt_dir / "exit_code").read_text().strip())
     except (OSError, ValueError):

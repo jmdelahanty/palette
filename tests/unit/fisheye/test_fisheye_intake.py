@@ -1226,3 +1226,40 @@ def test_cli_refuses_an_nvme1_destination_root_with_exit_65(tmp_path):
         "discover", "--staging-dir", str(tmp_path), "--destination-root", "/nvme1/recordings"
     )
     assert explicit.returncode == 65, explicit.stderr
+
+
+@needs_media_tools
+def test_registry_newer_than_this_code_is_refused_65_before_any_backup(tmp_path, monkeypatch) -> None:
+    """A non-additive migration this code doesn't know refuses deterministically (65)."""
+
+    import sqlite3
+
+    from fisheye.intake.outcomes import exit_code_for
+    from fisheye.registry.migrations import LATEST_MIGRATION_VERSION
+
+    _session, sha, destination, imported = _import(tmp_path, monkeypatch)
+    registry = _registry(tmp_path)
+    with sqlite3.connect(registry) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(schema_version);")}
+        if "additive" not in columns:
+            connection.execute("ALTER TABLE schema_version ADD COLUMN additive INTEGER;")
+        connection.execute(
+            "INSERT INTO schema_version (version, name, applied_utc, additive) VALUES (?, 'future', 't', 0);",
+            (LATEST_MIGRATION_VERSION + 1,),
+        )
+        connection.commit()
+    before = _sha(registry)
+    with pytest.raises(IntakeRefused) as refused:
+        register_delivery(sha, writer=_writer(tmp_path, registry),
+                          destination_root=destination, allow_synthetic=True)
+    assert exit_code_for(refused.value) == EXIT_REFUSED
+    assert refused.value.code == "registry_schema_newer_than_code"
+    assert refused.value.details == {
+        "registry_schema_version": LATEST_MIGRATION_VERSION + 1,
+        "code_schema_version": LATEST_MIGRATION_VERSION,
+        "blocking_migrations": [f"{LATEST_MIGRATION_VERSION + 1} future"],
+    }
+    assert _sha(registry) == before
+    # The gateway may create its backup directory, but refuses before copying a backup.
+    backups = registry.parent / ".palette-registry-backups"
+    assert not backups.exists() or not any(backups.iterdir())

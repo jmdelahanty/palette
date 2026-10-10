@@ -257,7 +257,10 @@ def import_step(
     step_dir = config.delivery_dir(sha) / "import"
     argv = ["-m", "fisheye.intake", "import-delivery", sha,
             "--run-dir", f"{ATTEMPT_PLACEHOLDER}/run",
-            "--destination-root", str(config.destination_root)]
+            "--destination-root", str(config.destination_root),
+            # A fresh delivery has no durable state yet: intake finds its
+            # sealed marker under staging by snapshot sha.
+            "--staging-dir", str(config.staging_dir)]
     cache = cache or BjobsCache(config.lsf_state_dir,
                                 min_interval_s=config.lsf.bjobs_min_interval_s,
                                 query=build_ssh_bjobs_runner(config.lsf.submit_host),
@@ -296,7 +299,57 @@ def deployment_for_commit(config: IntakeFlowConfig, commit: str, *, runner: Exec
     return None
 
 
-def register_step(config: IntakeFlowConfig, sha: str, *, runner: Exec = _exec) -> int:
+STATE_VISIBILITY_TIMEOUT_S = 180
+STATE_VISIBILITY_POLL_S = 5
+
+
+def await_state_visible(
+    config: IntakeFlowConfig,
+    sha: str,
+    *,
+    timeout_s: float = STATE_VISIBILITY_TIMEOUT_S,
+    poll_s: float = STATE_VISIBILITY_POLL_S,
+    clock=time.monotonic,
+    sleep=time.sleep,
+) -> bool:
+    """Wait until ws1 sees the intake state the LSF import just wrote.
+
+    The NFS client caches negative lookups (about 60 s here): a ws1 lookup of
+    the state path made before the import (the import step's probe) keeps
+    answering "missing" for a while after a cluster node creates it. Found
+    by the synthetic trial on 2026-10-09; register then failed with "no
+    durable intake state yet".
+    """
+
+    from fisheye.intake.delivery import STATE_FILE, state_directory
+
+    from fisheye.flow.lsf import _revalidate
+
+    path = state_directory(config.destination_root, sha) / STATE_FILE
+    started = clock()
+    deadline = started + timeout_s
+    while True:
+        # A plain stat can keep answering from the cached negative lookup;
+        # listing each parent makes the NFS client revalidate it.
+        for directory in (path.parent.parent, path.parent):
+            _revalidate(directory)
+        if path.exists():
+            waited = clock() - started
+            if waited >= poll_s:
+                print(f"intake state for {sha} became visible after {waited:.0f}s", file=sys.stderr)
+            return True
+        if clock() >= deadline:
+            return False
+        sleep(poll_s)
+
+
+def register_step(
+    config: IntakeFlowConfig,
+    sha: str,
+    *,
+    runner: Exec = _exec,
+    await_visible=await_state_visible,
+) -> int:
     if refusal_path(config, sha).exists():
         return EXIT_REFUSED
     try:
@@ -317,6 +370,9 @@ def register_step(config: IntakeFlowConfig, sha: str, *, runner: Exec = _exec) -
             file=sys.stderr,
         )
         return record_failure(config, sha, "register", f"no ws1 deployment at producer commit {commit}")
+    if not await_visible(config, sha):
+        print(f"register {sha}: intake state still not visible on this host; "
+              "trying anyway", file=sys.stderr)
     args = ["register-delivery", sha,
             "--config", str(config.registrar_config),
             "--destination-root", str(config.destination_root)]

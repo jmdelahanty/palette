@@ -163,6 +163,7 @@ def register_delivery(
 
     from fisheye.registry.shadow_publish import (
         RegistryProducerCommitMismatch,
+        RegistrySchemaNewerThanCode,
         shadow_synchronize_recording_imports,
     )
     from fisheye.shared.recording_import_receipt import (
@@ -216,6 +217,17 @@ def register_delivery(
                     "registrar_git_sha": exc.registrar_git_sha,
                     "registrar_git_dirty": exc.registrar_git_dirty,
                     "zarr_path": exc.zarr_path,
+                },
+            ) from exc
+        except RegistrySchemaNewerThanCode as exc:
+            # Deterministic: this deployment's code is older than the registry.
+            raise IntakeRefused(
+                str(exc),
+                code="registry_schema_newer_than_code",
+                details={
+                    "registry_schema_version": exc.registry_schema_version,
+                    "code_schema_version": exc.code_schema_version,
+                    "blocking_migrations": exc.blocking_migrations,
                 },
             ) from exc
         registered = probe_register(sha, destination_root=destination, registry=writer.registry)
