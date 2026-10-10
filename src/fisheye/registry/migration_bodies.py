@@ -9232,3 +9232,99 @@ class RegistryMigrationMixin:
             GROUP BY m.session_uuid;
             """
         )
+
+    def _migration_076_recording_realtime_products(self) -> None:
+        """Orange realtime products recorded at import, and the models that ran.
+
+        One row per dataset and product (``detections``, ``pose``), mirroring
+        the analysis Zarr's ``analysis/acquisition_realtime_products`` record
+        exactly. A recording whose session predates Orange's declaration has
+        one row with product ``undeclared``. The view joins each product's model
+        to ``training_runs`` by content (weights sha256 = model_sha256) and by
+        name (engine manifest run_id), and to ``model_deployment_artifacts`` by
+        engine sha256. Engine manifest status is history, never a gate.
+        """
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_realtime_products (
+                dataset_id TEXT NOT NULL,
+                product TEXT NOT NULL,
+                recording_id TEXT,
+                camera_id TEXT,
+                declared INTEGER NOT NULL,
+                status TEXT,
+                line_schema_id TEXT,
+                line_schema_version INTEGER,
+                row_count INTEGER,
+                header_rows INTEGER,
+                result_rows INTEGER,
+                no_result_rows INTEGER,
+                failed_rows INTEGER,
+                other_rows INTEGER,
+                first_recording_frame_id INTEGER,
+                last_recording_frame_id INTEGER,
+                validation TEXT,
+                line_validator TEXT,
+                events_path TEXT,
+                events_sha256 TEXT,
+                model_id TEXT,
+                model_schema TEXT,
+                engine_sha256 TEXT,
+                engine_bytes INTEGER,
+                weights_sha256 TEXT,
+                onnx_sha256 TEXT,
+                engine_manifest_sha256 TEXT,
+                engine_manifest_run_id TEXT,
+                engine_manifest_status TEXT,
+                engine_precision TEXT,
+                engine_build_id TEXT,
+                record_sha256 TEXT NOT NULL,
+                updated_utc TEXT,
+                PRIMARY KEY (dataset_id, product)
+            );
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_realtime_products_engine "
+            "ON recording_realtime_products(engine_sha256);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_realtime_products_weights "
+            "ON recording_realtime_products(weights_sha256);"
+        )
+        cur.execute("DROP VIEW IF EXISTS recording_realtime_models;")
+        cur.execute(
+            """
+            CREATE VIEW recording_realtime_models AS
+            SELECT
+                p.dataset_id,
+                p.recording_id,
+                p.camera_id,
+                p.product,
+                p.model_id,
+                p.engine_sha256,
+                p.weights_sha256,
+                p.onnx_sha256,
+                p.engine_precision,
+                p.engine_manifest_status,
+                by_weights.run_id AS training_run_by_weights,
+                by_name.run_id AS training_run_by_name,
+                CASE
+                    WHEN by_weights.run_id IS NULL OR by_name.run_id IS NULL THEN NULL
+                    WHEN by_weights.run_id = by_name.run_id THEN 1
+                    ELSE 0
+                END AS training_joins_agree,
+                artifact.artifact_id AS deployment_artifact_id,
+                artifact.status AS deployment_artifact_status
+            FROM recording_realtime_products p
+            LEFT JOIN training_runs by_weights
+              ON p.weights_sha256 IS NOT NULL AND by_weights.model_sha256 = p.weights_sha256
+            LEFT JOIN training_runs by_name
+              ON p.engine_manifest_run_id IS NOT NULL AND by_name.run_id = p.engine_manifest_run_id
+            LEFT JOIN model_deployment_artifacts artifact
+              ON p.engine_sha256 IS NOT NULL AND artifact.engine_sha256 = p.engine_sha256
+            WHERE p.declared = 1 AND p.status = 'present';
+            """
+        )

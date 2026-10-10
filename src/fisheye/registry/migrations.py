@@ -298,7 +298,92 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
         "_migration_074_recording_producer_context",
     ),
     (75, "recording_run_views", "_migration_075_recording_run_views"),
+    (
+        76,
+        "recording_realtime_products",
+        "_migration_076_recording_realtime_products",
+    ),
 )
+
+
+# Migrations that only add tables, indexes or views, and so leave every existing
+# table's meaning unchanged for code that predates them. When one is applied,
+# the registry records that in schema_version.additive. Code whose latest
+# migration is older than the registry's refuses to write unless every newer
+# applied migration is recorded additive (schema_compatibility_problem). A
+# migration not listed here is treated as non-additive: list it only when that
+# holds.
+ADDITIVE_MIGRATIONS = frozenset({76})
+LATEST_MIGRATION_VERSION = MIGRATION_METHODS[-1][0]
+
+
+def record_schema_version(conn, *, version: int, name: str, applied_utc: str) -> None:
+    """Record an applied migration and whether it is additive.
+
+    The ``additive`` column is added here, when a migration is recorded, never
+    when a registry is opened, so readers of the canonical registry never write
+    it outside the single-writer gateway.
+    """
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(schema_version);")}
+    if "additive" not in columns:
+        conn.execute("ALTER TABLE schema_version ADD COLUMN additive INTEGER;")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version, name, applied_utc, additive) VALUES (?, ?, ?, ?);",
+        (int(version), str(name), applied_utc, 1 if int(version) in ADDITIVE_MIGRATIONS else 0),
+    )
+
+
+def schema_compatibility(conn) -> dict | None:
+    """Why code at LATEST_MIGRATION_VERSION must not write this registry, or None.
+
+    Reads ``schema_version`` only. A registry newer than this code is writable
+    only when every newer applied migration is recorded additive. The result
+    names the registry's and the code's versions and the blocking migrations.
+    """
+
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table';")}
+    if "schema_version" not in tables:
+        return None
+    current = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()[0]
+    if current is None or int(current) <= LATEST_MIGRATION_VERSION:
+        return None
+    problem = {
+        "registry_schema_version": int(current),
+        "code_schema_version": LATEST_MIGRATION_VERSION,
+    }
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(schema_version);")}
+    if "additive" not in columns:
+        return {
+            **problem,
+            "blocking_migrations": [],
+            "message": (
+                f"registry schema {current} is newer than this code ({LATEST_MIGRATION_VERSION}) "
+                "and does not record whether its newer migrations are additive"
+            ),
+        }
+    newer = conn.execute(
+        "SELECT version, name, additive FROM schema_version WHERE version > ? ORDER BY version;",
+        (LATEST_MIGRATION_VERSION,),
+    ).fetchall()
+    blocking = [f"{row[0]} {row[1]}" for row in newer if row[2] != 1]
+    if not blocking:
+        return None
+    return {
+        **problem,
+        "blocking_migrations": blocking,
+        "message": (
+            f"registry schema {current} is newer than this code ({LATEST_MIGRATION_VERSION}) "
+            f"and these newer migrations are not additive: {', '.join(blocking)}"
+        ),
+    }
+
+
+def schema_compatibility_problem(conn) -> str | None:
+    """The message of :func:`schema_compatibility`, or None."""
+
+    problem = schema_compatibility(conn)
+    return None if problem is None else problem["message"]
 
 
 def bind_migrations(
@@ -310,4 +395,12 @@ def bind_migrations(
     ]
 
 
-__all__ = ["MIGRATION_METHODS", "bind_migrations"]
+__all__ = [
+    "ADDITIVE_MIGRATIONS",
+    "LATEST_MIGRATION_VERSION",
+    "MIGRATION_METHODS",
+    "bind_migrations",
+    "record_schema_version",
+    "schema_compatibility",
+    "schema_compatibility_problem",
+]
