@@ -775,8 +775,14 @@ def import_zebrobot_subject_reference(
         # (a legacy or pre-contract H5 can carry ids and subject_count only).
         # Orange is a cross-check when there is a dish to compare.
         if existing.subject.get("dish_uuid") or existing.subject.get("dish_id"):
-            return {"status": "collected", "published": False,
-                    **_cross_check_h5_subject(existing.subject, resolved.metadata),
+            origin = _orange_reference_origin(plan.recording_dir, manifest, reference)
+            checked = _cross_check_h5_subject(
+                existing.subject, resolved.metadata, origin=origin["orange_reference_origin"]
+            )
+            root.attrs["orange_subject_reference_origin"] = origin
+            if "dish_disagreement" in checked:
+                root.attrs["orange_subject_reference_dish_disagreement"] = checked["dish_disagreement"]
+            return {"status": "collected", "published": False, **checked, **origin,
                     **resolved.source}
         return {"status": "collected", "published": False, "cross_checked": None,
                 **resolved.source}
@@ -797,13 +803,89 @@ def import_zebrobot_subject_reference(
             "subject_metadata_run": authority.run_name, **resolved.source}
 
 
-def _cross_check_h5_subject(h5: Mapping[str, Any], orange: Mapping[str, Any]) -> dict[str, Any]:
+ORANGE_REFERENCE_FROM_APP_CONFIG_DEFAULT = "app_config_default"
+# Orange reference versions whose GUI could set only a rig-wide default dish.
+# A later version records per-entry provenance, so every entry must agree again.
+_DEFAULT_PLACEHOLDER_REFERENCE_VERSIONS = frozenset({2})
+# Written by Orange GUI recordings from 3b9a754 on, with the per-camera panel.
+ORANGE_SUBJECT_CONFIRMATION = "subject_confirmation.json"
+
+
+def _orange_reference_origin(
+    recording_dir: Path, manifest: Mapping[str, Any], reference: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Whether Orange's reference for this camera came from its app_config default.
+
+    Orange resolves ``recording.subject_references`` per camera: an entry under
+    ``cameras.<serial>`` wins, otherwise ``default``. Before per-entry
+    provenance (reference v2), the GUI edited only the default, so a default is
+    a rig-wide configuration placeholder, not an observation of this arena.
+    That is proven only from the sealed ``recording_snapshot_start.json``
+    (digest re-checked against the sealed inventory): the loaded app_config has
+    no entry for this camera, its default names the reference's ``dish_id``,
+    and the start snapshot's own reference for the camera equals the manifest's.
+    A sealed ``subject_confirmation.json`` means the operator confirmed each
+    camera's dish, so nothing is a placeholder. Anything else keeps the strict
+    cross-check.
+    """
+
+    from fisheye.shared.acquisition_realtime_products import sealed_parent_files
+
+    unproven = {"orange_reference_origin": "unproven"}
+    if reference.get("schema_version") not in _DEFAULT_PLACEHOLDER_REFERENCE_VERSIONS:
+        return unproven
+    camera = str(manifest.get("camera_id") or "")
+    sealed = sealed_parent_files(manifest) or {}
+    if ORANGE_SUBJECT_CONFIRMATION in sealed:
+        # Orange 3b9a754+: the operator confirmed every camera's dish at start
+        # (a blank camera row deliberately follows the default), so it is an
+        # observation that must agree.
+        return {"orange_reference_origin": "operator_confirmed"}
+    item = sealed.get("recording_snapshot_start.json")
+    if item is None:
+        return unproven
+    path = Path(recording_dir) / item["relative_path"]
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != item["sha256"] or len(data) != item["size_bytes"]:
+        raise ValueError(f"recording_snapshot_start.json differs from the sealed inventory: {path}")
+    snapshot = json.loads(data)
+    session = snapshot.get("session") if isinstance(snapshot.get("session"), Mapping) else {}
+    declared = (session.get("subject_references") or {}).get(camera)
+    if declared is not None and declared != reference:
+        return unproven
+    app_config = (session.get("effective_configuration") or {}).get("app_config") or {}
+    if app_config.get("status") != "loaded":
+        return unproven
+    configured = ((app_config.get("contents") or {}).get("recording") or {}).get("subject_references")
+    if not isinstance(configured, Mapping):
+        return unproven
+    cameras = configured.get("cameras") or {}
+    default = configured.get("default")
+    dish = reference.get("dish") if isinstance(reference.get("dish"), Mapping) else {}
+    if (
+        camera in cameras
+        or not isinstance(default, Mapping)
+        or default.get("dish_id") != dish.get("dish_id")
+    ):
+        return unproven
+    return {
+        "orange_reference_origin": ORANGE_REFERENCE_FROM_APP_CONFIG_DEFAULT,
+        "orange_app_config_sha256": app_config.get("sha256"),
+    }
+
+
+def _cross_check_h5_subject(
+    h5: Mapping[str, Any], orange: Mapping[str, Any], *, origin: str = "unproven"
+) -> dict[str, Any]:
     """Orange's reference against the H5 subject (authoritative for bound sessions).
 
     The dish must match: ``dish_uuid`` when the H5 has one, else the declared
     ``dish_id`` (a Citrus lookup can fail and still record it). Sex and
     genotype must match too, unless MetaZebrobot shows the dish was edited
     since recording (then Orange's intake copy may legitimately differ).
+    A reference proven to be Orange's v2 app_config default is a placeholder:
+    a differing dish is returned as a recorded disagreement, not refused, and
+    its biology is not compared (it describes another dish).
     """
 
     if h5.get("dish_uuid"):
@@ -811,6 +893,17 @@ def _cross_check_h5_subject(h5: Mapping[str, Any], orange: Mapping[str, Any]) ->
     else:
         field = "dish_id"
     if str(h5[field]) != str(orange.get(field)):
+        if origin == ORANGE_REFERENCE_FROM_APP_CONFIG_DEFAULT:
+            return {
+                "cross_checked": field,
+                "dish_disagreement": {
+                    "field": field,
+                    "h5": str(h5[field]),
+                    "orange": None if orange.get(field) is None else str(orange.get(field)),
+                    "orange_dish_id": orange.get("dish_id"),
+                    "resolution": "h5_authoritative_orange_reference_is_app_config_default",
+                },
+            }
         raise ValueError(
             f"zebrobot_dish_mismatch: Orange declared {field} "
             f"{orange.get(field)!r} but the H5 records {h5[field]!r}"

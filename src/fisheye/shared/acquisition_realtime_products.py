@@ -53,7 +53,7 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
-def _sealed_parent_files(manifest: Mapping[str, Any]) -> dict[str, dict] | None:
+def sealed_parent_files(manifest: Mapping[str, Any]) -> dict[str, dict] | None:
     """Source path -> {relative_path, sha256, size_bytes} of this parent's files."""
 
     transfer = manifest.get("source_transfer")
@@ -108,7 +108,7 @@ def build_realtime_products_record(recording_dir: Path, manifest: Mapping[str, A
     recording whose session predates the declaration gets a record that says so.
     """
 
-    sealed = _sealed_parent_files(manifest)
+    sealed = sealed_parent_files(manifest)
     if sealed is None or "recording_session.json" not in sealed:
         return None
     recording_dir = Path(recording_dir)
