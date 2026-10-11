@@ -1,0 +1,302 @@
+{
+  "schema_id": "citrus_palette.unified_h5_admission",
+  "schema_version": 3,
+  "status": "draft_not_production_admitted",
+  "producer_candidate": {
+    "repository": "JohnsonLabJanelia/citrus",
+    "branch": "agent/citrus/start-mode-and-bbox-v2",
+    "commit": "07712fe113db47f002da5835e7b053e406dc6412"
+  },
+  "artifact_profile": "unified_experimental_h5_v1",
+  "versions": {
+    "core": {
+      "schema_id": "citrus.experimental_h5",
+      "schema_version": 1
+    },
+    "correspondence_input": {
+      "schema_id": "citrus.experimental_h5.correspondence_input",
+      "schema_version": 2
+    },
+    "correspondence_receipt": {
+      "schema_id": "citrus.experimental_h5.correspondence_receipt",
+      "schema_version": 2
+    },
+    "acquisition_binding": {
+      "schema_id": "citrus.experimental_h5.acquisition_binding",
+      "schema_version": 1
+    },
+    "optional_pose": {
+      "schema_id": "citrus.pose_observation",
+      "schema_version": 1
+    },
+    "optional_pose_receipt": {
+      "schema_id": "citrus.pose_observation_receipt",
+      "schema_version": 1
+    },
+    "capacity_preflight": {
+      "schema_id": "citrus.experimental_h5.capacity_preflight",
+      "schema_version": 1
+    },
+    "chaser_state": {
+      "schema_id": "citrus.experimental_h5.chaser_state",
+      "schema_version": 2
+    },
+    "live_frame_identity": {
+      "schema_id": "citrus.experimental_h5.live_frame_identity.v2",
+      "schema_version": 2
+    },
+    "live_chaser_identity": {
+      "schema_id": "citrus.experimental_h5.live_chaser_identity.v2",
+      "schema_version": 2
+    },
+    "bounding_boxes": {
+      "schema_id": "citrus.experimental_h5.bounding_boxes",
+      "schema_version": 2
+    }
+  },
+  "digest_encodings": {
+    "core_tables": "core_schema_json_and_packed_le_v1",
+    "generic_datasets": "hdf5_closed_logical_values_v1",
+    "canonical_json": "canonical_json_utf8_sort_keys_compact_v1"
+  },
+  "resource_profile": {
+    "schema_id": "citrus_palette.unified_h5.long_session_resources",
+    "schema_version": 1,
+    "max_dataset_logical_bytes": 1099511627776,
+    "max_dataset_rows": 1099511627776,
+    "max_single_element_bytes": 67108864,
+    "max_json_payload_bytes": 8388608,
+    "max_variable_string_dataset_payload_bytes": 8388608,
+    "max_decoded_chunk_bytes": 67108864,
+    "target_io_buffer_bytes": 1048576,
+    "max_io_buffer_bytes": 67108864
+  },
+  "table_storage": {
+    "layout": "one_rank1_chunked_dataset_per_table",
+    "segmentation": false,
+    "chunk_shape_authority": "per_file_hdf5_dataset_creation_properties",
+    "chunk_shape_fixed_by_schema": false,
+    "allowed_filter_ids": [],
+    "filter_policy": "no_filters_for_fixed_width_tables_in_this_admission_revision",
+    "logical_digests_independent_of_chunk_shape": true,
+    "physical_chunk_digests_producer_supplied": false
+  },
+  "required_operations": {
+    "hashing": "bounded_row_ranges",
+    "copying": "bounded_buffers",
+    "reading": "genuine_row_range_hyperslabs_no_whole_table_then_slice",
+    "capacity_preflight": "required_before_arming",
+    "runtime_capacity_check": "required_before_dataset_extension",
+    "preflight_evidence_path": "/metadata/admission/capacity_preflight_json",
+    "preflight_evidence_location": "same_experimental_h5_not_a_companion",
+    "output_creation": "exclusive_no_overwrite",
+    "post_receipt_h5_mutation": "forbidden"
+  },
+  "delivery": {
+    "collection_relative_path": "recording_observation_bindings/finalized_collection.json",
+    "receipt_relative_path_template": "recording_observation_bindings/receipts/<observation_context_id>.json",
+    "h5_path_authority": "collection.observation_contexts[].citrus_h5.relative_path",
+    "receipt_path_authority": "collection.observation_contexts[].finalized_receipt.relative_path",
+    "internal_receipt_path": "/evidence/integrity/finalization_receipt_json",
+    "palette_storage_policy": "sealed_reference_to_source_h5_not_native_h5_byte_copy",
+    "palette_storage_version": "assigned_by_palette_not_defined_here"
+  },
+  "core_definition_pins": {
+    "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+    "selection": {
+      "key": [
+        "chaser_state",
+        "bounding_boxes"
+      ],
+      "rule": "the file's exact (chaser_state, bounding_boxes) dataset schema_version pair selects exactly one admitted catalog below; every table attribute is validated against that catalog; any other pair, or a catalog not admitted by this revision, is refused",
+      "current_producer_catalog": "bounding_boxes_v2"
+    },
+    "historical_v1": {
+      "catalog_path": "docs/schemas/experimental_h5_core_v1.json",
+      "catalog_file_sha256": "sha256:febb7516ff96f359b6784bf137682abe387b7922270e9637ebc58b369e07f9c1",
+      "catalog_canonical_json_sha256": "sha256:a8bf656a41cd6ccc4d78a1c896fb54c31a5f9fee1787d04861b2ba4d5df301a7",
+      "table_versions": {
+        "chaser_state": 1,
+        "bounding_boxes": 1
+      },
+      "chaser_table": {
+        "schema_id": "citrus.experimental_h5.chaser_state",
+        "schema_version": 1,
+        "definition_canonical_json_sha256": "sha256:0a257c510f57c08a2b308aef1901daf01988760fbca5a321b5419eaa944c9e34"
+      },
+      "bounding_boxes_table": {
+        "schema_id": "citrus.experimental_h5.bounding_boxes",
+        "schema_version": 1,
+        "definition_canonical_json_sha256": "sha256:4fd978728dc265746d8f2b6a4b7657b194769f6d1e28273dfce4e1285c73c1b0"
+      },
+      "admitted_by_this_revision": false
+    },
+    "chaser_v2": {
+      "catalog_path": "docs/schemas/experimental_h5_core_chaser_v2.json",
+      "catalog_file_sha256": "sha256:cb68ab6ecea614030b8f2a3d2096e9122b1efa5156b56ed7a495b3072c70316a",
+      "catalog_canonical_json_sha256": "sha256:cadf30c237c2d00e280554258599fce1ee10c6e7417a1409bb66c945ec72a243",
+      "table_versions": {
+        "chaser_state": 2,
+        "bounding_boxes": 1
+      },
+      "chaser_table": {
+        "schema_id": "citrus.experimental_h5.chaser_state",
+        "schema_version": 2,
+        "definition_canonical_json_sha256": "sha256:c6c6e41a00efc770fd18bb410a6126ab00c09308ad4affbb6303a36f53138a3c"
+      },
+      "bounding_boxes_table": {
+        "schema_id": "citrus.experimental_h5.bounding_boxes",
+        "schema_version": 1,
+        "definition_canonical_json_sha256": "sha256:4fd978728dc265746d8f2b6a4b7657b194769f6d1e28273dfce4e1285c73c1b0"
+      },
+      "admitted_by_this_revision": true,
+      "bounding_boxes_row_rule": "every_received_shaman_v2_update; with /observations/pose present each box appears twice (detections update and same-frame pose-enriched update); consumers deduplicate on (payload_frame_id, payload_camera_id, box_index_in_payload) keeping the later payload_timestamp_ns_monotonic"
+    },
+    "bounding_boxes_v2": {
+      "catalog_path": "docs/schemas/experimental_h5_core_bounding_boxes_v2.json",
+      "catalog_file_sha256": "sha256:55f94f83e6f43824488161b7238846b2233933be871ac8044bef04d3fa6df4f8",
+      "catalog_canonical_json_sha256": "sha256:3349cba786f7350317d11e6d3f69c345bfaaf1a543250ba1b5d7a2fbe82e45e1",
+      "table_versions": {
+        "chaser_state": 2,
+        "bounding_boxes": 2
+      },
+      "chaser_table": {
+        "schema_id": "citrus.experimental_h5.chaser_state",
+        "schema_version": 2,
+        "definition_canonical_json_sha256": "sha256:c6c6e41a00efc770fd18bb410a6126ab00c09308ad4affbb6303a36f53138a3c"
+      },
+      "bounding_boxes_table": {
+        "schema_id": "citrus.experimental_h5.bounding_boxes",
+        "schema_version": 2,
+        "definition_canonical_json_sha256": "sha256:29f67ef95815229003bbfcb7914e0584dca15860b8de708641ef465bc3eb9772"
+      },
+      "admitted_by_this_revision": true,
+      "bounding_boxes_row_rule": "one_row_per_source_frame_per_object_per_camera; layout and fields identical to v1; Citrus docs/bounding_boxes_table_v2_2026-10-11.md"
+    }
+  },
+  "correspondence_definition_pins": {
+    "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+    "catalog": {
+      "path": "docs/schemas/experimental_h5_correspondence_tables_v2.json",
+      "file_sha256": "sha256:cb3ac574c76750c23de730129c4a32371328ffb34d792b1cfab164b7201ba1ea",
+      "canonical_json_sha256": "sha256:ea7051ceddaa39cc56cd42a8f0d9e3c6dcecf4ce4f842c789f223fc49ce62ee9",
+      "tables": [
+        {
+          "schema_id": "citrus.experimental_h5.live_frame_identity.v2",
+          "schema_version": 2,
+          "path": "/correspondence/acquisition/live_frame_identities",
+          "definition_canonical_json_sha256": "sha256:63d6736a91a77b52bcade1dbfa2eb344a08849b657a74ce8f082c2e85b1fd9f0"
+        },
+        {
+          "schema_id": "citrus.experimental_h5.live_chaser_identity.v2",
+          "schema_version": 2,
+          "path": "/correspondence/acquisition/live_chaser_identities",
+          "definition_canonical_json_sha256": "sha256:a466f73341bbc90fe86baa11d1eccf3e78c10d8612203ef9f6934497355f1c49"
+        }
+      ]
+    },
+    "input_schema": {
+      "path": "docs/schemas/experimental_h5_correspondence_input_v2.schema.json",
+      "file_sha256": "sha256:a33e06819e966b7273015bfffe4aa0d01f24a04fb9ffac69abb29ed5c76329a3",
+      "canonical_json_sha256": "sha256:dd2c1f297046b76582078216e96f4ee36bc5aab7b3d96a0c07de2173544f8e23",
+      "schema_id": "citrus.experimental_h5.correspondence_input",
+      "schema_version": 2,
+      "h5_path": "/correspondence/acquisition/raw_live_identity_provenance_json"
+    },
+    "receipt_schema": {
+      "path": "docs/schemas/experimental_h5_correspondence_receipt_v2.schema.json",
+      "file_sha256": "sha256:8d2a414f46f6d6263f2609c55e15add9d7a2b61ad98349cf1ac3aef598b8d4e8",
+      "canonical_json_sha256": "sha256:6f8a5cf2370b7172edc133c9e3c69af183c5a17299b5f459fe8549f2aad90139",
+      "schema_id": "citrus.experimental_h5.correspondence_receipt",
+      "schema_version": 2,
+      "h5_path": "/correspondence/receipt_json"
+    }
+  },
+  "correspondence_scope": {
+    "correspondence_schema_version": 2,
+    "emitted_source_tables": [
+      "/correspondence/frames/sources",
+      "/correspondence/chaser/sources"
+    ],
+    "chaser_sources_presence": "conditional_on_chaser_rows",
+    "component_current_source_join": {
+      "state_tables": [
+        "/components/independent_motion_grid/states",
+        "/components/moving_grating/states"
+      ],
+      "state_key": "stimulus_frame_num",
+      "source_table": "/correspondence/frames/sources",
+      "source_key": "stimulus_frame_num",
+      "join": "exact_integer_equality",
+      "matches_required_per_state_row": 1,
+      "value_field": "source_acquisition_frame_index",
+      "validity_field": "source_acquisition_frame_valid",
+      "validity_required_value": 1,
+      "many_state_rows_per_stimulus_frame": true,
+      "repeated_acquisition_index_across_stimulus_frames": true,
+      "missing_or_invalid_source": "no_verified_correspondence_do_not_substitute_zero",
+      "per_component_source_table": "not_emitted_or_required",
+      "held_target_correspondence": "not_defined",
+      "meaning": "current_acquisition_source_for_stimulus_update_not_prior_reactive_trigger_or_physical_presentation_time",
+      "consumer_validation": "validate_component_definition_and_frame_key_join_in_addition_to_correspondence_receipt"
+    },
+    "receipt_scope": "canonical_frames_and_chaser_only_not_other_component_state_row_joins"
+  },
+  "capacity_preflight_definition_pin": {
+    "path": "docs/schemas/experimental_h5_capacity_preflight_v1.schema.json",
+    "file_sha256": "sha256:ba8333a35526dc1fc655734d938b14a816fd143d2c5eb395ad17065f79718a54",
+    "canonical_json_sha256": "sha256:31507f39932aa9bcd803e6cfa7214f4581782ddaabac261ef6a3f37a129fae52",
+    "schema_id": "citrus.experimental_h5.capacity_preflight",
+    "schema_version": 1,
+    "h5_path": "/metadata/admission/capacity_preflight_json",
+    "applies_to_catalog": "bounding_boxes_v2",
+    "authority": "admitted_catalog_bindings binds one preflight schema per admitted catalog; this is the current producer's"
+  },
+  "producer_policy_pin": {
+    "path": "citrus-palette/producer_policies/unified_h5_admission_b2af7764.json",
+    "file_sha256": "sha256:b2af7764c7f27f6295007ba3049dcf8a35d0f84c5801f8a1ff56150c7f9e7fc1",
+    "canonical_json_sha256": "sha256:7c4740418291977965816a9be014f2cbf470e5527811eea60854e242638f3855",
+    "repository": "jmdelahanty/agent-contracts",
+    "source_commit": "pending_merge_of_this_revision",
+    "h5_evidence_path": "/metadata/admission/capacity_preflight_json",
+    "h5_digest_field": "admission_policy_sha256",
+    "h5_digest_representation": "lowercase_sha256_hex_without_prefix",
+    "relationship": "exact_frozen_producer_policy_not_the_hash_of_this_consumer_definition_pin_document",
+    "compatibility": "same_resource_storage_operations_delivery_and_digest_encodings; existing_versions_unchanged; adds_bounding_boxes_v2_catalog_and_table_version_keyed_catalog_selection; chaser_v2_catalog_files_stay_admitted",
+    "applies_to_catalog": "bounding_boxes_v2",
+    "authority": "admitted_catalog_bindings binds one policy per admitted catalog; this is the current producer's"
+  },
+  "admitted_catalog_bindings": {
+    "rule": "the H5's /metadata/admission/capacity_preflight_json admission_policy_sha256 (lowercase hex, no prefix) must equal the producer_policy file_sha256 bound to the catalog that the file's (chaser_state, bounding_boxes) table versions select, and that preflight JSON must validate against the same binding's capacity_preflight_schema; a policy digest, schema or catalog from different bindings is refused",
+    "absent_tables": "a selection-key table that is absent from the file (chaser_state is absent in every non-chaser recording, including the 2026-10-09 sessions) does not constrain the choice: the present key tables' schema_versions together with the declared admission_policy_sha256 must select exactly one admitted binding, otherwise the file is refused; (absent, bounding_boxes 1) with d544b081 selects chaser_v2, (absent, bounding_boxes 2) with b2af7764 selects bounding_boxes_v2, and a file with neither key table is decided by its policy digest alone; this clause lives here rather than in core_definition_pins.selection so the frozen producer policy is unchanged",
+    "chaser_v2": {
+      "issued_by_revision": 2,
+      "citrus_commit": "07712fe113db47f002da5835e7b053e406dc6412",
+      "producer_policy": {
+        "path": "citrus-palette/producer_policies/unified_h5_admission_d544b081.json",
+        "file_sha256": "sha256:d544b0814006360b11b02cd9d171eefbddae7cc9cc41ad57470bbd240bc83cb9",
+        "canonical_json_sha256": "sha256:cb8714b9a0743b4ac443b0c1905d7d1f2014f224fcd9d3b5df2bf36617f62c13"
+      },
+      "capacity_preflight_schema": {
+        "path": "docs/schemas/experimental_h5_capacity_preflight_v1.schema.json",
+        "file_sha256": "sha256:d5d7ebf5249de35ce7234ddfec3c7cb51b57ac3b6fdcb25bf75724f25223d068",
+        "canonical_json_sha256": "sha256:b811754e7c5497e24c60319fd7e63398ff63038b0ac7013e15a379e6197f9104"
+      },
+      "note": "every H5 produced before Citrus 4d9d04d, including the three delivered 2026-10-09 sessions, declares this policy"
+    },
+    "bounding_boxes_v2": {
+      "issued_by_revision": 3,
+      "citrus_commit": "4d9d04d0d001cee9d46b2610a87089b4dd46a8ca",
+      "producer_policy": {
+        "path": "citrus-palette/producer_policies/unified_h5_admission_b2af7764.json",
+        "file_sha256": "sha256:b2af7764c7f27f6295007ba3049dcf8a35d0f84c5801f8a1ff56150c7f9e7fc1",
+        "canonical_json_sha256": "sha256:7c4740418291977965816a9be014f2cbf470e5527811eea60854e242638f3855"
+      },
+      "capacity_preflight_schema": {
+        "path": "docs/schemas/experimental_h5_capacity_preflight_v1.schema.json",
+        "file_sha256": "sha256:ba8333a35526dc1fc655734d938b14a816fd143d2c5eb395ad17065f79718a54",
+        "canonical_json_sha256": "sha256:31507f39932aa9bcd803e6cfa7214f4581782ddaabac261ef6a3f37a129fae52"
+      }
+    }
+  }
+}

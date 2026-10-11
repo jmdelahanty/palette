@@ -24,6 +24,7 @@ from .hdf5_types import dataset_bytes, iter_blocks
 from .integrity import internal_nodes
 from .schema import (
     CHASER_STATES,
+    admitted_binding,
     contract,
     describe_internal_dataset,
     describe_table,
@@ -215,14 +216,12 @@ def validate_capacity_preflight(h5) -> None:
     """
 
     document = read_json(h5, PREFLIGHT, canonical=True)
-    _schema_check(
-        document, "experimental_h5_capacity_preflight_v1.schema.json", "capacity_preflight"
-    )
-    pin = contract("unified_h5_admission_v2.json")["producer_policy_pin"]["file_sha256"]
-    require(
-        "sha256:" + document["admission_policy_sha256"] == pin,
-        "capacity_preflight_producer_policy",
-    )
+    declared = document.get("admission_policy_sha256")
+    require(isinstance(declared, str), "capacity_preflight_producer_policy")
+    # Admission revision 3: the file's table versions and declared policy select
+    # one admitted catalog binding, whose own preflight schema then applies.
+    binding = admitted_binding(h5, declared)
+    _schema_check(document, binding["preflight_schema"], "capacity_preflight")
 
 
 def _validate_v2(h5, binding, total, inputs) -> CorrespondenceSummary:
