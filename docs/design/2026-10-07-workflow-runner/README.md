@@ -246,7 +246,8 @@ Consequences:
   - `probe-import` output, and therefore the import sentinel, carries `producer_git_sha`;
   - `register_delivery` runs from the ws1 deployment at that commit (`~/.palette/deployments/ops-<sha>`), not from the current pin;
   - discovery and new imports always use the current pin;
-  - moving the pin is safe at any time. An older deployment is retired only when discovery shows no delivery whose `producer_git_sha` needs it;
+  - moving the pin is safe at any time, except when the target adds registry migrations (2026-10-10, below). An older deployment is retired only when discovery shows no delivery whose `producer_git_sha` needs it;
+  - **A move that adds registry migrations must drain first.** The first registration by new code migrates the live registry. Deliveries imported by older code would then register through code that predates the migration: the gateway's schema guard refuses non-additive migrations, and an additive one silently skips the new projections. `palette_flow.sh pin-check intake --config … --to-ops … --to-lsf …` refuses (exit 65) while any delivery imported by older code is still unregistered, counting both runner sentinels and cron-path imports from discovery. It also refuses ws1 and LSF targets that are at different commits;
   - if that deployment is missing, the rule fails as an operator incident. The runner never creates or moves deployments on its own.
 
 ## 6. First slice: the intake DAG
@@ -398,6 +399,7 @@ Still open:
 
 ## Decision log
 
+- 2026-10-10: pin moves that add registry migrations drain first, enforced by `pin-check`. This follows palette-33's finding that older code works silently against a migrated registry but misses new projections, plus the schema guard in #344/#346 that refuses non-additive migrations.
 - 2026-10-09: retry cap and isolated synthetic trials (Jeremy approved both).
   - After `max_consecutive_failures` (default 3) consecutive retryable failures of a step, the runner writes a `retry_cap` hold (`refused.json`) instead of retrying every tick.
   - What counts as a failure: exit 1, a lost LSF job, a submission error, or a missing producer-commit deployment. Exit 75 ("held by another job") does not count, and success resets the count.

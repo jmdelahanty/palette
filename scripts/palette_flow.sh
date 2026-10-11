@@ -4,13 +4,14 @@
 #   scripts/palette_flow.sh run intake --config RUNNER.json [snakemake args...]
 #   scripts/palette_flow.sh dry-run intake --config RUNNER.json
 #   scripts/palette_flow.sh status intake --config RUNNER.json
+#   scripts/palette_flow.sh pin-check intake --config RUNNER.json --to-ops OPS --to-lsf LSF
 #
 # Snakemake comes from the separate palette-flow conda env (ws1 only); all
 # Palette code runs through the config's pinned ops deployment. One controller
 # per workflow: a non-blocking flock makes overlapping cron ticks exit 0.
 set -euo pipefail
 
-usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 [[ $# -ge 2 ]] || usage
 action="$1"; workflow="$2"; shift 2
 [[ "$workflow" == "intake" ]] || { echo "unknown workflow: $workflow" >&2; exit 2; }
@@ -25,6 +26,11 @@ ops_py="$("$repo/scripts/py" -c 'import json,sys; print(json.load(open(sys.argv[
 case "$action" in
   status)
     exec "$ops_py" -m fisheye.flow.intake status --config "$config"
+    ;;
+  pin-check)
+    # Before moving the runner to another deployment: refuses (exit 65) while
+    # imported deliveries still need older code to register (§5.4).
+    exec "$ops_py" -m fisheye.flow.intake pin-check --config "$config" "$@"
     ;;
   run|dry-run)
     mkdir -p "$flow_root/controller"
