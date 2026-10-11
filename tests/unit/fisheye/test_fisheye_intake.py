@@ -236,9 +236,26 @@ def test_end_to_end_gate_job_script_register_probes_and_replay(tmp_path: Path, m
     assert target["producer_git_sha"] == GIT_SHA  # read cheaply from the receipt files
     assert sorted(imported.zarr_paths) == sorted(status["zarr_paths"])
     rows_before = _rows(registry)
+    # One live import verification per registration run: the register
+    # probes before and after publication reuse it inside the claim.
+    import fisheye.intake.probes as probes_module
+    import fisheye.intake.registration as registration_module
+
+    real_probe_import = probes_module.probe_import
+    import_probes = []
+
+    def counted_probe_import(*args, **kwargs):
+        import_probes.append(args)
+        return real_probe_import(*args, **kwargs)
+
+    monkeypatch.setattr(probes_module, "probe_import", counted_probe_import)
+    monkeypatch.setattr(registration_module, "probe_import", counted_probe_import)
     registered = register_delivery(
         sha, writer=_writer(tmp_path, registry), destination_root=destination, allow_synthetic=True
     )
+    assert len(import_probes) == 1
+    monkeypatch.setattr(probes_module, "probe_import", real_probe_import)
+    monkeypatch.setattr(registration_module, "probe_import", real_probe_import)
     assert registered.verdict and len(registered.bindings) == 2
     assert _rows(registry)["recording_import_receipt_bindings"] == (
         rows_before["recording_import_receipt_bindings"] + 2
@@ -246,6 +263,11 @@ def test_end_to_end_gate_job_script_register_probes_and_replay(tmp_path: Path, m
     [backup] = (tmp_path / "registry" / ".palette-registry-backups").iterdir()  # one publication
     assert ".before-recording-imports-" in backup.name
     assert probe_register(sha, destination_root=destination, registry=registry) == registered
+    assert probe_register(
+        sha, destination_root=destination, registry=registry, imported=imported
+    ) == registered
+    with pytest.raises(ValueError, match="not this delivery's import probe"):
+        probe_register(sha, destination_root=destination, registry=registry, imported=registered)
     assert discover(tmp_path / "staging", destination, registry=registry).targets == ()
 
     # 4. Replay every step: no change, no duplicate rows, identical digests.
