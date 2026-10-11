@@ -113,3 +113,19 @@ def test_the_old_policy_with_bounding_boxes_v2_is_refused(tmp_path):
         UnifiedH5ContractError, match="capacity_preflight_producer_policy"
     ):
         validate_capacity_preflight(h5)
+
+
+def test_a_present_core_table_must_be_declared(tmp_path):
+    path = Path(shutil.copy(FIXTURES / "bounding_boxes_v2_capacity_pose_off.h5", tmp_path / "undeclared.h5"))
+    with h5py.File(path, "r+") as h5:
+        document = json.loads(h5[PREFLIGHT][()])
+        document["tables"] = [t for t in document["tables"] if t["path"] != "/events/records"]
+        del h5[PREFLIGHT]
+        h5.create_dataset(
+            PREFLIGHT, data=json.dumps(document, sort_keys=True, separators=(",", ":")),
+            dtype=h5py.string_dtype("utf-8"),
+        )
+    with h5py.File(path, "r") as h5, pytest.raises(
+        UnifiedH5ContractError, match="declared_core_table_mismatch:/events/records"
+    ):
+        validate_capacity_preflight(h5)

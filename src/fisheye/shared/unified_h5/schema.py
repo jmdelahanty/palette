@@ -36,7 +36,7 @@ CONTRACT_HASHES = {
     "experimental_h5_correspondence_receipt_v2.schema.json": "8d2a414f46f6d6263f2609c55e15add9d7a2b61ad98349cf1ac3aef598b8d4e8",
     "experimental_h5_capacity_preflight_v1.schema.json": "d5d7ebf5249de35ce7234ddfec3c7cb51b57ac3b6fdcb25bf75724f25223d068",
     # Admission revision 3 (bounding_boxes v2, agent-contracts PR 73).
-    "unified_h5_admission_v3.json": "b356ef665990b20f1942c18fbf3362f3423c2ccf25bb91ac766bcbbe430d1c70",
+    "unified_h5_admission_v3.json": "c32282b68dc5d0057abe3b4144df27a19afbc69f4a920a64aabd09db6b8647b0",
     "unified_h5_producer_policy_b2af7764.json": "b2af7764c7f27f6295007ba3049dcf8a35d0f84c5801f8a1ff56150c7f9e7fc1",
     "experimental_h5_core_bounding_boxes_v2.json": "55f94f83e6f43824488161b7238846b2233933be871ac8044bef04d3fa6df4f8",
     # Citrus 4d9d04d docs/schemas/experimental_h5_capacity_preflight_v1.schema.json,
@@ -99,7 +99,28 @@ def admitted_binding(h5, declared_policy_sha256: str) -> dict:
     binding = bindings[matches[0]]
     schema_sha = binding["capacity_preflight_schema"]["file_sha256"].removeprefix("sha256:")
     (schema_name,) = [name for name, digest in CONTRACT_HASHES.items() if digest == schema_sha]
-    return {"catalog": matches[0], "preflight_schema": schema_name, **binding}
+    catalog_file = admission["core_definition_pins"][matches[0]]["catalog_path"].rsplit("/", 1)[-1]
+    return {
+        "catalog": matches[0],
+        "catalog_file": catalog_file,
+        "preflight_schema": schema_name,
+        **binding,
+    }
+
+
+def require_declared_core_tables(h5, declared_paths, catalog_file: str) -> None:
+    """The selected catalog's literal tables are present iff the preflight declares them.
+
+    Templated catalog paths (``/correspondence/{component}/sources``, enums) and
+    non-core tables follow their own contracts (admission revision 3,
+    ``admitted_catalog_bindings.declared_tables``).
+    """
+    declared = set(declared_paths)
+    for table in contract(catalog_file)["tables"]:
+        path = table["path"]
+        if "{" in path:
+            continue
+        require((path in declared) == (path in h5), f"declared_core_table_mismatch:{path}")
 CORRESPONDENCE_CATALOG = "experimental_h5_correspondence_tables_v2.json"
 
 

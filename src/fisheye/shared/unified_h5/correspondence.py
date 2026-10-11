@@ -25,6 +25,7 @@ from .integrity import internal_nodes
 from .schema import (
     CHASER_STATES,
     admitted_binding,
+    require_declared_core_tables,
     contract,
     describe_internal_dataset,
     describe_table,
@@ -222,6 +223,9 @@ def validate_capacity_preflight(h5) -> None:
     # one admitted catalog binding, whose own preflight schema then applies.
     binding = admitted_binding(h5, declared)
     _schema_check(document, binding["preflight_schema"], "capacity_preflight")
+    require_declared_core_tables(
+        h5, (table["path"] for table in document["tables"]), binding["catalog_file"]
+    )
 
 
 def _validate_v2(h5, binding, total, inputs) -> CorrespondenceSummary:

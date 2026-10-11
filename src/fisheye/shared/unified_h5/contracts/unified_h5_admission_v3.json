@@ -268,7 +268,17 @@
   },
   "admitted_catalog_bindings": {
     "rule": "the H5's /metadata/admission/capacity_preflight_json admission_policy_sha256 (lowercase hex, no prefix) must equal the producer_policy file_sha256 bound to the catalog that the file's (chaser_state, bounding_boxes) table versions select, and that preflight JSON must validate against the same binding's capacity_preflight_schema; a policy digest, schema or catalog from different bindings is refused",
-    "absent_tables": "a selection-key table that is absent from the file (chaser_state is absent in every non-chaser recording, including the 2026-10-09 sessions) does not constrain the choice: the present key tables' schema_versions together with the declared admission_policy_sha256 must select exactly one admitted binding, otherwise the file is refused; (absent, bounding_boxes 1) with d544b081 selects chaser_v2, (absent, bounding_boxes 2) with b2af7764 selects bounding_boxes_v2, and a file with neither key table is decided by its policy digest alone; this clause lives here rather than in core_definition_pins.selection so the frozen producer policy is unchanged",
+    "declared_tables": {
+      "declared_by": "/metadata/admission/capacity_preflight_json tables[].path",
+      "rule": "the protocol declares the core table set: Citrus derives it from the protocol steps (src/logging/experimental_h5_selected_catalog.h SelectedCoreComponents) and seals it, with the correspondence and pose tables, in the capacity preflight that every bound recording carries; for the tables of the selected core catalog, a declared table that is absent, or a present core table that is not declared, is refused; a selection-key table that is not declared (chaser_state in every non-chaser protocol, the 2026-10-09 sessions included) does not constrain the choice; the declared key tables' schema_versions together with the declared admission_policy_sha256 must select exactly one admitted binding, otherwise the file is refused; (chaser undeclared, bounding_boxes 1) with d544b081 selects chaser_v2, (chaser undeclared, bounding_boxes 2) with b2af7764 selects bounding_boxes_v2; this clause lives here rather than in core_definition_pins.selection so the frozen producer policy is unchanged",
+      "non_core_declared_tables": {
+        "/correspondence/frames/sources": "always present when declared (core catalog table)",
+        "/correspondence/acquisition/live_frame_identities": "correspondence_definition_pins; present when declared",
+        "/correspondence/acquisition/live_chaser_identities": "correspondence_definition_pins; present when declared (may be empty)",
+        "/correspondence/chaser/sources": "declared by the preflight in every protocol but conditional_on_chaser_rows (correspondence_scope.chaser_sources_presence): absent in every non-chaser recording, the 2026-10-09 sessions included; its absence is not a refusal when chaser_state is undeclared",
+        "/observations/pose/*": "governed by citrus-pose-observation-v1: present iff pose_observations is declared in component_outcomes"
+      }
+    },
     "chaser_v2": {
       "issued_by_revision": 2,
       "citrus_commit": "07712fe113db47f002da5835e7b053e406dc6412",
