@@ -358,6 +358,26 @@ def build_transfer_organization_plan(
         receipt_by_camera[camera] = receipt
         producer_context[camera] = dict(metadata)
 
+    # Sealer 3.1.0 (snapshot v3): receipt-v2-declared Citrus artifacts, such as
+    # the stimulus video, belong to the camera whose H5 shares their Citrus
+    # session (the sealer requires citrus/<citrus_session_uuid>_<protocol>.h5).
+    for row in current.snapshot.get("citrus_artifacts", []):
+        relative = row["path"]
+        owners = [
+            camera
+            for camera, h5 in h5_by_camera.items()
+            if h5.startswith(f"citrus/{row['citrus_session_uuid']}_")
+        ]
+        require(
+            len(owners) == 1,
+            f"Citrus artifact has no single H5 camera owner: {relative}",
+        )
+        owner = camera_owners.setdefault(relative, (owners[0], "camera_citrus_artifact"))
+        require(
+            owner == (owners[0], "camera_citrus_artifact"),
+            f"Citrus artifact has conflicting ownership: {relative}",
+        )
+
     # Orange's realtime-products declaration (2026-10-08 on) names each camera's
     # own event logs, perf and diagnostic CSVs; they go only to that camera.
     for camera, relative in _declared_realtime_product_files(
