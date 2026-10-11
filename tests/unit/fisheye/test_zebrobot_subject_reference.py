@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -387,3 +388,121 @@ def test_h5_dish_record_is_kept_over_orange(tmp_path):
     assert result["published"] is False and result["cross_checked"] == "dish_uuid"
     root = zarr.open_group(str(plan.zarr_path), mode="r")
     assert resolve_subject_metadata(root, allow_legacy=False).run_name == h5["subject_metadata_run"]
+
+
+H5_OTHER_DISH = {"dish_id": "19220_2", "dish_uuid": "11111111-1111-4111-8111-111111111111",
+                 "subject_count": 1}
+
+
+def _with_start_snapshot(plan, reference, *, configured, tamper=False):
+    """Seal a recording_snapshot_start.json into the parent's transfer mapping."""
+
+    snapshot = {
+        "session": {
+            "subject_references": {"CAM-1": reference},
+            "effective_configuration": {"app_config": {
+                "status": "loaded", "path": "/rig/app/default.json", "sha256": "a" * 64,
+                "size_bytes": 1, "error": None,
+                "contents": {"recording": {"subject_references": configured}},
+            }},
+        }
+    }
+    relative = "raw/acquisition/recording_snapshot_start.json"
+    path = plan.recording_dir / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(snapshot).encode()
+    path.write_bytes(data)
+    sealed_sha = hashlib.sha256(data).hexdigest()
+    if tamper:
+        path.write_bytes(data + b" ")
+    manifest_path = plan.recording_dir / "recording_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["source_transfer"] = {"source_to_parent_files": [{
+        "relative_path": relative,
+        "source": {"path": "recording_snapshot_start.json", "sha256": sealed_sha,
+                   "size_bytes": len(data)},
+    }]}
+    manifest_path.write_text(json.dumps(manifest))
+
+
+def _h5_dish_recording(tmp_path, reference):
+    importer, plan = _recording(tmp_path, reference)
+    root = zarr.open_group(str(plan.zarr_path), mode="r+")
+    publish_subject_metadata(root, H5_OTHER_DISH, source_artifact={"kind": "test_h5"})
+    return importer, plan
+
+
+DEFAULT_ONLY = {"schema_version": 1, "default": {"dish_id": "19220_1", "subject_count": 1}}
+
+
+def test_v2_app_config_default_dish_disagreement_is_recorded_not_refused(tmp_path):
+    importer, plan = _h5_dish_recording(tmp_path, _v2())
+    _with_start_snapshot(plan, _v2(), configured=DEFAULT_ONLY)
+    result = importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+    assert result["published"] is False
+    assert result["orange_reference_origin"] == "app_config_default"
+    disagreement = result["dish_disagreement"]
+    assert disagreement["h5"] == H5_OTHER_DISH["dish_uuid"] and disagreement["orange"] == UUID
+    attrs = zarr.open_group(str(plan.zarr_path), mode="r").attrs
+    assert attrs["orange_subject_reference_dish_disagreement"] == disagreement
+    assert attrs["orange_subject_reference_origin"]["orange_app_config_sha256"] == "a" * 64
+    # The H5 record stays the subject authority.
+    root = zarr.open_group(str(plan.zarr_path), mode="r")
+    assert resolve_subject_metadata(root).subject["dish_uuid"] == H5_OTHER_DISH["dish_uuid"]
+
+
+def test_v2_app_config_default_that_agrees_records_no_disagreement(tmp_path):
+    importer, plan = _recording(tmp_path, _v2())
+    root = zarr.open_group(str(plan.zarr_path), mode="r+")
+    publish_subject_metadata(root, {"dish_uuid": UUID, "subject_count": 1},
+                             source_artifact={"kind": "test_h5"})
+    _with_start_snapshot(plan, _v2(), configured=DEFAULT_ONLY)
+    result = importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+    assert result["cross_checked"] == "dish_uuid" and "dish_disagreement" not in result
+    assert "orange_subject_reference_dish_disagreement" not in zarr.open_group(
+        str(plan.zarr_path), mode="r").attrs
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "per_camera_entry",      # an operator entry for this camera is an observation
+        "v1_reference",          # only v2 had the default-only GUI
+        "default_names_other",   # the default does not explain the reference
+        "snapshot_reference_differs",
+        "config_not_loaded",
+        "no_start_snapshot",
+    ],
+)
+def test_dish_disagreement_still_refuses_unless_default_is_proven(tmp_path, case):
+    reference = COLLECTED if case == "v1_reference" else _v2()
+    importer, plan = _h5_dish_recording(tmp_path, reference)
+    configured = copy.deepcopy(DEFAULT_ONLY)
+    snapshot_reference = reference
+    if case == "per_camera_entry":
+        configured["cameras"] = {"CAM-1": {"dish_id": "19220_1", "subject_count": 1}}
+    elif case == "default_names_other":
+        configured["default"]["dish_id"] = "19220_9"
+    elif case == "snapshot_reference_differs":
+        snapshot_reference = {**reference, "subject_count": 2}
+    if case != "no_start_snapshot":
+        _with_start_snapshot(plan, snapshot_reference, configured=configured)
+    if case == "config_not_loaded":
+        manifest = json.loads((plan.recording_dir / "recording_manifest.json").read_text())
+        item = manifest["source_transfer"]["source_to_parent_files"][0]
+        path = plan.recording_dir / item["relative_path"]
+        snapshot = json.loads(path.read_text())
+        snapshot["session"]["effective_configuration"]["app_config"]["status"] = "missing"
+        data = json.dumps(snapshot).encode()
+        path.write_bytes(data)
+        item["source"].update(sha256=hashlib.sha256(data).hexdigest(), size_bytes=len(data))
+        (plan.recording_dir / "recording_manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="zebrobot_dish_mismatch"):
+        importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+
+
+def test_a_start_snapshot_that_differs_from_the_seal_refuses(tmp_path):
+    importer, plan = _h5_dish_recording(tmp_path, _v2())
+    _with_start_snapshot(plan, _v2(), configured=DEFAULT_ONLY, tamper=True)
+    with pytest.raises(ValueError, match="differs from the sealed inventory"):
+        importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
