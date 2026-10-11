@@ -472,6 +472,7 @@ def test_v2_app_config_default_that_agrees_records_no_disagreement(tmp_path):
         "snapshot_reference_differs",
         "config_not_loaded",
         "no_start_snapshot",
+        "operator_confirmed",    # Orange 3b9a754+ seals subject_confirmation.json
     ],
 )
 def test_dish_disagreement_still_refuses_unless_default_is_proven(tmp_path, case):
@@ -487,6 +488,14 @@ def test_dish_disagreement_still_refuses_unless_default_is_proven(tmp_path, case
         snapshot_reference = {**reference, "subject_count": 2}
     if case != "no_start_snapshot":
         _with_start_snapshot(plan, snapshot_reference, configured=configured)
+    if case == "operator_confirmed":
+        manifest_path = plan.recording_dir / "recording_manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["source_transfer"]["source_to_parent_files"].append({
+            "relative_path": "raw/acquisition/subject_confirmation.json",
+            "source": {"path": "subject_confirmation.json", "sha256": "b" * 64, "size_bytes": 1},
+        })
+        manifest_path.write_text(json.dumps(manifest))
     if case == "config_not_loaded":
         manifest = json.loads((plan.recording_dir / "recording_manifest.json").read_text())
         item = manifest["source_transfer"]["source_to_parent_files"][0]

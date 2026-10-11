@@ -807,6 +807,8 @@ ORANGE_REFERENCE_FROM_APP_CONFIG_DEFAULT = "app_config_default"
 # Orange reference versions whose GUI could set only a rig-wide default dish.
 # A later version records per-entry provenance, so every entry must agree again.
 _DEFAULT_PLACEHOLDER_REFERENCE_VERSIONS = frozenset({2})
+# Written by Orange GUI recordings from 3b9a754 on, with the per-camera panel.
+ORANGE_SUBJECT_CONFIRMATION = "subject_confirmation.json"
 
 
 def _orange_reference_origin(
@@ -822,7 +824,9 @@ def _orange_reference_origin(
     (digest re-checked against the sealed inventory): the loaded app_config has
     no entry for this camera, its default names the reference's ``dish_id``,
     and the start snapshot's own reference for the camera equals the manifest's.
-    Anything else is ``unproven`` and keeps the strict cross-check.
+    A sealed ``subject_confirmation.json`` means the operator confirmed each
+    camera's dish, so nothing is a placeholder. Anything else keeps the strict
+    cross-check.
     """
 
     from fisheye.shared.acquisition_realtime_products import sealed_parent_files
@@ -832,6 +836,11 @@ def _orange_reference_origin(
         return unproven
     camera = str(manifest.get("camera_id") or "")
     sealed = sealed_parent_files(manifest) or {}
+    if ORANGE_SUBJECT_CONFIRMATION in sealed:
+        # Orange 3b9a754+: the operator confirmed every camera's dish at start
+        # (a blank camera row deliberately follows the default), so it is an
+        # observation that must agree.
+        return {"orange_reference_origin": "operator_confirmed"}
     item = sealed.get("recording_snapshot_start.json")
     if item is None:
         return unproven
