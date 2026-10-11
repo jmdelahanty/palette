@@ -27,6 +27,7 @@ from .common import (
     uint64,
 )
 from .hdf5_types import dataset_bytes
+from .pose import COMPONENT as POSE_COMPONENT, RECEIPT as POSE_RECEIPT, validate_pose_observations
 from .schema import (
     CORE_CATALOG,
     contract,
@@ -45,6 +46,8 @@ COMPONENT_RECEIPTS = {
     "correspondence": "/correspondence/receipt_json",
     "geometry": "/geometry/correspondence/receipt_json",
     "recording_association": "/metadata/recording_association/receipt_json",
+    # Optional per recording, required once declared; validated in .pose.
+    POSE_COMPONENT: POSE_RECEIPT,
 }
 
 
@@ -228,6 +231,7 @@ class InternalIntegrity:
     component_outcomes: tuple[dict, ...]
     table_descriptors: Mapping[str, dict]
     nodes: Mapping[str, str]
+    pose_rows: int | None = None
 
 
 def validate_internal_integrity(h5) -> InternalIntegrity:
@@ -380,8 +384,10 @@ def validate_internal_integrity(h5) -> InternalIntegrity:
                 f"receipt_dependency_mismatch:{path}",
             )
             if kind == "component_receipt":
+                # The pose receipt reports first_error, not reason (.pose).
                 require(
-                    parsed.get("status") == "complete" and parsed.get("reason") == "",
+                    parsed.get("status") == "complete"
+                    and (component == POSE_COMPONENT or parsed.get("reason") == ""),
                     f"component_receipt_incomplete:{component}",
                 )
         else:
@@ -465,4 +471,5 @@ def validate_internal_integrity(h5) -> InternalIntegrity:
         tuple(outcomes["components"]),
         tables,
         nodes,
+        validate_pose_observations(h5, components, receipt_components),
     )
