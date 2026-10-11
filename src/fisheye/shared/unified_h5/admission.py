@@ -19,6 +19,7 @@ from .integrity import (
     validate_external_receipt,
     validate_internal_integrity,
 )
+from .pose import COMPONENT as POSE_COMPONENT
 from .protocol import validate_protocol
 from .rows import validate_table_relations
 from .schema import APPEARANCE, read_json
@@ -89,6 +90,8 @@ def _accounting(h5, integrity, correspondence):
         geometry=1,
         recording_association=1,
     )
+    if integrity.pose_rows is not None:
+        counts[POSE_COMPONENT] = integrity.pose_rows
     for name, count in counts.items():
         value = outcomes.get(name)
         require(

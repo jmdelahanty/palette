@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "citrus.pose_observation_receipt.v1",
+  "title": "Citrus unified-H5 pose observation receipt (/observations/pose/receipt_json), v1",
+  "description": "Closed. Row conservation against the table extents is a normative rule in README.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "schema_version",
+    "status",
+    "contract_ref",
+    "updates_expected",
+    "updates_written",
+    "objects_expected",
+    "objects_written",
+    "keypoints_expected",
+    "keypoints_written",
+    "dropped_logger_batches",
+    "write_errors",
+    "first_error",
+    "row_offsets_conserved"
+  ],
+  "properties": {
+    "schema_id": {
+      "const": "citrus.pose_observation_receipt"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "status": {
+      "enum": [
+        "complete",
+        "failed"
+      ]
+    },
+    "contract_ref": {
+      "const": "/observations/pose/contract_json"
+    },
+    "updates_expected": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "updates_written": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "objects_expected": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "objects_written": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "keypoints_expected": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "keypoints_written": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "dropped_logger_batches": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "write_errors": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "first_error": {
+      "type": "string"
+    },
+    "row_offsets_conserved": {
+      "type": "boolean"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "complete"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "dropped_logger_batches": {
+            "const": 0
+          },
+          "write_errors": {
+            "const": 0
+          },
+          "first_error": {
+            "const": ""
+          },
+          "row_offsets_conserved": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "first_error": {
+            "minLength": 1
+          }
+        }
+      }
+    }
+  ]
+}
