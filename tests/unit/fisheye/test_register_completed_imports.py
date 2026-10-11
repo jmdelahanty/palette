@@ -10,6 +10,13 @@ import pytest
 from fisheye.utils import citrus_transfer_v2_poller as poller
 from fisheye.utils import register_completed_imports as registrar
 
+
+@pytest.fixture(autouse=True)
+def _no_ambient_recordings_root(monkeypatch):
+    """The registrar's default destination must not come from the caller's shell."""
+    monkeypatch.delenv("PALETTE_RECORDINGS_ROOT", raising=False)
+
+
 KEY = "b" * 64
 
 

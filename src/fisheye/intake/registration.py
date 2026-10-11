@@ -186,10 +186,16 @@ def register_delivery(
         raise IntakeRefused(f"invalid stored plan: {exc}") from exc
 
     with claim(plan, kind=REGISTER_LOCK_KIND):
-        registered = probe_register(sha, destination_root=destination, registry=writer.registry)
+        # One live verification of the delivery per run, taken inside the
+        # register claim and reused only inside it. The identity authority
+        # still re-verifies each zarr when it synchronizes and again in the
+        # post-publication register probe.
+        imported = probe_import(sha, destination_root=destination)
+        registered = probe_register(
+            sha, destination_root=destination, registry=writer.registry, imported=imported
+        )
         if registered.verdict:
             return registered
-        imported = probe_import(sha, destination_root=destination)
         if not imported.verdict:
             raise RuntimeError(f"delivery is not imported: {imported.reason}")
         imports = [
@@ -230,7 +236,9 @@ def register_delivery(
                     "blocking_migrations": exc.blocking_migrations,
                 },
             ) from exc
-        registered = probe_register(sha, destination_root=destination, registry=writer.registry)
+        registered = probe_register(
+            sha, destination_root=destination, registry=writer.registry, imported=imported
+        )
         if not registered.verdict:
             raise RuntimeError(f"published, but the register probe is false: {registered.reason}")
         return registered
