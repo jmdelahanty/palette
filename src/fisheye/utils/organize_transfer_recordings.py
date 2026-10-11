@@ -365,8 +365,11 @@ def build_transfer_organization_plan(
     ):
         require(relative in inventory, f"declared realtime product is not delivered: {relative}")
         owner = camera_owners.setdefault(relative, (camera, "camera_realtime_product"))
+        # A declared file may already be this camera's own clip output (Orange
+        # declares the crop metadata CSV under crop_files); it keeps its output
+        # placement. Any other owner, or another camera, is a contradiction.
         require(
-            owner == (camera, "camera_realtime_product"),
+            owner in ((camera, "camera_realtime_product"), (camera, "camera_output")),
             f"realtime product file has conflicting ownership: {relative}",
         )
 
