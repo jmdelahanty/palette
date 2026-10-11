@@ -435,28 +435,43 @@ def _frame_id_offset(first_frame_id: int) -> int:
     )
 
 
-def _load_csv_source(
-    path: Path,
-    *,
-    recording_dir: Path,
-    camera_id: str,
-) -> AcquisitionFrameClockSource:
+CLOCK_CSV_FRAME_ID_FIELDS = ("recording_frame_id", "frame_id", "local_frame_id")
+CLOCK_CSV_TIMESTAMP_FIELDS = ("timestamp", "timestamp_sys")
+
+
+@dataclass(frozen=True)
+class ParsedFrameClockCsv:
+    """Unvalidated rows of one Orange camera-metadata CSV."""
+
+    frame_field: str
+    recording_frame_id: np.ndarray
+    camera_timestamp_ns: np.ndarray
+    camera_timestamp_valid: np.ndarray
+    system_timestamp_ns: np.ndarray
+    system_timestamp_valid: np.ndarray
+
+
+def clock_csv_frame_field(fieldnames: Sequence[str]) -> str | None:
+    fields = {str(value).strip() for value in fieldnames}
+    return next((name for name in CLOCK_CSV_FRAME_ID_FIELDS if name in fields), None)
+
+
+def parse_acquisition_frame_clock_csv(path: str | Path) -> ParsedFrameClockCsv:
+    """Parse clock rows with the authority's rules, without validating the clock.
+
+    This is the only Orange camera-metadata CSV parser.  Diagnostics that report
+    on a raw CSV use it so they read rows exactly as clock publication does.
+    """
+
+    path = Path(path)
     frame_ids: list[int] = []
     camera_values: list[int | None] = []
     system_values: list[int | None] = []
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         fields = tuple(str(value).strip() for value in (reader.fieldnames or ()))
-        frame_field = (
-            "recording_frame_id"
-            if "recording_frame_id" in fields
-            else "frame_id"
-            if "frame_id" in fields
-            else "local_frame_id"
-            if "local_frame_id" in fields
-            else None
-        )
-        if frame_field is None or "timestamp" not in fields or "timestamp_sys" not in fields:
+        frame_field = clock_csv_frame_field(fields)
+        if frame_field is None or not set(CLOCK_CSV_TIMESTAMP_FIELDS) <= set(fields):
             raise AcquisitionFrameClockError(
                 f"Frame-clock CSV {path} must contain recording_frame_id/frame_id, "
                 "timestamp, and timestamp_sys."
@@ -482,14 +497,32 @@ def _load_csv_source(
                     row_number=row_number,
                 )
             )
-
-    if not frame_ids:
-        raise AcquisitionFrameClockError(f"Frame-clock CSV has no data rows: {path}")
-    recording_ids = np.asarray(frame_ids, dtype=np.int64)
-    offset = _frame_id_offset(int(recording_ids[0]))
-    parent = recording_ids - np.int64(offset)
     camera, camera_valid = _timestamp_array(camera_values)
     system, system_valid = _timestamp_array(system_values)
+    return ParsedFrameClockCsv(
+        frame_field=frame_field,
+        recording_frame_id=np.asarray(frame_ids, dtype=np.int64),
+        camera_timestamp_ns=camera,
+        camera_timestamp_valid=camera_valid,
+        system_timestamp_ns=system,
+        system_timestamp_valid=system_valid,
+    )
+
+
+def _load_csv_source(
+    path: Path,
+    *,
+    recording_dir: Path,
+    camera_id: str,
+) -> AcquisitionFrameClockSource:
+    parsed = parse_acquisition_frame_clock_csv(path)
+    if not parsed.recording_frame_id.size:
+        raise AcquisitionFrameClockError(f"Frame-clock CSV has no data rows: {path}")
+    recording_ids = parsed.recording_frame_id
+    offset = _frame_id_offset(int(recording_ids[0]))
+    parent = recording_ids - np.int64(offset)
+    camera, camera_valid = parsed.camera_timestamp_ns, parsed.camera_timestamp_valid
+    system, system_valid = parsed.system_timestamp_ns, parsed.system_timestamp_valid
     clock_surfaces, semantic_evidence = _clock_semantics(
         recording_dir,
         camera_id=str(camera_id),
@@ -1000,6 +1033,70 @@ def load_published_acquisition_frame_clock(
         **arrays,
     )
     return resolved, source
+
+
+NOMINAL_FRAME_TIME_TOLERANCE_FRAMES = 0.5
+
+
+def nominal_frame_time_deviation_s(
+    camera_timestamp_ns: np.ndarray,
+    camera_timestamp_valid: np.ndarray,
+    parent_frame_index: np.ndarray,
+    *,
+    nominal_fps: float,
+) -> float | None:
+    """Largest gap between camera time and ``frame / nominal_fps``, in seconds."""
+
+    valid = np.asarray(camera_timestamp_valid, dtype=np.bool_)
+    if int(np.count_nonzero(valid)) < 2:
+        return None
+    stamps = np.asarray(camera_timestamp_ns, dtype=np.int64)[valid]
+    frames = np.asarray(parent_frame_index, dtype=np.int64)[valid]
+    measured = (stamps - stamps[0]).astype(np.float64) / 1e9
+    nominal = (frames - frames[0]).astype(np.float64) / float(nominal_fps)
+    return float(np.max(np.abs(measured - nominal)))
+
+
+def require_nominal_frame_timing(
+    root: Any,
+    *,
+    nominal_fps: float,
+    tolerance_frames: float = NOMINAL_FRAME_TIME_TOLERANCE_FRAMES,
+) -> dict[str, Any] | None:
+    """Fail when ``frame / nominal_fps`` disagrees with the published camera clock.
+
+    Analysis time is frame index divided by nominal fps.  That is only correct
+    while the camera clock ticks at the nominal rate, so producers of fps-based
+    time call this first.  Returns ``None`` for a recording without a published
+    clock; the caller keeps its existing nominal-fps behavior there.
+    """
+
+    if not np.isfinite(nominal_fps) or float(nominal_fps) <= 0:
+        raise AcquisitionFrameClockError(f"Nominal fps must be positive: {nominal_fps!r}.")
+    resolved = resolve_acquisition_frame_clock(root, required=False)
+    if resolved is None:
+        return None
+    run = root[resolved.group_path]
+    deviation = nominal_frame_time_deviation_s(
+        np.asarray(run["camera_timestamp_ns"][:]),
+        np.asarray(run["camera_timestamp_valid"][:]),
+        np.asarray(run["parent_frame_index"][:]),
+        nominal_fps=float(nominal_fps),
+    )
+    tolerance_s = float(tolerance_frames) / float(nominal_fps)
+    evidence = {
+        "acquisition_frame_clock_sha256": resolved.record_sha256,
+        "nominal_fps": float(nominal_fps),
+        "max_abs_deviation_s": deviation,
+        "tolerance_s": tolerance_s,
+    }
+    if deviation is not None and deviation > tolerance_s:
+        raise AcquisitionFrameClockError(
+            "Frame-index time disagrees with the published camera clock: "
+            f"max deviation {deviation:.4f} s exceeds {tolerance_s:.4f} s "
+            f"({tolerance_frames} frames at {float(nominal_fps)} fps)."
+        )
+    return evidence
 
 
 def _owned_clock_run(root: Any, run_name: str, owner: str) -> Any:
