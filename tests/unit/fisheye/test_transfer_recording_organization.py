@@ -1069,3 +1069,35 @@ def test_realtime_products_materialize_and_retire_per_camera(tmp_path, monkeypat
             for other, folder in folders.items():
                 present = (folder / "raw/acquisition" / name).is_file()
                 assert present is (other == camera), (name, other)
+
+
+def _also_declare(root: Path, camera: str, path: str) -> None:
+    """Declare one delivered file under a camera's realtime crop_files, then reseal."""
+
+    session_path = root / "recording_session.json"
+    session = json.loads(session_path.read_bytes())
+    crop_files = session["realtime_products"]["cameras"][camera]["crop_files"]
+    data = (root / path).read_bytes()
+    crop_files.append(
+        {
+            **crop_files[0],
+            "path": path,
+            "size_bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    )
+    session_path.write_bytes(transfer.canonical_bytes(session))
+    _resign(root)
+
+
+def test_a_declared_file_that_is_its_cameras_own_output_keeps_its_placement(tmp_path):
+    # Orange declares each camera's crop metadata CSV under crop_files, and the
+    # same file is that camera's clip output (the 2026_10_09 snow sessions). It
+    # keeps its output placement; a different owner still refuses (above).
+    source = _single_video_source(tmp_path)
+    _declare_realtime_products(source)
+    _also_declare(source, "02010093", "Cam02010093_full.csv")
+    plan = _plan(source, tmp_path / "recordings")
+    item = next(i for i in plan["files"] if i["source"]["path"] == "Cam02010093_full.csv")
+    assert (item["role"], item["camera_id"]) == ("camera_output", "02010093")
+    assert [t["relative_path"] for t in item["destinations"]] == ["cams/acquisition/Cam02010093_full.csv"]
