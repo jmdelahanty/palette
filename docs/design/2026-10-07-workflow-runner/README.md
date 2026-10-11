@@ -302,11 +302,22 @@ for each snapshot_sha:
 
 ### 6.3 Migration of existing state
 
-- A one-time `palette-flow reconcile intake --adopt` writes sentinels for deliveries whose `.registered` state and receipts verify. It records each delivery's `admission_contract` mode in the sentinel, so an adopted job-mode delivery is never retried in workstation mode.
+- **Handover step: a one-time ledger import, `fisheye.flow.intake adopt-ledger`.** Jeremy decided this on 2026-10-11. It runs once, before the runner takes over from the cron poller/registrar pair. From then on, runner state under `<flow_root>` is the only authority on whether a delivery is done or dead. Discovery never reads the poller's ledger.
+  - [ ] Dry-run by default. It prints a per-sha plan, and an explicit apply flag is needed to write.
+  - [ ] A `.submitted` or `.registered` record becomes a runner sentinel only when a `fisheye.intake` verdict for the same `snapshot_sha` confirms it: `probe-import` for import, `probe-register` for registration. The ledger file is never enough by itself.
+  - [ ] `probe-register` evaluates at the import receipt's `producer_git_sha` (§5.4). A delivery imported under an older pin must not read as unregistered just because the current deployment is newer.
+  - [ ] Each sentinel records the delivery's `admission_contract` mode, so an adopted job-mode delivery is never retried in workstation mode.
+  - [ ] An operator hold (`refused.json`, `operator_hold: true`) that cites the ledger file is written for:
+    - every `.import_failed` record;
+    - every `.submitted`/`.registered` record that the probe does not confirm;
+    - every marker the poller deliberately abandoned while leaving it in staging, such as e15446de.
+  - [ ] Superseded deliveries get a hold naming their successor, so a superseded original and its replacement never organize into the same `recordings/<session>_Cam*` names. Example: the 2026-10-09 snow originals 5ea8847f, 8aedb4dd and e90d39eb, superseded by their `_resealed` deliveries 01daeec2, 4060c802 and e6685159. Those three holds were written by hand on 2026-10-11; `adopt-ledger` must reproduce them, not duplicate them.
+  - [ ] Before the cron swap, the apply run's report shows that every v2 ledger key ends in exactly one outcome: a sentinel, a hold, or "not yet claimed". Jeremy reviews that report.
+  - [ ] The poller's ledger files are only read, never moved or edited. They stay as historical evidence.
 - **The runner never reads v1 state.** The v1 poller's `staging/.processing_state` holds 68 legacy v1 submissions. A v2 registrar dry run against that shared directory would have marked all 68 as `import_failed`. So:
   - v2 poller state lives only in `staging/.processing_state_v2` and `.processing_logs_v2` (from #286);
   - runner state lives only under `<flow_root>`;
-  - `--adopt` reads only the v2 state directory, plus Palette evidence;
+  - `adopt-ledger` reads only the v2 state directory, plus Palette evidence;
   - discovery ignores v1 markers, as `check_marker` already does;
   - a test fails if any runner or v2 path resolves into the v1 state directory.
 - The old `state_dir` files stay read-only as historical evidence.
@@ -399,6 +410,7 @@ Still open:
 
 ## Decision log
 
+- 2026-10-11: Jeremy chose a one-time ledger import at handover (§6.3, `fisheye.flow.intake adopt-ledger`). The rejected alternative was having discovery read the poller's `.processing_state_v2` ledger permanently. The trigger was the shadow planning the three superseded 2026-10-09 originals as fresh deliveries, because their only "dead" record was the poller's `.import_failed`. Importing the ledger once keeps runner state as the only "done" authority after the poller retires. cluster-runner implements it; palette-33 wrote the checklist.
 - 2026-10-10: pin moves that add registry migrations drain first, enforced by `pin-check`. This follows palette-33's finding that older code works silently against a migrated registry but misses new projections, plus the schema guard in #344/#346 that refuses non-additive migrations.
 - 2026-10-09: retry cap and isolated synthetic trials (Jeremy approved both).
   - After `max_consecutive_failures` (default 3) consecutive retryable failures of a step, the runner writes a `retry_cap` hold (`refused.json`) instead of retrying every tick.
