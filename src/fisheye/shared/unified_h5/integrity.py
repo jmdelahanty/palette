@@ -98,10 +98,13 @@ def validate_external_receipt(h5, *, source_h5: Path, receipt: dict) -> dict:
         "external_receipt",
     )
     expected = "citrus.recording_observation_finalized_receipt"
+    # Receipt v2 (Citrus sealer 3.1.0) adds only contract.citrus_artifacts. The
+    # transfer admission validates those rows against the sealed inventory.
+    version = receipt["schema_version"]
     require(
         receipt["schema_id"] == expected
-        and type(receipt["schema_version"]) is int
-        and receipt["schema_version"] == 1
+        and type(version) is int
+        and version in (1, 2)
         and receipt["canonicalization"] == "canonical_json_utf8_sort_keys_compact_v1",
         "external_receipt_schema",
     )
@@ -124,14 +127,16 @@ def validate_external_receipt(h5, *, source_h5: Path, receipt: dict) -> dict:
             "session_status",
             "finalized_at_utc",
             "h5_artifact",
+            *(("citrus_artifacts",) if version == 2 else ()),
         ),
         "external_receipt_contract",
     )
     require(
         body["schema_id"] == expected
         and type(body["schema_version"]) is int
-        and body["schema_version"] == 1
-        and body["session_status"] == "COMPLETE",
+        and body["schema_version"] == version
+        and body["session_status"] == "COMPLETE"
+        and (version == 1 or isinstance(body["citrus_artifacts"], list)),
         "external_receipt_not_complete",
     )
     contract_digest = digest(canonical_json(body))
