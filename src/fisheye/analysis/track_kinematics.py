@@ -83,6 +83,7 @@ from fisheye.shared.coordinate_identity import (
     stamp_and_bind_row_identity_contract,
     stamp_track_sample_time_lineage,
 )
+from fisheye.shared.acquisition_frame_clock import require_nominal_frame_timing
 from fisheye.shared.pixel_frame_authority import (
     PixelFrameAuthorityError,
     load_persisted_acquisition_camera_authority,
@@ -13602,6 +13603,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         render_online = render_offline = True
 
     fps = resolve_fps(root, explicit_fps=args.fps)
+    # time_seconds is frame / fps; refuse when the camera clock disagrees.
+    require_nominal_frame_timing(root, nominal_fps=fps)
 
     if render_online:
         # Online track kinematics prefers the sealed refined surface and otherwise

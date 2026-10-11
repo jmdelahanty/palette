@@ -498,10 +498,6 @@ def _create_clip_group(
         "first_clip_local_frame_index": row.get("first_clip_local_frame_index"),
         "last_clip_local_frame_index": row.get("last_clip_local_frame_index"),
         "frame_count": row.get("frame_count"),
-        "timestamp_first": row.get("first_timestamp"),
-        "timestamp_last": row.get("last_timestamp"),
-        "timestamp_sys_first": row.get("first_timestamp_sys"),
-        "timestamp_sys_last": row.get("last_timestamp_sys"),
     }
     _set_attrs(source, source_attrs)
     frame_map = source.require_group("frame_map")
