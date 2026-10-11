@@ -77,7 +77,7 @@ def test_packaged_contracts_match_the_revision_3_pins():
         assert definition["schema_version"] == version
 
 
-@pytest.mark.parametrize("name", ["bounding_boxes_v2_capacity_pose_off.h5", "bounding_boxes_v2_pose_off.h5"])
+@pytest.mark.parametrize("name", sorted(DIGESTS))
 def test_a_bounding_boxes_v2_file_is_admitted(name):
     with h5py.File(FIXTURES / name, "r") as h5:
         validate_internal_integrity(h5)
