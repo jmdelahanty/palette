@@ -1,0 +1,71 @@
+{
+  "schema_id": "citrus.recording_observation_finalized_receipt",
+  "schema_version": 3,
+  "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+  "receipt_id": "obsbindfin_c1113a8f3499bc8c25fdf47159a1e1bcf5f62197f7884a75f9f7058c5d2d0674",
+  "contract_sha256": "sha256:c1113a8f3499bc8c25fdf47159a1e1bcf5f62197f7884a75f9f7058c5d2d0674",
+  "contract": {
+    "schema_id": "citrus.recording_observation_finalized_receipt",
+    "schema_version": 3,
+    "request_id": "obsbindreq_2222222222222222222222222222222222222222222222222222222222222222",
+    "request_contract_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "acceptance_id": "obsbindacc_2222222222222222222222222222222222222222222222222222222222222222",
+    "acceptance_contract_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+    "observation_context_id": "obsctx_2222222222222222222222222222222222222222222222222222222222222222",
+    "finalized_at_utc": "2026-10-10T00:05:00Z",
+    "citrus_experiment_id": "citexp_2222222222222222222222222222222222222222222222222222222222222222",
+    "citrus_session_uuid": "citsess_2222222222222222222222222222222222222222222222222222222222222222",
+    "target": {
+      "rig_id": "fixture-rig",
+      "canvas_name": "fixture",
+      "arena_id": "arena_1",
+      "camera_id": "02010094",
+      "source_camera_stream_id": "02010094"
+    },
+    "h5_artifact": {
+      "relative_path": "citrus/citsess_2222222222222222222222222222222222222222222222222222222222222222_snow_1h.h5",
+      "size_bytes": 78,
+      "sha256": "sha256:c6e3a029df51f8a04529632e8eaf4144251659b96d6d3f7991f60bd0d52dd9da"
+    },
+    "session_status": "COMPLETE",
+    "runtime_geometry_contract_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+    "protocol_semantic": {
+      "status": "available",
+      "semantic_sha256": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    },
+    "citrus_artifacts": [],
+    "subject_reference": {
+      "schema_id": "citrus.subject_reference",
+      "schema_version": 1,
+      "dish_id": "19234_2",
+      "lookup_status": "collected",
+      "lookup_reason": null,
+      "lookup_http_status": null,
+      "queried_at_utc": "2026-10-09T21:20:42Z",
+      "dish": {
+        "dish_id": "19234_2",
+        "dish_uuid": "b01892a2-c7a8-4d4e-9131-16676f295209",
+        "dish_revision": 4,
+        "dish_updated_at": "2026-10-09 15:45:02",
+        "fish_count": 6,
+        "cross_id": "19234"
+      },
+      "fish_status": "not_collected",
+      "fish_reason": "operator_did_not_select",
+      "fish": null,
+      "subject_id": "061346be-666a-49f3-8b95-9f0eb352bf3a",
+      "subject_type": "individual",
+      "subject_count": 1,
+      "zebrobot_version": {
+        "base_url": "http://delahantyj-ws1.hhmi.org",
+        "api_schema_version": 2,
+        "service_commit": "a56e219194d6dd9e0bfecf2f4a880c8778098bc2",
+        "service_commit_dirty": false,
+        "consumer_schema_sha256": "f5280e430d4b5f10c3643cb89a6187eacc45fdac7af55b2e81f5e315b7b754dc",
+        "http_status": 200,
+        "error": null
+      },
+      "source": "citrus_mzb_lookup"
+    }
+  }
+}

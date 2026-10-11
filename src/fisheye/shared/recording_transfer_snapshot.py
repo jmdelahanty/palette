@@ -40,12 +40,18 @@ CONTEXT_FIELDS = (
 OBSERVATION_BINDING_DIR = "recording_observation_bindings"
 OBSERVATION_FINALIZATION_PATH = f"{OBSERVATION_BINDING_DIR}/finalized_collection.json"
 # Sealer 3.1.0 (agent-contracts citrus-recording-transfer-3.1): Citrus receipt
-# v2 declares every per-session file Citrus writes under citrus/.
-SNAPSHOT_VERSION_CITRUS_ARTIFACTS = 3  # head receipts all v2
+# v2 declares every per-session file Citrus writes under citrus/. Sealer 3.2.0:
+# receipt v3 is v2 plus contract.subject_reference (the MetaZebrobot-confirmed
+# subject Citrus recorded; agent-contracts citrus-orange subject_declaration_v1).
+# It changes nothing on disk, so a v3 head seals exactly like a v2 head
+# (snapshot v3, marker v4); the sealer checks subject_reference structurally
+# and leaves its semantics to Citrus (writer) and Orange/Palette (readers).
+SNAPSHOT_VERSION_CITRUS_ARTIFACTS = 3  # head receipts all v2 or all v3
 MARKER_SCHEMA_V4 = "citrus.transfer_completion_marker.v4"  # pairs with snapshot v3
 MARKER_VERSION_V4 = 4
 CITRUS_DIR = "citrus"
-RECEIPT_VERSIONS = (1, 2)
+RECEIPT_VERSIONS = (1, 2, 3)
+RECEIPT_VERSIONS_CITRUS_ARTIFACTS = (2, 3)
 RECEIPT_KEYS = {"schema_id", "schema_version", "canonicalization", "receipt_id",
                 "contract_sha256", "contract"}
 RECEIPT_V2_CONTRACT_KEYS = {
@@ -54,6 +60,23 @@ RECEIPT_V2_CONTRACT_KEYS = {
     "finalized_at_utc", "citrus_experiment_id", "citrus_session_uuid", "target",
     "h5_artifact", "session_status", "runtime_geometry_contract_sha256",
     "protocol_semantic", "citrus_artifacts"}
+RECEIPT_V3_CONTRACT_KEYS = RECEIPT_V2_CONTRACT_KEYS | {"subject_reference"}
+RECEIPT_CONTRACT_KEYS = {2: RECEIPT_V2_CONTRACT_KEYS, 3: RECEIPT_V3_CONTRACT_KEYS}
+# citrus.subject_reference v1 (agent-contracts citrus-orange/; the receipt v3
+# schema that embeds it is pinned by digest in the tests): key sets only, the
+# schema's allOf conditionals are the readers' business.
+SUBJECT_REFERENCE_SCHEMA = "citrus.subject_reference"
+SUBJECT_REFERENCE_KEYS = {
+    "schema_id", "schema_version", "dish_id", "lookup_status", "lookup_reason",
+    "lookup_http_status", "queried_at_utc", "dish", "fish_status", "fish_reason", "fish",
+    "subject_id", "subject_type", "subject_count", "zebrobot_version", "source"}
+SUBJECT_REFERENCE_OBJECT_KEYS = {
+    "dish": {"dish_id", "dish_uuid", "dish_revision", "dish_updated_at", "fish_count",
+             "cross_id"},
+    "fish": {"fish_id", "revision", "updated_at"},
+    "zebrobot_version": {"base_url", "api_schema_version", "service_commit",
+                         "service_commit_dirty", "consumer_schema_sha256", "http_status",
+                         "error"}}
 CITRUS_ROLE_ORDER = ("stimulus_video", "stimulus_video_container_finalization",
                      "update_timing", "process_diagnostic")
 CITRUS_ROLE_SUFFIX = {"stimulus_video": ".mp4",
@@ -422,8 +445,8 @@ def parent_contexts(manifest: dict, cameras: list[str]) -> dict:
     return contexts
 
 
-# Ported from citrus-recording-transfer 3.1.0 snapshot.py (456d7fe) so Palette's
-# independent rebuild applies the sealer's exact rules.
+# Ported from citrus-recording-transfer 3.2.0 snapshot.py (00787e7c; 3.1.0 was
+# 456d7fe) so Palette's independent rebuild applies the sealer's exact rules.
 def require_observation_binding_transfer_admission(
         root: Path, manifest: dict, refs: dict[str, dict], *,
         video_digests_pending: bool = False) -> dict | None:
@@ -571,8 +594,11 @@ def require_observation_binding_transfer_admission(
             require("citrus_artifacts" not in contract,
                     "receipt v1 carries citrus_artifacts")
             continue
-        require(set(receipt) == RECEIPT_KEYS and set(contract) == RECEIPT_V2_CONTRACT_KEYS,
-                "receipt v2 keys are not exact")
+        require(set(receipt) == RECEIPT_KEYS and
+                set(contract) == RECEIPT_CONTRACT_KEYS[version],
+                f"receipt v{version} keys are not exact")
+        if version == 3:
+            check_subject_reference(contract["subject_reference"])
         session_uuid = contract.get("citrus_session_uuid")
         require(isinstance(session_uuid, str) and
                 re.fullmatch(r"citsess_[0-9a-f]{64}", session_uuid) is not None and
@@ -596,7 +622,7 @@ def require_observation_binding_transfer_admission(
         require(len(pre310_contexts) == 1 and pre310_contexts[0] == min(seen_contexts),
                 "a pre-3.1.0 process diagnostic must appear once, in the lowest "
                 "observation_context_id")
-    if receipt_version == 2:
+    if receipt_version in RECEIPT_VERSIONS_CITRUS_ARTIFACTS:
         # Closed citrus/: every file is a context's H5 or declared in its receipt.
         admitted = seen_h5 | set(paths)
         for path in refs:
@@ -609,6 +635,20 @@ def require_observation_binding_transfer_admission(
                                    CITRUS_ROLE_ORDER.index(row["role"]), row["path"]))
     return {"receipt_version": receipt_version, "citrus_artifacts": declared,
             "revisions": [refs[path] for _, path, _ in chain]}
+
+
+def check_subject_reference(reference) -> None:
+    """Structural check of receipt v3 contract.subject_reference (key sets and
+    the two consts). Its semantics (status/reason pairing, subject_type vs
+    count) are the writer's and the readers' contract, not transfer integrity."""
+    require(type(reference) is dict and set(reference) == SUBJECT_REFERENCE_KEYS and
+            reference["schema_id"] == SUBJECT_REFERENCE_SCHEMA and
+            type(reference["schema_version"]) is int and reference["schema_version"] == 1,
+            "receipt v3 subject_reference is not citrus.subject_reference v1")
+    for key, keys in SUBJECT_REFERENCE_OBJECT_KEYS.items():
+        value = reference[key]
+        require(value is None or (type(value) is dict and set(value) == keys),
+                f"receipt v3 subject_reference.{key} keys are not exact")
 
 
 def observation_binding_revision_chain(
@@ -1166,8 +1206,10 @@ def build_snapshot(
     # Current supported envelope has only declared full/crop media. A retained
     # shard/preview needs an explicit future auxiliary-media profile, not guessing.
     # Sealer 3.1.0: a bound session's receipt-v2-declared Citrus stimulus videos
-    # are admitted too; any other video is still refused.
-    v2_binding = binding is not None and binding["receipt_version"] == 2
+    # are admitted too (receipt v3 declares them the same way); any other video
+    # is still refused.
+    v2_binding = (binding is not None and
+                  binding["receipt_version"] in RECEIPT_VERSIONS_CITRUS_ARTIFACTS)
     stimulus_videos = (
         {row["path"] for row in binding["citrus_artifacts"] if row["role"] == "stimulus_video"}
         if v2_binding

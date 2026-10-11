@@ -10,6 +10,13 @@ from typing import Mapping
 
 import h5py
 
+from fisheye.shared.recording_transfer_snapshot import (
+    RECEIPT_VERSIONS,
+    RECEIPT_VERSIONS_CITRUS_ARTIFACTS,
+    TransferSnapshotError,
+    check_subject_reference,
+)
+
 from .common import (
     BLOCK_BYTES,
     MAX_DEPTH,
@@ -103,11 +110,13 @@ def validate_external_receipt(h5, *, source_h5: Path, receipt: dict) -> dict:
     expected = "citrus.recording_observation_finalized_receipt"
     # Receipt v2 (Citrus sealer 3.1.0) adds only contract.citrus_artifacts. The
     # transfer admission validates those rows against the sealed inventory.
+    # Receipt v3 (sealer 3.2.0) is v2 plus contract.subject_reference, checked
+    # structurally here exactly as the sealer checks it.
     version = receipt["schema_version"]
     require(
         receipt["schema_id"] == expected
         and type(version) is int
-        and version in (1, 2)
+        and version in RECEIPT_VERSIONS
         and receipt["canonicalization"] == "canonical_json_utf8_sort_keys_compact_v1",
         "external_receipt_schema",
     )
@@ -130,7 +139,8 @@ def validate_external_receipt(h5, *, source_h5: Path, receipt: dict) -> dict:
             "session_status",
             "finalized_at_utc",
             "h5_artifact",
-            *(("citrus_artifacts",) if version == 2 else ()),
+            *(("citrus_artifacts",) if version in RECEIPT_VERSIONS_CITRUS_ARTIFACTS else ()),
+            *(("subject_reference",) if version == 3 else ()),
         ),
         "external_receipt_contract",
     )
@@ -142,6 +152,11 @@ def validate_external_receipt(h5, *, source_h5: Path, receipt: dict) -> dict:
         and (version == 1 or isinstance(body["citrus_artifacts"], list)),
         "external_receipt_not_complete",
     )
+    if version == 3:
+        try:
+            check_subject_reference(body["subject_reference"])
+        except TransferSnapshotError:
+            require(False, "external_receipt_subject_reference")
     contract_digest = digest(canonical_json(body))
     require(
         receipt["contract_sha256"] == contract_digest
