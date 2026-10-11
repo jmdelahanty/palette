@@ -12,6 +12,12 @@
     },
     {
       "$ref": "#/$defs/marker_v3"
+    },
+    {
+      "$ref": "#/$defs/snapshot_v3"
+    },
+    {
+      "$ref": "#/$defs/marker_v4"
     }
   ],
   "$defs": {
@@ -182,10 +188,22 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["role", "artifact"],
+            "required": [
+              "role",
+              "artifact"
+            ],
             "properties": {
-              "role": {"enum": ["keyframes", "perf", "sidecar_perf", "summary"]},
-              "artifact": {"$ref": "#/$defs/artifact"}
+              "role": {
+                "enum": [
+                  "keyframes",
+                  "perf",
+                  "sidecar_perf",
+                  "summary"
+                ]
+              },
+              "artifact": {
+                "$ref": "#/$defs/artifact"
+              }
             }
           }
         }
@@ -236,21 +254,68 @@
     "recording_context": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_id", "schema_version", "recording_type", "behavior_mode", "recording_intent", "data_origin"],
+      "required": [
+        "schema_id",
+        "schema_version",
+        "recording_type",
+        "behavior_mode",
+        "recording_intent",
+        "data_origin"
+      ],
       "properties": {
-        "schema_id": {"const": "citrus.parent_recording_context"},
-        "schema_version": {"type": "integer", "enum": [1, 2]},
-        "recording_type": {"$ref": "#/$defs/recordingLabel"},
-        "recording_subtype": {"$ref": "#/$defs/recordingLabel"},
-        "behavior_mode": {"enum": ["free", "embedded", "none"]},
-        "recording_intent": {"enum": ["stimulus_experiment", "recording_only"]},
-        "data_origin": {"enum": ["acquired", "synthetic"]}
+        "schema_id": {
+          "const": "citrus.parent_recording_context"
+        },
+        "schema_version": {
+          "type": "integer",
+          "enum": [
+            1,
+            2
+          ]
+        },
+        "recording_type": {
+          "$ref": "#/$defs/recordingLabel"
+        },
+        "recording_subtype": {
+          "$ref": "#/$defs/recordingLabel"
+        },
+        "behavior_mode": {
+          "enum": [
+            "free",
+            "embedded",
+            "none"
+          ]
+        },
+        "recording_intent": {
+          "enum": [
+            "stimulus_experiment",
+            "recording_only"
+          ]
+        },
+        "data_origin": {
+          "enum": [
+            "acquired",
+            "synthetic"
+          ]
+        }
       },
-      "if": {"properties": {"schema_version": {"const": 1}}},
-      "then": {"required": ["recording_subtype"]}
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "recording_subtype"
+        ]
+      }
     },
     "recordingLabel": {
-      "type": "string", "minLength": 1, "maxLength": 1024,
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
       "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f-\\u009f])(?![\\s\\uFEFF])[\\s\\S]*[^\\s\\uFEFF]$",
       "description": "Nonempty, well-formed UTF-8 label, at most 1024 UTF-8 bytes (parser enforced; maxLength counts characters). No C0/DEL/C1 controls, no boundary ECMA whitespace or BOM. Never trim or synthesize."
     },
@@ -263,7 +328,9 @@
         "clips"
       ],
       "properties": {
-        "recording_context": {"$ref": "#/$defs/recording_context"},
+        "recording_context": {
+          "$ref": "#/$defs/recording_context"
+        },
         "parent_key": {
           "type": "object",
           "additionalProperties": false,
@@ -560,11 +627,19 @@
         "sealer": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["package", "version"],
+          "required": [
+            "package",
+            "version"
+          ],
           "description": "Provenance: the sealer release that wrote this marker. Not an admission input.",
           "properties": {
-            "package": {"const": "citrus-recording-transfer"},
-            "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"}
+            "package": {
+              "const": "citrus-recording-transfer"
+            },
+            "version": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+            }
           }
         },
         "schema_id": {
@@ -613,6 +688,325 @@
             "schema_version": {
               "type": "integer",
               "const": 2
+            }
+          }
+        },
+        "recording_layout": {
+          "enum": [
+            "single_video",
+            "rolling_clips"
+          ]
+        },
+        "recording_payload_kind": {
+          "enum": [
+            "citrus_h5",
+            "video_only"
+          ]
+        },
+        "acquisition_session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "parent_recording_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "semantic_receipt_acceptance": {
+          "const": "not_evaluated_by_transfer"
+        },
+        "delivery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "attempt_id",
+            "created_utc",
+            "source_dir",
+            "destination_dir",
+            "verification",
+            "source_retention"
+          ],
+          "properties": {
+            "attempt_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "created_utc": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "source_dir": {
+              "type": "string",
+              "minLength": 1
+            },
+            "destination_dir": {
+              "type": "string",
+              "minLength": 1
+            },
+            "verification": {
+              "const": "sha256_all_inventory_bytes"
+            },
+            "source_retention": {
+              "const": "retained_pending_consumer_receipt"
+            }
+          }
+        }
+      }
+    },
+    "snapshot_v3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "schema_version",
+        "canonicalization",
+        "recording_layout",
+        "recording_payload_kind",
+        "acquisition_session_id",
+        "parent_identity_policy",
+        "source_manifest",
+        "finalization",
+        "parents",
+        "inventory",
+        "citrus_artifacts",
+        "observation_binding_revisions"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "citrus.recording_transfer_snapshot"
+        },
+        "schema_version": {
+          "type": "integer",
+          "const": 3
+        },
+        "canonicalization": {
+          "const": "json_sort_keys_ascii_compact_lf_v1"
+        },
+        "recording_layout": {
+          "enum": [
+            "single_video",
+            "rolling_clips"
+          ]
+        },
+        "recording_payload_kind": {
+          "enum": [
+            "citrus_h5",
+            "video_only"
+          ]
+        },
+        "acquisition_session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "parent_identity_policy": {
+          "const": "orange_session_id_and_camera_serial_v1"
+        },
+        "source_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "size_bytes",
+            "sha256",
+            "schema_id",
+            "schema_version"
+          ],
+          "properties": {
+            "path": {
+              "const": "recording_session.json"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "schema_id": {
+              "const": "orange.recording_session"
+            },
+            "schema_version": {
+              "type": "integer",
+              "const": 1
+            }
+          }
+        },
+        "finalization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "manifest_status",
+            "drain_completed",
+            "semantic_receipt_acceptance"
+          ],
+          "properties": {
+            "manifest_status": {
+              "const": "completed"
+            },
+            "drain_completed": {
+              "const": true
+            },
+            "semantic_receipt_acceptance": {
+              "const": "not_evaluated_by_transfer"
+            }
+          }
+        },
+        "parents": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/parent"
+          }
+        },
+        "inventory": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        },
+        "citrus_artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "observation_context_id",
+              "citrus_session_uuid",
+              "role",
+              "path",
+              "size_bytes",
+              "sha256"
+            ],
+            "properties": {
+              "observation_context_id": {
+                "type": "string",
+                "pattern": "^obsctx_[0-9a-f]{64}$"
+              },
+              "citrus_session_uuid": {
+                "type": "string",
+                "pattern": "^citsess_[0-9a-f]{64}$"
+              },
+              "role": {
+                "enum": [
+                  "stimulus_video",
+                  "stimulus_video_container_finalization",
+                  "update_timing",
+                  "process_diagnostic"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^citrus/[^/\\u0000-\\u001f]+$"
+              },
+              "size_bytes": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        },
+        "observation_binding_revisions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/artifact"
+          },
+          "description": "Orange finalized-collection revisions, oldest first: finalized_collection.json, then finalized_collection.r2.json ... The last is the projected head. Each is also in inventory."
+        }
+      }
+    },
+    "marker_v4": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "schema_version",
+        "status",
+        "required_consumer_profile",
+        "snapshot_id",
+        "snapshot",
+        "recording_layout",
+        "recording_payload_kind",
+        "acquisition_session_id",
+        "parent_recording_count",
+        "semantic_receipt_acceptance",
+        "delivery",
+        "sealer"
+      ],
+      "properties": {
+        "sealer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "package",
+            "version"
+          ],
+          "description": "Provenance: the sealer release that wrote this marker. Not an admission input.",
+          "properties": {
+            "package": {
+              "const": "citrus-recording-transfer"
+            },
+            "version": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+            }
+          }
+        },
+        "schema_id": {
+          "const": "citrus.transfer_completion_marker.v4"
+        },
+        "schema_version": {
+          "type": "integer",
+          "const": 4
+        },
+        "status": {
+          "const": "transfer_complete"
+        },
+        "required_consumer_profile": {
+          "const": "parent_recording_intake_v2"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "size_bytes",
+            "sha256",
+            "schema_id",
+            "schema_version"
+          ],
+          "properties": {
+            "path": {
+              "const": "_citrus_transfer/snapshot.json"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "schema_id": {
+              "const": "citrus.recording_transfer_snapshot"
+            },
+            "schema_version": {
+              "type": "integer",
+              "const": 3
             }
           }
         },
