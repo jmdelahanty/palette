@@ -303,17 +303,23 @@ for each snapshot_sha:
 ### 6.3 Migration of existing state
 
 - **Handover step: a one-time ledger import, `fisheye.flow.intake adopt-ledger`.** Jeremy decided this on 2026-10-11. It runs once, before the runner takes over from the cron poller/registrar pair. From then on, runner state under `<flow_root>` is the only authority on whether a delivery is done or dead. Discovery never reads the poller's ledger.
-  - [ ] Dry-run by default. It prints a per-sha plan, and an explicit apply flag is needed to write.
-  - [ ] A `.submitted` or `.registered` record becomes a runner sentinel only when a `fisheye.intake` verdict for the same `snapshot_sha` confirms it: `probe-import` for import, `probe-register` for registration. The ledger file is never enough by itself.
-  - [ ] `probe-register` evaluates at the import receipt's `producer_git_sha` (§5.4). A delivery imported under an older pin must not read as unregistered just because the current deployment is newer.
-  - [ ] Each sentinel records the delivery's `admission_contract` mode, so an adopted job-mode delivery is never retried in workstation mode.
-  - [ ] An operator hold (`refused.json`, `operator_hold: true`) that cites the ledger file is written for:
-    - every `.import_failed` record;
-    - every `.submitted`/`.registered` record that the probe does not confirm;
-    - every marker the poller deliberately abandoned while leaving it in staging, such as e15446de.
-  - [ ] Superseded deliveries get a hold naming their successor, so a superseded original and its replacement never organize into the same `recordings/<session>_Cam*` names. Example: the 2026-10-09 snow originals 5ea8847f, 8aedb4dd and e90d39eb, superseded by their `_resealed` deliveries 01daeec2, 4060c802 and e6685159. Those three holds were written by hand on 2026-10-11; `adopt-ledger` must reproduce them, not duplicate them.
-  - [ ] Before the cron swap, the apply run's report shows that every v2 ledger key ends in exactly one outcome: a sentinel, a hold, or "not yet claimed". Jeremy reviews that report.
-  - [ ] The poller's ledger files are only read, never moved or edited. They stay as historical evidence.
+  - [ ] **The ledger it reads:** `.processing_state_v2/<key>.{claimed,submitted,import_failed,registered}` and the launcher's `.processing_logs_v2/bsub_submissions/by_marker/<key>.job`. The runner never uses `by_marker` as a submission gate. On 2026-10-11 a stale `by_marker` record made a cleared delivery return its old, finished job instead of resubmitting.
+  - [ ] **Drain first.** Before applying, the poller cron is paused and every poller job has finished. A `.submitted` key with no terminal record is in flight. Dry-run reports such keys as `in-flight`, and apply refuses while any exist; it does not hold them.
+  - [ ] **Dry-run by default.** It prints a per-key plan, and an explicit apply flag is needed to write.
+  - [ ] **Sentinels only from a verdict.** A `.submitted` or `.registered` key becomes a runner sentinel only when a `fisheye.intake` verdict for the same `snapshot_sha` confirms it: `probe-import` for import, `probe-register` for registration. The ledger file is never enough by itself.
+  - [ ] **`probe-register` runs at the import receipt's `producer_git_sha`** (§5.4). A delivery imported under an older pin must not read as unregistered just because the current deployment is newer.
+  - [ ] **Admission mode.** Each sentinel records the delivery's `admission_contract` mode, so an adopted job-mode delivery is never retried in workstation mode.
+  - [ ] **Outcome per ledger key.** Each key gets exactly one outcome:
+    - `sentinel`: confirmed, and the marker is still discoverable;
+    - `retired`: confirmed, but the marker is gone from staging. This is history only, and no runner state is written. Most of the ledger is in this state.
+    - `hold (new)`: an `.import_failed` record, or a key the probe does not confirm. The new `refused.json` has `operator_hold: true` and cites the ledger file.
+    - `hold (existing)`: an existing `refused.json` is never overwritten or duplicated. The three snow holds cluster-runner wrote by hand on 2026-10-11 (5ea8847f, 8aedb4dd, e90d39eb) are reported this way.
+    - `in-flight`: see "Drain first".
+  - [ ] **Unclaimed markers.** Discovered markers with no ledger key are reported separately as `unclaimed → runner drives`.
+  - [ ] **Abandoned markers come from an explicit operator list.** The ledger has no "abandoned" record; e15446de was an operator judgement. adopt-ledger takes `--abandon SHA:reason` and writes a hold for each listed marker. Nothing is inferred.
+  - [ ] **No inferred successors.** A new hold for a superseded original names no successor, because the ledger doesn't record one and a `_resealed` or `_rtpfix` directory suffix is not authority. A sibling with such a name is listed only as an advisory note in the report. A superseded original and its replacement organize into the same `recordings/<session>_Cam*` names, so every such original must end as a hold before the cron swap.
+  - [ ] **Jeremy reviews the apply report before the cron swap.** It lists every v2 ledger key with its outcome, plus the unclaimed markers and advisory notes.
+  - [ ] **The ledger is read-only.** adopt-ledger only reads ledger files and never moves or edits them. They stay as historical evidence.
 - **The runner never reads v1 state.** The v1 poller's `staging/.processing_state` holds 68 legacy v1 submissions. A v2 registrar dry run against that shared directory would have marked all 68 as `import_failed`. So:
   - v2 poller state lives only in `staging/.processing_state_v2` and `.processing_logs_v2` (from #286);
   - runner state lives only under `<flow_root>`;
