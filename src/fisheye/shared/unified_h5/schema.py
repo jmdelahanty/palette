@@ -47,6 +47,19 @@ CORE_CATALOGS = {
 ADMITTED_CHASER_VERSION = 2
 CORE_CATALOG = CORE_CATALOGS[ADMITTED_CHASER_VERSION]
 CHASER_STATES = "/components/chaser/states"
+BOUNDING_BOXES = "/observations/bounding_boxes"
+# Tables whose schema_version selects their definition: version -> the pinned
+# core catalog that defines it. The catalogs differ only in these tables, so
+# every other table resolves through CORE_CATALOG. A version outside
+# ADMITTED_TABLE_VERSIONS is refused before its layout is read.
+TABLE_VERSION_CATALOGS = {
+    CHASER_STATES: CORE_CATALOGS,
+    BOUNDING_BOXES: {1: CORE_CATALOGS[ADMITTED_CHASER_VERSION]},
+}
+ADMITTED_TABLE_VERSIONS = {
+    CHASER_STATES: frozenset({ADMITTED_CHASER_VERSION}),
+    BOUNDING_BOXES: frozenset({1}),
+}
 CORRESPONDENCE_CATALOG = "experimental_h5_correspondence_tables_v2.json"
 
 
@@ -116,12 +129,12 @@ def validate_catalog_table(h5, path: str) -> dict:
 
 
 def table_version(h5, path: str) -> int | None:
-    """The chaser table's declared schema_version; only v2 is admitted."""
-    if path != CHASER_STATES or path not in h5:
+    """A versioned table's declared schema_version, if it is admitted."""
+    if path not in ADMITTED_TABLE_VERSIONS or path not in h5:
         return None
     version = h5[path].attrs.get("schema_version")
     require(
-        version is not None and int(version) == ADMITTED_CHASER_VERSION,
+        version is not None and int(version) in ADMITTED_TABLE_VERSIONS[path],
         f"unsupported_table_version:{path}",
     )
     return int(version)
@@ -138,7 +151,11 @@ def table_schema(path: str, version: int | None = None) -> dict:
     ):
         require(len(path.split("/")) == 4, f"unknown_table:{path}")
         template = "/correspondence/{component}/sources"
-    catalog = CORE_CATALOGS[version] if version is not None else CORE_CATALOG
+    catalog = (
+        TABLE_VERSION_CATALOGS[path][version]
+        if version is not None and path in TABLE_VERSION_CATALOGS
+        else CORE_CATALOG
+    )
     matches = [
         table
         for table in _contract(catalog)["tables"]
